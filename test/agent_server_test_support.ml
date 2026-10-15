@@ -414,6 +414,7 @@ let config
         ; authoring_budget = None
         ; project_sources = None
         ; authoring_project_access = None
+        ; authoring_upload_access = None
         ; unix_socket = Filename.concat root "agent.sock"
         ; http =
             { enabled = false

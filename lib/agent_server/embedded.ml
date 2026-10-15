@@ -95,6 +95,7 @@ let server_config ~project_sources data_root =
     ; authoring_budget = None
     ; project_sources
     ; authoring_project_access = None
+    ; authoring_upload_access = None
     ; unix_socket = Filename.concat data_root "agent.sock"
     ; http =
         { enabled = false

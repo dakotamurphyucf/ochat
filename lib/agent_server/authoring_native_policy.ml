@@ -124,6 +124,9 @@ module Limits = struct
       ~prefix
       ~query
   ;;
+
+  let max_contract_identity_bytes t = t.max_contract_identity_bytes
+  let max_contract_work_steps t = t.max_contract_work_steps
 end
 
 let bind_error = function
@@ -140,6 +143,7 @@ let bind_error = function
 let create
       ~base
       ~configured
+      ~contracts
       ~source_configuration
       ~source_host
       ~initialize_limits
@@ -163,6 +167,7 @@ let create
         source_host
         ~configuration
         ~project_sources:source_configuration
+        ~contracts
         ~max_contract_identity_bytes:limits.max_contract_identity_bytes
         ~max_work_steps:limits.max_contract_work_steps
         ~checkpoint

@@ -122,3 +122,64 @@ let%expect_test
       (String.concat ~sep:" " [ selected "./shared"; selected "./shared" ]));
   [%expect {| (shared unix.peer shared chatml.project.json 1) |}]
 ;;
+
+let%expect_test
+    "upload grants are independent, bounded and restart-required without native roots"
+  =
+  with_workspace (fun env root _ ->
+    let source_file = Eio.Path.native_exn Eio.Path.(root / "server.sexp") in
+    let text access =
+      sprintf
+        {|(version 1)
+(server ((data_dir "./data") (unix_socket "./agent.sock")
+         (authoring_upload_access %s)))
+(workspaces ()) (prompts ()) (permission_profiles ())|}
+        access
+    in
+    let validate access =
+      Agent_server.Config_parser.parse_string ~source_file (text access)
+      |> ok
+      |> Agent_server.Config_validator.validate ~env
+    in
+    let grant operation =
+      sprintf
+        "((principal_id pri_upload_config) (authentication_kind unix.peer) (operation \
+         %s))"
+        operation
+    in
+    let selection target =
+      sprintf
+        "((principal_id pri_upload_config) (authentication_kind unix.peer) (request \
+         (entry ((name main) (environment prod)))) (selected_environment prod) (target \
+         %s))"
+        target
+    in
+    let access mode grants selections =
+      sprintf "((mode %s) (grants (%s)) (selections (%s)))" mode grants selections
+    in
+    let grants =
+      String.concat
+        ~sep:" "
+        (List.map [ "upload_write"; "publish"; "bundle_read"; "rebind" ] ~f:grant)
+    in
+    let valid = access "upload_only" grants (selection "tool_v1") in
+    let admitted = validate valid |> ok in
+    let config = Option.value_exn admitted.server.authoring_upload_access in
+    assert (Option.is_none admitted.server.project_sources);
+    assert (List.length config.grants = 4);
+    assert (List.length config.selections = 1);
+    let removed =
+      { admitted with server = { admitted.server with authoring_upload_access = None } }
+    in
+    assert
+      (Agent_server.Config_diff.between ~previous:admitted ~current:removed)
+        .server_changed;
+    let invalid value = assert (Result.is_error (validate value)) in
+    invalid (access "upload_only" (grant "upload_write" ^ " " ^ grant "upload_write") "");
+    invalid (access "upload_only" (grant "native_read") "");
+    invalid (access "upload_only" (grant "publish") (selection "unknown_v1"));
+    invalid (access "future_mode" grants "");
+    invalid (access "upload_only" "" "");
+    print_endline "four grants, no native root, restart on change");
+  [%expect {| four grants, no native root, restart on change |}]
+;;

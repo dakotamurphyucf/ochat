@@ -15,19 +15,33 @@ val host_id : t -> Agent_protocol.Id.Server.t
 module Upload_policy : sig
   type t
 
-  (** Both callbacks must be non-yielding and query current host policy.
-      [authorize_upload] is mandatory and independent of Send_messages and
-      project/source-read grants. [authorize_parent] checks an optional
-      parent-context reference against the actual current context and read
+  module Operation : sig
+    type t =
+      | Write
+      | Commit
+      | Publish
+  end
+
+  (** All callbacks must be non-yielding and query current host policy.
+      [authorize_write] independently gates begin/chunk/status/cancel;
+      Commit requires both write and publication, and the already sealed
+      marker requires [authorize_publish]. These are independent of
+      Send_messages and project/source-read grants. When installed,
+      [authorize_parent] checks an optional parent-context reference against the actual current context and read
       grant; a wire-supplied Expected value is never custody by itself. A
-      request without a parent needs no source context. Unexpected callback
+      configured host with no parent policy returns Selection_unavailable for
+      a parent-bearing begin before any Store write; this is the honest
+      parentless deployment boundary until a physical Core parent policy is
+      installed. A request without a parent needs no source context. Unexpected callback
       exceptions propagate with their original backtrace. *)
   val create
-    :  authorize_upload:(Operator_authorization.t -> bool)
+    :  authorize_write:(Operator_authorization.t -> bool)
+    -> authorize_publish:(Operator_authorization.t -> bool)
     -> authorize_parent:
          (Operator_authorization.t
           -> Agent_protocol.Authoring_context.Context.Expected.t
           -> bool)
+           option
     -> t
 end
 
@@ -86,17 +100,23 @@ module Rebind_policy : sig
       -> contract:Chatml.Chatml_compiler_contract.t
       -> t Core.Or_error.t
 
+    val create_standard
+      :  environment:string
+      -> admitted:Authoring_standard_contracts.Entry.t
+      -> t Core.Or_error.t
+
     val environment : t -> string
     val contract : t -> Chatml.Chatml_compiler_contract.t
   end
 
-  (** Independent bundle-read permission, separate from upload/write and
+  (** Independent bundle-read and rebind permissions, separate from upload/write and
       message scopes. Both callbacks are bounded, non-yielding reads of
       already admitted current host state: no catalog reload, filesystem
       acquisition or wait. A saved receipt/manifest only supplies comparison
       coordinates. Source_only scripts select no Project contract. *)
   val create
     :  authorize_read:(Operator_authorization.t -> bool)
+    -> authorize_rebind:(Operator_authorization.t -> bool)
     -> select:
          (Operator_authorization.t
           -> Bundle.Manifest.t
@@ -177,13 +197,14 @@ module Error : sig
   val sexp_of_t : t -> Sexp.t
 end
 
-(** Bounded non-yielding current actor/upload-grant check for a caller's final
+(** Bounded non-yielding current actor/operation-grant check for a caller's final
     publication boundary after its own yielding lifecycle gate. This grants no
     store lookup or source read; each upload operation still uses its guarded
     host/store admission. *)
 val check_upload_current_now
   :  t
   -> actor:Operator_authorization.t
+  -> operation:Upload_policy.Operation.t
   -> (unit, Error.t) result
 
 (** Take exclusive lifetime ownership of one already opened store. Its owner
@@ -202,8 +223,8 @@ val create
   -> upload_policy:Upload_policy.t
   -> t
 
-(** Every request checks original actor currentness and the current upload
-    grant before queueing, again after the facade gate, and within the store's
+(** Every request checks original actor currentness and its exact method's
+    independently selected grant before queueing, again after the facade gate, and within the store's
     own operation gate before recovery or private state access. The guarded
     checkpoint repeats those checks both before and after the caller's
     checkpoint, which may itself yield, during store work. The store samples
@@ -247,8 +268,9 @@ val claim_commit
     Validation uses only the authenticated sealed snapshot and genuine
     captured-only Project/ChatMD adapters. A failed closure is durably rejected
     with a coarse path-free reason before any intent; loss of selection or grant
-    never causes a false rejection or publication. Upload-only hosts return
-    Selection_unavailable. *)
+    never causes a false rejection or publication. An installed configured
+    upload-only publisher may publish under its explicit grants and selected
+    target; an absent publisher returns Selection_unavailable. *)
 val publish
   :  t
   -> actor:Operator_authorization.t
@@ -256,12 +278,12 @@ val publish
   -> checkpoint:(unit -> unit)
   -> (Bundle.Receipt.t, Error.t) result
 
-(** Independently authorize current bundle read before Store lookup. Under the
+(** Independently authorize current bundle read AND rebind before Store lookup. Under the
     SAME host gate/cancellation scope, select current actual target/environment/
     compiler contracts from saved metadata before this request's captured bytes
     are materialized, then restore final saved Project locks and reparse genuine
     captured ChatMD declarations while Store holds a protected read lease.
-    Current actor, read grant and selections are rechecked after waits and
+    Current actor, both grants and selections are rechecked after waits and
     before reply. Foreign/missing IDs share one Store code; changed selected
     contract/receipt/graph identity returns Stale_capture. A competing borrow
     returns Busy. The immutable Rebound value is data, never a continuing
@@ -282,7 +304,7 @@ val capture_for_context
   -> checkpoint:(unit -> unit)
   -> (Context_capture.t, Error.t) result
 
-(** Check both original/current actor, independent bundle-read grant, durable
+(** Check both original/current actor, independent bundle-read and rebind grants, durable
     publication pin/deadline and every actual selected target/contract. This
     runs under the existing host/store gates but does not restore the graph or
     reread installed source bytes. Selection is checked again AFTER the
@@ -296,7 +318,7 @@ val check_context_current
   -> (unit, Error.t) result
 
 (** Nonyielding final comparison after a caller's own publication gate. Recheck
-    original/current actor, bundle-read grant and exact selected target/contract
+    original/current actor, bundle-read and rebind grants and exact selected target/contract
     against the retained owner-affine capture. The caller MUST have performed
     [check_context_current] first for durable pin/deadline/current marker; this
     check alone never authenticates publication or installed bytes. Trusted

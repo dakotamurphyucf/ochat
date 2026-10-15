@@ -102,13 +102,35 @@ let identity t ~checkpoint =
     [ Sexp.Atom (compiler_family t); target; globals; modules; aliases; requirements ]
 ;;
 
-let input_bytes t ~checkpoint ~allocate =
+module Identity_summary = struct
+  type t =
+    { encoded_bytes : int
+    ; fingerprint : Chatml_source.Digest.t
+    }
+
+  let encoded_bytes t = t.encoded_bytes
+  let fingerprint t = t.fingerprint
+end
+
+let encode_identity t ~checkpoint ~allocate =
   let converted_checkpoint () =
     checkpoint ();
     allocate 512
   in
   let identity = identity t ~checkpoint:converted_checkpoint in
-  Chatml_contract_encoding.to_string identity ~checkpoint ~allocate |> String.length
+  Chatml_contract_encoding.to_string identity ~checkpoint ~allocate
+;;
+
+let summarize_identity t ~checkpoint ~allocate =
+  let encoded = encode_identity t ~checkpoint ~allocate in
+  Identity_summary.
+    { encoded_bytes = String.length encoded
+    ; fingerprint = Chatml_source.Digest.of_contents encoded ~checkpoint
+    }
+;;
+
+let input_bytes t ~checkpoint ~allocate =
+  encode_identity t ~checkpoint ~allocate |> String.length
 ;;
 
 let fingerprint t ~checkpoint =

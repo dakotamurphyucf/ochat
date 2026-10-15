@@ -62,6 +62,24 @@ val identity : t -> checkpoint:(unit -> unit) -> Sexp.t
     actual work; retains no encoded identity or callback. *)
 val input_bytes : t -> checkpoint:(unit -> unit) -> allocate:(int -> unit) -> int
 
+module Identity_summary : sig
+  type t
+
+  val encoded_bytes : t -> int
+  val fingerprint : t -> Chatml_source.Digest.t
+end
+
+(** Construct the actual compiler.v1/native identity and encode it once under
+    the same [allocate] debit as [input_bytes], then derive the canonical
+    fingerprint from those exact bytes before releasing the encoded string.
+    This is startup comparison data, not a target or runtime grant. Callback
+    exceptions and cancellation retain identity/backtrace. *)
+val summarize_identity
+  :  t
+  -> checkpoint:(unit -> unit)
+  -> allocate:(int -> unit)
+  -> Identity_summary.t
+
 (** Compute SHA256 from this ACTUAL identity during compilation. Linked.compile
     checks it against Prepared.compiler_contract before parsing. No independent
     digest claim is trusted. Compilation.target/contract remain adapters here. *)

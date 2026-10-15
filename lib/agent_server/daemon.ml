@@ -1467,14 +1467,46 @@ let compose
                  ~retryable:false
                  ())))
   in
-  let%bind authoring_policy =
+  let%bind configured_contracts =
+    match
+      config.server.authoring_project_access, config.server.authoring_upload_access
+    with
+    | None, None -> Ok None
+    | native, upload ->
+      let%bind native_limits = Authoring_native_policy.Limits.standard in
+      let native_targets =
+        Option.value_map native ~default:[] ~f:(fun access ->
+          List.map access.selections ~f:(fun selected -> selected.target))
+      in
+      let upload_targets =
+        Option.value_map
+          upload
+          ~default:[]
+          ~f:Authoring_upload_access_configuration.targets
+      in
+      Authoring_standard_contracts.create
+        ~targets:(native_targets @ upload_targets)
+        ~max_identity_bytes:
+          (Authoring_native_policy.Limits.max_contract_identity_bytes native_limits)
+        ~max_work_steps:
+          (Authoring_native_policy.Limits.max_contract_work_steps native_limits)
+        ~checkpoint:Eio.Fiber.check
+      |> Result.map_error ~f:(function
+        | Authoring_standard_contracts.Error.Invalid_limits ->
+          Agent_protocol.Error.invalid_request "invalid Standard authoring limits"
+        | Contract_limit ->
+          Agent_protocol.Error.invalid_request "Standard authoring target limit")
+      |> Result.map ~f:(fun contracts -> Some (native_limits, contracts))
+  in
+  let%bind native_authoring_policy =
     match config.server.authoring_project_access with
     | None -> Ok options.authoring
     | Some configured ->
-      let%bind limits = Authoring_native_policy.Limits.standard in
+      let native_limits, shared_contracts = Option.value_exn configured_contracts in
       Authoring_native_policy.create
         ~base:options.authoring
         ~configured:(Some configured)
+        ~contracts:(Some shared_contracts)
         ~source_configuration:
           (Option.value
              config.server.project_sources
@@ -1482,9 +1514,25 @@ let compose
         ~source_host:project_sources
         ~initialize_limits:options.protocol_limits
         ~document_dir:(Eio.Stdenv.cwd env)
-        ~limits
+        ~limits:native_limits
         ~checkpoint:Eio.Fiber.check
       |> Result.map ~f:Authoring_native_policy.host_policy
+  in
+  let%bind authoring_policy =
+    match config.server.authoring_upload_access with
+    | None -> Ok native_authoring_policy
+    | Some configured ->
+      let _, shared_contracts = Option.value_exn configured_contracts in
+      let%bind limits = Authoring_upload_policy.Limits.standard in
+      Authoring_upload_policy.create
+        ~base:native_authoring_policy
+        ~configured:(Some configured)
+        ~native_config:config.server.authoring_project_access
+        ~contracts:shared_contracts
+        ~initialize_limits:options.protocol_limits
+        ~document_dir:(Eio.Stdenv.cwd env)
+        ~limits
+      |> Result.map ~f:Authoring_upload_policy.host_policy
   in
   let%bind authoring =
     match authoring_policy with
@@ -1709,6 +1757,28 @@ let start
     | true ->
       Agent_session.Automatic_turn_budget.create options.chatml_runtime_policy
       |> Agent_session.Automatic_turn_budget.validate
+  in
+  let%bind () =
+    match config.server.authoring_project_access with
+    | None -> Ok ()
+    | Some access ->
+      (match config.server.project_sources with
+       | None ->
+         Error
+           (Agent_protocol.Error.invalid_request
+              "configured authoring read grants require project sources")
+       | Some project_sources ->
+         Authoring_project_access_configuration.validate access ~project_sources
+         |> Result.map_error ~f:(fun _ ->
+           Agent_protocol.Error.invalid_request "invalid configured authoring read grants"))
+  in
+  let%bind () =
+    match config.server.authoring_upload_access with
+    | None -> Ok ()
+    | Some access ->
+      Authoring_upload_access_configuration.validate access
+      |> Result.map_error ~f:(fun _ ->
+        Agent_protocol.Error.invalid_request "invalid configured upload grants")
   in
   let%bind store, origin =
     open_store ~sw ~env config.server ~process_start_identity

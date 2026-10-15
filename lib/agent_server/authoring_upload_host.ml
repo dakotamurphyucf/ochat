@@ -6,13 +6,29 @@ module Validation = Authoring_upload_validation
 module Rebind_validation = Authoring_upload_rebind
 
 module Upload_policy = struct
+  module Operation = struct
+    type t =
+      | Write
+      | Commit
+      | Publish
+  end
+
   type t =
-    { authorize_upload : Actor.t -> bool
+    { authorize_write : Actor.t -> bool
+    ; authorize_publish : Actor.t -> bool
     ; authorize_parent :
-        Actor.t -> Agent_protocol.Authoring_context.Context.Expected.t -> bool
+        (Actor.t -> Agent_protocol.Authoring_context.Context.Expected.t -> bool) option
     }
 
-  let create ~authorize_upload ~authorize_parent = { authorize_upload; authorize_parent }
+  let create ~authorize_write ~authorize_publish ~authorize_parent =
+    { authorize_write; authorize_publish; authorize_parent }
+  ;;
+
+  let authorize t actor = function
+    | Operation.Write -> t.authorize_write actor
+    | Commit -> t.authorize_write actor && t.authorize_publish actor
+    | Publish -> t.authorize_publish actor
+  ;;
 end
 
 module Publication_policy = struct
@@ -141,30 +157,34 @@ let check_host t =
   else Ok ()
 ;;
 
-let check t actor parent =
+let check t actor operation parent =
   let open Result.Let_syntax in
   let%bind () = check_host t in
   if not (Actor.is_current actor)
   then Error Error.Expired_actor
-  else if not (t.upload_policy.authorize_upload actor)
+  else if not (Upload_policy.authorize t.upload_policy actor operation)
   then Error Error.Unauthorized
   else (
     match parent with
     | None -> Ok ()
     | Some expected ->
-      if t.upload_policy.authorize_parent actor expected
-      then Ok ()
-      else Error Error.Unauthorized)
+      (match t.upload_policy.authorize_parent with
+       | None -> Error Error.Selection_unavailable
+       | Some authorize_parent ->
+         if authorize_parent actor expected then Ok () else Error Error.Unauthorized))
 ;;
 
-let check_upload_current_now t ~actor = check t actor None
+let check_upload_current_now t ~actor ~operation = check t actor operation None
 
 let check_read t actor policy =
   let open Result.Let_syntax in
   let%bind () = check_host t in
   if not (Actor.is_current actor)
   then Error Error.Expired_actor
-  else if not (Rebind_policy.authorize_read policy actor)
+  else if
+    not
+      (Rebind_policy.authorize_read policy actor
+       && Rebind_policy.authorize_rebind policy actor)
   then Error Error.Unauthorized
   else Ok ()
 ;;
@@ -212,11 +232,11 @@ let with_operation t ~actor ~check ~map_error ~checkpoint f =
   | `Raised (exn, backtrace) -> Stdlib.Printexc.raise_with_backtrace exn backtrace
 ;;
 
-let with_request t ~actor ~parent ~checkpoint f =
+let with_request t ~actor ~operation ~parent ~checkpoint f =
   with_operation
     t
     ~actor
-    ~check:(fun () -> check t actor parent)
+    ~check:(fun () -> check t actor operation parent)
     ~map_error:Error.of_store
     ~checkpoint
     f
@@ -274,6 +294,7 @@ let begin_upload t ~actor ~(request : Bundle.Begin.request) ~checkpoint =
   with_request
     t
     ~actor
+    ~operation:Upload_policy.Operation.Write
     ~parent:request.parent_context
     ~checkpoint
     (fun ~principal ~now ~checkpoint ->
@@ -281,99 +302,118 @@ let begin_upload t ~actor ~(request : Bundle.Begin.request) ~checkpoint =
 ;;
 
 let chunk t ~actor ~request ~checkpoint =
-  with_request t ~actor ~parent:None ~checkpoint (fun ~principal ~now ~checkpoint ->
-    Store.chunk t.store ~principal ~request ~now ~checkpoint)
+  with_request
+    t
+    ~actor
+    ~operation:Upload_policy.Operation.Write
+    ~parent:None
+    ~checkpoint
+    (fun ~principal ~now ~checkpoint ->
+       Store.chunk t.store ~principal ~request ~now ~checkpoint)
 ;;
 
 let claim_commit t ~actor ~request ~checkpoint =
-  with_request t ~actor ~parent:None ~checkpoint (fun ~principal ~now ~checkpoint ->
-    Store.claim_commit t.store ~principal ~request ~now ~checkpoint)
+  with_request
+    t
+    ~actor
+    ~operation:Upload_policy.Operation.Commit
+    ~parent:None
+    ~checkpoint
+    (fun ~principal ~now ~checkpoint ->
+       Store.claim_commit t.store ~principal ~request ~now ~checkpoint)
 ;;
 
 let publish t ~actor ~sealed ~checkpoint =
   match t.publication with
   | None -> Error Error.Selection_unavailable
   | Some publication ->
-    with_request t ~actor ~parent:None ~checkpoint (fun ~principal ~now ~checkpoint ->
-      let snapshot = Store.snapshot t.store ~principal sealed ~now ~checkpoint in
-      match snapshot with
-      | Error _ as error -> error
-      | Ok snapshot ->
-        let manifest = Store.Snapshot.manifest snapshot in
-        let selection =
-          Validation.admit publication.policy ~actor ~manifest ~checkpoint
-        in
-        (match selection with
-         | Error (Unavailable | Invalid_closure | Resource_limit) ->
-           raise (Revoked Error.Selection_unavailable)
-         | Ok selection ->
-           let selected_checkpoint () =
-             checkpoint ();
-             if
-               not
-                 (Validation.check_current
-                    selection
-                    ~policy:publication.policy
-                    ~actor
-                    ~checkpoint)
-             then raise (Revoked Error.Selection_unavailable)
+    with_request
+      t
+      ~actor
+      ~operation:Upload_policy.Operation.Publish
+      ~parent:None
+      ~checkpoint
+      (fun ~principal ~now ~checkpoint ->
+         let snapshot = Store.snapshot t.store ~principal sealed ~now ~checkpoint in
+         match snapshot with
+         | Error _ as error -> error
+         | Ok snapshot ->
+           let manifest = Store.Snapshot.manifest snapshot in
+           let selection =
+             Validation.admit publication.policy ~actor ~manifest ~checkpoint
            in
-           let validated =
-             Validation.validate
-               selection
-               ~snapshot
-               ~document_dir:publication.document_dir
-               ~limits:publication.limits
-               ~checkpoint
-           in
-           selected_checkpoint ();
-           (match validated with
-            | Error Unavailable -> raise (Revoked Error.Selection_unavailable)
-            | Error ((Invalid_closure | Resource_limit) as problem) ->
-              let reason =
-                match problem with
-                | Invalid_closure -> Bundle.Rejection.Invalid_closure
-                | Resource_limit -> Bundle.Rejection.Resource_limit
-                | Unavailable -> assert false
-              in
-              (match
-                 Store.reject
-                   t.store
-                   ~principal
-                   sealed
-                   ~reason
-                   ~now
-                   ~checkpoint:selected_checkpoint
-               with
-               | Error _ as error -> error
-               | Ok () ->
-                 raise
-                   (Revoked
-                      (match problem with
-                       | Invalid_closure -> Error.Invalid_closure
-                       | Resource_limit -> Error.Resource_limit
-                       | Unavailable -> assert false)))
-            | Ok proof ->
-              let final_admission () =
-                check_or_raise (fun () -> check t actor None);
+           (match selection with
+            | Error (Unavailable | Invalid_closure | Resource_limit) ->
+              raise (Revoked Error.Selection_unavailable)
+            | Ok selection ->
+              let selected_checkpoint () =
+                checkpoint ();
                 if
                   not
                     (Validation.check_current
                        selection
                        ~policy:publication.policy
                        ~actor
-                       ~checkpoint:Fn.id)
+                       ~checkpoint)
                 then raise (Revoked Error.Selection_unavailable)
               in
-              Store.publish
-                t.store
-                ~principal
-                sealed
-                ~snapshot
-                ~proof
-                ~now
-                ~checkpoint:selected_checkpoint
-                ~final_admission)))
+              let validated =
+                Validation.validate
+                  selection
+                  ~snapshot
+                  ~document_dir:publication.document_dir
+                  ~limits:publication.limits
+                  ~checkpoint
+              in
+              selected_checkpoint ();
+              (match validated with
+               | Error Unavailable -> raise (Revoked Error.Selection_unavailable)
+               | Error ((Invalid_closure | Resource_limit) as problem) ->
+                 let reason =
+                   match problem with
+                   | Invalid_closure -> Bundle.Rejection.Invalid_closure
+                   | Resource_limit -> Bundle.Rejection.Resource_limit
+                   | Unavailable -> assert false
+                 in
+                 (match
+                    Store.reject
+                      t.store
+                      ~principal
+                      sealed
+                      ~reason
+                      ~now
+                      ~checkpoint:selected_checkpoint
+                  with
+                  | Error _ as error -> error
+                  | Ok () ->
+                    raise
+                      (Revoked
+                         (match problem with
+                          | Invalid_closure -> Error.Invalid_closure
+                          | Resource_limit -> Error.Resource_limit
+                          | Unavailable -> assert false)))
+               | Ok proof ->
+                 let final_admission () =
+                   check_or_raise (fun () ->
+                     check t actor Upload_policy.Operation.Publish None);
+                   if
+                     not
+                       (Validation.check_current
+                          selection
+                          ~policy:publication.policy
+                          ~actor
+                          ~checkpoint:Fn.id)
+                   then raise (Revoked Error.Selection_unavailable)
+                 in
+                 Store.publish
+                   t.store
+                   ~principal
+                   sealed
+                   ~snapshot
+                   ~proof
+                   ~now
+                   ~checkpoint:selected_checkpoint
+                   ~final_admission)))
 ;;
 
 let rebind_with_pin t ~actor ~bundle_id ~checkpoint =
@@ -515,11 +555,23 @@ let check_context_current t ~actor (capture : Context_capture.t) ~checkpoint =
 ;;
 
 let status t ~actor ~(request : Bundle.Status.request) ~checkpoint =
-  with_request t ~actor ~parent:None ~checkpoint (fun ~principal ~now ~checkpoint ->
-    Store.status t.store ~principal ~upload_id:request.upload_id ~now ~checkpoint)
+  with_request
+    t
+    ~actor
+    ~operation:Upload_policy.Operation.Write
+    ~parent:None
+    ~checkpoint
+    (fun ~principal ~now ~checkpoint ->
+       Store.status t.store ~principal ~upload_id:request.upload_id ~now ~checkpoint)
 ;;
 
 let cancel t ~actor ~upload_id ~checkpoint =
-  with_request t ~actor ~parent:None ~checkpoint (fun ~principal ~now ~checkpoint ->
-    Store.cancel t.store ~principal ~upload_id ~now ~checkpoint)
+  with_request
+    t
+    ~actor
+    ~operation:Upload_policy.Operation.Write
+    ~parent:None
+    ~checkpoint
+    (fun ~principal ~now ~checkpoint ->
+       Store.cancel t.store ~principal ~upload_id ~now ~checkpoint)
 ;;

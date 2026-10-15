@@ -1072,6 +1072,170 @@ let parse_authoring_project_access context path sexp ~project_sources =
   result
 ;;
 
+let parse_authoring_upload_access context path sexp =
+  let module Access = Authoring_upload_access_configuration in
+  let open Result.Let_syntax in
+  let invalid path =
+    fail
+      context
+      ~code:"config.authoring_upload_access"
+      ~path
+      ~message:"invalid authoring upload access"
+      ~remediation:
+        "Use bounded exact authenticated principals, independent operation grants and \
+         Standard selections."
+  in
+  let bounded_rows path sexp maximum =
+    let%bind rows = list context path sexp in
+    if List.length rows > maximum then invalid path else Ok rows
+  in
+  let principal fields row_path =
+    let%bind spelling =
+      required context row_path fields "principal_id"
+      >>= atom context (row_path ^ ".principal_id")
+    in
+    match Agent_protocol.Id.Principal.of_string spelling with
+    | Ok principal_id -> Ok principal_id
+    | Error _ -> invalid (row_path ^ ".principal_id")
+  in
+  let parse_grant sexp =
+    let row_path = path ^ ".grants[]" in
+    let%bind fields = record context row_path sexp in
+    let%bind () =
+      ensure_allowed
+        context
+        row_path
+        fields
+        [ "principal_id"; "authentication_kind"; "operation" ]
+    in
+    let%bind principal_id = principal fields row_path in
+    let%bind authentication_kind =
+      required context row_path fields "authentication_kind"
+      >>= atom context (row_path ^ ".authentication_kind")
+    in
+    let%map operation =
+      let%bind spelling =
+        required context row_path fields "operation"
+        >>= atom context (row_path ^ ".operation")
+      in
+      match spelling with
+      | "upload_write" -> Ok Access.Grant.Upload_write
+      | "publish" -> Ok Publish
+      | "bundle_read" -> Ok Bundle_read
+      | "rebind" -> Ok Rebind
+      | _ -> invalid (row_path ^ ".operation")
+    in
+    Access.Grant.{ principal_id; authentication_kind; operation }
+  in
+  let parse_request row_path sexp =
+    let request_path = row_path ^ ".request" in
+    let%bind name, fields =
+      match sexp with
+      | Sexp.List [ Sexp.Atom name; fields ] -> Ok (name, fields)
+      | _ -> shape_error context request_path "(library fields) or (entry fields)"
+    in
+    let%bind fields = record context request_path fields in
+    let%bind () = ensure_allowed context request_path fields [ "name"; "environment" ] in
+    let%bind environment =
+      match field fields "environment" with
+      | None -> Ok None
+      | Some value ->
+        atom context (request_path ^ ".environment") value |> Result.map ~f:Option.some
+    in
+    match name with
+    | "library" ->
+      if Option.is_some (field fields "name")
+      then invalid request_path
+      else Ok (Authoring_project_access_configuration.Selection.Library { environment })
+    | "entry" ->
+      let%map name =
+        required context request_path fields "name"
+        >>= atom context (request_path ^ ".name")
+      in
+      Authoring_project_access_configuration.Selection.Entry { name; environment }
+    | _ -> invalid request_path
+  in
+  let parse_selection sexp =
+    let row_path = path ^ ".selections[]" in
+    let%bind fields = record context row_path sexp in
+    let%bind () =
+      ensure_allowed
+        context
+        row_path
+        fields
+        [ "principal_id"
+        ; "authentication_kind"
+        ; "request"
+        ; "selected_environment"
+        ; "target"
+        ]
+    in
+    let%bind principal_id = principal fields row_path in
+    let%bind authentication_kind =
+      required context row_path fields "authentication_kind"
+      >>= atom context (row_path ^ ".authentication_kind")
+    in
+    let%bind request =
+      required context row_path fields "request" >>= parse_request row_path
+    in
+    let%bind selected_environment =
+      required context row_path fields "selected_environment"
+      >>= atom context (row_path ^ ".selected_environment")
+    in
+    let%map target =
+      let%bind spelling =
+        required context row_path fields "target" >>= atom context (row_path ^ ".target")
+      in
+      match spelling with
+      | "one_off_v1" -> Ok Chatml.Chatml_compiler_contract.Target.One_off_v1
+      | "tool_v1" -> Ok Tool_v1
+      | "developer_tool_v1" -> Ok Developer_tool_v1
+      | "moderator_v1" -> Ok Moderator_v1
+      | "delegated_moderator_v1" -> Ok Delegated_moderator_v1
+      | _ -> invalid (row_path ^ ".target")
+    in
+    Access.Selection.
+      { principal_id; authentication_kind; request; selected_environment; target }
+  in
+  let%bind fields = record context path sexp in
+  let%bind () = ensure_allowed context path fields [ "mode"; "grants"; "selections" ] in
+  let%bind mode =
+    let%bind spelling =
+      required context path fields "mode" >>= atom context (path ^ ".mode")
+    in
+    match spelling with
+    | "upload_only" -> Ok Access.Upload_only
+    | "augment_core" -> Ok Augment_core
+    | _ -> invalid (path ^ ".mode")
+  in
+  let%bind grants =
+    required context path fields "grants"
+    >>= fun rows ->
+    bounded_rows (path ^ ".grants") rows 256
+    >>= fun rows -> List.map rows ~f:parse_grant |> Result.all
+  in
+  let%bind selections =
+    required context path fields "selections"
+    >>= fun rows ->
+    bounded_rows (path ^ ".selections") rows 256
+    >>= fun rows -> List.map rows ~f:parse_selection |> Result.all
+  in
+  let result = Access.{ mode; grants; selections } in
+  let%map () =
+    Access.validate result
+    |> Result.map_error ~f:(fun _ ->
+      [ diagnostic
+          context
+          ~code:"config.authoring_upload_access"
+          ~path
+          ~message:"authoring upload grants or selections are invalid"
+          ~remediation:
+            "Use bounded distinct principal/operation grants and Standard targets."
+      ])
+  in
+  result
+;;
+
 let parse_server context sexp =
   let path = "server" in
   let open Result.Let_syntax in
@@ -1080,6 +1244,7 @@ let parse_server context sexp =
     [ "data_dir"
     ; "project_sources"
     ; "authoring_project_access"
+    ; "authoring_upload_access"
     ; "session_helpers"
     ; "authoring_packages"
     ; "authoring_budget"
@@ -1116,6 +1281,13 @@ let parse_server context sexp =
         "server.authoring_project_access"
         value
         ~project_sources
+      |> Result.map ~f:Option.some
+  in
+  let%bind authoring_upload_access =
+    match field fields "authoring_upload_access" with
+    | None -> Ok None
+    | Some value ->
+      parse_authoring_upload_access context "server.authoring_upload_access" value
       |> Result.map ~f:Option.some
   in
   let%bind session_helpers =
@@ -1266,6 +1438,7 @@ let parse_server context sexp =
     { data_dir
     ; project_sources
     ; authoring_project_access
+    ; authoring_upload_access
     ; session_helpers
     ; authoring_packages
     ; authoring_budget
