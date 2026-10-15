@@ -62,6 +62,7 @@ let store_limits
       ?(max_document_bytes = 8192)
       ?(max_inference_bytes_per_run = 8192)
       ?(max_work_steps = 200)
+      ?max_command_terminal_bytes
       ?max_document_fields
       ?max_document_nodes
       ()
@@ -80,13 +81,24 @@ let store_limits
            ~default:(if max_document_bytes <= 8192 then 512 else 2048))
     |> ok
   in
+  let command_default = Agent_store.Developer_command_limits.default ~document in
+  let commands =
+    match max_command_terminal_bytes with
+    | None -> command_default
+    | Some max_terminal_bytes ->
+      Agent_store.Developer_command_limits.create
+        ~max_commands:(Agent_store.Developer_command_limits.max_commands command_default)
+        ~max_bytes:(Agent_store.Developer_command_limits.max_bytes command_default)
+        ~max_terminal_bytes
+      |> or_error
+  in
   R.Limits.create
     ~max_runs:3
     ~max_epochs_per_run:3
     ~max_jobs_per_run
     ~max_invocations_per_run
     ~max_inference_attempts_per_run:256
-    ~commands:(Agent_store.Developer_command_limits.default ~document)
+    ~commands
     ~max_inference_bytes_per_run
     ~max_selected_per_commit:2
     ~max_job_payload_bytes
@@ -118,6 +130,7 @@ let with_store
       ?(on_store = fun _ _ _ -> ())
       ?(max_job_payload_bytes = 1024)
       ?(max_invocations_per_run = 5)
+      ?max_command_terminal_bytes
       f
   =
   Eio_main.run (fun env ->
@@ -146,7 +159,12 @@ let with_store
             R.open_or_create
               session
               ~sw
-              ~limits:(store_limits ~max_job_payload_bytes ~max_invocations_per_run ())
+              ~limits:
+                (store_limits
+                   ~max_job_payload_bytes
+                   ~max_invocations_per_run
+                   ?max_command_terminal_bytes
+                   ())
               ~checkpoint
             |> ok
           in
