@@ -645,10 +645,11 @@ work. The exact same commit key can retry the sealed claim after selection is
 available. Status is read-only and reports a sealed pending claim as
 `Validating`, the same coarse wire state used for an active durable validation
 intent. That wire state promises neither automatic scheduling nor eventual
-publication. A known durable Published or Rejected terminal is returned only
-after the upload host verifies it under the current independent upload grant
-and rechecks any persisted parent. A terminal retry after parent refresh or
-revocation can fail without changing the durable result.
+publication. A same-key Commit retry returns a known durable Published or
+Rejected terminal after the upload host verifies it under the current
+independent upload grant and rechecks any persisted parent. Such a retry after
+parent refresh or revocation can fail without changing the durable result.
+Read-only Status checks its upload grant without rechecking the parent.
 Wire receipts echo authenticated host/principal comparison coordinates and
 the upload ID. A pending commit is distinct from a Published receipt; only
 the proof-gated store publisher may publish a validated graph, compiler-contract,
@@ -745,9 +746,11 @@ Its independent upload policy checks the original authenticated actor and
 current grant before each request, again after waiting for the facade gate,
 and within the store operation gate before recovery or private upload access.
 An optional parent context is checked against actual same-connection Core
-authority at begin and again before publication. A selected closure's original
-prior Build comes from current Project input or one exact retained Document
-script row; a missing or changed independent selection is unavailable. An
+authority at begin and again before publication. When Compose explicitly names
+a prior lock, its original Build comes from current Project input or one exact
+retained Document script row; a missing or changed independent selection is
+unavailable. A Document parent that supplies no prior Build does not require an
+Analyze request first. An
 uploaded Project parent carries a same-Store publication pin checked at the
 marker boundary. No parent is required for an upload-only client. The store
 samples the host wall clock after its own gate and recovery, so queue time
