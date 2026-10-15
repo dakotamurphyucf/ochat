@@ -335,7 +335,14 @@ let handle (t : t) ~actor ~connection request =
       | Bundle_begin _ | Bundle_chunk _ | Bundle_commit _ | Bundle_status _ ->
         if Option.is_some t.upload
         then
-          Service.handle_bundle t.service ~actor ~connection request
+          Service.handle_bundle
+            ?script_selection:
+              (Option.bind t.policy.semantic ~f:(fun semantic ->
+                 semantic.script_selection))
+            t.service
+            ~actor
+            ~connection
+            request
           |> Result.map_error ~f:Service.Error.to_protocol
         else Error (uninstalled ())
       | Analyze request ->

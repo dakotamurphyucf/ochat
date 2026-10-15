@@ -222,6 +222,35 @@ let host_ok = function
   | Error error -> raise_s (Host.Error.sexp_of_t error)
 ;;
 
+let direct_connection actor =
+  Agent_server.Connection_context.create_authenticated
+    ~actor
+    ~connection_id:"upload-host-test"
+    ~transport:In_memory
+    ~publish_notification:ignore
+    ~max_attachments:1
+;;
+
+let begin_direct host ~actor ~request ~checkpoint =
+  Host.begin_upload
+    host
+    ~actor
+    ~connection:(direct_connection actor)
+    ~parent_admission:None
+    ~request
+    ~checkpoint
+;;
+
+let publish_direct host ~actor ~sealed ~checkpoint =
+  Host.publish
+    host
+    ~actor
+    ~connection:(direct_connection actor)
+    ~parent_admission:None
+    ~sealed
+    ~checkpoint
+;;
+
 let status_request upload_id = B.Status.create_request ~upload_id
 
 let wait_until label condition =
@@ -623,7 +652,7 @@ let%test_unit "host publishes only an actor-current captured source-only documen
           ()
       in
       let upload_id =
-        Host.begin_upload host ~actor ~request ~checkpoint:Fn.id
+        begin_direct host ~actor ~request ~checkpoint:Fn.id
         |> host_ok
         |> B.Begin.upload_id
       in
@@ -662,7 +691,7 @@ let%test_unit "host publishes only an actor-current captured source-only documen
         | Ready sealed -> sealed
         | Published _ | Rejected _ -> failwith "host claim unexpectedly terminal"
       in
-      let receipt = Host.publish host ~actor ~sealed ~checkpoint:Fn.id |> host_ok in
+      let receipt = publish_direct host ~actor ~sealed ~checkpoint:Fn.id |> host_ok in
       check
         "host reports actual durable publication"
         (match
@@ -706,7 +735,7 @@ let%test_unit "host publishes only an actor-current captured source-only documen
       allowed := false;
       check
         "revoked grant cannot reuse published authority"
-        (match Host.publish host ~actor ~sealed ~checkpoint:Fn.id with
+        (match publish_direct host ~actor ~sealed ~checkpoint:Fn.id with
          | Error Host.Error.Unauthorized -> true
          | Ok _ | Error _ -> false);
       check
@@ -787,8 +816,7 @@ let%test_unit "host grant, actor lifetime, reentrancy, and private lookup symmet
          ~checks:_
        ->
        let response =
-         Host.begin_upload host ~actor ~request:(begin_request ()) ~checkpoint:Fn.id
-         |> host_ok
+         begin_direct host ~actor ~request:(begin_request ()) ~checkpoint:Fn.id |> host_ok
        in
        let parent =
          P.Authoring_context.Context.Expected.of_json
@@ -811,9 +839,7 @@ let%test_unit "host grant, actor lifetime, reentrancy, and private lookup symmet
        in
        check
          "uninstalled parent policy cannot grant current read authority"
-         (match
-            Host.begin_upload host ~actor ~request:parent_request ~checkpoint:Fn.id
-          with
+         (match begin_direct host ~actor ~request:parent_request ~checkpoint:Fn.id with
           | Error Host.Error.Selection_unavailable -> true
           | _ -> false);
        let upload_id = B.Begin.upload_id response in
@@ -824,7 +850,7 @@ let%test_unit "host grant, actor lifetime, reentrancy, and private lookup symmet
        let ancestor_close = ref None in
        with_sibling_host env sw root_handle (fun sibling ->
          let sibling_upload =
-           Host.begin_upload sibling ~actor ~request:(begin_request ()) ~checkpoint:Fn.id
+           begin_direct sibling ~actor ~request:(begin_request ()) ~checkpoint:Fn.id
            |> host_ok
            |> B.Begin.upload_id
          in
@@ -941,7 +967,7 @@ let%test_unit "yielding checkpoint revocation leaves both gates usable" =
          ~checks:_
        ->
        let upload_id =
-         Host.begin_upload host ~actor ~request:(begin_request ()) ~checkpoint:Fn.id
+         begin_direct host ~actor ~request:(begin_request ()) ~checkpoint:Fn.id
          |> host_ok
          |> B.Begin.upload_id
        in
@@ -1057,7 +1083,7 @@ let%test_unit "close cancels and joins an active request without poisoning the s
           ~upload_policy:(make_policy (ref true) (ref 0))
       in
       let upload_id =
-        Host.begin_upload host ~actor ~request:(begin_request ()) ~checkpoint:Fn.id
+        begin_direct host ~actor ~request:(begin_request ()) ~checkpoint:Fn.id
         |> host_ok
         |> B.Begin.upload_id
       in
