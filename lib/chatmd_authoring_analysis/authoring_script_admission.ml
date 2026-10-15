@@ -153,6 +153,8 @@ module Script = struct
     | Unavailable of Unavailable.t
 
   let document_stamp t = t.stamp
+  let parsed t = t.parsed
+  let declaration t = t.declaration
   let selected_source t = t.entry_source
   let selected_prepared t = Build.prepared t.selected
   let root_input t = Markdown.Parsed.root_input t.parsed

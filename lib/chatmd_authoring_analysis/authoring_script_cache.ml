@@ -17,6 +17,7 @@ module Candidate = struct
 
   let stamp t = Script.document_stamp t.script
   let checked t = t.checked
+  let script t = t.script
 
   let analyze_using script ~policy ~checkpoint ~analyze =
     let open Result.Let_syntax in
