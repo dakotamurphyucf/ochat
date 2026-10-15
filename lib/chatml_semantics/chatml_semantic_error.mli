@@ -5,6 +5,7 @@ type t =
   | Input_limit
   | Incompatible_contract
   | Invalid_dependency_depth
+  | Invalid_cursor
   | Invalid_input of Chatml_diagnostic.t
   | Work_limit
   | Sites of Chatml.Chatml_syntax_sites.Error.t

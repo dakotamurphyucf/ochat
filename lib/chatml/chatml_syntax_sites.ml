@@ -127,11 +127,15 @@ let at_span t ~role ~checkpoint (span : Source.span) =
 module type Sink = sig
   val enabled : bool
   val add : Role.t -> name:string -> span:Source.span -> Id.t
+  val completed_program_statement : end_byte:int -> unit
+  val completed_program_separator : end_byte:int -> unit
 end
 
 module Disabled = struct
   let enabled = false
   let add _ ~name:_ ~span:_ = assert false
+  let completed_program_statement ~end_byte:_ = ()
+  let completed_program_separator ~end_byte:_ = ()
 end
 
 let collect source ~limits ~checkpoint ~f =
@@ -143,6 +147,8 @@ let collect source ~limits ~checkpoint ~f =
     let reversed = ref [] in
     let module Sink = struct
       let enabled = true
+      let completed_program_statement ~end_byte:_ = ()
+      let completed_program_separator ~end_byte:_ = ()
 
       let add role ~name ~span =
         checkpoint ();

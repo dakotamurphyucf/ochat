@@ -58,8 +58,7 @@ type pending_view =
   | Expand of B.t
   | Finish of B.t
 
-let publish input checked ~identity ~limits ~budget ~checkpoint =
-  let facts = Driver.semantic_facts checked |> Option.value_exn in
+let publish_facts input ~facts ~parsed ~graph ~identity ~limits ~budget ~checkpoint =
   let groups = R.Settled.groups facts in
   let frozen =
     Frozen.freeze
@@ -372,7 +371,7 @@ let publish input checked ~identity ~limits ~budget ~checkpoint =
         ~contract:requirement.contract)
   in
   let checked_sources =
-    map (Driver.parsed checked) ~checkpoint ~f:(fun parsed ->
+    map parsed ~checkpoint ~f:(fun parsed ->
       let sites = Driver.Parsed.sites parsed in
       Budget.admit budget ~facts:1 ~edges:1 ~labels:0;
       List.iter (Chatml.Chatml_syntax_sites.sites sites) ~f:(fun site ->
@@ -384,7 +383,6 @@ let publish input checked ~identity ~limits ~budget ~checkpoint =
           ~labels:(String.length (Chatml.Chatml_syntax_sites.Site.name site)));
       Chatml_source.id (Driver.Parsed.source parsed), Driver.Parsed.phase parsed)
   in
-  let graph = Driver.graph checked in
   let runtime_order =
     Chatml_dependency_graph.runtime_dependency_order graph ~checkpoint
   in
@@ -409,4 +407,28 @@ let publish input checked ~identity ~limits ~budget ~checkpoint =
     ~exports
     ~host_requirements
     ~checked_sources
+;;
+
+let publish input checked ~identity ~limits ~budget ~checkpoint =
+  publish_facts
+    input
+    ~facts:(Driver.semantic_facts checked |> Option.value_exn)
+    ~parsed:(Driver.parsed checked)
+    ~graph:(Driver.graph checked)
+    ~identity
+    ~limits
+    ~budget
+    ~checkpoint
+;;
+
+let publish_provisional input checked ~identity ~limits ~budget ~checkpoint =
+  publish_facts
+    input
+    ~facts:(Driver.Provisional.semantic_facts checked |> Option.value_exn)
+    ~parsed:(Driver.Provisional.parsed checked)
+    ~graph:(Driver.Provisional.graph checked)
+    ~identity
+    ~limits
+    ~budget
+    ~checkpoint
 ;;

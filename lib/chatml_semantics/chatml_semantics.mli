@@ -349,6 +349,7 @@ module Error : sig
     | Input_limit
     | Incompatible_contract
     | Invalid_dependency_depth
+    | Invalid_cursor
     | Invalid_input of Chatml_diagnostic.t
     | Work_limit
     | Sites of Sites.Error.t
@@ -361,9 +362,60 @@ module Error : sig
   [@@deriving sexp_of]
 end
 
-type t =
+type t = private
   | Complete of Snapshot.t
   | Failed of Partial.t
+
+module Provisional : sig
+  (** Frozen, non-executable semantic facts for an exact parser-confirmed
+      implementation prefix. Full-input provenance is separate from the new
+      prefix graph/source revisions. This type cannot be used as Complete or a
+      linked/runtime artifact. *)
+  type t
+
+  val full_input_fingerprint : t -> Captured.Digest.t
+  val full_source_digest : t -> Captured.Digest.t
+  val prefix_source_digest : t -> Captured.Digest.t
+  val selected_source : t -> Captured.Id.t
+  val end_byte : t -> int
+
+  (** Query only against locations created from the prefix snapshot's captured
+      source digest. Service DTOs must retain the Provisional classification. *)
+  val snapshot : t -> Snapshot.t
+end
+
+module Prefix : sig
+  type unavailable =
+    | No_complete_statement
+    | Unsupported_source_phase
+    | Unchecked_source
+    | Prefix_rejected of Partial.Invalidity.t
+    | Invalid_rebased_metadata
+  [@@deriving sexp_of]
+
+  type t =
+    | Provisional of Provisional.t
+    | Unavailable of unavailable
+end
+
+(** One bounded authoring-only pass over the original admitted inventory, then
+    at most one exact parser-witnessed prefix revision and graph check. Only
+    implementation [program_stmts] can yield provisional facts. Incomplete
+    companion interfaces and metadata sources return Unavailable; whole-file
+    [analyze] remains authoritative for diagnostics and completed interfaces.
+    The same selected static contract, configured checker, companion checks,
+    recorder and freezer are used, omitting only final entrypoint requirements.
+    No executable checked/linked artifact or mutable inference data escapes.
+    One work ledger covers detection, revision, check and publication. *)
+val analyze_prefix
+  :  Prepared.t
+  -> source:Captured.Id.t
+  -> cursor_byte:int
+  -> contract:Contract.t
+  -> max_dependency_depth:int
+  -> limits:Limits.t
+  -> checkpoint:(unit -> unit)
+  -> (Prefix.t, Error.t) Result.t
 
 val analyze
   :  Prepared.t
