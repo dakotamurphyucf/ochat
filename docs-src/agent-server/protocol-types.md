@@ -8701,7 +8701,11 @@ end
 [implementation](../../lib/agent_protocol/scope.ml) · [interface](../../lib/agent_protocol/scope.mli)
 
 ```ocaml
-(** Authorization scopes carried by authenticated principals. *)
+(** Authorization scopes carried by authenticated principals. Developer scopes
+    admit only their exact Check, Fixture or Live method: none implies another
+    or grants source reads, configured prompt/workspace selection, native
+    effects, receipt disclosure or cancellation. Their stable wire names are
+    [developer.check], [developer.fixture.run] and [developer.live.run]. *)
 
 type t =
   | List_prompts
@@ -8724,6 +8728,9 @@ type t =
   | Provider_select
   | View_organization
   | Manage_organization
+  | Developer_check
+  | Developer_fixture_run
+  | Developer_live_run
 [@@deriving compare, equal, sexp]
 
 include Core.Comparable.S with type t := t

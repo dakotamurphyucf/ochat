@@ -316,6 +316,9 @@ module T = struct
     | Provider_select
     | View_organization
     | Manage_organization
+    | Developer_check
+    | Developer_fixture_run
+    | Developer_live_run
   [@@deriving compare, equal, sexp]
 end
 
@@ -343,6 +346,9 @@ let to_string = function
   | Provider_select -> "provider.select"
   | View_organization -> "organization.view"
   | Manage_organization -> "organization.manage"
+  | Developer_check -> "developer.check"
+  | Developer_fixture_run -> "developer.fixture.run"
+  | Developer_live_run -> "developer.live.run"
 ;;
 
 let of_string = function
@@ -366,6 +372,9 @@ let of_string = function
   | "provider.select" -> Ok Provider_select
   | "organization.view" -> Ok View_organization
   | "organization.manage" -> Ok Manage_organization
+  | "developer.check" -> Ok Developer_check
+  | "developer.fixture.run" -> Ok Developer_fixture_run
+  | "developer.live.run" -> Ok Developer_live_run
   | encoded -> Error (Protocol_error.invalid_request ("unknown scope: " ^ encoded))
 ;;
 
