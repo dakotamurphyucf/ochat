@@ -4,6 +4,8 @@ module F = Document_fields
 module P = Agent_protocol
 module O = Inference.Observation
 module Inference_entry = Developer_inference_row
+module Command_row = Developer_command_row
+module Command_rows = Developer_command_rows
 
 module Member = struct
   type t =
@@ -40,10 +42,11 @@ type t =
   ; last_inference_ordinal : int64
   ; inference_entries : Inference_entry.t list
   ; inference_bytes : int
+  ; command_rows : Command_rows.t
   }
 
 let kind = "store.developer_run"
-let version = 1
+let version = 2
 let ( let* ) result f = Result.bind result ~f
 let corrupt reason = Error (Store_error.Corrupt reason)
 let limit reason = Error (Store_error.Document (D.Error.Limit_exceeded reason))
@@ -60,6 +63,10 @@ let epoch_revision (t : epoch) = t.revision
 let inference_entries t = t.inference_entries
 let inference_count t = List.length t.inference_entries
 let inference_bytes t = t.inference_bytes
+let command_rows t = Command_rows.rows t.command_rows
+let find_command t key = Command_rows.find t.command_rows key
+let command_count t = Command_rows.count t.command_rows
+let command_bytes t = Command_rows.encoded_bytes t.command_rows
 let last_inference_ordinal t = t.last_inference_ordinal
 
 let next_inference_ordinal t =
@@ -123,6 +130,7 @@ let create ~(owner : P.Execution_owner.developer) ~capture_fingerprint =
   ; last_inference_ordinal = 0L
   ; inference_entries = []
   ; inference_bytes = 0
+  ; command_rows = Command_rows.empty
   }
 ;;
 
@@ -136,6 +144,61 @@ let matching_epoch t (owner : P.Execution_owner.developer) =
   if not (same_root t owner)
   then None
   else List.find t.epochs ~f:(fun epoch -> Int.equal epoch.number owner.epoch)
+;;
+
+let validate_command_owner t row =
+  let owner = Command_row.owner row in
+  match matching_epoch t owner with
+  | Some epoch
+    when Chatml_source.Digest.equal epoch.capture (Command_row.capture_fingerprint row) ->
+    Ok ()
+  | None | Some _ -> corrupt "developer command has foreign owner, epoch or capture"
+;;
+
+let append_command t row ~commands ~poll =
+  let* command_rows =
+    Command_rows.append
+      t.command_rows
+      row
+      ~commands
+      ~poll
+      ~check_owner:(validate_command_owner t)
+  in
+  let* revision = next_revision t.revision in
+  Ok { t with command_rows; revision }
+;;
+
+let change_command t ~expected ~change ~limits ~commands ~poll =
+  let* command_rows =
+    Command_rows.change
+      t.command_rows
+      ~expected
+      ~change
+      ~limits
+      ~commands
+      ~poll
+      ~check_owner:(validate_command_owner t)
+    |> Result.map_error ~f:(function
+      | Command_row.Error.Conflict -> Store_error.Corrupt "developer command row changed"
+      | Store error -> error)
+  in
+  let* revision = next_revision t.revision in
+  Ok { t with command_rows; revision }
+;;
+
+let command_recovery t ~limits ~commands ~poll =
+  let* original =
+    Command_rows.of_rows
+      (command_rows t)
+      ~commands
+      ~poll
+      ~check_owner:(validate_command_owner t)
+  in
+  let* recovered, count = Command_rows.interrupted original ~limits ~commands ~poll in
+  if Int64.(t.revision >= max_value - of_int count)
+  then limit "developer command recovery exhausts document revision"
+  else
+    Ok { t with command_rows = recovered; revision = Int64.(t.revision + of_int count) }
 ;;
 
 let validate_invocation_owner t invocation =
@@ -832,6 +895,11 @@ let to_payload t ~poll =
           (List.map t.jobs ~f:(fun job ->
              poll ();
              P.Developer_job.to_json job)) )
+    ; ( "commands"
+      , `Array
+          (List.map (command_rows t) ~f:(fun row ->
+             poll ();
+             Command_row.to_json row)) )
     ; "last_inference_ordinal", F.decimal_json t.last_inference_ordinal
     ; ( "inference_attempts"
       , `Array
@@ -851,6 +919,7 @@ let validate
       ~max_job_payload_bytes
       ~max_inference_attempts
       ~max_inference_bytes
+      ~commands
   =
   let open Result.Let_syntax in
   let%bind () =
@@ -927,6 +996,7 @@ let validate
       ~max_inference_attempts
       ~max_inference_bytes
   in
+  let%bind recovery = command_recovery recovery ~limits ~commands ~poll in
   let%map _payload_bytes =
     List.fold_result t.jobs ~init:0 ~f:(fun accumulated job ->
       poll ();
@@ -962,6 +1032,7 @@ let prepare_encode
       ~max_job_payload_bytes
       ~max_inference_attempts
       ~max_inference_bytes
+      ~commands
   =
   let open Result.Let_syntax in
   let%bind recovery =
@@ -975,10 +1046,11 @@ let prepare_encode
       ~max_job_payload_bytes
       ~max_inference_attempts
       ~max_inference_bytes
+      ~commands
   in
   let%bind payload = to_payload t ~poll in
   let%map recovery_payload =
-    if List.is_empty t.inference_entries || Int64.equal t.revision recovery.revision
+    if Int64.equal t.revision recovery.revision
     then Ok None
     else Result.map (to_payload recovery ~poll) ~f:Option.some
   in
@@ -1009,6 +1081,7 @@ let to_bytes
       ~max_job_payload_bytes
       ~max_inference_attempts
       ~max_inference_bytes
+      ~commands
   =
   prepare_encode
     t
@@ -1020,6 +1093,7 @@ let to_bytes
     ~max_job_payload_bytes
     ~max_inference_attempts
     ~max_inference_bytes
+    ~commands
   |> Result.bind ~f:finish_encode
 ;;
 
@@ -1072,6 +1146,7 @@ let of_decoded_document
       ~max_job_payload_bytes
       ~max_inference_attempts
       ~max_inference_bytes
+      ~commands
   =
   let open Result.Let_syntax in
   (* Document.decode recorded the exact admitted limits. With the Store's same
@@ -1094,6 +1169,7 @@ let of_decoded_document
       ; "epochs"
       ; "invocations"
       ; "jobs"
+      ; "commands"
       ; "last_inference_ordinal"
       ; "inference_attempts"
       ]
@@ -1161,6 +1237,20 @@ let of_decoded_document
   let inference_bytes =
     List.sum (module Int) inference_entries ~f:Inference_entry.encoded_bytes
   in
+  let%bind command_json = required payload "commands" F.array in
+  let%bind () =
+    if List.length command_json > Developer_command_limits.max_commands commands
+    then corrupt "developer command count exceeds limit"
+    else Ok ()
+  in
+  let%bind command_rows =
+    List.map command_json ~f:(fun json ->
+      poll ();
+      Command_row.of_json json ~limits ~poll)
+    |> Result.all
+    |> Result.bind ~f:(fun rows ->
+      Command_rows.of_rows rows ~commands ~poll ~check_owner:(fun _ -> Ok ()))
+  in
   let t =
     { host_id
     ; run_id
@@ -1172,6 +1262,7 @@ let of_decoded_document
     ; last_inference_ordinal
     ; inference_entries
     ; inference_bytes
+    ; command_rows
     }
   in
   let%bind recovery =
@@ -1185,6 +1276,7 @@ let of_decoded_document
       ~max_job_payload_bytes
       ~max_inference_attempts
       ~max_inference_bytes
+      ~commands
   in
   let%map () =
     if Int64.equal recovery.revision t.revision
@@ -1208,6 +1300,7 @@ let of_bytes_with_document
       ~max_job_payload_bytes
       ~max_inference_attempts
       ~max_inference_bytes
+      ~commands
   =
   let open Result.Let_syntax in
   let%bind document = D.Document.decode ~limits bytes |> F.store in
@@ -1222,6 +1315,7 @@ let of_bytes_with_document
       ~max_job_payload_bytes
       ~max_inference_attempts
       ~max_inference_bytes
+      ~commands
   in
   t, document
 ;;
@@ -1236,6 +1330,7 @@ let of_bytes
       ~max_job_payload_bytes
       ~max_inference_attempts
       ~max_inference_bytes
+      ~commands
   =
   Result.map
     (of_bytes_with_document
@@ -1247,6 +1342,7 @@ let of_bytes
        ~max_invocations
        ~max_job_payload_bytes
        ~max_inference_attempts
-       ~max_inference_bytes)
+       ~max_inference_bytes
+       ~commands)
     ~f:fst
 ;;

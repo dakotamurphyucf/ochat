@@ -16,12 +16,21 @@ let document_ok = function
 ;;
 
 let store_limits () =
+  let document =
+    Document_schema.Limits.create
+      ~max_bytes:4096
+      ~max_depth:16
+      ~max_fields:256
+      ~max_nodes:512
+    |> F.ok
+  in
   R.Limits.create
     ~max_runs:3
     ~max_epochs_per_run:3
     ~max_jobs_per_run:4
     ~max_invocations_per_run:4
     ~max_inference_attempts_per_run:256
+    ~commands:(Agent_store.Developer_command_limits.default ~document)
     ~max_inference_bytes_per_run:4096
     ~max_selected_per_commit:2
     ~max_job_payload_bytes:1024
@@ -29,13 +38,7 @@ let store_limits () =
     ~max_recovery_entries:16
     ~max_recovery_bytes:16384
     ~max_work_steps:200
-    ~document:
-      (Document_schema.Limits.create
-         ~max_bytes:4096
-         ~max_depth:16
-         ~max_fields:256
-         ~max_nodes:512
-       |> F.ok)
+    ~document
   |> Or_error.ok_exn
 ;;
 

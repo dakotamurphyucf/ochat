@@ -10,7 +10,11 @@ module Limits : sig
       document cap (itself at most 16 MiB); each Attempt_record also passes
       its canonical 64 KiB/observation/diagnostic admission. The document
       limits use the existing Document_schema JSON byte/depth/field/node
-      accounting. Aggregate recovery limits cover directory entries, bytes
+      accounting. [commands] bounds command rows, complete row bytes and
+      individual terminal payloads; its byte cap must fit this same document.
+      Joint recovery capacity reserves all pending command interruptions and
+      all live inference interruptions together. Aggregate recovery limits
+      cover directory entries, bytes
       and work before allocation. On disk, an over-limit document is corrupt;
       ordinary admission reports Limit_exceeded before mutation. *)
   val create
@@ -20,6 +24,7 @@ module Limits : sig
     -> max_invocations_per_run:int
     -> max_inference_attempts_per_run:int
     -> max_inference_bytes_per_run:int
+    -> commands:Developer_command_limits.t
     -> max_selected_per_commit:int
     -> max_job_payload_bytes:int
     -> max_document_bytes:int
@@ -1257,6 +1262,134 @@ val reconcile_and_settle
   -> Prepared.t
   -> Handoff.t
   -> (Settlement.t, Error.t) result
+
+module Command : sig
+  module Receipt = Developer_command_receipt
+  module Row = Developer_command_row
+
+  module View : sig
+    type t
+
+    (** Historical comparison data tied to one exact Store observation. Neither
+        a copied row nor a View grants execution or result disclosure. *)
+    val row : t -> Row.t
+  end
+
+  module Pending : sig
+    type t
+
+    (** The immutable selected row in this command's complete after-image.
+        Pending remains owned by the existing per-run Store pending map. *)
+    val after : t -> Row.t
+  end
+
+  module Execution_start : sig
+    type t
+
+    (** Consume this process-local acknowledgement once on its issuing domain.
+        Only the first uninterrupted successful commit of a fresh Start can
+        issue one. Reconciliation, repeat commit and historical reads cannot.
+        Consumption is nonyielding and rejects a foreign/closed Store or a
+        previously consumed acknowledgement. It is NOT host execution
+        authority: the caller must also enter its actual owned Root and apply
+        current actor/source/provider checks at every effect boundary. *)
+    val consume : t -> (unit, Error.t) result
+  end
+
+  type preparation =
+    | Unchanged of View.t
+    | Prepared of Pending.t
+
+  type installed =
+    { view : View.t
+    ; execution_start : Execution_start.t option
+    }
+
+  type reconciliation =
+    | Installed of View.t
+    | Absent
+    | Diverged
+
+  (** Read a retained key across epochs of this same stable principal/run.
+      Return its original owner/capture/ID/phase. This may yield; the host
+      authenticates historical access before and after this operation. A
+      command-key miss is never proof that a Pending write did not happen.
+      An unresolved same-run mutation rejects ordinary observation. *)
+  val observe
+    :  handle
+    -> key:Agent_protocol.Idempotency_key.t
+    -> (View.t option, Error.t) result
+
+  (** Return this handle's exact command Pending from the existing Store map.
+      A different kind of pending mutation is Conflict, not absent. Lookup is
+      nonyielding and does not release or settle custody. *)
+  val pending : handle -> (Pending.t option, Error.t) result
+
+  (** Under the sole writer, require latest Active original epoch/capture and
+      prove absence before allocating an ID. An existing identical
+      kind/request/capture/epoch returns its persisted View; changed identity
+      conflicts. Register the complete immutable Pending before releasing the
+      writer or attempting replacement. No new work follows from Unchanged:
+      only pure Check/Fixture in the current original Reserved epoch may be
+      recomputed, while a stored Start is terminal-only. *)
+  val prepare_reservation
+    :  handle
+    -> key:Agent_protocol.Idempotency_key.t
+    -> kind:Receipt.Kind.t
+    -> request_fingerprint:Chatml_source.Digest.t
+    -> (preparation, Error.t) result
+
+  (** Validate the exact View and immutable row under the writer. Wait/Start
+      require Live_run and latest Active original epoch. Finish may settle a
+      historical row but cannot append, reopen, change identity, or turn an
+      unstarted Live command into success. Only an exact identical terminal
+      returns Unchanged. Earlier-epoch pure work may be interrupted, never
+      silently recomputed under its old key. All changes share the canonical
+      row validator and existing full-document Prepared encoder. *)
+  val prepare_change
+    :  handle
+    -> previous:View.t
+    -> change:Row.Change.t
+    -> (preparation, Error.t) result
+
+  (** Commit only the exact Store-owned Pending through the existing writer
+      and before/after image classifier. New reservation, wait and Start
+      recheck original latest Active owner/capture plus trusted nonyielding
+      [admit] immediately before rename, after all waits. Finish still calls
+      [admit], allowing the host's narrower terminal-bookkeeping policy.
+      Successful repeated commit returns the same View with no fresh Start.
+      If the first Start acknowledgement is interrupted or uncertain, even an
+      installed after-image is observation only: never issue execution_start
+      from reconciliation. Exceptions/cancellation preserve identity and raw
+      backtrace while retaining exact Pending custody. An unknown/diverged
+      write blocks any different mutation; selected terminal bytes never get
+      replaced by a recomputed result. *)
+  val commit : handle -> Pending.t -> admit:(unit -> bool) -> (installed, Error.t) result
+
+  (** One fresh full-image classification under the writer for an unsettled
+      Pending; an already settled exact token returns its Installed observation.
+      Never repeat an effect or mint Execution_start. Installed settles this exact Pending.
+      Absent and Diverged retain it. Unknown I/O preserves the original token;
+      neither a cached Absent nor a key miss releases the pending barrier. *)
+  val reconcile : handle -> Pending.t -> (reconciliation, Error.t) result
+
+  (** Recheck exact before-image absence under the writer and replace only
+      this Pending with a fresh preparation of the SAME immutable row/change.
+      Current-epoch admission is repeated for reserve/wait/Start. A formerly
+      unknown Start can be retried only after this proves its barrier absent;
+      an installed Start can never be made executable again. No terminal
+      result is selected again and no runtime callback is invoked. *)
+  val reprepare_same : handle -> Pending.t -> (Pending.t, Error.t) result
+
+  (** Retire only a reserve/wait/Start whose complete before-image is freshly
+      proved present under the writer. This allows cancellation or revocation
+      to release an uninstalled admission without requiring renewed live
+      authority. An installed/unknown/diverged write rejects, and terminal
+      selections cannot be discarded through this operation. There is no
+      execution permission to revoke: a settled Start is no longer Pending.
+      Cached classification never suffices. *)
+  val retire_absent_admission : handle -> Pending.t -> (unit, Error.t) result
+end
 
 (** Stop admission, join owned operations and invalidate all handles. An active
     Run_claim rejects explicit close before any state change; the daemon must
