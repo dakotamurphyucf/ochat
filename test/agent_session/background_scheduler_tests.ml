@@ -535,6 +535,8 @@ let%test_unit "developer scan advances beyond an unsupported 64-job window" =
       ~max_epochs_per_run:3
       ~max_jobs_per_run:65
       ~max_invocations_per_run:5
+      ~max_inference_attempts_per_run:256
+      ~max_inference_bytes_per_run:8192
       ~max_selected_per_commit:65
       ~max_job_payload_bytes:262144
       ~max_document_bytes:262144
