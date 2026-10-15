@@ -5,7 +5,7 @@ module Owner = Authoring_context_service_core
 (** PRIVATE preparation of one genuine Project or selected-script Document
     parser-confirmed prefix. It installs no source authority and publishes no
     checked result. The enclosing Semantic service owns the joined request,
-    original/current actor rechecks and final five-head CAS. *)
+    original/current actor rechecks and final cache-head CAS. *)
 module Limits : sig
   type t
 

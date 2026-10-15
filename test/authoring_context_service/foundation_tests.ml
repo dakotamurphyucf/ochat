@@ -14,6 +14,7 @@ let with_supplied_owner
       ?(contents = "<developer>draft</developer>")
       ?(result_bytes = 4096)
       ?(on_context = fun (_ : P.Authoring.Context.t) -> ())
+      ?(analysis_policy = Service_tests.analysis_policy ())
       f
   =
   Eio_main.run (fun env ->
@@ -59,7 +60,7 @@ let with_supplied_owner
                ~max_context_source_bytes:4096
                ~max_total_source_bytes:4096
              |> Or_error.ok_exn)
-          ~analysis_policy:(Service_tests.analysis_policy ())
+          ~analysis_policy
           ~protocol_limits:
             (P.Authoring.Limits.create
                ~max_sources:4
@@ -142,6 +143,7 @@ let%test_unit "feature checks, expired Current and final publication head CAS" =
       ; "document", Testing.Document_cache
       ; "analysis index", Testing.Analysis_index
       ; "provisional index", Testing.Provisional_index
+      ; "checked template", Testing.Checked_template
       ]
       ~f:(fun (name, head) ->
         match invoke ~after:(fun probe -> Testing.replace_head probe head |> ok) () with

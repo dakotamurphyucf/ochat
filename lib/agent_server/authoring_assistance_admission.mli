@@ -25,6 +25,9 @@ module Limits : sig
     ; mapped : Chatmd_authoring_fallback.Limits.t
     }
 
+  (** [max_contract_identity_bytes] is caller-selected and at most 16 MiB;
+      canonical contract conversion debits its conservative allocation and
+      checkpoint work before any selected-catalog suggestion is admitted. *)
   val create
     :  protocol_limits:P.Authoring.Limits.t
     -> max_scan_work_steps:int

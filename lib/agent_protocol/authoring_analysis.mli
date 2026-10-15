@@ -222,8 +222,14 @@ module Analyze : sig
       -> target:Target.selector
       -> (t, Error.t) result
 
+    (** Explicitly opt in to preparing at most one selected-contract checked
+        template during this Analyze request. The default is analysis only.
+        The flag does not certify a template or grant a source/host selection. *)
+    val with_checked_template : t -> t
+
     val context : t -> Context.Expected.t
     val target : t -> Target.selector
+    val prepare_checked_template : t -> bool
     val equal : t -> t -> bool
     val sexp_of_t : t -> Core.Sexp.t
     val to_json : t -> Jsonaf.t

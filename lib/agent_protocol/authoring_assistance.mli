@@ -240,6 +240,36 @@ module Assistance : sig
     val of_json : Jsonaf.t -> (t, Error.t) result
   end
 
+  module Checked_template : sig
+    (** Portable comparison evidence emitted only after the host has matched a
+        retained opaque checked-example witness to the current selected Build,
+        environment, compiler contract and source. This DTO itself is not
+        compiler certification or a capability. *)
+    type target =
+      | One_off_v1
+      | Tool_v1
+      | Developer_tool_v1
+      | Moderator_v1
+      | Delegated_moderator_v1
+    [@@deriving equal, sexp_of]
+
+    type t
+
+    val create
+      :  selected:Selected_catalog.t
+      -> target:target
+      -> example_digest:Chatml_source.Digest.t
+      -> checked_input_fingerprint:Chatml_source.Digest.t
+      -> (t, Error.t) result
+
+    val selected : t -> Selected_catalog.t
+    val target : t -> target
+    val example_digest : t -> Chatml_source.Digest.t
+    val checked_input_fingerprint : t -> Chatml_source.Digest.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
   module Selected_tool : sig
     (** Comparison evidence for one binding in the host's ACTUALLY selected
         tool registry. Both digests come from the existing SHA-256
@@ -288,6 +318,7 @@ module Assistance : sig
           ; sha256 : Chatml_source.Digest.t
           }
       | Selected_catalog of Selected_catalog.t
+      | Checked_template of Checked_template.t
       | Selected_tool of Selected_tool.t
       | Host_root of Id.Authoring_root.t
     [@@deriving sexp_of]
@@ -297,7 +328,10 @@ module Assistance : sig
         Selected_tool;
         Path uses Parsed_project for a declared path, or Host_root or
         Selected_catalog for a separately authorized member; Template uses
-        Lexical static syntax, Parsed_document or Installed_builtin;
+        Lexical static syntax, Parsed_document, Installed_builtin or an
+        independently checked current Checked_template witness. For the latter
+        the suggestion constructor/decoder recomputes the bounded inserted
+        text digest; copied evidence still cannot authorize or certify.
         Environment uses Parsed_project or Selected_catalog. Parsed_document
         refers to genuine captured parser input. Parsed_project identifies the
         actual captured project declaration whose environment names were

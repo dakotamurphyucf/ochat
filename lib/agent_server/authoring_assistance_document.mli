@@ -51,6 +51,7 @@ val prepare
   -> script_selection:Authoring_script_selection.Policy.t option
   -> project_metadata:Authoring_project_metadata.Policy.t option
   -> selected_tools:Selected_tools.t option
+  -> project_build_limits:Chatml_project_build.Limits.t
   -> limits:Limits.t
   -> checkpoint:(unit -> unit)
   -> (t, Owner.Error.t) result

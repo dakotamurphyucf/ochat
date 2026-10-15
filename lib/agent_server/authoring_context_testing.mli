@@ -24,6 +24,7 @@ type head =
   | Analysis_index
   | Provisional_index
   | Parsed_capture
+  | Checked_template
 
 type probe
 type expired_borrow

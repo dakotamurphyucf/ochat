@@ -34,7 +34,7 @@ let ok = function
   | Error _ -> failwith "unexpected bounded setup/result failure"
 ;;
 
-let analysis_policy () =
+let analysis_policy ?(compilation = Chatml_compilation.default_limits) () =
   let semantic =
     Chatml_semantics.Limits.create
       ~max_input_bytes:1_000_000
@@ -58,7 +58,7 @@ let analysis_policy () =
     |> Or_error.ok_exn
   in
   Chatml_authoring_analysis.Policy.create
-    ~compilation:Chatml_compilation.default_limits
+    ~compilation
     ~semantic
     ~max_dependency_depth:16
     ~max_results:2
@@ -469,7 +469,7 @@ let%test_unit "host root read is fresh while project context remains captured" =
                ~limits:
                  (Agent_server.Authoring_source_host.Limits.create
                     ~max_contexts:2
-                    ~max_context_requests:12
+                    ~max_context_requests:24
                     ~max_manifest_entries:8
                     ~max_browse_entries:16
                     ~max_read_bytes:1024
@@ -505,6 +505,7 @@ let%test_unit "host root read is fresh while project context remains captured" =
            in
            Agent_server.Authoring_source_host.Context.close_and_wait static_owner;
            let static_allowed = ref true in
+           let project_allowed = ref true in
            let on_static = ref Fn.id in
            let host = P.Id.Server.create () in
            let connection =
@@ -526,10 +527,13 @@ let%test_unit "host root read is fresh while project context remains captured" =
                ~selection_policy:
                  (S.Selection_policy.create
                     ~project_contract:(fun _ ~root:_ ~project:_ ~selection:_ ->
-                      Some
-                        (Chatml.Chatml_compiler_contract.for_target
-                           One_off_v1
-                           ~checkpoint:Fn.id))
+                      if !project_allowed
+                      then
+                        Some
+                          (Chatml.Chatml_compiler_contract.for_target
+                             One_off_v1
+                             ~checkpoint:Fn.id)
+                      else None)
                     ~document_static:(fun _ ~requested_environment:_ ->
                       !on_static ();
                       if !static_allowed then Some static_build else None))
@@ -568,7 +572,10 @@ let%test_unit "host root read is fresh while project context remains captured" =
              ~response:
                (initialize_response_with_features
                   ~enabled_features:
-                    [ P.Authoring.Features.core; P.Authoring.Features.semantic ]
+                    [ P.Authoring.Features.core
+                    ; P.Authoring.Features.semantic
+                    ; P.Authoring.Features.assistance
+                    ]
                   ~server_id:host
                   ~principal)
            |> ok;
@@ -614,8 +621,8 @@ let%test_unit "host root read is fresh while project context remains captured" =
                ~project_metadata:None
                ~project_build_limits:
                  (Chatml_project_build.Limits.create
-                    ~max_work_steps:100_000
-                    ~max_input_bytes:(Some 4096)
+                    ~max_work_steps:1_000_000
+                    ~max_input_bytes:(Some 64_000)
                     ~document:Document_schema.Limits.default
                   |> Or_error.ok_exn)
                ~limits:
@@ -639,6 +646,7 @@ let%test_unit "host root read is fresh while project context remains captured" =
                ~context:expected
                ~target:P.Authoring.Analysis.Target.project
              |> ok
+             |> P.Authoring.Analysis.Analyze.Request.with_checked_template
            in
            let complete_capture, complete_snapshot, complete_graph =
              match S.Semantic.analyze analyze ~actor ~connection analysis_request with
@@ -648,7 +656,8 @@ let%test_unit "host root read is fresh while project context remains captured" =
                failwith
                  (Sexp.to_string_hum (P.Authoring.Analysis.Analyze.sexp_of_t result))
              | Error error ->
-               failwith (P.Error.code_to_string (S.Error.to_protocol error).code)
+               let error = S.Error.to_protocol error in
+               failwith (P.Error.code_to_string error.code ^ ": " ^ error.message)
            in
            let inventory =
              P.Authoring.Source_read.List_request.create
@@ -761,7 +770,8 @@ let%test_unit "host root read is fresh while project context remains captured" =
                  -> ()
                | _ -> failwith "provisional query lost current value candidates")
             | Error error ->
-              failwith (P.Error.code_to_string (S.Error.to_protocol error).code));
+              let error = S.Error.to_protocol error in
+              failwith (P.Error.code_to_string error.code ^ ": " ^ error.message));
            [%test_eq: int]
              (S.For_testing.provisional_count
                 service
@@ -771,6 +781,156 @@ let%test_unit "host root read is fresh while project context remains captured" =
                 ~checkpoint:ignore
               |> ok)
              1;
+           let assistance =
+             S.Assistance.create
+               ~owner:service
+               ~script_selection:None
+               ~project_metadata:None
+               ~selected_tools:None
+               ~project_build_limits:
+                 (Chatml_project_build.Limits.create
+                    ~max_work_steps:1_000_000
+                    ~max_input_bytes:(Some 64_000)
+                    ~document:Document_schema.Limits.default
+                  |> Or_error.ok_exn)
+               ~limits:
+                 (S.Assistance.Limits.create
+                    ~protocol_limits:
+                      (P.Authoring.Limits.create
+                         ~max_sources:8
+                         ~max_source_bytes:4096
+                         ~max_context_source_bytes:8192
+                         ~max_request_bytes:4096
+                         ~max_result_bytes:4096
+                         ~max_path_candidates:16
+                       |> ok)
+                    ~max_scan_work_steps:100_000
+                    ~max_assistance_work_steps:100_000
+                    ~max_contract_identity_bytes:(16 * 1024 * 1024)
+                    ~max_contract_work_steps:1_000_000
+                    ~max_projection_work_steps:100_000
+                    ~max_parser_input_bytes:4096
+                    ~max_imported_inputs:8
+                    ~max_selected_tools:16
+                    ~max_tool_metadata_bytes:4096
+                  |> Or_error.ok_exn)
+             |> ok
+           in
+           let project_assistance context source =
+             let assistance_request =
+               P.Authoring_assistance.Assistance.Request.create
+                 ~context
+                 ~source
+                 ~cursor_byte:4
+                 ~max_items:1
+               |> ok
+             in
+             S.Assistance.handle_assistance
+               assistance
+               ~actor
+               ~connection
+               assistance_request
+           in
+           let assert_checked_project context source =
+             match project_assistance context source with
+             | Ok (Assistance result) ->
+               (match P.Authoring_assistance.Assistance.Result.items result with
+                | [ item ] ->
+                  (match P.Authoring_assistance.Assistance.Suggestion.evidence item with
+                   | Checked_template checked ->
+                     assert (
+                       P.Authoring_assistance.Assistance.Checked_template.equal_target
+                         (P.Authoring_assistance.Assistance.Checked_template.target
+                            checked)
+                         One_off_v1);
+                     [%test_eq: string]
+                       (P.Authoring_assistance.Assistance.Suggestion.insert_text item)
+                       {|let main input = Task.pure(input)|};
+                     let replace =
+                       P.Authoring_assistance.Assistance.Suggestion.replace item
+                     in
+                     assert (
+                       P.Authoring.Source.equal
+                         (P.Authoring_assistance.Assistance.Range.source replace)
+                         source);
+                     [%test_eq: int]
+                       (P.Authoring_assistance.Assistance.Range.start_byte replace)
+                       0;
+                     [%test_eq: int]
+                       (P.Authoring_assistance.Assistance.Range.end_byte replace)
+                       (P.Authoring.Source.byte_length source)
+                   | _ -> failwith "project checked template lacked evidence")
+                | _ -> failwith "checked project example lost the one result slot")
+             | Ok _ | Error _ -> failwith "checked project assistance failed"
+           in
+           assert_checked_project expected script_source;
+           project_allowed := false;
+           (match project_assistance expected script_source with
+            | Error S.Error.Selection_unavailable -> ()
+            | Ok _ | Error _ ->
+              failwith "revoked project selection served checked example");
+           project_allowed := true;
+           let version =
+             match
+               call
+                 (Document_version
+                    (P.Authoring.Document.Version_request.create
+                       ~context:expected
+                       ~source_id:script_id
+                     |> ok))
+             with
+             | Ok (Document_version version) -> version
+             | Ok _ | Error _ -> failwith "project entry version missing"
+           in
+           let edited =
+             match
+               call
+                 (Document_replace
+                    (P.Authoring.Document.Replace_request.create
+                       ~expected:version
+                       ~next_editor_revision:1
+                       ~contents:"let main value = Task.pure(value)\n"
+                     |> ok))
+             with
+             | Ok (Document_replace result) -> result
+             | Ok _ | Error _ -> failwith "project entry overlay failed"
+           in
+           let edited_expected = P.Authoring.Context.Expected.of_view edited.context in
+           let edited_source = P.Authoring.Document.Version.source edited.version in
+           (match project_assistance edited_expected edited_source with
+            | Ok (Assistance result) ->
+              assert (
+                List.for_all
+                  (P.Authoring_assistance.Assistance.Result.items result)
+                  ~f:(fun item ->
+                    match P.Authoring_assistance.Assistance.Suggestion.evidence item with
+                    | Checked_template _ -> false
+                    | _ -> true))
+            | Ok _ | Error _ -> failwith "edited source used old checked example");
+           (match
+              S.Semantic.analyze
+                analyze
+                ~actor
+                ~connection
+                (P.Authoring.Analysis.Analyze.Request.create
+                   ~context:edited_expected
+                   ~target:P.Authoring.Analysis.Target.project
+                 |> ok
+                 |> P.Authoring.Analysis.Analyze.Request.with_checked_template)
+            with
+            | Ok (P.Authoring.Analysis.Analyze.Complete _) -> ()
+            | Ok _ | Error _ -> failwith "edited project entry was not checked");
+           assert_checked_project edited_expected edited_source;
+           let restored =
+             match
+               call
+                 (Document_close
+                    (P.Authoring.Document.Close_request.create ~expected:edited.version))
+             with
+             | Ok (Document_close result) -> result.context
+             | Ok _ | Error _ -> failwith "project entry overlay close failed"
+           in
+           let expected = P.Authoring.Context.Expected.of_view restored in
            let pinned =
              P.Authoring.Source_read.Read_request.create
                ~context:expected

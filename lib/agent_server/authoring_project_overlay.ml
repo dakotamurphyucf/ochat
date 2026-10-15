@@ -36,31 +36,15 @@ let selected_contract (current : Owner.Current.t) =
 ;;
 
 let fresh_lock_id_from_sources ~sources ~prior_lock ~checkpoint =
-  let open Result.Let_syntax in
-  let%bind seen, count =
-    List.fold_result
-      sources
-      ~init:(Set.singleton (module Captured.Id) prior_lock, 0)
-      ~f:(fun (seen, count) source ->
-        checkpoint ();
-        if count >= Int.max_value - 1
-        then Error Error.Lock_identity_unavailable
-        else Ok (Set.add seen (Captured.id source), count + 1))
-  in
-  let rec choose ordinal =
-    checkpoint ();
-    if ordinal > count + 1
-    then Error Error.Lock_identity_unavailable
-    else (
-      let namespace = "@ochat.authoring.overlay." ^ Int.to_string ordinal in
-      match
-        Captured.Id.create ~package_namespace:namespace ~relative_path:"authoring.lock"
-      with
-      | Error _ -> Error Error.Lock_identity_unavailable
-      | Ok candidate ->
-        if Set.mem seen candidate then choose (ordinal + 1) else Ok candidate)
-  in
-  choose 0
+  Authoring_entry_recomposition.fresh_lock_id_from_sources
+    ~sources
+    ~prior_lock
+    ~checkpoint
+  |> Result.map_error ~f:(function
+    | Authoring_entry_recomposition.Error.Lock_identity_unavailable ->
+      Error.Lock_identity_unavailable
+    | Invalid_selected_entry | Body_limit | Recomposition _ ->
+      Error.Lock_identity_unavailable)
 ;;
 
 let prepare current ~limits ~checkpoint =

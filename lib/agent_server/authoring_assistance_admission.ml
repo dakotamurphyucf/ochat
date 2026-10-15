@@ -58,7 +58,7 @@ module Limits = struct
       || max_imported_inputs > protocol_limits.max_sources
       || max_tool_metadata_bytes > protocol_limits.max_context_source_bytes
       || max_selected_tools > P.Authoring_assistance.Limits.max_suggestions
-      || max_contract_identity_bytes > 8 * 1024 * 1024
+      || max_contract_identity_bytes > 16 * 1024 * 1024
     then Or_error.error_string "invalid authoring assistance limits"
     else
       let open Or_error.Let_syntax in

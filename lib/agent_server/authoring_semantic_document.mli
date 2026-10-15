@@ -17,8 +17,11 @@ val prepare_checked
   -> inputs:Ledger.Document.Inputs.t
   -> retained:Owner.Retained_document_capture.t
   -> script:Document.Script.t
+  -> selected_build:Chatml_project_build.t
   -> env:Eio_unix.Stdenv.base
   -> contract:Chatml.Chatml_compiler_contract.t
+  -> checked_template:bool
+  -> template_limits:Authoring_checked_template.Limits.t
   -> checkpoint:(unit -> unit)
   -> (Publication.Prepared.t, Owner.Error.t) result
 
