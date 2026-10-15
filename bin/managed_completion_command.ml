@@ -202,7 +202,7 @@ let source_request selection mode submission =
      | None, Single_turn -> Ok (M.Request.Foreground_continue Start_stopped)
      | None, Workflow ->
        Error (failure Invalid_state "Workflow requires an actual versioned moderator"))
-  | Some (Standard (Tool_v1 | One_off_v1) | Native_hook _) ->
+  | Some (Standard (Tool_v1 | Developer_tool_v1 | One_off_v1) | Native_hook _) ->
     Error (failure Invalid_state "selected root has a child-only moderator role")
 ;;
 
