@@ -10,7 +10,7 @@ type phase =
 
 type t =
   { mutable selected : C.t
-  ; mutable current_capabilities : unit -> C.t
+  ; mutable current_capabilities : unit -> (C.t, string) result
   ; abort : P.Id.Job.t -> unit
   ; active : bool Atomic.t
   ; mutable issued : P.Id.Job.t list
@@ -35,9 +35,9 @@ let check_selection t =
   let open Result.Let_syntax in
   let%bind () = selectable t in
   let names = List.map (C.references t.selected) ~f:(fun reference -> reference.C.name) in
+  let%bind capabilities = t.current_capabilities () in
   let%bind current =
-    C.select (t.current_capabilities ()) ~names
-    |> Result.map_error ~f:(fun error -> error.C.message)
+    C.select capabilities ~names |> Result.map_error ~f:(fun error -> error.C.message)
   in
   let%bind () = selectable t in
   if String.equal (C.fingerprint current) (C.fingerprint t.selected)
@@ -60,9 +60,9 @@ let rebind_selected t ~selected ~current_capabilities =
   then Error "background selection is already bound to started work"
   else (
     let names = List.map (C.references selected) ~f:(fun reference -> reference.C.name) in
+    let%bind capabilities = current_capabilities () in
     let%bind current =
-      C.select (current_capabilities ()) ~names
-      |> Result.map_error ~f:(fun error -> error.C.message)
+      C.select capabilities ~names |> Result.map_error ~f:(fun error -> error.C.message)
     in
     if not (String.equal (C.fingerprint current) (C.fingerprint selected))
     then Error "managed dependency selection changed"

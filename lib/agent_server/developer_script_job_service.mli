@@ -177,6 +177,14 @@ end
     invocation kernel still re-resolves its binding and checks direct-parent
     liveness at effect entry; this module repeats the borrowed ceiling after
     yielding request preparation and before physical staging.
+    [selected_current] is an internal trusted comparison port used only by a
+    physically admitted child native executor. It cannot mint a capability:
+    this service still checks the exact Root, terminal, borrow and parent, and
+    each binding must resolve against the same caller selection after waits.
+    Its failure is final; no root-selection fallback is permitted. It may
+    yield, so the terminal is checked again after selection resolution and
+    immediately before the final parent check. Omission preserves the
+    original current Root registry path.
     Developer_native_executor keeps its existing shared Function/Custom/
     managed policy, dispatch, permission, callback and completion pipeline.
     It calls [seal_native] from that pipeline's canonical outcome continuation
@@ -190,6 +198,8 @@ val with_native_scope
   -> terminal:Developer_root_owner.Native_terminal.t
   -> borrowed:Agent_session.Native_tool_invocation.selected_borrowed option
   -> ?ceiling:Chat_response.Tool_capability.t
+  -> ?selected_current:
+       (unit -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result)
   -> check_parent_now:(unit -> (unit, Agent_protocol.Error.t) result)
   -> (scope:Scope.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
