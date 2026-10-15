@@ -450,7 +450,15 @@ module Worker_action = struct
     if not t.live
     then invalid "developer worker action is no longer live"
     else
-      let* () = check_effect_now t.issuer t.snapshot in
+      let* latest = current_local t.issuer in
+      let* () =
+        if
+          phys_equal latest.selected t.snapshot.selected
+          && Int.equal latest.selection_revision t.snapshot.selection_revision
+        then Ok ()
+        else invalid "developer worker selected registry changed"
+      in
+      let* () = check_effect_now t.issuer latest in
       Job_scope.Parent.check_now
         t.parent
         ~owner:t.issuer.owner

@@ -168,6 +168,7 @@
     lib/agent_server/managed_output_page.ml %{dep:../agent_server/managed_output_page.ml}
     lib/agent_server/session_factory.ml %{dep:../agent_server/session_factory.ml}
     lib/agent_server/developer_background_job_runner.ml %{dep:../agent_server/developer_background_job_runner.ml}
+    lib/agent_server/developer_script_job_execution.ml %{dep:../agent_server/developer_script_job_execution.ml}
     lib/agent_server/developer_script_job_service.ml %{dep:../agent_server/developer_script_job_service.ml}
     lib/agent_session/authoring_context_tool.ml %{dep:../agent_session/authoring_context_tool.ml}
     lib/agent_session/authoring_reference_scope.ml %{dep:../agent_session/authoring_reference_scope.ml}

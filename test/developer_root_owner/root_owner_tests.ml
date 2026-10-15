@@ -91,7 +91,13 @@ let capacity ?(per_session = 2) () =
   Agent_server.Job_capacity.create ~limits
 ;;
 
-let with_store ?(checkpoint = ignore) ?(wrap_env = Fn.id) ?(on_store = fun _ _ _ -> ()) f =
+let with_store
+      ?(checkpoint = ignore)
+      ?(wrap_env = Fn.id)
+      ?(on_store = fun _ _ _ -> ())
+      ?(max_job_payload_bytes = 1024)
+      f
+  =
   Eio_main.run (fun env ->
     let path =
       Filename.concat
@@ -115,7 +121,12 @@ let with_store ?(checkpoint = ignore) ?(wrap_env = Fn.id) ?(on_store = fun _ _ _
             |> ok
           in
           let store =
-            R.open_or_create session ~sw ~limits:(store_limits ()) ~checkpoint |> ok
+            R.open_or_create
+              session
+              ~sw
+              ~limits:(store_limits ~max_job_payload_bytes ())
+              ~checkpoint
+            |> ok
           in
           on_store env session store;
           let result = f env sw store in
