@@ -68,6 +68,7 @@ let on_event = fun ctx state event -> Task.pure(state)</script>|};
       let factory =
         Runner.create
           ~script_preparation:(Runtime_preparation_tests.policy ())
+          ~tool_contract:Chatml_compilation.Tool_contract.Standard
           ~content_limits:None
           ~policy_revision:
             (Chatml_source.Digest.of_contents "fixture-policy-v1" ~checkpoint:ignore)
@@ -225,7 +226,7 @@ let%expect_test "actual source and runtime policy limits participate in runner i
         ~parser_limits:(Agent_session.Prompt_revision_builder.capture_limits ())
         ~max_work_steps
         ~preprocess:Fn.id
-        ~prepare_programs:(fun _ ~invocation:_ _ _ ->
+        ~prepare_programs:(fun _ ~tool_contract:_ ~invocation:_ _ _ ->
           failwith "identity construction must not prepare programs")
       |> Or_error.ok_exn
       |> Runner.Source.policy_identity
@@ -233,6 +234,7 @@ let%expect_test "actual source and runtime policy limits participate in runner i
     let runtime max_custody_work_steps content_limits =
       Runner.create
         ~script_preparation:(Runtime_preparation_tests.policy ~max_custody_work_steps ())
+        ~tool_contract:Chatml_compilation.Tool_contract.Standard
         ~content_limits
         ~policy_revision:tag
         ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized

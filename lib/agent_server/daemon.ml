@@ -1209,10 +1209,11 @@ let compose
             ~parser_limits:(Agent_session.Prompt_revision_builder.capture_limits ())
             ~max_work_steps:(Sources.Policy.max_work_steps policy)
             ~preprocess:Meta_prompting.Preprocessor.preprocess
-            ~prepare_programs:(fun startup ~invocation scope capture ->
+            ~prepare_programs:(fun startup ~tool_contract ~invocation scope capture ->
               Prompt_catalog_host.prepare_child_programs
                 project_catalog
                 ~startup
+                ~tool_contract
                 ~invocation
                 ~scope
                 ~capture

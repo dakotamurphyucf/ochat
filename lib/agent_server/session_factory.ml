@@ -2515,6 +2515,7 @@ let source_binding (t : t) ~source_lease =
     Some
       (Agent_session.Captured_agent_runner.Source_binding.create
          ~source:policy.source
+         ~tool_contract:Chatml_compilation.Tool_contract.Standard
          ~runtime_policy_revision:policy.runtime_policy_revision
          ~content_limits:t.content_limits
          ~artifact_store:artifacts
@@ -2621,6 +2622,7 @@ let select_authored_code t ~binding ~parent ~reference ~recorded ~checkpoint =
          ~reference
          ~artifact_store:artifacts
          ~policy
+         ~tool_contract:Chatml_compilation.Tool_contract.Standard
          ~invocation:Delegated_ui
          ~content_limits:t.content_limits
          ~env:t.env

@@ -117,6 +117,69 @@ let convert_tools (ts : Openai.Completions.tool list) : Res.Request.Tool.t list 
 
 (*--- 4-c.  Agent tool → Ochat_function.t ------------------------------*)
 
+module Agent_definition (Spec : sig
+    val declaration : CM.agent_tool
+  end) : Ochat_function.Def with type input = string = struct
+  type input = string
+
+  let CM.{ name; description; agent; is_local = _ } = Spec.declaration
+  let name = name
+  let type_ = "function"
+
+  let description =
+    Option.first_some
+      description
+      (Some
+         (Printf.sprintf
+            "Run agent prompt located at %s and return its final answer."
+            agent))
+  ;;
+
+  let parameters : Jsonaf.t =
+    `Object
+      [ "type", `String "object"
+      ; "properties", `Object [ "input", `Object [ "type", `String "string" ] ]
+      ; "required", `Array [ `String "input" ]
+      ; "additionalProperties", `False
+      ]
+  ;;
+
+  let input_of_string input =
+    match Jsonaf.(of_string input |> member_exn "input") with
+    | `String value -> value
+    | _ -> failwith "Expected {\"input\": string} for agent tool input"
+  ;;
+end
+
+let agent_input_items input : CM.content_item list =
+  [ Basic
+      { type_ = "text"
+      ; text = Some input
+      ; image_url = None
+      ; document_url = None
+      ; is_local = false
+      ; cleanup_html = false
+      ; markdown = false
+      }
+  ]
+;;
+
+let agent_observer invocation =
+  if Ochat_function.Invocation.is_observed invocation
+  then (
+    let trace =
+      Agent_trace.create
+        ~emit:(Ochat_function.Invocation.emit invocation)
+        ~emit_trace:(Ochat_function.Invocation.emit_trace invocation)
+    in
+    Some
+      Agent_response_loop.
+        { on_event = Agent_trace.on_transcript_event trace
+        ; on_tool_execution = Agent_trace.on_tool_execution trace
+        })
+  else None
+;;
+
 (** [agent_fn ~ctx ~run_agent spec] wraps a nested ChatMarkdown
     {e agent} into a {!Ochat_function.t}.  Calling the resulting function
     is equivalent to starting a brand-new ChatMarkdown driver on the
@@ -137,58 +200,19 @@ let convert_tools (ts : Openai.Completions.tool list) : Res.Request.Tool.t list 
 let agent_fn ?agent_source_runner ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool)
   : Ochat_function.t
   =
-  let CM.{ name; description; agent; is_local } = agent_spec in
+  let CM.{ name = _; description = _; agent; is_local } = agent_spec in
   (* pull components from the shared context *)
   let _net_unused = Ctx.net ctx in
-  (* Interface definition for the agent tool – expects an object with a
-       single string field "input". *)
-  let module M : Ochat_function.Def with type input = string = struct
-    type input = string
-
-    let name = name
-    let type_ = "function"
-
-    let description : string option =
-      Option.first_some
-        description
-        (Some
-           (Printf.sprintf
-              "Run agent prompt located at %s and return its final answer."
-              agent))
-    ;;
-
-    let parameters : Jsonaf.t =
-      `Object
-        [ "type", `String "object"
-        ; "properties", `Object [ "input", `Object [ "type", `String "string" ] ]
-        ; "required", `Array [ `String "input" ]
-        ; "additionalProperties", `False
-        ]
-    ;;
-
-    let input_of_string s : input =
-      match Jsonaf.(of_string s |> member_exn "input") with
-      | `String str -> str
-      | _ -> failwith "Expected {\"input\": string} for agent tool input"
-    ;;
-  end
+  let module M =
+    Agent_definition (struct
+      let declaration = agent_spec
+    end)
   in
   (* Construction is synchronous and cannot invoke its callback. Initialize this
      private identity cell before returning the actual function for registration. *)
   let implementation = ref None in
   let run ~ctx ~source ?observer (user_msg : string) : string =
-    (* Build a basic content item from the provided user input. *)
-    let basic_item : CM.basic_content_item =
-      { type_ = "text"
-      ; text = Some user_msg
-      ; image_url = None
-      ; document_url = None
-      ; is_local = false
-      ; cleanup_html = false
-      ; markdown = false
-      }
-    in
-    let items = [ CM.Basic basic_item ] in
+    let items = agent_input_items user_msg in
     match agent_source_runner with
     | Some runner ->
       runner.Agent_source_runner.run
@@ -215,21 +239,7 @@ let agent_fn ?agent_source_runner ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.a
       (module M)
       (fun ~invocation args ->
          let source = Fork.Invocation_id.create () |> Fork.Invocation_id.to_string in
-         let observer =
-           if Ochat_function.Invocation.is_observed invocation
-           then (
-             let trace =
-               Agent_trace.create
-                 ~emit:(Ochat_function.Invocation.emit invocation)
-                 ~emit_trace:(Ochat_function.Invocation.emit_trace invocation)
-             in
-             Some
-               Agent_response_loop.
-                 { on_event = Agent_trace.on_transcript_event trace
-                 ; on_tool_execution = Agent_trace.on_tool_execution trace
-                 })
-           else None
-         in
+         let observer = agent_observer invocation in
          let ctx =
            Option.value_map
              (Ochat_function.Invocation.inference_parent invocation)
@@ -241,6 +251,52 @@ let agent_fn ?agent_source_runner ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.a
   implementation := Some function_;
   function_
 ;;
+
+module Deferred_agent = struct
+  type t = { implementation : Ochat_function.t }
+
+  let implementation t = t.implementation
+
+  let create ~declaration:(agent_spec : CM.agent_tool) ~runner ~with_context =
+    let module M =
+      Agent_definition (struct
+        let declaration = agent_spec
+      end)
+    in
+    let implementation = ref None in
+    let function_ =
+      Ochat_function.create_streaming_function
+        (module M)
+        (fun ~invocation input ->
+           let output =
+             with_context
+               ~implementation:(Option.value_exn !implementation)
+               ~invocation
+               (fun ctx ->
+                  let ctx =
+                    Option.value_map
+                      (Ochat_function.Invocation.inference_parent invocation)
+                      ~default:ctx
+                      ~f:(fun parent -> Ctx.with_inference_parent ctx ~parent)
+                  in
+                  let observer = agent_observer invocation in
+                  let source =
+                    Fork.Invocation_id.create () |> Fork.Invocation_id.to_string
+                  in
+                  runner.Agent_source_runner.run
+                    ~implementation:(Some (Option.value_exn !implementation))
+                    ~declaration:agent_spec
+                    ~ctx
+                    ~source
+                    ~observer
+                    (agent_input_items input))
+           in
+           Res.Tool_output.Output.Text output)
+    in
+    implementation := Some function_;
+    { implementation = function_ }
+  ;;
+end
 
 (** [mcp_tool ~sw ~ctx decl] resolves a `{<tool mcp_server="…"/>}`
       declaration.  It returns one {!Ochat_function.t} per advertised

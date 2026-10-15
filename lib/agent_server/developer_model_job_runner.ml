@@ -219,6 +219,15 @@ let strict_recipe t scope =
   recipe
 ;;
 
+let with_saved_agent_context t ~selected ~f =
+  O.Model_inference.with_claimed_agent t.root ~selected ~f:(fun scope ~sw:_ ->
+    O.Model_inference.check_current scope;
+    let ctx = context t scope (strict_recipe t scope) in
+    let value = f ctx in
+    O.Model_inference.check_current scope;
+    value)
+;;
+
 let execute_claimed t active =
   let claim = Job_scope.claim active in
   let job = Store.Claim.job claim in

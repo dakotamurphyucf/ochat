@@ -378,9 +378,27 @@ type installed_agent_fixture =
   { runtime : Chat_response.Agent_runtime.t
   ; selected : C.t
   ; source_root : Eio.Fs.dir_ty Eio.Path.t
+  ; source : Agent_session.Captured_agent_runner.Source.t
+  ; parent : Agent_session.Prompt_revision.t
+  ; artifacts : Agent_store.Prompt_artifact_store.t
+  ; policy : Agent_session.Runtime_script_preparation.t
+  ; response_root : Eio.Fs.dir_ty Eio.Path.t
   }
 
-let installed_agent_fixture ~on_run ~env ~sw ~data_root ~observed =
+let default_child_contents =
+  {|<developer>Original child instructions</developer>
+<developer><agent src="content.chatmd" local source_mode="captured"/></developer>|}
+;;
+
+let installed_agent_fixture_with_contents
+      ~deferred
+      ~child_contents
+      ~on_run
+      ~env
+      ~sw
+      ~data_root
+      ~observed
+  =
   let module Revision = Agent_session.Prompt_revision in
   let module Builder = Agent_session.Prompt_revision_builder in
   let module Runner = Agent_session.Captured_agent_runner in
@@ -394,11 +412,10 @@ let installed_agent_fixture ~on_run ~env ~sw ~data_root ~observed =
   save
     "root.chatmd"
     {|<tool name="child" agent="child.chatmd" local source_mode="captured"/>|};
-  save
-    "child.chatmd"
-    {|<developer>Original child instructions</developer>
-<developer><agent src="content.chatmd" local source_mode="captured"/></developer>|};
+  save "child.chatmd" child_contents;
   save "content.chatmd" "<developer>Content own instructions</developer>";
+  save "input.json" {|{"type":"object"}|};
+  save "output.json" {|{"type":"string"}|};
   let definition =
     Agent_session.Prompt_definition.create
       ~root_invocation:Ui
@@ -441,13 +458,14 @@ let installed_agent_fixture ~on_run ~env ~sw ~data_root ~observed =
       ~max_work_steps:
         (Agent_session.Runtime_script_preparation.max_custody_work_steps policy)
       ~preprocess:Fn.id
-      ~prepare_programs:(fun _ ~invocation:_ _ _ ->
+      ~prepare_programs:(fun _ ~tool_contract:_ ~invocation:_ _ _ ->
         failwith "saved Agent artifact must not prepare a new file source")
     |> Or_error.ok_exn
   in
   let runner =
     Runner.create
       ~script_preparation:policy
+      ~tool_contract:Chatml_compilation.Tool_contract.Standard
       ~content_limits:None
       ~policy_revision:
         (Chatml_source.Digest.of_contents "claimed-agent-runtime" ~checkpoint:ignore)
@@ -533,21 +551,84 @@ let installed_agent_fixture ~on_run ~env ~sw ~data_root ~observed =
       ~prompt_elements:elements
     |> ok
   in
+  let deferred_registrations =
+    if deferred
+    then (
+      let binding =
+        Runner.Source_binding.create
+          ~source
+          ~tool_contract:Chatml_compilation.Tool_contract.Standard
+          ~runtime_policy_revision:
+            (Chatml_source.Digest.of_contents
+               "claimed-deferred-runtime.v1"
+               ~checkpoint:ignore)
+          ~content_limits:None
+          ~artifact_store:artifacts
+          ~source_lease:Agent_session.Prompt_source_lease.legacy
+      in
+      let prepared =
+        Runner.Deferred_developer.prepare
+          binding
+          ~script_preparation:policy
+          ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
+          ~approval_provider:Shell_runtime.Approval_broker.None_available
+          ~response_dir:response_root
+          ~env
+          ~revision:parent
+          ~sw
+          ~max_agents:1
+          ~max_work_steps:100_000
+          ~checkpoint:ignore
+          ~with_context:(fun ~implementation ~invocation:_ f ->
+            let borrowed =
+              Agent_session.Native_tool_invocation.borrow_selected () |> ok
+            in
+            Runner.Claimed_developer.with_selected
+              ~borrowed
+              ~implementation
+              (fun selected ->
+                 Runner.Claimed_developer.Selected.check selected |> ok;
+                 on_run ();
+                 Ok (f ctx))
+            |> ok)
+        |> ok
+      in
+      Runner.Deferred_developer.registrations prepared)
+    else []
+  in
   let runtime =
-    Chat_response.Agent_runtime.create
-      ~agent_source_runner:port
-      ~approval_store:(Shell_access.Approval.create_store ())
-      ~sw
-      ~ctx
-      ~host
-      ~platform:(Chat_response.Agent_runtime.platform ())
-      ~prompt_elements:elements
-      ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
-      ~approval_provider:Shell_runtime.Approval_broker.None_available
-      ~run_agent:(fun ?prompt_dir:_ ?session_id:_ ?observer:_ ~source:_ ~ctx:_ _ _ ->
-        failwith "legacy Agent runner must not execute")
-      ()
-    |> ok
+    if deferred
+    then
+      (Chat_response.Agent_runtime.prepare_extensions_without_inference
+         ~native_registrations:deferred_registrations
+         ~approval_store:(Shell_access.Approval.create_store ())
+         ~sw
+         ~host
+         ~platform:(Chat_response.Agent_runtime.platform ())
+         ~prompt_elements:elements
+         ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
+         ~approval_provider:Shell_runtime.Approval_broker.None_available
+         ()
+       |> Result.map_error ~f:(fun diagnostics ->
+         Sexp.to_string_hum
+           ([%sexp_of: Chat_response.Agent_runtime.diagnostic list] diagnostics))
+       |> Result.ok_or_failwith)
+        .native
+    else
+      Chat_response.Agent_runtime.create
+        ~agent_source_runner:port
+        ~approval_store:(Shell_access.Approval.create_store ())
+        ~sw
+        ~ctx
+        ~host
+        ~platform:(Chat_response.Agent_runtime.platform ())
+        ~prompt_elements:elements
+        ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
+        ~approval_provider:Shell_runtime.Approval_broker.None_available
+        ~run_agent:(fun ?prompt_dir:_ ?session_id:_ ?observer:_ ~source:_ ~ctx:_ _ _ ->
+          failwith "legacy Agent runner must not execute")
+        ()
+      |> ok
   in
   let selected = Lazy.force runtime.capabilities |> ok in
   assert (
@@ -555,7 +636,18 @@ let installed_agent_fixture ~on_run ~env ~sw ~data_root ~observed =
       match registration.source_requirement with
       | Chat_response.Native_tool_pool.Source_requirement.Source (Some _) -> true
       | Source None | Ordinary -> false));
-  { runtime; selected; source_root }
+  { runtime; selected; source_root; source; parent; artifacts; policy; response_root }
+;;
+
+let installed_agent_fixture ~on_run ~env ~sw ~data_root ~observed =
+  installed_agent_fixture_with_contents
+    ~deferred:false
+    ~child_contents:default_child_contents
+    ~on_run
+    ~env
+    ~sw
+    ~data_root
+    ~observed
 ;;
 
 let stage_registered_agent_tool jobs =
@@ -601,6 +693,8 @@ let with_registered_agent
       ?(checkpoint = ignore)
       ?(on_current = ignore)
       ?(actor_is_current = fun () -> true)
+      ?(deferred = false)
+      ?(child_contents = default_child_contents)
       ~run_name
       ~observed
       ~on_run
@@ -621,7 +715,9 @@ let with_registered_agent
     ~make_selected:(fun _ -> failwith "selected runtime requires the owning switch")
     ~make_selected_with_switch:(fun env sw ->
       let value =
-        installed_agent_fixture
+        installed_agent_fixture_with_contents
+          ~deferred
+          ~child_contents
           ~on_run
           ~env
           ~sw
@@ -713,6 +809,35 @@ let%test_unit
       ~blobs
       ~fixture
       ~preparations ->
+       let source_registration =
+         List.find_exn fixture.runtime.native_registrations ~f:(fun registration ->
+           match registration.source_requirement with
+           | Chat_response.Native_tool_pool.Source_requirement.Source (Some _) -> true
+           | Source None | Ordinary -> false)
+       in
+       Chat_response.Agent_runtime.admit_exact_saved_agent_registration
+         fixture.runtime
+         ~registration:source_registration
+         ~max_registrations:16
+         ~checkpoint:ignore
+       |> ok;
+       let counterfeit_source =
+         Chat_response.Native_source_registration.create
+           ~implementation:source_registration.implementation
+           ~prepare:(fun ~launch:_ ~request:_ ~checkpoint:_ -> Ok None)
+       in
+       assert (
+         Result.is_error
+           (Chat_response.Agent_runtime.admit_exact_saved_agent_registration
+              fixture.runtime
+              ~registration:
+                { source_registration with
+                  source_requirement =
+                    Chat_response.Native_tool_pool.Source_requirement.Source
+                      (Some counterfeit_source)
+                }
+              ~max_registrations:16
+              ~checkpoint:ignore));
        let id = stage_registered_agent_tool jobs in
        selected_registry := Some selected;
        current_root := Some root;
@@ -729,6 +854,41 @@ let%test_unit
          ~create:(`Or_truncate 0o600)
          Eio.Path.(fixture.source_root / "child.chatmd")
          "<developer>Revised child instructions</developer>";
+       Eio.Switch.run (fun source_switch ->
+         let source_binding =
+           Agent_session.Captured_agent_runner.Source_binding.create
+             ~source:fixture.source
+             ~tool_contract:Chatml_compilation.Tool_contract.Standard
+             ~runtime_policy_revision:
+               (Chatml_source.Digest.of_contents
+                  "claimed-deferred-source.v1"
+                  ~checkpoint:ignore)
+             ~content_limits:None
+             ~artifact_store:fixture.artifacts
+             ~source_lease:Agent_session.Prompt_source_lease.legacy
+         in
+         let deferred =
+           Agent_session.Captured_agent_runner.Deferred_developer.prepare
+             source_binding
+             ~script_preparation:fixture.policy
+             ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
+             ~approval_provider:Shell_runtime.Approval_broker.None_available
+             ~response_dir:fixture.response_root
+             ~env
+             ~revision:fixture.parent
+             ~sw:source_switch
+             ~max_agents:1
+             ~max_work_steps:100_000
+             ~checkpoint:ignore
+             ~with_context:(fun ~implementation:_ ~invocation:_ _ ->
+               failwith "unbound deferred Agent must not borrow a Context")
+           |> ok
+         in
+         [%test_eq: int]
+           1
+           (List.length
+              (Agent_session.Captured_agent_runner.Deferred_developer.registrations
+                 deferred)));
        Eio.Switch.run (fun sw ->
          let runner =
            background_runner_with_runtime
@@ -784,6 +944,95 @@ let%test_unit
            Result.is_error
              (Agent_session.Captured_agent_runner.Claimed_developer.Selected.check_now
                 (Option.value_exn !borrowed_agent)))))
+;;
+
+let%test_unit "deferred saved Agent runs literal child and denies unselected effects" =
+  let cases =
+    [ "literal", "<developer>Original literal child instructions</developer>", true
+    ; ( "builtin"
+      , {|<developer>Original child instructions</developer>
+<tool name="read_file"/>|}
+      , false )
+    ; ( "managed"
+      , {|<developer>Original child instructions</developer>
+<script id="handler" kind="tool" language="chatml">
+let run ctx input = Task.pure(`Complete(`String("managed")))
+</script>
+<tool name="managed" type="chatml" script="handler" entrypoint="run" input_schema="input.json" output_schema="output.json"/>|}
+      , false )
+    ]
+  in
+  List.iter cases ~f:(fun (name, child_contents, should_succeed) ->
+    let observed = ref [] in
+    let entered = ref 0 in
+    with_registered_agent
+      ~deferred:true
+      ~child_contents
+      ~run_name:("dvr_deferred_" ^ name)
+      ~observed
+      ~on_run:(fun () -> Int.incr entered)
+      (fun ~env
+        ~root
+        ~executor:_
+        ~handle
+        ~owner:_
+        ~selected:_
+        ~jobs
+        ~store
+        ~blobs
+        ~fixture
+        ~preparations ->
+         let id = stage_registered_agent_tool jobs in
+         assert (Int.equal !preparations 1);
+         Eio.Path.save
+           ~create:(`Or_truncate 0o600)
+           Eio.Path.(fixture.source_root / "child.chatmd")
+           "<developer>Changed after admission</developer>";
+         Eio.Switch.run (fun sw ->
+           let runner =
+             background_runner_with_runtime
+               ~agent_runtime:(Some fixture.runtime)
+               ~sw
+               ~root
+               ~store
+               ~blobs
+               ~env
+               ~managed_definition:None
+               ~jobs
+               ~storage:Agent_store.Developer_result_publisher.Storage.Automatic
+           in
+           let candidate =
+             O.Job_candidate.read_current root ~checkpoint:ignore |> ok |> List.hd_exn
+           in
+           ignore
+             (Agent_server.Developer_background_job_runner.run_candidate runner candidate
+              : (P.Developer_job.t option, P.Error.t) result);
+           let persisted = R.find_job (R.observe handle |> ok) id |> Option.value_exn in
+           let failure =
+             match (P.Developer_job.state persisted).status with
+             | P.Job.Succeeded -> None
+             | Failed error -> Some error
+             | Queued
+             | Running
+             | Waiting_permission _
+             | Waiting_completion _
+             | Cancelled
+             | Interrupted _ -> failwith "deferred child has no terminal status"
+           in
+           assert (Bool.equal should_succeed (Option.is_none failure));
+           assert (Int.equal !entered 1);
+           if should_succeed
+           then (
+             assert (
+               List.exists !observed ~f:(fun row ->
+                 List.mem row "Original literal child instructions" ~equal:String.equal));
+             assert (
+               not
+                 (List.exists !observed ~f:(fun row ->
+                    List.mem row "Changed after admission" ~equal:String.equal))))
+           else (
+             assert (List.is_empty !observed);
+             assert (Option.is_some failure)))))
 ;;
 
 let%test_unit "claimed Agent source rejects actor revocation during its Claim read" =

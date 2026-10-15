@@ -22,12 +22,14 @@ val file
   -> source_lease:Prompt_source_lease.t
   -> artifact_store:Agent_store.Prompt_artifact_store.t
   -> compilation:Chatml_compilation.limits
+  -> tool_contract:Chatml_compilation.Tool_contract.t
   -> parser_limits:Prompt.Chat_markdown.Limits.t
   -> content_limits:Chatmd_prompt_content.Limits.t option
   -> max_work_steps:int
   -> preprocess:(string -> string)
   -> prepare_programs:
        (Chat_response.Startup_compilation.t
+        -> tool_contract:Chatml_compilation.Tool_contract.t
         -> Prompt_source_owner.Scope.t
         -> Prompt_source_owner.Capture.t
         -> (Chatml_prompt_programs.t, Prompt_revision_builder.Diagnostic.t list) Result.t)
@@ -46,6 +48,7 @@ val captured
   -> reference:Prompt.Chat_markdown.Agent_reference.t
   -> artifact_store:Agent_store.Prompt_artifact_store.t
   -> policy:Runtime_script_preparation.t
+  -> tool_contract:Chatml_compilation.Tool_contract.t
   -> invocation:Runtime_script_preparation.Invocation.t
   -> content_limits:Chatmd_prompt_content.Limits.t option
   -> env:Eio_unix.Stdenv.base
