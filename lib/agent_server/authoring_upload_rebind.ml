@@ -19,8 +19,12 @@ module Selected = struct
     ; identity_bytes : int
     }
 
+  let valid_environment environment =
+    (not (String.is_empty environment)) && String.length environment <= 1024
+  ;;
+
   let create ~environment ~contract =
-    if String.is_empty environment || String.length environment > 1024
+    if not (valid_environment environment)
     then Or_error.error_string "invalid selected environment"
     else (
       let maximum_work = 64 * 1024 * 1024 in
@@ -45,6 +49,21 @@ module Selected = struct
         Or_error.error_string "selected compiler contract exceeds rebind bound")
   ;;
 
+  let create_standard ~environment ~admitted =
+    let module Entry = Authoring_standard_contracts.Entry in
+    if not (valid_environment environment)
+    then Or_error.error_string "invalid selected environment"
+    else if Entry.identity_bytes admitted > 8 * 1024 * 1024
+    then Or_error.error_string "selected compiler contract exceeds rebind bound"
+    else
+      Ok
+        { environment
+        ; contract = Entry.contract admitted
+        ; fingerprint = Entry.fingerprint admitted
+        ; identity_bytes = Entry.identity_bytes admitted
+        }
+  ;;
+
   let environment t = t.environment
   let contract t = t.contract
 end
@@ -52,6 +71,7 @@ end
 module Policy = struct
   type t =
     { authorize_read : Actor.t -> bool
+    ; authorize_rebind : Actor.t -> bool
     ; select :
         Actor.t
         -> Bundle.Manifest.t
@@ -59,8 +79,12 @@ module Policy = struct
         -> Selected.t option
     }
 
-  let create ~authorize_read ~select = { authorize_read; select }
+  let create ~authorize_read ~authorize_rebind ~select =
+    { authorize_read; authorize_rebind; select }
+  ;;
+
   let authorize_read t actor = t.authorize_read actor
+  let authorize_rebind t actor = t.authorize_rebind actor
 end
 
 module Rebound = struct

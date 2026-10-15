@@ -32,11 +32,11 @@ let handle_bundle t ~actor ~connection request =
   else (
     let%bind upload = t.upload |> Result.of_option ~error:Service.Error.Uninstalled in
     let checkpoint () = Eio.Fiber.yield () in
-    let run f =
+    let run ~operation f =
       Service.with_request
         ~feature:Service.Selected_feature.Bundle_upload
         ~final_check:(fun () ->
-          Upload.check_upload_current_now upload ~actor |> upload_error)
+          Upload.check_upload_current_now upload ~actor ~operation |> upload_error)
         t
         ~actor
         ~connection
@@ -45,20 +45,20 @@ let handle_bundle t ~actor ~connection request =
     in
     match request with
     | W.Request.Bundle_begin begin_request ->
-      run (fun ~checkpoint ->
+      run ~operation:Upload.Upload_policy.Operation.Write (fun ~checkpoint ->
         let%bind response =
           Upload.begin_upload upload ~actor ~request:begin_request ~checkpoint
           |> upload_error
         in
         Authoring_context_owner.checked_response t (W.Response.Bundle_begin response))
     | W.Request.Bundle_chunk chunk_request ->
-      run (fun ~checkpoint ->
+      run ~operation:Upload.Upload_policy.Operation.Write (fun ~checkpoint ->
         let%bind response =
           Upload.chunk upload ~actor ~request:chunk_request ~checkpoint |> upload_error
         in
         Authoring_context_owner.checked_response t (W.Response.Bundle_chunk response))
     | W.Request.Bundle_commit commit_request ->
-      run (fun ~checkpoint ->
+      run ~operation:Upload.Upload_policy.Operation.Commit (fun ~checkpoint ->
         let%bind claim =
           Upload.claim_commit upload ~actor ~request:commit_request ~checkpoint
           |> upload_error
@@ -92,7 +92,7 @@ let handle_bundle t ~actor ~connection request =
         in
         Authoring_context_owner.checked_response t (W.Response.Bundle_commit response))
     | W.Request.Bundle_status status_request ->
-      run (fun ~checkpoint ->
+      run ~operation:Upload.Upload_policy.Operation.Write (fun ~checkpoint ->
         let%bind status =
           Upload.status upload ~actor ~request:status_request ~checkpoint |> upload_error
         in

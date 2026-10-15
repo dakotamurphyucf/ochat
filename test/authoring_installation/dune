@@ -9,6 +9,10 @@
   digestif
   agent_server_test_support
   agent_server_wire_fixture
+  chatml_project_build_tests
+  chatml_project_build
+  chatml_source
+  chatml_prepared_program
   ochat.agent_server
   ochat.agent_store
   ochat.agent_client

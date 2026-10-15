@@ -311,6 +311,12 @@ let with_configured_projects t ~bound ~source_limits ~analysis_policy =
       }
 ;;
 
+let with_configured_upload t ~upload =
+  if (not t.core) || Option.is_some t.upload
+  then invalid "authoring upload policy is already installed or lacks core"
+  else Ok { t with upload = Some upload }
+;;
+
 let with_semantic t ~semantic =
   if
     (not t.core)

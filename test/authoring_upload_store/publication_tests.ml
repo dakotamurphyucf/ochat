@@ -836,6 +836,7 @@ let%test_unit
     let read_checks = ref 0 in
     let change_at_read_check = ref None in
     let read_allowed = ref true in
+    let rebind_allowed = ref true in
     Eio.Switch.run (fun host_sw ->
       let rebind_policy =
         Host.Rebind_policy.create
@@ -844,6 +845,7 @@ let%test_unit
             if Option.equal Int.equal !change_at_read_check (Some !read_checks)
             then selected := selected_stale;
             !read_allowed)
+          ~authorize_rebind:(fun _ -> !rebind_allowed)
           ~select:(fun _ _ _ ->
             Int.incr selection_calls;
             Some !selected)
@@ -873,8 +875,9 @@ let%test_unit
           ~clock:(Eio_mock.Clock.make ())
           ~upload_policy:
             (Host.Upload_policy.create
-               ~authorize_upload:(fun _ -> false)
-               ~authorize_parent:(fun _ _ -> false))
+               ~authorize_write:(fun _ -> false)
+               ~authorize_publish:(fun _ -> false)
+               ~authorize_parent:None)
       in
       let rebound = Host.rebind host ~actor ~bundle_id ~checkpoint:Fn.id |> host_ok in
       check
@@ -1004,6 +1007,13 @@ let%test_unit
        | Error _ -> failwith "upload-only authoring close failed");
       check "successful rebind checked selected target" (!selection_calls > 1);
       check "successful rebind rechecked read grant" (final_read_check > 2);
+      rebind_allowed := false;
+      check
+        "bundle-read alone cannot restore a published Project"
+        (match Host.rebind host ~actor ~bundle_id ~checkpoint:Fn.id with
+         | Error Host.Error.Unauthorized -> true
+         | Ok _ | Error _ -> false);
+      rebind_allowed := true;
       read_checks := 0;
       change_at_read_check := Some final_read_check;
       check

@@ -35,13 +35,18 @@ module Limits : sig
       strings. It is built from existing lower validated constructors and
       admits all five Standard targets within a 40 MiB aggregate identity cap. *)
   val standard : (t, P.Error.t) result
+
+  val max_contract_identity_bytes : t -> int
+  val max_contract_work_steps : t -> int
 end
 
 (** [None] config preserves [base] exactly, including an intentional disabled
     authoring service. A configured grant with [base=None] is a typed startup
     conflict. Otherwise bind the exact resolved root inventory and physical
     Project_source_host identity with
-    Authoring_configured_project_policy's immutable binding; preserve
+    Authoring_configured_project_policy's immutable binding; when [contracts]
+    is [Some] it must cover each configured native target within this
+    profile's ceilings and is reused without another conversion. Preserve
     supplied-document/core/lexical/assistance families and install the real
     source, semantic, prefix/query and checked-template policies. The actual
     Initialize inbound ceiling is revalidated before any authoring child
@@ -52,6 +57,7 @@ end
 val create
   :  base:Authoring_installation.Host_policy.t option
   -> configured:Authoring_project_access_configuration.t option
+  -> contracts:Authoring_standard_contracts.t option
   -> source_configuration:Project_source_configuration.t
   -> source_host:Project_source_host.t
   -> initialize_limits:P.Initialize.Limits.t

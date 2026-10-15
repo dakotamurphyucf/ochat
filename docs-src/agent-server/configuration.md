@@ -145,6 +145,42 @@ root and principal with the deployment's actual values:
        (target one_off_v1))))))
 ```
 
+`authoring_upload_access` independently installs durable bundle upload. Its
+`mode` is `upload_only` or `augment_core`; the latter keeps the installed core
+and native authoring methods on the same service and Store. Each authenticated
+principal and authentication kind needs separate `upload_write`, `publish`,
+`bundle_read`, and `rebind` grants for those operations. Write alone cannot
+seal or publish a bundle, and reading a published bundle does not permit
+rebind. A `selections` row maps an exact manifest Entry or Library request and
+environment to a Standard target. A manifest cannot grant its own target,
+native source read, or access to a parent context. A parent-bearing upload is
+unavailable unless the host installs a separate physical parent policy.
+Changing this field requires a restart; the active configuration is never
+partly replaced. For a fresh, parentless upload-only service:
+
+```lisp
+(authoring_upload_access
+  ((mode upload_only)
+   (grants
+     (((principal_id pri_example_operator) (authentication_kind unix.peer)
+       (operation upload_write))
+      ((principal_id pri_example_operator) (authentication_kind unix.peer)
+       (operation publish))
+      ((principal_id pri_example_operator) (authentication_kind unix.peer)
+       (operation bundle_read))
+      ((principal_id pri_example_operator) (authentication_kind unix.peer)
+       (operation rebind))))
+   (selections
+     (((principal_id pri_example_operator) (authentication_kind unix.peer)
+       (request (entry ((name main) (environment prod))))
+       (selected_environment prod) (target tool_v1))))))
+```
+
+Configured Standard contracts are admitted once per distinct target under
+finite per-target and aggregate conversion limits. When native authoring and
+upload are both configured, they share that immutable contract cache. Upload
+budgets remain finite at each request and publication boundary.
+
 ### Scoped external session helpers
 
 `server.session_helpers` optionally grants a named shell tool access to the same
