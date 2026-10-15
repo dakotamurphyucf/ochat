@@ -147,7 +147,19 @@ let prepare t ~sw ~max_depth ~revision ~capture ~build ~services ~prepare_source
         let source =
           Chat_response.Native_source_registration.create
             ~implementation:registration.implementation
-            ~prepare:(prepare_source prepared ~implementation:registration.implementation)
+            ~prepare:(fun ~launch ~request ~checkpoint ->
+              match Chat_response.Source_launch.conversation_owner launch with
+              | None ->
+                Error
+                  (Agent_protocol.Error.invalid_request
+                     "persistent agent source requires a conversation owner")
+              | Some owner ->
+                prepare_source
+                  prepared
+                  ~implementation:registration.implementation
+                  ~owner
+                  ~request
+                  ~checkpoint)
         in
         { registration with source_requirement = Source (Some source) })
       |> Result.all

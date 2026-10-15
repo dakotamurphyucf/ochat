@@ -621,7 +621,7 @@ let%test_unit
         ~disclosure
         ~env
         ~current_actor:(fun () -> actor)
-        ~prepare_source:(fun ~binding:_ ~request:_ ~checkpoint ->
+        ~prepare_source:(fun ~parent:_ ~binding:_ ~request:_ ~checkpoint ->
           checkpoint ();
           Ok None)
       |> ok

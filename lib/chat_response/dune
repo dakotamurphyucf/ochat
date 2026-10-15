@@ -69,6 +69,7 @@
   one_off_script
   one_off_request
   background_request
+  source_launch
   native_source_registration
   background_job_operations
   background_delivery

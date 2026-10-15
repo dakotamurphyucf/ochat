@@ -258,11 +258,43 @@ type native_registration = Native_tool_pool.Registration.t =
 val prepare_agent_source
   :  t
   -> binding:Tool_capability.binding
-  -> owner:Agent_protocol.Job.launch_owner
+  -> launch:Source_launch.t
   -> request:Background_request.t
   -> max_registrations:int
   -> checkpoint:(unit -> unit)
   -> (Background_request.Agent_artifact.t option, Agent_protocol.Error.t) Result.t
+
+(** Compare every native binding in [selected] with this already constructed
+    runtime's exact capability reference and physical implementation. Managed
+    bindings belong to their separately admitted dispatcher. Preflight the
+    immutable registry count before allocating references; poll the binding
+    traversal under the caller's shared budget. Source registrations are
+    admitted separately at the effect boundary. No callback,
+    source read or native effect occurs. The runtime is borrowed from the host
+    that constructed those functions and must remain live for the runner's
+    joined workers; this comparison creates no new runtime owner. *)
+val admit_native_selection
+  :  t
+  -> selected:Tool_capability.t
+  -> max_bindings:int
+  -> checkpoint:(unit -> unit)
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Require that [binding] resolves to the same physical native implementation
+    in this runtime and has exactly one ordinary [Source (Some preparer)]
+    registration with [Native_output]. Persistent [Invocation_v1], [Source None],
+    [Ordinary], managed, foreign and ambiguous registrations reject. This is a
+    read-only pre-dispatch gate: it never invokes the native handler or prepares
+    a source. The selected caller must still rebind its exact Claim/reference,
+    actor and current host permission after yields and before the effect; a
+    successful result here is not continuing authority. Registration count and
+    traversal work are admitted before lookup, with cancellation preserved. *)
+val require_saved_agent_source
+  :  t
+  -> binding:Tool_capability.binding
+  -> max_registrations:int
+  -> checkpoint:(unit -> unit)
+  -> (unit, Agent_protocol.Error.t) Result.t
 
 (** Prepare a definition for an extensibility-aware host. Validates the captured
     declarations, constructs native resources through the same shell authorization

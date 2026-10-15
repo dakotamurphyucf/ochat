@@ -1021,53 +1021,130 @@ let inherit_native ?managed ~(parent : t) ~capabilities () =
     }
 ;;
 
-let prepare_agent_source t ~binding ~owner ~request ~max_registrations ~checkpoint =
+let poll_source_checkpoint checkpoint =
+  Eio.Fiber.check ();
+  checkpoint ();
+  Eio.Fiber.check ()
+;;
+
+let source_registration t ~implementation ~max_registrations ~checkpoint =
   let open Result.Let_syntax in
-  let poll () =
-    Eio.Fiber.check ();
-    checkpoint ();
-    Eio.Fiber.check ()
-  in
   let invalid message = Error (Agent_protocol.Error.invalid_request message) in
   if max_registrations < 0
   then invalid "invalid source registration count allowance"
   else (
-    match Tool_capability.native_implementation binding with
-    | None -> Ok None
-    | Some implementation ->
-      let rec admit remaining = function
-        | [] -> Ok ()
-        | _ :: _ when remaining <= 0 ->
-          invalid "source registrations exceed their count allowance"
-        | _ :: rest ->
-          poll ();
-          admit (remaining - 1) rest
+    let rec find remaining found = function
+      | [] ->
+        (match found with
+         | None -> invalid "native source target belongs to another runtime"
+         | Some registration -> Ok registration)
+      | _ :: _ when remaining <= 0 ->
+        invalid "source registrations exceed their count allowance"
+      | registration :: rest ->
+        poll_source_checkpoint checkpoint;
+        if
+          phys_equal
+            implementation
+            registration.Native_tool_pool.Registration.implementation
+        then (
+          match found with
+          | None -> find (remaining - 1) (Some registration) rest
+          | Some _ -> invalid "native source target has ambiguous registrations")
+        else find (remaining - 1) found rest
+    in
+    find max_registrations None t.native_registrations)
+;;
+
+let admit_native_selection t ~selected ~max_bindings ~checkpoint =
+  let open Result.Let_syntax in
+  let module C = Tool_capability in
+  let invalid message = Error (Agent_protocol.Error.invalid_request message) in
+  if max_bindings <= 0 || C.length selected > max_bindings
+  then invalid "selected native bindings exceed their count allowance"
+  else (
+    let%bind runtime =
+      Lazy.force t.capabilities
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request error.C.message)
+    in
+    C.references selected
+    |> List.fold_result ~init:() ~f:(fun () reference ->
+      poll_source_checkpoint checkpoint;
+      let%bind binding =
+        C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
+        |> Result.map_error ~f:(fun error ->
+          Agent_protocol.Error.invalid_request error.C.message)
       in
-      let%bind () = admit max_registrations t.native_registrations in
-      let rec find found = function
-        | [] ->
-          (match found with
-           | None -> invalid "native source target belongs to another runtime"
-           | Some Native_tool_pool.Source_requirement.Ordinary -> Ok None
-           | Some (Source None) -> invalid "queued source preparer is unavailable"
-           | Some (Source (Some registration)) ->
-             Native_source_registration.prepare
-               registration
-               ~binding
-               ~owner
-               ~request
-               ~checkpoint)
-        | registration :: rest ->
-          poll ();
-          if
-            phys_equal
-              implementation
-              registration.Native_tool_pool.Registration.implementation
-          then (
-            match found with
-            | None -> find (Some registration.source_requirement) rest
-            | Some _ -> invalid "native source target has ambiguous registrations")
-          else find found rest
-      in
-      find None t.native_registrations)
+      match C.implementation binding with
+      | Managed _ -> Ok ()
+      | Native implementation ->
+        let%bind original =
+          C.resolve runtime ~id:reference.id ~fingerprint:reference.fingerprint
+          |> Result.map_error ~f:(fun error ->
+            Agent_protocol.Error.invalid_request error.C.message)
+        in
+        (match C.native_implementation original with
+         | Some actual when phys_equal actual implementation -> Ok ()
+         | Some _ | None -> invalid "selected native binding belongs to another runtime")))
+;;
+
+let require_saved_agent_source t ~binding ~max_registrations ~checkpoint =
+  let open Result.Let_syntax in
+  let module C = Tool_capability in
+  let invalid message = Error (Agent_protocol.Error.invalid_request message) in
+  match C.native_implementation binding with
+  | None -> invalid "saved Agent.run requires an ordinary native source"
+  | Some implementation ->
+    let%bind runtime =
+      Lazy.force t.capabilities
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request error.C.message)
+    in
+    let reference = C.reference binding in
+    let%bind original =
+      C.resolve runtime ~id:reference.id ~fingerprint:reference.fingerprint
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request error.C.message)
+    in
+    let%bind () =
+      match C.native_implementation original with
+      | Some actual when phys_equal actual implementation -> Ok ()
+      | Some _ | None -> invalid "saved Agent.run source belongs to another runtime"
+    in
+    let%bind registration =
+      source_registration t ~implementation ~max_registrations ~checkpoint
+    in
+    (match
+       ( C.result_contract binding
+       , registration.result_contract
+       , registration.source_requirement )
+     with
+     | Native_output, Native_output, Source (Some source)
+       when Native_source_registration.matches_implementation source implementation ->
+       Ok ()
+     | Native_output, Native_output, Source (Some _) ->
+       invalid "saved Agent.run source preparer belongs to another native implementation"
+     | Native_output, Native_output, Source None ->
+       invalid "saved Agent.run source preparer is unavailable"
+     | Native_output, Native_output, Ordinary ->
+       invalid "saved Agent.run requires an installed native source registration"
+     | Invocation_v1, _, _ | _, Invocation_v1, _ ->
+       invalid "persistent native source is not a saved Agent.run target")
+;;
+
+let prepare_agent_source t ~binding ~launch ~request ~max_registrations ~checkpoint =
+  let open Result.Let_syntax in
+  match Tool_capability.native_implementation binding with
+  | None -> Ok None
+  | Some implementation ->
+    let%bind registration =
+      source_registration t ~implementation ~max_registrations ~checkpoint
+    in
+    (match registration.source_requirement with
+     | Ordinary -> Ok None
+     | Source None ->
+       Error
+         (Agent_protocol.Error.invalid_request "queued source preparer is unavailable")
+     | Source (Some source) ->
+       Native_source_registration.prepare source ~binding ~launch ~request ~checkpoint)
 ;;

@@ -159,6 +159,7 @@ let succeeded_claim claim =
 let with_executor
       ?(checkpoint = ignore)
       ?(on_current = ignore)
+      ?(actor_is_current = fun () -> true)
       ?on_store
       ?on_capacity
       ?on_owner
@@ -169,6 +170,7 @@ let with_executor
       ?(now = T.now)
       ~run_name
       ~make_selected
+      ?make_selected_with_switch
       f
   =
   T.with_store ~checkpoint ~wrap_env ?on_store ?max_job_payload_bytes (fun env sw store ->
@@ -182,7 +184,11 @@ let with_executor
         ~previous:None
       |> ok
     in
-    let selected = make_selected env in
+    let selected =
+      match make_selected_with_switch with
+      | None -> make_selected env
+      | Some make_selected -> make_selected env sw
+    in
     let limits =
       O.Limits.create
         ~max_active_runs:2
@@ -201,7 +207,7 @@ let with_executor
         ~actor:
           (Operator_authorization.guarded ~principal:T.principal ~is_current:(fun () ->
              on_current ();
-             true))
+             actor_is_current ()))
         ~capture:captured
         ~registry:selected
         ~selected
@@ -222,6 +228,8 @@ let with_executor
 let with_job_executor
       ?(checkpoint = ignore)
       ?(current_actor = fun root -> O.original_actor root)
+      ?(on_current = ignore)
+      ?(actor_is_current = fun () -> true)
       ?(wrap_env = Fn.id)
       ?(on_store = fun _ _ _ -> ())
       ?on_capacity
@@ -232,11 +240,18 @@ let with_job_executor
       ?(now = T.now)
       ~run_name
       ~make_selected
+      ?make_selected_with_switch
+      ?(prepare_source =
+        fun ~parent:_ ~binding:_ ~request:_ ~checkpoint ->
+          checkpoint ();
+          Ok None)
       f
   =
   let resources = ref None in
   with_executor
     ~checkpoint
+    ~on_current
+    ~actor_is_current
     ~wrap_env
     ?on_capacity
     ?on_owner
@@ -246,6 +261,7 @@ let with_job_executor
     ~now
     ~run_name
     ~make_selected
+    ?make_selected_with_switch
     ~on_store:(fun env session store ->
       on_store env session store;
       let root = Agent_store.Session_store.data_root session in
@@ -279,9 +295,7 @@ let with_job_executor
            ~disclosure
            ~env
            ~current_actor:(fun () -> current_actor root)
-           ~prepare_source:(fun ~binding:_ ~request:_ ~checkpoint ->
-             checkpoint ();
-             Ok None)
+           ~prepare_source
          |> Result.map_error ~f:(fun error -> error.P.Error.message)
          |> Result.ok_or_failwith
        in
@@ -289,7 +303,17 @@ let with_job_executor
        f ~env ~root ~executor ~handle ~owner ~selected ~jobs ~store ~blobs)
 ;;
 
-let background_runner ~sw ~root ~store ~blobs ~env ~managed ~jobs ~storage =
+let background_runner_with_runtime
+      ~agent_runtime
+      ~sw
+      ~root
+      ~store
+      ~blobs
+      ~env
+      ~managed
+      ~jobs
+      ~storage
+  =
   let limits =
     Agent_store.Developer_result_publisher.Limits.create
       ~inline_bytes:1024
@@ -306,12 +330,26 @@ let background_runner ~sw ~root ~store ~blobs ~env ~managed ~jobs ~storage =
     ~storage
     ~env
     ~managed
+    ~agent_runtime
     ~jobs
     ~authorize:(fun _ _ -> Ok ())
     ~prepare_output:(function
       | Openai.Responses.Tool_output.Output.Text value -> Ok (`String value)
       | _ -> Error (P.Error.invalid_request "unexpected output"))
   |> ok
+;;
+
+let background_runner ~sw ~root ~store ~blobs ~env ~managed ~jobs ~storage =
+  background_runner_with_runtime
+    ~agent_runtime:None
+    ~sw
+    ~root
+    ~store
+    ~blobs
+    ~env
+    ~managed
+    ~jobs
+    ~storage
 ;;
 
 let await_developer_status ~env ~handle id wanted =
@@ -330,6 +368,611 @@ let await_developer_status ~env ~handle id wanted =
           wait ())
     in
     wait ())
+;;
+
+type installed_agent_fixture =
+  { runtime : Chat_response.Agent_runtime.t
+  ; selected : C.t
+  ; source_root : Eio.Fs.dir_ty Eio.Path.t
+  }
+
+let installed_agent_fixture ~on_run ~env ~sw ~data_root ~observed =
+  let module Revision = Agent_session.Prompt_revision in
+  let module Builder = Agent_session.Prompt_revision_builder in
+  let module Runner = Agent_session.Captured_agent_runner in
+  let source_root = Eio.Path.(Eio.Stdenv.fs env / data_root / "agent-source") in
+  let response_root = Eio.Path.(Eio.Stdenv.fs env / data_root / "agent-responses") in
+  Eio.Path.mkdir ~perm:0o700 source_root;
+  Eio.Path.mkdir ~perm:0o700 response_root;
+  let save name contents =
+    Eio.Path.save ~create:(`Or_truncate 0o600) Eio.Path.(source_root / name) contents
+  in
+  save
+    "root.chatmd"
+    {|<tool name="child" agent="child.chatmd" local source_mode="captured"/>|};
+  save
+    "child.chatmd"
+    {|<developer>Original child instructions</developer>
+<developer><agent src="content.chatmd" local source_mode="captured"/></developer>|};
+  save "content.chatmd" "<developer>Content own instructions</developer>";
+  let definition =
+    Agent_session.Prompt_definition.create
+      ~root_invocation:Ui
+      ~id:(P.Id.Prompt_definition.create ())
+      ~config_name:"claimed-agent"
+      ~root_file:(Eio.Path.native_exn Eio.Path.(source_root / "root.chatmd"))
+      ~allowed_workspaces:[]
+      ~permission_profile:"fixture"
+      ~runtime_policy:None
+      ~enabled:true
+      ~description:None
+    |> ok
+  in
+  let artifacts =
+    Agent_store.Prompt_artifact_store.create
+      ~env
+      ~root:(Filename.concat data_root "prompt-artifacts")
+    |> ok
+  in
+  let parent =
+    Builder.build
+      ~env
+      ~artifact_store:artifacts
+      ~transaction_id:(P.Id.Transaction.create ())
+      ~created_at:(T.now ())
+      definition
+    |> Result.map_error ~f:(fun errors ->
+      Sexp.to_string_hum ([%sexp_of: Builder.Diagnostic.t list] errors))
+    |> Result.ok_or_failwith
+  in
+  let policy =
+    Agent_server.Daemon.default_options.script_preparation |> Option.value_exn
+  in
+  let source =
+    Runner.Source.create
+      ~policy_revision:
+        (Chatml_source.Digest.of_contents "claimed-agent-source" ~checkpoint:ignore)
+      ~compilation:(Agent_session.Runtime_script_preparation.compilation policy)
+      ~parser_limits:(Builder.capture_limits ())
+      ~max_work_steps:
+        (Agent_session.Runtime_script_preparation.max_custody_work_steps policy)
+      ~preprocess:Fn.id
+      ~prepare_programs:(fun _ ~invocation:_ _ _ ->
+        failwith "saved Agent artifact must not prepare a new file source")
+    |> Or_error.ok_exn
+  in
+  let runner =
+    Runner.create
+      ~script_preparation:policy
+      ~content_limits:None
+      ~policy_revision:
+        (Chatml_source.Digest.of_contents "claimed-agent-runtime" ~checkpoint:ignore)
+      ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
+      ~approval_provider:Shell_runtime.Approval_broker.None_available
+      ~response_dir:response_root
+  in
+  let port =
+    Runner.bind_installed
+      runner
+      ~source
+      ~artifact_store:artifacts
+      ~source_lease:Agent_session.Prompt_source_lease.legacy
+      ~env
+      ~revision:parent
+      ~sw
+    |> ok
+  in
+  let port =
+    { port with
+      run =
+        (fun ~implementation ~declaration ~ctx ~source ~observer items ->
+          on_run ();
+          port.run ~implementation ~declaration ~ctx ~source ~observer items)
+    }
+  in
+  let inference =
+    Inference_fixture.create
+      ~namespace:"claimed-agent"
+      ~default_model:"fixture-model"
+      ~post_stream:(fun ~sw:_ ~inputs ->
+        let input_text =
+          List.concat_map inputs ~f:(function
+            | Openai.Responses.Item.Input_message message ->
+              List.filter_map message.content ~f:(function
+                | Text { text; _ } -> Some text
+                | Image _ -> None)
+            | _ -> [])
+        in
+        observed := input_text :: !observed;
+        let answer =
+          if List.mem input_text "Content own instructions" ~equal:String.equal
+          then "content answer"
+          else "captured child result"
+        in
+        Stdlib.List.to_seq
+          [ Openai.Responses.Response_stream.Output_item_done
+              { item =
+                  Output_message
+                    { role = Assistant
+                    ; id = "claimed-agent-answer"
+                    ; content =
+                        [ { annotations = []; text = answer; _type = "output_text" } ]
+                    ; status = "completed"
+                    ; phase = None
+                    ; _type = "message"
+                    }
+              ; output_index = 0
+              ; type_ = "response.output_item.done"
+              }
+          ])
+  in
+  let ctx =
+    Inference_fixture.ctx
+      inference
+      ~env
+      ~dir:source_root
+      ~tool_dir:response_root
+      ~cache:(Chat_response.Cache.create ~max_size:1 ())
+      ()
+  in
+  let elements = Revision.elements parent in
+  let host =
+    Chat_response.Agent_runtime.host
+      ~env
+      ~workspace:source_root
+      ~tool_dir:response_root
+      ~prompt_dir:source_root
+      ~session_dir:response_root
+      ~cache_dir:response_root
+      ~home:response_root
+      ~session_id:"claimed-agent"
+      ~prompt_elements:elements
+    |> ok
+  in
+  let runtime =
+    Chat_response.Agent_runtime.create
+      ~agent_source_runner:port
+      ~approval_store:(Shell_access.Approval.create_store ())
+      ~sw
+      ~ctx
+      ~host
+      ~platform:(Chat_response.Agent_runtime.platform ())
+      ~prompt_elements:elements
+      ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
+      ~approval_provider:Shell_runtime.Approval_broker.None_available
+      ~run_agent:(fun ?prompt_dir:_ ?session_id:_ ?observer:_ ~source:_ ~ctx:_ _ _ ->
+        failwith "legacy Agent runner must not execute")
+      ()
+    |> ok
+  in
+  let selected = Lazy.force runtime.capabilities |> ok in
+  assert (
+    List.exists runtime.native_registrations ~f:(fun registration ->
+      match registration.source_requirement with
+      | Chat_response.Native_tool_pool.Source_requirement.Source (Some _) -> true
+      | Source None | Ordinary -> false));
+  { runtime; selected; source_root }
+;;
+
+let stage_registered_agent_tool jobs =
+  let module Runtime = Chatml_host_runtime in
+  let module Value = Chatml.Chatml_value_codec in
+  let compiled =
+    Runtime.compile_script
+      ~surface:Chatml.Chatml_extension_surface.one_off_v1
+      ~source:
+        {|let main input = Job.start_tool("child", `Object([{key="input"; value=`String("go")}]))|}
+      ()
+    |> Result.ok_or_failwith
+  in
+  let config : Runtime.runtime_config =
+    { surface = Chatml.Chatml_extension_surface.one_off_v1
+    ; operations = Runtime.default_operations ~handlers:Runtime.default_handlers ()
+    }
+  in
+  Jobs.with_root_action jobs ~phase:R.Checkpoint.Active (fun ~scope ~sw:_ ->
+    let config = Jobs.Scope.install scope config in
+    let effects = ref [] in
+    let value =
+      Runtime.run_entrypoint
+        ~prepare_result:(fun ~value:_ ~local_effects ->
+          effects := local_effects;
+          Ok ignore)
+        config
+        compiled
+        ~entrypoint:"main"
+        ~arguments:[ Value.import_json (`Object []) ]
+        ()
+      |> Result.map_error ~f:P.Error.invalid_request
+    in
+    Result.map value ~f:(fun value -> value, !effects))
+  |> ok
+  |> fst
+  |> function
+  | Chatml.Chatml_lang.VString id -> P.Id.Job.of_string id |> ok
+  | _ -> failwith "Job.start_tool returned no job ID"
+;;
+
+let with_registered_agent
+      ?(checkpoint = ignore)
+      ?(on_current = ignore)
+      ?(actor_is_current = fun () -> true)
+      ~run_name
+      ~observed
+      ~on_run
+      f
+  =
+  let data_root = ref None in
+  let fixture = ref None in
+  let preparations = ref 0 in
+  with_job_executor
+    ~run_name
+    ~max_job_payload_bytes:4096
+    ~checkpoint
+    ~on_current
+    ~actor_is_current
+    ~on_store:(fun _env session _store ->
+      data_root
+      := Some (Agent_store.Data_root.path (Agent_store.Session_store.data_root session)))
+    ~make_selected:(fun _ -> failwith "selected runtime requires the owning switch")
+    ~make_selected_with_switch:(fun env sw ->
+      let value =
+        installed_agent_fixture
+          ~on_run
+          ~env
+          ~sw
+          ~data_root:(Option.value_exn !data_root)
+          ~observed
+      in
+      fixture := Some value;
+      value.selected)
+    ~prepare_source:(fun ~parent ~binding ~request ~checkpoint ->
+      Int.incr preparations;
+      let fixture = Option.value_exn !fixture in
+      let open Result.Let_syntax in
+      let%bind launch = Jobs.Source_parent.launch parent in
+      assert (
+        match Chat_response.Source_launch.developer_parent launch with
+        | Some Chat_response.Source_launch.Developer_parent.Root_action -> true
+        | Some _ | None -> false);
+      let%bind () = Jobs.Source_parent.check parent ~binding in
+      Chat_response.Agent_runtime.prepare_agent_source
+        fixture.runtime
+        ~binding
+        ~launch
+        ~request
+        ~max_registrations:16
+        ~checkpoint)
+    (fun ~env ~root ~executor ~handle ~owner ~selected ~jobs ~store ~blobs ->
+       f
+         ~env
+         ~root
+         ~executor
+         ~handle
+         ~owner
+         ~selected
+         ~jobs
+         ~store
+         ~blobs
+         ~fixture:(Option.value_exn !fixture)
+         ~preparations)
+;;
+
+let%test_unit
+    "claimed Tool runs its exact saved Agent artifact through the installed runtime"
+  =
+  let observed = ref [] in
+  with_registered_agent
+    ~run_name:"dvr_claimed_agent_artifact"
+    ~observed
+    ~on_run:ignore
+    (fun
+        ~env
+         ~root
+         ~executor:_
+         ~handle
+         ~owner:_
+         ~selected:_
+         ~jobs
+         ~store
+         ~blobs
+         ~fixture
+         ~preparations
+       ->
+       let id = stage_registered_agent_tool jobs in
+       assert (Int.equal !preparations 1);
+       let stored = R.find_job (R.observe handle |> ok) id |> Option.value_exn in
+       let request =
+         Chat_response.Background_request.of_json
+           ~policy:Chat_response.One_off_request.default_policy
+           (P.Developer_job.payload stored)
+         |> ok
+       in
+       assert (Option.is_some (Chat_response.Background_request.agent_artifact request));
+       Eio.Path.save
+         ~create:(`Or_truncate 0o600)
+         Eio.Path.(fixture.source_root / "child.chatmd")
+         "<developer>Revised child instructions</developer>";
+       Eio.Switch.run (fun sw ->
+         let runner =
+           background_runner_with_runtime
+             ~agent_runtime:(Some fixture.runtime)
+             ~sw
+             ~root
+             ~store
+             ~blobs
+             ~env
+             ~managed:None
+             ~jobs
+             ~storage:Agent_store.Developer_result_publisher.Storage.Automatic
+         in
+         let candidate =
+           O.Job_candidate.read_current root ~checkpoint:ignore |> ok |> List.hd_exn
+         in
+         let completed =
+           Agent_server.Developer_background_job_runner.run_candidate runner candidate
+           |> ok
+           |> Option.value_exn
+         in
+         assert (P.Id.Job.equal id (P.Developer_job.id completed));
+         assert (
+           match (P.Developer_job.state completed).status with
+           | P.Job.Succeeded -> true
+           | Failed _
+           | Queued
+           | Running
+           | Waiting_permission _
+           | Waiting_completion _
+           | Cancelled
+           | Interrupted _ -> false);
+         assert (
+           List.exists !observed ~f:(fun row ->
+             List.mem row "Original child instructions" ~equal:String.equal));
+         assert (
+           List.exists !observed ~f:(fun row ->
+             List.mem row "Original child instructions" ~equal:String.equal
+             && List.mem row "content answer" ~equal:String.equal));
+         assert (
+           List.exists !observed ~f:(fun row ->
+             List.mem row "Content own instructions" ~equal:String.equal));
+         assert (
+           not
+             (List.exists !observed ~f:(fun row ->
+                List.mem row "Revised child instructions" ~equal:String.equal)));
+         assert (
+           P.Id.Job.equal
+             id
+             (P.Developer_job.id
+                (R.find_job (R.observe handle |> ok) id |> Option.value_exn)))))
+;;
+
+let%test_unit "claimed Agent source rejects actor revocation during its Claim read" =
+  let observed = ref [] in
+  let source_started = ref false in
+  let root_checked = ref false in
+  let current = ref true in
+  let hold_next_read = ref true in
+  let reached, reached_u = Eio.Promise.create () in
+  let release, release_u = Eio.Promise.create () in
+  with_registered_agent
+    ~run_name:"dvr_claimed_agent_revoke"
+    ~observed
+    ~on_run:(fun () -> source_started := true)
+    ~on_current:(fun () -> if !source_started then root_checked := true)
+    ~actor_is_current:(fun () -> !current)
+    ~checkpoint:(fun () ->
+      if !root_checked && !hold_next_read
+      then (
+        hold_next_read := false;
+        Eio.Promise.resolve reached_u ();
+        Eio.Promise.await release))
+    (fun ~env
+      ~root
+      ~executor:_
+      ~handle:_
+      ~owner:_
+      ~selected:_
+      ~jobs
+      ~store
+      ~blobs
+      ~fixture
+      ~preparations ->
+       let id = stage_registered_agent_tool jobs in
+       assert (Int.equal !preparations 1);
+       Eio.Switch.run (fun sw ->
+         let runner =
+           background_runner_with_runtime
+             ~agent_runtime:(Some fixture.runtime)
+             ~sw
+             ~root
+             ~store
+             ~blobs
+             ~env
+             ~managed:None
+             ~jobs
+             ~storage:Agent_store.Developer_result_publisher.Storage.Automatic
+         in
+         let candidate =
+           O.Job_candidate.read_current root ~checkpoint:ignore |> ok |> List.hd_exn
+         in
+         let finished, finished_u = Eio.Promise.create () in
+         Eio.Fiber.fork ~sw (fun () ->
+           Eio.Promise.resolve
+             finished_u
+             (Agent_server.Developer_background_job_runner.run_candidate runner candidate));
+         Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+           Eio.Promise.await reached);
+         assert !source_started;
+         current := false;
+         Eio.Promise.resolve release_u ();
+         (match Eio.Promise.await finished with
+          | Error _ | Ok None -> ()
+          | Ok (Some job) ->
+            assert (P.Id.Job.equal id (P.Developer_job.id job));
+            assert (
+              match (P.Developer_job.state job).status with
+              | P.Job.Succeeded -> false
+              | Failed _
+              | Queued
+              | Running
+              | Waiting_permission _
+              | Waiting_completion _
+              | Cancelled
+              | Interrupted _ -> true));
+         assert (List.is_empty !observed)))
+;;
+
+let%test_unit "nested Agent callback cannot consume outer saved artifact pin" =
+  let observed = ref [] in
+  let source_calls = ref 0 in
+  let rejected = ref false in
+  let run_nested = ref (fun () -> ()) in
+  with_registered_agent
+    ~run_name:"dvr_nested_agent_artifact"
+    ~observed
+    ~on_run:(fun () ->
+      Int.incr source_calls;
+      if Int.equal !source_calls 1
+      then !run_nested ()
+      else if Int.equal !source_calls 2
+      then ()
+      else failwith "Agent source entered an unexpected invocation")
+    (fun ~env
+      ~root
+      ~executor
+      ~handle
+      ~owner
+      ~selected
+      ~jobs
+      ~store:_
+      ~blobs:_
+      ~fixture:_
+      ~preparations ->
+       let id = stage_registered_agent_tool jobs in
+       assert (Int.equal !preparations 1);
+       let binding = C.find selected ~name:"child" |> ok in
+       let reference = C.reference binding in
+       (run_nested
+        := fun () ->
+             let observed_before = List.length !observed in
+             let borrowed =
+               Agent_session.Native_tool_invocation.borrow_selected () |> ok
+             in
+             let original =
+               Agent_session.Native_tool_invocation.selected_borrowed_invocation borrowed
+             in
+             let child =
+               H.create_developer
+                 { (H.context (invocation owner selected reference ~custom:false)) with
+                   parent_invocation = Some (H.context original).id
+                 ; parent_job = (H.context original).parent_job
+                 ; input = (H.context original).input
+                 }
+               |> ok
+             in
+             let terminal =
+               X.run_child
+                 executor
+                 ~managed:None
+                 ~reference
+                 ~invocation:child
+                 ~authorize:(fun _ _ -> Ok ())
+                 ~prepare_output:(fun _ -> Ok (`String "nested"))
+               |> ok
+             in
+             (match H.status terminal with
+              | Resolved (Fail _) -> rejected := true
+              | Admitted | Dispatching | Published _
+              | Resolved (Complete _ | Pending _ | Cancelled _) ->
+                failwith "nested same-function Agent consumed outer saved pin");
+             assert (Int.equal observed_before (List.length !observed)));
+       let expected = R.observe handle |> ok in
+       let completed =
+         O.with_claimed_job
+           root
+           ~expected
+           ~lookup:(R.find_job_exact expected id)
+           (fun ~active ~sw:_ ->
+              let claim = Scope.claim active in
+              let job = R.Claim.job claim in
+              let policy = O.job_policy root in
+              let request =
+                Chat_response.Background_request.of_json
+                  ~policy
+                  (P.Developer_job.payload job)
+                |> ok
+              in
+              let prepared =
+                Chat_response.Background_request.prepare
+                  ~env
+                  ~current_capabilities:(fun () -> selected)
+                  ~policy
+                  request
+                |> ok
+              in
+              let invocation =
+                let admitted = invocation owner selected reference ~custom:false in
+                let input =
+                  match prepared with
+                  | Chat_response.Background_request.Tool { input; _ } -> input
+                  | Script _ -> failwith "staged Agent request is not a Tool"
+                in
+                H.create_developer
+                  { (H.context admitted) with parent_job = Some id; input }
+                |> ok
+              in
+              let parent = O.job_parent root active |> ok in
+              let check_current () =
+                let capture_fingerprint =
+                  Chatml_developer_capture.fingerprint (O.capture root)
+                in
+                let open Result.Let_syntax in
+                let%bind () = Scope.Parent.check parent ~owner ~capture_fingerprint in
+                Scope.Parent.check_now parent ~owner ~capture_fingerprint
+              in
+              let run_native () =
+                X.run_job_child
+                  executor
+                  ~active
+                  ~managed:None
+                  ~reference
+                  ~invocation
+                  ~authorize:(fun _ _ -> Ok ())
+                  ~prepare_output:(fun _ -> Ok (`String "outer"))
+              in
+              let open Result.Let_syntax in
+              let%bind terminal =
+                Agent_session.Captured_agent_runner.Claimed_developer.with_saved_artifact
+                  ~active
+                  ~parent
+                  ~request
+                  ~policy
+                  ~prepared
+                  ~binding
+                  ~invocation
+                  ~check_current
+                  run_native
+              in
+              match H.status terminal with
+              | Resolved (Complete _) -> Ok (succeeded_claim claim)
+              | Admitted | Dispatching | Published _
+              | Resolved (Fail _ | Pending _ | Cancelled _) ->
+                Error (P.Error.invalid_request "outer native callback did not complete"))
+       in
+       let completed = completed |> ok |> Option.value_exn in
+       assert (P.Id.Job.equal id (P.Developer_job.id completed));
+       assert (
+         match (P.Developer_job.state completed).status with
+         | P.Job.Succeeded -> true
+         | Failed _
+         | Queued
+         | Running
+         | Waiting_permission _
+         | Waiting_completion _
+         | Cancelled
+         | Interrupted _ -> false);
+       assert !rejected;
+       assert (Int.equal !source_calls 2))
 ;;
 
 let%test_unit "shared scheduler overlaps two physically admitted jobs of one root" =
