@@ -56,6 +56,7 @@ type 'env t =
   ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
   ; on_inference_completion : Inference_client.Completion.t -> unit
   ; on_inference_observation : Inference.Observation.t -> unit
+  ; on_admitted_call : In_memory_stream.Admitted_call.t -> unit
   ; submission_guard : Inference_runtime.Submission_guard.t
   ; env : 'env
   ; dir : Eio.Fs.dir_ty Eio.Path.t
@@ -76,6 +77,7 @@ let create
       ~on_inference_completion
       ?(inference_relation = Transcript.Scope.Root)
       ?(on_inference_observation = fun _ -> ())
+      ?(on_admitted_call = fun _ -> ())
       ~env
       ~dir
       ~tool_dir
@@ -88,6 +90,7 @@ let create
   ; on_inference_attempt
   ; on_inference_completion
   ; on_inference_observation
+  ; on_admitted_call
   ; submission_guard = Inference_runtime.Submission_guard.empty
   ; env
   ; dir
@@ -103,6 +106,7 @@ let of_env
       ~on_inference_completion
       ?inference_relation
       ?on_inference_observation
+      ?on_admitted_call
       ~env
       ~cache
       ()
@@ -113,6 +117,7 @@ let of_env
     ~on_inference_attempt
     ~on_inference_completion
     ?on_inference_observation
+    ?on_admitted_call
     ?inference_relation
     ~env
     ~dir:(Eio.Stdenv.fs env)

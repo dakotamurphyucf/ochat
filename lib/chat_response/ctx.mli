@@ -34,6 +34,7 @@ type 'env t = private
   ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
   ; on_inference_completion : Inference_client.Completion.t -> unit
   ; on_inference_observation : Inference.Observation.t -> unit
+  ; on_admitted_call : In_memory_stream.Admitted_call.t -> unit
   ; submission_guard : Inference_runtime.Submission_guard.t
   ; env : 'env (** Underlying Eio standard environment. *)
   ; dir : Eio.Fs.dir_ty Eio.Path.t
@@ -57,6 +58,7 @@ val create
   -> on_inference_completion:(Inference_client.Completion.t -> unit)
   -> ?inference_relation:Transcript.Scope.relation
   -> ?on_inference_observation:(Inference.Observation.t -> unit)
+  -> ?on_admitted_call:(In_memory_stream.Admitted_call.t -> unit)
   -> env:'env
   -> dir:Eio.Fs.dir_ty Eio.Path.t
   -> tool_dir:Eio.Fs.dir_ty Eio.Path.t
@@ -78,6 +80,7 @@ val of_env
   -> on_inference_completion:(Inference_client.Completion.t -> unit)
   -> ?inference_relation:Transcript.Scope.relation
   -> ?on_inference_observation:(Inference.Observation.t -> unit)
+  -> ?on_admitted_call:(In_memory_stream.Admitted_call.t -> unit)
   -> env:(< fs : Eio.Fs.dir_ty Eio.Path.t ; cwd : Eio.Fs.dir_ty Eio.Path.t ; .. > as 'env)
   -> cache:Cache.t
   -> unit
