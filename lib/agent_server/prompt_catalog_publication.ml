@@ -548,6 +548,7 @@ let prepare_child_programs
       t
       ~sources
       ~startup
+      ~tool_contract
       ~invocation
       ~scope
       ~capture
@@ -568,6 +569,7 @@ let prepare_child_programs
        in
        let%map prepared =
          Capture.capture_child
+           ~tool_contract
            t.policy.source_preparation
            ~startup
            ~mode:Capture.Mode.Build

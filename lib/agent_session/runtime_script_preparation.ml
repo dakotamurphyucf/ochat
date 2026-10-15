@@ -124,7 +124,7 @@ let restore_programs t ~startup ~plan ~custody =
     Error (failure "script custody restoration exceeds host work allowance")
 ;;
 
-let restore_with_plan policy ~startup ~revision ~invocation =
+let restore_with_plan ?tool_contract policy ~startup ~revision ~invocation =
   let artifact = Prompt_revision.artifact revision in
   if
     Option.is_some artifact.content_bundle
@@ -145,7 +145,7 @@ let restore_with_plan policy ~startup ~revision ~invocation =
          Error (failure "owned script custody requires explicit host preparation policy")
        | Some policy ->
          let open Result.Let_syntax in
-         let%bind plan = plan policy ~startup ~parsed ~invocation in
+         let%bind plan = plan ?tool_contract policy ~startup ~parsed ~invocation in
          let%map programs =
            Startup.within startup ~map_error:compilation_error ~f:(fun () ->
              restore_programs policy ~startup ~plan ~custody)
@@ -156,11 +156,21 @@ let restore_with_plan policy ~startup ~revision ~invocation =
         (failure "script custody is missing its matching original parser or inventory"))
 ;;
 
-let restore policy ~startup ~revision ~invocation =
-  restore_with_plan policy ~startup ~revision ~invocation |> Result.map ~f:snd
+let restore ?tool_contract policy ~startup ~revision ~invocation =
+  restore_with_plan ?tool_contract policy ~startup ~revision ~invocation
+  |> Result.map ~f:snd
 ;;
 
-let with_revision_plan policy ?startup revision ~env ~invocation ~checkpoint ~f =
+let with_revision_plan
+      policy
+      ?startup
+      ?tool_contract
+      revision
+      ~env
+      ~invocation
+      ~checkpoint
+      ~f
+  =
   let compilation_limits =
     Option.value_map policy ~default:Compiler.default_limits ~f:compilation
   in
@@ -172,15 +182,18 @@ let with_revision_plan policy ?startup revision ~env ~invocation ~checkpoint ~f 
     ~map_error:compilation_error
     ~f:(fun startup ->
       let open Result.Let_syntax in
-      let%bind plan, programs = restore_with_plan policy ~startup ~revision ~invocation in
+      let%bind plan, programs =
+        restore_with_plan ?tool_contract policy ~startup ~revision ~invocation
+      in
       f startup ~compilation_limits ~plan ~programs)
     ()
 ;;
 
-let with_revision policy ?startup revision ~env ~invocation ~checkpoint ~f =
+let with_revision policy ?startup ?tool_contract revision ~env ~invocation ~checkpoint ~f =
   with_revision_plan
     policy
     ?startup
+    ?tool_contract
     revision
     ~env
     ~invocation
@@ -189,12 +202,12 @@ let with_revision policy ?startup revision ~env ~invocation ~checkpoint ~f =
       f startup ~compilation_limits ~programs)
 ;;
 
-let select_child_role policy ~startup ~invocation ~revision ~authored =
+let select_child_role ?tool_contract policy ~startup ~invocation ~revision ~authored =
   let open Result.Let_syntax in
   match Prompt_revision.parser_context revision, Prompt_revision.programs revision with
   | None, None ->
     let%map (_ : Chatml_prompt_programs.Restored.t option) =
-      restore policy ~startup ~revision ~invocation
+      restore ?tool_contract policy ~startup ~revision ~invocation
     in
     None
   | Some parsed, Some custody ->
@@ -202,7 +215,7 @@ let select_child_role policy ~startup ~invocation ~revision ~authored =
      | None ->
        Error (failure "owned child custody requires explicit host preparation policy")
      | Some policy ->
-       let%bind plan = plan policy ~startup ~parsed ~invocation in
+       let%bind plan = plan ?tool_contract policy ~startup ~parsed ~invocation in
        let%map selected =
          Chat_response.Retained_selection.select
            plan
@@ -222,7 +235,7 @@ let selected_custody = function
   | Chat_response.Retained_selection.Legacy custody | Selected custody -> custody
 ;;
 
-let select_child policy ~startup ~parent source =
+let select_child ?tool_contract policy ~startup ~parent source =
   let open Result.Let_syntax in
   let checkpoint () = Startup.checkpoint startup in
   let%bind revision =
@@ -230,6 +243,7 @@ let select_child policy ~startup ~parent source =
   in
   let%bind selected =
     select_child_role
+      ?tool_contract
       policy
       ~startup
       ~invocation:Delegated_ui
@@ -250,6 +264,7 @@ let select_child policy ~startup ~parent source =
 
 let with_authored_child
       ?startup
+      ?tool_contract
       policy
       ~parent
       ~tool_name
@@ -279,7 +294,7 @@ let with_authored_child
               ~tool_name
               ()
           in
-          select_child policy ~startup ~parent source)
+          select_child ?tool_contract policy ~startup ~parent source)
       in
       f startup ~source ~revision)
     ()
@@ -306,6 +321,7 @@ let child_preparation_id parent source =
 let with_captured_child
       policy
       ?startup
+      ?tool_contract
       parent
       ~reference
       ~invocation
@@ -339,6 +355,7 @@ let with_captured_child
           in
           let%bind selected =
             select_child_role
+              ?tool_contract
               (Some policy)
               ~startup
               ~invocation

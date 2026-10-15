@@ -84,13 +84,15 @@ val prune
   -> (int, Error.t) Result.t
 
 (** Actual Builder child callback: borrow this host's administrative source grants,
-    preserve current dependency history and the original child Startup/Scope.
+    preserve current dependency history, the original child Startup/Scope, and
+    the selected compiler [tool_contract].
     Source diagnostics retain their original values; admission failures become
     finite host diagnostics. No additional authority escapes. No index publication
     or fresh artifact retention is performed by this custody-only operation. *)
 val prepare_child_programs
   :  t
   -> startup:Chat_response.Startup_compilation.t
+  -> tool_contract:Chatml_compilation.Tool_contract.t
   -> invocation:Agent_session.Runtime_script_preparation.Invocation.t
   -> scope:Agent_session.Prompt_source_owner.Scope.t
   -> capture:Agent_session.Prompt_source_owner.Capture.t

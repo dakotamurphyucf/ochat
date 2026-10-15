@@ -293,7 +293,7 @@ let implementation_sources =
   ; ( "lib/chat_response/shell_tool.ml"
     , "2450c632c18067d0c984087461b9085f24314dd79a026a42a4f35b1014816f92" )
   ; ( "lib/chat_response/tool.ml"
-    , "70f4929cee0458894129bf90349cf4242f6226e10ea0375ebb3b9cbae89b6796" )
+    , "7ce912e92bd41c3bad9ad05e1c6d096ed52769c6538bb472a0351e006d4eef8e" )
   ; ( "lib/chatmd/chatmd_read_file_declaration.ml"
     , "446e56ceec98db2b0eeabed3b6f86e37127d71c03fb0594380b3daba9ba78eba" )
   ; ( "lib/chatmd/chatmd_read_file_spec.ml"

@@ -320,6 +320,18 @@ val require_saved_agent_source
   -> checkpoint:(unit -> unit)
   -> (unit, Agent_protocol.Error.t) Result.t
 
+(** Compare one already admitted deferred Agent registration with this runtime's
+    exact physical implementation and Source(Some) preparer, as well as its
+    revision and result contract. The runtime may copy the registration record
+    during construction, so record identity alone is not sufficient. A bounded
+    lookup rejects missing or ambiguous registrations before any source work. *)
+val admit_exact_saved_agent_registration
+  :  t
+  -> registration:native_registration
+  -> max_registrations:int
+  -> checkpoint:(unit -> unit)
+  -> (unit, Agent_protocol.Error.t) Result.t
+
 (** Prepare a definition for an extensibility-aware host. Validates the captured
     declarations, constructs native resources through the same shell authorization
     and resource bindings as [create], then compiles all versioned scripts in an

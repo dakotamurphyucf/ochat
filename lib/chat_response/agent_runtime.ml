@@ -1329,6 +1329,31 @@ let require_saved_agent_source t ~binding ~max_registrations ~checkpoint =
        invalid "persistent native source is not a saved Agent.run target")
 ;;
 
+let admit_exact_saved_agent_registration t ~registration ~max_registrations ~checkpoint =
+  let invalid message = Error (Agent_protocol.Error.invalid_request message) in
+  let open Result.Let_syntax in
+  let%bind actual =
+    source_registration
+      t
+      ~implementation:registration.implementation
+      ~max_registrations
+      ~checkpoint
+  in
+  match actual.source_requirement, registration.source_requirement with
+  | Source (Some actual_source), Source (Some expected_source)
+    when phys_equal actual.implementation registration.implementation
+         && phys_equal actual_source expected_source
+         && String.equal
+              actual.implementation_revision
+              registration.implementation_revision
+         && Tool_capability.equal_result_contract actual.result_contract Native_output
+         && Tool_capability.equal_result_contract
+              actual.result_contract
+              registration.result_contract -> Ok ()
+  | Source (Some _), Source (Some _) | Source _, _ | Ordinary, _ ->
+    invalid "deferred Agent registration differs from the installed source"
+;;
+
 let prepare_agent_source t ~binding ~launch ~request ~max_registrations ~checkpoint =
   let open Result.Let_syntax in
   match Tool_capability.native_implementation binding with
