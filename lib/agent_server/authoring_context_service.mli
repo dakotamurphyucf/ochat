@@ -608,6 +608,19 @@ val handle_core
   -> W.Request.t
   -> (W.Response.t, Error.t) result
 
+(** The installer supplies a pure, nonyielding builder over the exact
+    negotiation held by the admitted connection entry. Construct the selected
+    inventory only after the request is registered, so a reinitialize waiting
+    on admission cannot return an earlier epoch's methods. Core or bundle must
+    be selected. The installer never infers installation from wire codecs;
+    this owner repeats actor/epoch/feature checks before response. *)
+val handle_capabilities
+  :  t
+  -> actor:Operator_authorization.t
+  -> connection:Connection_context.t
+  -> make:(Connection_context.Authoring_negotiation.t -> P.Authoring.Capabilities.t)
+  -> (W.Response.t, Error.t) result
+
 (** Route the four bundle methods through the independently authorized upload
     host. An upload-only connection needs the selected bundle feature but no
     core feature or source context. This handler does not advertise itself;

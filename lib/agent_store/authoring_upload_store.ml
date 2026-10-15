@@ -378,10 +378,12 @@ type t =
   ; begin_keys : (string, Id.t) Hashtbl.t
   ; token : unit ref
   ; mutable closed : bool
+  ; mutable fully_closed : bool
   ; mutable uncertain : bool
   }
 
 let host_id t = t.host_id
+let fully_closed t = t.fully_closed
 let registry = Atomic.make String.Set.empty
 
 let rec reserve_root path =
@@ -397,6 +399,20 @@ let rec release_root path =
   let current = Atomic.get registry in
   let next = Set.remove current path in
   if not (Atomic.compare_and_set registry current next) then release_root path
+;;
+
+let complete_close t =
+  Eio.Cancel.protect (fun () ->
+    Eio.Mutex.use_rw ~protect:true t.gate (fun () ->
+      t.closed <- true;
+      while Hashtbl.length t.read_leases > 0 do
+        Eio.Condition.await t.readers_idle t.gate
+      done;
+      if not t.fully_closed
+      then (
+        release_root t.root_path;
+        t.fully_closed <- true);
+      Ok ()))
 ;;
 
 let ( let* ) result f = Result.bind result ~f
@@ -1650,6 +1666,7 @@ let open_or_create ~env ~sw ~data_root ~daemon_lock ~host_id ~limits ~checkpoint
                ; begin_keys = String.Table.create ()
                ; token = ref ()
                ; closed = false
+               ; fully_closed = false
                ; uncertain = false
                }
              in
@@ -1662,11 +1679,7 @@ let open_or_create ~env ~sw ~data_root ~daemon_lock ~host_id ~limits ~checkpoint
              then Error Error.Closed
              else (
                Eio.Switch.on_release sw (fun () ->
-                 Eio.Mutex.use_rw ~protect:true t.gate (fun () ->
-                   if not t.closed
-                   then (
-                     t.closed <- true;
-                     release_root t.root_path)));
+                 ignore (complete_close t : (unit, Error.t) result));
                keep := true;
                Ok t))
          in
@@ -2632,15 +2645,5 @@ let prune t ~now ~protected_uploads ~checkpoint =
 
 let close_and_wait t =
   let active = Option.value (Eio.Fiber.get active_reads) ~default:[] in
-  if List.exists active ~f:(phys_equal t)
-  then Error Error.Busy
-  else
-    Eio.Cancel.protect (fun () ->
-      Eio.Mutex.use_rw ~protect:true t.gate (fun () ->
-        t.closed <- true;
-        while Hashtbl.length t.read_leases > 0 do
-          Eio.Condition.await t.readers_idle t.gate
-        done;
-        release_root t.root_path;
-        Ok ()))
+  if List.exists active ~f:(phys_equal t) then Error Error.Busy else complete_close t
 ;;

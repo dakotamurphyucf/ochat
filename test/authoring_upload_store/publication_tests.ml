@@ -159,6 +159,163 @@ let validation_limits =
   |> Or_error.ok_exn
 ;;
 
+let%test_unit "session close waits for a genuine published upload read lease" =
+  Fixture.with_root "authoring-session-read-lease" (fun env sw root _ ->
+    let session =
+      Agent_store.Session_store.create
+        ~env
+        ~sw
+        ~root:
+          (Filename.concat (Filename.dirname (Agent_store.Data_root.path root)) "session")
+        ~server_id:Fixture.server_id
+        ~process_start_identity:(Some "authoring-session-read-lease")
+        ~lock_nonce:"authoring-session-read-lease"
+      |> Fixture.store_ok
+    in
+    let child =
+      Agent_store.Session_store.open_authoring_upload_store
+        session
+        ~sw
+        ~limits:(Fixture.limits ())
+        ~checkpoint:Fn.id
+      |> upload_ok
+    in
+    let dir = Eio.Stdenv.fs env in
+    let manifest = document_manifest dir in
+    let begin_request =
+      B.Begin.create_request
+        ~idempotency_key:(P.Idempotency_key.of_string "joined-read-begin" |> protocol_ok)
+        ~manifest
+        ()
+    in
+    let upload_id =
+      Store.begin_upload
+        child
+        ~principal:Fixture.principal
+        ~request:begin_request
+        ~now:(fun () -> Fixture.start)
+        ~checkpoint:Fn.id
+      |> upload_ok
+      |> B.Begin.upload_id
+    in
+    let first = Int.min 64 (String.length document_bytes) in
+    ignore
+      (Fixture.send_chunk
+         child
+         upload_id
+         document_id
+         0
+         (String.prefix document_bytes first)
+       |> upload_ok
+       : B.Chunk.response);
+    if first < String.length document_bytes
+    then
+      ignore
+        (Fixture.send_chunk
+           child
+           upload_id
+           document_id
+           first
+           (String.drop_prefix document_bytes first)
+         |> upload_ok
+         : B.Chunk.response);
+    let sealed =
+      match
+        Store.claim_commit
+          child
+          ~principal:Fixture.principal
+          ~request:
+            (B.Commit.create_request
+               ~upload_id
+               ~idempotency_key:
+                 (P.Idempotency_key.of_string "joined-read-commit" |> protocol_ok))
+          ~now:(fun () -> Fixture.start)
+          ~checkpoint:Fn.id
+        |> upload_ok
+      with
+      | Ready sealed -> sealed
+      | Published _ | Rejected _ -> failwith "expected a ready publication"
+    in
+    let snapshot =
+      Store.snapshot
+        child
+        ~principal:Fixture.principal
+        sealed
+        ~now:(fun () -> Fixture.start)
+        ~checkpoint:Fn.id
+      |> upload_ok
+    in
+    let validated =
+      Document.validate
+        manifest
+        ~sources:(Store.Snapshot.sources snapshot)
+        ~dir
+        ~selected_projects:[]
+        ~limits:validation_limits
+        ~checkpoint:Fn.id
+      |> Result.map_error ~f:(fun _ -> "valid source-only document rejected")
+      |> Result.ok_or_failwith
+    in
+    let receipt =
+      Store.publish
+        child
+        ~principal:Fixture.principal
+        sealed
+        ~snapshot
+        ~proof:(Store.Proof.Chatmd_document validated)
+        ~now:(fun () -> Fixture.start)
+        ~checkpoint:Fn.id
+        ~final_admission:Fn.id
+      |> upload_ok
+    in
+    let entered, entered_u = Eio.Promise.create () in
+    let release, release_u = Eio.Promise.create () in
+    let reader_done, reader_done_u = Eio.Promise.create () in
+    let close_done, close_done_u = Eio.Promise.create () in
+    Eio.Fiber.fork ~sw (fun () ->
+      Store.with_published
+        child
+        ~principal:Fixture.principal
+        ~bundle_id:(B.Receipt.bundle_id receipt)
+        ~now:(fun () -> Fixture.start)
+        ~checkpoint:Fn.id
+        ~admit_metadata:(fun _ _ -> ())
+        ~f:(fun _ ->
+          Eio.Promise.resolve entered_u ();
+          Eio.Promise.await release)
+      |> upload_ok;
+      Eio.Promise.resolve reader_done_u ());
+    Eio.Promise.await entered;
+    Eio.Fiber.fork ~sw (fun () ->
+      Store.close_and_wait child |> upload_ok;
+      Eio.Promise.resolve close_done_u ());
+    let rec await_closed remaining =
+      if remaining = 0 then failwith "upload close never stopped new admissions";
+      match
+        Store.status
+          child
+          ~principal:Fixture.principal
+          ~upload_id
+          ~now:(fun () -> Fixture.start)
+          ~checkpoint:Fn.id
+      with
+      | Error Closed -> ()
+      | Ok _ | Error _ ->
+        Eio.Fiber.yield ();
+        await_closed (remaining - 1)
+    in
+    await_closed 1000;
+    assert (not (Store.fully_closed child));
+    (match Agent_store.Session_store.close session with
+     | Error (Locked _) -> ()
+     | Ok () | Error _ -> failwith "parent released lock before published reader joined");
+    Eio.Promise.resolve release_u ();
+    Eio.Promise.await reader_done;
+    Eio.Promise.await close_done;
+    assert (Store.fully_closed child);
+    Agent_store.Session_store.close session |> Fixture.store_ok)
+;;
+
 let%test_unit "published capture survives uncertain marker, restart and bounded borrow" =
   Fixture.with_root "ochat-upload-publication" (fun env sw root lock ->
     let dir = Eio.Stdenv.fs env in
@@ -777,6 +934,7 @@ let%test_unit
                ~max_active_requests_per_connection:2
                ~max_roots_per_connection:2
                ~max_response_bytes:1_000_000
+               ~max_provisional_results:2
              |> Or_error.ok_exn)
       in
       (match

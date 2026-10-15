@@ -1543,6 +1543,8 @@ let%expect_test "provider close serializes retries and denies admission before y
           ~receipt:(fun ~actor:_ _ ->
             Int.incr dispatches;
             Error P.Provider_operator.Error.Unsupported)
+          ~current_model_bridge:(fun () ->
+            failwith "provider-close fixture must not select an inference model")
           ~close:(fun () ->
             Int.incr attempts;
             if Int.equal !attempts 1

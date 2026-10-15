@@ -87,6 +87,21 @@ val data_root : t -> Data_root.t
 val server_id : t -> Agent_protocol.Id.Server.t
 val session_index : t -> Session_index.t
 
+(** Open one durable authoring-upload child using THIS Store's live exclusive
+    daemon lock and Data_root. The lock remains privately owned here; no caller
+    may reacquire it or supply an unrelated root. Reject a closed Store and a
+    second live child before opening; register the child only after successful
+    bounded recovery. The caller transfers it to one Authoring_upload_host.
+    [close] refuses to release the daemon lock until that child reports
+    [fully_closed], after all read leases and its root reservation are gone.
+    A failed/cancelled open publishes no child slot. *)
+val open_authoring_upload_store
+  :  t
+  -> sw:Eio.Switch.t
+  -> limits:Authoring_upload_store.Limits.t
+  -> checkpoint:(unit -> unit)
+  -> (Authoring_upload_store.t, Authoring_upload_store.Error.t) result
+
 (** Shared private child-creation ledger under this store's exclusive ownership. *)
 val delegations : t -> Delegation_store.t
 

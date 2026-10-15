@@ -7,9 +7,17 @@
     commands during receipt reconciliation. *)
 
 val authorize
-  :  Agent_protocol.Principal.t
+  :  ?installed_authoring:bool
+  -> Agent_protocol.Principal.t
   -> Agent_protocol.Command.t
   -> (unit, Agent_protocol.Error.t) result
+
+(** [installed_authoring] defaults to false. The Command_handler passes true
+    only when it owns the actual Authoring_installation; this generic check
+    supplies no source/upload grant or feature selection. The installed
+    handler repeats current actor, epoch, feature and origin authorization.
+    Reconstructed command receipts keep the default false because authoring
+    commands have no generic idempotency receipt. *)
 
 (** Shared current session visibility used after method-scope authorization.
     Administer_configuration permits management visibility; otherwise the retained

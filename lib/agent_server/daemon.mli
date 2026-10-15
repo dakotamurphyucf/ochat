@@ -28,6 +28,13 @@ type options =
   ; implementation_name : string
   ; implementation_version : string
   ; features : string list
+  ; authoring : Authoring_installation.Host_policy.t option
+    (** [Some] installs one real bounded authoring service. The daemon default
+        is supplied-document/core/lexical/local assistance with no native read
+        or upload grant; [None] explicitly disables authoring. Optional native
+        source, upload and selected semantic policies are trusted host inputs,
+        never inferred from feature strings or client request identities. The
+        installed handler set, not this options record alone, is advertised. *)
   ; extension_host : Agent_protocol.Extension_capabilities.host
   ; protocol_limits : Agent_protocol.Initialize.Limits.t
   ; timing : Agent_protocol.Initialize.Timing.t
@@ -154,6 +161,12 @@ val inspect_prompt_shell
        Result.t
 
 val workspaces : t -> Agent_session.Workspace_catalog.t
+
+(** Transport-compatible unit close facade. The typed Command_handler close
+    joins authoring before session detach. A finite failed join is recorded in
+    daemon health/status and retains the authoring/source/upload owners for
+    shutdown retry; this callback never claims successful cleanup or releases
+    a borrowed owner. Unexpected exceptions retain their original backtrace. *)
 val close_connection : t -> Connection_context.t -> unit
 
 (** [reload_config] validates and atomically publishes catalog changes.
