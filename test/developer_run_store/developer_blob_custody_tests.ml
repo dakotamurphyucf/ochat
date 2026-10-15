@@ -21,6 +21,8 @@ let store_limits () =
     ~max_epochs_per_run:3
     ~max_jobs_per_run:4
     ~max_invocations_per_run:4
+    ~max_inference_attempts_per_run:256
+    ~max_inference_bytes_per_run:4096
     ~max_selected_per_commit:2
     ~max_job_payload_bytes:1024
     ~max_document_bytes:4096

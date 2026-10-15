@@ -1,7 +1,9 @@
 open! Core
 module P = Agent_protocol
+module O = Inference.Observation
 module Doc = Developer_run_document
 module Cpu = Developer_run_cpu
+module Inference_row = Developer_inference_row
 module Root = Session_store.Developer_root
 module Id = P.Id.Developer_run
 
@@ -11,6 +13,8 @@ module Limits = struct
     ; max_epochs_per_run : int
     ; max_jobs_per_run : int
     ; max_invocations_per_run : int
+    ; max_inference_attempts_per_run : int
+    ; max_inference_bytes_per_run : int
     ; max_selected_per_commit : int
     ; max_job_payload_bytes : int
     ; max_document_bytes : int
@@ -25,6 +29,8 @@ module Limits = struct
         ~max_epochs_per_run
         ~max_jobs_per_run
         ~max_invocations_per_run
+        ~max_inference_attempts_per_run
+        ~max_inference_bytes_per_run
         ~max_selected_per_commit
         ~max_job_payload_bytes
         ~max_document_bytes
@@ -41,6 +47,8 @@ module Limits = struct
             ; max_epochs_per_run
             ; max_jobs_per_run
             ; max_invocations_per_run
+            ; max_inference_attempts_per_run
+            ; max_inference_bytes_per_run
             ; max_selected_per_commit
             ; max_job_payload_bytes
             ; max_document_bytes
@@ -52,6 +60,8 @@ module Limits = struct
       || max_epochs_per_run > 1024
       || max_jobs_per_run > 16384
       || max_invocations_per_run > 16384
+      || max_inference_attempts_per_run > 16384
+      || max_inference_bytes_per_run > max_document_bytes
       || max_selected_per_commit > max_jobs_per_run
       || max_document_bytes > 16 * 1024 * 1024
       || max_recovery_entries < (2 * max_runs) + 1
@@ -64,6 +74,8 @@ module Limits = struct
         ; max_epochs_per_run
         ; max_jobs_per_run
         ; max_invocations_per_run
+        ; max_inference_attempts_per_run
+        ; max_inference_bytes_per_run
         ; max_selected_per_commit
         ; max_job_payload_bytes
         ; max_document_bytes
@@ -208,6 +220,8 @@ module Prepared = struct
     | Worker_claim
     | Claimed_transition
     | Inactive_cancel
+    | Inference_tracking
+    | Inference_recovery
 
   type claim_status =
     | Unsettled
@@ -275,6 +289,11 @@ type recovery_phase =
   | Recovery_finished
   | Recovery_aborted
 
+type tracking_phase =
+  | Tracking_unopened
+  | Tracking_open of unit ref
+  | Tracking_finished
+
 type run_claim_record =
   { token : unit ref
   ; handle_token : unit ref
@@ -282,6 +301,7 @@ type run_claim_record =
   ; mutable released : bool
   ; mutable normal_started : bool
   ; mutable recovery : recovery_phase
+  ; mutable tracking : tracking_phase
   }
 
 type t =
@@ -461,6 +481,7 @@ module Run_claim = struct
             ; released = false
             ; normal_started = false
             ; recovery = Recovery_unopened
+            ; tracking = Tracking_unopened
             }
           in
           Hashtbl.set store.run_claims ~key:run_id ~data:record;
@@ -480,10 +501,13 @@ module Run_claim = struct
             Hashtbl.mem t.store.pending t.run_id
             || Hashtbl.mem t.store.normal_operations t.run_id
             || Hashtbl.mem t.store.issued_claims t.run_id
+            || (match t.record.recovery with
+                | Recovery_open _ -> true
+                | Recovery_unopened | Recovery_finished | Recovery_aborted -> false)
             ||
-            match t.record.recovery with
-            | Recovery_open _ -> true
-            | Recovery_unopened | Recovery_finished | Recovery_aborted -> false
+            match t.record.tracking with
+            | Tracking_open _ -> true
+            | Tracking_unopened | Tracking_finished -> false
           then Error Error.Conflict
           else (
             Hashtbl.remove t.store.run_claims t.run_id;
@@ -540,6 +564,8 @@ let read t ~poll id =
         ~max_jobs:t.limits.max_jobs_per_run
         ~max_invocations:t.limits.max_invocations_per_run
         ~max_job_payload_bytes:t.limits.max_job_payload_bytes
+        ~max_inference_attempts:t.limits.max_inference_attempts_per_run
+        ~max_inference_bytes:t.limits.max_inference_bytes_per_run
       |> store
     in
     poll ();
@@ -706,6 +732,8 @@ let scan_documents_with t ~poll ~reader ~decode ~document_of ~project =
             ~max_jobs:t.limits.max_jobs_per_run
             ~max_invocations:t.limits.max_invocations_per_run
             ~max_job_payload_bytes:t.limits.max_job_payload_bytes
+            ~max_inference_attempts:t.limits.max_inference_attempts_per_run
+            ~max_inference_bytes:t.limits.max_inference_bytes_per_run
           |> store
         in
         let document = document_of decoded in
@@ -1176,6 +1204,8 @@ module Result_root = struct
                 ~max_jobs:t.issuer.limits.max_jobs_per_run
                 ~max_invocations:t.issuer.limits.max_invocations_per_run
                 ~max_job_payload_bytes:t.issuer.limits.max_job_payload_bytes
+                ~max_inference_attempts:t.issuer.limits.max_inference_attempts_per_run
+                ~max_inference_bytes:t.issuer.limits.max_inference_bytes_per_run
               |> store
             in
             Ok (bytes, document)
@@ -1454,6 +1484,8 @@ let admit_epoch t ~owner ~capture_fingerprint ~previous =
                 ~max_jobs:t.limits.max_jobs_per_run
                 ~max_invocations:t.limits.max_invocations_per_run
                 ~max_job_payload_bytes:t.limits.max_job_payload_bytes
+                ~max_inference_attempts:t.limits.max_inference_attempts_per_run
+                ~max_inference_bytes:t.limits.max_inference_bytes_per_run
               |> store
             in
             poll ();
@@ -1521,6 +1553,8 @@ let admit_epoch t ~owner ~capture_fingerprint ~previous =
                   ~max_jobs:t.limits.max_jobs_per_run
                   ~max_invocations:t.limits.max_invocations_per_run
                   ~max_job_payload_bytes:t.limits.max_job_payload_bytes
+                  ~max_inference_attempts:t.limits.max_inference_attempts_per_run
+                  ~max_inference_bytes:t.limits.max_inference_bytes_per_run
                 |> store
               in
               poll ();
@@ -1578,6 +1612,8 @@ let prepare_checkpoint handle ~expected ~phase =
             ~max_jobs:t.limits.max_jobs_per_run
             ~max_invocations:t.limits.max_invocations_per_run
             ~max_job_payload_bytes:t.limits.max_job_payload_bytes
+            ~max_inference_attempts:t.limits.max_inference_attempts_per_run
+            ~max_inference_bytes:t.limits.max_inference_bytes_per_run
           |> store
         in
         poll ();
@@ -1631,6 +1667,8 @@ let prepare_change handle ~expected ~kind ~f =
             ~max_jobs:t.limits.max_jobs_per_run
             ~max_invocations:t.limits.max_invocations_per_run
             ~max_job_payload_bytes:t.limits.max_job_payload_bytes
+            ~max_inference_attempts:t.limits.max_inference_attempts_per_run
+            ~max_inference_bytes:t.limits.max_inference_bytes_per_run
           |> Result.map_error ~f:(fun error ->
             match kind, error with
             | ( Prepared.External_model
@@ -1892,6 +1930,8 @@ let prepare_claimed_transition_internal
               ~max_jobs:t.limits.max_jobs_per_run
               ~max_invocations:t.limits.max_invocations_per_run
               ~max_job_payload_bytes:t.limits.max_job_payload_bytes
+              ~max_inference_attempts:t.limits.max_inference_attempts_per_run
+              ~max_inference_bytes:t.limits.max_inference_bytes_per_run
             |> store
           in
           Ok
@@ -2000,7 +2040,12 @@ let bind_handoff t handle prepared handoff =
   else if
     match prepared.Prepared.kind with
     | Developer_dispatch | Selected_transaction | External_model -> false
-    | Foundation_checkpoint | Worker_claim | Claimed_transition | Inactive_cancel -> true
+    | Foundation_checkpoint
+    | Worker_claim
+    | Claimed_transition
+    | Inactive_cancel
+    | Inference_tracking
+    | Inference_recovery -> true
   then Error Error.Conflict
   else
     let* () =
@@ -2170,7 +2215,9 @@ let bind_claim t handle prepared =
         | Selected_transaction
         | External_model
         | Claimed_transition
-        | Inactive_cancel )
+        | Inactive_cancel
+        | Inference_tracking
+        | Inference_recovery )
       , _ )
     | Worker_claim, None -> Error Error.Conflict)
 ;;
@@ -2178,7 +2225,8 @@ let bind_claim t handle prepared =
 let settle_worker_prepared t handle (prepared : Prepared.t) settlement =
   let identical_unwritten_claim =
     match prepared.kind with
-    | Worker_claim | Inactive_cancel -> not prepared.write_attempted
+    | Worker_claim | Inactive_cancel | Inference_tracking | Inference_recovery ->
+      not prepared.write_attempted
     | Foundation_checkpoint
     | Developer_dispatch
     | Selected_transaction
@@ -2203,10 +2251,19 @@ let settle_worker_prepared t handle (prepared : Prepared.t) settlement =
    | Unsettled | Claim_absent | Claim_diverged | Claim_prewrite_conflict -> ());
   let retire =
     match status, prepared.kind with
-    | Claim_installed, (Worker_claim | Claimed_transition | Inactive_cancel)
+    | ( Claim_installed
+      , ( Worker_claim
+        | Claimed_transition
+        | Inactive_cancel
+        | Inference_tracking
+        | Inference_recovery ) )
     | Claim_absent, (Worker_claim | Inactive_cancel)
-    | Claim_prewrite_conflict, (Worker_claim | Claimed_transition | Inactive_cancel) ->
-      true
+    | ( Claim_prewrite_conflict
+      , ( Worker_claim
+        | Claimed_transition
+        | Inactive_cancel
+        | Inference_tracking
+        | Inference_recovery ) ) -> true
     | (Unsettled | Claim_absent | Claim_diverged), _
     | ( Claim_installed
       , ( Foundation_checkpoint
@@ -2340,13 +2397,18 @@ let commit_job_claim handle prepared =
 type transition_path =
   | Physical_claim
   | Inactive_job
+  | Tracking_path
+  | Recovery_inference_path
 
 let bind_transition path t handle prepared =
   if not (prepared_for handle prepared)
   then Error Error.Foreign_or_stale
   else (
     match path, prepared.Prepared.kind with
-    | Physical_claim, Claimed_transition | Inactive_job, Inactive_cancel ->
+    | Physical_claim, Claimed_transition
+    | Inactive_job, Inactive_cancel
+    | Tracking_path, Inference_tracking
+    | Recovery_inference_path, Inference_recovery ->
       (match prepared.claim_status with
        | Claim_installed | Claim_diverged | Claim_prewrite_conflict -> Ok ()
        | Unsettled | Claim_absent ->
@@ -2359,14 +2421,16 @@ let bind_transition path t handle prepared =
            | Some (Transition pending) when phys_equal pending.token prepared.token ->
              Ok ()
            | Some (Selected _ | Claim _ | Transition _) -> Error Error.Conflict))
-    | ( (Physical_claim | Inactive_job)
+    | ( (Physical_claim | Inactive_job | Tracking_path | Recovery_inference_path)
       , ( Foundation_checkpoint
         | Developer_dispatch
         | Selected_transaction
         | External_model
         | Worker_claim
         | Claimed_transition
-        | Inactive_cancel ) ) -> Error Error.Conflict)
+        | Inactive_cancel
+        | Inference_tracking
+        | Inference_recovery ) ) -> Error Error.Conflict)
 ;;
 
 let claimed_transition_result t prepared =
@@ -2513,7 +2577,9 @@ let commit handle prepared =
     | External_model
     | Worker_claim
     | Claimed_transition
-    | Inactive_cancel -> true
+    | Inactive_cancel
+    | Inference_tracking
+    | Inference_recovery -> true
   then Error Error.Conflict
   else
     with_normal_lease t handle (fun ~env:_ ~root:_ ->
@@ -2550,7 +2616,9 @@ let reconcile handle prepared =
     | External_model
     | Worker_claim
     | Claimed_transition
-    | Inactive_cancel -> true
+    | Inactive_cancel
+    | Inference_tracking
+    | Inference_recovery -> true
   then Error Error.Conflict
   else
     with_normal_lease t handle (fun ~env:_ ~root:_ ->
@@ -2566,6 +2634,28 @@ let reconcile handle prepared =
 ;;
 
 module Recovery = struct
+  module Inference_candidate = struct
+    type t =
+      { view_token : unit ref
+      ; row : Inference_row.t
+      }
+
+    let row t = t.row
+  end
+
+  module Inference_pending = struct
+    type t =
+      { row : Inference_row.t
+      ; after : O.Attempt_record.t
+      ; prepared : Prepared.t
+      ; window_token : unit ref
+      ; mutable can_reprepare : bool
+      }
+
+    let row t = t.row
+    let after t = t.after
+  end
+
   module Candidate = struct
     type t =
       { view_token : unit ref
@@ -2581,10 +2671,12 @@ module Recovery = struct
       ; window_token : unit ref
       ; observation : Observation.t
       ; candidates : Candidate.t list
+      ; inference_candidates : Inference_candidate.t list
       }
 
     let observation t = t.observation
     let candidates t = t.candidates
+    let inference_candidates t = t.inference_candidates
   end
 
   module Pending = struct
@@ -2606,6 +2698,7 @@ module Recovery = struct
     ; claim : Run_claim.t
     ; token : unit ref
     ; mutable pending : Pending.t option
+    ; mutable inference_pending : Inference_pending.t option
     ; mutable ever_prepared : bool
     ; mutable busy : bool
     }
@@ -2637,6 +2730,7 @@ module Recovery = struct
             ; claim
             ; token
             ; pending = None
+            ; inference_pending = None
             ; ever_prepared = false
             ; busy = false
             }
@@ -2701,9 +2795,21 @@ module Recovery = struct
         | Queued | Waiting_completion _ | Succeeded | Failed _ | Cancelled | Interrupted _
           -> Ok acc)
     in
+    let inference_candidates =
+      List.filter_map (Doc.inference_entries observation.document) ~f:(fun row ->
+        poll ();
+        match O.Attempt_record.state (Inference_row.record row) with
+        | Prepared | Running -> Some { Inference_candidate.view_token = token; row }
+        | Terminal _ | Interrupted _ -> None)
+    in
     let* () = valid t in
     let view : View.t =
-      { token; window_token = t.token; observation; candidates = List.rev candidates }
+      { token
+      ; window_token = t.token
+      ; observation
+      ; candidates = List.rev candidates
+      ; inference_candidates
+      }
     in
     Ok view
   ;;
@@ -2745,6 +2851,21 @@ module Recovery = struct
               else (
                 let job = candidate.job in
                 let owner = P.Developer_job.owner job in
+                let* () =
+                  if
+                    List.exists (Doc.inference_entries document) ~f:(fun row ->
+                      poll ();
+                      P.Id.Job.equal (Inference_row.job_id row) (P.Developer_job.id job)
+                      && Int.equal
+                           (Inference_row.job_attempt row)
+                           (P.Developer_job.state job).attempt
+                      &&
+                      match O.Attempt_record.state (Inference_row.record row) with
+                      | Prepared | Running -> true
+                      | Terminal _ | Interrupted _ -> false)
+                  then Error Error.Conflict
+                  else Ok ()
+                in
                 let* epoch = find_epoch document ~owner in
                 let* () =
                   if
@@ -2793,6 +2914,8 @@ module Recovery = struct
                     ~max_jobs:t.store.limits.max_jobs_per_run
                     ~max_invocations:t.store.limits.max_invocations_per_run
                     ~max_job_payload_bytes:t.store.limits.max_job_payload_bytes
+                    ~max_inference_attempts:t.store.limits.max_inference_attempts_per_run
+                    ~max_inference_bytes:t.store.limits.max_inference_bytes_per_run
                   |> store
                 in
                 let* () = valid t in
@@ -2820,9 +2943,9 @@ module Recovery = struct
 
   let prepare_terminal t ~view ~candidate ~after =
     with_operation t (fun () ->
-      match t.pending with
-      | Some _ -> Error Error.Conflict
-      | None ->
+      match t.pending, t.inference_pending with
+      | Some _, _ | _, Some _ -> Error Error.Conflict
+      | None, None ->
         let* pending = build_pending t ~view ~candidate ~after in
         t.pending <- Some pending;
         t.ever_prepared <- true;
@@ -2830,6 +2953,7 @@ module Recovery = struct
   ;;
 
   let pending t = t.pending
+  let inference_pending t = t.inference_pending
 
   let same_pending t pending =
     Option.value_map t.pending ~default:false ~f:(fun current ->
@@ -2912,14 +3036,210 @@ module Recovery = struct
           Ok next))
   ;;
 
-  let finish t =
+  let build_inference_pending t ~view ~candidate =
+    if
+      (not (phys_equal view.View.window_token t.token))
+      || not (phys_equal candidate.Inference_candidate.view_token view.View.token)
+    then Error Error.Foreign_or_stale
+    else
+      with_lease t.store (fun ~env:_ ~root:_ ->
+        let poll = work t.store t.store.checkpoint in
+        let* current = read t.store ~poll t.claim.run_id in
+        match current with
+        | None -> Error Error.Foreign_or_stale
+        | Some (before_bytes, document) ->
+          if
+            not (same_observation t.store t.handle view.observation before_bytes document)
+          then Error Error.Conflict
+          else (
+            let row = candidate.row in
+            let* current_row =
+              match
+                List.find (Doc.inference_entries document) ~f:(fun entry ->
+                  poll ();
+                  Int64.equal (Inference_row.ordinal entry) (Inference_row.ordinal row))
+              with
+              | None -> Error Error.Conflict
+              | Some current_row -> Ok current_row
+            in
+            let* () =
+              if
+                Inference_row.same_identity current_row row
+                && Jsonaf.exactly_equal
+                     (Inference_row.to_json current_row)
+                     (Inference_row.to_json row)
+              then Ok ()
+              else Error Error.Conflict
+            in
+            let prior = Inference_row.record row in
+            let* delivery =
+              match O.Attempt_record.state prior with
+              | Prepared -> Ok Inference.Event.Terminal.Definitely_not_submitted
+              | Running -> Ok Possibly_submitted
+              | Terminal _ | Interrupted _ -> Error Error.Conflict
+            in
+            let* after =
+              O.Attempt_record.create
+                ~scope:(O.Attempt_record.scope prior)
+                ~accounting_id:(O.Attempt_record.accounting_id prior)
+                ~configuration:(O.Attempt_record.configuration prior)
+                ~state:(Interrupted { reason = Host_interrupted; delivery })
+                ~observations:(O.Attempt_record.observations prior)
+                ~omitted_diagnostics:(O.Attempt_record.omitted_diagnostics prior)
+                ~limits:O.Admission.attempt
+              |> Result.map_error ~f:(fun _ -> Error.Conflict)
+            in
+            let* next =
+              Doc.set_inference_record
+                document
+                ~poll
+                ~limits:t.store.limits.document
+                ~ordinal:(Inference_row.ordinal row)
+                ~expected:current_row
+                ~after
+                ~max_inference_bytes:t.store.limits.max_inference_bytes_per_run
+              |> store
+            in
+            poll ();
+            let* after_bytes =
+              Cpu.encode
+                t.store.cpu
+                next
+                ~poll
+                ~limits:t.store.limits.document
+                ~max_epochs:t.store.limits.max_epochs_per_run
+                ~max_jobs:t.store.limits.max_jobs_per_run
+                ~max_invocations:t.store.limits.max_invocations_per_run
+                ~max_job_payload_bytes:t.store.limits.max_job_payload_bytes
+                ~max_inference_attempts:t.store.limits.max_inference_attempts_per_run
+                ~max_inference_bytes:t.store.limits.max_inference_bytes_per_run
+              |> store
+            in
+            let* () = valid t in
+            let prepared =
+              Prepared.
+                { store_token = t.store.token
+                ; handle_token = t.handle.token
+                ; owner = t.handle.owner
+                ; before_bytes
+                ; after_bytes
+                ; after_document = next
+                ; token = ref ()
+                ; kind = Inference_recovery
+                ; claim_data = None
+                ; claim_status = Unsettled
+                ; write_attempted = false
+                ; claimed_selection = None
+                }
+            in
+            Ok
+              { Inference_pending.row
+              ; after
+              ; prepared
+              ; window_token = t.token
+              ; can_reprepare = false
+              }))
+  ;;
+
+  let prepare_inference_interruption t ~view ~candidate =
     with_operation t (fun () ->
-      if Option.is_some t.pending
+      match t.pending, t.inference_pending with
+      | Some _, _ | _, Some _ -> Error Error.Conflict
+      | None, None ->
+        let* pending = build_inference_pending t ~view ~candidate in
+        t.inference_pending <- Some pending;
+        t.ever_prepared <- true;
+        Ok pending)
+  ;;
+
+  let same_inference_pending t pending =
+    Option.value_map t.inference_pending ~default:false ~f:(fun current ->
+      phys_equal current pending)
+  ;;
+
+  let reconcile_inference_interruption t pending =
+    with_operation t (fun () ->
+      if not (same_inference_pending t pending)
+      then Error Error.Foreign_or_stale
+      else (
+        match
+          reconcile_transition_using
+            (fun store _handle f -> with_lease store f)
+            ~path:Recovery_inference_path
+            t.handle
+            pending.prepared
+        with
+        | Ok outcome ->
+          (match outcome with
+           | Installed _ -> t.inference_pending <- None
+           | Absent -> pending.can_reprepare <- true
+           | Diverged -> ());
+          Ok outcome
+        | Error Error.Prewrite_conflict when not pending.prepared.write_attempted ->
+          pending.can_reprepare <- true;
+          Error Error.Prewrite_conflict
+        | Error error -> Error error))
+  ;;
+
+  let commit_inference_interruption t pending =
+    with_operation t (fun () ->
+      if not (same_inference_pending t pending)
+      then Error Error.Foreign_or_stale
+      else
+        let* installed =
+          commit_transition_using
+            (fun store _handle f -> with_lease store f)
+            ~path:Recovery_inference_path
+            ~admit:(fun () -> true)
+            t.handle
+            pending.prepared
+        in
+        t.inference_pending <- None;
+        Ok installed)
+  ;;
+
+  let reprepare_inference_same t pending =
+    with_operation t (fun () ->
+      if not (same_inference_pending t pending && pending.can_reprepare)
       then Error Error.Conflict
       else (
         let poll = work t.store t.store.checkpoint in
         let* view = read_view t ~poll in
-        if not (List.is_empty view.candidates)
+        let candidate =
+          List.find view.inference_candidates ~f:(fun candidate ->
+            poll ();
+            Inference_row.same_identity candidate.row pending.row
+            && Jsonaf.exactly_equal
+                 (Inference_row.to_json candidate.row)
+                 (Inference_row.to_json pending.row))
+        in
+        match candidate with
+        | None -> Error Error.Conflict
+        | Some candidate ->
+          let* next = build_inference_pending t ~view ~candidate in
+          let* () =
+            with_run_lifecycle t.store (fun () ->
+              match Hashtbl.find t.store.pending t.claim.run_id with
+              | Some (Transition old) when phys_equal old.token pending.prepared.token ->
+                Hashtbl.remove t.store.pending t.claim.run_id;
+                Ok ()
+              | None -> Ok ()
+              | Some (Selected _ | Claim _ | Transition _) -> Error Error.Conflict)
+          in
+          t.inference_pending <- Some next;
+          Ok next))
+  ;;
+
+  let finish t =
+    with_operation t (fun () ->
+      if Option.is_some t.pending || Option.is_some t.inference_pending
+      then Error Error.Conflict
+      else (
+        let poll = work t.store t.store.checkpoint in
+        let* view = read_view t ~poll in
+        if
+          (not (List.is_empty view.candidates))
+          || not (List.is_empty view.inference_candidates)
         then Error Error.Conflict
         else
           with_run_lifecycle t.store (fun () ->
@@ -2943,7 +3263,7 @@ module Recovery = struct
 
   let abort_clean t =
     with_operation t (fun () ->
-      if t.ever_prepared || Option.is_some t.pending
+      if t.ever_prepared || Option.is_some t.pending || Option.is_some t.inference_pending
       then Error Error.Conflict
       else
         with_run_lifecycle t.store (fun () ->
@@ -2953,6 +3273,812 @@ module Recovery = struct
             Ok ()
           | Recovery_unopened | Recovery_open _ | Recovery_finished | Recovery_aborted ->
             Error Error.Foreign_or_stale))
+  ;;
+end
+
+module Tracking = struct
+  module Registration = struct
+    type t =
+      { manager_token : unit ref
+      ; claim : Claim.t
+      ; row : Inference_row.t
+      }
+
+    let row t = t.row
+    let scope t = O.Attempt_record.scope (Inference_row.record t.row)
+    let accounting_id t = O.Attempt_record.accounting_id (Inference_row.record t.row)
+    let context_id t = Inference_row.context_id t.row
+  end
+
+  module View = struct
+    type t =
+      { manager_token : unit ref
+      ; registration : Registration.t
+      ; observation : Observation.t
+      ; row : Inference_row.t
+      }
+
+    let observation t = t.observation
+    let row t = t.row
+  end
+
+  type change =
+    | Started
+    | Observed of O.t
+    | Finished of Inference.Event.Terminal.t
+    | Interrupted of
+        { reason : O.Attempt_record.interruption
+        ; delivery : Inference.Event.Terminal.delivery
+        }
+
+  type relation =
+    | Root
+    | Nested of
+        { parent : Registration.t
+        ; call_entry_id : History_entry.Id.t option
+        ; call_alias : string option
+        }
+
+  type receipt =
+    | Admitted of Registration.t
+    | Updated of View.t
+
+  type reconciliation =
+    | Tracking_installed of receipt
+    | Tracking_absent
+    | Tracking_diverged
+
+  module Pending = struct
+    type t =
+      { manager_token : unit ref
+      ; claim : Claim.t
+      ; original : Registration.t option
+      ; prior : Inference_row.t option
+      ; after : Inference_row.t
+      ; requires_live : bool
+      ; prepared : Prepared.t
+      ; mutable can_reprepare : bool
+      ; mutable receipt : receipt option
+      }
+  end
+
+  type preparation =
+    | Unchanged of View.t
+    | Prepared of Pending.t
+
+  type t =
+    { store : store
+    ; handle : handle
+    ; run_claim : Run_claim.t
+    ; token : unit ref
+    ; registrations : (int64, Registration.t) Hashtbl.t
+    ; mutable pending : Pending.t option
+    ; mutable busy : bool
+    }
+
+  let current_domain t =
+    Int.equal t.run_claim.record.domain (Stdlib.Domain.self () :> int)
+  ;;
+
+  let valid t =
+    with_run_lifecycle t.store (fun () ->
+      if Atomic.get t.store.closed || Atomic.get t.store.closing
+      then Error Error.Closed
+      else if not (current_domain t)
+      then Error Error.Foreign_or_stale
+      else (
+        match Hashtbl.find t.store.run_claims t.run_claim.run_id with
+        | Some record when phys_equal record.token t.run_claim.record.token ->
+          (match record.tracking with
+           | Tracking_open token when phys_equal token t.token -> Ok ()
+           | Tracking_unopened | Tracking_open _ | Tracking_finished ->
+             Error Error.Foreign_or_stale)
+        | Some _ | None -> Error Error.Foreign_or_stale))
+  ;;
+
+  let with_operation t f =
+    try
+      let* () = valid t in
+      if t.busy
+      then Error Error.Conflict
+      else (
+        t.busy <- true;
+        Exn.protect
+          ~f:(fun () ->
+            let* () = valid t in
+            f ())
+          ~finally:(fun () -> t.busy <- false))
+    with
+    | Work_limit -> Error Error.Limit_exceeded
+  ;;
+
+  let open_ ~claim ~(handle : handle) =
+    let store = claim.Run_claim.store in
+    with_run_lifecycle store (fun () ->
+      if Atomic.get store.closed || Atomic.get store.closing
+      then Error Error.Closed
+      else if
+        (not (phys_equal handle.store store))
+        || (not (phys_equal handle.token claim.record.handle_token))
+        || claim.record.released
+        || not (Int.equal claim.record.domain (Stdlib.Domain.self () :> int))
+      then Error Error.Foreign_or_stale
+      else (
+        match Hashtbl.find store.run_claims claim.run_id with
+        | Some
+            ({ recovery = Recovery_finished; tracking = Tracking_unopened; _ } as record)
+          when phys_equal record.token claim.record.token
+               && not (Hashtbl.mem store.pending claim.run_id) ->
+          let token = ref () in
+          record.tracking <- Tracking_open token;
+          Ok
+            { store
+            ; handle
+            ; run_claim = claim
+            ; token
+            ; registrations = Hashtbl.create (module Int64)
+            ; pending = None
+            ; busy = false
+            }
+        | Some _ | None -> Error Error.Conflict))
+  ;;
+
+  let valid_claim t claim =
+    if
+      (not (Claim.issued_by claim t.store))
+      || (not (phys_equal claim.handle_token t.handle.token))
+      || (not (P.Execution_owner.equal_developer claim.owner t.handle.owner))
+      || (not (equal_entry_state (Atomic.get claim.entry_state) Entered))
+      || (match claim.issuing_domain with
+          | Some domain -> not (Int.equal domain (Stdlib.Domain.self () :> int))
+          | None -> true)
+      || not (P.Job.equal_kind (P.Developer_job.kind claim.job) P.Job.Model_call)
+    then Error Error.Foreign_or_stale
+    else Ok ()
+  ;;
+
+  let issued_claim t claim =
+    with_run_lifecycle t.store (fun () ->
+      Option.value_map
+        (Hashtbl.find t.store.issued_claims t.run_claim.run_id)
+        ~default:false
+        ~f:(fun claims ->
+          List.exists claims ~f:(fun issued ->
+            phys_equal issued.entry_state claim.entry_state)))
+  ;;
+
+  let valid_live_claim t claim =
+    let* () = valid_claim t claim in
+    if issued_claim t claim then Ok () else Error Error.Foreign_or_stale
+  ;;
+
+  let valid_registration t claim registration =
+    let* () = valid_claim t claim in
+    if
+      (not (phys_equal registration.Registration.manager_token t.token))
+      || not (phys_equal registration.claim claim)
+    then Error Error.Foreign_or_stale
+    else (
+      match Hashtbl.find t.registrations (Inference_row.ordinal registration.row) with
+      | Some issued when phys_equal issued registration -> Ok ()
+      | Some _ | None -> Error Error.Foreign_or_stale)
+  ;;
+
+  let matching_job claim document =
+    match Doc.find_job document (P.Developer_job.id claim.job) with
+    | Some job
+      when P.Developer_job.same_immutable job claim.job
+           && Int.equal
+                (P.Developer_job.state job).attempt
+                (P.Developer_job.state claim.job).attempt -> Ok job
+    | Some _ | None -> Error Error.Foreign_or_stale
+  ;;
+
+  let running_job claim document =
+    let* job = matching_job claim document in
+    match (P.Developer_job.state job).status with
+    | Running -> Ok job
+    | Queued
+    | Waiting_permission _
+    | Waiting_completion _
+    | Succeeded
+    | Failed _
+    | Cancelled
+    | Interrupted _ -> Error Error.Foreign_or_stale
+  ;;
+
+  let latest_active document owner =
+    match List.last (Doc.epochs document) with
+    | Some epoch ->
+      Int.equal (Doc.epoch_number epoch) owner.P.Execution_owner.epoch
+      &&
+        (match Doc.epoch_phase epoch with
+        | `Active -> true
+        | `Interrupted | `Closed -> false)
+    | None -> false
+  ;;
+
+  let prepared t ~before_bytes ~after_document ~after_bytes =
+    Prepared.
+      { store_token = t.store.token
+      ; handle_token = t.handle.token
+      ; owner = t.handle.owner
+      ; before_bytes
+      ; after_bytes
+      ; after_document
+      ; token = ref ()
+      ; kind = Inference_tracking
+      ; claim_data = None
+      ; claim_status = Unsettled
+      ; write_attempted = false
+      ; claimed_selection = None
+      }
+  ;;
+
+  let encode t document ~poll =
+    Cpu.encode
+      t.store.cpu
+      document
+      ~poll
+      ~limits:t.store.limits.document
+      ~max_epochs:t.store.limits.max_epochs_per_run
+      ~max_jobs:t.store.limits.max_jobs_per_run
+      ~max_invocations:t.store.limits.max_invocations_per_run
+      ~max_job_payload_bytes:t.store.limits.max_job_payload_bytes
+      ~max_inference_attempts:t.store.limits.max_inference_attempts_per_run
+      ~max_inference_bytes:t.store.limits.max_inference_bytes_per_run
+    |> Result.map_error ~f:(function
+      | Store_error.Document (Document_schema.Error.Limit_exceeded _) ->
+        Error.Limit_exceeded
+      | error -> Error.Store error)
+  ;;
+
+  let admission_store result =
+    Result.map_error result ~f:(function
+      | Store_error.Document (Document_schema.Error.Limit_exceeded _) ->
+        Error.Limit_exceeded
+      | error -> Error.Store error)
+  ;;
+
+  let read_current t ~poll =
+    let* found = read t.store ~poll t.run_claim.run_id in
+    match found with
+    | Some current -> Ok current
+    | None -> Error Error.Foreign_or_stale
+  ;;
+
+  let pending t = t.pending
+
+  let same_pending t pending =
+    Option.value_map t.pending ~default:false ~f:(fun current ->
+      phys_equal current pending)
+  ;;
+
+  let registration_view t registration observation row : View.t =
+    { manager_token = t.token; registration; observation; row }
+  ;;
+
+  let receipt t (pending : Pending.t) installed =
+    match pending.receipt with
+    | Some receipt -> Ok receipt
+    | None ->
+      let observed = Installed.observation installed in
+      let value =
+        match pending.original with
+        | None ->
+          let registration : Registration.t =
+            { manager_token = t.token; claim = pending.claim; row = pending.after }
+          in
+          Hashtbl.set
+            t.registrations
+            ~key:(Inference_row.ordinal pending.after)
+            ~data:registration;
+          Admitted registration
+        | Some registration ->
+          Updated (registration_view t registration observed pending.after)
+      in
+      pending.receipt <- Some value;
+      t.pending <- None;
+      Ok value
+  ;;
+
+  let prepare_admit t ~claim ~relation ~configuration =
+    with_operation t (fun () ->
+      let* () = valid_live_claim t claim in
+      if Option.is_some t.pending
+      then Error Error.Conflict
+      else
+        with_lease t.store (fun ~env:_ ~root:_ ->
+          let poll = work t.store t.store.checkpoint in
+          let* before_bytes, document = read_current t ~poll in
+          let* _ = running_job claim document in
+          let* () =
+            if latest_active document claim.owner
+            then Ok ()
+            else Error Error.Foreign_or_stale
+          in
+          let* epoch = find_epoch document ~owner:claim.owner in
+          let* () =
+            if
+              Chatml_source.Digest.equal
+                (Doc.epoch_capture epoch)
+                (P.Developer_job.capture_fingerprint claim.job)
+            then Ok ()
+            else Error Error.Foreign_or_stale
+          in
+          let* ordinal =
+            match Doc.next_inference_ordinal document with
+            | Some ordinal -> Ok ordinal
+            | None -> Error Error.Limit_exceeded
+          in
+          let* () =
+            if
+              Doc.inference_count document
+              >= t.store.limits.max_inference_attempts_per_run
+            then Error Error.Limit_exceeded
+            else Ok ()
+          in
+          let* scope_relation =
+            match relation with
+            | Root -> Ok Transcript.Scope.Root
+            | Nested { parent; call_entry_id; call_alias } ->
+              let* () = valid_registration t claim parent in
+              let* () =
+                if
+                  List.exists (Doc.inference_entries document) ~f:(fun row ->
+                    poll ();
+                    Inference_row.same_identity row parent.row)
+                then Ok ()
+                else Error Error.Foreign_or_stale
+              in
+              Ok
+                (Transcript.Scope.Nested
+                   { scope = Transcript.Scope.key (Registration.scope parent)
+                   ; call_entry_id
+                   ; call_alias
+                   })
+          in
+          let* scope =
+            Doc.inference_scope
+              document
+              ~owner:claim.owner
+              ~job_id:(P.Developer_job.id claim.job)
+              ~ordinal
+              ~relation:scope_relation
+            |> admission_store
+          in
+          let* accounting_id =
+            O.Observation_id.of_string "usage"
+            |> Result.map_error ~f:(fun _ -> Error.Conflict)
+          in
+          let* context_id =
+            O.Observation_id.of_string "context"
+            |> Result.map_error ~f:(fun _ -> Error.Conflict)
+          in
+          let* record =
+            O.Attempt_record.create
+              ~scope
+              ~accounting_id
+              ~configuration
+              ~state:Prepared
+              ~observations:[]
+              ~omitted_diagnostics:0L
+              ~limits:O.Admission.attempt
+            |> Result.map_error ~f:(fun _ -> Error.Conflict)
+          in
+          let* new_row =
+            Inference_row.create
+              ~ordinal
+              ~owner:claim.owner
+              ~capture_fingerprint:(P.Developer_job.capture_fingerprint claim.job)
+              ~job_id:(P.Developer_job.id claim.job)
+              ~job_attempt:(Claim.attempt claim)
+              ~context_id
+              ~record
+              ~limits:t.store.limits.document
+            |> admission_store
+          in
+          let* () =
+            if
+              Inference_row.encoded_bytes new_row
+              > t.store.limits.max_inference_bytes_per_run - Doc.inference_bytes document
+            then Error Error.Limit_exceeded
+            else Ok ()
+          in
+          let* next =
+            Doc.append_inference
+              document
+              ~poll
+              ~limits:t.store.limits.document
+              ~ordinal
+              ~owner:claim.owner
+              ~capture_fingerprint:(P.Developer_job.capture_fingerprint claim.job)
+              ~job_id:(P.Developer_job.id claim.job)
+              ~job_attempt:(Claim.attempt claim)
+              ~context_id
+              ~record
+              ~max_inference_attempts:t.store.limits.max_inference_attempts_per_run
+              ~max_inference_bytes:t.store.limits.max_inference_bytes_per_run
+            |> admission_store
+          in
+          let* after_bytes = encode t next ~poll in
+          let* () = valid t in
+          let after = List.last_exn (Doc.inference_entries next) in
+          let pending : Pending.t =
+            { manager_token = t.token
+            ; claim
+            ; original = None
+            ; prior = None
+            ; after
+            ; requires_live = true
+            ; prepared = prepared t ~before_bytes ~after_document:next ~after_bytes
+            ; can_reprepare = false
+            ; receipt = None
+            }
+          in
+          t.pending <- Some pending;
+          Ok pending))
+  ;;
+
+  let observe t (registration : Registration.t) =
+    with_operation t (fun () ->
+      let* () = valid_registration t registration.claim registration in
+      with_lease t.store (fun ~env:_ ~root:_ ->
+        let poll = work t.store t.store.checkpoint in
+        let* before_bytes, document = read_current t ~poll in
+        let* observation =
+          observation t.store ~owner:t.handle.owner ~bytes:before_bytes document
+        in
+        let* row =
+          match
+            List.find (Doc.inference_entries document) ~f:(fun row ->
+              poll ();
+              Int64.equal
+                (Inference_row.ordinal row)
+                (Inference_row.ordinal registration.row))
+          with
+          | Some row when Inference_row.same_identity row registration.row -> Ok row
+          | Some _ | None -> Error Error.Foreign_or_stale
+        in
+        Ok (registration_view t registration observation row)))
+  ;;
+
+  let transition prior = function
+    | Started -> Developer_inference_transition.started prior
+    | Observed observation -> Developer_inference_transition.observed prior observation
+    | Finished terminal -> Developer_inference_transition.finished prior terminal
+    | Interrupted { reason; delivery } ->
+      Developer_inference_transition.interrupted prior ~reason ~delivery
+  ;;
+
+  let prepare_change t ~claim ~registration ~previous ~change =
+    with_operation t (fun () ->
+      let* () = valid_registration t claim registration in
+      let* () =
+        match change with
+        | Started -> valid_live_claim t claim
+        | Observed _ | Finished _ | Interrupted _ -> Ok ()
+      in
+      if Option.is_some t.pending
+      then Error Error.Conflict
+      else if
+        (not (phys_equal previous.View.manager_token t.token))
+        || not (phys_equal previous.registration registration)
+      then Error Error.Foreign_or_stale
+      else
+        with_lease t.store (fun ~env:_ ~root:_ ->
+          let poll = work t.store t.store.checkpoint in
+          let* before_bytes, document = read_current t ~poll in
+          let* () =
+            if
+              same_observation t.store t.handle previous.observation before_bytes document
+            then Ok ()
+            else Error Error.Conflict
+          in
+          let* _ =
+            match change with
+            | Started -> running_job claim document
+            | Observed _ | Finished _ | Interrupted _ -> matching_job claim document
+          in
+          let* current =
+            match
+              List.find (Doc.inference_entries document) ~f:(fun row ->
+                poll ();
+                Int64.equal
+                  (Inference_row.ordinal row)
+                  (Inference_row.ordinal previous.row))
+            with
+            | Some row
+              when Inference_row.same_identity row previous.row
+                   && Jsonaf.exactly_equal
+                        (Inference_row.to_json row)
+                        (Inference_row.to_json previous.row) -> Ok row
+            | Some _ | None -> Error Error.Conflict
+          in
+          let* () =
+            match change with
+            | Started when not (latest_active document claim.owner) ->
+              Error Error.Foreign_or_stale
+            | Started | Observed _ | Finished _ | Interrupted _ -> Ok ()
+          in
+          let* disposition =
+            transition (Inference_row.record current) change
+            |> Result.map_error ~f:(function
+              | Developer_inference_transition.Conflict -> Error.Conflict
+              | Limit_exceeded -> Error.Limit_exceeded)
+          in
+          match disposition with
+          | Developer_inference_transition.Unchanged -> Ok (Unchanged previous)
+          | Changed after_record ->
+            let* updated =
+              Inference_row.with_record
+                current
+                after_record
+                ~limits:t.store.limits.document
+              |> admission_store
+            in
+            let* () =
+              if
+                Inference_row.encoded_bytes updated
+                > t.store.limits.max_inference_bytes_per_run
+                  - (Doc.inference_bytes document - Inference_row.encoded_bytes current)
+              then Error Error.Limit_exceeded
+              else Ok ()
+            in
+            let* next =
+              Doc.set_inference_record
+                document
+                ~poll
+                ~limits:t.store.limits.document
+                ~ordinal:(Inference_row.ordinal current)
+                ~expected:current
+                ~after:after_record
+                ~max_inference_bytes:t.store.limits.max_inference_bytes_per_run
+              |> admission_store
+            in
+            let* after_bytes = encode t next ~poll in
+            let* () = valid t in
+            let after =
+              List.find_exn (Doc.inference_entries next) ~f:(fun row ->
+                Int64.equal (Inference_row.ordinal row) (Inference_row.ordinal current))
+            in
+            let pending : Pending.t =
+              { manager_token = t.token
+              ; claim
+              ; original = Some registration
+              ; prior = Some current
+              ; after
+              ; requires_live =
+                  (match change with
+                   | Started -> true
+                   | Observed _ | Finished _ | Interrupted _ -> false)
+              ; prepared = prepared t ~before_bytes ~after_document:next ~after_bytes
+              ; can_reprepare = false
+              ; receipt = None
+              }
+            in
+            t.pending <- Some pending;
+            Ok (Prepared pending)))
+  ;;
+
+  let valid_pending t pending =
+    let* () = valid_claim t pending.Pending.claim in
+    if
+      (not (phys_equal pending.manager_token t.token))
+      || ((not (same_pending t pending)) && Option.is_none pending.receipt)
+    then Error Error.Foreign_or_stale
+    else Ok ()
+  ;;
+
+  let commit t pending ~admit =
+    with_operation t (fun () ->
+      let* () = valid_pending t pending in
+      match pending.receipt with
+      | Some receipt -> Ok receipt
+      | None ->
+        let* installed =
+          commit_transition_using
+            (fun store _handle f -> with_lease store f)
+            ~path:Tracking_path
+            ~admit:(fun () ->
+              Result.is_ok (valid t)
+              && Result.is_ok
+                   (if pending.requires_live
+                    then valid_live_claim t pending.claim
+                    else valid_claim t pending.claim)
+              && same_pending t pending
+              && admit ())
+            t.handle
+            pending.prepared
+        in
+        receipt t pending installed)
+  ;;
+
+  let reconcile t pending =
+    with_operation t (fun () ->
+      let* () = valid_pending t pending in
+      match pending.receipt with
+      | Some receipt -> Ok (Tracking_installed receipt)
+      | None ->
+        (match
+           reconcile_transition_using
+             (fun store _handle f -> with_lease store f)
+             ~path:Tracking_path
+             t.handle
+             pending.prepared
+         with
+         | Ok (Installed installed) ->
+           Result.map (receipt t pending installed) ~f:(fun receipt ->
+             Tracking_installed receipt)
+         | Ok Absent ->
+           pending.can_reprepare <- true;
+           Ok Tracking_absent
+         | Ok Diverged -> Ok Tracking_diverged
+         | Error Error.Prewrite_conflict when not pending.prepared.write_attempted ->
+           pending.can_reprepare <- true;
+           Error Error.Prewrite_conflict
+         | Error error -> Error error))
+  ;;
+
+  let reprepare_same t pending =
+    with_operation t (fun () ->
+      let* () = valid_pending t pending in
+      let* () =
+        if pending.requires_live then valid_live_claim t pending.claim else Ok ()
+      in
+      if not pending.can_reprepare
+      then Error Error.Conflict
+      else
+        with_lease t.store (fun ~env:_ ~root:_ ->
+          let poll = work t.store t.store.checkpoint in
+          let* before_bytes, document = read_current t ~poll in
+          let* () =
+            if pending.requires_live
+            then
+              let* _ = running_job pending.claim document in
+              if latest_active document pending.claim.owner
+              then Ok ()
+              else Error Error.Foreign_or_stale
+            else Ok ()
+          in
+          let* () =
+            match pending.prior with
+            | None ->
+              if
+                Option.value_map
+                  (Doc.next_inference_ordinal document)
+                  ~default:false
+                  ~f:(fun ordinal ->
+                    Int64.equal ordinal (Inference_row.ordinal pending.after))
+              then Ok ()
+              else Error Error.Conflict
+            | Some prior ->
+              if
+                List.exists (Doc.inference_entries document) ~f:(fun row ->
+                  Inference_row.same_identity row prior
+                  && Jsonaf.exactly_equal
+                       (Inference_row.to_json row)
+                       (Inference_row.to_json prior))
+              then Ok ()
+              else Error Error.Conflict
+          in
+          let* () =
+            match pending.prior with
+            | None ->
+              if
+                Doc.inference_count document
+                >= t.store.limits.max_inference_attempts_per_run
+                || Inference_row.encoded_bytes pending.after
+                   > t.store.limits.max_inference_bytes_per_run
+                     - Doc.inference_bytes document
+              then Error Error.Limit_exceeded
+              else Ok ()
+            | Some prior ->
+              if
+                Inference_row.encoded_bytes pending.after
+                > t.store.limits.max_inference_bytes_per_run
+                  - (Doc.inference_bytes document - Inference_row.encoded_bytes prior)
+              then Error Error.Limit_exceeded
+              else Ok ()
+          in
+          let* next =
+            match pending.prior with
+            | None ->
+              Doc.append_inference
+                document
+                ~poll
+                ~limits:t.store.limits.document
+                ~ordinal:(Inference_row.ordinal pending.after)
+                ~owner:(Inference_row.owner pending.after)
+                ~capture_fingerprint:(Inference_row.capture_fingerprint pending.after)
+                ~job_id:(Inference_row.job_id pending.after)
+                ~job_attempt:(Inference_row.job_attempt pending.after)
+                ~context_id:(Inference_row.context_id pending.after)
+                ~record:(Inference_row.record pending.after)
+                ~max_inference_attempts:t.store.limits.max_inference_attempts_per_run
+                ~max_inference_bytes:t.store.limits.max_inference_bytes_per_run
+              |> admission_store
+            | Some prior ->
+              Doc.set_inference_record
+                document
+                ~poll
+                ~limits:t.store.limits.document
+                ~ordinal:(Inference_row.ordinal prior)
+                ~expected:prior
+                ~after:(Inference_row.record pending.after)
+                ~max_inference_bytes:t.store.limits.max_inference_bytes_per_run
+              |> admission_store
+          in
+          let* after_bytes = encode t next ~poll in
+          let* () =
+            with_run_lifecycle t.store (fun () ->
+              match Hashtbl.find t.store.pending t.run_claim.run_id with
+              | Some (Transition old) when phys_equal old.token pending.prepared.token ->
+                Hashtbl.remove t.store.pending t.run_claim.run_id;
+                Ok ()
+              | None -> Ok ()
+              | Some (Selected _ | Claim _ | Transition _) -> Error Error.Conflict)
+          in
+          let next_pending : Pending.t =
+            { pending with
+              prepared = prepared t ~before_bytes ~after_document:next ~after_bytes
+            ; can_reprepare = false
+            ; receipt = None
+            }
+          in
+          t.pending <- Some next_pending;
+          Ok next_pending))
+  ;;
+
+  let abort_unattempted_admission t pending =
+    with_operation t (fun () ->
+      let* () = valid_pending t pending in
+      if Option.is_some pending.original || pending.prepared.write_attempted
+      then Error Error.Conflict
+      else
+        let* () =
+          with_run_lifecycle t.store (fun () ->
+            match Hashtbl.find t.store.pending t.run_claim.run_id with
+            | None -> Ok ()
+            | Some (Transition current)
+              when phys_equal current.token pending.prepared.token ->
+              Hashtbl.remove t.store.pending t.run_claim.run_id;
+              Ok ()
+            | Some (Selected _ | Claim _ | Transition _) -> Error Error.Conflict)
+        in
+        t.pending <- None;
+        Ok ())
+  ;;
+
+  let finish t =
+    with_operation t (fun () ->
+      if Option.is_some t.pending
+      then Error Error.Conflict
+      else
+        with_lease t.store (fun ~env:_ ~root:_ ->
+          let poll = work t.store t.store.checkpoint in
+          let* _, document = read_current t ~poll in
+          let by_ordinal = Hashtbl.create (module Int64) in
+          List.iter (Doc.inference_entries document) ~f:(fun row ->
+            poll ();
+            Hashtbl.set by_ordinal ~key:(Inference_row.ordinal row) ~data:row);
+          let* () =
+            List.fold_result (Hashtbl.keys t.registrations) ~init:() ~f:(fun () ordinal ->
+              poll ();
+              match Hashtbl.find by_ordinal ordinal with
+              | Some row ->
+                (match O.Attempt_record.state (Inference_row.record row) with
+                 | Terminal _ | Interrupted _ -> Ok ()
+                 | Prepared | Running -> Error Error.Conflict)
+              | None -> Error Error.Foreign_or_stale)
+          in
+          with_run_lifecycle t.store (fun () ->
+            match t.run_claim.record.tracking with
+            | Tracking_open token when phys_equal token t.token ->
+              t.run_claim.record.tracking <- Tracking_finished;
+              Ok ()
+            | Tracking_unopened | Tracking_open _ | Tracking_finished ->
+              Error Error.Foreign_or_stale)))
   ;;
 end
 

@@ -1,7 +1,7 @@
 (** The single versioned developer-run authority document. Version one stores
-    bounded typed invocation and job arrays, including exact owner/epoch/capture
-    membership and structural parent relationships. Its records alone grant no
-    live execution or result-read authority. *)
+    bounded typed invocation, job and inference-attempt arrays, including exact
+    owner/epoch/capture membership and structural parent relationships. Its
+    records alone grant no live execution or result-read authority. *)
 open! Core
 
 type epoch
@@ -13,6 +13,11 @@ module Invocation_entry : sig
   val revision : t -> int
   val value : t -> Agent_protocol.Host_invocation.t
 end
+
+(** Ordinals are positive, allocated once per run and never recycled. These
+    coordinates are persisted comparison data; a pure document row cannot
+    admit work without the Store's entered physical Claim. *)
+module Inference_entry = Developer_inference_row
 
 val create
   :  owner:Agent_protocol.Execution_owner.developer
@@ -33,6 +38,68 @@ val invocation_count : t -> int
 val find_job : t -> Agent_protocol.Id.Job.t -> Agent_protocol.Developer_job.t option
 val jobs : t -> Agent_protocol.Developer_job.t list
 val job_count : t -> int
+val inference_entries : t -> Inference_entry.t list
+val inference_count : t -> int
+
+(** Sum of complete canonical inference-entry JSON bytes, including ordinal,
+    owner/job/context wrappers; not only Attempt_record payload bytes. *)
+val inference_bytes : t -> int
+
+val last_inference_ordinal : t -> int64
+
+(** The next positive ordinal, or None on ordinary capacity exhaustion; the
+    Store maps that case to Limit_exceeded. A row may be retained after terminal
+    and ordinals are never recycled. *)
+val next_inference_ordinal : t -> int64 option
+
+(** One canonical source qualification, independent of any Session ID. The
+    validated host/run/epoch/job coordinates plus ordinal determine the exact
+    transcript scope; the resulting IDs grant no Claim or dispatch authority. *)
+val inference_scope
+  :  t
+  -> owner:Agent_protocol.Execution_owner.developer
+  -> job_id:Agent_protocol.Id.Job.t
+  -> ordinal:int64
+  -> relation:Transcript.Scope.relation
+  -> (Transcript.Scope.t, Store_error.t) result
+
+(** These pure mutations validate complete Attempt_record admission and exact
+    structural ancestry under the same bounded traversal as [to_bytes]. Every
+    row references a positive historical attempt no greater than that
+    job's latest recorded attempt; a later retry never invalidates prior
+    inference evidence. A nested row references a preceding retained ordinal
+    for the same immutable Model_call job and exact historical attempt. Parent
+    inference may already be Terminal when a
+    delayed admitted tool call starts a nested inference; the physical Store
+    manager requires a genuinely issued retained parent registration and the
+    current entered worker Claim for NEW effect admission, independently of
+    the parent's provider-attempt state. Only the record changes on
+    replacement: ordinal, owner, capture, job, attempt and context ID remain
+    immutable. Every change advances the document revision. *)
+val append_inference
+  :  t
+  -> poll:(unit -> unit)
+  -> limits:Document_schema.Limits.t
+  -> ordinal:int64
+  -> owner:Agent_protocol.Execution_owner.developer
+  -> capture_fingerprint:Chatml_source.Digest.t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> job_attempt:int
+  -> context_id:Inference.Observation.Observation_id.t
+  -> record:Inference.Observation.Attempt_record.t
+  -> max_inference_attempts:int
+  -> max_inference_bytes:int
+  -> (t, Store_error.t) result
+
+val set_inference_record
+  :  t
+  -> poll:(unit -> unit)
+  -> limits:Document_schema.Limits.t
+  -> ordinal:int64
+  -> expected:Inference_entry.t
+  -> after:Inference.Observation.Attempt_record.t
+  -> max_inference_bytes:int
+  -> (t, Store_error.t) result
 
 (** A Model_call from the physical run root has no job ancestor and depth zero.
     Invocation descendants carry comparison coordinates; their actual claimed
@@ -92,7 +159,13 @@ module Encode_input : sig
 end
 
 (** Validate the typed document and build its complete JSON payload under the
-    existing work and document limits. [poll] is called during traversal by
+    existing work and document limits. Every encoded document also reserves
+    exact aggregate and whole-envelope capacity for ALL still Prepared/Running
+    inference rows to become Host_interrupted together, including their
+    document revision increments. This bounds every intermediate subset:
+    each such interruption expands the fixed state object, never shrinks it.
+    The reserve concerns inference rows; a later caller-chosen job terminal
+    result has its own admission limit. [poll] is called during traversal by
     the owner of the operation. No canonical bytes are written or published. *)
 val prepare_encode
   :  t
@@ -102,6 +175,8 @@ val prepare_encode
   -> max_jobs:int
   -> max_invocations:int
   -> max_job_payload_bytes:int
+  -> max_inference_attempts:int
+  -> max_inference_bytes:int
   -> (Encode_input.t, Store_error.t) result
 
 (** The original Document_schema.Document.create and to_string on the opaque
@@ -119,6 +194,8 @@ val to_bytes
   -> max_jobs:int
   -> max_invocations:int
   -> max_job_payload_bytes:int
+  -> max_inference_attempts:int
+  -> max_inference_bytes:int
   -> (string, Store_error.t) result
 
 (** Typed/version/relationship admission of an already canonically decoded
@@ -137,6 +214,8 @@ val of_decoded_document
   -> max_jobs:int
   -> max_invocations:int
   -> max_job_payload_bytes:int
+  -> max_inference_attempts:int
+  -> max_inference_bytes:int
   -> (t, Store_error.t) result
 
 (** Direct pure wrapper over canonical Document_schema.Document.decode and
@@ -149,6 +228,8 @@ val of_bytes
   -> max_jobs:int
   -> max_invocations:int
   -> max_job_payload_bytes:int
+  -> max_inference_attempts:int
+  -> max_inference_bytes:int
   -> (t, Store_error.t) result
 
 (** The same bounded decoder also returning its original admitted document
@@ -164,4 +245,6 @@ val of_bytes_with_document
   -> max_jobs:int
   -> max_invocations:int
   -> max_job_payload_bytes:int
+  -> max_inference_attempts:int
+  -> max_inference_bytes:int
   -> (t * Document_schema.Document.t, Store_error.t) result
