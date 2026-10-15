@@ -104,6 +104,13 @@ module Script : sig
 
   val document_stamp : t -> Document_stamp.t
 
+  (** Exact immutable parser receipt and member declaration already admitted
+      by [assess]. Comparison/projection inputs only; neither getter grants a
+      native read or a current host selection. *)
+  val parsed : t -> Prompt.Chat_markdown.Parsed.t
+
+  val declaration : t -> Prompt.Chat_markdown.Declaration.t
+
   (** Exact full compiled entry capture to which this Script's genuine
       extraction map was bound. A host must still authorize its custody. *)
   val selected_source : t -> Chatml_source.t
@@ -139,6 +146,10 @@ module Candidate : sig
 
   val stamp : t -> Document_stamp.t
   val checked : t -> Chatml_authoring_analysis.Checked.t
+
+  (** The SAME selected Script whose stamp and checked result were published.
+      Query rechecks current actor/source/selection before reading its facts. *)
+  val script : t -> Script.t
 
   (** Reuse the context-neutral joined checker on the selected captured Build.
       Bind the actual declaration's public Extraction map against its exact

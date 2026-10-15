@@ -4,6 +4,29 @@ module Service = Agent_server.Authoring_context_service
 module Assistance = Service.Assistance
 module W = P.Authoring_assistance
 
+let query_limits () =
+  Service.Semantic.Query_limits.create
+    ~max_host_work_steps:100_000
+    ~projection:
+      (Chatml_authoring_query.Limits.create
+         ~max_items:32
+         ~max_member_depth:4
+         ~max_member_edges:128
+         ~max_label_bytes:4096
+         ~max_work_steps:100_000
+         ~type_display:
+           (Chatml_type_display.Limits.create
+              ~max_nodes:512
+              ~max_edges:1024
+              ~max_depth:16
+              ~max_work_steps:100_000
+              ~max_text_bytes:1024
+              ~max_output_bytes:4096
+            |> Or_error.ok_exn)
+       |> Or_error.ok_exn)
+  |> Or_error.ok_exn
+;;
+
 let ok = function
   | Ok value -> value
   | Error _ -> failwith "unexpected assistance fixture admission failure"
@@ -514,6 +537,7 @@ let%test_unit "host Analyze retains imported references and decoded project meta
                     ~max_parser_work_steps:100_000
                     ~max_diagnostic_work_steps:100_000
                   |> Or_error.ok_exn)
+               ~query_limits:(query_limits ())
                ~prefix_limits:
                  (Service.Semantic.Prefix_limits.create
                     ~max_document_bundle_files:4
@@ -578,6 +602,7 @@ let%test_unit "host Analyze retains imported references and decoded project meta
                     ~max_parser_work_steps:100_000
                     ~max_diagnostic_work_steps:100_000
                   |> Or_error.ok_exn)
+               ~query_limits:(query_limits ())
                ~prefix_limits:
                  (Service.Semantic.Prefix_limits.create
                     ~max_document_bundle_files:4

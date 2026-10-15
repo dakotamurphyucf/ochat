@@ -420,23 +420,17 @@ let document_capture ~contexts ~expected ~source ~script ~candidate =
   else document_script_capture ~contexts ~expected ~source ~script
 ;;
 
-let document
+let site_of_location
       ~contexts
-      ~expected
-      ~source:document_source
-      ~script
-      ~candidate
+      ~identity
+      ~native_source
+      location
+      ~authored
       ~input_sources
-      ~snapshot
-      ~policy
       ~checkpoint
   =
   let open Result.Let_syntax in
-  let identity = Document.Document_stamp.identity (Document.Candidate.stamp candidate) in
-  let checked = Document.Candidate.checked candidate in
-  let%bind capture =
-    document_capture ~contexts ~expected ~source:document_source ~script ~candidate
-  in
+  let%bind native = range ~contexts ~identity ~source:native_source location in
   let source_of_input input =
     List.find_map input_sources ~f:(fun (candidate, source) ->
       checkpoint ();
@@ -457,43 +451,65 @@ let document
         A.Byte_range.create ~source ~start_byte ~end_byte
         |> wire ~error:Error.Invalid_site)
   in
+  let%bind projection =
+    match authored with
+    | None -> Ok None
+    | Some (Prompt.Chat_markdown.Declaration.Extraction.Exact_inline span) ->
+      authored_range
+        (Prompt.Chat_markdown.Declaration.Extraction.input span)
+        ~start_byte:(Prompt.Chat_markdown.Declaration.Extraction.start_byte span)
+        ~end_byte:(Prompt.Chat_markdown.Declaration.Extraction.end_byte span)
+      |> Result.map ~f:(fun range -> Some (A.Site.Authored_exact range))
+    | Some (External_origin { member; body_digest; start_byte; end_byte }) ->
+      Ok (Some (A.Site.External_origin { member; body_digest; start_byte; end_byte }))
+    | Some (Approximate_declaration range) ->
+      let input = Input.Range.input range in
+      (match source_of_input input with
+       | Some captured
+         when String.equal
+                (Input.effective_sha256 input)
+                (Captured.Digest.to_hex (Captured.digest captured)) ->
+         (match
+            authored_range
+              input
+              ~start_byte:(Input.Range.start_byte range)
+              ~end_byte:(Input.Range.end_byte range)
+          with
+          | Ok range -> Ok (Some (A.Site.Approximate_declaration range))
+          | Error Error.Invalid_site -> Ok None
+          | Error error -> Error error)
+       | Some _ | None -> Ok None)
+  in
+  A.Site.create ~native ~projection |> wire ~error:Error.Invalid_site
+;;
+
+let document
+      ~contexts
+      ~expected
+      ~source:document_source
+      ~script
+      ~candidate
+      ~input_sources
+      ~snapshot
+      ~policy
+      ~checkpoint
+  =
+  let open Result.Let_syntax in
+  let identity = Document.Document_stamp.identity (Document.Candidate.stamp candidate) in
+  let checked = Document.Candidate.checked candidate in
+  let%bind capture =
+    document_capture ~contexts ~expected ~source:document_source ~script ~candidate
+  in
   let site_of_projection (projected : Document.Projection.site) =
-    let%bind native =
-      range
-        ~contexts
-        ~identity
-        ~source:(Diagnostic.Site.source (Project.Site_projection.native projected.native))
-        (Diagnostic.Site.location (Project.Site_projection.native projected.native))
-    in
-    let%bind projection =
-      match projected.authored with
-      | None -> Ok None
-      | Some (Prompt.Chat_markdown.Declaration.Extraction.Exact_inline span) ->
-        authored_range
-          (Prompt.Chat_markdown.Declaration.Extraction.input span)
-          ~start_byte:(Prompt.Chat_markdown.Declaration.Extraction.start_byte span)
-          ~end_byte:(Prompt.Chat_markdown.Declaration.Extraction.end_byte span)
-        |> Result.map ~f:(fun range -> Some (A.Site.Authored_exact range))
-      | Some (External_origin { member; body_digest; start_byte; end_byte }) ->
-        Ok (Some (A.Site.External_origin { member; body_digest; start_byte; end_byte }))
-      | Some (Approximate_declaration range) ->
-        let input = Input.Range.input range in
-        (match source_of_input input with
-         | Some captured
-           when String.equal
-                  (Input.effective_sha256 input)
-                  (Captured.Digest.to_hex (Captured.digest captured)) ->
-           (match
-              authored_range
-                input
-                ~start_byte:(Input.Range.start_byte range)
-                ~end_byte:(Input.Range.end_byte range)
-            with
-            | Ok range -> Ok (Some (A.Site.Approximate_declaration range))
-            | Error _ -> Ok None)
-         | Some _ | None -> Ok None)
-    in
-    A.Site.create ~native ~projection |> wire ~error:Error.Invalid_site
+    let native = Project.Site_projection.native projected.native in
+    site_of_location
+      ~contexts
+      ~identity
+      ~native_source:(Diagnostic.Site.source native)
+      (Diagnostic.Site.location native)
+      ~authored:projected.authored
+      ~input_sources
+      ~checkpoint
   in
   let convert projected =
     let%bind decorated =

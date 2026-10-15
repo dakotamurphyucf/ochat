@@ -46,6 +46,23 @@ val source
   -> Chatml_source.t
   -> (P.Authoring.Source.t, Error.t) result
 
+(** One exact native compiler location, with optional genuine ChatMD authored
+    projection. Reuse the Analyze diagnostic projection rules for Query sites:
+    the native owner is always retained; an exact authored span requires the
+    physical parser input/captured-source association and authored digest.
+    Approximate/external locations remain explicitly distinct. The caller
+    supplies only a projection from the bound Script extraction map, never a
+    client path or guessed offset. Every input association visit is charged. *)
+val site_of_location
+  :  contexts:Ledger.t
+  -> identity:Ledger.Identity.t
+  -> native_source:Chatml_source.t
+  -> Chatml_source.Location.t
+  -> authored:Prompt.Chat_markdown.Declaration.Extraction.projection option
+  -> input_sources:(Chatmd_parser_input.t * Chatml_source.t) list
+  -> checkpoint:(unit -> unit)
+  -> (A.Site.t, Error.t) result
+
 val project_capture
   :  expected:P.Authoring.Context.Expected.t
   -> stamp:Project.Project_stamp.t

@@ -252,12 +252,23 @@ environment and contracts. Raw document input returns typed semantic
 `Unavailable` until a real selected script has been admitted. Complete,
 Failed and Unavailable are distinct; a query identifies one snapshot and
 current context, and a provisional prefix has its own source identity.
+The current semantic service resolves Certified evidence only from its matching
+Complete cache row and snapshot label, Syntax_only only from the same-run Failed
+partial, and Provisional only from the exact retained prefix row. It checks the
+requested source against captured revisions and reauthorizes a selected ChatMD
+script against the current document and original host selection. Queries do not
+recapture imports or publish new checker results. Native query sites retain their
+compiler source; exact or approximate authored sites come only from the parser's
+captured input associations. The host sets a finite source/selection work budget
+alongside the lower query producer's item, display and traversal limits and
+checks the finished response against the current context and response cap.
 Semantic DTOs preserve native compiler sites and optional exact or approximate
 ChatMD projections. They expose bounded type/signature display text from actual
 selected bindings and explicit empty, unavailable, ambiguous and truncated
 states, without exporting mutable inference graphs. The protocol/client layer
 defines `authoring.semantic.v1` and checks selected feature, installed method
-and response affinity; the host analysis/query handlers remain separate work.
+and response affinity; the host's Analyze/Prefix publication and read-only
+Query paths share one context owner.
 The typed methods are `authoring.analysis` (current context and project or
 selected-script selector → Complete, Failed or Unavailable),
 `authoring.prefix` (exact source/cursor → provisional prefix or typed
