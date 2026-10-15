@@ -1,0 +1,1000 @@
+open! Core
+module P = Agent_protocol
+module Store = Agent_store.Developer_run_store
+module Receipt = Store.Command.Receipt
+module Row = Store.Command.Row
+module Root = Developer_root_owner
+module Startup = Developer_command_startup
+module Custody = Developer_command_store_custody
+
+let error code message ~retryable = P.Error.create code ~message ~retryable ()
+let busy () = error P.Error.Conflict "developer command is busy" ~retryable:true
+
+let stale () =
+  error P.Error.Lease_stale "developer command owner changed" ~retryable:false
+;;
+
+let denied () =
+  error P.Error.Permission_denied "developer command denied" ~retryable:false
+;;
+
+let closed () =
+  error P.Error.Invalid_state "developer command owner is closed" ~retryable:false
+;;
+
+let limited () =
+  error P.Error.Resource_limit "developer command limit reached" ~retryable:false
+;;
+
+let unavailable () =
+  error P.Error.Persistence_error "developer command unavailable" ~retryable:true
+;;
+
+let store_error = function
+  | Store.Error.Conflict | Prewrite_conflict -> busy ()
+  | Foreign_or_stale -> stale ()
+  | Limit_exceeded -> limited ()
+  | Closed -> closed ()
+  | Store _ -> unavailable ()
+;;
+
+let store result = Result.map_error result ~f:store_error
+
+module Disclosure_policy = struct
+  type t = { authorize : Operator_authorization.t -> Row.t -> bool }
+
+  let create ~authorize = { authorize }
+end
+
+module Control_policy = struct
+  type t = { authorize : Operator_authorization.t -> Row.t -> bool }
+
+  let create ~authorize = { authorize }
+end
+
+module Recovery_adapter = struct
+  type t =
+    { recover :
+        claim:Store.Run_claim.t
+        -> handle:Store.handle
+        -> window:Store.Recovery.t
+        -> (unit, P.Error.t) result
+    }
+
+  let create ~recover = { recover }
+end
+
+type phase =
+  | Cold
+  | Recovering
+  | Ready
+  | Quarantined
+
+type t =
+  { sw : Eio.Switch.t
+  ; store : Store.t
+  ; domain : int
+  ; max_runs : int
+  ; max_active_commands : int
+  ; document_limits : Document_schema.Limits.t
+  ; disclosure : Disclosure_policy.t
+  ; control : Control_policy.t
+  ; recovery_adapter : Recovery_adapter.t
+  ; runs : (P.Id.Developer_run.t, run_entry) Hashtbl.t
+  ; mutable occupied : int
+  ; mutable closed : bool
+  }
+
+and run_entry =
+  { issuer : t
+  ; run_id : P.Id.Developer_run.t
+  ; mutation_gate : Eio.Mutex.t
+  ; mutable phase : phase
+  ; mutable slot : slot option
+  ; mutable active : active list
+  ; mutable pending : Custody.t option
+  ; mutable recovery : Startup.Acquired.t option
+  ; mutable claim_only : Store.Run_claim.t option
+  ; mutable persisted : bool
+  ; mutable retained_charge : bool
+  }
+
+and slot =
+  { issuer : t
+  ; run : run_entry
+  ; mutable live : bool
+  ; mutable transferred : bool
+  ; borrowed_charge : bool
+  }
+
+and view =
+  { issuer : t
+  ; run_id : P.Id.Developer_run.t
+  ; row : Row.t
+  ; store_view : Store.Command.View.t option
+  }
+
+and active =
+  { issuer : t
+  ; run : run_entry
+  ; handle : Store.handle
+  ; mutable view : view
+  ; generation : unit ref
+  ; finished : unit Eio.Promise.t
+  ; finish : unit Eio.Promise.u
+  ; mutable cancel : Eio.Cancel.t option
+  ; mutable cancel_requested : bool
+  ; mutable live : bool
+  ; mutable retired : bool
+  ; mutable selected : Receipt.t option
+  ; mutable terminal : (view, P.Error.t) result option
+  ; mutable private_failure : (exn * Stdlib.Printexc.raw_backtrace) option
+  ; mutable started : bool
+  }
+
+and started =
+  { active : active
+  ; root : Root.run
+  ; generation : unit ref
+  ; mutable consumed : bool
+  }
+
+let active_key : active Eio.Fiber.key = Eio.Fiber.create_key ()
+
+module Slot = struct
+  type nonrec t = slot
+end
+
+module View = struct
+  type nonrec t = view
+
+  let row t = t.row
+
+  let receipt t =
+    match Row.phase t.row with
+    | Row.Phase.Terminal { receipt; _ } -> Some receipt
+    | Reserved | Waiting_permission | Execution_started -> None
+  ;;
+end
+
+let on_domain t = Int.equal t.domain (Stdlib.Domain.self () :> int)
+let current_actor actor = Operator_authorization.is_current actor
+
+let same_principal actor row =
+  P.Id.Principal.equal
+    (Operator_authorization.principal actor).id
+    (Row.owner row).principal_id
+;;
+
+let same_run_view t run_id (view : view) =
+  phys_equal view.issuer t && P.Id.Developer_run.equal view.run_id run_id
+;;
+
+let same_row a b = Document_schema.Json.equal (Row.to_json a) (Row.to_json b)
+
+let view_of_store t run_id (value : Store.Command.View.t) =
+  { issuer = t; run_id; row = Store.Command.View.row value; store_view = Some value }
+;;
+
+let safe_view t run_id row = { issuer = t; run_id; row; store_view = None }
+
+let create ~sw ~store:run_store ~max_active_commands ~disclosure ~control ~recovery =
+  let open Result.Let_syntax in
+  let%bind limits = store (Store.limits run_store) in
+  let max_runs = Store.Limits.max_runs limits in
+  let max_per_run =
+    Agent_store.Developer_command_limits.max_commands (Store.Limits.commands limits)
+  in
+  if
+    max_active_commands <= 0
+    || max_runs <= 0
+    || max_per_run <= 0
+    || max_active_commands / max_runs > max_per_run
+    || (max_active_commands / max_runs = max_per_run && max_active_commands % max_runs > 0)
+    || Option.is_some (Eio.Switch.get_error sw)
+  then Error (limited ())
+  else
+    Ok
+      { sw
+      ; store = run_store
+      ; domain = (Stdlib.Domain.self () :> int)
+      ; max_runs
+      ; max_active_commands
+      ; document_limits = Store.Limits.document limits
+      ; disclosure
+      ; control
+      ; recovery_adapter = recovery
+      ; runs = Hashtbl.create (module P.Id.Developer_run)
+      ; occupied = 0
+      ; closed = false
+      }
+;;
+
+let entry t run_id =
+  match Hashtbl.find t.runs run_id with
+  | Some entry -> Ok entry
+  | None ->
+    if Hashtbl.length t.runs >= t.max_runs
+    then Error (limited ())
+    else (
+      let entry =
+        { issuer = t
+        ; run_id
+        ; mutation_gate = Eio.Mutex.create ()
+        ; phase = Cold
+        ; slot = None
+        ; active = []
+        ; pending = None
+        ; recovery = None
+        ; claim_only = None
+        ; persisted = false
+        ; retained_charge = false
+        }
+      in
+      Hashtbl.set t.runs ~key:run_id ~data:entry;
+      Ok entry)
+;;
+
+let slot_current t (slot : slot) =
+  on_domain t
+  && (not t.closed)
+  && phys_equal slot.issuer t
+  && slot.live
+  && (not slot.transferred)
+  && Option.value_map slot.run.slot ~default:false ~f:(phys_equal slot)
+;;
+
+let with_mutation run f =
+  Eio.Mutex.lock run.mutation_gate;
+  Exn.protect ~f ~finally:(fun () ->
+    Eio.Cancel.protect (fun () -> Eio.Mutex.unlock run.mutation_gate))
+;;
+
+let with_slot t ~run_id ~f =
+  if not (on_domain t)
+  then Error (stale ())
+  else if t.closed
+  then Error (closed ())
+  else
+    let open Result.Let_syntax in
+    let%bind run = entry t run_id in
+    match run.slot with
+    | Some _ -> Error (busy ())
+    | None ->
+      let borrowed_charge = run.retained_charge in
+      if (not borrowed_charge) && t.occupied >= t.max_active_commands
+      then Error (busy ())
+      else (
+        let slot =
+          { issuer = t; run; live = true; transferred = false; borrowed_charge }
+        in
+        run.slot <- Some slot;
+        if not borrowed_charge then t.occupied <- t.occupied + 1;
+        Exn.protect
+          ~finally:(fun () ->
+            Eio.Cancel.protect (fun () ->
+              slot.live <- false;
+              (match run.slot with
+               | Some current when phys_equal current slot -> run.slot <- None
+               | None | Some _ -> ());
+              if not slot.transferred
+              then
+                if
+                  Option.is_some run.pending
+                  || Option.is_some run.recovery
+                  || Option.is_some run.claim_only
+                then (
+                  if List.is_empty run.active then run.retained_charge <- true;
+                  if (not (List.is_empty run.active)) && not borrowed_charge
+                  then t.occupied <- t.occupied - 1)
+                else (
+                  run.retained_charge <- false;
+                  t.occupied <- t.occupied - 1);
+              if
+                (not run.persisted)
+                && List.is_empty run.active
+                && Option.is_none run.pending
+                && Option.is_none run.recovery
+                && Option.is_none run.claim_only
+                && Option.is_none run.slot
+              then Hashtbl.remove t.runs run_id))
+          ~f:(fun () -> f slot))
+;;
+
+let update_active_view run (value : Store.Command.View.t) =
+  let row = Store.Command.View.row value in
+  List.iter run.active ~f:(fun active ->
+    if P.Idempotency_key.equal (Row.key active.view.row) (Row.key row)
+    then active.view <- view_of_store run.issuer run.run_id value)
+;;
+
+let reconcile_retained_unlocked run =
+  match run.pending with
+  | None -> Ok ()
+  | Some pending ->
+    let open Result.Let_syntax in
+    let result = store (Custody.reconcile pending) in
+    if Result.is_error result then run.phase <- Quarantined;
+    let%bind resolution = result in
+    (match resolution with
+     | Custody.Installed view ->
+       run.pending <- None;
+       update_active_view run view;
+       if Option.is_none run.recovery then run.phase <- Ready;
+       Ok ()
+     | Retired_absent ->
+       run.pending <- None;
+       if Option.is_none run.recovery then run.phase <- Ready;
+       Ok ())
+;;
+
+let reconcile_retained run =
+  let result = with_mutation run (fun () -> reconcile_retained_unlocked run) in
+  if
+    Result.is_ok result
+    && run.retained_charge
+    && Option.is_none run.slot
+    && List.is_empty run.active
+    && Option.is_none run.pending
+    && Option.is_none run.recovery
+    && Option.is_none run.claim_only
+  then (
+    run.retained_charge <- false;
+    run.issuer.occupied <- run.issuer.occupied - 1);
+  result
+;;
+
+let best_effort_reconcile_unlocked run =
+  try
+    Eio.Cancel.protect (fun () ->
+      ignore (reconcile_retained_unlocked run : (unit, P.Error.t) result))
+  with
+  | _ -> ()
+;;
+
+let snapshot t run_id ~actor ~key =
+  let open Result.Let_syntax in
+  if not (current_actor actor)
+  then Error (denied ())
+  else (
+    let%bind root = store (Store.Result_root.find_existing t.store run_id) in
+    match root with
+    | None -> if current_actor actor then Ok None else Error (denied ())
+    | Some root ->
+      let principal = (Operator_authorization.principal actor).id in
+      let%bind row =
+        store (Store.Result_root.find_command_snapshot root ~principal ~key)
+      in
+      if not (current_actor actor)
+      then Error (denied ())
+      else (
+        match row with
+        | None -> Ok None
+        | Some row ->
+          if
+            same_principal actor row
+            && t.disclosure.authorize actor row
+            && current_actor actor
+          then Ok (Some (safe_view t run_id row))
+          else Error (denied ())))
+;;
+
+let release_clean_claim run claim =
+  match store (Store.Run_claim.release claim) with
+  | Ok () ->
+    run.claim_only <- None;
+    Ok ()
+  | Error _ as error ->
+    run.claim_only <- Some claim;
+    run.phase <- Quarantined;
+    error
+;;
+
+let finish_recovery run acquired =
+  let open Result.Let_syntax in
+  let claim = Startup.Acquired.claim acquired in
+  let outcome =
+    Startup.finish
+      acquired
+      ~recover:run.issuer.recovery_adapter.recover
+      ~map_store_error:store_error
+  in
+  match outcome with
+  | Ok () ->
+    let%bind () = release_clean_claim run claim in
+    run.recovery <- None;
+    run.phase <- Ready;
+    Ok ()
+  | Error _ as error ->
+    run.phase <- Quarantined;
+    error
+;;
+
+let ensure_startup_recovered t (slot : slot) =
+  let open Result.Let_syntax in
+  if not (slot_current t slot)
+  then Error (stale ())
+  else (
+    let run = slot.run in
+    match run.phase, run.recovery with
+    | Ready, None -> Ok ()
+    | Quarantined, Some acquired -> finish_recovery run acquired
+    | Recovering, _ -> Error (busy ())
+    | (Cold | Quarantined), None ->
+      let%bind () = reconcile_retained run in
+      let%bind () =
+        match run.claim_only with
+        | None -> Ok ()
+        | Some claim -> release_clean_claim run claim
+      in
+      run.phase <- Recovering;
+      let outcome =
+        match
+          Startup.open_existing t.store ~run_id:run.run_id ~on_claim:(fun claim ->
+            run.claim_only <- Some claim)
+        with
+        | Error error ->
+          let original = store_error error in
+          (match run.claim_only with
+           | None -> ()
+           | Some claim ->
+             (try ignore (release_clean_claim run claim : (unit, P.Error.t) result) with
+              | _ ->
+                run.claim_only <- Some claim;
+                run.phase <- Quarantined));
+          Error original
+        | Ok None ->
+          run.phase <- Ready;
+          Ok ()
+        | Ok (Some acquired) ->
+          run.persisted <- true;
+          run.recovery <- Some acquired;
+          run.claim_only <- None;
+          finish_recovery run acquired
+      in
+      (match outcome with
+       | Ok () -> Ok ()
+       | Error _ as error ->
+         if Option.is_none run.recovery && Option.is_none run.claim_only
+         then run.phase <- Cold;
+         error
+       | exception exn ->
+         let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+         if Option.is_none run.recovery && Option.is_none run.claim_only
+         then run.phase <- Cold
+         else run.phase <- Quarantined;
+         Stdlib.Printexc.raise_with_backtrace exn backtrace)
+    | (Ready | Cold), Some _ -> Error (busy ()))
+;;
+
+let active_current (active : active) =
+  on_domain active.issuer
+  && active.live
+  && (not active.issuer.closed)
+  && Option.value_map (Eio.Fiber.get active_key) ~default:false ~f:(phys_equal active)
+  && List.exists active.run.active ~f:(phys_equal active)
+;;
+
+let same_active_root (active : active) root =
+  Root.issued_by_store root active.issuer.store
+  && P.Execution_owner.equal_developer (Root.owner root) (Store.owner active.handle)
+  && Chatml_source.Digest.equal
+       (Chatml_developer_capture.fingerprint (Root.capture root))
+       (Store.capture_fingerprint active.handle)
+  && current_actor (Root.original_actor root)
+;;
+
+module Active = struct
+  type nonrec t = active
+
+  module Started = struct
+    type nonrec t = started
+
+    let issued_by_root (token : t) root =
+      active_current token.active
+      && phys_equal token.generation token.active.generation
+      && phys_equal token.root root
+      && same_active_root token.active root
+    ;;
+
+    let consume_for token ~root =
+      if not (issued_by_root token root)
+      then Error (stale ())
+      else if token.consumed
+      then Error (busy ())
+      else (
+        token.consumed <- true;
+        Ok ())
+    ;;
+  end
+
+  let view t = t.view
+
+  let start_live t ~root ~admit =
+    let open Result.Let_syntax in
+    if not (active_current t && same_active_root t root)
+    then Error (stale ())
+    else if t.started || not (Receipt.Kind.equal (Row.kind t.view.row) Live_run)
+    then Error (busy ())
+    else
+      with_mutation t.run (fun () ->
+        let%bind () = reconcile_retained_unlocked t.run in
+        let%bind current = Root.current root in
+        let%bind () = Root.check_effect_now root current in
+        match t.view.store_view with
+        | None -> Error (stale ())
+        | Some previous ->
+          let%bind prepared =
+            store
+              (Store.Command.prepare_change
+                 t.handle
+                 ~previous
+                 ~change:Row.Change.Start_execution)
+          in
+          (match prepared with
+           | Store.Command.Unchanged _ -> Error (busy ())
+           | Prepared token ->
+             let pending =
+               Custody.create ~handle:t.handle ~token ~kind:Start ~admit:(fun () ->
+                 active_current t
+                 && same_active_root t root
+                 && Result.is_ok (Root.check_effect_now root current)
+                 && admit ())
+             in
+             t.run.pending <- Some pending;
+             (match store (Custody.commit pending ~remaining:3) with
+              | Error _ as error -> error
+              | Ok installed ->
+                t.run.pending <- None;
+                t.view <- view_of_store t.issuer t.run.run_id installed.view;
+                (match installed.execution_start with
+                 | None -> Error (busy ())
+                 | Some acknowledged ->
+                   let%bind () =
+                     store (Store.Command.Execution_start.consume acknowledged)
+                   in
+                   t.started <- true;
+                   Ok { active = t; root; generation = t.generation; consumed = false }))))
+  ;;
+end
+
+let reserve t (slot : slot) ~handle ~key ~kind ~request_fingerprint ~admit =
+  if not (slot_current t slot)
+  then Error (stale ())
+  else if
+    (not (Store.issued_by t.store handle))
+    || not (P.Id.Developer_run.equal (Store.owner handle).run_id slot.run.run_id)
+  then Error (stale ())
+  else
+    with_mutation slot.run (fun () ->
+      let open Result.Let_syntax in
+      let%bind () = reconcile_retained_unlocked slot.run in
+      if
+        (not (slot_current t slot))
+        ||
+        match slot.run.phase with
+        | Ready -> false
+        | Cold | Recovering | Quarantined -> true
+      then Error (stale ())
+      else (
+        let%bind prepared =
+          store (Store.Command.prepare_reservation handle ~key ~kind ~request_fingerprint)
+        in
+        match prepared with
+        | Store.Command.Unchanged value ->
+          if slot_current t slot && admit ()
+          then Ok (view_of_store t slot.run.run_id value)
+          else Error (stale ())
+        | Prepared token ->
+          let pending =
+            Custody.create ~handle ~token ~kind:Reserve ~admit:(fun () ->
+              slot_current t slot && admit ())
+          in
+          slot.run.pending <- Some pending;
+          (match store (Custody.commit pending ~remaining:3) with
+           | Ok installed ->
+             slot.run.pending <- None;
+             slot.run.persisted <- true;
+             Ok (view_of_store t slot.run.run_id installed.view)
+           | Error _ as error ->
+             best_effort_reconcile_unlocked slot.run;
+             error
+           | exception exn ->
+             let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+             best_effort_reconcile_unlocked slot.run;
+             Stdlib.Printexc.raise_with_backtrace exn backtrace)))
+;;
+
+let conservative_receipt t (active : active) ~cancelled ~typed_failure =
+  let value =
+    match Row.kind active.view.row with
+    | Receipt.Kind.Check ->
+      if cancelled
+      then Receipt.Check Receipt.Check.Cancelled
+      else if typed_failure
+      then
+        Receipt.Check
+          (Receipt.Check.Rejected
+             { Receipt.Diagnostic.code = "developer.command.failed"
+             ; message = "developer check failed before producing a result"
+             ; location = None
+             })
+      else Receipt.Check Receipt.Check.Interrupted
+    | Fixture_run ->
+      Receipt.Fixture
+        (if cancelled then Receipt.Fixture.Cancelled else Receipt.Fixture.Interrupted)
+    | Live_run ->
+      Receipt.Live
+        (if cancelled
+         then Receipt.Live.Cancelled
+         else if typed_failure
+         then
+           Receipt.Live.Failed
+             (error
+                P.Error.Invalid_state
+                "developer command failed before producing a result"
+                ~retryable:false)
+         else Receipt.Live.Interrupted)
+  in
+  Receipt.create value ~limits:t.document_limits ~poll:(fun () -> Eio.Fiber.yield ())
+  |> Result.map_error ~f:(fun _ -> limited ())
+;;
+
+let receipt_for_outcome t active = function
+  | Ok receipt when Receipt.Kind.equal (Receipt.kind receipt) (Row.kind active.view.row)
+    -> Ok receipt
+  | Ok _ | Error _ ->
+    conservative_receipt t active ~cancelled:active.cancel_requested ~typed_failure:true
+;;
+
+let finish_active t (active : active) receipt =
+  Eio.Cancel.protect (fun () ->
+    with_mutation active.run (fun () ->
+      let open Result.Let_syntax in
+      let%bind () = reconcile_retained_unlocked active.run in
+      let key = Row.key active.view.row in
+      let rec attempt remaining =
+        let%bind observed = store (Store.Command.observe active.handle ~key) in
+        let%bind observed =
+          match observed with
+          | Some value -> Ok value
+          | None -> Error (stale ())
+        in
+        let current_row = Store.Command.View.row observed in
+        match Row.phase current_row with
+        | Row.Phase.Terminal { receipt = installed; _ }
+          when Row.same_identity current_row active.view.row
+               && Receipt.equal installed receipt ->
+          active.view <- view_of_store t active.run.run_id observed;
+          Ok active.view
+        | Reserved | Waiting_permission | Execution_started ->
+          if not (same_row current_row active.view.row)
+          then Error (stale ())
+          else (
+            match
+              Store.Command.prepare_change
+                active.handle
+                ~previous:observed
+                ~change:(Row.Change.Finish receipt)
+            with
+            | Error Store.Error.Conflict when remaining > 0 -> attempt (remaining - 1)
+            | Error error -> Error (store_error error)
+            | Ok (Store.Command.Unchanged value) ->
+              active.view <- view_of_store t active.run.run_id value;
+              Ok active.view
+            | Ok (Prepared token) ->
+              let pending =
+                Custody.create ~handle:active.handle ~token ~kind:Finish ~admit:(fun () ->
+                  on_domain t
+                  && Store.issued_by t.store active.handle
+                  && P.Execution_owner.equal_developer
+                       (Row.owner active.view.row)
+                       (Store.owner active.handle))
+              in
+              active.run.pending <- Some pending;
+              (match store (Custody.commit pending ~remaining:3) with
+               | Ok installed ->
+                 active.run.pending <- None;
+                 active.view <- view_of_store t active.run.run_id installed.view;
+                 Ok active.view
+               | Error _ as error ->
+                 best_effort_reconcile_unlocked active.run;
+                 error
+               | exception exn ->
+                 let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+                 best_effort_reconcile_unlocked active.run;
+                 Stdlib.Printexc.raise_with_backtrace exn backtrace))
+        | Terminal _ -> Error (busy ())
+      in
+      attempt 3))
+;;
+
+let retire_active t (active : active) =
+  if (not active.retired) && Option.is_none active.run.pending
+  then (
+    active.retired <- true;
+    active.run.active
+    <- List.filter active.run.active ~f:(fun item -> not (phys_equal item active));
+    t.occupied <- t.occupied - 1)
+;;
+
+let launch t (slot : slot) ~handle ~reserved ~f =
+  if
+    (not (slot_current t slot))
+    ||
+    match slot.run.phase with
+    | Ready -> false
+    | Cold | Recovering | Quarantined -> true
+  then Error (stale ())
+  else if
+    (not (Store.issued_by t.store handle))
+    || (not (same_run_view t slot.run.run_id reserved))
+    || (not
+          (P.Execution_owner.equal_developer
+             (Store.owner handle)
+             (Row.owner reserved.row)))
+    || not
+         (Chatml_source.Digest.equal
+            (Store.capture_fingerprint handle)
+            (Row.capture_fingerprint reserved.row))
+  then Error (stale ())
+  else (
+    match reserved.store_view, Row.phase reserved.row with
+    | Some _, Row.Phase.Reserved ->
+      if
+        Option.is_some slot.run.pending
+        || List.exists slot.run.active ~f:(fun active ->
+          P.Idempotency_key.equal (Row.key active.view.row) (Row.key reserved.row))
+      then Error (busy ())
+      else (
+        let finished, finish = Eio.Promise.create () in
+        let active =
+          { issuer = t
+          ; run = slot.run
+          ; handle
+          ; view = reserved
+          ; generation = ref ()
+          ; finished
+          ; finish
+          ; cancel = None
+          ; cancel_requested = false
+          ; live = true
+          ; retired = false
+          ; selected = None
+          ; terminal = None
+          ; private_failure = None
+          ; started = false
+          }
+        in
+        slot.run.active <- active :: slot.run.active;
+        if slot.borrowed_charge then slot.run.retained_charge <- false;
+        slot.transferred <- true;
+        match
+          Eio.Fiber.fork ~sw:t.sw (fun () ->
+            Exn.protect
+              ~finally:(fun () ->
+                active.live <- false;
+                active.cancel <- None;
+                (match active.terminal with
+                 | Some (Ok _) -> retire_active t active
+                 | None | Some (Error _) -> ());
+                Eio.Promise.resolve active.finish ())
+              ~f:(fun () ->
+                let outcome =
+                  try
+                    Eio.Cancel.sub (fun cancel ->
+                      active.cancel <- Some cancel;
+                      if active.cancel_requested then Eio.Cancel.cancel cancel Exit;
+                      Eio.Switch.run (fun sw ->
+                        Eio.Fiber.with_binding active_key active (fun () -> f active ~sw)))
+                  with
+                  | exn ->
+                    active.private_failure
+                    <- Some (exn, Stdlib.Printexc.get_raw_backtrace ());
+                    Error (unavailable ())
+                in
+                let terminal =
+                  try
+                    Eio.Cancel.protect (fun () ->
+                      let open Result.Let_syntax in
+                      let%bind receipt = receipt_for_outcome t active outcome in
+                      active.selected <- Some receipt;
+                      finish_active t active receipt)
+                  with
+                  | exn ->
+                    active.private_failure
+                    <- Some (exn, Stdlib.Printexc.get_raw_backtrace ());
+                    Error (unavailable ())
+                in
+                active.terminal <- Some terminal))
+        with
+        | () -> Ok reserved
+        | exception exn ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          active.live <- false;
+          slot.run.active
+          <- List.filter slot.run.active ~f:(fun item -> not (phys_equal item active));
+          if slot.borrowed_charge then slot.run.retained_charge <- true;
+          slot.transferred <- false;
+          Stdlib.Printexc.raise_with_backtrace exn backtrace)
+    | Some _, (Waiting_permission | Execution_started | Terminal _) | None, _ ->
+      Error (busy ()))
+;;
+
+let active_for_key t run_id key =
+  match Hashtbl.find t.runs run_id with
+  | None -> None
+  | Some run ->
+    List.find run.active ~f:(fun active ->
+      P.Idempotency_key.equal (Row.key active.view.row) key)
+;;
+
+let terminal_view t ~actor ~run_id ~key =
+  let open Result.Let_syntax in
+  let%bind observed = snapshot t run_id ~actor ~key in
+  match observed with
+  | Some view when Option.is_some (View.receipt view) -> Ok view
+  | None | Some _ -> Error (busy ())
+;;
+
+let await_terminal t ~actor ~run_id ~key =
+  let open Result.Let_syntax in
+  if not (on_domain t && current_actor actor)
+  then Error (denied ())
+  else (
+    match active_for_key t run_id key with
+    | Some active ->
+      if Option.value_map (Eio.Fiber.get active_key) ~default:false ~f:(phys_equal active)
+      then Error (busy ())
+      else if
+        not
+          (same_principal actor active.view.row
+           && t.disclosure.authorize actor active.view.row)
+      then Error (denied ())
+      else (
+        Eio.Promise.await active.finished;
+        if
+          not
+            (current_actor actor
+             && same_principal actor active.view.row
+             && t.disclosure.authorize actor active.view.row)
+        then Error (denied ())
+        else (
+          match active.terminal with
+          | Some (Error error) -> Error error
+          | None | Some (Ok _) -> terminal_view t ~actor ~run_id ~key))
+    | None ->
+      with_slot t ~run_id ~f:(fun slot ->
+        let%bind () = ensure_startup_recovered t slot in
+        terminal_view t ~actor ~run_id ~key))
+;;
+
+let cancel_and_wait t ~actor ~run_id ~key =
+  let open Result.Let_syntax in
+  if not (on_domain t && current_actor actor)
+  then Error (denied ())
+  else (
+    match active_for_key t run_id key with
+    | None -> Error (stale ())
+    | Some active ->
+      if
+        (not active.live)
+        || Option.value_map
+             (Eio.Fiber.get active_key)
+             ~default:false
+             ~f:(phys_equal active)
+      then Error (stale ())
+      else if
+        not
+          (same_principal actor active.view.row
+           && t.control.authorize actor active.view.row)
+      then Error (denied ())
+      else (
+        active.cancel_requested <- true;
+        Option.iter active.cancel ~f:(fun cancel -> Eio.Cancel.cancel cancel Exit);
+        Eio.Promise.await active.finished;
+        if
+          not
+            (current_actor actor
+             && t.control.authorize actor active.view.row
+             && t.disclosure.authorize actor active.view.row)
+        then Error (denied ())
+        else (
+          match active.terminal with
+          | Some (Error error) -> Error error
+          | None | Some (Ok _) -> terminal_view t ~actor ~run_id ~key)))
+;;
+
+let retry_finished_active t (active : active) =
+  if active.live || active.retired
+  then Ok ()
+  else (
+    match active.selected with
+    | None -> Error (busy ())
+    | Some receipt ->
+      (match finish_active t active receipt with
+       | Ok view ->
+         active.terminal <- Some (Ok view);
+         retire_active t active;
+         Ok ()
+       | Error error ->
+         active.terminal <- Some (Error error);
+         Error error))
+;;
+
+let lookup t (slot : slot) ~actor ~key ~kind ~request_fingerprint =
+  let open Result.Let_syntax in
+  if not (slot_current t slot)
+  then Error (stale ())
+  else if not (current_actor actor)
+  then Error (denied ())
+  else (
+    let%bind () = reconcile_retained slot.run in
+    let%bind found = snapshot t slot.run.run_id ~actor ~key in
+    match found with
+    | None -> Ok None
+    | Some view ->
+      if
+        not
+          (Receipt.Kind.equal (Row.kind view.row) kind
+           && Chatml_source.Digest.equal
+                (Row.request_fingerprint view.row)
+                request_fingerprint)
+      then Error (busy ())
+      else (
+        let%bind () =
+          match
+            List.find slot.run.active ~f:(fun active ->
+              P.Idempotency_key.equal (Row.key active.view.row) key)
+          with
+          | Some active when not active.live ->
+            Eio.Cancel.protect (fun () -> retry_finished_active t active)
+          | None | Some _ -> Ok ()
+        in
+        let%bind refreshed = snapshot t slot.run.run_id ~actor ~key in
+        if not (slot_current t slot)
+        then Error (stale ())
+        else (
+          match refreshed with
+          | Some refreshed
+            when Row.same_identity refreshed.row view.row
+                 && Receipt.Kind.equal (Row.kind refreshed.row) kind
+                 && Chatml_source.Digest.equal
+                      (Row.request_fingerprint refreshed.row)
+                      request_fingerprint -> Ok (Some refreshed)
+          | None | Some _ -> Error (stale ()))))
+;;
+
+let close_and_wait t =
+  if not (on_domain t)
+  then Error (stale ())
+  else if
+    Option.value_map (Eio.Fiber.get active_key) ~default:false ~f:(fun active ->
+      phys_equal active.issuer t)
+  then Error (busy ())
+  else (
+    t.closed <- true;
+    let active = Hashtbl.data t.runs |> List.concat_map ~f:(fun run -> run.active) in
+    List.iter active ~f:(fun call ->
+      call.cancel_requested <- true;
+      Option.iter call.cancel ~f:(fun cancel -> Eio.Cancel.cancel cancel Exit));
+    Eio.Cancel.protect (fun () ->
+      List.iter active ~f:(fun call -> Eio.Promise.await call.finished);
+      let outcomes =
+        Hashtbl.data t.runs
+        |> List.map ~f:(fun run ->
+          let pending = reconcile_retained run in
+          let retried =
+            List.map run.active ~f:(retry_finished_active t)
+            |> List.find_map ~f:Result.error
+          in
+          match pending, retried, run.recovery, run.claim_only with
+          | Ok (), None, None, None when List.is_empty run.active -> Ok ()
+          | Error error, _, _, _ -> Error error
+          | Ok (), Some error, _, _ -> Error error
+          | Ok (), None, _, _ -> Error (busy ()))
+      in
+      match List.find_map outcomes ~f:Result.error with
+      | None -> Ok ()
+      | Some error -> Error error))
+;;

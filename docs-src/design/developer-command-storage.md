@@ -1,7 +1,8 @@
 # Developer command storage
 
-Status: the durable storage primitive is implemented. The hosted developer-command
-service and its execution policy remain separate integration work.
+Status: durable storage and daemon command lifecycle are implemented. The
+hosted source capture, execution policy and client service remain separate
+integration work.
 
 A top-level check, fixture run or live run has its own command receipt. Child-job
 results and Root phase checkpoints remain separate evidence. Commands live in
@@ -77,3 +78,23 @@ older and latest nonterminal command rows Interrupted through the same writer;
 it preserves completed receipts and retains uncertain writes for reconciliation.
 This startup handle does not authorize execution: current actor, source and
 target policy must be checked separately before any new effect.
+
+## Daemon lifecycle
+
+The [command lifecycle](../../lib/agent_server/developer_command_lifecycle.mli)
+uses one bounded, process-local entry per run. A same-run slot sequences
+historical lookup, startup recovery and fresh reservation. Recovery owns the
+physical Store run claim until the host has settled authentic abandoned job and
+inference inventory, finished its window and released the claim. An uncertain
+window or command write retains its exact claim or Pending; it is never treated
+as a key miss. A later authorized same-key lookup may reconcile only the
+selected terminal without invoking the command callback again.
+
+Callbacks run under a daemon-owned switch, each with a joined child switch.
+The submitting request can end while the callback and its capacity charge
+remain. Explicit cancellation checks a separate control policy, cancels and
+joins that callback, then settles its receipt. Passive waiting only reads a
+result after a fresh disclosure check. A live callback must cross the physical
+Root check and consume a fresh one-use execution acknowledgement before
+starting effects; neither historical receipts nor recovered Starts can supply
+it. The lifecycle does not select source, grant tools or schedule jobs.
