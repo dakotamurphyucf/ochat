@@ -51,20 +51,24 @@ let fetch_prompt ~ctx ~prompt ~is_local =
   | exn -> Error (Exn.to_string exn)
 ;;
 
-let capabilities_with_model_executor
-      ~(model_executor : Model_executor.t)
-      ~(session_id : string)
+let capabilities_with_model_recipe
+      ~(recipe : Moderation.Capabilities.model_recipe)
       (capabilities : Moderation.Capabilities.t)
   : Moderation.Capabilities.t
   =
   { capabilities with
     model_recipes =
-      Map.of_alist_exn
-        (module String)
-        [ ( Model_executor.agent_prompt_v1_name
-          , Model_executor.recipe_agent_prompt_v1 model_executor ~session_id () )
-        ]
+      Map.of_alist_exn (module String) [ Model_executor.agent_prompt_v1_name, recipe ]
   }
+;;
+
+let model_recipe_for_context ~sw ~(exec_context : Model_executor.exec_context) ~session_id
+  =
+  match exec_context.ctx.agent_prompt_v1_recipe with
+  | Some recipe -> recipe, None
+  | None ->
+    let executor = Model_executor.create ~sw ~exec_context () in
+    Model_executor.recipe_agent_prompt_v1 executor ~session_id (), Some executor
 ;;
 
 let create_moderator
@@ -673,6 +677,8 @@ let rec run_agent_input
       ~on_inference_completion:ctx.on_inference_completion
       ~on_inference_observation:ctx.on_inference_observation
       ~on_admitted_call:ctx.on_admitted_call
+      ~before_inference_dispatch:ctx.before_inference_dispatch
+      ?agent_prompt_v1_recipe:ctx.agent_prompt_v1_recipe
       ~inference_relation:ctx.inference_relation
       ()
     |> fun child -> Ctx.with_submission_guard child ctx.submission_guard
@@ -817,12 +823,11 @@ let rec run_agent_input
         ; fetch_prompt
         }
       in
-      let model_executor = Model_executor.create ~sw ~exec_context () in
+      let recipe, model_executor =
+        model_recipe_for_context ~sw ~exec_context ~session_id
+      in
       let capabilities =
-        capabilities_with_model_executor
-          ~model_executor
-          ~session_id
-          Moderation.Capabilities.default
+        capabilities_with_model_recipe ~recipe Moderation.Capabilities.default
       in
       let allocator =
         let namespace =
@@ -848,11 +853,13 @@ let rec run_agent_input
           ()
         |> Result.ok_or_failwith
       in
-      Option.iter moderator ~f:(fun (m : In_memory_stream.moderator) ->
-        Model_executor.register_session
-          model_executor
-          ~session_id:m.session_id
-          ~manager:m.manager);
+      (match model_executor, moderator with
+       | Some model_executor, Some (m : In_memory_stream.moderator) ->
+         Model_executor.register_session
+           model_executor
+           ~session_id:m.session_id
+           ~manager:m.manager
+       | None, Some _ | Some _, None | None, None -> ());
       In_memory_stream.run_completion_stream_in_memory_entries
         ~inference_context:ctx.inference_context
         ~inference_identity:ctx.inference_identity
@@ -861,6 +868,7 @@ let rec run_agent_input
         ~on_inference_observation:ctx.on_inference_observation
         ~on_admitted_call:ctx.on_admitted_call
         ~submission_guard:ctx.submission_guard
+        ~before_inference_dispatch:ctx.before_inference_dispatch
         ~inference_relation:ctx.inference_relation
         ~env:(Ctx.env ctx)
         ~datadir:response_dir
@@ -1196,26 +1204,24 @@ and run_completion_stream
     |> Result.ok_or_failwith
   in
   let input_entries = create_history_entries ~allocator inputs in
-  let model_executor =
-    let exec_context : Model_executor.exec_context =
-      { ctx
-      ; run_agent =
-          (fun ?history_compaction ?prompt_dir ?session_id ~ctx prompt items ->
-            run_agent
-              ?history_compaction
-              ?prompt_dir
-              ?session_id
-              ~response_dir:datadir
-              ~shell_manifest_authorizer
-              ~shell_approval_provider
-              ~ctx
-              prompt
-              items)
-      ; fetch_prompt
-      }
-    in
-    Model_executor.create ~sw ~exec_context ()
+  let exec_context : Model_executor.exec_context =
+    { ctx
+    ; run_agent =
+        (fun ?history_compaction ?prompt_dir ?session_id ~ctx prompt items ->
+          run_agent
+            ?history_compaction
+            ?prompt_dir
+            ?session_id
+            ~response_dir:datadir
+            ~shell_manifest_authorizer
+            ~shell_approval_provider
+            ~ctx
+            prompt
+            items)
+    ; fetch_prompt
+    }
   in
+  let recipe, model_executor = model_recipe_for_context ~sw ~exec_context ~session_id in
   let moderator =
     if has_script elements
     then
@@ -1227,20 +1233,19 @@ and run_completion_stream
         ~history:input_entries
         ~available_tools:tools
         ~capabilities:
-          (capabilities_with_model_executor
-             ~model_executor
-             ~session_id
-             Moderation.Capabilities.default)
+          (capabilities_with_model_recipe ~recipe Moderation.Capabilities.default)
         ?on_process_run:(Agent_runtime.moderator_process_handler agent_runtime)
         ()
       |> Result.ok_or_failwith
     else None
   in
-  Option.iter moderator ~f:(fun (m : In_memory_stream.moderator) ->
-    Model_executor.register_session
-      model_executor
-      ~session_id:m.session_id
-      ~manager:m.manager);
+  (match model_executor, moderator with
+   | Some model_executor, Some (m : In_memory_stream.moderator) ->
+     Model_executor.register_session
+       model_executor
+       ~session_id:m.session_id
+       ~manager:m.manager
+   | None, Some _ | Some _, None | None, None -> ());
   let runtime_requests = ref [] in
   let all_entries =
     In_memory_stream.run_completion_stream_in_memory_entries
@@ -1252,6 +1257,7 @@ and run_completion_stream
       ~on_inference_observation:ctx.on_inference_observation
       ~on_admitted_call:ctx.on_admitted_call
       ~submission_guard:ctx.submission_guard
+      ~before_inference_dispatch:ctx.before_inference_dispatch
       ~inference_relation:ctx.inference_relation
       ~datadir
       ~allocator
