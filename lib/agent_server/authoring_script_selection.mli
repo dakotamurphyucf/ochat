@@ -15,8 +15,9 @@ module Limits : sig
 
   (** Positive limits on one contract admission. [max_identity_bytes] bounds
       encoded contract identity and conservative encoding allocation before
-      either is built; [max_work_steps] bounds conversion/hash work through the
-      supplied checkpoint. Host source/Build byte limits remain independent. *)
+      either is built (at most 16 MiB); [max_work_steps] bounds conversion/hash
+      work through the supplied checkpoint. Host source/Build byte limits remain
+      independent. A caller must choose its own finite cap within this bound. *)
   val create : max_identity_bytes:int -> max_work_steps:int -> t Or_error.t
 end
 

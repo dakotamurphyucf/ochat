@@ -389,6 +389,23 @@ selected tool references require their separate current host grants. The
 service checks the selected method feature and final owner/selection state
 before returning a bounded response; transport installation and advertised
 capabilities remain separate.
+An Analyze request can explicitly opt in to one
+[checked ChatML example](../../lib/agent_server/authoring_checked_template.mli)
+for the actual selected Standard target. Preparation replaces only the captured
+entry in the validated Build, recomposes its frozen closure, and runs the joined
+non-executing compiler under the selected contract and finite host policy. The
+default Analyze request does no example work; Native contracts have no curated
+example. A compiler or resource failure aborts the opt-in request without
+publishing a partial analysis result. An originally Failed script can retain a
+separately successful example witness. The context owner stores only a bounded
+immutable comparison witness, evicts it on context revision or selection
+change, and serves it through Assistance without compiling or reading sources.
+The checked example takes one result slot before optional lexical candidates
+and carries its own target and exact text digest. For inline ChatMD bodies the
+full replacement must project through the genuine extraction map to one exact
+current authored range. External `src` bodies currently lack that reverse
+authored-point proof and receive no checked replacement; matching text or path
+cannot supply it.
 `Unavailable` and `Ambiguous` remain distinct from a successful empty result.
 No completion operation invokes prompt preprocessing, scripts, tools, model
 inference, Git/HTTP fetch, install or initializer evaluation.

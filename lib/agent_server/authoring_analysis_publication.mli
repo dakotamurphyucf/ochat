@@ -37,6 +37,7 @@ module Prepared : sig
     :  retained:Core_owner.Retained_document_capture.t
     -> document_after:Document.Document_cache.t
     -> index_after:Authoring_analysis_index.t
+    -> templates_after:Authoring_checked_template_cache.t
     -> response:P.Authoring.Analysis.Analyze.t
     -> t
 
@@ -49,6 +50,7 @@ module Prepared : sig
     :  project_after:Project.Project_cache.t
     -> document_after:Document.Document_cache.t
     -> index_after:Authoring_analysis_index.t
+    -> templates_after:Authoring_checked_template_cache.t
     -> response:P.Authoring.Analysis.Analyze.t
     -> t
 
@@ -60,6 +62,7 @@ module Prepared : sig
     :  retained:Core_owner.Retained_document_capture.t
     -> document_after:Document.Document_cache.t
     -> index_after:Authoring_analysis_index.t
+    -> templates_after:Authoring_checked_template_cache.t
     -> response:P.Authoring.Analysis.Analyze.t
     -> t
 end

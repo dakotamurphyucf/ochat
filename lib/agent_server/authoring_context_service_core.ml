@@ -94,6 +94,7 @@ module Error = struct
     | Invalid_position of P.Authoring.Failure.invalid_position
     | Invalid_request
     | Analysis_unavailable
+    | Checked_template_failed
     | Storage_unavailable
     | Upload_failure of Upload.Error.t
 
@@ -138,6 +139,8 @@ module Error = struct
       | Invalid_request -> P.Error.Invalid_request, "invalid authoring request", None
       | Analysis_unavailable ->
         P.Error.Internal_error, "authoring analysis unavailable", None
+      | Checked_template_failed ->
+        P.Error.Internal_error, "checked authoring template unavailable", None
       | Storage_unavailable ->
         P.Error.Internal_error, "authoring storage unavailable", None
       | Upload_failure upload_error ->
@@ -337,6 +340,7 @@ type t =
   ; mutable document_capture : Retained_document_capture.t option
   ; mutable analysis_index : Authoring_analysis_index.t
   ; mutable provisional_index : Authoring_provisional_index.t
+  ; mutable checked_templates : Authoring_checked_template_cache.t
   ; mutable closed : bool
   ; mutable release_hook : Eio.Switch.hook
   }
@@ -600,6 +604,8 @@ let transition t contexts =
        ~document:t.document_cache;
   t.provisional_index
   <- Authoring_provisional_index.transition t.provisional_index ~contexts;
+  t.checked_templates
+  <- Authoring_checked_template_cache.transition t.checked_templates ~contexts;
   Option.iter t.document_capture ~f:(fun retained ->
     match Ledger.find_document contexts ~identity:retained.identity with
     | Some view
@@ -625,6 +631,7 @@ module Current = struct
     ; borrowed_document_cache : Document.Document_cache.t
     ; borrowed_analysis_index : Authoring_analysis_index.t
     ; borrowed_provisional_index : Authoring_provisional_index.t
+    ; borrowed_checked_templates : Authoring_checked_template_cache.t
     }
 
   let basis t =
@@ -645,6 +652,12 @@ module Current = struct
     if (not !(t.live)) || not (Int.equal t.domain (Stdlib.Domain.self () :> int))
     then Error Error.Stale_context
     else Ok t.borrowed_provisional_index
+  ;;
+
+  let checked_templates t =
+    if (not !(t.live)) || not (Int.equal t.domain (Stdlib.Domain.self () :> int))
+    then Error Error.Stale_context
+    else Ok t.borrowed_checked_templates
   ;;
 
   let analysis_heads t =
@@ -817,6 +830,12 @@ let create
       ~max_rows:limits.max_provisional_results
     |> Or_error.ok_exn
   in
+  let checked_templates =
+    Authoring_checked_template_cache.create
+      ~max_rows:(Int.min 512 (Project.Policy.max_results analysis_policy))
+      ~max_retained_bytes:(2 * 1024 * 1024)
+    |> Or_error.ok_exn
+  in
   let service =
     { sw
     ; domain = (Stdlib.Domain.self () :> int)
@@ -836,6 +855,7 @@ let create
     ; document_capture = None
     ; analysis_index
     ; provisional_index
+    ; checked_templates
     ; closed = false
     ; release_hook = Eio.Switch.null_hook
     }

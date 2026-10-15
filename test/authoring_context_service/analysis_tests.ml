@@ -10,6 +10,7 @@ module Selection = Core_owner.Semantic.Script_selection
 module Build = Chatml_project_build
 module Captured = Chatml_source
 module Ledger = Chatml_authoring_context
+module Assistance_wire = P.Authoring_assistance.Assistance
 
 let%test_unit "compiler admission errors retain resource, selection and internal truth" =
   let module C = Chatml_compilation in
@@ -92,8 +93,8 @@ let analyzer ?(script_selection = None) owner env =
     ~project_metadata:None
     ~project_build_limits:
       (Chatml_project_build.Limits.create
-         ~max_work_steps:10_000
-         ~max_input_bytes:(Some 4096)
+         ~max_work_steps:1_000_000
+         ~max_input_bytes:(Some 64_000)
          ~document:Document_schema.Limits.default
        |> Or_error.ok_exn)
     ~limits:
@@ -113,7 +114,7 @@ let analyzer ?(script_selection = None) owner env =
        |> Or_error.ok_exn)
 ;;
 
-let selected_build ?contract body =
+let selected_build ?contract ?(check_identity_boundary = false) body =
   let module Fixtures = Chatml_project_build_tests.Fixtures in
   let module Support = Chatml_project_build_tests.Support in
   let fixture = Fixtures.make ?contract () in
@@ -142,19 +143,81 @@ let selected_build ?contract body =
       ~checkpoint:ignore
     |> ok
   in
+  if check_identity_boundary
+  then (
+    let allocation = ref 0 in
+    ignore
+      (Chatml.Chatml_compiler_contract.input_bytes
+         (Fixtures.contract fixture)
+         ~checkpoint:ignore
+         ~allocate:(fun bytes -> allocation := !allocation + bytes)
+       : int);
+    assert (!allocation > 1);
+    let limits =
+      Selection.Limits.create
+        ~max_identity_bytes:(!allocation - 1)
+        ~max_work_steps:1_000_000
+      |> Or_error.ok_exn
+    in
+    match
+      Selection.Selected.admit
+        ~build
+        ~contract:(Fixtures.contract fixture)
+        ~limits
+        ~checkpoint:ignore
+    with
+    | Error Selection.Error.Identity_limit -> ()
+    | Ok _ | Error _ -> failwith "undersized actual contract admission passed");
   let selected =
     Selection.Selected.admit
       ~build
       ~contract:(Fixtures.contract fixture)
       ~limits:
         (Selection.Limits.create
-           ~max_identity_bytes:(4 * 1024 * 1024)
-           ~max_work_steps:100_000
+           ~max_identity_bytes:(16 * 1024 * 1024)
+           ~max_work_steps:1_000_000
          |> Or_error.ok_exn)
       ~checkpoint:ignore
     |> ok
   in
   build, selected
+;;
+
+let selected_assistance owner selection =
+  let module Assistance = Core_owner.Assistance in
+  Assistance.create
+    ~owner
+    ~script_selection:(Some selection)
+    ~project_metadata:None
+    ~selected_tools:None
+    ~project_build_limits:
+      (Build.Limits.create
+         ~max_work_steps:1_000_000
+         ~max_input_bytes:(Some 64_000)
+         ~document:Document_schema.Limits.default
+       |> Or_error.ok_exn)
+    ~limits:
+      (Assistance.Limits.create
+         ~protocol_limits:
+           (P.Authoring.Limits.create
+              ~max_sources:4
+              ~max_source_bytes:1024
+              ~max_context_source_bytes:4096
+              ~max_request_bytes:4096
+              ~max_result_bytes:65536
+              ~max_path_candidates:16
+            |> ok)
+         ~max_scan_work_steps:1_000_000
+         ~max_assistance_work_steps:1_000_000
+         ~max_contract_identity_bytes:(16 * 1024 * 1024)
+         ~max_contract_work_steps:1_000_000
+         ~max_projection_work_steps:1_000_000
+         ~max_parser_input_bytes:1024
+         ~max_imported_inputs:4
+         ~max_selected_tools:16
+         ~max_tool_metadata_bytes:4096
+       |> Or_error.ok_exn)
+  |> ok
 ;;
 
 let inspect_capture owner actor connection expected =
@@ -213,20 +276,73 @@ let%expect_test "supplied Analyze retains only authentic root syntax without Bui
 ;;
 
 let%expect_test "selected supplied script publishes certified or same-run failed facts" =
+  let module Contract = Chatml.Chatml_compiler_contract in
+  let module Checked = Assistance_wire.Checked_template in
+  let tool_body = {|let run ctx input = Task.pure(`Complete(input))|} in
+  let moderator_body =
+    {|let initial_state = 0
+let on_event ctx state event = Task.pure(state)|}
+  in
   let native_contract =
-    Chatml.Chatml_compiler_contract.for_static_surface
+    Contract.for_static_surface
       (Chatml.Chatml_static_surface.of_runtime_surface
          Chatml.Chatml_builtin_surface.empty
          ~checkpoint:ignore)
       ~required_bindings:[]
   in
   List.iter
-    [ "valid", "let main input = Task.pure(input)", None
-    ; "invalid", "let x = 1;; let broken = true + 1", None
-    ; "native", "let main = 1", Some native_contract
+    [ "valid-default", "let main input = Task.pure(input)", None, None, false, None
+    ; ( "valid"
+      , "let main input = Task.pure(input)"
+      , None
+      , None
+      , true
+      , Some Checked.One_off_v1 )
+    ; ( "edited"
+      , "let main input = Task.pure(input)"
+      , Some "let main = 0"
+      , None
+      , true
+      , Some Checked.One_off_v1 )
+    ; ( "invalid"
+      , "let x = 1;; let broken = true + 1"
+      , None
+      , None
+      , true
+      , Some Checked.One_off_v1 )
+    ; "native", "let main = 1", None, Some native_contract, true, None
+    ; ( "tool"
+      , tool_body
+      , None
+      , Some (Contract.for_target Tool_v1 ~checkpoint:ignore)
+      , true
+      , Some Checked.Tool_v1 )
+    ; ( "developer"
+      , tool_body
+      , None
+      , Some (Contract.for_target Developer_tool_v1 ~checkpoint:ignore)
+      , true
+      , Some Checked.Developer_tool_v1 )
+    ; ( "moderator"
+      , moderator_body
+      , None
+      , Some (Contract.for_target Moderator_v1 ~checkpoint:ignore)
+      , true
+      , Some Checked.Moderator_v1 )
+    ; ( "delegated"
+      , moderator_body
+      , None
+      , Some (Contract.for_target Delegated_moderator_v1 ~checkpoint:ignore)
+      , true
+      , Some Checked.Delegated_moderator_v1 )
     ]
-    ~f:(fun (label, body, contract) ->
-      let _, selected = selected_build ?contract body in
+    ~f:(fun (label, body, selected_body, contract, checked_template, expected_target) ->
+      let _, selected =
+        selected_build
+          ?contract
+          ~check_identity_boundary:(String.equal label "moderator")
+          (Option.value selected_body ~default:body)
+      in
       let selection =
         Selection.Policy.create
           ~select_script:
@@ -243,8 +359,19 @@ let%expect_test "selected supplied script publishes certified or same-run failed
         sprintf {|<script id="%s" language="chatml" kind="tool">%s</script>|} id body
       in
       let contents = script "s" ^ if String.equal label "valid" then script "t" else "" in
+      let source = ref None in
       Foundation_tests.with_supplied_owner
         ~contents
+        ~result_bytes:65536
+        ~analysis_policy:
+          (Service_tests.analysis_policy
+             ~compilation:
+               { Chatml_compilation.wall_seconds = 10.; max_source_bytes = 512 * 1024 }
+             ())
+        ~on_context:(fun context ->
+          match P.Authoring.Context.basis context with
+          | Document { source = captured; _ } -> source := Some captured
+          | Project _ -> failwith "script fixture gained a project")
         (fun owner actor connection expected env ->
            let semantic = analyzer ~script_selection:(Some selection) owner env in
            let request =
@@ -252,6 +379,11 @@ let%expect_test "selected supplied script publishes certified or same-run failed
                ~context:expected
                ~target:(A.Target.selected_script "s" |> ok)
              |> ok
+           in
+           let request =
+             if checked_template
+             then A.Analyze.Request.with_checked_template request
+             else request
            in
            let result =
              match Analyze.analyze semantic ~actor ~connection request with
@@ -298,6 +430,75 @@ let%expect_test "selected supplied script publishes certified or same-run failed
                     ^ P.Error.code_to_string (Core_owner.Error.to_protocol error).code))
             | Complete _ | Unavailable _ -> ());
            let capture, sources, rows = inspect_capture owner actor connection expected in
+           let authored = Option.value_exn !source in
+           let cursor_byte =
+             String.length {|<script id="s" language="chatml" kind="tool">|} + 4
+           in
+           let assistance_request =
+             Assistance_wire.Request.create
+               ~context:expected
+               ~source:authored
+               ~cursor_byte
+               ~max_items:(if String.equal label "edited" then 1 else 8)
+             |> ok
+           in
+           let checked_items, status =
+             match
+               Core_owner.Assistance.handle_assistance
+                 (selected_assistance owner selection)
+                 ~actor
+                 ~connection
+                 assistance_request
+             with
+             | Ok (Assistance result) ->
+               ( List.filter (Assistance_wire.Result.items result) ~f:(fun item ->
+                   match Assistance_wire.Suggestion.evidence item with
+                   | Checked_template _ -> true
+                   | _ -> false)
+               , Assistance_wire.Result.status result )
+             | Ok _ -> failwith "assistance returned another method"
+             | Error error ->
+               failwith
+                 ("assistance fixture ("
+                  ^ label
+                  ^ "): "
+                  ^ Jsonaf.to_string
+                      (P.Error.to_json (Core_owner.Error.to_protocol error)))
+           in
+           let expected_checked = Option.is_some expected_target in
+           [%test_eq: int] (List.length checked_items) (if expected_checked then 1 else 0);
+           List.iter checked_items ~f:(fun item ->
+             let example = Assistance_wire.Suggestion.insert_text item in
+             let expected_example =
+               match Option.value_exn expected_target with
+               | Checked.One_off_v1 -> {|let main input = Task.pure(input)|}
+               | Tool_v1 | Developer_tool_v1 -> tool_body
+               | Moderator_v1 | Delegated_moderator_v1 -> moderator_body
+             in
+             [%test_eq: string] example expected_example;
+             let replace = Assistance_wire.Suggestion.replace item in
+             let body_start =
+               String.length {|<script id="s" language="chatml" kind="tool">|}
+             in
+             [%test_eq: int] (Assistance_wire.Range.start_byte replace) body_start;
+             [%test_eq: int]
+               (Assistance_wire.Range.end_byte replace)
+               (body_start + String.length body);
+             assert (
+               Captured.Id.equal
+                 (P.Authoring.Source.id (Assistance_wire.Range.source replace))
+                 (P.Authoring.Source.id authored));
+             match Assistance_wire.Suggestion.evidence item with
+             | Checked_template checked ->
+               assert (
+                 Checked.equal_target
+                   (Checked.target checked)
+                   (Option.value_exn expected_target));
+               assert (
+                 Captured.Digest.equal
+                   (Checked.example_digest checked)
+                   (Captured.Digest.of_contents example ~checkpoint:ignore))
+             | _ -> failwith "checked item lost checked evidence");
            print_s
              [%sexp
                (label : string)
@@ -305,7 +506,9 @@ let%expect_test "selected supplied script publishes certified or same-run failed
              , (diagnostic_count : int)
              , (capture : bool)
              , (sources : bool)
-             , (rows : int)];
+             , (rows : int)
+             , (List.length checked_items : int)
+             , (status : Assistance_wire.Status.t)];
            if String.equal label "valid"
            then (
              let first_index =
@@ -396,12 +599,33 @@ let%expect_test "selected supplied script publishes certified or same-run failed
                 with
                 | Error Testing.Stale_context -> ()
                 | Ok _ | Error _ -> failwith "evicted capture passed final CAS");
-               assert (not !published)
+               assert (not !published);
+               (match
+                  Core_owner.Assistance.handle_assistance
+                    (selected_assistance owner selection)
+                    ~actor
+                    ~connection
+                    assistance_request
+                with
+                | Ok (Assistance response) ->
+                  assert (
+                    List.for_all (Assistance_wire.Result.items response) ~f:(fun item ->
+                      match Assistance_wire.Suggestion.evidence item with
+                      | Checked_template _ -> false
+                      | _ -> true))
+                | Ok _ | Error _ ->
+                  failwith "ordinary Analyze did not retire checked example")
              | _ -> failwith "second genuine declaration was not certified")));
   [%expect
     {|
-      (valid complete 0 true true 1)
+      (valid-default complete 0 true true 1 0 (Truncated Item_limit))
+      (valid complete 0 true true 1 1 (Truncated Item_limit))
       (true true true true)
-      (invalid failed 1 true true 0)
-      (native complete 0 true true 1) |}]
+      (edited complete 0 true true 1 1 (Truncated Item_limit))
+      (invalid failed 1 true true 0 1 (Truncated Item_limit))
+      (native complete 0 true true 1 0 (Truncated Item_limit))
+      (tool complete 0 true true 1 1 (Truncated Item_limit))
+      (developer complete 0 true true 1 1 (Truncated Item_limit))
+      (moderator complete 0 true true 1 1 (Truncated Item_limit))
+      (delegated complete 0 true true 1 1 (Truncated Item_limit)) |}]
 ;;

@@ -8,6 +8,7 @@ module Sources = Authoring_source_host
 module Project = Chatml_authoring_analysis
 module Document = Chatmd_authoring_analysis
 module Analysis = Agent_protocol.Authoring.Analysis
+module Template = Authoring_semantic_template
 
 let response_within_owner owner response =
   Wire.within_host_limit response ~max_bytes:owner.Owner.limits.max_response_bytes
@@ -19,6 +20,7 @@ let prepare_parsed_only owner current ~inputs ~retained ~target ~reason ~checkpo
   let%bind _, document_before, index_before = Owner.Current.analysis_heads current in
   checkpoint ();
   let identity = Ledger.Document.Inputs.identity inputs in
+  let%bind templates_after = Template.retire current ~identity in
   let document_after = Document.Document_cache.retire document_before ~identity in
   let index_after = Index.retire index_before ~identity in
   let%bind response =
@@ -26,13 +28,42 @@ let prepare_parsed_only owner current ~inputs ~retained ~target ~reason ~checkpo
     |> Result.map_error ~f:(fun _ -> Owner.Error.Invalid_request)
   in
   let%map () = response_within_owner owner response in
-  Publication.Prepared.parsed_only ~retained ~document_after ~index_after ~response
+  Publication.Prepared.parsed_only
+    ~retained
+    ~document_after
+    ~index_after
+    ~templates_after
+    ~response
 ;;
 
-let prepare_checked owner current ~inputs ~retained ~script ~env ~contract ~checkpoint =
+let prepare_checked
+      owner
+      current
+      ~inputs
+      ~retained
+      ~script
+      ~selected_build
+      ~env
+      ~contract
+      ~checked_template
+      ~template_limits
+      ~checkpoint
+  =
   let open Result.Let_syntax in
   let%bind project_before, document_before, index_before =
     Owner.Current.analysis_heads current
+  in
+  let%bind templates_after =
+    Template.document
+      current
+      ~inputs
+      ~script
+      ~selected:selected_build
+      ~contract
+      ~requested:checked_template
+      ~limits:template_limits
+      ~env
+      ~checkpoint
   in
   let%bind candidate =
     Document.Candidate.analyze_with_contract
@@ -104,5 +135,10 @@ let prepare_checked owner current ~inputs ~retained ~script ~env ~contract ~chec
     |> Result.map_error ~f:Authoring_semantic_error.wire
   in
   let%map () = response_within_owner owner response in
-  Publication.Prepared.checked_document ~retained ~document_after ~index_after ~response
+  Publication.Prepared.checked_document
+    ~retained
+    ~document_after
+    ~index_after
+    ~templates_after
+    ~response
 ;;

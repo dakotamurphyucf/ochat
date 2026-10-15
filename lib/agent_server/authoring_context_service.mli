@@ -89,6 +89,7 @@ module Error : sig
     | Invalid_position of P.Authoring.Failure.invalid_position
     | Invalid_request
     | Analysis_unavailable
+    | Checked_template_failed
     | Storage_unavailable
     | Upload_failure of Upload.Error.t
 
@@ -432,6 +433,7 @@ module For_testing : sig
     | Analysis_index
     | Provisional_index
     | Parsed_capture
+    | Checked_template
 
   type probe
   type expired_borrow
