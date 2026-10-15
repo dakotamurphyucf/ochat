@@ -10,6 +10,8 @@ module Publisher = Agent_store.Developer_result_publisher
 module H = P.Host_invocation
 module Jobs = Developer_script_job_service
 module Script = Developer_script_job_execution
+module Runtime = Chat_response.Agent_runtime
+module Claim_scope = Agent_session.Developer_job_scope
 
 type t =
   { root : O.run
@@ -17,6 +19,7 @@ type t =
   ; publisher : Publisher.t
   ; env : Eio_unix.Stdenv.base
   ; managed : Agent_session.Native_tool_invocation.selected_managed_dispatch option
+  ; agent_runtime : Runtime.t option
   ; storage : Publisher.Storage.t
   ; jobs : Jobs.t
   ; authorize : H.t -> C.binding -> (unit, P.Error.t) result
@@ -44,6 +47,7 @@ let create
       ~storage
       ~env
       ~managed
+      ~agent_runtime
       ~jobs
       ~authorize
       ~prepare_output
@@ -51,13 +55,34 @@ let create
   if not (O.issued_by_store root store)
   then invalid "developer Tool runner has a foreign Store"
   else
+    let* () =
+      match agent_runtime with
+      | None -> Ok ()
+      | Some runtime ->
+        Runtime.admit_native_selection
+          runtime
+          ~selected:(O.native_ceiling root)
+          ~max_bindings:(O.job_policy root).execution.max_array_items
+          ~checkpoint:(fun () -> ())
+    in
     let* result_root = O.result_root root in
     let* publisher =
       Publisher.create ~sw ~runs:store ~root:result_root ~blobs ~limits:publisher_limits
     in
     let* native = N.create ~root in
     let* native = N.with_job_service native jobs in
-    Ok { root; native; publisher; env; managed; storage; jobs; authorize; prepare_output }
+    Ok
+      { root
+      ; native
+      ; publisher
+      ; env
+      ; managed
+      ; agent_runtime
+      ; storage
+      ; jobs
+      ; authorize
+      ; prepare_output
+      }
 ;;
 
 let issued_by_root t root = phys_equal t.root root
@@ -68,10 +93,13 @@ let decode t job =
   else B.of_json ~policy:(O.job_policy t.root) (P.Developer_job.payload job)
 ;;
 
-let classify request =
+let classify t request =
   match B.target_kind request, B.agent_artifact request with
   | B.Target_kind.Tool, None -> Availability.Runnable
-  | Tool, Some _ -> Agent_artifact_installer_unavailable
+  | Tool, Some _ ->
+    (match t.agent_runtime with
+     | None -> Agent_artifact_installer_unavailable
+     | Some _ -> Runnable)
   | Script, _ -> Runnable
 ;;
 
@@ -81,7 +109,7 @@ let availability t candidate =
   then Ok Availability.Unsupported_kind
   else (
     match decode t job with
-    | Ok request -> Ok (classify request)
+    | Ok request -> Ok (classify t request)
     | Error _ -> Ok Malformed_supported)
 ;;
 
@@ -180,6 +208,25 @@ let execute_with_budget t active claim job request deadline effective control =
   match prepared with
   | B.Script _ -> invalid "developer Script target has no installed executor"
   | Tool { capabilities; reference; input; policy } ->
+    let* binding =
+      C.resolve capabilities ~id:reference.id ~fingerprint:reference.fingerprint
+      |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
+    in
+    let* () =
+      match B.agent_artifact request, t.agent_runtime with
+      | None, _ -> Ok ()
+      | Some _, None -> invalid "saved Agent.run runtime is not installed"
+      | Some _, Some runtime ->
+        Runtime.require_saved_agent_source
+          runtime
+          ~binding
+          ~max_registrations:(O.job_policy t.root).execution.max_array_items
+          ~checkpoint:(fun () ->
+            Option.iter
+              control
+              ~f:(fun (control : Chatml.Chatml_lang.execution_control) ->
+                control.checkpoint ()))
+    in
     let* revision, completion_schema = selected_schema t capabilities reference in
     let context : H.context =
       { id = P.Id.Invocation.create ()
@@ -198,7 +245,7 @@ let execute_with_budget t active claim job request deadline effective control =
     let* invocation = H.create_developer context in
     Option.iter control ~f:(fun control ->
       control.Chatml.Chatml_lang.before_effect ~name:"Tool.call" ~spawned:false);
-    let* terminal =
+    let run_native () =
       N.run_job_child
         ~selected:capabilities
         t.native
@@ -208,6 +255,28 @@ let execute_with_budget t active claim job request deadline effective control =
         ~invocation
         ~authorize:t.authorize
         ~prepare_output:t.prepare_output
+    in
+    let* terminal =
+      match B.agent_artifact request with
+      | None -> run_native ()
+      | Some _ ->
+        let* parent = O.job_parent t.root active in
+        Agent_session.Captured_agent_runner.Claimed_developer.with_saved_artifact
+          ~active
+          ~parent
+          ~request
+          ~policy:(O.job_policy t.root)
+          ~prepared
+          ~binding
+          ~invocation
+          ~check_current:(fun () ->
+            let owner = O.owner t.root in
+            let capture_fingerprint =
+              Chatml_developer_capture.fingerprint (O.capture t.root)
+            in
+            let* () = Claim_scope.Parent.check parent ~owner ~capture_fingerprint in
+            Claim_scope.Parent.check_now parent ~owner ~capture_fingerprint)
+          run_native
     in
     let* outcome =
       H.outcome terminal
@@ -273,7 +342,7 @@ let execute_claimed t active =
   let job = Store.Claim.job claim in
   let* request = decode t job in
   let* () =
-    match classify request with
+    match classify t request with
     | Runnable -> Ok ()
     | Malformed_supported | Agent_artifact_installer_unavailable | Unsupported_kind ->
       invalid "developer background target has no installed executor"

@@ -370,7 +370,7 @@ let%expect_test
                Chat_response.Agent_runtime.prepare_agent_source
                  native
                  ~binding
-                 ~owner
+                 ~launch:(Chat_response.Source_launch.conversation owner)
                  ~request
                  ~max_registrations:16
                  ~checkpoint)

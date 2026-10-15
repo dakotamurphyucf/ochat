@@ -65,6 +65,7 @@ type selected_borrowed =
   ; active : bool Atomic.t
   ; domain_id : int
   ; ceiling : C.t option
+  ; effect_entry : (C.binding -> (unit, Agent_protocol.Error.t) result) option
   ; execution_context : Chatml_execution.context
   ; runtime_context : Chat_response.Runtime_request_scope.t option
   }
@@ -263,6 +264,84 @@ let selected_borrowed_capabilities (scope : selected_borrowed) =
          "selected developer borrow has no live verified capabilities")
 ;;
 
+let check_selected_source (scope : selected_borrowed) ~implementation =
+  let open Result.Let_syntax in
+  let invalid message = Error (Agent_protocol.Error.invalid_request message) in
+  let current_scope () =
+    selected_active scope
+    && Option.value_map
+         (Eio.Fiber.get selected_scope_key)
+         ~default:false
+         ~f:(fun active -> phys_equal active scope)
+  in
+  if not (current_scope ())
+  then invalid "selected developer source callback has expired"
+  else (
+    let%bind ceiling = selected_borrowed_capabilities scope in
+    let%bind selected = D.Selected.selected scope.issuer in
+    if not (current_scope ())
+    then invalid "selected developer source callback changed after admission"
+    else (
+      let context = Agent_protocol.Host_invocation.context scope.invocation in
+      if not (String.equal (C.fingerprint ceiling) context.capability_fingerprint)
+      then invalid "selected developer source registry differs from invocation"
+      else (
+        let%bind binding =
+          C.find ceiling ~name:context.tool_name
+          |> Result.map_error ~f:(fun error ->
+            Agent_protocol.Error.invalid_request error.C.message)
+        in
+        let reference = C.reference binding in
+        let%bind current =
+          C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
+          |> Result.map_error ~f:(fun error ->
+            Agent_protocol.Error.invalid_request error.C.message)
+        in
+        if
+          String.equal reference.implementation_revision context.implementation_revision
+          && Option.value_map
+               (C.native_implementation binding)
+               ~default:false
+               ~f:(phys_equal implementation)
+          && Option.value_map
+               (C.native_implementation current)
+               ~default:false
+               ~f:(phys_equal implementation)
+          && current_scope ()
+        then (
+          let%bind effect_entry =
+            scope.effect_entry
+            |> Result.of_option
+                 ~error:
+                   (Agent_protocol.Error.invalid_request
+                      "selected source has no physical effect admission")
+          in
+          let%bind () = effect_entry binding in
+          if current_scope ()
+          then Ok ()
+          else invalid "selected developer source callback expired after admission")
+        else invalid "selected developer source implementation changed")))
+;;
+
+let check_selected_content_context scope =
+  let open Result.Let_syntax in
+  let%bind ceiling = selected_borrowed_capabilities scope in
+  let context = Agent_protocol.Host_invocation.context scope.invocation in
+  let%bind binding =
+    C.find ceiling ~name:context.tool_name
+    |> Result.map_error ~f:(fun error ->
+      Agent_protocol.Error.invalid_request error.C.message)
+  in
+  let%bind implementation =
+    C.native_implementation binding
+    |> Result.of_option
+         ~error:
+           (Agent_protocol.Error.invalid_request
+              "selected developer content has no native invocation")
+  in
+  check_selected_source scope ~implementation
+;;
+
 let owned_borrowed_invocation (scope : owned_borrowed) = scope.invocation
 let owned_borrowed_execution_context (scope : owned_borrowed) = scope.execution_context
 
@@ -372,6 +451,7 @@ let with_owned_scope
 
 let with_selected_scope
       ?ceiling
+      ?effect_entry
       ?execution_context
       ?runtime_context
       ~issuer
@@ -394,6 +474,7 @@ let with_selected_scope
     ; active = Atomic.make true
     ; domain_id = (Stdlib.Domain.self () :> int)
     ; ceiling
+    ; effect_entry
     ; execution_context
     ; runtime_context
     }
@@ -757,6 +838,7 @@ let with_selected_managed_scope execution f =
   in
   with_selected_scope
     ~ceiling:(Chat_response.Extension_compiler.capabilities prepared)
+    ?effect_entry:scope.effect_entry
     ~issuer:scope.issuer
     ~parent_claim:scope.parent_claim
     ~execution_context:scope.execution_context
@@ -864,6 +946,7 @@ let with_developer_selected_capabilities selected f =
     in
     with_selected_scope
       ~ceiling:selected
+      ?effect_entry:scope.effect_entry
       ~issuer:scope.issuer
       ~parent_claim:scope.parent_claim
       ~execution_context:scope.execution_context
@@ -1185,6 +1268,7 @@ let run_owned_selected
          enter_callback ~dispatched (fun () ->
            with_selected_scope
              ~ceiling:(D.Selected.ceiling owner)
+             ~effect_entry
              ~issuer:owner
              ~parent_claim:active
              dispatched

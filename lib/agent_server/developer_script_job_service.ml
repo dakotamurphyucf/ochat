@@ -19,27 +19,31 @@ type t =
   ; env : Eio_unix.Stdenv.base
   ; current_actor : unit -> Operator_authorization.t
   ; prepare_source :
-      binding:C.binding
+      parent:source_parent
+      -> binding:C.binding
       -> request:B.t
       -> checkpoint:(unit -> unit)
       -> (B.Agent_artifact.t option, P.Error.t) result
   }
 
-type physical =
+and source_parent = { scope : scope }
+
+and physical =
   | Root of O.Action.t
   | Native of O.Native_terminal.t
   | Worker of O.Worker_action.t
 
-type native_selection =
+and native_selection =
   { terminal : O.Native_terminal.t
   ; physical : O.Native_terminal.Selection.t
   ; acknowledge : unit -> unit
   ; mutable acknowledged : bool
   }
 
-type scope =
+and scope =
   { service : t
   ; physical : physical
+  ; worker_parent : Agent_session.Developer_job_scope.Parent.t option
   ; mutable selected : C.t
   ; mutable selected_now : unit -> (C.t, P.Error.t) result
   ; kernel : K.t
@@ -100,6 +104,63 @@ let check scope =
   current scope
 ;;
 
+let check_scope = check
+
+module Source_parent = struct
+  type t = source_parent
+
+  let check t ~binding =
+    let* () = check_scope t.scope in
+    let reference = C.reference binding in
+    let* selected =
+      C.resolve t.scope.selected ~id:reference.id ~fingerprint:reference.fingerprint
+      |> Result.map_error ~f:(fun error -> invalid error.C.message)
+    in
+    let* current =
+      C.resolve
+        (O.native_selected t.scope.service.root)
+        ~id:reference.id
+        ~fingerprint:reference.fingerprint
+      |> Result.map_error ~f:(fun error -> invalid error.C.message)
+    in
+    match C.native_implementation binding with
+    | None -> Error (invalid "developer source binding is not native")
+    | Some implementation ->
+      if
+        Option.value_map
+          (C.native_implementation selected)
+          ~default:false
+          ~f:(phys_equal implementation)
+        && Option.value_map
+             (C.native_implementation current)
+             ~default:false
+             ~f:(phys_equal implementation)
+      then check_scope t.scope
+      else Error (invalid "developer source binding changed")
+  ;;
+
+  let launch t =
+    let* () = check_scope t.scope in
+    let* parent =
+      match t.scope.physical, t.scope.worker_parent with
+      | Root _, None -> Ok Chat_response.Source_launch.Developer_parent.Root_action
+      | Native terminal, None ->
+        Ok
+          (Chat_response.Source_launch.Developer_parent.Native_invocation
+             (H.context (O.Native_terminal.invocation terminal)).id)
+      | Worker _, Some parent ->
+        Ok
+          (Chat_response.Source_launch.Developer_parent.Worker_claim
+             { job_id = Agent_session.Developer_job_scope.Parent.job_id parent
+             ; attempt = Agent_session.Developer_job_scope.Parent.attempt parent
+             })
+      | (Root _ | Native _), Some _ | Worker _, None ->
+        Error (invalid "developer source parent is inconsistent")
+    in
+    Chat_response.Source_launch.developer ~owner:(O.owner t.scope.service.root) ~parent
+  ;;
+end
+
 let stage_physical scope ~checkpoint request =
   let checkpoint () =
     checkpoint ();
@@ -116,7 +177,7 @@ let stage_physical scope ~checkpoint request =
   | Worker action -> O.Worker_action.stage_background action ~request ~checkpoint
 ;;
 
-let rollback_physical scope id =
+let rollback_physical (scope : scope) id =
   match scope.physical with
   | Root action -> O.Action.rollback_staged action id
   | Native terminal -> O.Native_terminal.rollback_staged terminal id
@@ -239,7 +300,14 @@ let handlers scope : Ops.handlers =
           R.tool
             ~selected:scope.selected
             ~policy:(O.job_policy scope.service.root)
-            ~prepare_source:scope.service.prepare_source
+            ~prepare_source:(fun ~binding ~request ~checkpoint ->
+              let parent = { scope } in
+              let* () = Source_parent.check parent ~binding in
+              let* artifact =
+                scope.service.prepare_source ~parent ~binding ~request ~checkpoint
+              in
+              let* () = Source_parent.check parent ~binding in
+              Ok artifact)
             ~name
             ~input
             ~checkpoint:(fun () -> K.checkpoint scope.kernel)
@@ -315,7 +383,7 @@ let model_spawn_operation ?control scope =
 module Scope = struct
   type t = scope
 
-  let admit_managed t execution =
+  let admit_managed (t : t) execution =
     match t.physical with
     | Root _ | Worker _ ->
       Error (invalid "managed native admission requires a native scope")
@@ -424,6 +492,7 @@ let with_kernel service ~physical ~selected ~selected_now ~check_parent_now f =
        f
          { service
          ; physical
+         ; worker_parent = None
          ; selected
          ; selected_now
          ; kernel
@@ -456,6 +525,7 @@ let with_root_action service ~phase f =
            let scope =
              { service
              ; physical = Root issued
+             ; worker_parent = None
              ; selected
              ; selected_now = (fun () -> Ok (O.native_selected service.root))
              ; kernel
@@ -518,6 +588,7 @@ let with_claimed_worker service ~candidate ?on_capacity_decision ?select f =
               let scope =
                 { service
                 ; physical = Worker issued
+                ; worker_parent = Some parent
                 ; selected
                 ; selected_now
                 ; kernel
@@ -614,7 +685,7 @@ let with_native_scope service ~terminal ~borrowed ?ceiling ~check_parent_now f =
       (fun scope -> f ~scope)
 ;;
 
-let seal_native scope ~terminal ~outcome ~selected_jobs =
+let seal_native (scope : scope) ~terminal ~outcome ~selected_jobs =
   match scope.physical with
   | Root _ -> Error (invalid "root job scope cannot seal a native terminal")
   | Worker _ -> Error (invalid "worker job scope cannot seal a native terminal")
@@ -643,13 +714,13 @@ let seal_native scope ~terminal ~outcome ~selected_jobs =
        Ok selection)
 ;;
 
-let frozen_native scope ~terminal =
+let frozen_native (scope : scope) ~terminal =
   match scope.physical, scope.frozen with
   | Native actual, Some pair when phys_equal actual terminal -> Some pair
   | Native _, Some _ | Native _, None | Root _, _ | Worker _, _ -> None
 ;;
 
-let acknowledge_native scope selection =
+let acknowledge_native (scope : scope) selection =
   match scope.physical, scope.frozen with
   | Native terminal, Some (_, frozen)
     when phys_equal terminal selection.terminal

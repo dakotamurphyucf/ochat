@@ -109,6 +109,36 @@ val bind_installed
   -> sw:Eio.Switch.t
   -> (Chat_response.Tool.Agent_source_runner.t, Agent_protocol.Error.t) Result.t
 
+module Claimed_developer : sig
+  (** One saved ordinary Agent.run reference from the exact entered Worker Claim.
+      [request] must decode canonically from that Claim's payload under [policy].
+      [prepared] is the same request's genuinely re-admitted Tool execution,
+      and [binding] must be its resolved pinned native binding. The source scope
+      retains no capability registry, Store writer or child Session. It expires
+      when [f] returns and never makes a raw artifact reference authoritative.
+
+      [invocation] is the exact new Host invocation constructed for this
+      Claim and Tool request; the scope rejects a different or nested callback
+      even when it calls the same function under the same Worker. The later
+      native callback must present the actual selected_borrowed for that
+      invocation, same physical Worker Parent, selected binding and implementation.
+      The callback calls [check_current] after yielding restoration/selection
+      and before child execution; original exceptions and cancellation pass
+      through unchanged. A foreign or expired selected callback rejects rather
+      than falling back to File or a conversation native service. *)
+  val with_saved_artifact
+    :  active:Developer_job_scope.active
+    -> parent:Developer_job_scope.Parent.t
+    -> request:Chat_response.Background_request.t
+    -> policy:Chat_response.One_off_request.policy
+    -> prepared:Chat_response.Background_request.execution
+    -> binding:Chat_response.Tool_capability.binding
+    -> invocation:Agent_protocol.Host_invocation.t
+    -> check_current:(unit -> (unit, Agent_protocol.Error.t) result)
+    -> (unit -> ('a, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
+end
+
 module Source_binding : sig
   (** Immutable original-source template; borrows Store and source lease, without
       opening or claiming either. Bound ports belong to their actual resource

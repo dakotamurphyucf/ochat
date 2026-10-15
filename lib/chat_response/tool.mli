@@ -56,7 +56,7 @@ module Agent_source_runner : sig
     { revision : Chatml_source.Digest.t
     ; prepare :
         (declaration:Prompt.Chat_markdown.agent_tool
-         -> owner:Agent_protocol.Job.launch_owner
+         -> launch:Source_launch.t
          -> checkpoint:(unit -> unit)
          -> (Background_request.Agent_artifact.t, Agent_protocol.Error.t) Result.t)
           option

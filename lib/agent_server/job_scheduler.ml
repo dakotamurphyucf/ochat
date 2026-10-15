@@ -593,9 +593,9 @@ let claim_developer developer batch =
             Developer.clear_retry developer batch;
             Developer.Attempted)
        | Ok
-           ( Developer_background_job_runner.Availability
-             .Agent_artifact_installer_unavailable
-           | Developer_background_job_runner.Availability.Unsupported_kind ) -> loop rest)
+           ( Developer_background_job_runner.Availability.Unsupported_kind
+           | Developer_background_job_runner.Availability
+             .Agent_artifact_installer_unavailable ) -> loop rest)
   in
   loop (Developer.Batch.candidates batch)
 ;;

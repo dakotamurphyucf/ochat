@@ -53,6 +53,15 @@ module Parent : sig
   val attempt : t -> int
   val nested_depth : t -> int
 
+  (** Physical comparison of two expiring proofs for the SAME entered Claim,
+      issuing Store and Worker callback. IDs and attempts alone are insufficient.
+      This grants no new operation and does not extend either lifetime. *)
+  val same_claim : t -> t -> bool
+
+  (** Compare this proof with the exact entered callback passed to a claimed
+      source scope. False after expiry or across even equal-looking attempts. *)
+  val same_active : t -> active -> bool
+
   (** Verify exact owner/capture and current durable Claim/epoch through the
       issuing Store. This can yield. A later effect must also call [check_now]
       after its last yielding permission, root-current and Store operation. *)

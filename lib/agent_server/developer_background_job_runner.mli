@@ -22,7 +22,19 @@ end
     physically bound to that Store. [sw] is the owning run/service switch and
     outlives every joined worker and retained publisher selection. [managed]
     is the host's selected managed dispatcher, not an authority supplied by a
-    job payload. [jobs] must be issued by this same physical root; the
+    job payload. [agent_runtime] borrows the assembler's already constructed
+    runtime for the same physical native implementations and switch lifetime;
+    it is never reconstructed or owned by this runner. At construction, every
+    binding in [root]'s native ceiling must resolve to the exact same live
+    runtime reference and physical implementation (managed bindings remain
+    owned by [managed]). The finite root job-policy array ceiling bounds this
+    constructor comparison before selected-reference allocation. The separate
+    registered-source traversal is bounded at dispatch under the same ceiling. A
+    missing runtime permits ordinary Tool/Script work, but a valid saved
+    Agent.run artifact remains installer-unavailable and unclaimed. A matching runtime is still
+    only a borrowed comparison source: the entered Claim, selected binding,
+    original/current actor and registered source are rechecked after waits at
+    the effect boundary. [jobs] must be issued by this same physical root; the
     constructor installs it through the existing native with_job_service path
     so managed Tool callbacks can stage actual child jobs and use their selected
     Developer_tool_v1 Model.spawn admission. It also retains that same service
@@ -40,6 +52,7 @@ val create
   -> storage:Agent_store.Developer_result_publisher.Storage.t
   -> env:Eio_unix.Stdenv.base
   -> managed:Agent_session.Native_tool_invocation.selected_managed_dispatch option
+  -> agent_runtime:Chat_response.Agent_runtime.t option
   -> jobs:Developer_script_job_service.t
   -> authorize:
        (Agent_protocol.Host_invocation.t
@@ -56,12 +69,15 @@ val issued_by_root : t -> Developer_root_owner.run -> bool
 
 (** Scheduling classification only, not execution authority. Decode the
     bounded saved payload from the authentic candidate. Tool and Script are
-    runnable; v2 Agent.run artifacts remain unavailable until their physical
-    installer exists, so the scheduler leaves those Queued without a claim.
+    runnable, including Tools with saved v2 Agent.run references when the
+    actual runtime is installed. Without that runtime, a valid saved artifact
+    remains [Agent_artifact_installer_unavailable] and unclaimed. Runnable
+    classification grants no source authority: the entered Worker re-decodes
+    its Claim, and the actual selected native callback restores the exact pin.
     A malformed saved Async_tool payload is [Malformed_supported]: the same
     runner physically claims it, decodes again inside the Worker callback and
-    persists Failed without a handler effect. Other job kinds and a valid but
-    uninstalled v2 artifact remain unclaimed. A foreign or stale candidate
+    persists Failed without a handler effect. Other job kinds remain unclaimed.
+    A foreign or stale candidate
     cannot execute: the physical claim path rechecks it.
     The later active Claim is decoded again before either execution. This
     projection never grants an effect or result. *)
@@ -76,7 +92,8 @@ val availability
     Developer_script_job_service.with_claimed_worker (Script). Saturated,
     not-due or stale work returns [Ok None] without a callback. Under the
     physically entered Claim: require Async_tool and the admitted target form;
-    reject an uninstalled v2 agent artifact before any effect; decode
+    require an exact selected ordinary Agent.run source binding for a v2
+    artifact before any effect; decode
     and re-admit its immutable payload with the root's policy; rebind its pinned
     selected capability after preparation; derive the invocation owner,
     parent_job/attempt/depth, input and deadline from that Claim and request.
