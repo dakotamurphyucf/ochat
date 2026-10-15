@@ -43,6 +43,7 @@ let run_entries
     ~on_inference_attempt:ctx.on_inference_attempt
     ~on_inference_completion:ctx.on_inference_completion
     ~on_inference_observation:ctx.on_inference_observation
+    ~submission_guard:ctx.submission_guard
     ~inference_relation:ctx.inference_relation
     ?datadir:response_dir
     ~allocator

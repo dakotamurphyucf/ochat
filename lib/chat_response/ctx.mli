@@ -34,6 +34,7 @@ type 'env t = private
   ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
   ; on_inference_completion : Inference_client.Completion.t -> unit
   ; on_inference_observation : Inference.Observation.t -> unit
+  ; submission_guard : Inference_runtime.Submission_guard.t
   ; env : 'env (** Underlying Eio standard environment. *)
   ; dir : Eio.Fs.dir_ty Eio.Path.t
     (** Base directory used when a function needs to access the
@@ -94,6 +95,13 @@ val with_inference_attempt_guard
   :  'env t
   -> before_attempt:(Inference_runtime.Attempt.t -> unit)
   -> 'env t
+
+(** Append a physically issued application-submit guard without removing
+    inherited parent checks. Context copies, nested inference and auxiliary
+    requests retain the composed guard. The default is empty for ordinary
+    conversation execution. Constructing a guard does not itself authorize
+    provider selection, an actor, a Claim or a tool effect. *)
+val with_submission_guard : 'env t -> Inference_runtime.Submission_guard.t -> 'env t
 
 (** Rebind only the explicitly selected inference context, retaining host identity
     and observers. Call Context.derive or the host resolver/policy first; this
