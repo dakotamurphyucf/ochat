@@ -181,6 +181,7 @@ let shared_features =
     , [ "lib/agent_protocol/developer_agent_artifact.ml"
       ; "lib/chat_response/background_request.ml"
       ; "lib/agent_session/captured_agent_runner.ml"
+      ; "lib/agent_session/developer_child_preflight.ml"
       ; "lib/agent_store/developer_run_document.ml"
       ; "lib/agent_store/developer_run_store.ml"
       ; "lib/agent_server/developer_root_owner.ml"
@@ -376,7 +377,9 @@ let implementation_sources =
   ; ( "lib/agent_session/background_execution.ml"
     , "2149c979ce81c6c851c8d8cbe749c622334f3c43d05b72b17ae89873e5d563c3" )
   ; ( "lib/agent_session/captured_agent_runner.ml"
-    , "137e6d2695b61c257c87dbedf81d21ffd66e7cf73a3e6628f39b5627173dd90b" )
+    , "bab8c5b7e28689f1366c3e781b0a7f490705ad23a7bb40e360e68b599c6ff09a" )
+  ; ( "lib/agent_session/developer_child_preflight.ml"
+    , "8a954694e652731261f32fb0eeedfd2dbb79a626198cef88150333dfa7772514" )
   ; ( "lib/agent_store/developer_run_document.ml"
     , "7274f5aa4214a9fe6fd16614e6f9163d2aeb36b72e12160adb4389f45566fcf7" )
   ; ( "lib/agent_store/developer_run_store.ml"

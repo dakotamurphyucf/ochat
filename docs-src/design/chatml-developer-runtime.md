@@ -65,6 +65,16 @@ scripts, nested Agent content and document/image fetches reject before Driver
 can expose them. This is an interim lower runtime boundary; hosted assembly and
 full nested child capabilities remain separate M5 work.
 
+The [child preflight](../../lib/agent_session/developer_child_preflight.mli)
+reads the genuine parser projection and bounded caller input before any
+selected-child host prepares effects. Its literal mode retains the strict
+lower boundary. Its selected mode rejects content fetches, moderation,
+unowned nested Agents and the Driver's special `fork` route; a host must still
+prove the saved target, physical Root and child policy before installing any
+tool. The scan admits at most 16,384 nodes and 8 MiB of text and propagates
+the caller's cancellation checkpoint. Passing it is classification, not an
+execution grant. The selected-child host remains to be installed.
+
 A physically claimed developer Worker borrows the same lexical kernel through a
 [Worker action](../../lib/agent_server/developer_root_owner.mli). It derives the
 saved Script request's selected capability ceiling before effects and rebinds

@@ -168,6 +168,13 @@ module Claimed_developer : sig
         physical Native_terminal, current actor, provider and epoch. *)
     val check_now : t -> (unit, Agent_protocol.Error.t) result
 
+    (** Comparison only: is this the same physical selected-native borrow that
+        originally entered the saved Agent callback? The caller must first
+        obtain [borrowed] from the current fiber and separately run [check_now]
+        or the exact descendant check. A copied ID or equal capability does not
+        classify the execution phase. *)
+    val matches_borrowed : t -> Native_tool_invocation.selected_borrowed -> bool
+
     (** The saved selected callback remains the exact ancestor of a current
         nested native borrow. This does not bypass the direct [check_now] at
         saved-source entry; it is only for the physically descended child
