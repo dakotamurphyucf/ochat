@@ -309,6 +309,140 @@ let with_current
            value))
 ;;
 
+let parent_scope_error = function
+  | Authoring_parent_scope.Error.Foreign_operation | Stale_parent -> Error.Stale_context
+  | Unauthorized -> Error.Unauthorized
+  | Busy -> Error.Busy
+  | Prior_unavailable -> Error.Selection_unavailable
+;;
+
+let with_parent_scope
+      ?script_selection
+      t
+      ~actor
+      ~connection
+      ~expected
+      ~operation
+      ~checkpoint
+      ~f
+  =
+  with_current
+    ~feature:Selected_feature.Bundle_upload
+    t
+    ~actor
+    ~connection
+    ~expected
+    ~checkpoint
+    ~f:(fun current ~checkpoint ->
+      let open Result.Let_syntax in
+      let context = current.Current.context in
+      let%bind origin =
+        match context.owner with
+        | Host_project _ ->
+          let%map inputs = Current.project_inputs current ~checkpoint in
+          Authoring_parent_scope.Origin.Project (Ledger.Inputs.base inputs)
+        | Uploaded_project capture ->
+          let%map inputs = Current.project_inputs current ~checkpoint in
+          Authoring_parent_scope.Origin.Uploaded_project
+            { previous = Ledger.Inputs.base inputs
+            ; pin = Upload.Context_capture.published_pin capture
+            }
+        | Host_document _ | Supplied_document _ ->
+          let%bind inputs = Current.document_inputs current ~checkpoint in
+          let selected =
+            match current.retained_document_capture with
+            | Some retained
+              when Retained_document_capture.matches_current retained ~context ~inputs ->
+              Some
+                Authoring_parent_scope.Origin.
+                  { capture = Retained_document_capture.capture retained
+                  ; rows = Retained_document_capture.selection_rows retained
+                  ; original_actor = context.original_actor
+                  ; script_selection
+                  }
+            | Some _ | None -> None
+          in
+          Ok (Authoring_parent_scope.Origin.Document { inputs; selected })
+      in
+      let live = current.live in
+      let scope_error = function
+        | Error.Busy -> Authoring_parent_scope.Error.Busy
+        | Unauthorized | Expired_actor | Foreign_connection -> Unauthorized
+        | Selection_unavailable -> Prior_unavailable
+        | Uninstalled
+        | Unselected_feature
+        | Closed
+        | Stale_context
+        | Stale_source
+        | Stale_negotiation
+        | Source_unavailable
+        | Invalid_request
+        | Invalid_position _
+        | Resource_limit
+        | Storage_unavailable
+        | Analysis_unavailable
+        | Checked_template_failed
+        | Upload_failure _ -> Stale_parent
+      in
+      let check_current_now () =
+        let open Result.Let_syntax in
+        let%bind () =
+          (match context.owner with
+           | Uploaded_project capture ->
+             (match t.upload with
+              | None -> Error Error.Uninstalled
+              | Some upload ->
+                Upload.check_context_selection_policy_now upload ~actor capture
+                |> Result.map_error ~f:upload_host_error)
+           | Host_project _ | Host_document _ | Supplied_document _ ->
+             check_context_selection_now t context ~actor)
+          |> Result.map_error ~f:scope_error
+        in
+        try_with_gate t (fun () ->
+          let%bind () = check_domain t in
+          let%bind () = check_actor_context context.original_actor actor in
+          match find_connection t connection with
+          | Some entry ->
+            let%bind () = check_entry t entry in
+            if not (valid_negotiation entry)
+            then Error Error.Stale_negotiation
+            else (
+              match find_context entry context.id with
+              | Some actual
+                when phys_equal actual context
+                     && P.Authoring.Context.Expected.equal
+                          expected
+                          (P.Authoring.Context.Expected.of_view actual.view)
+                     && phys_equal current.borrowed_project_cache t.project_cache
+                     && phys_equal current.borrowed_document_cache t.document_cache
+                     && Retained_document_capture.same_head
+                          current.retained_document_capture
+                          t.document_capture
+                     && phys_equal current.borrowed_analysis_index t.analysis_index
+                     && Authoring_provisional_index.same_head
+                          current.borrowed_provisional_index
+                          t.provisional_index
+                     && phys_equal current.borrowed_checked_templates t.checked_templates
+                -> Ok ()
+              | Some _ | None -> Error Error.Stale_context)
+          | None -> Error Error.Stale_negotiation)
+        |> Result.map_error ~f:scope_error
+      in
+      let%bind scope =
+        Authoring_parent_scope.issue
+          ~operation
+          ~host:t.host
+          ~connection
+          ~actor
+          ~expected
+          ~live
+          ~check_current_now
+          ~origin
+        |> Result.map_error ~f:parent_scope_error
+      in
+      f scope ~checkpoint)
+;;
+
 let view_of_context t ledger ~id ~identity ~origin ~checkpoint =
   Authoring_context_projection.view_of_context
     ~host:t.host

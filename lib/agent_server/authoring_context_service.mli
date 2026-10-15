@@ -649,11 +649,16 @@ val handle_capabilities
   -> (W.Response.t, Error.t) result
 
 (** Route the four bundle methods through the independently authorized upload
-    host. An upload-only connection needs the selected bundle feature but no
-    core feature or source context. This handler does not advertise itself;
-    installation and transport routing belong to the protocol installer. *)
+    host. Parentless requests can use a bundle-only connection. A request with
+    a parent must additionally borrow the actual same-connection Core context
+    and, for an independently selected Document prior, the installed script
+    policy. That policy rechecks genuine current Parsed/declaration/Build
+    evidence; a wire Expected cannot grant parent authority. This handler does
+    not advertise itself; installation and transport routing belong to the
+    protocol installer. *)
 val handle_bundle
-  :  t
+  :  ?script_selection:Semantic.Script_selection.Policy.t
+  -> t
   -> actor:Operator_authorization.t
   -> connection:Connection_context.t
   -> W.Request.t

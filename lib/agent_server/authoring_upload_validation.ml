@@ -7,6 +7,7 @@ module Document = Chatml_authoring_bundle_document
 module Build = Chatml_project_build
 module Prepared = Chatml_prepared_program
 module Captured = Chatml_source
+module Source = Agent_protocol.Authoring_common.Source
 
 module Selected = struct
   type t =
@@ -47,6 +48,7 @@ end
 
 type target =
   { selector : Bundle.Manifest.Script.Selector.t option
+  ; raw : Selected.t
   ; selected : Selected.t
   }
 
@@ -67,17 +69,23 @@ let selectors manifest =
       | Selected_project _ -> Some (Some (Bundle.Manifest.Script.selector script)))
 ;;
 
-let admit policy ~actor ~manifest ~checkpoint =
-  let* targets =
-    List.fold (selectors manifest) ~init:(Ok []) ~f:(fun result selector ->
-      let* targets = result in
-      checkpoint ();
-      match policy.Policy.select actor manifest selector with
-      | None -> Error Error.Unavailable
-      | Some selected -> Ok ({ selector; selected } :: targets))
-  in
-  Ok { manifest; targets = List.rev targets }
-;;
+module Parent_previous = struct
+  type t =
+    { manifest : Bundle.Manifest.t
+    ; targets : (Bundle.Manifest.Script.Selector.t option * Build.t option) list
+    }
+
+  let prepare manifest ~checkpoint ~select =
+    let* targets =
+      List.fold (selectors manifest) ~init:(Ok []) ~f:(fun result selector ->
+        let* targets = result in
+        checkpoint ();
+        let* previous = select selector ~checkpoint in
+        Ok ((selector, previous) :: targets))
+    in
+    Ok { manifest; targets = List.rev targets }
+  ;;
+end
 
 let same_source left right =
   Captured.Id.equal (Captured.id left) (Captured.id right)
@@ -96,6 +104,91 @@ let same_previous left right =
   | None, Some _ | Some _, None -> false
 ;;
 
+let selected_previous_lock manifest selector ~checkpoint =
+  let project =
+    match Bundle.Manifest.basis manifest, selector with
+    | Project project, None -> Some project
+    | Chatmd_document document, Some selector ->
+      List.find_map (Bundle.Manifest.Chatmd_document.scripts document) ~f:(fun script ->
+        checkpoint ();
+        if
+          Bundle.Manifest.Script.Selector.equal
+            selector
+            (Bundle.Manifest.Script.selector script)
+        then (
+          match Bundle.Manifest.Script.choice script with
+          | Source_only -> None
+          | Selected_project project -> Some project)
+        else None)
+    | Project _, Some _ | Chatmd_document _, None -> None
+  in
+  match project with
+  | None -> Error Error.Invalid_closure
+  | Some project ->
+    (match Bundle.Manifest.Project.mode project with
+     | Exact_lock _ | Compose { selected_previous_lock = None; _ } -> Ok None
+     | Compose { selected_previous_lock = Some metadata; _ } -> Ok (Some metadata))
+;;
+
+let same_lock_metadata build metadata =
+  let lock = Build.lock_source build in
+  Captured.Id.equal (Captured.id lock) (Source.id metadata)
+  && Captured.Digest.equal (Captured.digest lock) (Source.digest metadata)
+  && Int.equal (Captured.byte_length lock) (Source.byte_length metadata)
+;;
+
+let admit policy ~actor ~manifest ~parent_previous ~checkpoint =
+  let* targets_with_previous =
+    match parent_previous with
+    | None -> Ok (List.map (selectors manifest) ~f:(fun selector -> selector, None))
+    | Some prepared ->
+      if not (Bundle.Manifest.equal manifest prepared.Parent_previous.manifest)
+      then Error Error.Invalid_closure
+      else (
+        match List.zip (selectors manifest) prepared.targets with
+        | Unequal_lengths -> Error Error.Invalid_closure
+        | Ok pairs ->
+          if
+            List.for_all pairs ~f:(fun (selector, (prepared_selector, _)) ->
+              checkpoint ();
+              Option.equal
+                Bundle.Manifest.Script.Selector.equal
+                selector
+                prepared_selector)
+          then
+            Ok
+              (List.map pairs ~f:(fun (selector, (_, previous)) ->
+                 selector, Some previous))
+          else Error Error.Invalid_closure)
+  in
+  let* targets =
+    List.fold targets_with_previous ~init:(Ok []) ~f:(fun result (selector, prior) ->
+      let* targets = result in
+      checkpoint ();
+      match policy.Policy.select actor manifest selector with
+      | None -> Error Error.Unavailable
+      | Some raw ->
+        let* selected =
+          match prior with
+          | None -> Ok raw
+          | Some previous ->
+            if Option.is_some raw.previous && not (same_previous raw.previous previous)
+            then Error Error.Unavailable
+            else Ok { raw with previous }
+        in
+        let* required_previous = selected_previous_lock manifest selector ~checkpoint in
+        let* () =
+          match required_previous, selected.previous with
+          | None, _ -> Ok ()
+          | Some metadata, Some previous when same_lock_metadata previous metadata ->
+            Ok ()
+          | Some _, None | Some _, Some _ -> Error Error.Unavailable
+        in
+        Ok ({ selector; raw; selected } :: targets))
+  in
+  Ok { manifest; targets = List.rev targets }
+;;
+
 let same_selected left right ~checkpoint =
   checkpoint ();
   String.equal left.Selected.environment right.Selected.environment
@@ -110,7 +203,7 @@ let check_current t ~policy ~actor ~checkpoint =
     checkpoint ();
     match policy.Policy.select actor t.manifest target.selector with
     | None -> false
-    | Some current -> same_selected target.selected current ~checkpoint)
+    | Some current -> same_selected target.raw current ~checkpoint)
 ;;
 
 let target t selector =

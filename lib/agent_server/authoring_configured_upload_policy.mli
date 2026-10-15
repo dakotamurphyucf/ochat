@@ -36,10 +36,9 @@ val upload_policy : t -> Host.Upload_policy.t
     manifest, then use its Selected_project selection; Source_only supplies no
     selected Project. These are coordinates for an administrator mapping,
     never native source/path grants. An actor without Publish or a missing
-    mapping returns None. Only fresh Exact_lock/Compose-with-no-selected-prior
-    can select previous=None; any required prior lock returns None until an
-    authentic Core parent Build is installed by the dependent custody work.
-    Lower captured-only validation still proves exact source/graph closure. *)
+    mapping returns None. A configured target has no previous Build of its
+    own; a required Compose prior succeeds only when the physical Core parent
+    supplies the exact Build before captured-only closure validation. *)
 val publication_policy : t -> Host.Publication_policy.t
 
 (** Independent Bundle_read AND Rebind permissions are checked before saved

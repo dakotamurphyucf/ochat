@@ -107,6 +107,36 @@ module Error = struct
   ;;
 end
 
+module Parent_admission = struct
+  module Operation = struct
+    type t =
+      | Begin
+      | Publish
+    [@@deriving equal]
+  end
+
+  type t =
+    { host_id : Agent_protocol.Id.Server.t
+    ; expected : Agent_protocol.Authoring.Context.Expected.t
+    ; check_now :
+        Operation.t
+        -> connection:Connection_context.t
+        -> actor:Actor.t
+        -> expected:Agent_protocol.Authoring.Context.Expected.t
+        -> (unit, Error.t) result
+    ; previous_for :
+        Bundle.Manifest.t
+        -> selector:Bundle.Manifest.Script.Selector.t option
+        -> checkpoint:(unit -> unit)
+        -> (Chatml_project_build.t option, Error.t) result
+    ; parent_pin : Store.Published_pin.t option
+    }
+
+  let create ~host_id ~expected ~check_now ~previous_for ~parent_pin () =
+    { host_id; expected; check_now; previous_for; parent_pin }
+  ;;
+end
+
 type t =
   { domain : int
   ; store : Store.t
@@ -132,6 +162,7 @@ module Context_capture = struct
     }
 
   let rebound t = t.rebound
+  let published_pin t = t.pin
   let project_contract t = Rebind_validation.project_contract t.selected
 end
 
@@ -172,6 +203,19 @@ let check t actor operation parent =
        | None -> Error Error.Selection_unavailable
        | Some authorize_parent ->
          if authorize_parent actor expected then Ok () else Error Error.Unauthorized))
+;;
+
+let check_parent_admission t ~actor ~operation ~connection ~parent ~admission =
+  match parent, admission with
+  | None, None -> Ok ()
+  | Some expected, Some admission ->
+    if
+      (not
+         (Agent_protocol.Id.Server.equal admission.Parent_admission.host_id (host_id t)))
+      || not (Agent_protocol.Authoring.Context.Expected.equal admission.expected expected)
+    then Error Error.Stale_capture
+    else admission.check_now operation ~connection ~actor ~expected
+  | None, Some _ | Some _, None -> Error Error.Selection_unavailable
 ;;
 
 let check_upload_current_now t ~actor ~operation = check t actor operation None
@@ -232,11 +276,27 @@ let with_operation t ~actor ~check ~map_error ~checkpoint f =
   | `Raised (exn, backtrace) -> Stdlib.Printexc.raise_with_backtrace exn backtrace
 ;;
 
-let with_request t ~actor ~operation ~parent ~checkpoint f =
+let with_request ?connection ?parent_admission t ~actor ~operation ~parent ~checkpoint f =
   with_operation
     t
     ~actor
-    ~check:(fun () -> check t actor operation parent)
+    ~check:(fun () ->
+      let open Result.Let_syntax in
+      let%bind () = check t actor operation parent in
+      match parent, connection, parent_admission with
+      | None, _, None -> Ok ()
+      | Some _, Some connection, _ ->
+        check_parent_admission
+          t
+          ~actor
+          ~operation:
+            (match operation with
+             | Upload_policy.Operation.Write -> Parent_admission.Operation.Begin
+             | Publish | Commit -> Parent_admission.Operation.Publish)
+          ~connection
+          ~parent
+          ~admission:parent_admission
+      | None, _, Some _ | Some _, None, _ -> Error Error.Selection_unavailable)
     ~map_error:Error.of_store
     ~checkpoint
     f
@@ -290,8 +350,17 @@ let create ?publication ?rebind store ~sw ~clock ~upload_policy =
   t
 ;;
 
-let begin_upload t ~actor ~(request : Bundle.Begin.request) ~checkpoint =
+let begin_upload
+      t
+      ~actor
+      ~connection
+      ~parent_admission
+      ~(request : Bundle.Begin.request)
+      ~checkpoint
+  =
   with_request
+    ~connection
+    ?parent_admission
     t
     ~actor
     ~operation:Upload_policy.Operation.Write
@@ -323,15 +392,17 @@ let claim_commit t ~actor ~request ~checkpoint =
        Store.claim_commit t.store ~principal ~request ~now ~checkpoint)
 ;;
 
-let publish t ~actor ~sealed ~checkpoint =
+let publish t ~actor ~connection ~parent_admission ~sealed ~checkpoint =
   match t.publication with
   | None -> Error Error.Selection_unavailable
   | Some publication ->
     with_request
+      ~connection
+      ?parent_admission
       t
       ~actor
       ~operation:Upload_policy.Operation.Publish
-      ~parent:None
+      ~parent:(Store.sealed_parent_context sealed)
       ~checkpoint
       (fun ~principal ~now ~checkpoint ->
          let snapshot = Store.snapshot t.store ~principal sealed ~now ~checkpoint in
@@ -339,8 +410,29 @@ let publish t ~actor ~sealed ~checkpoint =
          | Error _ as error -> error
          | Ok snapshot ->
            let manifest = Store.Snapshot.manifest snapshot in
+           let parent_previous =
+             match parent_admission with
+             | None -> Ok None
+             | Some admission ->
+               Validation.Parent_previous.prepare
+                 manifest
+                 ~checkpoint
+                 ~select:(fun selector ~checkpoint ->
+                   admission.Parent_admission.previous_for manifest ~selector ~checkpoint)
+               |> Result.map ~f:Option.some
+           in
+           let parent_previous =
+             match parent_previous with
+             | Ok value -> value
+             | Error error -> raise (Revoked error)
+           in
            let selection =
-             Validation.admit publication.policy ~actor ~manifest ~checkpoint
+             Validation.admit
+               publication.policy
+               ~actor
+               ~manifest
+               ~parent_previous
+               ~checkpoint
            in
            (match selection with
             | Error (Unavailable | Invalid_closure | Resource_limit) ->
@@ -395,7 +487,21 @@ let publish t ~actor ~sealed ~checkpoint =
                | Ok proof ->
                  let final_admission () =
                    check_or_raise (fun () ->
-                     check t actor Upload_policy.Operation.Publish None);
+                     let open Result.Let_syntax in
+                     let%bind () =
+                       check
+                         t
+                         actor
+                         Upload_policy.Operation.Publish
+                         (Store.sealed_parent_context sealed)
+                     in
+                     check_parent_admission
+                       t
+                       ~actor
+                       ~operation:Parent_admission.Operation.Publish
+                       ~connection
+                       ~parent:(Store.sealed_parent_context sealed)
+                       ~admission:parent_admission);
                    if
                      not
                        (Validation.check_current
@@ -411,6 +517,9 @@ let publish t ~actor ~sealed ~checkpoint =
                    sealed
                    ~snapshot
                    ~proof
+                   ~parent_pin:
+                     (Option.bind parent_admission ~f:(fun admitted ->
+                        admitted.Parent_admission.parent_pin))
                    ~now
                    ~checkpoint:selected_checkpoint
                    ~final_admission)))
@@ -508,7 +617,7 @@ let capture_for_context t ~actor ~bundle_id ~checkpoint =
         { owner = t; original_actor = actor; selected; pin; rebound = result })
 ;;
 
-let check_context_selection_now t ~actor (capture : Context_capture.t) =
+let check_context_selection_policy_now t ~actor (capture : Context_capture.t) =
   match t.rebind with
   | None -> Error Error.Selection_unavailable
   | Some config ->
@@ -536,6 +645,17 @@ let check_context_selection_now t ~actor (capture : Context_capture.t) =
       check ())
 ;;
 
+let check_context_selection_now t ~actor (capture : Context_capture.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_context_selection_policy_now t ~actor capture in
+  Store.check_published_pin_now
+    t.store
+    ~principal:(Actor.principal actor).id
+    capture.pin
+    ~now:t.now
+  |> Result.map_error ~f:Error.of_store
+;;
+
 let check_context_current t ~actor (capture : Context_capture.t) ~checkpoint =
   match t.rebind with
   | None -> Error Error.Selection_unavailable
@@ -546,7 +666,7 @@ let check_context_current t ~actor (capture : Context_capture.t) ~checkpoint =
       with_operation
         t
         ~actor
-        ~check:(fun () -> check_context_selection_now t ~actor capture)
+        ~check:(fun () -> check_context_selection_policy_now t ~actor capture)
         ~map_error:Fn.id
         ~checkpoint
         (fun ~principal ~now ~checkpoint ->

@@ -27,12 +27,12 @@ module Upload_policy : sig
       Commit requires both write and publication, and the already sealed
       marker requires [authorize_publish]. These are independent of
       Send_messages and project/source-read grants. When installed,
-      [authorize_parent] checks an optional parent-context reference against the actual current context and read
-      grant; a wire-supplied Expected value is never custody by itself. A
-      configured host with no parent policy returns Selection_unavailable for
-      a parent-bearing begin before any Store write; this is the honest
-      parentless deployment boundary until a physical Core parent policy is
-      installed. A request without a parent needs no source context. Unexpected callback
+      [authorize_parent] is an additional configured parent grant; physical
+      custody comes from the live Core [Authoring_parent_scope] whenever the
+      persisted upload has parent provenance. A configured host with no parent
+      policy returns Selection_unavailable for a parent-bearing begin before
+      any Store write. A request without a parent needs no source context.
+      Unexpected callback
       exceptions propagate with their original backtrace. *)
   val create
     :  authorize_write:(Operator_authorization.t -> bool)
@@ -156,6 +156,10 @@ module Context_capture : sig
       continuing bundle-read or execution grant. *)
   val rebound : t -> Rebound.t
 
+  (** The exact parent Store pin retained by this physical uploaded context.
+      Comparison only: it does not authorize bundle read or publication. *)
+  val published_pin : t -> Store.Published_pin.t
+
   (** The one actual top-level Project selection retained in this rebind.
       ChatMD document bundles have per-script selections and return [None].
       The contract is comparison data, never a fresh bundle-read grant. *)
@@ -197,6 +201,48 @@ module Error : sig
   val sexp_of_t : t -> Sexp.t
 end
 
+module Parent_admission : sig
+  type t
+
+  module Operation : sig
+    type t =
+      | Begin
+      | Publish
+    [@@deriving equal]
+  end
+
+  (** Trusted host callback port, not authority minted from a wire Expected.
+      The installed bundle handler obtains these closures only from a live
+      [Authoring_context_owner.with_parent_scope] on the same physical Core
+      connection. Host integrations that construct this port themselves own
+      the equivalent physical-currentness proof; this constructor does not
+      authenticate an arbitrary callback. [check_now] is bounded,
+      nonyielding, and uses a try-lock rather than waiting while Upload_host
+      or Store owns a gate. It checks original/current actors, physical
+      connection, owner/generation, operation and current selected policy.
+      [previous_for] walks only retained immutable genuine parent evidence
+      under [checkpoint]; it never fetches a source or parses on completion.
+      [parent_pin] is present only for an uploaded parent verified by the SAME
+      Store. Store independently checks that pin before durable publication. *)
+  val create
+    :  host_id:Agent_protocol.Id.Server.t
+    -> expected:Agent_protocol.Authoring.Context.Expected.t
+    -> check_now:
+         (Operation.t
+          -> connection:Connection_context.t
+          -> actor:Operator_authorization.t
+          -> expected:Agent_protocol.Authoring.Context.Expected.t
+          -> (unit, Error.t) result)
+    -> previous_for:
+         (Bundle.Manifest.t
+          -> selector:Bundle.Manifest.Script.Selector.t option
+          -> checkpoint:(unit -> unit)
+          -> (Chatml_project_build.t option, Error.t) result)
+    -> parent_pin:Store.Published_pin.t option
+    -> unit
+    -> t
+end
+
 (** Bounded non-yielding current actor/operation-grant check for a caller's final
     publication boundary after its own yielding lifecycle gate. This grants no
     store lookup or source read; each upload operation still uses its guarded
@@ -236,8 +282,9 @@ val create
     A revoked
     request has no successful reply, even if an already durable mutation must
     later be reconciled by an authorized retry/status. Optional parent
-    provenance is checked at begin against current context authority; the
-    uploaded immutable source inventory is thereafter independent of that
+    provenance is checked at begin and exact commit retry against the current
+    physical Core context authority, including original and request actors.
+    The uploaded immutable source inventory is thereafter independent of that
     read context. Reentrant calls from any active ancestor operation (including
     an inherited child fiber) return Busy before waiting for the host gate. A
     callback cancellation or unexpected exception is rethrown
@@ -245,9 +292,17 @@ val create
 val begin_upload
   :  t
   -> actor:Operator_authorization.t
+  -> connection:Connection_context.t
+  -> parent_admission:Parent_admission.t option
   -> request:Bundle.Begin.request
   -> checkpoint:(unit -> unit)
   -> (Bundle.Begin.response, Error.t) result
+
+(** [parent_admission] is [None] exactly when the request has no parent. A parent
+    request requires a live Begin admission for this physical connection,
+    host, actor and Expected. The host repeats that check at guarded
+    checkpoints before and after yielding Store work. Late revocation may
+    leave an exact idempotent begin, never a success reply. *)
 
 val chunk
   :  t
@@ -270,10 +325,20 @@ val claim_commit
     with a coarse path-free reason before any intent; loss of selection or grant
     never causes a false rejection or publication. An installed configured
     upload-only publisher may publish under its explicit grants and selected
-    target; an absent publisher returns Selection_unavailable. *)
+    target; an absent publisher returns Selection_unavailable. The parent
+    Expected comes from the persisted sealed claim, not a commit DTO.
+    [parent_admission] is required exactly for a parent-bearing claim and must
+    be a live Publish admission for the same connection, actor and Expected. Native
+    parents supply current Core/Source proof; uploaded parents additionally
+    supply a same-Store publication pin. The marker's existing final admission
+    checks parent, original/current actors, selected policy and pin after all
+    yielding work. A mismatch leaves exact intent custody for authorized
+    reconciliation; no second publisher or late post-write denial is used. *)
 val publish
   :  t
   -> actor:Operator_authorization.t
+  -> connection:Connection_context.t
+  -> parent_admission:Parent_admission.t option
   -> sealed:Store.sealed
   -> checkpoint:(unit -> unit)
   -> (Bundle.Receipt.t, Error.t) result
@@ -317,12 +382,25 @@ val check_context_current
   -> checkpoint:(unit -> unit)
   -> (unit, Error.t) result
 
-(** Nonyielding final comparison after a caller's own publication gate. Recheck
-    original/current actor, bundle-read and rebind grants and exact selected target/contract
-    against the retained owner-affine capture. The caller MUST have performed
-    [check_context_current] first for durable pin/deadline/current marker; this
-    check alone never authenticates publication or installed bytes. Trusted
-    policy callbacks must remain bounded and nonyielding. *)
+(** Nonyielding actor/read/rebind/selected-policy comparison only. The
+    physical Core parent scope uses this while the child Store gate is
+    already held, so it cannot recursively borrow that Store. It grants no
+    publication-pin or durable integrity claim; the same Store marker callback
+    independently compares the actual parent pin. Ordinary read-only final
+    currentness uses [check_context_selection_now] below. *)
+val check_context_selection_policy_now
+  :  t
+  -> actor:Operator_authorization.t
+  -> Context_capture.t
+  -> (unit, Error.t) result
+
+(** Nonyielding final comparison after a caller's full
+    [check_context_current]. Recheck original/current actor, bundle-read and
+    rebind grants, exact selected target/contract, and the current in-memory
+    same-Store publication pin/deadline through Store's nonblocking gate. Busy
+    or changed marker fails closed. The earlier full check authenticates
+    durable metadata; this final comparison performs no read or installed-byte
+    verification. Trusted policy callbacks remain bounded and nonyielding. *)
 val check_context_selection_now
   :  t
   -> actor:Operator_authorization.t

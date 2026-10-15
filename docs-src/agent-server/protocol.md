@@ -165,9 +165,9 @@ epoch is published.
 | `authoring.query` | `Authoring.Analysis.Query.Request` | `authoring.core.v1` and `authoring.semantic.v1` selected | Bounded hover, completion, signature, syntax and source navigation over exact Complete, same-run Failed or Provisional evidence. |
 | `authoring.lexical` | `Authoring.Assistance.Lexical.Request` | `authoring.core.v1` and `authoring.lexical.v1` selected | Byte-exact ChatML or authored/effective ChatMD roles, open constructs, and scanned-prefix status, including malformed UTF-8 source bytes. |
 | `authoring.assistance` | `Authoring.Assistance.Assistance.Request` | `authoring.core.v1` and `authoring.assistance.v1` selected | Bounded local markup, reference, path, template and environment suggestions with exact authored replacements and explicit evidence. |
-| `authoring.bundle.begin` | `Authoring.Bundle.Begin.request` | `authoring.bundle.v1` selected; installed upload policy | Qualified immutable manifest, optional parent provenance and explicit begin idempotency. |
+| `authoring.bundle.begin` | `Authoring.Bundle.Begin.request` | `authoring.bundle.v1` selected; installed upload policy; with a parent, `authoring.core.v1` and current context authority | Qualified immutable manifest, optional physically checked parent and explicit begin idempotency. |
 | `authoring.bundle.chunk` | `Authoring.Bundle.Chunk.request` | `authoring.bundle.v1` selected; installed upload policy | Bounded exact binary member chunk with replay-safe offset. |
-| `authoring.bundle.commit` | `Authoring.Bundle.Commit.request` | `authoring.bundle.v1` selected; installed upload policy | Seal complete upload under explicit idempotency; acceptance may precede closure publication. |
+| `authoring.bundle.commit` | `Authoring.Bundle.Commit.request` | `authoring.bundle.v1` selected; installed upload policy; with a persisted parent, `authoring.core.v1` and current context authority | Seal complete upload under explicit idempotency; acceptance may precede closure publication; terminal retries recheck the parent. |
 | `authoring.bundle.status` | `Authoring.Bundle.Status.request` | `authoring.bundle.v1` selected; installed upload policy | Principal-bound staging/validation/publication/retention state for a known upload ID. |
 
 The default daemon installs core lifecycle, exact supplied-document bytes,
@@ -184,8 +184,11 @@ publication and rebind for exact authenticated principals. Clients select
 `authoring.bundle.v1`. An upload-only daemon does not advertise core or native
 methods. A configured native and upload daemon uses one service and Store; its
 native read grants never imply upload write or publication, and upload grants
-never imply native read. A parent-bearing begin needs an additional physical
-parent policy and is otherwise typed Unavailable before Store staging.
+never imply native read. A parent-bearing begin additionally requires
+`authoring.core.v1`, the same live connection's current parent context, and
+current actor/source authority. Its wire context label alone cannot attach a
+parent. A same-key terminal commit retry rechecks that persisted parent;
+refresh or revocation can deny the retry without changing the durable upload.
 
 Read-only attachments cannot authorize writer operations or permission answers.
 Ingress has separate authority: it needs its dedicated scope and matching

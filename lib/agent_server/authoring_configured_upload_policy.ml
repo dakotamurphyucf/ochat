@@ -91,7 +91,7 @@ let upload_policy t =
   Host.Upload_policy.create
     ~authorize_write:(fun actor -> grant t actor Config.Grant.Upload_write)
     ~authorize_publish:(fun actor -> grant t actor Config.Grant.Publish)
-    ~authorize_parent:None
+    ~authorize_parent:(Some (fun actor _ -> grant t actor Config.Grant.Upload_write))
 ;;
 
 let project_from_manifest manifest selector =
@@ -111,13 +111,6 @@ let project_from_manifest manifest selector =
   | Project _, Some _ | Chatmd_document _, None -> None
 ;;
 
-let no_previous_required project =
-  match Bundle.Manifest.Project.mode project with
-  | Exact_lock _ -> true
-  | Compose { selected_previous_lock = None; generated_lock = _ } -> true
-  | Compose { selected_previous_lock = Some _; generated_lock = _ } -> false
-;;
-
 let selection t actor project =
   let principal = Actor.principal actor in
   let request = Bundle.Manifest.Project.selection project in
@@ -135,9 +128,7 @@ let publication_policy t =
       match project_from_manifest manifest selector with
       | None -> None
       | Some project ->
-        if not (no_previous_required project)
-        then None
-        else Option.map (selection t actor project) ~f:(fun row -> row.publication)))
+        Option.map (selection t actor project) ~f:(fun row -> row.publication)))
 ;;
 
 let rebind_policy t =

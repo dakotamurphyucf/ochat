@@ -23,7 +23,7 @@ let terminal_status upload ~actor ~upload_id ~checkpoint =
   | Ok (Open _ | Ready | Validating | Expired) | Error _ -> None
 ;;
 
-let handle_bundle t ~actor ~connection request =
+let handle_bundle ?script_selection t ~actor ~connection request =
   let open Result.Let_syntax in
   let%bind () = Service.check_domain t in
   let request_bytes = String.length (Jsonaf.to_string (W.Request.params request)) in
@@ -43,14 +43,47 @@ let handle_bundle t ~actor ~connection request =
         ~checkpoint
         (fun _ ~checkpoint -> f ~checkpoint)
     in
+    let with_parent ~operation ~upload_operation expected f =
+      Authoring_context_owner.with_parent_scope
+        ?script_selection
+        t
+        ~actor
+        ~connection
+        ~expected
+        ~operation
+        ~checkpoint
+        ~f:(fun scope ~checkpoint ->
+          let%bind () =
+            Upload.check_upload_current_now upload ~actor ~operation:upload_operation
+            |> upload_error
+          in
+          f ~parent_admission:(Some (Authoring_parent_scope.admission scope)) ~checkpoint)
+    in
     match request with
     | W.Request.Bundle_begin begin_request ->
-      run ~operation:Upload.Upload_policy.Operation.Write (fun ~checkpoint ->
+      let perform ~parent_admission ~checkpoint =
         let%bind response =
-          Upload.begin_upload upload ~actor ~request:begin_request ~checkpoint
+          Upload.begin_upload
+            upload
+            ~actor
+            ~connection
+            ~parent_admission
+            ~request:begin_request
+            ~checkpoint
           |> upload_error
         in
-        Authoring_context_owner.checked_response t (W.Response.Bundle_begin response))
+        Authoring_context_owner.checked_response t (W.Response.Bundle_begin response)
+      in
+      (match begin_request.parent_context with
+       | None ->
+         run ~operation:Upload.Upload_policy.Operation.Write (fun ~checkpoint ->
+           perform ~parent_admission:None ~checkpoint)
+       | Some expected ->
+         with_parent
+           ~operation:Upload.Parent_admission.Operation.Begin
+           ~upload_operation:Upload.Upload_policy.Operation.Write
+           expected
+           perform)
     | W.Request.Bundle_chunk chunk_request ->
       run ~operation:Upload.Upload_policy.Operation.Write (fun ~checkpoint ->
         let%bind response =
@@ -58,17 +91,32 @@ let handle_bundle t ~actor ~connection request =
         in
         Authoring_context_owner.checked_response t (W.Response.Bundle_chunk response))
     | W.Request.Bundle_commit commit_request ->
-      run ~operation:Upload.Upload_policy.Operation.Commit (fun ~checkpoint ->
-        let%bind claim =
+      let%bind claim =
+        run ~operation:Upload.Upload_policy.Operation.Commit (fun ~checkpoint ->
           Upload.claim_commit upload ~actor ~request:commit_request ~checkpoint
-          |> upload_error
-        in
+          |> upload_error)
+      in
+      let parent =
+        match claim with
+        | Store.Claim_result.Published { parent_context; _ }
+        | Rejected { parent_context; _ } -> parent_context
+        | Ready sealed -> Store.sealed_parent_context sealed
+      in
+      let finish ~parent_admission ~checkpoint =
         let%bind outcome =
           match claim with
-          | Store.Claim_result.Published receipt -> Ok (B.Commit.Published receipt)
-          | Rejected reason -> Ok (B.Commit.Rejected reason)
+          | Store.Claim_result.Published { receipt; _ } -> Ok (B.Commit.Published receipt)
+          | Rejected { reason; _ } -> Ok (B.Commit.Rejected reason)
           | Ready sealed ->
-            (match Upload.publish upload ~actor ~sealed ~checkpoint with
+            (match
+               Upload.publish
+                 upload
+                 ~actor
+                 ~connection
+                 ~parent_admission
+                 ~sealed
+                 ~checkpoint
+             with
              | Ok receipt -> Ok (B.Commit.Published receipt)
              | Error ((Upload.Error.Invalid_closure | Resource_limit) as error) ->
                (match
@@ -90,7 +138,18 @@ let handle_bundle t ~actor ~connection request =
             ~outcome
           |> protocol_error
         in
-        Authoring_context_owner.checked_response t (W.Response.Bundle_commit response))
+        Authoring_context_owner.checked_response t (W.Response.Bundle_commit response)
+      in
+      (match parent with
+       | None ->
+         run ~operation:Upload.Upload_policy.Operation.Commit (fun ~checkpoint ->
+           finish ~parent_admission:None ~checkpoint)
+       | Some expected ->
+         with_parent
+           ~operation:Upload.Parent_admission.Operation.Publish
+           ~upload_operation:Upload.Upload_policy.Operation.Commit
+           expected
+           finish)
     | W.Request.Bundle_status status_request ->
       run ~operation:Upload.Upload_policy.Operation.Write (fun ~checkpoint ->
         let%bind status =

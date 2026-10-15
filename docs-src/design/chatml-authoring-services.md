@@ -620,7 +620,12 @@ Use `authoring.bundle.begin/chunk/commit/status` over the common typed protocol.
 Staging is bound to the authenticated principal, host incarnation, intended
 origin and per-principal/global storage quotas. A client may attach a current
 authoring context for provenance, but an upload-only client does not need a host
-source-read grant or an existing context. Begin and commit each use an explicit
+source-read grant or an existing context. With a parent, the handler borrows the
+actual current Core context on the same physical connection, checks original
+and request actors, and retains that exact parent in the durable upload. A
+parent-bearing request therefore needs the selected Core feature and current
+context authority; echoed context coordinates grant nothing. Begin and commit
+each use an explicit
 idempotency key; repeated accepted chunks with identical bytes are no-ops,
 while conflicting bytes fail. An incomplete or cancelled upload publishes
 nothing. After a lost HTTP/stdio commit reply, the client queries status
@@ -641,7 +646,9 @@ available. Status is read-only and reports a sealed pending claim as
 `Validating`, the same coarse wire state used for an active durable validation
 intent. That wire state promises neither automatic scheduling nor eventual
 publication. A known durable Published or Rejected terminal is returned only
-after the upload host verifies it under the current independent upload grant.
+after the upload host verifies it under the current independent upload grant
+and rechecks any persisted parent. A terminal retry after parent refresh or
+revocation can fail without changing the durable result.
 Wire receipts echo authenticated host/principal comparison coordinates and
 the upload ID. A pending commit is distinct from a Published receipt; only
 the proof-gated store publisher may publish a validated graph, compiler-contract,
@@ -737,8 +744,12 @@ The host upload facade takes exclusive lifetime ownership of one staging store.
 Its independent upload policy checks the original authenticated actor and
 current grant before each request, again after waiting for the facade gate,
 and within the store operation gate before recovery or private upload access.
-An optional parent context is checked against current context authority at
-begin; it is provenance, not a requirement for upload-only clients. The store
+An optional parent context is checked against actual same-connection Core
+authority at begin and again before publication. A selected closure's original
+prior Build comes from current Project input or one exact retained Document
+script row; a missing or changed independent selection is unavailable. An
+uploaded Project parent carries a same-Store publication pin checked at the
+marker boundary. No parent is required for an upload-only client. The store
 samples the host wall clock after its own gate and recovery, so queue time
 cannot extend an expired upload. Publication separately rechecks the current
 host-selected contracts, source grant, wall-clock deadline and daemon lock
