@@ -74,6 +74,15 @@ third-party parser steps remain indivisible. The fixed host contract projection 
 the joined adapter is covered by its elapsed policy before the analysis work ledger
 begins. Snapshots retain no inference cells, recorder callbacks or execution state.
 
+Within one analysis recorder, repeated source units using the exact same immutable
+static host surface reuse its staged host definitions and type schemes. Each unit
+still gets its own source context and authored bindings. The recorder keeps only
+the most recently used surface as a lookup shortcut; another surface is checked
+and staged independently. Type-scheme uses instantiate fresh inference cells, and
+recursive binders are resolved within their original quantifier group. This keeps
+multi-module checking within the same finite analysis limits without conflating
+source facts or independent polymorphic uses.
+
 `Chatml_authoring_query` projects those immutable facts into portable semantic
 query payloads. It checks actual snapshot or provisional identity against the
 request capture and exact source ID, digest and byte length. The host separately

@@ -1276,7 +1276,8 @@ let init_env_with_static
   let values = Env.of_list (globals @ modules) |> Value_scope.of_schemes in
   match semantic with
   | None -> values
-  | Some frame -> Semantic_host.values_exn frame values ~globals ~modules ~checkpoint
+  | Some frame ->
+    Semantic_host.values_exn frame values ~surface ~globals ~modules ~checkpoint
 ;;
 
 let init_env_with_surface ?(checkpoint = fun () -> ()) surface =
@@ -1288,14 +1289,21 @@ let init_env_with_surface ?(checkpoint = fun () -> ()) surface =
 let init_env () : tenv = init_env_with_surface Builtin_surface.core_surface
 
 let init_types_with_static ?semantic ?(checkpoint = fun () -> ()) surface : type_env =
-  List.fold
+  List.foldi
     (Chatml.Chatml_static_surface.type_aliases surface)
     ~init:Type_alias.empty
-    ~f:(fun env (alias : Builtin_surface.builtin_type_alias) ->
+    ~f:(fun ordinal env (alias : Builtin_surface.builtin_type_alias) ->
       let alias_ty = typ_of_builtin_ty ~checkpoint alias.body in
       let metadata =
         Option.map semantic ~f:(fun frame ->
-          Semantic_host.alias_exn frame env ~name:alias.name ~body:alias_ty ~checkpoint)
+          Semantic_host.alias_exn
+            frame
+            env
+            ~surface
+            ~ordinal
+            ~name:alias.name
+            ~body:alias_ty
+            ~checkpoint)
       in
       let semantic_binding = Option.map metadata ~f:fst in
       match

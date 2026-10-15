@@ -68,6 +68,49 @@ val discard : t -> unit
     this neither charges compiler inference nor retains a callback. *)
 val poll : t -> checkpoint:(unit -> unit) -> (unit, Error.t) Result.t
 
+module Host_baseline : sig
+  (** Invocation-local sharing of authentic static host definitions. The exact
+      physically identical immutable [Static_surface.t], not its path/name or
+      digest, is the cache key. [Typechecker.typ_of_builtin_ty] converts every
+      built-in template to Var-free immutable constructors: type and row
+      variables become [Generic]. Actual uses instantiate fresh mutable cells.
+      Thus retaining the first unit's raw host scheme cannot be changed by later
+      inference. Group IDs represent the one host scheme, not linked uses.
+      Each source unit still creates its own lexical contexts and source facts.
+      This is a one-surface hot cache: retaining a different physical surface
+      replaces the cache, without merging schemes or invalidating already
+      staged bindings. Retained binding pointers charge aggregate edges; lookup/validation charge
+      recorder work. No callback or native capability is retained. Duplicate
+      retention is a caller invariant error, never an overwrite. *)
+  val values
+    :  t
+    -> surface:Chatml.Chatml_static_surface.t
+    -> checkpoint:(unit -> unit)
+    -> ((string * Binding.t) list option, Error.t) Result.t
+
+  val retain_values
+    :  t
+    -> surface:Chatml.Chatml_static_surface.t
+    -> (string * Binding.t) list
+    -> checkpoint:(unit -> unit)
+    -> (unit, Error.t) Result.t
+
+  val alias
+    :  t
+    -> surface:Chatml.Chatml_static_surface.t
+    -> ordinal:int
+    -> checkpoint:(unit -> unit)
+    -> (Binding.t option, Error.t) Result.t
+
+  val retain_alias
+    :  t
+    -> surface:Chatml.Chatml_static_surface.t
+    -> ordinal:int
+    -> Binding.t
+    -> checkpoint:(unit -> unit)
+    -> (unit, Error.t) Result.t
+end
+
 (** Remaining aggregate metadata allowance for the real parser. Each admitted
     table is charged by [implementation]/[interface] before retaining its Unit. *)
 val site_limits : t -> checkpoint:(unit -> unit) -> (Sites.Limits.t, Error.t) Result.t
