@@ -27,6 +27,7 @@ type t =
 type physical =
   | Root of O.Action.t
   | Native of O.Native_terminal.t
+  | Worker of O.Worker_action.t
 
 type native_selection =
   { terminal : O.Native_terminal.t
@@ -94,22 +95,26 @@ let stage_physical scope ~checkpoint request =
       ~request
       ~checkpoint
       ~check_parent_now:scope.check_parent_now
+  | Worker action -> O.Worker_action.stage_background action ~request ~checkpoint
 ;;
 
 let rollback_physical scope id =
   match scope.physical with
   | Root action -> O.Action.rollback_staged action id
   | Native terminal -> O.Native_terminal.rollback_staged terminal id
+  | Worker action -> O.Worker_action.rollback_staged action id
 ;;
 
 let cleanup_physical physical id =
   match physical with
   | Root action -> O.Action.cleanup_staged action id
   | Native terminal -> O.Native_terminal.cleanup_staged terminal id
+  | Worker action -> O.Worker_action.cleanup_staged action id
 ;;
 
 let stage scope ~checkpoint request =
   let* () = check scope in
+  let* () = B.validate_capabilities request ~capabilities:scope.selected in
   Eio.Cancel.protect (fun () ->
     let* id = stage_physical scope ~checkpoint request in
     let recorded =
@@ -276,6 +281,7 @@ let model_spawn_operation ?control scope =
             ~request
             ~checkpoint
             ~check_parent_now:scope.check_parent_now
+        | Worker _ -> Error (invalid "bare worker scripts cannot spawn model jobs")
       in
       admitted |> message |> Result.map ~f:P.Id.Job.to_string)
   in
@@ -295,13 +301,16 @@ module Scope = struct
 
   let install ?control t config =
     let config = K.install ?control t.kernel ~handlers:(handlers t) config in
-    let model = model_spawn_operation ?control t in
-    { config with
-      operations =
-        model
-        :: List.filter config.operations ~f:(fun operation ->
-          not (String.equal operation.name model.name))
-    }
+    match t.physical with
+    | Worker _ -> config
+    | Root _ | Native _ ->
+      let model = model_spawn_operation ?control t in
+      { config with
+        operations =
+          model
+          :: List.filter config.operations ~f:(fun operation ->
+            not (String.equal operation.name model.name))
+      }
   ;;
 
   let install_selected ?control t ~prepared config =
@@ -385,6 +394,80 @@ let with_root_action service ~phase f =
        Ok (value, ordinary))
 ;;
 
+let with_claimed_worker service ~candidate ?select f =
+  let* witness = O.current service.root in
+  let* saved =
+    B.of_json
+      ~policy:(O.job_policy service.root)
+      (P.Developer_job.payload (O.Job_candidate.job candidate))
+  in
+  let* selected =
+    B.selected_capabilities saved ~capabilities:(O.Current.selected witness)
+  in
+  let* () = O.check_effect_now service.root witness in
+  let selected_now () =
+    B.selected_capabilities saved ~capabilities:(O.native_selected service.root)
+  in
+  let action = ref None in
+  K.with_scope
+    ~selected
+    ~current_capabilities:(fun () -> O.native_selected service.root)
+    ~abort:(fun id ->
+      match !action with
+      | None -> failwith "claimed job stage has no issuing physical action"
+      | Some action ->
+        (match O.Worker_action.cleanup_staged action id with
+         | Ok O.Action.Aborted | Ok Physically_owned -> ()
+         | Error error -> failwith error.message))
+    ~error:invalid
+    (fun kernel ->
+       let acknowledgement = ref None in
+       let* result =
+         O.Job_candidate.with_claimed_selected
+           service.root
+           candidate
+           ?select
+           (fun ~active ~action:issued ~sw ->
+              action := Some issued;
+              let* parent = O.job_parent service.root active in
+              let capture_fingerprint =
+                Chatml_developer_capture.fingerprint (O.capture service.root)
+              in
+              let scope =
+                { service
+                ; physical = Worker issued
+                ; selected
+                ; selected_now
+                ; kernel
+                ; check_parent_now =
+                    (fun () ->
+                      Agent_session.Developer_job_scope.Parent.check_now
+                        parent
+                        ~owner:(O.owner service.root)
+                        ~capture_fingerprint)
+                ; frozen = None
+                }
+              in
+              let* state, effects = f ~active ~scope ~sw in
+              let* ids, _ordinary = Scope.split_starts scope effects in
+              let* selection = O.Worker_action.seal issued ~selected:ids in
+              let* acknowledge = kernel_result (K.mark_prepared kernel) in
+              acknowledgement := Some acknowledge;
+              Ok (state, selection))
+       in
+       match result, !acknowledgement with
+       | None, None -> Ok None
+       | ( Some (job, Developer_job_worker.Children.Settlement.Selected_installed)
+         , Some acknowledge ) ->
+         acknowledge ();
+         Ok (Some job)
+       | Some (_, Selected_omitted_after_epoch_change), Some _ ->
+         Error
+           (invalid "developer claimed child selection was omitted after epoch change")
+       | None, Some _ | Some _, None ->
+         Error (invalid "developer claimed job acknowledgement is unavailable"))
+;;
+
 module Native_selection = struct
   type t = native_selection
 
@@ -448,6 +531,7 @@ let with_native_scope service ~terminal ~borrowed ~check_parent_now f =
 let seal_native scope ~terminal ~outcome ~selected_jobs =
   match scope.physical with
   | Root _ -> Error (invalid "root job scope cannot seal a native terminal")
+  | Worker _ -> Error (invalid "worker job scope cannot seal a native terminal")
   | Native actual when not (phys_equal actual terminal) ->
     Error (invalid "native job terminal changed before sealing")
   | Native _ ->
@@ -476,7 +560,7 @@ let seal_native scope ~terminal ~outcome ~selected_jobs =
 let frozen_native scope ~terminal =
   match scope.physical, scope.frozen with
   | Native actual, Some pair when phys_equal actual terminal -> Some pair
-  | Native _, Some _ | Native _, None | Root _, _ -> None
+  | Native _, Some _ | Native _, None | Root _, _ | Worker _, _ -> None
 ;;
 
 let acknowledge_native scope selection =
@@ -488,6 +572,6 @@ let acknowledge_native scope selection =
     selection.acknowledge ();
     selection.acknowledged <- true;
     Ok ()
-  | Native _, Some _ | Native _, None | Root _, _ ->
+  | Native _, Some _ | Native _, None | Root _, _ | Worker _, _ ->
     Error (invalid "native job acknowledgement is foreign, absent, or repeated")
 ;;

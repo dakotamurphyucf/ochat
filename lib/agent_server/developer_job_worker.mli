@@ -132,6 +132,110 @@ val with_claimed_attempt
       -> (Agent_protocol.Developer_job.State.t, Agent_protocol.Error.t) result)
   -> (Agent_protocol.Developer_job.t option, Agent_protocol.Error.t) result
 
+(** Selected child jobs of one physically entered claim. This is the existing
+    Worker's capacity ledger and quarantine, not a second action writer.
+    A caller cannot construct a Scope or Selection from job IDs or a saved
+    Running row. All operations require the issuing domain; staging,
+    rollback and sealing also require the live callback fiber. Cleanup of an
+    already staged ID may run after callback expiry on that same domain. *)
+module Children : sig
+  type t
+
+  module Selection : sig
+    type t
+  end
+
+  module Settlement : sig
+    type t =
+      | Selected_installed
+      | Selected_omitted_after_epoch_change
+    [@@deriving sexp_of]
+  end
+
+  type cleanup =
+    | Aborted
+    | Physically_owned
+  [@@deriving sexp_of]
+
+  (** Acquire the finite in-flight staging slot before invoking [prepare],
+      including its request parsing, selected-policy admission and checkpoints.
+      Recheck this scope's entered physical Claim and require its exact parent
+      ID, attempt and depth in a Run_root launch, along with same owner/capture,
+      new queued Async_tool shape and finite per-action bound. Reserve in the
+      same Job_capacity ledger as root/native jobs. The caller must still
+      recheck its own actor and selected registry after yielding preparation.
+      A callback/checkpoint exception preserves identity and rolls back an
+      unreturned reservation. *)
+  val stage
+    :  t
+    -> prepare:
+         (unit
+          -> ( Agent_session.Developer_root_job_admission.Prepared.t
+               , Agent_protocol.Error.t )
+               result)
+    -> checkpoint:(unit -> unit)
+    -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result
+
+  val rollback_staged
+    :  t
+    -> Agent_protocol.Id.Job.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Lexical cleanup may call this after scope expiry. An unsealed provisional
+      ID aborts; a sealed or uncertain selected ID stays with this Worker's
+      retained terminal until exact Store reconciliation. *)
+  val cleanup_staged
+    :  t
+    -> Agent_protocol.Id.Job.t
+    -> (cleanup, Agent_protocol.Error.t) result
+
+  (** Freeze one exact subset of this scope's own provisional IDs. Duplicate,
+      foreign, aborted, published, repeated or in-flight selections reject.
+      Returned identity is bound to this scope and actual Claim; the Worker
+      validates it again after the child Switch joins and before writing. *)
+  val seal
+    :  t
+    -> selected:Agent_protocol.Id.Job.t list
+    -> (Selection.t, Agent_protocol.Error.t) result
+end
+
+(** The same claim/lease/callback/reconciliation kernel as
+    [with_claimed_attempt], with an added physically owned child selection.
+    [f] seals its returned Job.start IDs while live; its child Switch joins
+    before result selection or Store I/O. A callback, normalization or pure
+    [select] failure before publication attempt aborts all staged children.
+    Once result or parent persistence may have been attempted, retain the
+    exact terminal, child Selection and reservations through the existing
+    bounded quarantine; never rerun [f] or [select]. A failed/unknown result
+    publisher attempt cannot be replaced with a new Failed outcome.
+
+    The Store writes parent and selected children in one claimed Prepared.
+    [Settlement.Selected_installed] is returned only from an exact Installed
+    observation proving every selected immutable child row. A changed epoch
+    may durably preserve a terminal parent/result while omitting all new
+    children; report [Selected_omitted_after_epoch_change] and abort only the
+    proven unpublished reservations. Partial/foreign child rows fail closed
+    and retain custody. Empty selected subsets are vacuously installed.
+    [max_staged_jobs] is the physical root's positive per-action ceiling. *)
+val with_claimed_selected_attempt
+  :  t
+  -> expected:Agent_store.Developer_run_store.Observation.t
+  -> lookup:Agent_store.Developer_run_store.Job_lookup.t
+  -> max_staged_jobs:int
+  -> ?select:
+       (claim:Agent_store.Developer_run_store.Claim.t
+        -> proposed:Agent_protocol.Developer_job.State.t
+        -> (Selected.t option, Agent_protocol.Error.t) result)
+  -> (active:Agent_session.Developer_job_scope.active
+      -> sw:Eio.Switch.t
+      -> children:Children.t
+      -> ( Agent_protocol.Developer_job.State.t * Children.Selection.t
+           , Agent_protocol.Error.t )
+           result)
+  -> ( (Agent_protocol.Developer_job.t * Children.Settlement.t) option
+       , Agent_protocol.Error.t )
+       result
+
 module Cancellation : sig
   type t =
     | No_live_claim

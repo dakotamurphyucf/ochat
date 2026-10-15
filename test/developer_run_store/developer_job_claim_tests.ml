@@ -11,14 +11,14 @@ module Selected = Developer_run_selected_tests
 
 let timestamp = Selected.timestamp
 
-let capacity () =
+let capacity ?(max_total = 2) ?(per_session = 1) () =
   let limits : Agent_server.Config.Server.job_limits =
-    { daemon_total = 2
-    ; per_principal = 2
-    ; per_prompt = 2
-    ; per_workspace = 2
-    ; per_session = 1
-    ; per_kind = 2
+    { daemon_total = max_total
+    ; per_principal = max_total
+    ; per_prompt = max_total
+    ; per_workspace = max_total
+    ; per_session
+    ; per_kind = max_total
     ; max_nested_depth = 2
     }
   in
@@ -93,6 +93,255 @@ let terminal_state claim status =
        | Cancelled
        | Interrupted _ -> None)
   }
+;;
+
+let claimed_child ~owner ~capture ~parent ~parent_attempt ~depth ~id =
+  let launch =
+    P.Developer_job.Launch.create
+      ~parent:P.Developer_job.Launch.Run_root
+      ~parent_job:(Some (parent, parent_attempt))
+      ~nested_depth:depth
+    |> F.ok
+  in
+  let state : P.Developer_job.State.t =
+    { status = P.Job.Queued
+    ; attempt = 0
+    ; started_at = None
+    ; next_run_at = None
+    ; completed_at = None
+    ; result = None
+    ; retry_failure = None
+    }
+  in
+  P.Developer_job.create
+    ~owner
+    ~capture_fingerprint:capture
+    ~id
+    ~launch
+    ~kind:P.Job.Async_tool
+    ~payload:(`Object [ "selected_child", `True ])
+    ~retry_policy:P.Job.Never
+    ~created_at:timestamp
+    ~state
+  |> F.ok
+;;
+
+let%test_unit
+    "claimed selected transition installs exact children or omits them after epoch change"
+  =
+  List.iter [ `Active; `Old_epoch ] ~f:(fun mode ->
+    F.with_root (fun _env _sw _root _session store ->
+      let owner = F.owner 0 in
+      let capture = F.digest "atomic claimed selected children" in
+      let handle, initial = F.admit store owner capture in
+      let parent_id = Selected.job_id "job_claimed_selected_parent" in
+      let _, observed = select_root handle initial owner capture parent_id in
+      let claim_prepared =
+        R.prepare_job_claim
+          handle
+          ~expected:observed
+          ~lookup:(R.find_job_exact observed parent_id)
+          ~now:timestamp
+        |> F.run_ok
+      in
+      let claimed = R.commit_job_claim handle claim_prepared |> F.run_ok in
+      let claim = R.Claimed.claim claimed in
+      assert (
+        R.Claim.try_enter claim ~handle ~admit:(fun () -> true) ~on_enter:(fun () -> ())
+        |> F.run_ok);
+      let child_id = Selected.job_id "job_claimed_selected_child" in
+      let child =
+        claimed_child
+          ~owner
+          ~capture
+          ~parent:parent_id
+          ~parent_attempt:(R.Claim.attempt claim)
+          ~depth:1
+          ~id:child_id
+      in
+      let terminal = terminal_state claim P.Job.Succeeded in
+      let expected =
+        match mode with
+        | `Active -> R.Claimed.observation claimed
+        | `Old_epoch ->
+          let prior = R.observe handle |> F.run_ok in
+          let _next, _ =
+            R.admit_epoch
+              store
+              ~owner:(F.owner 1)
+              ~capture_fingerprint:(F.digest "next selected graph")
+              ~previous:(Some prior)
+            |> F.run_ok
+          in
+          R.observe handle |> F.run_ok
+      in
+      let invalid_child =
+        claimed_child
+          ~owner
+          ~capture
+          ~parent:parent_id
+          ~parent_attempt:(R.Claim.attempt claim + 1)
+          ~depth:1
+          ~id:(Selected.job_id "job_claimed_selected_invalid")
+      in
+      (match mode with
+       | `Active ->
+         assert (
+           Result.is_error
+             (R.prepare_claimed_selected
+                handle
+                ~expected
+                ~claim
+                ~after:terminal
+                ~revoked_after:terminal
+                ~selected:[ invalid_child ]))
+       | `Old_epoch -> ());
+      let prepared =
+        R.prepare_claimed_selected
+          handle
+          ~expected
+          ~claim
+          ~after:terminal
+          ~revoked_after:terminal
+          ~selected:[ child ]
+        |> F.run_ok
+      in
+      let installed = R.commit_claimed_transition handle prepared |> F.run_ok in
+      let disposition =
+        R.Claimed_selection.installed_disposition ~prepared ~installed |> F.run_ok
+      in
+      let actual = R.Installed.observation installed in
+      let parent = R.find_job actual parent_id |> Option.value_exn in
+      assert (
+        match (P.Developer_job.state parent).status with
+        | P.Job.Succeeded -> true
+        | _ -> false);
+      match mode, disposition, R.find_job actual child_id with
+      | `Active, Selected_installed, Some actual_child ->
+        assert (
+          Jsonaf.exactly_equal
+            (P.Developer_job.to_json child)
+            (P.Developer_job.to_json actual_child))
+      | `Old_epoch, Selected_omitted_after_epoch_change, None -> ()
+      | _ -> failwith "claimed selected disposition lost exact child set"))
+;;
+
+let%test_unit "claimed children bound concurrent preparation before capacity reserve" =
+  F.with_root (fun env sw _root _session store ->
+    let owner = F.owner 0 in
+    let capture = F.digest "bounded claimed children" in
+    let handle, initial = F.admit store owner capture in
+    let parent_id = Selected.job_id "job_bounded_claimed_parent" in
+    let _, observed = select_root handle initial owner capture parent_id in
+    let selected =
+      Chat_response.Tool_capability.create
+        ~owner:"bounded-worker-test"
+        ~resource_fingerprint:
+          (Chatml_source.Digest.to_hex (F.digest "bounded worker tools"))
+        []
+      |> F.ok
+    in
+    let compiled =
+      Chat_response.One_off_script.prepare_in_domain
+        ~env
+        ~capabilities:selected
+        ~tools:[]
+        ~source:"let main input = Task.pure(input)"
+        ()
+      |> F.ok
+    in
+    let request =
+      Chat_response.Background_request.script
+        ~prepared:compiled
+        ~input:`Null
+        ~policy:Chat_response.One_off_request.default_policy
+      |> F.ok
+    in
+    let worker =
+      worker ~sw ~store ~handle ~capacity:(capacity ~max_total:3 ~per_session:3 ()) ()
+    in
+    let inner = ref None in
+    let selected_child = ref None in
+    let limit_seen = ref false in
+    let result =
+      Worker.with_claimed_selected_attempt
+        worker
+        ~expected:observed
+        ~lookup:(R.find_job_exact observed parent_id)
+        ~max_staged_jobs:2
+        (fun ~active ~sw:_ ~children ->
+           let claim = Scope.claim active in
+           let prepare () =
+             let launch =
+               P.Developer_job.Launch.create
+                 ~parent:P.Developer_job.Launch.Run_root
+                 ~parent_job:(Some (parent_id, R.Claim.attempt claim))
+                 ~nested_depth:1
+               |> F.ok
+             in
+             Agent_session.Developer_root_job_admission.background
+               ~owner
+               ~capture_fingerprint:capture
+               ~launch
+               ~selected
+               ~policy:Chat_response.One_off_request.default_policy
+               ~request
+               ~created_at:timestamp
+               ~checkpoint:ignore
+             |> F.ok
+           in
+           let entered = ref false in
+           let third_prepared = ref false in
+           let outer =
+             Worker.Children.stage
+               children
+               ~prepare:(fun () -> Ok (prepare ()))
+               ~checkpoint:(fun () ->
+                 if not !entered
+                 then (
+                   entered := true;
+                   let checked = ref false in
+                   let id =
+                     Worker.Children.stage
+                       children
+                       ~prepare:(fun () -> Ok (prepare ()))
+                       ~checkpoint:(fun () ->
+                         if not !checked
+                         then (
+                           checked := true;
+                           match
+                             Worker.Children.stage
+                               children
+                               ~prepare:(fun () ->
+                                 third_prepared := true;
+                                 Ok (prepare ()))
+                               ~checkpoint:ignore
+                           with
+                           | Error error ->
+                             assert (P.Error.equal_code error.code P.Error.Resource_limit);
+                             limit_seen := true
+                           | Ok _ -> failwith "third in-flight child was admitted"))
+                     |> F.ok
+                   in
+                   inner := Some id))
+             |> F.ok
+           in
+           assert (not !third_prepared);
+           selected_child := Some outer;
+           let selection = Worker.Children.seal children ~selected:[ outer ] |> F.ok in
+           Ok (terminal_state claim P.Job.Succeeded, selection))
+      |> F.ok
+      |> Option.value_exn
+    in
+    let _, disposition = result in
+    (match disposition with
+     | Worker.Children.Settlement.Selected_installed -> ()
+     | Selected_omitted_after_epoch_change -> failwith "active claimed child was omitted");
+    assert !limit_seen;
+    let actual = R.observe handle |> F.run_ok in
+    assert (Option.is_some (R.find_job actual (Option.value_exn !selected_child)));
+    assert (Option.is_none (R.find_job actual (Option.value_exn !inner)));
+    Worker.close_and_wait worker |> F.ok)
 ;;
 
 let selected_artifact ~claim ~proposed ~ensure_attempted ~acknowledge_installed =
@@ -1626,7 +1875,7 @@ let%test_unit "scope close joins a yielding admission without consuming its call
       F.store_ok (Agent_store.Session_store.close session)))
 ;;
 
-let%test_unit "terminal rename exception keeps exact Prepared and callback runs once" =
+let%test_unit "terminal rename exception keeps exact Prepared, child and callback" =
   F.with_temp_directory "ochat-developer-terminal-exception" (fun original temporary ->
     Eio.Switch.run (fun sw ->
       let armed = ref false in
@@ -1649,8 +1898,33 @@ let%test_unit "terminal rename exception keeps exact Prepared and callback runs 
       let handle, initial = F.admit store owner capture in
       let id = Selected.job_id "job_terminal_exception" in
       let _, selected = select_root handle initial owner capture id in
-      let capacity = capacity () in
+      let capacity = capacity ~per_session:2 () in
       let worker = worker ~sw ~store ~handle ~capacity () in
+      let capabilities =
+        Chat_response.Tool_capability.create
+          ~owner:"uncertain-child-test"
+          ~resource_fingerprint:
+            (Chatml_source.Digest.to_hex (F.digest "uncertain child tools"))
+          []
+        |> F.ok
+      in
+      let script =
+        Chat_response.One_off_script.prepare_in_domain
+          ~env
+          ~capabilities
+          ~tools:[]
+          ~source:"let main input = Task.pure(input)"
+          ()
+        |> F.ok
+      in
+      let request =
+        Chat_response.Background_request.script
+          ~prepared:script
+          ~input:`Null
+          ~policy:Chat_response.One_off_request.default_policy
+        |> F.ok
+      in
+      let child_id = ref None in
       let callback_count = ref 0 in
       let selection_count = ref 0 in
       let prepare_count = ref 0 in
@@ -1658,10 +1932,11 @@ let%test_unit "terminal rename exception keeps exact Prepared and callback runs 
       let observed_exception =
         try
           ignore
-            (Worker.with_claimed_attempt
+            (Worker.with_claimed_selected_attempt
                worker
                ~expected:selected
                ~lookup:(R.find_job_exact selected id)
+               ~max_staged_jobs:2
                ~select:(fun ~claim ~proposed ->
                  incr selection_count;
                  Ok
@@ -1675,11 +1950,44 @@ let%test_unit "terminal rename exception keeps exact Prepared and callback runs 
                          ~acknowledge_installed:(fun _ ->
                            incr acknowledge_count;
                            Ok ()))))
-               (fun ~active ~sw:_ ->
+               (fun ~active ~sw:_ ~children ->
                   incr callback_count;
+                  let claim = Scope.claim active in
+                  let launch =
+                    P.Developer_job.Launch.create
+                      ~parent:P.Developer_job.Launch.Run_root
+                      ~parent_job:(Some (id, R.Claim.attempt claim))
+                      ~nested_depth:1
+                    |> F.ok
+                  in
+                  let prepared =
+                    Agent_session.Developer_root_job_admission.background
+                      ~owner
+                      ~capture_fingerprint:capture
+                      ~launch
+                      ~selected:capabilities
+                      ~policy:Chat_response.One_off_request.default_policy
+                      ~request
+                      ~created_at:timestamp
+                      ~checkpoint:ignore
+                    |> F.ok
+                  in
+                  let child =
+                    Worker.Children.stage
+                      children
+                      ~prepare:(fun () -> Ok prepared)
+                      ~checkpoint:ignore
+                    |> F.ok
+                  in
+                  child_id := Some child;
+                  let selected =
+                    Worker.Children.seal children ~selected:[ child ] |> F.ok
+                  in
                   armed := true;
-                  Ok (terminal_state (Scope.claim active) P.Job.Succeeded))
-             : (P.Developer_job.t option, P.Error.t) result);
+                  Ok (terminal_state claim P.Job.Succeeded, selected))
+             : ( (P.Developer_job.t * Worker.Children.Settlement.t) option
+                 , P.Error.t )
+                 result);
           false
         with
         | exn -> phys_equal exn sentinel
@@ -1690,6 +1998,7 @@ let%test_unit "terminal rename exception keeps exact Prepared and callback runs 
       assert (Int.equal !prepare_count 1);
       assert (Int.equal !acknowledge_count 0);
       let current = R.observe handle |> F.run_ok in
+      assert (Option.is_some (R.find_job current (Option.value_exn !child_id)));
       assert (
         match R.find_job current id with
         | Some job ->
@@ -1698,6 +2007,9 @@ let%test_unit "terminal rename exception keeps exact Prepared and callback runs 
            | _ -> false)
         | None -> false);
       Worker.reconcile_quarantined worker |> F.ok;
+      assert (
+        Option.is_some
+          (R.find_job (R.observe handle |> F.run_ok) (Option.value_exn !child_id)));
       assert (Int.equal !callback_count 1);
       assert (Int.equal !selection_count 1);
       assert (Int.equal !acknowledge_count 1);
