@@ -85,6 +85,32 @@ val set_phase
   -> phase:[ `Active | `Interrupted | `Closed ]
   -> (t, Store_error.t) result
 
+(** Immutable, bounded canonical-serialization input. It is pure comparison
+    data, not a Store Prepared, document observation or write authority. *)
+module Encode_input : sig
+  type t
+end
+
+(** Validate the typed document and build its complete JSON payload under the
+    existing work and document limits. [poll] is called during traversal by
+    the owner of the operation. No canonical bytes are written or published. *)
+val prepare_encode
+  :  t
+  -> poll:(unit -> unit)
+  -> limits:Document_schema.Limits.t
+  -> max_epochs:int
+  -> max_jobs:int
+  -> max_invocations:int
+  -> max_job_payload_bytes:int
+  -> (Encode_input.t, Store_error.t) result
+
+(** The original Document_schema.Document.create and to_string on the opaque
+    prepared input. Pure and callback-free; exactly the same envelope, size,
+    field and duplicate-key admission as [to_bytes]. No alternate encoder. *)
+val finish_encode : Encode_input.t -> (string, Store_error.t) result
+
+(** The direct pure wrapper over [prepare_encode] and [finish_encode]. Existing
+    callers outside the Store can use it without an Eio runtime. *)
 val to_bytes
   :  t
   -> poll:(unit -> unit)
@@ -95,6 +121,26 @@ val to_bytes
   -> max_job_payload_bytes:int
   -> (string, Store_error.t) result
 
+(** Typed/version/relationship admission of an already canonically decoded
+    Document_schema.Document.t. Revalidate the envelope against these exact
+    [limits], then perform the sole typed validator also used by the direct
+    wrappers below; no caller-supplied JSON or unchecked DTO is admitted.
+    A decoder result admitted under these same limits proves that comparison
+    with four scalar bounds, without another JSON traversal. Stricter limits
+    retain the canonical full revalidation behavior.
+    Pure except for its supplied [poll]. *)
+val of_decoded_document
+  :  Document_schema.Document.t
+  -> poll:(unit -> unit)
+  -> limits:Document_schema.Limits.t
+  -> max_epochs:int
+  -> max_jobs:int
+  -> max_invocations:int
+  -> max_job_payload_bytes:int
+  -> (t, Store_error.t) result
+
+(** Direct pure wrapper over canonical Document_schema.Document.decode and
+    [of_decoded_document]; unknown fields/versions and limits fail closed. *)
 val of_bytes
   :  string
   -> poll:(unit -> unit)

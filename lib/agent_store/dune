@@ -10,6 +10,7 @@
   authoring_upload_publication
   authoring_upload_store
   developer_run_document
+  developer_run_cpu
   developer_run_transition
   developer_run_store
   frame
@@ -91,6 +92,7 @@
   authoring_upload_files
   authoring_upload_publication
   developer_run_document
+  developer_run_cpu
   developer_run_transition
   blob_developer_namespace
   result_intent_file
