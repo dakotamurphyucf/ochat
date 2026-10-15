@@ -83,6 +83,7 @@ module Error = struct
     | Document_bundle_limit
     | Project_declaration_unavailable
     | Invalid_project_declaration
+    | Selected_script_unavailable
 
   let sexp_of_t = function
     | Unauthorized -> Sexp.Atom "Unauthorized"
@@ -104,6 +105,7 @@ module Error = struct
     | Document_bundle_limit -> Sexp.Atom "Document_bundle_limit"
     | Project_declaration_unavailable -> Sexp.Atom "Project_declaration_unavailable"
     | Invalid_project_declaration -> Sexp.Atom "Invalid_project_declaration"
+    | Selected_script_unavailable -> Sexp.Atom "Selected_script_unavailable"
   ;;
 end
 
@@ -536,6 +538,62 @@ let read_member_on_root context root ~actor ~member ~checkpoint =
     read_local context owner ~policy ~member ~poll)
 ;;
 
+let prepare_local_project
+      ~selected
+      ~project
+      ~selection
+      ~entry
+      ~contract
+      ~policy
+      ~limits
+      ~max_request_bytes
+      ~clock
+      ~poll
+  =
+  let open Result.Let_syntax in
+  let root_prefix, _ = List.hd_exn selected in
+  let anchors = List.map selected ~f:snd in
+  let%bind source_host =
+    Project.Host.create
+      anchors
+      ~git_store:None
+      ~git_grants:[]
+      ~max_grants:0
+      ~max_grant_bytes:0
+    |> Result.map_error ~f:(fun _ -> Error.Unsupported_source_selection)
+  in
+  let%bind lock_id =
+    Captured.Id.create
+      ~package_namespace:"@ochat.authoring.lock"
+      ~relative_path:"authoring.lock"
+    |> Result.map_error ~f:(fun _ -> Error.Unsupported_source_selection)
+  in
+  let%bind request =
+    Project.Request.create_with_entry
+      (Project.Root.Local { locator = root_prefix; project })
+      ~operation:Build.Operation.Build_without_previous
+      ~selection
+      ~entry
+      ~contract
+      ~lock_id
+      ~max_request_bytes
+    |> Result.map_error ~f:(fun _ -> Error.Unsupported_source_selection)
+  in
+  let%bind batch =
+    Project.prepare_sources
+      source_host
+      [ request ]
+      ~policy
+      ~limits
+      ~clock
+      ~checkpoint:poll
+    |> Result.map_error ~f:(fun error -> Error.Project error)
+  in
+  match Project.Source_batch.preparations batch with
+  | [ prepared ] -> Ok (Project.Source_preparation.build prepared)
+  | _ -> Error Error.Unsupported_source_selection
+;;
+
 module Context = struct
   type t = project_context
 
@@ -569,48 +627,18 @@ module Context = struct
           let open Result.Let_syntax in
           poll ();
           let%bind selected = selected_anchors roots (t.root :: t.dependency_roots) in
-          let root_prefix, _ = List.hd_exn selected in
-          let anchors = List.map selected ~f:snd in
-          let%bind source_host =
-            Project.Host.create
-              anchors
-              ~git_store:None
-              ~git_grants:[]
-              ~max_grants:0
-              ~max_grant_bytes:0
-            |> Result.map_error ~f:(fun _ -> Error.Unsupported_source_selection)
-          in
-          let%bind lock_id =
-            Captured.Id.create
-              ~package_namespace:"@ochat.authoring.lock"
-              ~relative_path:"authoring.lock"
-            |> Result.map_error ~f:(fun _ -> Error.Unsupported_source_selection)
-          in
-          let%bind request =
-            Project.Request.create
-              (Project.Root.Local { locator = root_prefix; project = t.project })
-              ~operation:Build.Operation.Build_without_previous
+          let%bind build =
+            prepare_local_project
+              ~selected
+              ~project:t.project
               ~selection:t.selection
-              ~entry:Build.Entry.Declared
+              ~entry:Project.Request.Entry.Declared
               ~contract:t.contract
-              ~lock_id
-              ~max_request_bytes
-            |> Result.map_error ~f:(fun _ -> Error.Unsupported_source_selection)
-          in
-          let%bind batch =
-            Project.prepare_sources
-              source_host
-              [ request ]
               ~policy
               ~limits
+              ~max_request_bytes
               ~clock
-              ~checkpoint:poll
-            |> Result.map_error ~f:(fun error -> Error.Project error)
-          in
-          let%bind build =
-            match Project.Source_batch.preparations batch with
-            | [ prepared ] -> Ok (Project.Source_preparation.build prepared)
-            | _ -> Error Error.Unsupported_source_selection
+              ~poll
           in
           let capture = { Capture.build } in
           if
@@ -958,6 +986,27 @@ module Document_context = struct
     ;;
   end
 
+  module Script_capture = struct
+    type t =
+      { build : Build.t
+      ; contract : Chatml.Chatml_compiler_contract.t
+      ; entry_source : Captured.t
+      ; parsed : Parsed_capture.t
+      ; declaration : Prompt.Chat_markdown.Declaration.t
+      ; project : Project_capture.t
+      }
+
+    let build t = t.build
+    let contract t = t.contract
+    let entry_source t = t.entry_source
+
+    let matches t ~parsed ~declaration ~project =
+      phys_equal t.parsed parsed
+      && phys_equal t.declaration declaration
+      && phys_equal t.project project
+    ;;
+  end
+
   exception Project_work_limit
 
   let capture_project_declaration
@@ -1099,6 +1148,185 @@ module Document_context = struct
                   }))
          with
          | Project_work_limit -> Error Error.Result_limit))
+  ;;
+
+  exception Script_work_limit
+
+  let prepare_selected_script
+        t
+        ~actor
+        ~parsed
+        ~declaration
+        ~project_capture
+        ~select_contract
+        ~clock
+        ~max_script_bytes
+        ~max_locator_bytes
+        ~max_path_components
+        ~max_work_steps
+        ~checkpoint
+    =
+    let module Contract = Chatml.Chatml_compiler_contract in
+    let open Result.Let_syntax in
+    if
+      max_script_bytes <= 0
+      || max_script_bytes > Chatmd_source_bundle.default_limits.max_source_bytes
+      || max_locator_bytes <= 0
+      || max_locator_bytes > 1024
+      || max_path_components <= 0
+      || max_path_components > 1024
+      || max_work_steps <= 0
+    then Error Error.Result_limit
+    else if not (Project_capture.matches project_capture ~parsed ~declaration)
+    then Error Error.Foreign_root
+    else (
+      match t.root with
+      | None -> Error Error.Project_declaration_unavailable
+      | Some root when not (Project_capture.belongs_to_root project_capture root) ->
+        Error Error.Foreign_root
+      | Some root ->
+        let remaining = ref max_work_steps in
+        let budgeted_checkpoint () =
+          if !remaining <= 0 then raise Script_work_limit;
+          decr remaining;
+          checkpoint ()
+        in
+        let select actor ~selection =
+          budgeted_checkpoint ();
+          select_contract
+            actor
+            ~root
+            ~project:(Project_capture.member project_capture)
+            ~selection
+        in
+        let standard_target contract =
+          match Contract.kind contract with
+          | Contract.Kind.Standard target -> Some target
+          | Native -> None
+        in
+        (try
+           with_operation t.common ~actor (fun poll ->
+             let poll = poll budgeted_checkpoint in
+             Sources.with_authoring
+               t.common.host.source_host
+               ~f:(fun ~roots ~policy ~limits ~max_request_bytes ->
+                 poll ();
+                 let root_source = Parsed_capture.source parsed in
+                 if
+                   (not (Captured.Id.equal (Captured.id root_source) t.source_id))
+                   || not
+                        (String.equal
+                           (Captured.Id.relative_path (Captured.id root_source))
+                           (Path.to_string t.member))
+                 then Error Error.Foreign_root
+                 else (
+                   let%bind route =
+                     Authoring_document_script_route.admit
+                       ~parsed:(Parsed_capture.parsed parsed)
+                       ~input_sources:(Parsed_capture.input_sources parsed)
+                       ~bundle:(Parsed_capture.bundle parsed)
+                       ~declaration
+                       ~project_member:(Project_capture.member project_capture)
+                       ~root_source
+                       ~max_script_bytes
+                       ~max_locator_bytes
+                       ~max_path_components
+                       ~checkpoint:poll
+                     |> Result.map_error ~f:(function
+                       | Foreign_declaration -> Error.Foreign_root
+                       | Invalid_project_route
+                       | Missing_external_source
+                       | Conflicting_external_source ->
+                         Error.Project_declaration_unavailable
+                       | Limit -> Error.Result_limit)
+                   in
+                   let%bind selection =
+                     Agent_protocol.Authoring.Context.Selection.create
+                       ~target:Library
+                       ~environment:(Authoring_document_script_route.environment route)
+                     |> Result.map_error ~f:(fun _ -> Error.Selected_script_unavailable)
+                   in
+                   let%bind original_contract =
+                     select t.common.original_actor ~selection
+                     |> Result.of_option ~error:Error.Selected_script_unavailable
+                   in
+                   let%bind contract =
+                     select actor ~selection
+                     |> Result.of_option ~error:Error.Selected_script_unavailable
+                   in
+                   let%bind selected_target =
+                     match
+                       standard_target original_contract, standard_target contract
+                     with
+                     | Some original, Some current
+                       when Contract.Target.equal original current -> Ok current
+                     | _ -> Error Error.Selected_script_unavailable
+                   in
+                   let%bind selected = selected_anchors roots [ root ] in
+                   let%bind build =
+                     prepare_local_project
+                       ~selected
+                       ~project:(Project_capture.member project_capture)
+                       ~selection:
+                         (Chatml_project.Selection.Library
+                            { environment =
+                                Authoring_document_script_route.environment route
+                            })
+                       ~entry:(Authoring_document_script_route.entry route)
+                       ~contract
+                       ~policy
+                       ~limits
+                       ~max_request_bytes
+                       ~clock
+                       ~poll
+                   in
+                   let%bind () =
+                     List.fold_result
+                       (Chatml_prepared_program.sources (Build.prepared build))
+                       ~init:0
+                       ~f:(fun count _ ->
+                         poll ();
+                         if count >= t.common.host.limits.max_manifest_entries
+                         then Error Error.Result_limit
+                         else Ok (count + 1))
+                     |> Result.map ~f:(fun _ -> ())
+                   in
+                   let%bind same_project =
+                     Project_capture.matches_project_contents
+                       project_capture
+                       ~build
+                       ~max_compare_bytes:(64 * 1024 * 1024)
+                       ~checkpoint:poll
+                   in
+                   if not same_project
+                   then Error Error.Selected_script_unavailable
+                   else (
+                     poll ();
+                     let%bind original_now =
+                       select t.common.original_actor ~selection
+                       |> Result.of_option ~error:Error.Selected_script_unavailable
+                     in
+                     let%bind current_now =
+                       select actor ~selection
+                       |> Result.of_option ~error:Error.Selected_script_unavailable
+                     in
+                     match standard_target original_now, standard_target current_now with
+                     | Some original, Some current
+                       when Contract.Target.equal selected_target original
+                            && Contract.Target.equal selected_target current ->
+                       Ok
+                         { Script_capture.build
+                         ; contract
+                         ; entry_source = Authoring_document_script_route.source route
+                         ; parsed
+                         ; declaration
+                         ; project = project_capture
+                         }
+                     | _ -> Error Error.Selected_script_unavailable)))
+             |> Result.map_error ~f:(fun error -> Error.Sources error)
+             |> Result.bind ~f:Fn.id)
+         with
+         | Script_work_limit -> Error Error.Result_limit))
   ;;
 
   module Origin = struct
