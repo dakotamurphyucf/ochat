@@ -188,6 +188,19 @@ One [Root-bound result owner](../../lib/agent_server/developer_root_owner.mli) b
 
 An ordinary Agent.run tool can attach a saved child artifact only through the selected native registration's source preparer under a live Root action, native invocation or claimed Worker parent. That launch label is comparison metadata; the physical parent and original selected binding are checked before and after preparation. At execution, the entered Worker decodes its own saved request, verifies the current runtime has the exact native function and an installed source preparer, and restores the pinned child artifact before any file-source branch. A changed or deleted original child file therefore cannot silently replace the selected code. The headless child keeps its own source and content revisions: an embedded content-agent occurrence uses its defining captured revision and does not consume the enclosing tool's saved pin. Selected native callbacks repeat Root, Claim and invocation checks after yielding restoration. Without an installed runtime, a valid saved Agent artifact stays queued; a raw artifact reference, file path or correlation label is never an installation grant. Hosted installer and run-receipt assembly remain separate work.
 
+The shared [Driver streaming entry](../../lib/chat_response/driver.mli) accepts
+an already selected inference Context, identity-bearing history and allocator,
+tool descriptors and dispatch, and an explicit optional moderator. Ordinary
+script-bearing nested Agents reach the same streaming loop after their existing
+setup; the nonstream `run_entries` path remains separate. The prepared entry
+does no source acquisition, runtime construction, ChatMarkdown conversion,
+Fetch or recursive Agent/Model-executor setup. It returns the full history,
+including its original prefix, and exposes the same semantic assistant-text
+projection as ordinary nested execution. Those supplied values are composition
+data, not an effect grant: a hosted child must separately bind its source,
+content, tools and optional moderator to the actual physical owner before
+entering this loop.
+
 The [developer result disclosure service](../../lib/agent_server/developer_result_disclosure.mli) reads only under a current authenticated request actor and an explicit host policy. Its selection carries the original host, run, epoch, principal, captured source digest, job and attempt as comparison coordinates. The Store reopens that exact historical job through its physical root, even if a newer epoch is active; queued or running jobs stay pending, while a failed terminal without a result is distinct. Inline completions and artifact descriptors must match the persisted terminal. Artifact reads reborrow the existing Blob coordinator and verify durable metadata ownership, canonical use, whole bytes, length and digest before bounded JSON/Completion decoding. After yielding I/O, the service rereads the same Store job and rechecks both the original and current actor plus policy immediately before returning frozen completion data. A descriptor or Blob ID alone never grants disclosure. Disclosure remains separate from the collector's authenticated cross-owner reference graph and cannot mint collection authority.
 
 The [developer command storage design](developer-command-storage.md) separately describes top-level Check, Fixture_run and Live_run receipts, bounded recovery and the distinction between a fresh execution acknowledgement and a stored observation. Its host assembly remains in progress.

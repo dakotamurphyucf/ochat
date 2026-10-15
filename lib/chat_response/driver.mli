@@ -88,6 +88,39 @@ val run_entries
   -> History_entry.t list
   -> History_entry.t list
 
+(** Run already admitted identity-bearing history through the same streaming
+    inference loop used by script-bearing nested agents. The caller owns the
+    selected [ctx], allocator, initial history, tool descriptors/dispatch and
+    any actual moderator. [moderator = None] still uses the streaming path.
+    The result is the full history with its original prefix; failures and
+    cancellation propagate as in the ordinary nested-agent path.
+
+    This entry does not construct Agent_runtime/native resources, convert
+    ChatMarkdown content, Fetch sources, recursively run an Agent, or construct
+    Model_executor. Supplied values are trusted composition data, not effect
+    authority. The caller keeps their source/runtime/moderator owner live
+    through this call. Inference target, identity, submission and observation
+    hooks come from [ctx], with no implicit target re-selection. *)
+val run_stream_entries
+  :  ctx:Eio_unix.Stdenv.base Ctx.t
+  -> allocator:History_entry.Allocator.t
+  -> history:History_entry.t list
+  -> tools:Openai.Responses.Request.Tool.t list
+  -> tool_tbl:(string, Ochat_function.runner) Base.Hashtbl.t
+  -> moderator:In_memory_stream.moderator option
+  -> history_compaction:bool
+  -> response_dir:Eio.Fs.dir_ty Eio.Path.t
+  -> ?observer:agent_observer
+  -> ?source:string
+  -> ?parent_call_id:string
+  -> unit
+  -> History_entry.t list
+
+(** Semantic assistant text from identity-bearing history, shared by the
+    ordinary nested-agent result and hosts consuming [run_stream_entries].
+    Opaque reasoning, calls and results are never lowered into text. *)
+val assistant_text : History_entry.t list -> string
+
 val run_completion
   :  env:Eio_unix.Stdenv.base
   -> inference_context:Inference_runtime.Context.t
