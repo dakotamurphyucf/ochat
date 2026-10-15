@@ -6,6 +6,7 @@ module Startup = Chat_response.Startup_compilation
 module Driver = Chat_response.Driver
 module Port = Chat_response.Tool.Agent_source_runner
 module Preparation = Runtime_script_preparation
+module Portable_path = Source.Portable_path
 
 let numeric_identity host_tag policy =
   [%sexp (Chatml_source.Digest.to_hex host_tag : string), (policy : Sexp.t)]
@@ -250,6 +251,11 @@ type invocation_target =
   | Tool_target of Ochat_function.t option
   | Content_target
 
+type selected_source =
+  | No_selected_source
+  | Selected_tool_source of Native_tool_invocation.selected_borrowed * Ochat_function.t
+  | Selected_content_context of Native_tool_invocation.selected_borrowed
+
 let select_installed_child
       installed
       ~script_preparation
@@ -319,6 +325,140 @@ let select_child t installed ~parent ~reference ~invocation ~recorded ~checkpoin
     ~checkpoint
 ;;
 
+module Claimed_developer = struct
+  module B = Chat_response.Background_request
+  module C = Chat_response.Tool_capability
+  module P = Agent_protocol
+  module J = Developer_job_scope
+  module N = Native_tool_invocation
+  module D = Developer_invocation_owner.Selected
+
+  type t =
+    { active : J.active
+    ; parent : J.Parent.t
+    ; artifact : B.Agent_artifact.t
+    ; binding : C.binding
+    ; invocation : P.Host_invocation.t
+    ; check_current : unit -> (unit, P.Error.t) result
+    ; domain_id : int
+    ; live : bool Atomic.t
+    }
+
+  let key : t Eio.Fiber.key = Eio.Fiber.create_key ()
+  let invalid message = Error (P.Error.invalid_request message)
+
+  let live t =
+    Atomic.get t.live
+    && Int.equal t.domain_id (Stdlib.Domain.self () :> int)
+    && J.Parent.same_active t.parent t.active
+    && Option.value_map (Eio.Fiber.get key) ~default:false ~f:(phys_equal t)
+  ;;
+
+  let with_saved_artifact
+        ~active
+        ~parent
+        ~request
+        ~policy
+        ~prepared
+        ~binding
+        ~invocation
+        ~check_current
+        f
+    =
+    let open Result.Let_syntax in
+    let claim = J.claim active in
+    let job = Agent_store.Developer_run_store.Claim.job claim in
+    let%bind stored = B.of_json ~policy (P.Developer_job.payload job) in
+    let%bind artifact =
+      B.agent_artifact stored
+      |> Result.of_option
+           ~error:(P.Error.invalid_request "claimed Tool has no saved Agent artifact")
+    in
+    let%bind () =
+      if
+        J.Parent.same_active parent active
+        && B.Target_kind.equal (B.target_kind stored) B.Target_kind.Tool
+        && String.equal (B.fingerprint stored) (B.fingerprint request)
+      then Ok ()
+      else invalid "saved Agent artifact is foreign to the entered Worker Claim"
+    in
+    let%bind () =
+      match prepared with
+      | B.Script _ -> invalid "saved Agent artifact requires a Tool execution"
+      | Tool { capabilities; reference; _ } ->
+        let actual = C.reference binding in
+        let context = P.Host_invocation.context invocation in
+        if
+          P.Id.Capability.equal reference.id actual.id
+          && String.equal reference.fingerprint actual.fingerprint
+          && String.equal reference.name context.tool_name
+          && String.equal
+               reference.implementation_revision
+               context.implementation_revision
+          && String.equal (C.fingerprint capabilities) context.capability_fingerprint
+          && Option.equal
+               P.Id.Job.equal
+               context.parent_job
+               (Some (P.Developer_job.id job))
+          && Option.is_some (C.native_implementation binding)
+        then B.validate_capabilities stored ~capabilities
+        else invalid "saved Agent artifact has a foreign selected native binding"
+    in
+    let%bind () = check_current () in
+    let scoped =
+      { active
+      ; parent
+      ; artifact
+      ; binding
+      ; invocation
+      ; check_current
+      ; domain_id = (Stdlib.Domain.self () :> int)
+      ; live = Atomic.make true
+      }
+    in
+    Exn.protect
+      ~finally:(fun () -> Atomic.set scoped.live false)
+      ~f:(fun () -> Eio.Fiber.with_binding key scoped f)
+  ;;
+
+  let selected ~borrowed ~implementation =
+    let open Result.Let_syntax in
+    match Eio.Fiber.get key with
+    | None -> Ok None
+    | Some scoped ->
+      let expected = C.native_implementation scoped.binding in
+      (match expected with
+       | None -> invalid "claimed Agent source binding is no longer native"
+       | Some expected when not (phys_equal expected implementation) -> Ok None
+       | Some _ ->
+         let%bind () =
+           if live scoped then Ok () else invalid "claimed Agent source scope has expired"
+         in
+         let actual = N.selected_borrowed_invocation borrowed in
+         let expected_context = P.Host_invocation.context scoped.invocation in
+         let actual_context = P.Host_invocation.context actual in
+         if not (P.Id.Invocation.equal expected_context.id actual_context.id)
+         then invalid "saved Agent source belongs to another native invocation"
+         else (
+           let issuer = N.selected_borrowed_issuer borrowed in
+           let%bind inherited =
+             D.inherited_job_parent issuer (N.selected_borrowed_parent borrowed)
+           in
+           let%bind () =
+             match inherited with
+             | Some inherited when J.Parent.same_claim scoped.parent inherited -> Ok ()
+             | Some _ | None ->
+               invalid "saved Agent source belongs to another Worker Claim"
+           in
+           let%bind () = N.check_selected_source borrowed ~implementation in
+           let%bind () = scoped.check_current () in
+           let%bind () = N.check_selected_source borrowed ~implementation in
+           if live scoped
+           then Ok (Some scoped.artifact)
+           else invalid "saved Agent scope ended"))
+  ;;
+end
+
 let rec bind_with_checkpoint ?installed t ~revision ~sw ~checkpoint =
   let open Result.Let_syntax in
   let%map parsed, projection, identity = admit_revision t revision ~checkpoint in
@@ -352,7 +492,7 @@ let rec bind_with_checkpoint ?installed t ~revision ~sw ~checkpoint =
               tool_reference t parsed declaration ~checkpoint)
             items)
     ; prepare =
-        Option.map installed ~f:(fun installed ~declaration ~owner:_ ~checkpoint ->
+        Option.map installed ~f:(fun installed ~declaration ~launch:_ ~checkpoint ->
           Runtime_activity.run activity (fun () ->
             let open Result.Let_syntax in
             let%bind reference = tool_reference t parsed declaration ~checkpoint in
@@ -409,7 +549,14 @@ and invoke
   Runtime_activity.with_switch activity (fun ~sw ->
     let env = Chat_response.Ctx.env ctx in
     let checkpoint = Eio.Fiber.check in
-    let run caller startup ~revision ~compilation_limits ~programs =
+    let run
+          ?(check_selected = fun () -> Ok ())
+          caller
+          startup
+          ~revision
+          ~compilation_limits
+          ~programs
+      =
       let poll () = Startup.checkpoint startup in
       let open Result.Let_syntax in
       let%bind child =
@@ -426,6 +573,7 @@ and invoke
           Prompt_revision.materialized_tree revision
           / Filename.dirname (Prompt_revision.root_relative_path revision))
       in
+      let%bind () = check_selected () in
       Ok
         (Driver.run_prepared_agent
            parsed
@@ -476,7 +624,7 @@ and invoke
            Content occurrences keep their own defining revision and must never
            consume the enclosing queued target. Both paths reject expired/foreign
            services before source selection. *)
-        let%bind recorded =
+        let%bind recorded, selected_source =
           match Script_tool_calls.native_services_scope () with
           | Active services ->
             (match target with
@@ -484,13 +632,35 @@ and invoke
                Script_tool_calls.agent_artifact_for_implementation
                  services
                  ~implementation
+               |> Result.map ~f:(fun recorded -> recorded, No_selected_source)
              | Content_target ->
-               Script_tool_calls.agent_artifact services |> Result.map ~f:(fun _ -> None))
+               Script_tool_calls.agent_artifact services
+               |> Result.map ~f:(fun _ -> None, No_selected_source))
           | Expired -> Error (failure "selected child native services have expired")
           | Unbound ->
-            (match Native_tool_invocation.current_scope () with
-             | Expired -> Error (failure "selected child native invocation has expired")
-             | Unbound | Active _ -> Ok None)
+            (match Native_tool_invocation.borrow_selected () with
+             | Ok borrowed ->
+               (match target with
+                | Content_target ->
+                  let%map () =
+                    Native_tool_invocation.check_selected_content_context borrowed
+                  in
+                  None, Selected_content_context borrowed
+                | Tool_target None ->
+                  Error (failure "developer Agent source requires its exact native tool")
+                | Tool_target (Some implementation) ->
+                  let%bind () =
+                    Native_tool_invocation.check_selected_source borrowed ~implementation
+                  in
+                  let%map recorded =
+                    Claimed_developer.selected ~borrowed ~implementation
+                  in
+                  recorded, Selected_tool_source (borrowed, implementation))
+             | Error _ ->
+               (match Native_tool_invocation.current_scope () with
+                | Expired ->
+                  Error (failure "selected child native invocation has expired")
+                | Unbound | Active _ -> Ok (None, No_selected_source)))
         in
         let%bind context =
           match recorded, target, Script_tool_calls.native_services_scope () with
@@ -525,6 +695,34 @@ and invoke
             ~recorded
             ~checkpoint
         in
+        let check_selected () =
+          match selected_source with
+          | No_selected_source -> Ok ()
+          | Selected_content_context borrowed ->
+            Native_tool_invocation.check_selected_content_context borrowed
+          | Selected_tool_source (borrowed, implementation) ->
+            let open Result.Let_syntax in
+            let%bind () =
+              Native_tool_invocation.check_selected_source borrowed ~implementation
+            in
+            let%bind current = Claimed_developer.selected ~borrowed ~implementation in
+            let same_reference left right =
+              let module Artifact = Chat_response.Background_request.Agent_artifact in
+              Agent_protocol.Id.Prompt_revision.equal
+                (Artifact.revision_id left)
+                (Artifact.revision_id right)
+              && Chatml_source.Digest.equal
+                   (Artifact.manifest_sha256 left)
+                   (Artifact.manifest_sha256 right)
+              && Portable_path.equal
+                   (Artifact.root_relative_path left)
+                   (Artifact.root_relative_path right)
+            in
+            if Option.equal same_reference recorded current
+            then Ok ()
+            else Error (failure "selected Agent source changed during restoration")
+        in
+        let%bind () = check_selected () in
         let revision = Prompt_child_source.revision selected in
         Preparation.with_revision
           (Some t.script_preparation)
@@ -532,7 +730,7 @@ and invoke
           ~env
           ~invocation:Headless
           ~checkpoint
-          ~f:(run caller ~revision)
+          ~f:(run ~check_selected caller ~revision)
     in
     runner_result result)
 ;;

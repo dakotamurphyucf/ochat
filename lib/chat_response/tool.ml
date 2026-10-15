@@ -62,7 +62,7 @@ module Agent_source_runner = struct
     { revision : Chatml_source.Digest.t
     ; prepare :
         (declaration:CM.agent_tool
-         -> owner:Agent_protocol.Job.launch_owner
+         -> launch:Source_launch.t
          -> checkpoint:(unit -> unit)
          -> (Background_request.Agent_artifact.t, Agent_protocol.Error.t) Result.t)
           option

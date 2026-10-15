@@ -184,8 +184,8 @@ let build_functions
                   Option.map runner.Tool.Agent_source_runner.prepare ~f:(fun prepare ->
                     Native_source_registration.create
                       ~implementation
-                      ~prepare:(fun ~owner ~request:_ ~checkpoint ->
-                        prepare ~declaration:specification ~owner ~checkpoint
+                      ~prepare:(fun ~launch ~request:_ ~checkpoint ->
+                        prepare ~declaration:specification ~launch ~checkpoint
                         |> Result.map ~f:Option.some)))
               in
               Source_requirement.Source registration

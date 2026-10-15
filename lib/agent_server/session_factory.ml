@@ -1522,7 +1522,7 @@ let extension_jobs t actor_ref registry native =
       Chat_response.Agent_runtime.prepare_agent_source
         native
         ~binding
-        ~owner
+        ~launch:(Chat_response.Source_launch.conversation owner)
         ~request
         ~max_registrations:
           Chat_response.One_off_request.default_policy.execution.max_array_items

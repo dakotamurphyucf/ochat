@@ -26,7 +26,9 @@
   ochat.agent_store
   ochat.agent_protocol
   ochat.agent_server
+  ochat.agent_session
   ochat.chat_response
+  inference_fixture
   developer_run_store_test_suite)
  (inline_tests)
  (preprocess

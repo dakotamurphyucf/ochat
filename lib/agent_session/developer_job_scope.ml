@@ -173,6 +173,20 @@ module Parent = struct
   let attempt t = t.attempt
   let nested_depth t = t.nested_depth
 
+  let same_active t active =
+    phys_equal t.active active
+    && phys_equal t.issuer active.issuer
+    && check_local t.issuer active
+  ;;
+
+  let same_claim left right =
+    phys_equal left.issuer right.issuer
+    && phys_equal left.active right.active
+    && check_local left.issuer left.active
+    && P.Id.Job.equal left.job_id right.job_id
+    && Int.equal left.attempt right.attempt
+  ;;
+
   let check t ~owner ~capture_fingerprint =
     check_parent
       t.issuer

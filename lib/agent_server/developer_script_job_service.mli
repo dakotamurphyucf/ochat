@@ -9,6 +9,28 @@ type t
 (** Physical composition check for the selected native executor. *)
 val issued_by_root : t -> Developer_root_owner.run -> bool
 
+module Source_parent : sig
+  (** Borrowed proof belonging to one live Root action, Native terminal or
+      claimed Worker scope. The service creates it from its existing physical
+      scope; source callbacks cannot construct it from a job ID or request.
+      It expires with the enclosing scope and never escapes into a saved job. *)
+  type t
+
+  (** Bounded current actor/selection and exact physical parent check. This
+      may yield for current Store/host evidence. The caller repeats it after
+      source I/O and before returning an artifact; the lexical service repeats
+      its own check before stage. No read grant follows from the artifact. *)
+  val check
+    :  t
+    -> binding:Chat_response.Tool_capability.binding
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Comparison-only metadata derived from the checked physical parent.
+      Native carries its actual Host invocation ID; Worker carries the entered
+      Claim's job ID and attempt. It cannot replace [check]. *)
+  val launch : t -> (Chat_response.Source_launch.t, Agent_protocol.Error.t) result
+end
+
 module Scope : sig
   type t
 
@@ -96,7 +118,8 @@ val create
   -> env:Eio_unix.Stdenv.base
   -> current_actor:(unit -> Operator_authorization.t)
   -> prepare_source:
-       (binding:Chat_response.Tool_capability.binding
+       (parent:Source_parent.t
+        -> binding:Chat_response.Tool_capability.binding
         -> request:Chat_response.Background_request.t
         -> checkpoint:(unit -> unit)
         -> ( Chat_response.Background_request.Agent_artifact.t option

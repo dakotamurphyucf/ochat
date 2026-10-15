@@ -74,6 +74,31 @@ val selected_borrowed_capabilities
   :  selected_borrowed
   -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
 
+(** Recheck the actual selected callback's original parent/actor, current host
+    registry and unchanged physical native function after a yielding source
+    restoration. The implementation must match both the callback's retained
+    ceiling and its independently current selection. It reuses this exact
+    invocation's trusted native [effect_entry] guard: fresh Root currentness,
+    selected binding, yielding inherited Claim check, then nonyielding Root and
+    Parent checks. A child invocation installs its own guard; a narrowed scope
+    of the same invocation retains it. This check never treats source path or
+    saved artifact data as authority. *)
+val check_selected_source
+  :  selected_borrowed
+  -> implementation:Ochat_function.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Content from the defining captured revision may run inside an
+    ordinary selected native callback without consuming that callback's saved
+    Agent.run tool pin. Derive the exact physical native implementation from
+    this invocation's retained selected binding and apply the same fresh Root,
+    Claim, actor and scope check as [check_selected_source]. Managed or foreign
+    scopes cannot use this ordinary native content path. No content/path/source
+    reference is made authoritative by this comparison. *)
+val check_selected_content_context
+  :  selected_borrowed
+  -> (unit, Agent_protocol.Error.t) result
+
 val borrow_owned : unit -> (owned_borrowed, Agent_protocol.Error.t) result
 val owned_borrowed_invocation : owned_borrowed -> Agent_protocol.Host_invocation.t
 val owned_borrowed_execution_context : owned_borrowed -> Chatml_execution.context

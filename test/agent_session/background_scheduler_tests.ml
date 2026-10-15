@@ -280,7 +280,7 @@ let with_physical_developer
             ~disclosure
             ~env
             ~current_actor:(fun () -> DR.original_actor root)
-            ~prepare_source:(fun ~binding:_ ~request:_ ~checkpoint ->
+            ~prepare_source:(fun ~parent:_ ~binding:_ ~request:_ ~checkpoint ->
               checkpoint ();
               Ok None)
           |> DT.ok
@@ -762,7 +762,7 @@ let%test_unit "a saturated developer root leaves another physical root runnable"
                     ~disclosure
                     ~env
                     ~current_actor:(fun () -> DR.original_actor other_root)
-                    ~prepare_source:(fun ~binding:_ ~request:_ ~checkpoint ->
+                    ~prepare_source:(fun ~parent:_ ~binding:_ ~request:_ ~checkpoint ->
                       checkpoint ();
                       Ok None)
                   |> DT.ok
