@@ -5,14 +5,21 @@ open! Core
 module Limits : sig
   type t
 
-  (** Every bound is positive and finite. The document limits use the existing
-      Document_schema JSON byte/depth/field/node accounting. Aggregate recovery
-      limits cover directory entries, bytes and work before allocation. *)
+  (** Every bound is positive and finite. Inference row count is bounded by
+      16,384 and encoded aggregate inference bytes by the configured whole
+      document cap (itself at most 16 MiB); each Attempt_record also passes
+      its canonical 64 KiB/observation/diagnostic admission. The document
+      limits use the existing Document_schema JSON byte/depth/field/node
+      accounting. Aggregate recovery limits cover directory entries, bytes
+      and work before allocation. On disk, an over-limit document is corrupt;
+      ordinary admission reports Limit_exceeded before mutation. *)
   val create
     :  max_runs:int
     -> max_epochs_per_run:int
     -> max_jobs_per_run:int
     -> max_invocations_per_run:int
+    -> max_inference_attempts_per_run:int
+    -> max_inference_bytes_per_run:int
     -> max_selected_per_commit:int
     -> max_job_payload_bytes:int
     -> max_document_bytes:int
@@ -59,7 +66,8 @@ module Run_claim : sig
   (** Non-yielding release of this exact issuer token after host-owned actions,
       workers and uncertain handoffs are joined/reconciled. A pending Store
       transaction, open recovery window, in-flight normal Store operation or
-      unsettled issued worker Claim for the run rejects release. Repeated release is harmless;
+      unsettled issued worker Claim or open Tracking manager for the run
+      rejects release. Repeated release is harmless;
       the shared Store and unrelated runs stay open. *)
   val release : t -> (unit, Error.t) result
 end
@@ -178,6 +186,22 @@ module Claim : sig
   val current_for_effect : t -> (bool, Error.t) result
 end
 
+module Inference_row : sig
+  type t
+
+  (** A bounded, validated projection from this Store's actual document. It
+      carries comparison evidence only; it cannot be used to enter a worker,
+      allocate another attempt or disclose a provider payload. *)
+  val ordinal : t -> int64
+
+  val owner : t -> Agent_protocol.Execution_owner.developer
+  val capture_fingerprint : t -> Chatml_source.Digest.t
+  val job_id : t -> Agent_protocol.Id.Job.t
+  val job_attempt : t -> int
+  val context_id : t -> Inference.Observation.Observation_id.t
+  val record : t -> Inference.Observation.Attempt_record.t
+end
+
 module Prepared : sig
   type t
 
@@ -212,6 +236,22 @@ type reconciliation =
 module Recovery : sig
   type t
 
+  module Inference_candidate : sig
+    type t
+
+    (** Exact persisted Prepared or Running row from this View. The row's
+        historical owner, capture, job, attempt, scope and evidence are never
+        rewritten to the new startup epoch. *)
+    val row : t -> Inference_row.t
+  end
+
+  module Inference_pending : sig
+    type t
+
+    val row : t -> Inference_row.t
+    val after : t -> Inference.Observation.Attempt_record.t
+  end
+
   module Candidate : sig
     type t
 
@@ -229,6 +269,7 @@ module Recovery : sig
     val observation : t -> Observation.t
 
     val candidates : t -> Candidate.t list
+    val inference_candidates : t -> Inference_candidate.t list
   end
 
   module Pending : sig
@@ -261,7 +302,10 @@ module Recovery : sig
       observation, still current at the Store read. [after] must be terminal,
       preserve job attempt/start and contain no retry or child selection. The
       existing pure transition and document encoder produce the one Prepared
-      CAS; a mismatch rejects without writing. A retained Pending must be
+      CAS; a mismatch rejects without writing. Persisted Prepared/Running
+      inference rows for this job/attempt must first be interrupted through
+      this same Recovery window, so the job cannot become terminal while its
+      old provider attempt still appears live. A retained Pending must be
       settled before any different selection is prepared. *)
   val prepare_terminal
     :  t
@@ -270,6 +314,19 @@ module Recovery : sig
     -> after:Agent_protocol.Developer_job.State.t
     -> (Pending.t, Error.t) result
 
+  (** Prepare the exact recovered inference row before interrupting its
+      abandoned Model_call job. Prepared proves no application request began
+      and becomes Host_interrupted/Definitely_not_submitted. Running is
+      conservatively Host_interrupted/Possibly_submitted; its recorded
+      observations are retained. A terminal or already-interrupted row is not
+      a candidate. This derives the change from the source row and cannot
+      manufacture a provider terminal or a new scope. *)
+  val prepare_inference_interruption
+    :  t
+    -> view:View.t
+    -> candidate:Inference_candidate.t
+    -> (Inference_pending.t, Error.t) result
+
   (** A retained exact preparation is reported after an uncertain write or
       cancellation. Higher result publication reuses/reconciles it and its
       private selected intent; it must not select replacement bytes. Successful
@@ -277,6 +334,8 @@ module Recovery : sig
       a retry or [reprepare_same]; Diverged/unknown retains it and forbids a
       different preparation. *)
   val pending : t -> Pending.t option
+
+  val inference_pending : t -> Inference_pending.t option
 
   (** Use the same Store writer, pending barrier, file/directory durability and
       exact reconciliation as ordinary claimed terminal transitions. [admit]
@@ -301,11 +360,33 @@ module Recovery : sig
       custody. A proven same-revision absence may instead retry its Prepared. *)
   val reprepare_same : t -> Pending.t -> (Pending.t, Error.t) result
 
-  (** Complete the one-shot startup window only after no Pending remains and a
-      fresh bounded read finds no Running/Waiting_permission attempt in any
-      retained epoch. A successful close enables normal claims under this
-      Run_claim. No callback may enter a worker between the final read and
-      closing the window. *)
+  (** Same one-shot window, per-run pending barrier, exact Prepared bytes and
+      bounded reconciliation as [commit_terminal]. Only one job or inference
+      Pending may exist at once. An uncertain write retains the exact physical
+      token in process; a restarted process instead reads the authoritative
+      persisted row and opens a NEW Recovery window. No callback is replayed.
+      Proven Absent can reprepare only this original row/state against a fresh
+      View, not choose another interruption or parent. *)
+  val commit_inference_interruption
+    :  t
+    -> Inference_pending.t
+    -> (Installed.t, Error.t) result
+
+  val reconcile_inference_interruption
+    :  t
+    -> Inference_pending.t
+    -> (reconciliation, Error.t) result
+
+  val reprepare_inference_same
+    :  t
+    -> Inference_pending.t
+    -> (Inference_pending.t, Error.t) result
+
+  (** Complete the one-shot startup window only after neither kind of Pending
+      remains and a fresh bounded read finds no Running/Waiting_permission
+      job or Prepared/Running inference row in any retained epoch. A successful
+      close enables normal claims under this Run_claim. No callback may enter
+      a worker between the final read and closing the window. *)
   val finish : t -> (unit, Error.t) result
 
   (** Non-authorizing lifecycle observation for the owning startup adapter. *)
@@ -316,6 +397,174 @@ module Recovery : sig
       before publication. It never discards uncertain Store work; otherwise
       the physical claim remains quarantined for retry/restart. *)
   val abort_clean : t -> (unit, Error.t) result
+end
+
+(** One physically registered inference-attempt manager for a live run claim.
+    It shares this Store's document writer, bounded codec, run-lifecycle gate
+    and single per-run pending barrier. This lower layer never constructs an
+    Inference_client.Identity, provider request, fake Session or worker lease.
+    Root owns this manager until all model callbacks have joined and their
+    exact tracking writes are settled. All operations use the issuing domain;
+    a DTO with matching IDs is not physical authority. *)
+module Tracking : sig
+  type t
+
+  module Registration : sig
+    type t
+
+    (** Minted only after the exact admission write is durably Installed. The
+        row accessor is that admitted immutable snapshot; use [observe] for
+        a fresh latest record after later revisions. *)
+    val row : t -> Inference_row.t
+
+    val scope : t -> Transcript.Scope.t
+    val accounting_id : t -> Inference.Observation.Observation_id.t
+    val context_id : t -> Inference.Observation.Observation_id.t
+  end
+
+  module View : sig
+    type t
+
+    (** The exact fresh Store Observation plus the row registered by this
+        manager. Matching numeric revisions or copied rows do not suffice. *)
+    val observation : t -> Observation.t
+
+    val row : t -> Inference_row.t
+  end
+
+  module Pending : sig
+    type t
+  end
+
+  type receipt =
+    | Admitted of Registration.t
+    | Updated of View.t
+
+  type reconciliation =
+    | Tracking_installed of receipt
+    | Tracking_absent
+    | Tracking_diverged
+
+  type change =
+    | Started
+    | Observed of Inference.Observation.t
+    | Finished of Inference.Event.Terminal.t
+    | Interrupted of
+        { reason : Inference.Observation.Attempt_record.interruption
+        ; delivery : Inference.Event.Terminal.delivery
+        }
+
+  type preparation =
+    | Unchanged of View.t
+    | Prepared of Pending.t
+
+  type relation =
+    | Root
+    | Nested of
+        { parent : Registration.t
+        ; call_entry_id : History_entry.Id.t option
+        ; call_alias : string option
+        }
+
+  (** Register exactly once for the physical Run_claim, after its one-shot
+      Recovery window finished and before exposing any Model_call callback.
+      The Store rejects a second manager even if it has the same handle/claim.
+      Registration occurs before a yielding read; foreign Store/handle/domain,
+      closed claim, unfinished recovery or a live same-run pending reject. *)
+  val open_ : claim:Run_claim.t -> handle:handle -> (t, Error.t) result
+
+  (** A new Prepared row needs an actually entered Claim for this Store, exact
+      immutable Model_call job with a positive attempt in durable Running
+      state, still held by the issuer's physical worker registry, latest
+      Active epoch and capture, and remaining row/byte/ordinal capacity.
+      Waiting_permission is an ended callback state, not new-work admission.
+      A nested parent is a
+      genuinely issued retained registration from this manager and the SAME
+      physical entered Claim; it may be Terminal because an admitted tool
+      call can execute after the parent provider response completes. The
+      parent key/ordinal and supplied call binding are retained in the Scope
+      relation. The higher host must prove that binding came from its actual
+      admitted call candidate; the Store cannot infer that fact from an
+      Attempt_record or caller text. Parent provenance does not grant new
+      effect authority: the current Claim/actor/provider checks remain
+      mandatory. The
+      generated source, ordinal-based attempt, usage and context IDs are
+      validated and persisted by the Store, not supplied as authority. This
+      prepares exact before/after bytes and reserves the manager's one Pending
+      slot. No inference callback may begin until [commit] yields Admitted. *)
+  val prepare_admit
+    :  t
+    -> claim:Claim.t
+    -> relation:relation
+    -> configuration:Inference.Observation.Configuration.t
+    -> (Pending.t, Error.t) result
+
+  (** Re-read the exact registered row through the issuing handle and writer
+      lease. This may yield and is never an effect-currentness lease. *)
+  val observe : t -> Registration.t -> (View.t, Error.t) result
+
+  (** Validates exact registration/Claim/job/attempt, fresh View, full immutable
+      Scope/accounting/configuration and canonical Attempt_record bounds.
+      Started is allowed only while the exact issued job remains durable Running
+      and its epoch remains latest Active;
+      an entered historical claim may record only already-started observations
+      and truthful terminal/interruption bookkeeping. Observed uses complete
+      authoritative snapshots: higher revisions replace, exact duplicates and
+      stale revisions produce Unchanged, same-revision disagreement conflicts.
+      A retained terminal may receive a later matching observation but cannot
+      reopen or change its terminal evidence. Finished must match the original
+      full Scope and its delivery/outcome combination. An invalid change leaves
+      the prior row untouched. *)
+  val prepare_change
+    :  t
+    -> claim:Claim.t
+    -> registration:Registration.t
+    -> previous:View.t
+    -> change:change
+    -> (preparation, Error.t) result
+
+  (** Both preparation kinds settle through ONE typed operation and the Store's
+      existing exact Prepared/pending classifier. [receipt] distinguishes the
+      only legal acknowledgement of each kind. [admit] is a trusted
+      nonyielding physical host-currentness check at the pre-rename boundary;
+      it may reject new work while permitting truthful old-attempt cleanup.
+      Store additionally rechecks this manager's exact Run_claim, handle,
+      entered worker Claim, job/attempt, retained Pending and CAS bytes; an
+      always-true host callback cannot replace those lower checks. It performs
+      no I/O or callback replay. Unexpected exceptions and Eio
+      cancellation retain this manager's exact Pending and their original
+      identity/backtrace. Repeating an already-settled exact Pending returns
+      its original receipt without rewriting or minting another registration. *)
+  val commit : t -> Pending.t -> admit:(unit -> bool) -> (receipt, Error.t) result
+
+  (** Classify an uncertain attempted write using the exact retained token;
+      Installed acknowledges its original bytes, Absent permits only
+      [reprepare_same], and Diverged remains quarantined. A proven prewrite
+      conflict retires only this never-attempted token; it cannot adopt another
+      writer's identical after-bytes. The application callback is never retried. *)
+  val reconcile : t -> Pending.t -> (reconciliation, Error.t) result
+
+  val reprepare_same : t -> Pending.t -> (Pending.t, Error.t) result
+
+  (** Exposes the single physical Pending to its owning Root after a lexical
+      inference callback unwinds; it remains live until exact settlement. This
+      value grants no separate writer and cannot be copied across managers. *)
+  val pending : t -> Pending.t option
+
+  (** Retire only a prepared admission that has conclusively never attempted a
+      replacement and has never exposed a callback; a change or uncertain
+      admission cannot be dropped. The Store's pending slot is released only
+      when that exact token is removed. *)
+  val abort_unattempted_admission : t -> Pending.t -> (unit, Error.t) result
+
+  (** Finish after joined callbacks, no Pending, and a fresh bounded document
+      read proving every registration issued by this manager is Terminal or
+      Interrupted. This unregisters the exact manager and invalidates its
+      tokens. It never closes the shared Store or other runs. Run_claim.release
+      rejects while the manager is open; a second manager cannot open on this
+      SAME claim after finish. Failure retains the manager/claim for bounded
+      reconciliation and prevents capacity release by the higher owner. *)
+  val finish : t -> (unit, Error.t) result
 end
 
 (** Open one singleton facade for this physical Session_store under its existing

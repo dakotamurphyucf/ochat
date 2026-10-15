@@ -33,6 +33,8 @@ let decode_with_document
       ~max_jobs
       ~max_invocations
       ~max_job_payload_bytes
+      ~max_inference_attempts
+      ~max_inference_bytes
   =
   let open Result.Let_syntax in
   let%bind document = decode_document t bytes ~limits in
@@ -45,6 +47,8 @@ let decode_with_document
       ~max_jobs
       ~max_invocations
       ~max_job_payload_bytes
+      ~max_inference_attempts
+      ~max_inference_bytes
   in
   value, document
 ;;
@@ -58,6 +62,8 @@ let decode
       ~max_jobs
       ~max_invocations
       ~max_job_payload_bytes
+      ~max_inference_attempts
+      ~max_inference_bytes
   =
   decode_with_document
     t
@@ -68,6 +74,8 @@ let decode
     ~max_jobs
     ~max_invocations
     ~max_job_payload_bytes
+    ~max_inference_attempts
+    ~max_inference_bytes
   |> Result.map ~f:fst
 ;;
 
@@ -80,6 +88,8 @@ let encode
       ~max_jobs
       ~max_invocations
       ~max_job_payload_bytes
+      ~max_inference_attempts
+      ~max_inference_bytes
   =
   let open Result.Let_syntax in
   let%bind input =
@@ -91,6 +101,8 @@ let encode
       ~max_jobs
       ~max_invocations
       ~max_job_payload_bytes
+      ~max_inference_attempts
+      ~max_inference_bytes
   in
   Eio.Domain_manager.run t.domain_mgr (fun () -> Doc.finish_encode input)
 ;;

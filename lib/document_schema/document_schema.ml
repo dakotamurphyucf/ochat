@@ -393,9 +393,15 @@ module Document = struct
     { json; kind; version; payload; required_semantics; admitted_limits = limits }
   ;;
 
-  let inspect ~limits json =
-    let%bind.Result () = Json.validate ~limits json in
+  let inspect_with_checkpoint ~limits ~checkpoint json =
+    let%bind.Result _ =
+      Json.validate_and_measure_with_checkpoint ~limits ~checkpoint json
+    in
     inspect_validated ~limits json
+  ;;
+
+  let inspect ~limits json =
+    inspect_with_checkpoint ~limits ~checkpoint:(fun () -> ()) json
   ;;
 
   let decode ~limits bytes =
@@ -412,15 +418,20 @@ module Document = struct
         | _ -> Error Error.Unsupported_beta_format))
   ;;
 
-  let create ~limits ~kind ~version ~payload =
-    inspect
+  let create_with_checkpoint ~limits ~checkpoint ~kind ~version ~payload =
+    inspect_with_checkpoint
       ~limits
+      ~checkpoint
       (`Object
           [ "format", `String format
           ; "schema_version", `Number (Int.to_string version)
           ; "kind", `String kind
           ; "payload", payload
           ])
+  ;;
+
+  let create ~limits ~kind ~version ~payload =
+    create_with_checkpoint ~limits ~checkpoint:(fun () -> ()) ~kind ~version ~payload
   ;;
 
   let replace_payload t ~limits ~version ~payload =

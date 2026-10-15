@@ -116,6 +116,17 @@ module Document : sig
     -> payload:Json.t
     -> (t, Error.t) Result.t
 
+  (** The same canonical envelope admission as [create], charging the supplied
+      cooperative checkpoint during JSON validation. The checkpoint does not
+      alter the limits or error ordering. *)
+  val create_with_checkpoint
+    :  limits:Limits.t
+    -> checkpoint:(unit -> unit)
+    -> kind:string
+    -> version:int
+    -> payload:Json.t
+    -> (t, Error.t) Result.t
+
   val kind : t -> string
   val version : t -> int
   val payload : t -> Json.t

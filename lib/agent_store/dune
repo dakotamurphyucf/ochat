@@ -9,6 +9,8 @@
   authoring_upload_files
   authoring_upload_publication
   authoring_upload_store
+  developer_inference_row
+  developer_inference_transition
   developer_run_document
   developer_run_cpu
   developer_run_transition
@@ -91,6 +93,8 @@
   authoring_upload_document
   authoring_upload_files
   authoring_upload_publication
+  developer_inference_row
+  developer_inference_transition
   developer_run_document
   developer_run_cpu
   developer_run_transition
@@ -103,6 +107,8 @@
   result_publication_lock
   result_publication_phase)
  (libraries ochat.inference
+  ochat.transcript
+  ochat.history_entry
   core
   core_unix
   cstruct
