@@ -461,6 +461,7 @@ let%test_unit
         ~limits:
           (Root_fixture.store_limits
              ~max_job_payload_bytes:4096
+             ~max_jobs_per_run:8
              ~max_document_bytes:131072
              ~max_inference_bytes_per_run:65536
              ~max_work_steps:4096
@@ -519,12 +520,12 @@ let%test_unit
         ~capacity:
           (Agent_server.Job_capacity.create
              ~limits:
-               { Agent_server.Config.Server.daemon_total = 4
-               ; per_principal = 4
-               ; per_prompt = 4
-               ; per_workspace = 4
-               ; per_session = 4
-               ; per_kind = 4
+               { Agent_server.Config.Server.daemon_total = 8
+               ; per_principal = 8
+               ; per_prompt = 8
+               ; per_workspace = 8
+               ; per_session = 8
+               ; per_kind = 8
                ; max_nested_depth = 2
                })
         ~now:Root_fixture.now
@@ -726,6 +727,7 @@ let%test_unit
     let nested_effects = ref 0 in
     let escaped_scope = ref None in
     let escaped_prepared = ref None in
+    let claimed_children = ref [] in
     let expected = Run_store.observe handle |> ok in
     let failed_model_callback =
       try
@@ -745,6 +747,77 @@ let%test_unit
                       phys_equal
                         context
                         (Port.Model_selection.context selected_model |> ok));
+                    let document_limits = Run_store.document_limits handle |> ok in
+                    let measured json =
+                      Document_schema.Json.validate_and_measure
+                        ~limits:document_limits
+                        json
+                      |> ok
+                    in
+                    let before_children = Run_store.observe handle |> ok in
+                    let existing_payload_bytes =
+                      List.fold
+                        [ first_model
+                        ; second_model
+                        ; script
+                        ; Option.value_exn !child_model
+                        ]
+                        ~init:0
+                        ~f:(fun total id ->
+                          let job =
+                            Run_store.find_job before_children id |> Option.value_exn
+                          in
+                          total + measured (P.Developer_job.payload job))
+                    in
+                    let child_envelope =
+                      P.Developer_model_call.create
+                        ~request:(P.Model_spawn_request.original model_request)
+                        ~target
+                        ~limits:document_limits
+                      |> ok
+                      |> P.Developer_model_call.to_json
+                    in
+                    let aggregate_payload_bytes =
+                      existing_payload_bytes + (2 * measured child_envelope)
+                    in
+                    assert (aggregate_payload_bytes <= 4096);
+                    let first_child =
+                      Root.Model_inference.admit_external_model
+                        scope
+                        ~request:model_request
+                        ~checkpoint:ignore
+                      |> Result.map_error ~f:(fun error ->
+                        P.Error.code_to_string error.P.Error.code
+                        ^ ": "
+                        ^ error.P.Error.message)
+                      |> Result.ok_or_failwith
+                    in
+                    let second_child =
+                      Root.Model_inference.admit_external_model
+                        scope
+                        ~request:model_request
+                        ~checkpoint:ignore
+                      |> ok
+                    in
+                    assert (not (P.Id.Job.equal first_child second_child));
+                    claimed_children := [ first_child; second_child ];
+                    let after_children = Run_store.observe handle |> ok in
+                    List.iter !claimed_children ~f:(fun id ->
+                      let child =
+                        Run_store.find_job after_children id |> Option.value_exn
+                      in
+                      let launch = P.Developer_job.launch child in
+                      assert (P.Job.equal_kind (P.Developer_job.kind child) Model_call);
+                      assert (
+                        match P.Developer_job.Launch.parent launch with
+                        | Run_root -> true
+                        | Invocation _ -> false);
+                      assert (
+                        match P.Developer_job.Launch.parent_job launch with
+                        | Some (id, attempt) ->
+                          P.Id.Job.equal id first_model && Int.equal attempt 1
+                        | None -> false);
+                      assert (Int.equal (P.Developer_job.Launch.nested_depth launch) 1));
                     let synthetic_context, synthetic_rounds =
                       synthetic_call_context (RT.Context.target context)
                     in
@@ -923,6 +996,9 @@ let%test_unit
       | Model_ack_failed -> true
     in
     assert failed_model_callback;
+    let after_parent_failure = Run_store.observe handle |> ok in
+    List.iter !claimed_children ~f:(fun id ->
+      assert (Option.is_some (Run_store.find_job after_parent_failure id)));
     assert (!model_acknowledgements = 1 && !model_completions = 1);
     assert (
       try

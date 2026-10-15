@@ -94,8 +94,9 @@ let job_count t = List.length t.jobs
 let valid_external_model_launch_shape launch =
   match P.Developer_job.Launch.parent launch with
   | Run_root ->
-    Option.is_none (P.Developer_job.Launch.parent_job launch)
-    && Int.equal (P.Developer_job.Launch.nested_depth launch) 0
+    (match P.Developer_job.Launch.parent_job launch with
+     | None -> Int.equal (P.Developer_job.Launch.nested_depth launch) 0
+     | Some (_, attempt) -> attempt > 0 && P.Developer_job.Launch.nested_depth launch > 0)
   | Invocation _ -> true
 ;;
 
@@ -255,8 +256,40 @@ let validate_relations t ~poll =
         if
           P.Job.equal_kind (P.Developer_job.kind job) P.Job.Model_call
           && not (valid_external_model_launch_shape launch)
-        then corrupt "external model root launch has job ancestry or depth"
+        then corrupt "external model launch has invalid ancestry or depth"
         else Ok ()
+      in
+      let%bind () =
+        match
+          ( P.Developer_job.kind job
+          , P.Developer_job.Launch.parent launch
+          , P.Developer_job.Launch.parent_job launch )
+        with
+        | P.Job.Model_call, Run_root, Some (parent_id, _) ->
+          (match Hashtbl.find jobs parent_id with
+           | Some parent ->
+             let depth =
+               P.Developer_job.Launch.nested_depth (P.Developer_job.launch parent)
+             in
+             if
+               P.Job.equal_kind (P.Developer_job.kind parent) P.Job.Model_call
+               && depth < Int.max_value
+               && Int.equal (P.Developer_job.Launch.nested_depth launch) (depth + 1)
+               && Chatml_source.Digest.equal
+                    (P.Developer_job.capture_fingerprint parent)
+                    (P.Developer_job.capture_fingerprint job)
+             then Ok ()
+             else corrupt "external model claimed parent kind, capture or depth differs"
+           | None -> corrupt "external model claimed parent is missing")
+        | P.Job.Model_call, (Run_root | Invocation _), None
+        | P.Job.Model_call, Invocation _, Some _
+        | ( ( P.Job.Nested_agent
+            | P.Job.Scheduled_event
+            | P.Job.Async_tool
+            | P.Job.Shell_process
+            | P.Job.Compaction )
+          , _
+          , _ ) -> Ok ()
       in
       let%bind invocation_edge =
         match P.Developer_job.Launch.parent launch with
