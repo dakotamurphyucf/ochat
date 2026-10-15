@@ -119,6 +119,17 @@ module Job_lookup : sig
   val value : t -> Agent_protocol.Developer_job.t option
 end
 
+(** Read-only queued-job projection from one exact latest-Active Observation.
+    This value retains the Store-issued lookup and immutable job, but grants no
+    claim, effect or result authority. A copied job/ID cannot construct one. *)
+module Scheduler_candidate : sig
+  type t
+
+  val job : t -> Agent_protocol.Developer_job.t
+  val observation : t -> Observation.t
+  val lookup : t -> Job_lookup.t
+end
+
 (** Exact job presence and bytes tied to a physical Observation. A copied job
     or bare ID is not a claim basis. *)
 val find_job_exact : Observation.t -> Agent_protocol.Id.Job.t -> Job_lookup.t
@@ -371,6 +382,20 @@ val observe : handle -> (Observation.t, Error.t) result
     This is a comparison snapshot, not execution authority; a later CAS must
     still validate the same condition under its own writer lease. *)
 val observe_latest_active : handle -> (Observation.t, Error.t) result
+
+(** Read one current document through [handle]'s existing Store lease and
+    configured byte/work limits, then project its queued jobs for this exact
+    Active owner/epoch/capture. Every decoded job visited and candidate
+    retained is charged before allocation to the same Store work allowance;
+    [checkpoint] runs between bounded steps and propagates exception or
+    cancellation unchanged. At most the Store's configured jobs-per-run limit
+    can be returned. This does not use the full retention inventory or grant
+    a worker Claim. A later claim must reread/revalidate the exact observed
+    lookup and current owner. No partial candidate list escapes on error. *)
+val scheduler_candidates
+  :  handle
+  -> checkpoint:(unit -> unit)
+  -> (Scheduler_candidate.t list, Error.t) result
 
 (** Storage custody for an existing developer run. This is not a worker claim,
     execution grant, current-epoch assertion or result-disclosure grant. A run

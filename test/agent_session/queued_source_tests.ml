@@ -88,6 +88,7 @@ let dispatch env sw actor backend job request tools =
       ~sw
       ~clock:(Eio.Stdenv.clock env)
       ~registry
+      ~developer_registry:None
       ~capacity:
         (Agent_server.Job_capacity.create
            ~limits:

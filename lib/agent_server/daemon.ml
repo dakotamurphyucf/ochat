@@ -1371,6 +1371,7 @@ let compose
       ~sw
       ~clock:(Eio.Stdenv.clock env)
       ~registry
+      ~developer_registry:None
       ~capacity:job_capacity
       ~model_job_inference:(Session_factory.model_job_inference factory)
   in
@@ -1486,7 +1487,7 @@ let compose
       ~ping:(ping env status_ref)
       ~server_info:(fun () -> server_info options implementation config store)
       ~server_health:(server_health health_services)
-      ~cancel_job:(Job_scheduler.cancel job_scheduler)
+      ~cancel_job:(Job_scheduler.cancel_conversation job_scheduler)
       ~create_session:(Session_factory.create_session factory)
       ~seed_factory:(Some factory)
       ~seed_recovery_limits:options.seed_recovery_limits
