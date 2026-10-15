@@ -53,6 +53,7 @@ type capture_state =
       grouped fixture; imported receipts have distinct genuine source IDs. *)
   ; source_matches : bool
   ; project_metadata : bool
+  ; selection_rows : int
   ; complete_rows : int
   }
 

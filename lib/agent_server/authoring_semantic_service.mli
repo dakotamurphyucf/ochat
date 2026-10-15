@@ -19,12 +19,22 @@ module Limits : sig
       separate immutable Core analysis policy's compilation/semantic limits;
       response bytes use the Core host response cap. All components remain
       bounded, but they are not one interchangeable work allowance. These
-      bundle bounds cannot exceed the checked Generated defaults. *)
+      bundle bounds cannot exceed the checked Generated defaults. One explicit
+      Analyze also collects every admitted declaration under separate positive
+      row, retained-source, canonical-input and checkpoint limits. Those byte
+      counts describe measurable retained representations, not exact heap size
+      or native bytes read on a failed lower preparation. Each Project attempt
+      keeps its own configured source/file/work caps; no completion-time native
+      preparation is permitted. *)
   val create
     :  max_document_bundle_files:int
     -> max_document_bundle_bytes:int
     -> max_parser_work_steps:int
     -> max_diagnostic_work_steps:int
+    -> max_selection_rows:int
+    -> max_retained_selection_source_bytes:int
+    -> max_retained_selection_input_bytes:int
+    -> max_selection_work_steps:int
     -> t Or_error.t
 end
 

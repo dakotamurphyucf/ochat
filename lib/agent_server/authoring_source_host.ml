@@ -988,8 +988,11 @@ module Document_context = struct
 
   module Script_capture = struct
     type t =
-      { build : Build.t
+      { owner : document_context
+      ; build : Build.t
       ; contract : Chatml.Chatml_compiler_contract.t
+      ; target : Chatml.Chatml_compiler_contract.Target.t
+      ; selection : Agent_protocol.Authoring.Context.Selection.t
       ; entry_source : Captured.t
       ; parsed : Parsed_capture.t
       ; declaration : Prompt.Chat_markdown.Declaration.t
@@ -1006,6 +1009,38 @@ module Document_context = struct
       && phys_equal t.project project
     ;;
   end
+
+  let check_selected_now t ~script ~actor ~select_contract =
+    let module Contract = Chatml.Chatml_compiler_contract in
+    let open Result.Let_syntax in
+    let%bind () =
+      if phys_equal script.Script_capture.owner t then Ok () else Error Error.Foreign_root
+    in
+    let%bind () = check_all t.common actor in
+    let%bind root =
+      match t.root with
+      | Some root when Project_capture.belongs_to_root script.project root -> Ok root
+      | None | Some _ -> Error Error.Foreign_root
+    in
+    let same_target actor =
+      match
+        select_contract
+          actor
+          ~root
+          ~project:(Project_capture.member script.project)
+          ~selection:script.selection
+      with
+      | Some contract ->
+        (match Contract.kind contract with
+         | Contract.Kind.Standard target -> Contract.Target.equal script.target target
+         | Native -> false)
+      | None -> false
+    in
+    let original = same_target t.common.original_actor in
+    let current = same_target actor in
+    let%bind () = check_all t.common actor in
+    if original && current then Ok () else Error Error.Selected_script_unavailable
+  ;;
 
   exception Project_work_limit
 
@@ -1315,8 +1350,11 @@ module Document_context = struct
                        when Contract.Target.equal selected_target original
                             && Contract.Target.equal selected_target current ->
                        Ok
-                         { Script_capture.build
+                         { Script_capture.owner = t
+                         ; build
                          ; contract
+                         ; target = selected_target
+                         ; selection
                          ; entry_source = Authoring_document_script_route.source route
                          ; parsed
                          ; declaration

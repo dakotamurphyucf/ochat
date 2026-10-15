@@ -14,15 +14,55 @@ module Error = struct
     | Evidence_mismatch
 end
 
-type document =
-  Chatmd_authoring_analysis.Script.t * (Chatmd_parser_input.t * Captured.t) list
+module Document = struct
+  type t =
+    { script : Chatmd_authoring_analysis.Script.t
+    ; input_sources : (Chatmd_parser_input.t * Captured.t) list
+    ; selection : Authoring_document_selection_rebind.t
+    }
+
+  let create ~script ~input_sources ~selection ~checkpoint =
+    let actual =
+      Authoring_source_host.Document_context.Parsed_capture.input_sources
+        (Authoring_document_selection_rebind.updated_capture selection)
+    in
+    let rec same count supplied actual =
+      if count > 1024
+      then false
+      else (
+        checkpoint ();
+        match supplied, actual with
+        | [], [] -> true
+        | ( (left_input, left_source) :: left_tail
+          , (right_input, right_source) :: right_tail ) ->
+          phys_equal left_input right_input
+          && phys_equal left_source right_source
+          && same (count + 1) left_tail right_tail
+        | [], _ :: _ | _ :: _, [] -> false)
+    in
+    if
+      phys_equal
+        (Chatmd_authoring_analysis.Script.parsed script)
+        (Authoring_document_selection_rebind.parsed selection)
+      && phys_equal
+           (Chatmd_authoring_analysis.Script.declaration script)
+           (Authoring_document_selection_rebind.declaration selection)
+      && same 0 input_sources actual
+    then Ok { script; input_sources; selection }
+    else Or_error.error_string "foreign provisional document selection"
+  ;;
+
+  let script t = t.script
+  let input_sources t = t.input_sources
+  let selection t = t.selection
+end
 
 type row =
   { capture : A.Capture.t
   ; wire : A.Prefix.provisional
   ; semantics : Semantics.Provisional.t
   ; full_source : Captured.t
-  ; document : document option
+  ; document : Document.t option
   }
 
 type t =

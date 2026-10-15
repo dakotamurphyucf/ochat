@@ -9,6 +9,7 @@ module Upload = Authoring_upload_host
 module Captured = Chatml_source
 module Build = Chatml_project_build
 module Activity = Authoring_context_activity
+module Selection_rows = Authoring_document_selection_rows
 open Activity
 
 module Limits = struct
@@ -211,7 +212,7 @@ module Retained_document_capture = struct
     ; source_digest : Captured.Digest.t
     ; source_bytes : int
     ; capture : Sources.Document_context.Parsed_capture.t
-    ; project_capture : Sources.Document_context.Project_capture.t option
+    ; rows : Selection_rows.t
     }
 
   let same_source left right =
@@ -220,7 +221,7 @@ module Retained_document_capture = struct
     && Int.equal (Captured.byte_length left) (Captured.byte_length right)
   ;;
 
-  let prepare ~context ~inputs ~capture ~metadata ~max_sources ~max_bytes ~checkpoint =
+  let prepare ~context ~inputs ~capture ~rows ~max_sources ~max_bytes ~checkpoint =
     let source = Ledger.Document.Inputs.source inputs in
     let captured = Sources.Document_context.Parsed_capture.source capture in
     let bundle = Sources.Document_context.Parsed_capture.bundle capture in
@@ -228,14 +229,7 @@ module Retained_document_capture = struct
       max_sources <= 0
       || max_bytes <= 0
       || (not (same_source source captured))
-      || not
-           (match metadata with
-            | None -> true
-            | Some (declaration, project) ->
-              Sources.Document_context.Project_capture.matches
-                project
-                ~parsed:capture
-                ~declaration)
+      || not (Selection_rows.matches rows ~inputs ~capture)
     then Error Error.Stale_source
     else (
       let rec visit sources count bytes =
@@ -249,20 +243,8 @@ module Retained_document_capture = struct
           else visit rest (count + 1) (bytes + length)
       in
       let open Result.Let_syntax in
-      let metadata_source =
-        Option.map metadata ~f:(fun (_, project) ->
-          Sources.Document_context.Project_capture.source project)
-      in
       let bundle_sources = Chatmd_source_bundle.sources bundle in
-      let metadata_bytes =
-        Option.value_map metadata_source ~default:0 ~f:Captured.byte_length
-      in
-      let metadata_count = Option.value_map metadata_source ~default:0 ~f:(fun _ -> 1) in
-      let%map _, _ =
-        if metadata_bytes > max_bytes
-        then Error Error.Resource_limit
-        else visit bundle_sources metadata_count metadata_bytes
-      in
+      let%map _, _ = visit bundle_sources 0 0 in
       { context
       ; identity = Ledger.Document.Inputs.identity inputs
       ; generation = Ledger.Document.Inputs.generation inputs
@@ -270,7 +252,7 @@ module Retained_document_capture = struct
       ; source_digest = Captured.digest source
       ; source_bytes = Captured.byte_length source
       ; capture
-      ; project_capture = Option.map metadata ~f:snd
+      ; rows
       })
   ;;
 
@@ -292,7 +274,7 @@ module Retained_document_capture = struct
   ;;
 
   let capture t = t.capture
-  let project_capture t = t.project_capture
+  let selection_rows t = t.rows
 
   let same_head left right =
     match left, right with
@@ -692,13 +674,22 @@ module Current = struct
       else None)
   ;;
 
-  let project_capture t ~checkpoint =
+  let selection_row t ~declaration ~checkpoint =
     let open Result.Let_syntax in
-    let%map inputs = document_inputs t ~checkpoint in
-    Option.bind t.retained_document_capture ~f:(fun retained ->
-      if Retained_document_capture.matches_current retained ~context:t.context ~inputs
-      then Retained_document_capture.project_capture retained
-      else None)
+    let%bind inputs = document_inputs t ~checkpoint in
+    match t.retained_document_capture with
+    | Some retained
+      when Retained_document_capture.matches_current retained ~context:t.context ~inputs
+      ->
+      Selection_rows.find
+        (Retained_document_capture.selection_rows retained)
+        ~capture:(Retained_document_capture.capture retained)
+        ~declaration
+        ~checkpoint
+      |> Result.map_error ~f:(function
+        | Foreign_capture | Invalid_row -> Error.Stale_context
+        | Row_limit | Retained_byte_limit | Work_limit -> Error.Resource_limit)
+    | Some _ | None -> Ok None
   ;;
 
   let frozen_document_bundle t ~checkpoint =

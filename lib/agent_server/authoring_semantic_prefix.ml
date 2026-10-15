@@ -17,6 +17,8 @@ module Markdown = Prompt.Chat_markdown
 module Script = Chatmd_authoring_analysis.Script
 module Selection = Authoring_script_selection
 module Metadata = Authoring_project_metadata
+module Rows = Authoring_document_selection_rows
+module Rebind = Authoring_document_selection_rebind
 
 module Limits = struct
   type t =
@@ -268,7 +270,7 @@ let find_declaration parsed script_id ~checkpoint =
 ;;
 
 let document
-      owner
+      (owner : Owner.t)
       current
       ~actor
       ~env
@@ -315,51 +317,65 @@ let document
        (match declaration with
         | None -> unavailable request A.Prefix.Unchecked_source
         | Some declaration ->
-          let%bind metadata_head = Owner.Current.project_capture current ~checkpoint in
-          let%bind metadata =
-            match project_metadata, metadata_head with
-            | Some policy, Some capture ->
-              if not (Project_capture.matches capture ~parsed:captured ~declaration)
-              then Ok None
-              else if
-                Metadata.Policy.authorize_now
-                  policy
-                  ~original_actor
-                  ~actor
-                  ~current:inputs
-                  ~parsed
-                  ~declaration
-                  ~capture
-              then Ok (Some capture)
+          let previous_parsed =
+            (Markdown.Generated.parsed (Parsed_capture.parsed previous)).parsed_root
+          in
+          let%bind old_declaration =
+            find_declaration previous_parsed script_id ~checkpoint
+            |> Result.bind ~f:(Result.of_option ~error:Owner.Error.Selection_unavailable)
+          in
+          let%bind old_row =
+            Rows.find
+              (Owner.Retained_document_capture.selection_rows retained)
+              ~capture:previous
+              ~declaration:old_declaration
+              ~checkpoint
+            |> Result.map_error ~f:(fun _ -> Owner.Error.Stale_source)
+            |> Result.bind ~f:(Result.of_option ~error:Owner.Error.Selection_unavailable)
+          in
+          let%bind proof =
+            Rebind.prove
+              ~old_capture:previous
+              ~rows:(Owner.Retained_document_capture.selection_rows retained)
+              ~old:old_row
+              ~updated:captured
+              ~current_source:source
+              ~script_id
+              ~max_script_bytes:limits.max_document_bundle_bytes
+              ~max_locator_bytes:1024
+              ~max_path_components:256
+              ~checkpoint
+            |> Result.map_error ~f:(function
+                | Foreign_owner_or_imports
+                | Changed_route_or_environment
+                | Ambiguous_declaration
+                | No_validated_build
+                -> Owner.Error.Selection_unavailable)
+          in
+          let metadata = Rebind.original_metadata proof in
+          let%bind () =
+            match metadata, project_metadata with
+            | None, _ -> Ok ()
+            | Some capture, Some policy ->
+              if
+                Project_capture.matches
+                  capture
+                  ~parsed:previous
+                  ~declaration:(Rebind.original_declaration proof)
+                && Metadata.Policy.authorize_now
+                     policy
+                     ~original_actor
+                     ~actor
+                     ~current:inputs
+                     ~parsed:(Rebind.original_parsed proof)
+                     ~declaration:(Rebind.original_declaration proof)
+                     ~capture
+              then Ok ()
               else Error Owner.Error.Selection_unavailable
-            | None, _ | Some _, None -> Ok None
+            | Some _, None -> Error Owner.Error.Selection_unavailable
           in
-          let raw_selected =
-            Option.bind script_selection ~f:(fun policy ->
-              Selection.Policy.select
-                policy
-                ~original_actor
-                ~actor
-                ~current:inputs
-                ~parsed
-                ~declaration
-                ~metadata)
-          in
-          let%bind selected =
-            match raw_selected, metadata with
-            | Some selected, Some metadata ->
-              (match
-                 Project_capture.matches_project_contents
-                   metadata
-                   ~build:(Selection.Selected.build selected)
-                   ~max_compare_bytes:limits.max_document_bundle_bytes
-                   ~checkpoint
-               with
-               | Ok true -> Ok (Some selected)
-               | Ok false -> Ok None
-               | Error _ -> Error Owner.Error.Resource_limit)
-            | Some _, None | None, _ -> Ok raw_selected
-          in
+          let selected = Some (Rebind.selected proof) in
+          let host_source = Rebind.host_source proof in
           let final_check_now () =
             let metadata_current =
               match metadata, project_metadata with
@@ -370,39 +386,39 @@ let document
                   ~original_actor
                   ~actor
                   ~current:inputs
-                  ~parsed
-                  ~declaration
+                  ~parsed:(Rebind.original_parsed proof)
+                  ~declaration:(Rebind.original_declaration proof)
                   ~capture
               | Some _, None -> false
             in
-            let selected_current =
-              match raw_selected, script_selection with
-              | None, None -> true
-              | None, Some policy ->
-                Option.is_none
-                  (Selection.Policy.select
-                     policy
-                     ~original_actor
-                     ~actor
-                     ~current:inputs
-                     ~parsed
-                     ~declaration
-                     ~metadata)
-              | Some selected, Some policy ->
+            let open Result.Let_syntax in
+            let%bind () =
+              if metadata_current then Ok () else Error Owner.Error.Selection_unavailable
+            in
+            match host_source, selected, script_selection, current.context.owner with
+            | Some source, Some _, _, Owner.Host_document document ->
+              Sources.Document_context.check_selected_now
+                document
+                ~script:source
+                ~actor
+                ~select_contract:owner.selection_policy.project_contract
+              |> Result.map_error ~f:Authoring_context_owner.source_host_error
+            | None, Some selected, Some policy, _ ->
+              if
                 Selection.Policy.same_now
                   policy
                   ~original_actor
                   ~actor
                   ~current:inputs
-                  ~parsed
-                  ~declaration
+                  ~parsed:(Rebind.original_parsed proof)
+                  ~declaration:(Rebind.original_declaration proof)
                   ~metadata
                   ~selected
-              | Some _, None -> false
-            in
-            if metadata_current && selected_current
-            then Ok ()
-            else Error Owner.Error.Selection_unavailable
+              then Ok ()
+              else Error Owner.Error.Selection_unavailable
+            | None, None, _, _ -> Ok ()
+            | Some _, _, _, _ | None, Some _, None, _ ->
+              Error Owner.Error.Selection_unavailable
           in
           (match selected with
            | None ->
@@ -497,6 +513,14 @@ let document
                          ~script
                        |> Result.map_error ~f:Authoring_semantic_error.wire)
                    in
+                   let%bind document =
+                     Index.Document.create
+                       ~script
+                       ~input_sources
+                       ~selection:proof
+                       ~checkpoint
+                     |> Result.map_error ~f:(fun _ -> Owner.Error.Analysis_unavailable)
+                   in
                    run
                      owner
                      current
@@ -508,7 +532,7 @@ let document
                      ~full_source
                      ~compiled_cursor_byte
                      ~authored_request:(Some authored_request)
-                     ~document:(Some (script, input_sources))
+                     ~document:(Some document)
                      ~final_check_now
                      ~checkpoint)))))
 ;;
