@@ -213,6 +213,73 @@ let%expect_test "observed and unobserved entry execution preserve payloads and I
   [%expect {| (true (0 1 2 3) (0 1 2 3) true 4 4) |}]
 ;;
 
+let%expect_test "host-prepared stream shares nested tool and history semantics" =
+  Eio_main.run
+  @@ fun env ->
+  let allocator = allocator "prepared-stream" in
+  let initial =
+    Openai.Responses_history.create ~allocator (input_message "hello")
+    |> Result.ok_or_failwith
+  in
+  let responses =
+    Queue.of_list
+      [ response [ Function_call function_call ]
+      ; response [ Output_message (output_text "provider-message" "done") ]
+      ]
+  in
+  let requests = ref 0 in
+  let ctx =
+    fixture_ctx
+      env
+      ~namespace:"prepared-stream"
+      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+        Int.incr requests;
+        stream_response (Queue.dequeue_exn responses))
+      ()
+  in
+  let events = ref 0 in
+  let tool_executions = ref 0 in
+  let executed = Queue.create () in
+  let tool_tbl = create_tool_table () in
+  Hashtbl.set tool_tbl ~key:"echo" ~data:(fun ~invocation:_ payload ->
+    Queue.enqueue executed payload;
+    Res.Tool_output.Output.Text payload);
+  let observer : Chat_response.Driver.agent_observer =
+    { on_event = (fun _ -> Int.incr events)
+    ; on_tool_execution = (fun _ -> Int.incr tool_executions)
+    }
+  in
+  let history =
+    Chat_response.Driver.run_stream_entries
+      ~ctx
+      ~allocator
+      ~history:[ initial ]
+      ~tools:[]
+      ~tool_tbl
+      ~moderator:None
+      ~history_compaction:false
+      ~response_dir:(Eio.Stdenv.cwd env)
+      ~observer
+      ()
+  in
+  let ids =
+    List.map history ~f:(fun entry -> History_entry.Id.sequence (History_entry.id entry))
+  in
+  print_s
+    [%sexp
+      (History_entry.Id.equal
+         (History_entry.id initial)
+         (History_entry.id (List.hd_exn history))
+       : bool)
+    , (ids : int list)
+    , (Chat_response.Driver.assistant_text history : string)
+    , (!requests : int)
+    , (!events > 0 : bool)
+    , (!tool_executions : int)
+    , (Queue.to_list executed : string list)];
+  [%expect {| (true (0 1 2 3) done 2 true 2 ("{\"text\":\"hello\"}")) |}]
+;;
+
 let%expect_test "observed fork keeps child identity and history isolated" =
   Eio_main.run
   @@ fun env ->

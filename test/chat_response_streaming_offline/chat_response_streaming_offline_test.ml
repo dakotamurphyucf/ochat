@@ -258,6 +258,77 @@ let show_pending_ui_request = function
 
 let moderator () = moderator_of_source moderator_source
 
+let%expect_test "prepared Driver stream retains the supplied moderator overlay" =
+  Eio_main.run
+  @@ fun env ->
+  let source =
+    {|
+      type state = { seen : int }
+      type event = [ `Turn_start | `Turn_end ]
+      let initial_state = { seen = 0 }
+      let on_event : context -> state -> event -> state task =
+        fun ctx st ev ->
+          match ev with
+          | `Turn_start ->
+            Task.bind(Turn.prepend_system("policy"), fun ignored -> Task.pure(st))
+          | _ -> Task.pure(st)
+    |}
+  in
+  let allocator =
+    History_entry.Allocator.create ~namespace:"prepared-moderator" ~next_sequence:0
+    |> Result.ok_or_failwith
+  in
+  let initial = input_entry allocator in
+  let saw_policy = ref false in
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"prepared-moderator"
+      ~default_model:"fixture"
+      ~post_stream:(fun ~sw:_ ~inputs ->
+        saw_policy
+        := List.exists inputs ~f:(function
+             | Res.Item.Input_message message ->
+               String.equal (Res.Input_message.role_to_string message.role) "developer"
+               && List.exists message.content ~f:(function
+                 | Res.Input_message.Text { text; _ } ->
+                   String.is_substring text ~substring:"policy"
+                 | Image _ -> false)
+             | _ -> false);
+        stream_message ~output_index:0 ~item_id:"reply" "done" |> Stdlib.List.to_seq)
+  in
+  let dir = Eio.Stdenv.cwd env in
+  let ctx =
+    Inference_fixture.ctx
+      fixture
+      ~env
+      ~dir
+      ~tool_dir:dir
+      ~cache:(Chat_response.Cache.create ~max_size:1 ())
+      ()
+  in
+  let history =
+    Chat_response.Driver.run_stream_entries
+      ~ctx
+      ~allocator
+      ~history:[ initial ]
+      ~tools:[]
+      ~tool_tbl:(String.Table.create ())
+      ~moderator:(Some (moderator_of_source ~allocator source))
+      ~history_compaction:false
+      ~response_dir:dir
+      ()
+  in
+  print_s
+    [%sexp
+      (!saw_policy : bool)
+    , (History_entry.Id.equal
+         (History_entry.id initial)
+         (History_entry.id (List.hd_exn history))
+       : bool)
+    , (Chat_response.Driver.assistant_text history : string)];
+  [%expect {| (true true done) |}]
+;;
+
 let runtime_policy_with_budget budget =
   { Chat_response.Runtime_semantics.default_policy with budget }
 ;;
