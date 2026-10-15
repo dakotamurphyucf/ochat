@@ -6,6 +6,23 @@ module R = Chat_response.Agent_runtime
 module N = Agent_session.Native_tool_invocation
 module Claimed = Agent_session.Captured_agent_runner.Claimed_developer
 
+module Selected_target = struct
+  type mode =
+    | Literal_only
+    | Bound_runner
+
+  type runner =
+    target:Claimed.Selected.Target.t
+    -> startup:Chat_response.Startup_compilation.t
+    -> compilation_limits:Chatml_compilation.limits
+    -> programs:Chatml_prompt_programs.Restored.t option
+    -> ctx:Eio_unix.Stdenv.base Chat_response.Ctx.t
+    -> input:Prompt.Chat_markdown.content_item list
+    -> observer:Chat_response.Driver.agent_observer option
+    -> source:string
+    -> (string, P.Error.t) result
+end
+
 module Limits = struct
   type t =
     { max_agents : int
@@ -23,6 +40,7 @@ type bound =
   { root : O.run
   ; models : Developer_model_job_runner.t
   ; agent_runtime : R.t
+  ; run_selected_target : Selected_target.runner option
   }
 
 type state =
@@ -34,6 +52,7 @@ type t =
   { domain_id : int
   ; deferred : Agent_session.Captured_agent_runner.Deferred_developer.t
   ; limits : Limits.t
+  ; selected_target : Selected_target.mode
   ; state : state ref
   }
 
@@ -74,7 +93,28 @@ let with_context state ~implementation ~invocation:_ f =
   | Error error -> fail error
 ;;
 
+let with_selected_target
+      state
+      ~target
+      ~startup
+      ~compilation_limits
+      ~programs
+      ~ctx
+      ~input
+      ~observer
+      ~source
+  =
+  match !state with
+  | Unbound -> invalid "deferred Agent child Root has not been bound"
+  | Revoked -> invalid "deferred Agent child Root has been revoked"
+  | Bound { run_selected_target = None; _ } ->
+    invalid "deferred Agent selected child executor is unavailable"
+  | Bound { run_selected_target = Some run; _ } ->
+    run ~target ~startup ~compilation_limits ~programs ~ctx ~input ~observer ~source
+;;
+
 let prepare
+      ~selected_target
       ~source
       ~script_preparation
       ~manifest_authorizer
@@ -87,7 +127,13 @@ let prepare
       ~checkpoint
   =
   let state = ref Unbound in
+  let run_selected_target =
+    match selected_target with
+    | Selected_target.Literal_only -> None
+    | Bound_runner -> Some (with_selected_target state)
+  in
   Agent_session.Captured_agent_runner.Deferred_developer.prepare
+    ?run_selected_target
     source
     ~script_preparation
     ~manifest_authorizer
@@ -101,14 +147,19 @@ let prepare
     ~checkpoint
     ~with_context:(with_context state)
   |> Result.map ~f:(fun deferred ->
-    { domain_id = (Stdlib.Domain.self () :> int); deferred; limits; state })
+    { domain_id = (Stdlib.Domain.self () :> int)
+    ; deferred
+    ; limits
+    ; selected_target
+    ; state
+    })
 ;;
 
 let registrations t =
   Agent_session.Captured_agent_runner.Deferred_developer.registrations t.deferred
 ;;
 
-let bind t ~root ~models ~agent_runtime ~checkpoint =
+let bind t ~root ~models ~agent_runtime ~run_selected_target ~checkpoint =
   let open Result.Let_syntax in
   if not (current_domain t.domain_id)
   then invalid "deferred Agent belongs to another Eio domain"
@@ -116,7 +167,13 @@ let bind t ~root ~models ~agent_runtime ~checkpoint =
     match !(t.state) with
     | Bound _ | Revoked -> invalid "deferred Agent Root is already bound or revoked"
     | Unbound ->
-      if not (Developer_model_job_runner.issued_by_root models root)
+      if
+        not
+          (match t.selected_target, run_selected_target with
+           | Selected_target.Literal_only, None | Bound_runner, Some _ -> true
+           | Literal_only, Some _ | Bound_runner, None -> false)
+      then invalid "deferred Agent selected child mode changed before bind"
+      else if not (Developer_model_job_runner.issued_by_root models root)
       then invalid "deferred Agent provider belongs to another Root"
       else (
         let selected = O.native_selected root in
@@ -160,9 +217,21 @@ let bind t ~root ~models ~agent_runtime ~checkpoint =
         in
         match !(t.state) with
         | Unbound ->
-          t.state := Bound { root; models; agent_runtime };
+          t.state := Bound { root; models; agent_runtime; run_selected_target };
           Ok ()
         | Bound _ | Revoked -> invalid "deferred Agent Root changed during admission"))
+;;
+
+let bound_to t ~root ~agent_runtime =
+  if not (current_domain t.domain_id)
+  then invalid "deferred Agent belongs to another Eio domain"
+  else (
+    match !(t.state) with
+    | Bound bound
+      when phys_equal bound.root root && phys_equal bound.agent_runtime agent_runtime ->
+      Ok ()
+    | Unbound | Revoked | Bound _ ->
+      invalid "deferred Agent source is not bound to this Root/runtime")
 ;;
 
 let revoke t =

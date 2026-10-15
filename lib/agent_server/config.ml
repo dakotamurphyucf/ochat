@@ -145,6 +145,7 @@ module Prompt = struct
     ; allowed_workspaces : string list
     ; permission_profile : string
     ; runtime_policy : string option
+    ; tool_contract : Chatml_compilation.Tool_contract.t
     ; enabled : bool
     }
   [@@deriving compare, equal, sexp]

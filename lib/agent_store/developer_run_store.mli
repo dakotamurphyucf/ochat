@@ -133,6 +133,11 @@ module Run_claim : sig
       rejects release. Repeated release is harmless;
       the shared Store and unrelated runs stay open. *)
   val release : t -> (unit, Error.t) result
+
+  (** Nonyielding comparison-only observation for the former issuer of a
+      transferred claim. A true result means this exact token was
+      conclusively released; it never releases or grants the claim. *)
+  val is_released : t -> bool
 end
 
 module Checkpoint : sig
@@ -465,6 +470,13 @@ module Recovery : sig
 
   (** Non-authorizing lifecycle observation for the owning startup adapter. *)
   val is_finished : t -> bool
+
+  (** Nonyielding comparison for transfer of an already finished physical
+      recovery window. The Store, exact handle token, live Run_claim token and
+      this window must all coincide. A historical owner/capture match or a
+      finished window from another claim is insufficient. This comparison
+      grants no execution authority. *)
+  val issued_finished : t -> claim:Run_claim.t -> handle:handle -> bool
 
   (** Release a window only when no terminal was prepared or attempted and no
       selected custody was retained. This supports ordinary validation failure

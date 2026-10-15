@@ -97,6 +97,8 @@ and run_entry =
   ; mutable unlaunched : unlaunched option
   ; mutable recovery : Startup.Acquired.t option
   ; mutable claim_only : Store.Run_claim.t option
+  ; mutable finished : Startup.Acquired.t option
+  ; mutable transferred_claim : (Store.handle * Store.Run_claim.t) option
   ; mutable persisted : bool
   ; mutable retained_charge : bool
   }
@@ -148,6 +150,13 @@ and started =
   ; root : Root.run
   ; generation : unit ref
   ; mutable consumed : bool
+  }
+
+and preparing =
+  { active : active
+  ; actor : Operator_authorization.t
+  ; generation : unit ref
+  ; mutable binding_attempted : bool
   }
 
 let active_key : active Eio.Fiber.key = Eio.Fiber.create_key ()
@@ -260,6 +269,8 @@ let entry t run_id =
         ; unlaunched = None
         ; recovery = None
         ; claim_only = None
+        ; finished = None
+        ; transferred_claim = None
         ; persisted = false
         ; retained_charge = false
         }
@@ -365,6 +376,15 @@ let snapshot t run_id ~actor ~key =
           else Error (denied ())))
 ;;
 
+(* A terminal waiter must not observe this run while a sibling command owns
+   the run-wide Store Pending barrier. Other Store writers remain subject to
+   that barrier and still report retained custody as Conflict. *)
+let await_snapshot t run_id ~actor ~key =
+  match Hashtbl.find t.runs run_id with
+  | None -> snapshot t run_id ~actor ~key
+  | Some run -> with_mutation run (fun () -> snapshot t run_id ~actor ~key)
+;;
+
 let release_clean_claim run claim =
   match store (Store.Run_claim.release claim) with
   | Ok () ->
@@ -378,7 +398,6 @@ let release_clean_claim run claim =
 
 let finish_recovery run acquired =
   let open Result.Let_syntax in
-  let claim = Startup.Acquired.claim acquired in
   let outcome =
     Startup.finish
       acquired
@@ -387,8 +406,9 @@ let finish_recovery run acquired =
   in
   match outcome with
   | Ok () ->
-    let%bind () = release_clean_claim run claim in
     run.recovery <- None;
+    run.claim_only <- None;
+    run.finished <- Some acquired;
     run.phase <- Ready;
     Ok ()
   | Error _ as error ->
@@ -404,6 +424,7 @@ let ensure_startup_recovered t (slot : slot) =
     let run = slot.run in
     match run.phase, run.recovery with
     | Ready, None -> Ok ()
+    | Quarantined, None when Option.is_some run.finished -> Error (busy ())
     | Quarantined, Some acquired -> finish_recovery run acquired
     | Recovering, _ -> Error (busy ())
     | (Cold | Quarantined), None ->
@@ -457,6 +478,147 @@ let ensure_startup_recovered t (slot : slot) =
     | (Ready | Cold), Some _ -> Error (busy ()))
 ;;
 
+let ready_epoch t (slot : slot) =
+  if not (slot_current t slot)
+  then Error (stale ())
+  else (
+    match slot.run.phase, slot.run.recovery, slot.run.claim_only with
+    | Ready, None, None ->
+      (match slot.run.finished with
+       | None -> Ok None
+       | Some acquired ->
+         let handle = Startup.Acquired.handle acquired in
+         if
+           Store.Recovery.issued_finished
+             (Startup.Acquired.window acquired)
+             ~claim:(Startup.Acquired.claim acquired)
+             ~handle
+         then Ok (Some handle)
+         else Error (busy ()))
+    | Cold, None, None -> Ok None
+    | (Ready | Cold | Recovering | Quarantined), _, _ -> Error (busy ()))
+;;
+
+let release_finished_epoch t (slot : slot) =
+  if not (slot_current t slot)
+  then Error (stale ())
+  else (
+    let run = slot.run in
+    if
+      (not (List.is_empty run.active))
+      || Option.is_some run.pending
+      || Option.is_some run.unlaunched
+      || Option.is_some run.recovery
+      || Option.is_some run.claim_only
+      || Option.is_some run.transferred_claim
+    then Error (busy ())
+    else (
+      match run.finished with
+      | None -> Ok ()
+      | Some acquired ->
+        (match store (Store.Run_claim.release (Startup.Acquired.claim acquired)) with
+         | Ok () ->
+           run.finished <- None;
+           Ok ()
+         | Error _ as error ->
+           run.phase <- Quarantined;
+           error)))
+;;
+
+let confirm_transferred_retired t (slot : slot) ~handle =
+  if (not (slot_current t slot)) || not (Store.issued_by t.store handle)
+  then Error (stale ())
+  else (
+    let run = slot.run in
+    if
+      (not (List.is_empty run.active))
+      || Option.is_some run.pending
+      || Option.is_some run.unlaunched
+      || Option.is_some run.recovery
+      || Option.is_some run.claim_only
+    then Error (busy ())
+    else (
+      match run.transferred_claim with
+      | Some (issued, claim)
+        when phys_equal issued handle && Store.Run_claim.is_released claim ->
+        run.transferred_claim <- None;
+        Ok ()
+      | None -> Ok ()
+      | Some _ -> Error (busy ())))
+;;
+
+let ensure_admitted_claim t (slot : slot) ~handle =
+  let open Result.Let_syntax in
+  if (not (slot_current t slot)) || not (Store.issued_by t.store handle)
+  then Error (stale ())
+  else (
+    let run = slot.run in
+    if not (P.Id.Developer_run.equal run.run_id (Store.owner handle).run_id)
+    then Error (stale ())
+    else (
+      match run.finished, run.transferred_claim with
+      | Some acquired, None ->
+        if
+          phys_equal (Startup.Acquired.handle acquired) handle
+          && Store.Recovery.issued_finished
+               (Startup.Acquired.window acquired)
+               ~claim:(Startup.Acquired.claim acquired)
+               ~handle
+        then Ok ()
+        else Error (busy ())
+      | None, Some (issued, claim) ->
+        if phys_equal issued handle && not (Store.Run_claim.is_released claim)
+        then Ok ()
+        else Error (busy ())
+      | Some _, Some _ -> Error (busy ())
+      | None, None ->
+        if
+          (not (List.is_empty run.active))
+          || Option.is_some run.pending
+          || Option.is_some run.unlaunched
+        then Error (busy ())
+        else (
+          try
+            let%bind () =
+              match run.claim_only with
+              | None -> Ok ()
+              | Some claim -> release_clean_claim run claim
+            in
+            match run.recovery with
+            | Some acquired ->
+              if phys_equal (Startup.Acquired.handle acquired) handle
+              then finish_recovery run acquired
+              else Error (busy ())
+            | None ->
+              run.phase <- Recovering;
+              (match
+                 Startup.open_admitted t.store ~handle ~on_claim:(fun claim ->
+                   run.claim_only <- Some claim)
+               with
+               | Error error ->
+                 let original = store_error error in
+                 (match run.claim_only with
+                  | None -> run.phase <- Ready
+                  | Some claim ->
+                    (match release_clean_claim run claim with
+                     | Ok () -> run.phase <- Ready
+                     | Error _ -> run.phase <- Quarantined));
+                 Error original
+               | Ok acquired ->
+                 run.recovery <- Some acquired;
+                 run.claim_only <- None;
+                 run.persisted <- true;
+                 finish_recovery run acquired)
+          with
+          | exn ->
+            let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+            run.phase
+            <- (if Option.is_none run.recovery && Option.is_none run.claim_only
+                then Ready
+                else Quarantined);
+            Stdlib.Printexc.raise_with_backtrace exn backtrace)))
+;;
+
 let active_current (active : active) =
   on_domain active.issuer
   && active.live
@@ -498,19 +660,47 @@ module Active = struct
     ;;
   end
 
+  module Preparing = struct
+    type nonrec t = preparing
+
+    let bind_root t ~root =
+      if t.binding_attempted
+      then Error (busy ())
+      else (
+        t.binding_attempted <- true;
+        let same_now () =
+          active_current t.active
+          && phys_equal t.generation t.active.generation
+          && Operator_authorization.is_current t.actor
+          && phys_equal t.actor (Root.original_actor root)
+          && same_active_root t.active root
+        in
+        if not (same_now ())
+        then Error (stale ())
+        else
+          let open Result.Let_syntax in
+          let%bind current = Root.current root in
+          let%bind () = Root.check_effect_now root current in
+          if same_now ()
+          then Ok { active = t.active; root; generation = t.generation; consumed = false }
+          else Error (stale ()))
+    ;;
+  end
+
   let view (t : t) = t.view
 
-  let start_live t ~root ~admit =
+  let start_preparation t ~actor ~admit =
     let open Result.Let_syntax in
-    if not (active_current t && same_active_root t root)
+    if
+      (not (active_current t))
+      || (not (Operator_authorization.is_current actor))
+      || not (same_principal actor t.view.row)
     then Error (stale ())
     else if t.started || not (Receipt.Kind.equal (Row.kind t.view.row) Live_run)
     then Error (busy ())
     else
       with_mutation t.run (fun () ->
         let%bind () = reconcile_retained_unlocked t.run in
-        let%bind current = Root.current root in
-        let%bind () = Root.check_effect_now root current in
         match t.view.store_view with
         | None -> Error (stale ())
         | Some previous ->
@@ -527,8 +717,8 @@ module Active = struct
              let pending =
                Custody.create ~handle:t.handle ~token ~kind:Start ~admit:(fun () ->
                  active_current t
-                 && same_active_root t root
-                 && Result.is_ok (Root.check_effect_now root current)
+                 && Operator_authorization.is_current actor
+                 && same_principal actor t.view.row
                  && admit ())
              in
              t.run.pending <- Some pending;
@@ -544,7 +734,48 @@ module Active = struct
                      store (Store.Command.Execution_start.consume acknowledged)
                    in
                    t.started <- true;
-                   Ok { active = t; root; generation = t.generation; consumed = false }))))
+                   Ok
+                     { active = t
+                     ; actor
+                     ; generation = t.generation
+                     ; binding_attempted = false
+                     }))))
+  ;;
+
+  let start_live t ~root ~admit =
+    let open Result.Let_syntax in
+    if not (active_current t && same_active_root t root)
+    then Error (stale ())
+    else (
+      let%bind current = Root.current root in
+      let%bind () = Root.check_effect_now root current in
+      let%bind preparing =
+        start_preparation t ~actor:(Root.original_actor root) ~admit:(fun () ->
+          same_active_root t root
+          && Result.is_ok (Root.check_effect_now root current)
+          && admit ())
+      in
+      Preparing.bind_root preparing ~root)
+  ;;
+
+  let transfer_finished_claim t ~handle ~accept =
+    if not (active_current t && phys_equal t.handle handle)
+    then Error (stale ())
+    else (
+      match t.run.finished, t.run.transferred_claim with
+      | Some acquired, None when phys_equal (Startup.Acquired.handle acquired) handle ->
+        let claim = Startup.Acquired.claim acquired in
+        let window = Startup.Acquired.window acquired in
+        if not (Store.Recovery.issued_finished window ~claim ~handle)
+        then Error (busy ())
+        else (
+          match accept ~claim ~window with
+          | Error _ as error -> error
+          | Ok () ->
+            t.run.finished <- None;
+            t.run.transferred_claim <- Some (handle, claim);
+            Ok ())
+      | None, _ | Some _, _ -> Error (busy ()))
   ;;
 end
 
@@ -842,6 +1073,10 @@ let launch t (slot : slot) ~handle ~reserved ~f =
   else (
     match reserved.store_view, Row.phase reserved.row with
     | Some _, Row.Phase.Reserved ->
+      (* The pinned Eio [Fiber.fork] silently skips a cancelled switch. Check
+         before transferring this reservation into Active custody, with no
+         yield before the fork itself. *)
+      Eio.Switch.check t.sw;
       if
         Option.is_some slot.run.pending
         || List.exists slot.run.active ~f:(fun active ->
@@ -948,7 +1183,7 @@ let active_for_key t run_id key =
 
 let terminal_view t ~actor ~run_id ~key =
   let open Result.Let_syntax in
-  let%bind observed = snapshot t run_id ~actor ~key in
+  let%bind observed = await_snapshot t run_id ~actor ~key in
   match observed with
   | Some view when Option.is_some (View.receipt view) -> Ok view
   | None | Some _ -> Error (busy ())
@@ -981,9 +1216,10 @@ let await_terminal t ~actor ~run_id ~key =
           | Some (Error error) -> Error error
           | None | Some (Ok _) -> terminal_view t ~actor ~run_id ~key))
     | None ->
-      let%bind before = snapshot t run_id ~actor ~key in
+      let%bind before = await_snapshot t run_id ~actor ~key in
       (match before with
        | None -> Error (stale ())
+       | Some view when Option.is_some (View.receipt view) -> Ok view
        | Some _ ->
          with_slot t ~run_id ~f:(fun slot ->
            let%bind () = ensure_startup_recovered t slot in
@@ -1043,6 +1279,79 @@ let retry_finished_active t (active : active) =
          Error error))
 ;;
 
+let settle_joined_run t run =
+  let pending = reconcile_retained run in
+  let abandonment =
+    Result.bind pending ~f:(fun () ->
+      match run.unlaunched with
+      | None -> Ok ()
+      | Some selected -> settle_unlaunched t run selected)
+  in
+  let settled = Result.bind abandonment ~f:(fun () -> reconcile_retained run) in
+  let retried =
+    List.map run.active ~f:(retry_finished_active t) |> List.find_map ~f:Result.error
+  in
+  match settled, retried, run.pending, run.recovery, run.claim_only, run.unlaunched with
+  | Ok (), None, None, None, None, None when List.is_empty run.active -> Ok ()
+  | Error error, _, _, _, _, _ -> Error error
+  | Ok (), Some error, _, _, _, _ -> Error error
+  | Ok (), None, _, _, _, _ -> Error (busy ())
+;;
+
+let settle_finished_claim run =
+  let open Result.Let_syntax in
+  let%bind () =
+    match run.finished with
+    | None -> Ok ()
+    | Some acquired ->
+      let%bind () = store (Store.Run_claim.release (Startup.Acquired.claim acquired)) in
+      run.finished <- None;
+      Ok ()
+  in
+  match run.transferred_claim with
+  | None -> Ok ()
+  | Some (_, claim) when Store.Run_claim.is_released claim ->
+    run.transferred_claim <- None;
+    Ok ()
+  | Some _ -> Error (busy ())
+;;
+
+let check_retirement t (slot : slot) ~actor =
+  if not (slot_current t slot)
+  then Error (stale ())
+  else if
+    Option.value_map (Eio.Fiber.get active_key) ~default:false ~f:(fun active ->
+      phys_equal active.run slot.run)
+  then Error (busy ())
+  else if
+    not
+      (current_actor actor
+       && List.for_all slot.run.active ~f:(fun active ->
+         same_principal actor active.view.row && t.control.authorize actor active.view.row)
+      )
+  then Error (denied ())
+  else Ok ()
+;;
+
+let has_active t (slot : slot) =
+  if slot_current t slot
+  then Ok (not (List.is_empty slot.run.active))
+  else Error (stale ())
+;;
+
+let retire_run t (slot : slot) ~actor =
+  let open Result.Let_syntax in
+  let%bind () = check_retirement t slot ~actor in
+  let run = slot.run in
+  Eio.Cancel.protect (fun () ->
+    let active = run.active in
+    List.iter active ~f:(fun call ->
+      call.cancel_requested <- true;
+      Option.iter call.cancel ~f:(fun cancel -> Eio.Cancel.cancel cancel Exit));
+    List.iter active ~f:(fun call -> Eio.Promise.await call.finished);
+    if not (slot_current t slot) then Error (stale ()) else settle_joined_run t run)
+;;
+
 let lookup t (slot : slot) ~actor ~key ~kind ~request_fingerprint =
   let open Result.Let_syntax in
   if not (slot_current t slot)
@@ -1086,7 +1395,7 @@ let lookup t (slot : slot) ~actor ~key ~kind ~request_fingerprint =
           | None | Some _ -> Error (stale ()))))
 ;;
 
-let close_and_wait t =
+let stop_and_join t =
   if not (on_domain t)
   then Error (stale ())
   else if Hashtbl.exists t.runs ~f:(fun run -> Option.is_some run.slot)
@@ -1097,34 +1406,23 @@ let close_and_wait t =
   then Error (busy ())
   else (
     t.closed <- true;
-    let active = Hashtbl.data t.runs |> List.concat_map ~f:(fun run -> run.active) in
-    List.iter active ~f:(fun call ->
-      call.cancel_requested <- true;
-      Option.iter call.cancel ~f:(fun cancel -> Eio.Cancel.cancel cancel Exit));
     Eio.Cancel.protect (fun () ->
+      let active = Hashtbl.data t.runs |> List.concat_map ~f:(fun run -> run.active) in
+      List.iter active ~f:(fun call ->
+        call.cancel_requested <- true;
+        Option.iter call.cancel ~f:(fun cancel -> Eio.Cancel.cancel cancel Exit));
       List.iter active ~f:(fun call -> Eio.Promise.await call.finished);
-      let outcomes =
-        Hashtbl.data t.runs
-        |> List.map ~f:(fun run ->
-          let pending = reconcile_retained run in
-          let abandonment =
-            Result.bind pending ~f:(fun () ->
-              match run.unlaunched with
-              | None -> Ok ()
-              | Some selected -> settle_unlaunched t run selected)
-          in
-          let settled = Result.bind abandonment ~f:(fun () -> reconcile_retained run) in
-          let retried =
-            List.map run.active ~f:(retry_finished_active t)
-            |> List.find_map ~f:Result.error
-          in
-          match settled, retried, run.recovery, run.claim_only, run.unlaunched with
-          | Ok (), None, None, None, None when List.is_empty run.active -> Ok ()
-          | Error error, _, _, _, _ -> Error error
-          | Ok (), Some error, _, _, _ -> Error error
-          | Ok (), None, _, _, _ -> Error (busy ()))
-      in
+      let outcomes = Hashtbl.data t.runs |> List.map ~f:(settle_joined_run t) in
       match List.find_map outcomes ~f:Result.error with
       | None -> Ok ()
       | Some error -> Error error))
+;;
+
+let close_and_wait t =
+  let open Result.Let_syntax in
+  let%bind () = stop_and_join t in
+  let outcomes = Hashtbl.data t.runs |> List.map ~f:settle_finished_claim in
+  match List.find_map outcomes ~f:Result.error with
+  | None -> Ok ()
+  | Some error -> Error error
 ;;

@@ -6,6 +6,7 @@ type t =
   ; root_file : string
   ; root_invocation :
       Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+  ; tool_contract : Chatml_compilation.Tool_contract.t
   ; allowed_workspaces : Agent_protocol.Id.Workspace_definition.t list
   ; permission_profile : string
   ; runtime_policy : string option
@@ -44,6 +45,7 @@ let create
       ; config_name
       ; root_file
       ; root_invocation
+      ; tool_contract = Chatml_compilation.Tool_contract.Standard
       ; allowed_workspaces
       ; permission_profile
       ; runtime_policy
@@ -58,3 +60,5 @@ let allows_workspace t workspace_id =
 ;;
 
 let root_invocation t = t.root_invocation
+let with_tool_contract t tool_contract = { t with tool_contract }
+let tool_contract t = t.tool_contract

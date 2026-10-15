@@ -90,11 +90,21 @@ val with_revision
     immutable plan used to authenticate the restored programs. No second parser
     or planning traversal. [None] plan means genuine legacy custody absence, not
     evidence that the captured revision contains no moderator. Borrowed startup,
-    callback and original exception rules are identical to [with_revision]. *)
+    callback and original exception rules are identical to [with_revision].
+    [tool_contract] selects the captured managed Tool surface; omission keeps
+    the existing Standard session fingerprint. Developer Live passes
+    Developer_model_spawn and uses the same choice for managed registry
+    preparation. That explicit choice must select the corresponding genuine
+    binding/compiler-contract records from the revision's immutable inventory
+    through Retained_selection before graph restoration. Missing or ambiguous
+    Developer records reject; a Standard graph is never relabelled or compiled
+    from current files on resume. The authored bundle comes from the verified
+    revision artifact, not a caller-selected source. This is compiler identity,
+    not provider authority. *)
 val with_revision_plan
-  :  t option
+  :  ?tool_contract:Chatml_compilation.Tool_contract.t
+  -> t option
   -> ?startup:Chat_response.Startup_compilation.t
-  -> ?tool_contract:Chatml_compilation.Tool_contract.t
   -> Prompt_revision.t
   -> env:Eio_unix.Stdenv.base
   -> invocation:Invocation.t

@@ -76,7 +76,9 @@ module Prepared : sig
 end
 
 (** Reserve this host's complete preparation/publication attempt. Snapshot durable
-    history, prepare every actual definition with per-script selected operations,
+    history, prepare every actual definition with per-script selected operations
+    and its explicit Prompt_definition tool compiler contract (Standard by
+    default, Developer_model_spawn only when configured),
     preserve authentic next associations, finalize only actual successful durable
     artifacts, preallocate the bounded next index, and seal the exact catalog
     candidate. An Update validates its expected generation and target definitions

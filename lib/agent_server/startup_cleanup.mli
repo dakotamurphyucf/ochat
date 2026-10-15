@@ -1,7 +1,9 @@
 open! Core
 
-(** One switch-scoped startup owner. No background retry, global owner, or host is
-    created by this guard. Registry cleanup precedes operator and Store release. *)
+(** One switch-scoped startup owner. No background retry or second host is
+    created by this guard. An installed developer host joins before the sole
+    scheduler; scheduler children join before registry, operator and Store
+    release. *)
 type t
 
 module Failure : sig
@@ -14,8 +16,8 @@ end
 exception Cleanup_failed of Failure.t
 
 (** Registers one exceptional switch finalizer for an unfinished startup failure.
-    If immediate cleanup fails, actual registry/operator/Store capabilities remain
-    in this scope and later release attempts the same ordered drain once. A repeated
+    If immediate cleanup fails, actual joined owners and Store capabilities remain
+    in this scope and later release attempts the same ordered drain. A repeated
     failure raises with both diagnostics; it never reports cleanup complete or
     promises resources survive process/switch teardown. *)
 val create : sw:Eio.Switch.t -> store:Agent_store.Session_store.t -> t
@@ -23,6 +25,22 @@ val create : sw:Eio.Switch.t -> store:Agent_store.Session_store.t -> t
 val adopt_registry_exn : t -> Session_registry.t -> unit
 val adopt_operator_exn : t -> Provider_operator_port.t -> unit
 val adopt_authoring_exn : t -> Authoring_installation.t -> unit
+
+(** Retain this exact daemon-owned developer close operation before the
+    scheduler starts. It joins command callbacks, Root workers and source
+    owners while the scheduler remains serviceable. No caller receives an
+    execution capability from this cleanup-only callback. *)
+val adopt_developer_exn
+  :  t
+  -> close_and_wait:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> unit
+
+(** A started scheduler is adopted before further yielding startup work.
+    Failed startup joins its existing scheduler fibers before registry/Store
+    cleanup. The developer host is joined first while dispatch is serviceable. *)
+val adopt_job_scheduler_exn : t -> Job_scheduler.t -> unit
+
+val adopt_start_scheduler_exn : t -> Start_scheduler.t -> unit
 
 (** Preserve original Error or exception/backtrace if ordered cleanup also fails.
     On success the actual host takes ownership; this startup guard stops releasing

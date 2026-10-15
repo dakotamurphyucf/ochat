@@ -154,6 +154,7 @@ let prompt_config options =
     ; allowed_workspaces = [ "embedded.workspace" ]
     ; permission_profile = options.permission_profile.id
     ; runtime_policy = None
+    ; tool_contract = Chatml_compilation.Tool_contract.Standard
     ; enabled = true
     }
 ;;

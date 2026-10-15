@@ -312,6 +312,7 @@ end
       When [decl.names] is [`Some list`] only the named tools are wrapped;
       otherwise the full catalog is exposed. *)
 let mcp_tool
+      ?(check_preparation_now = fun () -> Ok ())
       ~sw
       ~env
       CM.{ names; description = _; mcp_server; strict; client_id_env; client_secret_env }
@@ -332,7 +333,10 @@ let mcp_tool
     let uri = add_param_if_some uri ("client_secret", client_secret_env) in
     Uri.to_string uri
   in
+  let open Result.Let_syntax in
+  let%bind () = check_preparation_now () in
   let client = Mcp_client.connect ~sw ~env mcp_server_uri in
+  let%bind () = check_preparation_now () in
   let cache =
     Mcp_discovery_cache.create
       ~now:(fun () -> Eio.Time.now (Eio.Stdenv.clock env))
@@ -367,20 +371,29 @@ let mcp_tool
   in
   let get_tool name =
     let find () =
-      List.find (Mcp_discovery_cache.get cache) ~f:(fun tool ->
-        String.equal tool.Mcp_types.Tool.name name)
+      Result.map
+        (Mcp_discovery_cache.get_checked cache ~before_load:check_preparation_now)
+        ~f:(fun tools ->
+          List.find tools ~f:(fun tool -> String.equal tool.Mcp_types.Tool.name name))
     in
-    match find () with
-    | Some tool -> wrap tool
+    let%bind found = find () in
+    match found with
+    | Some tool -> Ok (wrap tool)
     | None ->
       Mcp_discovery_cache.invalidate cache;
-      (match find () with
-       | Some tool -> wrap tool
-       | None -> failwithf "MCP tool %s is unavailable" name ())
+      Result.map (find ()) ~f:(function
+        | Some tool -> wrap tool
+        | None -> failwithf "MCP tool %s is unavailable" name ())
   in
   match names with
-  | Some names -> List.map names ~f:get_tool
-  | None -> List.map (Mcp_discovery_cache.get cache) ~f:wrap
+  | Some names ->
+    List.fold_result names ~init:[] ~f:(fun found name ->
+      Result.map (get_tool name) ~f:(fun tool -> tool :: found))
+    |> Result.map ~f:List.rev
+  | None ->
+    Result.map
+      (Mcp_discovery_cache.get_checked cache ~before_load:check_preparation_now)
+      ~f:(List.map ~f:wrap)
 ;;
 
 (*--- 4-d.  Unified declaration → function mapping ------------------*)
@@ -476,6 +489,7 @@ let of_declaration_with
       ?shell_registry
       ?host
       ?agent_source_runner
+      ?check_preparation_now
       ~sw
       ~env
       ~tool_dir
@@ -553,7 +567,7 @@ let of_declaration_with
      | Some (ctx, run_agent) ->
        Ok [ agent_fn ?agent_source_runner ~ctx ~run_agent agent_spec ]
      | None -> inference_required "Agent requires admitted inference")
-  | CM.Mcp mcp -> Ok (mcp_tool ~sw ~env mcp)
+  | CM.Mcp mcp -> mcp_tool ?check_preparation_now ~sw ~env mcp
 ;;
 
 let of_declaration
@@ -580,9 +594,11 @@ let of_declaration
   | Error error -> failwithf "%s: %s" error.Native_error.code error.message ()
 ;;
 
-let of_declaration_without_inference ?shell_registry ~sw ~host decl =
+let of_declaration_without_inference ?shell_registry ?check_preparation_now ~sw ~host decl
+  =
   of_declaration_with
     ?shell_registry
+    ?check_preparation_now
     ~host
     ~sw
     ~env:host.Shell_runtime.Host.env

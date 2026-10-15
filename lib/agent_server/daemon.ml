@@ -14,6 +14,8 @@ type startup_mode =
   | Operator_only
 [@@deriving equal, sexp]
 
+module Developer_configuration = Developer_daemon_configuration
+
 type options =
   { startup_mode : startup_mode
   ; root_invocation :
@@ -22,6 +24,7 @@ type options =
   ; implementation_version : string
   ; features : string list
   ; authoring : Authoring_installation.Host_policy.t option
+  ; developer : Developer_configuration.t option
   ; extension_host : Agent_protocol.Extension_capabilities.host
   ; protocol_limits : Agent_protocol.Initialize.Limits.t
   ; timing : Agent_protocol.Initialize.Timing.t
@@ -61,6 +64,7 @@ type t =
   ; registry : Session_registry.t
   ; handler : Command_handler.t
   ; authoring : Authoring_installation.t option
+  ; developer : Developer_host.t option
   ; provider_operator : Provider_operator_port.t option
   ; dispatcher : Dispatcher.t
   ; start_scheduler : Start_scheduler.t
@@ -120,6 +124,7 @@ let default_options =
            ~initialize_limits:default_protocol_limits
          |> Result.map_error ~f:(fun failure -> failure.Agent_protocol.Error.message)
          |> Result.ok_or_failwith)
+  ; developer = None
   ; features =
       [ "sessions.seed"
       ; "attachments.multi_client"
@@ -1168,10 +1173,9 @@ let compose
   let registry = Session_registry.create () in
   Startup_cleanup.adopt_registry_exn startup_cleanup registry;
   let start_queue = Agent_session.Start_queue.create () in
+  let workspace_leases = Agent_session.Workspace_lease.create () in
   let%bind quota_manager =
-    Agent_session.Quota_manager.create
-      ~limits:options.quota_limits
-      ~workspace_leases:(Agent_session.Workspace_lease.create ())
+    Agent_session.Quota_manager.create ~limits:options.quota_limits ~workspace_leases
   in
   let job_capacity = Job_capacity.create ~limits:config.server.job_limits in
   let factory_limits =
@@ -1365,109 +1369,6 @@ let compose
       let%bind () = Schedule_scheduler.reconcile_recovered ~registry ~startup_time in
       Session_factory.complete_index_recovery factory (Session_registry.entries registry))
   in
-  let start_scheduler =
-    Start_scheduler.start_controlled
-      ~enabled:execution_enabled
-      ~sw
-      ~clock:(Eio.Stdenv.clock env)
-      ~registry
-      ~queue:start_queue
-      ~resume_initial_starts:(fun () ->
-        if execute
-        then Session_factory.resume_generated_initial_starts factory
-        else Session_factory.resume_selected_initial_starts factory)
-  in
-  let job_scheduler =
-    Job_scheduler.start_controlled
-      ~enabled:execution_enabled
-      ~sw
-      ~clock:(Eio.Stdenv.clock env)
-      ~registry
-      ~developer_registry:None
-      ~capacity:job_capacity
-      ~model_job_inference:(Session_factory.model_job_inference factory)
-  in
-  let permission_scheduler =
-    Permission_scheduler.start_controlled
-      ~enabled:execution_enabled
-      ~sw
-      ~clock:(Eio.Stdenv.clock env)
-      ~registry
-  in
-  let schedule_scheduler =
-    Schedule_scheduler.start_controlled
-      ~enabled:execution_enabled
-      ~sw
-      ~clock:(Eio.Stdenv.mono_clock env)
-      ~registry
-  in
-  let maintenance =
-    Maintenance.start_controlled
-      ~collection_policy:(if execute then Load_retained else Selected_only)
-      ~enabled:execution_enabled
-      ~env
-      ~sw
-      ~clock:(Eio.Stdenv.clock env)
-      ~every:60.
-      ~idempotency_store
-      ~blob_store
-      ~response_retention:
-        (Time_ns.Span.of_ms
-           (Float.of_int config.server.event_retention.response_artifact_ms))
-      ~registry
-      ~session_store:store
-      ~on_error:(fun _ -> ())
-  in
-  let status_ref = ref Ready in
-  let config_watcher =
-    config_watcher
-      ~enabled:execute
-      ~sw
-      ~env
-      ~config
-      ~project_catalog
-      ~factory
-      ~audit_store
-      ~reviewer_resolver:options.reviewer_resolver
-      ~policy_evaluator_resolver:options.policy_evaluator_resolver
-      ~root_invocation:options.root_invocation
-  in
-  let health_services =
-    { health_env = env
-    ; health_store = store
-    ; health_registry = registry
-    ; health_start_scheduler = start_scheduler
-    ; health_job_scheduler = job_scheduler
-    ; health_permission_scheduler = permission_scheduler
-    ; health_schedule_scheduler = schedule_scheduler
-    ; health_maintenance = maintenance
-    ; health_config_watcher = config_watcher
-    ; health_status_ref = status_ref
-    }
-  in
-  let dependency_administration =
-    Dependency_administration.create
-      ~status:(fun () ->
-        let publication, _ = Config_watcher.status config_watcher in
-        Prompt_dependency_projection.status project_catalog ~publication)
-      ~update:(fun request ~checkpoint ->
-        Config_watcher.update_dependencies config_watcher request ~checkpoint
-        |> Result.map_error ~f:(function
-          | Config_watcher.Failure.Rejected _ ->
-            Dependency_administration.Failure.Rejected
-              (Agent_protocol.Error.create
-                 Invalid_state
-                 ~message:"dependency update rejected before publication"
-                 ~retryable:false
-                 ())
-          | Uncertain _ ->
-            Dependency_administration.Failure.Uncertain
-              (Agent_protocol.Error.create
-                 Interrupted
-                 ~message:"dependency publication is uncertain; do not repeat the update"
-                 ~retryable:false
-                 ())))
-  in
   let%bind configured_contracts =
     match
       config.server.authoring_project_access, config.server.authoring_upload_access
@@ -1551,6 +1452,192 @@ let compose
       |> Result.map ~f:Option.some
   in
   Option.iter authoring ~f:(Startup_cleanup.adopt_authoring_exn startup_cleanup);
+  let%bind developer =
+    match options.developer, authoring, home with
+    | None, _, _ -> Ok None
+    | Some _, None, _ ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "developer commands require the installed authoring owner")
+    | Some _, Some _, None ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "developer live resources require an explicit host home")
+    | Some configuration, Some authoring, Some home ->
+      let limits = configuration.limits in
+      let catalogs = Session_factory.developer_catalog factory in
+      let physical_roots =
+        Session_factory.Developer_catalog.workspace_definitions catalogs
+        |> List.filter_map ~f:(fun definition ->
+          Eio.Fiber.check ();
+          match definition.Agent_session.Workspace_definition.source with
+          | Physical { configured_root } -> Some configured_root
+          | Temporary _ -> None)
+      in
+      let cache =
+        Chat_response.Cache.create ~max_size:limits.max_agent_cache_entries ()
+      in
+      let disclosure =
+        Developer_host.Command.Disclosure_policy.create
+          ~authorize:configuration.receipt_read
+      in
+      let control =
+        Developer_host.Command.Control_policy.create
+          ~authorize:configuration.command_control
+      in
+      Developer_host.create
+        ~sw
+        ~env
+        ~session_store:store
+        ~blobs:blob_store
+        ~capacity:job_capacity
+        ~authoring
+        ~provider:provider_operator
+        ~model_target:configuration.model_target
+        ~prompts
+        ~catalogs
+        ~workspace_leases
+        ~physical_roots
+        ~workspace_cleanup:limits.workspace_cleanup
+        ~script_preparation:options.script_preparation
+        ~tool_dir:Eio.Path.(Eio.Stdenv.fs env / tool_dir)
+        ~home:Eio.Path.(Eio.Stdenv.fs env / home)
+        ~cache
+        ~approval_broker:None
+        ~max_native_bindings:limits.max_native_bindings
+        ~child_sources
+        ~content_limits:options.content_limits
+        ~agent_source_limits:limits.agent_sources
+        ~job_policy:Chat_response.One_off_request.default_policy
+        ~authorize_native:configuration.authorize_native
+        ~prepare_output:configuration.prepare_output
+        ~capture_policy:configuration.capture_policy
+        ~capture_limits:configuration.capture_limits
+        ~command_disclosure:disclosure
+        ~command_control:control
+        ~result_disclosure:configuration.result_disclosure
+        ~publisher_limits:configuration.publisher_limits
+        ~publisher_storage:configuration.publisher_storage
+        ~store_limits:limits.store
+        ~limits:limits.host
+        ~budget_configuration:limits.budgets
+        ~now:(fun () -> timestamp env)
+        ~checkpoint:Eio.Fiber.check
+      |> Result.map ~f:Option.some
+  in
+  Option.iter developer ~f:(fun developer ->
+    Startup_cleanup.adopt_developer_exn startup_cleanup ~close_and_wait:(fun () ->
+      Developer_host.close_and_wait developer));
+  let start_scheduler =
+    Start_scheduler.start_controlled
+      ~enabled:execution_enabled
+      ~sw
+      ~clock:(Eio.Stdenv.clock env)
+      ~registry
+      ~queue:start_queue
+      ~resume_initial_starts:(fun () ->
+        if execute
+        then Session_factory.resume_generated_initial_starts factory
+        else Session_factory.resume_selected_initial_starts factory)
+  in
+  Startup_cleanup.adopt_start_scheduler_exn startup_cleanup start_scheduler;
+  let job_scheduler =
+    Job_scheduler.start_controlled
+      ~enabled:execution_enabled
+      ~sw
+      ~clock:(Eio.Stdenv.clock env)
+      ~registry
+      ~developer_registry:(Option.map developer ~f:Developer_host.registry)
+      ~capacity:job_capacity
+      ~model_job_inference:(Session_factory.model_job_inference factory)
+  in
+  Startup_cleanup.adopt_job_scheduler_exn startup_cleanup job_scheduler;
+  let%bind () =
+    match developer with
+    | None -> Ok ()
+    | Some developer -> Developer_host.install_scheduler developer job_scheduler
+  in
+  let permission_scheduler =
+    Permission_scheduler.start_controlled
+      ~enabled:execution_enabled
+      ~sw
+      ~clock:(Eio.Stdenv.clock env)
+      ~registry
+  in
+  let schedule_scheduler =
+    Schedule_scheduler.start_controlled
+      ~enabled:execution_enabled
+      ~sw
+      ~clock:(Eio.Stdenv.mono_clock env)
+      ~registry
+  in
+  let maintenance =
+    Maintenance.start_controlled
+      ~collection_policy:(if execute then Load_retained else Selected_only)
+      ~enabled:execution_enabled
+      ~env
+      ~sw
+      ~clock:(Eio.Stdenv.clock env)
+      ~every:60.
+      ~idempotency_store
+      ~blob_store
+      ~response_retention:
+        (Time_ns.Span.of_ms
+           (Float.of_int config.server.event_retention.response_artifact_ms))
+      ~registry
+      ~session_store:store
+      ~on_error:(fun _ -> ())
+  in
+  let status_ref = ref Ready in
+  let config_watcher =
+    config_watcher
+      ~enabled:execute
+      ~sw
+      ~env
+      ~config
+      ~project_catalog
+      ~factory
+      ~audit_store
+      ~reviewer_resolver:options.reviewer_resolver
+      ~policy_evaluator_resolver:options.policy_evaluator_resolver
+      ~root_invocation:options.root_invocation
+  in
+  let health_services =
+    { health_env = env
+    ; health_store = store
+    ; health_registry = registry
+    ; health_start_scheduler = start_scheduler
+    ; health_job_scheduler = job_scheduler
+    ; health_permission_scheduler = permission_scheduler
+    ; health_schedule_scheduler = schedule_scheduler
+    ; health_maintenance = maintenance
+    ; health_config_watcher = config_watcher
+    ; health_status_ref = status_ref
+    }
+  in
+  let dependency_administration =
+    Dependency_administration.create
+      ~status:(fun () ->
+        let publication, _ = Config_watcher.status config_watcher in
+        Prompt_dependency_projection.status project_catalog ~publication)
+      ~update:(fun request ~checkpoint ->
+        Config_watcher.update_dependencies config_watcher request ~checkpoint
+        |> Result.map_error ~f:(function
+          | Config_watcher.Failure.Rejected _ ->
+            Dependency_administration.Failure.Rejected
+              (Agent_protocol.Error.create
+                 Invalid_state
+                 ~message:"dependency update rejected before publication"
+                 ~retryable:false
+                 ())
+          | Uncertain _ ->
+            Dependency_administration.Failure.Uncertain
+              (Agent_protocol.Error.create
+                 Interrupted
+                 ~message:"dependency publication is uncertain; do not repeat the update"
+                 ~retryable:false
+                 ())))
+  in
   let handler =
     Command_handler.create
       ~sw
@@ -1700,6 +1787,7 @@ let compose
     ; registry
     ; handler
     ; authoring
+    ; developer
     ; provider_operator
     ; dispatcher
     ; start_scheduler
@@ -1752,6 +1840,14 @@ let start
       }
   in
   let open Result.Let_syntax in
+  let%bind () =
+    match options.developer, options.startup_mode with
+    | None, _ | Some _, (Execute | On_demand) -> Ok ()
+    | Some _, Operator_only ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "developer commands require an execution-enabled daemon")
+  in
   let%bind () =
     match options.qualify_chatml_extensions with
     | false -> Ok ()
@@ -1913,14 +2009,19 @@ let shutdown t =
   | Starting | Ready | Failed _ | Draining ->
     t.status_ref := Draining;
     Start_scheduler.close t.start_scheduler;
-    Job_scheduler.close t.job_scheduler;
     Permission_scheduler.close t.permission_scheduler;
     Schedule_scheduler.close t.schedule_scheduler;
     Maintenance.close t.maintenance;
     Config_watcher.close_and_wait t.config_watcher;
     Start_scheduler.close_and_wait t.start_scheduler;
-    shutdown_sessions t;
     let open Result.Let_syntax in
+    let%bind () =
+      match t.developer with
+      | None -> Ok ()
+      | Some developer -> Developer_host.close_and_wait developer
+    in
+    let%bind () = Job_scheduler.close_and_wait t.job_scheduler in
+    shutdown_sessions t;
     let%bind () =
       match t.authoring with
       | None -> Ok ()
@@ -2001,3 +2102,57 @@ let inspect_prompt_shell t ~definition_id ~selection ~checkpoint =
       checkpoint ();
       Preparation.inspect_shell policy revision ~env:t.env ~invocation ~checkpoint)
 ;;
+
+module Developer = struct
+  module Configuration = Developer_configuration
+  module Request = Developer_command_original
+
+  module View = struct
+    type t = Developer_host.Command.view
+
+    let id = Developer_host.Command.id
+    let owner = Developer_host.Command.owner
+    let kind = Developer_host.Command.kind
+    let phase = Developer_host.Command.phase
+    let receipt = Developer_host.Command.receipt
+    let capture_fingerprint = Developer_host.Command.capture_fingerprint
+    let request_fingerprint = Developer_host.Command.request_fingerprint
+  end
+
+  let with_host t f =
+    match t.developer with
+    | Some host -> f host
+    | None ->
+      Error
+        (Agent_protocol.Error.create
+           Invalid_state
+           ~message:"developer commands are not installed on this daemon"
+           ~retryable:false
+           ())
+  ;;
+
+  let submit t ~actor ~run_id ~key ~request ~fresh_source =
+    with_host t (fun host ->
+      Developer_host.Command.submit
+        host
+        ~actor
+        ~run_id
+        ~key
+        ~original:request
+        ~fresh_source)
+  ;;
+
+  let observe t ~actor ~run_id ~key =
+    with_host t (fun host -> Developer_host.Command.observe host ~actor ~run_id ~key)
+  ;;
+
+  let await_terminal t ~actor ~run_id ~key =
+    with_host t (fun host ->
+      Developer_host.Command.await_terminal host ~actor ~run_id ~key)
+  ;;
+
+  let cancel_and_wait t ~actor ~run_id ~key =
+    with_host t (fun host ->
+      Developer_host.Command.cancel_and_wait host ~actor ~run_id ~key)
+  ;;
+end

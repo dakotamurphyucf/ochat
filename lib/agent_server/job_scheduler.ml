@@ -85,13 +85,19 @@ type running_job =
   }
 
 type t =
-  { closed : bool Atomic.t
+  { domain_id : int
+  ; closed : bool Atomic.t
+  ; loop_done : unit Eio.Promise.t
+  ; active_children : int ref
+  ; children_idle : Eio.Condition.t
   ; capacity : Job_capacity.t
   ; developer : Developer.t option
+  ; developer_registry : Developer_root_owner.Registry.t option
   ; mutex : Eio.Mutex.t
   ; mutable running : running_job Map.M(Worker_key).t
   ; mutable after : P.Execution_owner.t option
   ; mutable delivering : Session_registry.entry list
+  ; mutable delivery_cancels : Eio.Cancel.t list
   ; deliveries_idle : Eio.Condition.t
   ; model_job_inference :
       Session_registry.entry
@@ -99,6 +105,42 @@ type t =
       -> (Session_factory.model_job_inference, Agent_protocol.Error.t) Result.t
   ; sleep : float -> unit
   }
+
+let scheduler_fiber_key : t Eio.Fiber.key = Eio.Fiber.create_key ()
+let on_domain t = Int.equal t.domain_id (Stdlib.Domain.self () :> int)
+
+let check_domain_exn t =
+  if not (on_domain t) then invalid_arg "developer scheduler used on a foreign domain"
+;;
+
+let child_finished t =
+  t.active_children := !(t.active_children) - 1;
+  if !(t.active_children) = 0 then Eio.Condition.broadcast t.children_idle
+;;
+
+let fork_owned t ~sw ~on_refused f =
+  let counted = ref false in
+  match
+    check_domain_exn t;
+    Eio.Switch.check sw;
+    t.active_children := !(t.active_children) + 1;
+    counted := true;
+    Eio.Fiber.fork ~sw (fun () ->
+      Exn.protect
+        ~f:(fun () -> Eio.Fiber.with_binding scheduler_fiber_key t f)
+        ~finally:(fun () -> Eio.Cancel.protect (fun () -> child_finished t)))
+  with
+  | () -> ()
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    Eio.Cancel.protect (fun () ->
+      if !counted then child_finished t;
+      (* Both callbacks are local nonyielding cleanup for pre-fork custody.
+         Preserve the original switch/domain failure if cleanup itself fails. *)
+      try on_refused () with
+      | _ -> ());
+    Exn.raise_with_original_backtrace exn backtrace
+;;
 
 module For_testing = struct
   let fair_order ~after groups =
@@ -364,34 +406,40 @@ let dispatch t sw entry job lease rejection =
     | Ok key -> key
     | Error _ -> failwith "claimed conversation job has invalid identity"
   in
-  Eio.Fiber.fork ~sw (fun () ->
-    Exn.protect
-      ~f:(fun () ->
-        try
-          Eio.Switch.run (fun job_sw ->
-            register_running
-              t
-              key
-              job
-              job_sw
-              ~actor:entry.Session_registry.actor
-              ~rejected:(Option.is_some rejection);
-            match rejection with
-            | None -> run_claimed_job t entry job
-            | Some error ->
-              (match job.kind with
-               | Async_tool -> complete_background t entry job (failure_completion error)
-               | _ ->
-                 complete
-                   entry
-                   job
-                   (Agent_session.Runtime_builder.Model_failed error.message)))
-        with
-        | Job_cancelled | Eio.Cancel.Cancelled _ -> ())
-      ~finally:(fun () ->
-        Eio.Cancel.protect (fun () ->
-          unregister_running t key ~actor:entry.Session_registry.actor;
-          Option.iter lease ~f:Job_capacity.release)))
+  fork_owned
+    t
+    ~sw
+    ~on_refused:(fun () -> Option.iter lease ~f:Job_capacity.release)
+    (fun () ->
+       Exn.protect
+         ~f:(fun () ->
+           try
+             Eio.Switch.run (fun job_sw ->
+               register_running
+                 t
+                 key
+                 job
+                 job_sw
+                 ~actor:entry.Session_registry.actor
+                 ~rejected:(Option.is_some rejection);
+               Eio.Switch.check job_sw;
+               match rejection with
+               | None -> run_claimed_job t entry job
+               | Some error ->
+                 (match job.kind with
+                  | Async_tool ->
+                    complete_background t entry job (failure_completion error)
+                  | _ ->
+                    complete
+                      entry
+                      job
+                      (Agent_session.Runtime_builder.Model_failed error.message)))
+           with
+           | Job_cancelled | Eio.Cancel.Cancelled _ -> ())
+         ~finally:(fun () ->
+           Eio.Cancel.protect (fun () ->
+             unregister_running t key ~actor:entry.Session_registry.actor;
+             Option.iter lease ~f:Job_capacity.release)))
 ;;
 
 let nested_depth (job : Agent_protocol.Job.t) =
@@ -543,13 +591,31 @@ let dispatch_delivery t sw entry jobs =
     && not (List.mem t.delivering entry ~equal:phys_equal)
   then (
     t.delivering <- entry :: t.delivering;
-    Eio.Fiber.fork ~sw (fun () ->
-      Exn.protect
-        ~f:(fun () -> if not (Atomic.get t.closed) then deliver_pending entry)
-        ~finally:(fun () ->
-          t.delivering
-          <- List.filter t.delivering ~f:(fun active -> not (phys_equal active entry));
-          if List.is_empty t.delivering then Eio.Condition.broadcast t.deliveries_idle)))
+    fork_owned
+      t
+      ~sw
+      ~on_refused:(fun () ->
+        t.delivering
+        <- List.filter t.delivering ~f:(fun active -> not (phys_equal active entry));
+        if List.is_empty t.delivering then Eio.Condition.broadcast t.deliveries_idle)
+      (fun () ->
+         Exn.protect
+           ~f:(fun () ->
+             try
+               Eio.Cancel.sub (fun cancel ->
+                 t.delivery_cancels <- cancel :: t.delivery_cancels;
+                 Exn.protect
+                   ~f:(fun () -> if not (Atomic.get t.closed) then deliver_pending entry)
+                   ~finally:(fun () ->
+                     t.delivery_cancels
+                     <- List.filter t.delivery_cancels ~f:(fun current ->
+                          not (phys_equal current cancel))))
+             with
+             | Job_cancelled | Eio.Cancel.Cancelled _ -> ())
+           ~finally:(fun () ->
+             t.delivering
+             <- List.filter t.delivering ~f:(fun active -> not (phys_equal active entry));
+             if List.is_empty t.delivering then Eio.Condition.broadcast t.deliveries_idle)))
 ;;
 
 let claim_one t sw entry jobs =
@@ -763,22 +829,43 @@ let start_controlled
     Option.map developer_registry ~f:(fun registry ->
       Developer.create ~sw ~clock ~registry ~capacity)
   in
+  let loop_done, loop_done_u = Eio.Promise.create () in
   let t =
-    { closed = Atomic.make (not enabled)
+    { domain_id = (Stdlib.Domain.self () :> int)
+    ; closed = Atomic.make (not enabled)
+    ; loop_done
+    ; active_children = ref 0
+    ; children_idle = Eio.Condition.create ()
     ; capacity
     ; developer
+    ; developer_registry
     ; model_job_inference
     ; mutex = Eio.Mutex.create ()
     ; running = Map.empty (module Worker_key)
     ; after = None
     ; delivering = []
+    ; delivery_cancels = []
     ; deliveries_idle = Eio.Condition.create ()
     ; sleep = Eio.Time.sleep clock
     }
   in
   if not enabled then Option.iter developer ~f:Developer.close;
-  if enabled then Eio.Fiber.fork ~sw (fun () -> run t sw clock registry);
+  if enabled
+  then (
+    Eio.Switch.check sw;
+    Eio.Fiber.fork ~sw (fun () ->
+      Exn.protect
+        ~f:(fun () ->
+          Eio.Fiber.with_binding scheduler_fiber_key t (fun () -> run t sw clock registry))
+        ~finally:(fun () -> Eio.Promise.resolve loop_done_u ())))
+  else Eio.Promise.resolve loop_done_u ();
   t
+;;
+
+let uses_developer_registry t registry =
+  (not (Atomic.get t.closed))
+  && Option.exists t.developer_registry ~f:(fun installed ->
+    phys_equal installed registry)
 ;;
 
 let start ~sw ~clock ~registry ~developer_registry ~capacity ~model_job_inference =
@@ -803,8 +890,10 @@ let cancel_conversation t ~actor ~job =
 ;;
 
 let close t =
+  check_domain_exn t;
   Atomic.set t.closed true;
   Option.iter t.developer ~f:Developer.close;
+  List.iter t.delivery_cancels ~f:(fun cancel -> Eio.Cancel.cancel cancel Job_cancelled);
   Eio.Mutex.use_ro t.mutex (fun () ->
     Map.iter t.running ~f:(fun running -> Eio.Switch.fail running.sw Job_cancelled))
 ;;
@@ -855,6 +944,39 @@ let await_developer_scans_idle t =
   match t.developer with
   | None -> Ok ()
   | Some developer -> Developer.await_idle developer
+;;
+
+let close_and_wait t =
+  if not (on_domain t)
+  then
+    Error
+      (P.Error.create
+         P.Error.Invalid_state
+         ~message:"developer scheduler cannot join from a foreign domain"
+         ~retryable:false
+         ())
+  else if
+    Option.value_map (Eio.Fiber.get scheduler_fiber_key) ~default:false ~f:(fun current ->
+      phys_equal current t)
+  then
+    Error
+      (P.Error.create
+         P.Error.Invalid_state
+         ~message:"developer scheduler cannot join its own fiber"
+         ~retryable:false
+         ())
+  else
+    Eio.Cancel.protect (fun () ->
+      close t;
+      Eio.Promise.await t.loop_done;
+      let rec await_children () =
+        if !(t.active_children) > 0
+        then (
+          Eio.Condition.await_no_mutex t.children_idle;
+          await_children ())
+      in
+      await_children ();
+      await_developer_scans_idle t)
 ;;
 
 let rec await_deliveries_idle t =

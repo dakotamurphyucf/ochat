@@ -74,18 +74,65 @@ module Active : sig
     val consume_for : t -> root:Developer_root_owner.run -> (unit, P.Error.t) result
   end
 
+  module Preparing : sig
+    (** Exact fresh, durable Execution_start consumed once for this physical
+        Active/row/callback generation BEFORE native runtime construction.
+        It is not Root or execution authority. It expires when the callback
+        exits; an uncertain Start never issues this value and permits no
+        runtime construction. *)
+    type t
+
+    (** Bind at most once to the subsequently admitted physical Root. The
+        Root must carry the SAME original actor token, Store owner and capture
+        as the prepared Active, and be current after its yielding check.
+        Failure consumes this binding attempt; another Root cannot replace it.
+        This neither writes nor consumes another durable Start. The returned
+        Started remains one-use for the interpreter. *)
+    val bind_root : t -> root:Developer_root_owner.run -> (Started.t, P.Error.t) result
+  end
+
   val view : t -> View.t
+
+  (** Commit and consume the unique fresh durable Start for this Active
+      before any native/shell/MCP initialization or language effect. [actor]
+      is the original authenticated token from the captured request; current
+      principal/owner and the trusted nonyielding [admit] are rechecked at the
+      exact Store boundary. No Root exists yet, so this returns only opaque
+      preparation custody. A failed/unknown Start yields no token and no
+      native runtime may start. A later callback failure settles a truthful
+      started partial-effect receipt; same-key retry never replays it. *)
+  val start_preparation
+    :  t
+    -> actor:Operator_authorization.t
+    -> admit:(unit -> bool)
+    -> (Preparing.t, P.Error.t) result
 
   (** Live only, inside this exact daemon-owned callback. Commit the first
       uninterrupted Start under physical Root/current-actor authorization and
       consume its Execution_start once before returning to the language
       interpreter. Installed/reconciled/old Start returns a typed no-replay
-      failure. A copied row or second call cannot enter an effect. *)
+      failure. A copied row or second call cannot enter an effect. Existing
+      callers use this checked adapter over the same Start transaction. *)
   val start_live
     :  t
     -> root:Developer_root_owner.run
     -> admit:(unit -> bool)
     -> (Started.t, P.Error.t) result
+
+  (** Transfer the exact finished physical startup claim and window to a
+      Registry Admitting slot from this same live callback. [accept] is a
+      trusted, NONYIELDING callback: it validates the same Store, physical
+      handle/claim/window and installs both tokens in Admitting before
+      returning Ok. Only then does Lifecycle mark its custody transferred,
+      with no yield or exception-producing work between the two steps. A
+      rejection leaves Lifecycle owning the claim. No historical row, owner
+      coordinate or repeated callback can transfer it. *)
+  val transfer_finished_claim
+    :  t
+    -> handle:Store.handle
+    -> accept:
+         (claim:Store.Run_claim.t -> window:Store.Recovery.t -> (unit, P.Error.t) result)
+    -> (unit, P.Error.t) result
 end
 
 (** [sw] is the daemon owner switch, never a transport request switch. The
@@ -156,9 +203,46 @@ val lookup
     Missing run needs no recovery. Ready runs skip this operation, so later
     pure Check/Fixture submissions cannot interrupt an active command.
     Quarantined runs retain their claim and deny new work; exact reconciliation
-    may resume. A clean finished temporary claim is released. A Root epoch
-    replacement first joins its old callbacks/worker/owner before recovery. *)
+    may resume. A clean finished claim and exact handle are retained for
+    same-epoch reuse, bounded by Store max_runs, without consuming an active
+    callback slot. A changed epoch joins old callbacks and releases this claim
+    before Store.admit_epoch. A Root epoch replacement first joins its old
+    callbacks/worker/owner before recovery. *)
 val ensure_startup_recovered : t -> Slot.t -> (unit, P.Error.t) result
+
+(** Observe the exact retained finished startup handle under this run Slot.
+    The Host may reuse it only after its fresh candidate has the same
+    persisted principal, owner and capture. Store.admit_epoch must NOT be
+    called for that reuse: even an identical call mints a different physical
+    handle token. No claim or new epoch is created by this getter. *)
+val ready_epoch : t -> Slot.t -> (Store.handle option, P.Error.t) result
+
+(** Conclusively release an untransferred finished claim before the Host
+    selects a different epoch. Requires no active callback, unlaunched
+    reservation, Pending or unfinished recovery under this same Slot.
+    Failure retains exact custody for retry. Transferred claims are owned by
+    Registry and cannot be released here. *)
+val release_finished_epoch : t -> Slot.t -> (unit, P.Error.t) result
+
+(** After a genuinely new Store.admit_epoch, establish its physical claim,
+    run normal terminal-only Recovery and finish that window BEFORE first
+    Command.reserve. An identical already-finished handle is reused. A new
+    window requires no same-run Active callback, Pending or unlaunched
+    reservation; the Slot alone does not join callback bodies. An uncertain
+    window stays quarantined and cannot be replaced. A transferred claim
+    permits only its exact same handle. *)
+val ensure_admitted_claim : t -> Slot.t -> handle:Store.handle -> (unit, P.Error.t) result
+
+(** After joined Root/Registry retirement has conclusively released its
+    transferred exact claim, clear Lifecycle's comparison-only marker. The
+    marker cannot release Registry custody; a still-live claim or any
+    same-run callback denies this operation. Host uses it before a changed
+    epoch admission. *)
+val confirm_transferred_retired
+  :  t
+  -> Slot.t
+  -> handle:Store.handle
+  -> (unit, P.Error.t) result
 
 (** Reserve only after [ensure_startup_recovered] and fresh source/capture
     admission. Current original actor, selected source/Root policy and latest
@@ -211,12 +295,54 @@ val launch
   -> f:(Active.t -> sw:Eio.Switch.t -> (Store.Command.Receipt.t, P.Error.t) result)
   -> (View.t, P.Error.t) result
 
+(** Comparison-only preflight of the exact live Slot, self-join and existing
+    old-row Control_policy. It performs no cancellation or Store mutation and
+    grants no future authority: [retire_run] repeats the same predicate before
+    its first cancellation. A host can call this immediately before retaining
+    its own Retiring custody so a denied request cannot strand that state. *)
+val check_retirement
+  :  t
+  -> Slot.t
+  -> actor:Operator_authorization.t
+  -> (unit, P.Error.t) result
+
+(** Nonyielding comparison under the exact current same-run Slot. This lets
+    the host refuse a second same-capture Live key while a provisional first
+    callback is still preparing, without implicitly cancelling that callback.
+    It is scheduling information, not permission or cleanup authority. *)
+val has_active : t -> Slot.t -> (bool, P.Error.t) result
+
+(** Host-only same-run epoch retirement under the exact still-live admission
+    Slot. A replacement source/actor is authenticated against the persisted
+    principal and current method/source policy BEFORE this call. [actor] must
+    be current and pass this lifecycle's existing distinct Control_policy,
+    same-principal check and old-kind method scope for EVERY exact active old
+    Row; any rejection happens before the first cancellation. A retained Root
+    whose originating command has finished also needs the host's Live/control
+    check on that authentic origin Row before Root retirement. No external
+    command key or receipt-read permission grants retirement. Reject a call
+    from any current callback of this run before cancelling anything. Cancel
+    and join all its callback children, reconcile their exact selected terminal
+    receipts and settle an unlaunched reservation through Store.Command's one
+    writer. The Slot stays owned by the caller, excluding another admission or
+    launch until the host retires its Root/scheduler attachment and admits the
+    next epoch. Success proves no active callback, command Pending, unlaunched
+    row, startup Recovery or claim-only custody remains. Unknown writes retain
+    their exact Pending/occupancy for a later retry; cancellation during join
+    preserves original identity after protected cleanup. This neither closes
+    the Lifecycle nor cancels other runs. *)
+val retire_run : t -> Slot.t -> actor:Operator_authorization.t -> (unit, P.Error.t) result
+
 (** A passive read authenticates the exact persisted row and disclosure BEFORE
     entering Cold startup Recovery. An authorized Cold restarted nonterminal
     row then completes joined Recovery under the same-run slot and rereads its
-    terminal interruption; it never
-    awaits a vanished callback. Otherwise passive authenticated wait only
-    detaches this waiter on cancellation; the
+    terminal interruption; it never awaits a vanished callback. Already
+    terminal historical rows need no startup Recovery. Await snapshots wait
+    for this Lifecycle's same-run terminal writer, so a sibling command's
+    transient Pending does not make a settled callback look failed. Pending
+    from another Store writer or uncertain custody still returns typed
+    Conflict. Otherwise passive authenticated wait only detaches this waiter
+    on cancellation; the
     callback belongs to [sw]. Unexpected callback failure appears only as
     bounded, kind-correct persisted status/diagnostic or a typed retained-
     custody error, never raw exception/secret-bearing text. Explicit cancel
@@ -237,9 +363,16 @@ val cancel_and_wait
   -> key:P.Idempotency_key.t
   -> (View.t, P.Error.t) result
 
-(** Stop admissions, cancel/join callbacks and retain unresolved physical
-    claims/Pending for safe retry. An in-flight admission Slot returns typed
-    Busy before changing close state; its owner must finish or cancel first.
-    The registry and Store remain daemon-owned and are closed afterward, in
-    that order. *)
+(** Daemon-owned first shutdown phase. Reject an in-flight borrowed Slot or
+    self-join before changing state. Stop admission, cancel/join every command
+    callback and settle its exact pending/unlaunched/terminal bookkeeping.
+    Retain finished and transferred Run_claim custody while the same daemon
+    detaches its scheduler and closes physical Roots. Repeated calls retry
+    unsettled bookkeeping without launching or replaying effects. *)
+val stop_and_join : t -> (unit, P.Error.t) result
+
+(** After [stop_and_join] and physical Root/Registry cleanup, release the
+    remaining untransferred finished claims and verify each transferred claim
+    was released by its actual Registry owner. Uncertain custody remains
+    retained for a retry; the Store closes only after this succeeds. *)
 val close_and_wait : t -> (unit, P.Error.t) result

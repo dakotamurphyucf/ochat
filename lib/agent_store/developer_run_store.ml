@@ -559,6 +559,10 @@ module Run_claim = struct
             Ok ())
         | Some _ | None -> Error Error.Foreign_or_stale))
   ;;
+
+  let is_released t =
+    with_run_lifecycle t.store (fun () -> t.record.released)
+  ;;
 end
 
 let with_lease t f =
@@ -3970,6 +3974,24 @@ module Recovery = struct
          | Recovery_finished -> true
          | Recovery_unopened | Recovery_open _ | Recovery_aborted -> false)
       | Some _ | None -> false)
+  ;;
+
+  let issued_finished t ~(claim : Run_claim.t) ~(handle : handle) =
+    with_run_lifecycle t.store (fun () ->
+      phys_equal t.store handle.store
+      && phys_equal t.store claim.store
+      && phys_equal t.handle.token handle.token
+      && phys_equal t.claim.record.token claim.record.token
+      && phys_equal claim.record.handle_token handle.token
+      && Int.equal claim.record.domain (Stdlib.Domain.self () :> int)
+      && not claim.record.released
+      &&
+      match Hashtbl.find t.store.run_claims claim.run_id with
+      | Some record when phys_equal record.token claim.record.token ->
+        (match record.recovery with
+         | Recovery_finished -> true
+         | Recovery_unopened | Recovery_open _ | Recovery_aborted -> false)
+      | None | Some _ -> false)
   ;;
 
   let abort_clean t =

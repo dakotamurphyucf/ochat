@@ -13,7 +13,13 @@ let ok = function
   | Error _ -> failwith "unexpected catalog admission fixture rejection"
 ;;
 
-let with_daemon ~policy f =
+let with_daemon
+      ?(prompt_text = "<developer>Pinned source during creation.</developer>")
+      ?(schemas = false)
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
+      ~policy
+      f
+  =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
     let root = temporary_root env in
@@ -22,16 +28,39 @@ let with_daemon ~policy f =
       ~finally:(fun () -> Eio.Cancel.protect (fun () -> Eio.Path.rmtree path))
       (fun () ->
          let prompt = Filename.concat root "parent.chatmd" in
-         Eio.Path.save
-           ~create:(`Exclusive 0o600)
-           Eio.Path.(env#fs / prompt)
-           "<developer>Pinned source during creation.</developer>";
+         Eio.Path.save ~create:(`Exclusive 0o600) Eio.Path.(env#fs / prompt) prompt_text;
+         if schemas
+         then (
+           Eio.Path.save
+             ~create:(`Exclusive 0o600)
+             Eio.Path.(env#fs / root / "input.json")
+             {|{"type":"object"}|};
+           Eio.Path.save
+             ~create:(`Exclusive 0o600)
+             Eio.Path.(env#fs / root / "output.json")
+             {|{"type":"string"}|};
+           Eio.Path.save
+             ~create:(`Exclusive 0o600)
+             Eio.Path.(env#fs / root / "chatml.project.json")
+             {|{"schema_version":1,"namespace":"developer-prompt","modules":{"Entry":{"implementation":"handler.chatml"}},"environments":{"default":{"modules":{"Entry":"self.Entry"}}}}|};
+           Eio.Path.save
+             ~create:(`Exclusive 0o600)
+             Eio.Path.(env#fs / root / "handler.chatml")
+             {|let run ctx input =
+  let unused = fun () -> Model.spawn("agent_prompt_v1", input) in
+  Task.pure(`Complete(`String("ok")))|});
          Eio.Switch.run (fun sw ->
            let daemon =
              Daemon.start
                ~sw
                ~env
-               ~config:(config root root prompt)
+               ~config:
+                 (let config = config root root prompt in
+                  { config with
+                    prompts =
+                      List.map config.prompts ~f:(fun entry ->
+                        { entry with tool_contract })
+                  })
                ~tool_dir:root
                ~home:root
                ~process_start_identity:None
@@ -42,6 +71,92 @@ let with_daemon ~policy f =
            Fun.protect
              ~finally:(fun () -> Daemon.shutdown daemon |> protocol_ok)
              (fun () -> f env sw root daemon))))
+;;
+
+let%test_unit
+    "developer publication restores only its captured contract and blocks conversation \
+     creation"
+  =
+  let prompt_text =
+    {|<developer>Developer managed handler.</developer>
+<script id="handler" kind="tool" language="chatml" src="handler.chatml" project="chatml.project.json"/>
+<tool name="managed" type="chatml" script="handler" entrypoint="run" input_schema="input.json" output_schema="output.json"/>|}
+  in
+  let captures = ref 0 in
+  let policy =
+    inference_policy ~default_model:"fixture-model" ~post_stream:(fun ~sw:_ ~inputs:_ ->
+      failwith "unexpected model dispatch")
+  in
+  let policy =
+    { policy with
+      capture_inference_target =
+        (fun ~prompt_revision_id ~config ->
+          incr captures;
+          policy.capture_inference_target ~prompt_revision_id ~config)
+    }
+  in
+  with_daemon
+    ~prompt_text
+    ~schemas:true
+    ~tool_contract:Chatml_compilation.Tool_contract.Developer_model_spawn
+    ~policy
+    (fun env _ root daemon ->
+       let entries = Catalog.entries (Daemon.prompts daemon) in
+       let entry = List.hd_exn entries in
+       let revision =
+         match entry.availability with
+         | Catalog.Ready revision -> revision
+         | Catalog.Unavailable _ | Catalog.Disabled ->
+           failwith "developer Prompt did not publish"
+       in
+       [%test_eq: Chatml_compilation.Tool_contract.t]
+         (Agent_session.Prompt_definition.tool_contract entry.definition)
+         Chatml_compilation.Tool_contract.Developer_model_spawn;
+      assert (Option.is_some (Agent_session.Prompt_revision.programs revision));
+       Eio.Path.unlink Eio.Path.(env#fs / root / "parent.chatmd");
+       Eio.Path.unlink Eio.Path.(env#fs / root / "input.json");
+       Eio.Path.unlink Eio.Path.(env#fs / root / "output.json");
+      Eio.Path.unlink Eio.Path.(env#fs / root / "handler.chatml");
+      Eio.Path.unlink Eio.Path.(env#fs / root / "chatml.project.json");
+       let preparation = Option.value_exn Daemon.default_options.script_preparation in
+       (match
+          Agent_session.Runtime_script_preparation.with_revision_plan
+            ~tool_contract:Chatml_compilation.Tool_contract.Developer_model_spawn
+            (Some preparation)
+            revision
+            ~env
+            ~invocation:Agent_session.Runtime_script_preparation.Invocation.Ui
+            ~checkpoint:Eio.Fiber.check
+           ~f:(fun _ ~compilation_limits:_ ~plan ~programs ->
+             Ok
+               ( Option.value_map plan ~default:0 ~f:(fun plan ->
+                   List.length (Chat_response.Script_contract_plan.programs plan))
+               , Option.is_some programs ))
+        with
+       | Ok (count, true) when count > 0 -> ()
+       | Ok (count, restored) ->
+         raise_s [%sexp "retained developer graph did not restore", (count : int), (restored : bool)]
+       | Error error -> raise_s [%sexp "retained developer restore", (error : Agent_protocol.Error.t)]);
+       assert (
+         Result.is_error
+           (Agent_session.Runtime_script_preparation.with_revision_plan
+              ~tool_contract:Chatml_compilation.Tool_contract.Standard
+              (Some preparation)
+              revision
+              ~env
+              ~invocation:Agent_session.Runtime_script_preparation.Invocation.Ui
+              ~checkpoint:Eio.Fiber.check
+              ~f:(fun _ ~compilation_limits:_ ~plan:_ ~programs:_ -> Ok ())));
+       (match
+          Factory.create_session
+            (Daemon.factory daemon)
+            ~command_audit:None
+            ~principal:(principal ())
+            (create_request ())
+        with
+        | Error { code = Prompt_unavailable; _ } -> ()
+        | Error _ | Ok _ -> failwith "conversation admitted a developer-only Prompt");
+       [%test_eq: int] !captures 0)
 ;;
 
 let%test_unit "fresh creation keeps one generation across inference and runtime preflight"

@@ -1390,9 +1390,24 @@ let%test_unit "shared scheduler overlaps two physically admitted jobs of one roo
          Exn.protect
            ~finally:(fun () ->
              unblock ();
-             Agent_server.Job_scheduler.close scheduler;
-             Agent_server.Job_scheduler.await_developer_scans_idle scheduler |> ok)
+             Agent_server.Job_scheduler.close_and_wait scheduler |> ok)
            ~f:(fun () ->
+             let foreign =
+               Stdlib.Domain.spawn (fun () ->
+                 let joined = Agent_server.Job_scheduler.close_and_wait scheduler in
+                 let closed =
+                   try
+                     Agent_server.Job_scheduler.close scheduler;
+                     false
+                   with
+                   | Invalid_argument _ -> true
+                 in
+                 joined, closed)
+             in
+             (match Stdlib.Domain.join foreign with
+              | Error { P.Error.code = Invalid_state; _ }, true -> ()
+              | _ -> failwith "foreign scheduler shutdown mutated the owner");
+             assert (Agent_server.Job_scheduler.is_running scheduler);
              Agent_server.Job_scheduler.attach_developer scheduler ~root ~runner |> ok;
              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
                Eio.Promise.await both_entered);
@@ -1469,8 +1484,7 @@ let%test_unit "developer scheduler retirement joins an entered protected handler
            ~finally:(fun () ->
              if not (Eio.Promise.is_resolved release)
              then Eio.Promise.resolve resolve_release ();
-             Agent_server.Job_scheduler.close scheduler;
-             Agent_server.Job_scheduler.await_developer_scans_idle scheduler |> ok)
+             Agent_server.Job_scheduler.close_and_wait scheduler |> ok)
            ~f:(fun () ->
              Agent_server.Job_scheduler.attach_developer scheduler ~root ~runner |> ok;
              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
@@ -1871,9 +1885,7 @@ let%test_unit "malformed saved Async_tool enters one physical Failed attempt" =
                Error (P.Error.invalid_request "unused conversation inference"))
          in
          Exn.protect
-           ~finally:(fun () ->
-             Agent_server.Job_scheduler.close scheduler;
-             Agent_server.Job_scheduler.await_developer_scans_idle scheduler |> ok)
+           ~finally:(fun () -> Agent_server.Job_scheduler.close_and_wait scheduler |> ok)
            ~f:(fun () ->
              Agent_server.Job_scheduler.attach_developer scheduler ~root ~runner |> ok;
              let state =

@@ -289,11 +289,11 @@ let implementation_sources =
   ; ( "lib/chat_response/fetch.ml"
     , "170db560c0693c7ec37f2a34c1907133feaffddd079571fcc32552bab59549ca" )
   ; ( "lib/chat_response/mcp_discovery_cache.ml"
-    , "b7c02f701beaaf87c1cd04bf06065cb5564f2702f923704d8e8676f13d5724fb" )
+    , "9365e8d63b16864e3535ec8c961282d259797cb84f8046691691f2c98eaecc8a" )
   ; ( "lib/chat_response/shell_tool.ml"
     , "2450c632c18067d0c984087461b9085f24314dd79a026a42a4f35b1014816f92" )
   ; ( "lib/chat_response/tool.ml"
-    , "7ce912e92bd41c3bad9ad05e1c6d096ed52769c6538bb472a0351e006d4eef8e" )
+    , "794ed9c2a672118538f328a07a2ca627282291c405a939f1ec864295aa489761" )
   ; ( "lib/chatmd/chatmd_read_file_declaration.ml"
     , "446e56ceec98db2b0eeabed3b6f86e37127d71c03fb0594380b3daba9ba78eba" )
   ; ( "lib/chatmd/chatmd_read_file_spec.ml"

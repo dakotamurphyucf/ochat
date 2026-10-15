@@ -112,6 +112,7 @@ val instantiate_prepared_after
   -> host:Host.t
   -> grant:Manifest_authorizer.grant
   -> approval_provider:Approval_broker.provider
+  -> ?check_preparation_now:(unit -> (unit, error list) result)
   -> ?approval_store:Shell_access.Approval.store
   -> ?model_completion:Runtime.model_completion
   -> ?extension_snapshots:Session.Shell_state.Extension_snapshot.t list

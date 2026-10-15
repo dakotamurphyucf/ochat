@@ -383,6 +383,7 @@ let instantiate
       ~programs
       ~compilation_limits
       ~checkpoint
+      ?(check_preparation_now : (unit -> (unit, diagnostic) result) option)
       ~sw
       ~host
       ~admin_policy
@@ -436,6 +437,12 @@ let instantiate
     ~grant
     ~approval_provider
     ~approval_store
+    ?check_preparation_now:
+      (Option.map check_preparation_now ~f:(fun check () ->
+         Result.map_error (check ()) ~f:(fun diagnostic ->
+           [ Shell_runtime.Registry.
+               { code = diagnostic.code; message = diagnostic.message; runtime_id = None }
+           ])))
     ?model_completion
     ~extension_snapshots
     ?persist_extension_snapshots
@@ -461,6 +468,7 @@ let shell_registry
       ~programs
       ~compilation_limits
       ~checkpoint
+      ?(check_preparation_now : (unit -> (unit, diagnostic) result) option)
       ~sw
       ~host
       ~platform
@@ -507,6 +515,7 @@ let shell_registry
             ~programs
             ~compilation_limits
             ~checkpoint
+            ?check_preparation_now
             ~sw
             ~host
             ~admin_policy
@@ -585,6 +594,7 @@ let create_native
       ~programs
       ~compilation_limits
       ~checkpoint
+      ?(check_preparation_now : (unit -> (unit, diagnostic) result) option)
       ~preflight
       ~native_registrations
       ~sw
@@ -665,6 +675,7 @@ let create_native
       ~programs
       ~compilation_limits
       ~checkpoint
+      ?check_preparation_now
       ~sw
       ~host
       ~platform
@@ -907,9 +918,11 @@ type extension_resources =
 
 let prepare_extensions_with
       ?startup
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
       ?(moderator_surface = Chatml.Chatml_builtin_surface.moderator_surface)
       ?(compilation_limits = Chatml_compilation.default_limits)
       ?(checkpoint = Eio.Fiber.check)
+      ?(check_preparation_now : (unit -> (unit, diagnostic) result) option)
       ?(native_registrations = [])
       ?(delegated_moderator = false)
       ?programs
@@ -967,6 +980,7 @@ let prepare_extensions_with
         let%bind managed =
           Managed_tool_registry.prepare
             ~startup
+            ~tool_contract
             ~limits:compilation_limits
             ~delegated_moderator
             ?programs
@@ -1018,6 +1032,7 @@ let prepare_extensions_with
           ~programs
           ~compilation_limits
           ~checkpoint
+          ?check_preparation_now
           ~preflight:prepare_managed
           ~native_registrations
           ~sw
@@ -1041,6 +1056,7 @@ let prepare_extensions_with
 let prepare_extensions
       ?native_service_revision
       ?startup
+      ?tool_contract
       ?agent_source_runner
       ?moderator_surface
       ?compilation_limits
@@ -1063,6 +1079,7 @@ let prepare_extensions
   =
   prepare_extensions_with
     ?startup
+    ?tool_contract
     ?moderator_surface
     ?compilation_limits
     ?checkpoint
@@ -1098,9 +1115,11 @@ let prepare_extensions
 let prepare_extensions_without_inference
       ?native_service_revision
       ?startup
+      ?tool_contract
       ?moderator_surface
       ?compilation_limits
       ?checkpoint
+      ?(check_preparation_now : (unit -> (unit, diagnostic) result) option)
       ?(native_registrations = [])
       ?delegated_moderator
       ?programs
@@ -1115,9 +1134,11 @@ let prepare_extensions_without_inference
   =
   prepare_extensions_with
     ?startup
+    ?tool_contract
     ?moderator_surface
     ?compilation_limits
     ?checkpoint
+    ?check_preparation_now
     ~native_registrations
     ?delegated_moderator
     ?programs
@@ -1129,6 +1150,11 @@ let prepare_extensions_without_inference
         ~host
         ~shell
         ~admin_policy
+        ?check_preparation_now:
+          (Option.map check_preparation_now ~f:(fun check () ->
+             Result.map_error (check ()) ~f:(fun diagnostic ->
+               Native_tool_pool.Error.
+                 { code = diagnostic.code; message = diagnostic.message })))
         ?native_service_revision
         ~registrations:native_registrations
         prompt_elements)

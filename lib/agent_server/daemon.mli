@@ -18,6 +18,56 @@ type startup_mode =
   | Operator_only
 [@@deriving equal, sexp]
 
+module Developer_configuration : sig
+  type t
+
+  module Limits : sig
+    type t
+
+    val create
+      :  store:Agent_store.Developer_run_store.Limits.t
+      -> roots:Developer_root_owner.Limits.t
+      -> max_active_commands:int
+      -> disclosure:Developer_result_disclosure.Limits.t
+      -> compilation:Chatml_compilation.policy
+      -> max_dependency_depth:int
+      -> execution:Chatml_execution.limits
+      -> max_output_bytes:int
+      -> receipt:Document_schema.Limits.t
+      -> max_agent_sources:int
+      -> max_agent_source_work_steps:int
+      -> max_native_bindings:int
+      -> workspace_cleanup:Agent_session.Workspace_cleanup.Limits.t
+      -> max_agent_cache_entries:int
+      -> (t, Agent_protocol.Error.t) result
+  end
+
+  (** Trusted daemon policy. The daemon shares its existing child source
+      policy, catalogs, Store, Blob owner, workspace lease and scheduler with
+      Developer commands. Predicate callbacks are nonyielding and rechecked
+      after waits; they grant neither source nor method permission. *)
+  val create
+    :  capture_policy:Authoring_context_service.Developer.Target_policy.t
+    -> capture_limits:Authoring_context_service.Developer.Limits.t
+    -> limits:Limits.t
+    -> result_disclosure:Developer_result_disclosure.Policy.t
+    -> receipt_read:
+         (Operator_authorization.t -> Agent_store.Developer_command_row.t -> bool)
+    -> command_control:
+         (Operator_authorization.t -> Agent_store.Developer_command_row.t -> bool)
+    -> publisher_limits:Agent_store.Developer_result_publisher.Limits.t
+    -> publisher_storage:Agent_store.Developer_result_publisher.Storage.t
+    -> model_target:Inference.Request.Target.t option
+    -> authorize_native:
+         (Agent_protocol.Host_invocation.t
+          -> Chat_response.Tool_capability.binding
+          -> (unit, Agent_protocol.Error.t) result)
+    -> prepare_output:
+         (Openai.Responses.Tool_output.Output.t
+          -> (Jsonaf.t, Agent_protocol.Error.t) result)
+    -> (t, Agent_protocol.Error.t) result
+end
+
 type options =
   { startup_mode : startup_mode
   ; root_invocation :
@@ -35,6 +85,10 @@ type options =
         source, upload and selected semantic policies are trusted host inputs,
         never inferred from feature strings or client request identities. The
         installed handler set, not this options record alone, is advertised. *)
+  ; developer : Developer_configuration.t option
+    (** Optional callable developer service. Some requires Authoring plus
+        Execute or On_demand; None is the default and advertises no developer
+        command transport. Wire methods belong to OCH267. *)
   ; extension_host : Agent_protocol.Extension_capabilities.host
   ; protocol_limits : Agent_protocol.Initialize.Limits.t
   ; timing : Agent_protocol.Initialize.Timing.t
@@ -100,6 +154,104 @@ type options =
   }
 
 type t
+
+module Developer : sig
+  module Configuration = Developer_configuration
+
+  module Request : sig
+    type t
+
+    module Route : sig
+      type t =
+        | Local_project of
+            { root_index : int
+            ; dependency_root_indices : int list
+            ; project : Source.Portable_path.t
+            ; selection : Chatml_project.Selection.request
+            }
+        | Local_source of
+            { root_index : int
+            ; member : Source.Portable_path.t
+            }
+        | Authoring_project of { expected : Agent_protocol.Authoring.Context.Expected.t }
+        | Document_script of
+            { expected : Agent_protocol.Authoring.Context.Expected.t
+            ; selector : Agent_protocol.Authoring.Analysis.Target.selector
+            }
+    end
+
+    module Fresh_source : sig
+      type t =
+        | Local_project of
+            { root : Authoring_source_host.Root.t
+            ; dependency_roots : Authoring_source_host.Root.t list
+            }
+        | Local_source of { root : Authoring_source_host.Root.t }
+        | Authoring_project of { connection : Connection_context.t }
+        | Document_script of { connection : Connection_context.t }
+    end
+
+    val create
+      :  route:Route.t
+      -> kind:Agent_store.Developer_command_receipt.Kind.t
+      -> prompt:Agent_protocol.Id.Prompt_definition.t option
+      -> workspace:Agent_protocol.Id.Workspace_definition.t option
+      -> entrypoint:string
+      -> input:Jsonaf.t
+      -> fixtures:Chatml_developer_capture.Fixture.t option
+      -> requested_execution:Chatml_execution.limits option
+      -> requested_max_output_bytes:int option
+      -> bounds:Chatml_developer_capture.Json_bounds.t
+      -> checkpoint:(unit -> unit)
+      -> (t, Agent_protocol.Error.t) result
+  end
+
+  module View : sig
+    type t
+
+    val id : t -> Agent_store.Developer_command_receipt.Id.t
+    val owner : t -> Agent_protocol.Execution_owner.developer
+    val kind : t -> Agent_store.Developer_command_receipt.Kind.t
+    val phase : t -> Agent_store.Developer_command_row.Phase.t
+    val receipt : t -> Agent_store.Developer_command_receipt.t option
+    val capture_fingerprint : t -> Chatml_source.Digest.t
+    val request_fingerprint : t -> Chatml_source.Digest.t
+  end
+
+  (** The daemon checks that this exact host was installed with the single
+      serviceable Job_scheduler. There is no transport parsing or independent
+      worker queue here. Fresh source capabilities are needed only for a true
+      original-key miss; an identical historical retry may omit them. *)
+  val submit
+    :  t
+    -> actor:Operator_authorization.t
+    -> run_id:Agent_protocol.Id.Developer_run.t
+    -> key:Agent_protocol.Idempotency_key.t
+    -> request:Request.t
+    -> fresh_source:Request.Fresh_source.t option
+    -> (View.t, Agent_protocol.Error.t) result
+
+  val observe
+    :  t
+    -> actor:Operator_authorization.t
+    -> run_id:Agent_protocol.Id.Developer_run.t
+    -> key:Agent_protocol.Idempotency_key.t
+    -> (View.t option, Agent_protocol.Error.t) result
+
+  val await_terminal
+    :  t
+    -> actor:Operator_authorization.t
+    -> run_id:Agent_protocol.Id.Developer_run.t
+    -> key:Agent_protocol.Idempotency_key.t
+    -> (View.t, Agent_protocol.Error.t) result
+
+  val cancel_and_wait
+    :  t
+    -> actor:Operator_authorization.t
+    -> run_id:Agent_protocol.Id.Developer_run.t
+    -> key:Agent_protocol.Idempotency_key.t
+    -> (View.t, Agent_protocol.Error.t) result
+end
 
 (** The default inference policy permits storage inspection but refuses target
     capture, target changes and runtime resolution; legacy migration callbacks

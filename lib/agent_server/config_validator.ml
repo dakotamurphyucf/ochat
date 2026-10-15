@@ -1594,6 +1594,7 @@ let parse_prompt context index sexp =
     ; "allowed_workspaces"
     ; "permission_profile"
     ; "runtime_policy"
+    ; "tool_contract"
     ; "enabled"
     ]
   in
@@ -1622,6 +1623,18 @@ let parse_prompt context index sexp =
     | Some value ->
       Result.map (identifier context (path ^ ".runtime_policy") value) ~f:Option.some
   in
+  let%bind tool_contract =
+    match field fields "tool_contract" with
+    | None -> Ok Chatml_compilation.Tool_contract.Standard
+    | Some value ->
+      let%bind value = atom context (path ^ ".tool_contract") value in
+      (match value with
+       | "standard" -> Ok Chatml_compilation.Tool_contract.Standard
+       | "developer_model_spawn" ->
+         Ok Chatml_compilation.Tool_contract.Developer_model_spawn
+       | _ ->
+         shape_error context (path ^ ".tool_contract") "standard or developer_model_spawn")
+  in
   let%map enabled =
     optional_value context path fields "enabled" parse_bool ~default:true
   in
@@ -1632,6 +1645,7 @@ let parse_prompt context index sexp =
     ; allowed_workspaces
     ; permission_profile
     ; runtime_policy
+    ; tool_contract
     ; enabled
     }
 ;;

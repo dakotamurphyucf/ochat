@@ -16,7 +16,7 @@ module Tool_contract : sig
   type t =
     | Standard
     | Developer_model_spawn
-  [@@deriving sexp, equal]
+  [@@deriving sexp, equal, compare]
 
   val target : t -> target
 end
