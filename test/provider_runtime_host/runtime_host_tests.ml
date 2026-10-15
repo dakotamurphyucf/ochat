@@ -482,6 +482,245 @@ let%expect_test
     {| pre-created port selected the real actor bridge; denied and closed issuers stayed denied |}]
 ;;
 
+let%test_unit "saved Agent source admits one selected provider attempt" =
+  let model_requests = ref 0 in
+  with_fixture ~model_requests (fun env sw anchor create _ ->
+    let runtime = create () in
+    ignore (setup runtime : P.Method_result.t);
+    let reads = ref 0 in
+    ignore (enroll runtime ~sw "one" "saved-agent-key" reads : DTO.Configuration_result.t);
+    let target = capture runtime in
+    let selected_model =
+      Port.select_model (Runtime.operator_port runtime) ~actor ~target |> ok
+    in
+    let session =
+      Session_store.create
+        ~env
+        ~sw
+        ~root:(Eio.Path.native_exn Eio.Path.(anchor / "saved-agent-runs"))
+        ~server_id
+        ~process_start_identity:None
+        ~lock_nonce:"saved-agent-model-test"
+      |> ok
+    in
+    let store =
+      Run_store.open_or_create
+        session
+        ~sw
+        ~limits:
+          (Root_fixture.store_limits
+             ~max_job_payload_bytes:4096
+             ~max_jobs_per_run:5
+             ~max_document_bytes:131072
+             ~max_inference_bytes_per_run:65536
+             ~max_work_steps:4096
+             ~max_document_fields:8192
+             ~max_document_nodes:16384
+             ())
+        ~checkpoint:ignore
+      |> ok
+    in
+    let owner =
+      match
+        P.Execution_owner.developer
+          ~host_id:server_id
+          ~run_id:(P.Id.Developer_run.of_string "dvr_saved_agent_model" |> ok)
+          ~epoch:0
+          ~principal_id:principal.id
+        |> ok
+      with
+      | Developer owner -> owner
+      | Conversation _ -> failwith "expected developer owner"
+    in
+    let captured = Root_fixture.capture () in
+    let handle =
+      Run_store.admit_epoch
+        store
+        ~owner
+        ~capture_fingerprint:(Chatml_developer_capture.fingerprint captured)
+        ~previous:None
+      |> ok
+      |> fst
+    in
+    let root_ref = ref None in
+    let selected_ref = ref None in
+    let saved_attempts = ref 0 in
+    let observed = ref [] in
+    let installed =
+      Native_fixture.installed_agent_fixture
+        ~env
+        ~sw
+        ~data_root:(Agent_store.Data_root.path (Session_store.data_root session))
+        ~observed
+        ~on_run:(fun () ->
+          if Int.equal !saved_attempts 0
+          then (
+            let selected = Option.value_exn !selected_ref in
+            let binding = Capabilities.find selected ~name:"child" |> ok in
+            let implementation =
+              Capabilities.native_implementation binding |> Option.value_exn
+            in
+            let borrowed =
+              Agent_session.Native_tool_invocation.borrow_selected () |> ok
+            in
+            Agent_session.Captured_agent_runner.Claimed_developer.with_selected
+              ~borrowed
+              ~implementation
+              (fun selected ->
+                 Root.Model_inference.with_claimed_agent
+                   (Option.value_exn !root_ref)
+                   ~selected
+                   ~f:(fun scope ~sw ->
+                     let context = Root.Model_inference.context scope in
+                     assert (
+                       phys_equal
+                         context
+                         (Port.Model_selection.context selected_model |> ok));
+                     let request =
+                       Inference.Request.create
+                         ~target:(Inference_runtime.Context.target context)
+                         ~history:[]
+                         ~tools:[]
+                         ~assets:[]
+                         ~limits:Document_schema.Limits.default
+                       |> ok
+                     in
+                     ignore
+                       (Inference_client.run
+                          context
+                          ~sw
+                          ~identity:(Root.Model_inference.identity scope)
+                          ~relation:Transcript.Scope.Root
+                          ~request
+                          ~before_dispatch:(Root.Model_inference.before_dispatch scope)
+                          ~on_attempt:(Root.Model_inference.on_attempt scope)
+                          ~on_completion:(Root.Model_inference.on_completion scope)
+                          ~on_event:ignore
+                          ~on_observation:(Root.Model_inference.on_observation scope)
+                          ~submission_guard:(Root.Model_inference.submission_guard scope)
+                        |> ok
+                        : Inference_runtime.Receipt.t);
+                     incr saved_attempts))
+            |> ok
+            |> ignore))
+    in
+    let blobs =
+      Agent_store.Blob_store.create
+        ~env
+        ~temporary_directory:
+          (Agent_store.Data_root.temporary_blobs_path (Session_store.data_root session))
+        ~durable_directory:
+          (Agent_store.Data_root.durable_blobs_path (Session_store.data_root session))
+        ~max_upload_bytes:65536L
+      |> ok
+    in
+    Agent_store.Blob_store.bind_developer_runs blobs ~session_store:session store |> ok;
+    let disclosure =
+      Disclosure.create
+        ~runs:store
+        ~blobs
+        ~policy:(Disclosure.Policy.create ~authorize:(fun _ _ -> true))
+        ~limits:
+          (Disclosure.Limits.create
+             ~max_result_bytes:65536
+             ~json:Document_schema.Limits.default
+           |> ok)
+      |> ok
+    in
+    let registry =
+      Root.Registry.create
+        ~sw
+        ~store
+        ~capacity:(Root_fixture.capacity ())
+        ~now:Root_fixture.now
+        ~limits:
+          (Root.Limits.create
+             ~max_active_runs:1
+             ~max_staged_jobs:2
+             ~max_native_occupancy:2
+             ~max_active_workers:1
+             ~max_quarantined_workers:1
+             ~max_active_inference_attempts:2
+             ~max_admitted_call_bindings:8
+           |> Or_error.ok_exn)
+    in
+    let root =
+      Root.Registry.admit
+        registry
+        ~actor
+        ~capture:captured
+        ~registry:installed.selected
+        ~selected:installed.selected
+        ~job_policy:Chat_response.One_off_request.default_policy
+        ~selected_model:(Some selected_model)
+        ~handle
+        ~workspace_conflict_domain:"saved-agent-model-test"
+      |> ok
+    in
+    root_ref := Some root;
+    selected_ref := Some installed.selected;
+    let jobs =
+      Jobs.create
+        ~root
+        ~store
+        ~disclosure
+        ~env
+        ~current_actor:(fun () -> actor)
+        ~prepare_source:(fun ~parent ~binding ~request ~checkpoint ->
+          let open Result.Let_syntax in
+          let%bind launch = Jobs.Source_parent.launch parent in
+          let%bind () = Jobs.Source_parent.check parent ~binding in
+          Chat_response.Agent_runtime.prepare_agent_source
+            installed.runtime
+            ~binding
+            ~launch
+            ~request
+            ~max_registrations:16
+            ~checkpoint)
+      |> ok
+    in
+    let job = Native_fixture.stage_registered_agent_tool jobs in
+    Eio.Switch.run (fun runner_sw ->
+      let runner =
+        Native_fixture.background_runner_with_runtime
+          ~agent_runtime:(Some installed.runtime)
+          ~sw:runner_sw
+          ~root
+          ~store
+          ~blobs
+          ~env
+          ~managed:None
+          ~jobs
+          ~storage:Agent_store.Developer_result_publisher.Storage.Automatic
+      in
+      let candidate =
+        Root.Job_candidate.read_current root ~checkpoint:ignore |> ok |> List.hd_exn
+      in
+      let completed =
+        Agent_server.Developer_background_job_runner.run_candidate runner candidate
+        |> ok
+        |> Option.value_exn
+      in
+      assert (P.Id.Job.equal job (P.Developer_job.id completed));
+      assert (
+        match (P.Developer_job.state completed).status with
+        | Succeeded -> true
+        | Queued
+        | Running
+        | Waiting_permission _
+        | Waiting_completion _
+        | Failed _
+        | Cancelled
+        | Interrupted _ -> false));
+    assert (Int.equal !saved_attempts 1);
+    assert (Int.equal !model_requests 1);
+    Root.close_and_wait root |> ok;
+    Root.Registry.close_and_wait registry |> ok;
+    Run_store.close_and_wait store |> ok;
+    Session_store.close session |> ok;
+    Runtime.close runtime)
+;;
+
 let%test_unit "claimed developer model runner publishes a real offline response" =
   let requests = ref 0 in
   let live = ref true in

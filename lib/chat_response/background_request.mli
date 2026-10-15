@@ -13,7 +13,7 @@ module Agent_artifact : sig
       revision ID, digest and exact portable root member. The trusted host must
       install and verify that artifact, its authentic role and its association
       with the original native binding before attaching this reference. *)
-  type t
+  type t = Agent_protocol.Developer_agent_artifact.t
 
   val create
     :  revision_id:Agent_protocol.Id.Prompt_revision.t

@@ -92,13 +92,18 @@
     lib/chatml_trace/chatml_trace.mli %{dep:../chatml_trace/chatml_trace.mli}
     lib/chatml_trace/chatml_trace.ml %{dep:../chatml_trace/chatml_trace.ml}
     lib/agent_protocol/delivery.ml %{dep:../agent_protocol/delivery.ml}
+    lib/agent_protocol/developer_agent_artifact.ml %{dep:../agent_protocol/developer_agent_artifact.ml}
     lib/agent_protocol/job.ml %{dep:../agent_protocol/job.ml}
     lib/agent_protocol/stored_completion.ml %{dep:../agent_protocol/stored_completion.ml}
     lib/agent_protocol/subscription.ml %{dep:../agent_protocol/subscription.ml}
     lib/agent_server/job_scheduler.ml %{dep:../agent_server/job_scheduler.ml}
     lib/agent_server/job_scheduler_developer.ml %{dep:../agent_server/job_scheduler_developer.ml}
+    lib/agent_server/developer_root_owner.ml %{dep:../agent_server/developer_root_owner.ml}
     lib/agent_server/schedule_scheduler.ml %{dep:../agent_server/schedule_scheduler.ml}
     lib/agent_session/background_execution.ml %{dep:../agent_session/background_execution.ml}
+    lib/agent_session/captured_agent_runner.ml %{dep:../agent_session/captured_agent_runner.ml}
+    lib/agent_store/developer_run_document.ml %{dep:../agent_store/developer_run_document.ml}
+    lib/agent_store/developer_run_store.ml %{dep:../agent_store/developer_run_store.ml}
     lib/agent_session/background_job_event.ml %{dep:../agent_session/background_job_event.ml}
     lib/agent_session/external_ingress.ml %{dep:../agent_session/external_ingress.ml}
     lib/agent_session/moderator_tool_dispatch.ml %{dep:../agent_session/moderator_tool_dispatch.ml}
