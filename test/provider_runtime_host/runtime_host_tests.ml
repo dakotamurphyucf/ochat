@@ -191,7 +191,66 @@ let components = [ S.Name.create "authority" |> ok ]
 let namespace = Secret.Namespace.create "runtime-host-test" |> ok
 let server_id = P.Id.Server.of_string "srv_runtime_host" |> ok
 
-let with_fixture f =
+let local_model_endpoint env sw requests on_submit =
+  let socket =
+    Eio.Net.listen
+      ~sw
+      ~reuse_addr:true
+      ~backlog:4
+      (Eio.Stdenv.net env)
+      (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0))
+  in
+  let port =
+    match Eio.Net.listening_addr socket with
+    | `Tcp (_, port) -> port
+    | _ -> failwith "model fixture did not bind TCP"
+  in
+  let completed =
+    "data: \
+     {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"object\":\"response\",\"id\":\"model-response\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"model-message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"model \
+     answer\",\"annotations\":[]}] }]}}\n\n"
+  in
+  Eio.Fiber.fork_daemon ~sw (fun () ->
+    while true do
+      let flow, _ = Eio.Net.accept ~sw socket in
+      Eio.Fiber.fork_daemon ~sw (fun () ->
+        Exn.protect
+          ~finally:(fun () -> Eio.Flow.close flow)
+          ~f:(fun () ->
+            let reader = Eio.Buf_read.of_flow flow ~max_size:2_000_000 in
+            ignore (Eio.Buf_read.line reader : string);
+            let rec headers length =
+              let line = Eio.Buf_read.line reader in
+              if String.is_empty line
+              then length
+              else (
+                let key, value = String.lsplit2 line ~on:':' |> Option.value_exn in
+                headers
+                  (if String.Caseless.equal key "content-length"
+                   then Int.of_string (String.strip value)
+                   else length))
+            in
+            let body_length = headers 0 in
+            ignore (Eio.Buf_read.take body_length reader : string);
+            incr requests;
+            on_submit ();
+            Eio.Flow.copy_string
+              (sprintf
+                 "HTTP/1.1 200 OK\r\n\
+                  Content-Type: text/event-stream\r\n\
+                  Content-Length: %d\r\n\
+                  Connection: close\r\n\
+                  \r\n\
+                  %s"
+                 (String.length completed)
+                 completed)
+              flow);
+        `Stop_daemon)
+    done);
+  sprintf "http://127.0.0.1:%d/v1/responses" port
+;;
+
+let with_fixture ?model_requests ?(on_model_submit = ignore) f =
   Mirage_crypto_rng_unix.use_default ();
   Eio_main.run (fun env ->
     let suffix = P.Id.Transaction.create () |> P.Id.Transaction.to_string in
@@ -203,6 +262,11 @@ let with_fixture f =
       ~finally:(fun () -> Eio.Path.rmtree anchor)
       ~f:(fun () ->
         Eio.Switch.run (fun sw ->
+          let model_endpoint =
+            match model_requests with
+            | None -> "http://127.0.0.1:9/v1/responses"
+            | Some requests -> local_model_endpoint env sw requests on_model_submit
+          in
           let driver =
             Openai.Responses_driver.create
               ~net:(Eio.Stdenv.net env)
@@ -244,7 +308,7 @@ let with_fixture f =
                   Openai.Responses_driver.Profile.create
                     ~id:name
                     ~account:None
-                    ~endpoint:"http://127.0.0.1:9/v1/responses"
+                    ~endpoint:model_endpoint
                     ~capabilities:
                       (Openai.Responses_driver.Capability.create
                          ~baseline:[ Text_input, Supported ]
@@ -416,6 +480,454 @@ let%expect_test
      denied";
   [%expect
     {| pre-created port selected the real actor bridge; denied and closed issuers stayed denied |}]
+;;
+
+let%test_unit "claimed developer model runner publishes a real offline response" =
+  let requests = ref 0 in
+  let live = ref true in
+  let on_submit = ref ignore in
+  let model_actor = Actor.guarded ~principal ~is_current:(fun () -> !live) in
+  with_fixture
+    ~model_requests:requests
+    ~on_model_submit:(fun () -> !on_submit ())
+    (fun env sw anchor create _ ->
+       let runtime = create () in
+       ignore (setup runtime : P.Method_result.t);
+       let reads = ref 0 in
+       ignore (enroll runtime ~sw "one" "runner-key" reads : DTO.Configuration_result.t);
+       let target = capture runtime in
+       let selected_model =
+         Port.select_model (Runtime.operator_port runtime) ~actor:model_actor ~target
+         |> ok
+       in
+       let session =
+         Session_store.create
+           ~env
+           ~sw
+           ~root:(Eio.Path.native_exn Eio.Path.(anchor / "model-runs"))
+           ~server_id
+           ~process_start_identity:None
+           ~lock_nonce:"model-runner-test"
+         |> ok
+       in
+       let store =
+         Run_store.open_or_create
+           session
+           ~sw
+           ~limits:
+             (Root_fixture.store_limits
+                ~max_job_payload_bytes:4096
+                ~max_jobs_per_run:5
+                ~max_document_bytes:131072
+                ~max_inference_bytes_per_run:65536
+                ~max_work_steps:4096
+                ~max_document_fields:8192
+                ~max_document_nodes:16384
+                ())
+           ~checkpoint:ignore
+         |> ok
+       in
+       let owner =
+         match
+           P.Execution_owner.developer
+             ~host_id:server_id
+             ~run_id:(P.Id.Developer_run.of_string "dvr_model_runner" |> ok)
+             ~epoch:0
+             ~principal_id:principal.id
+           |> ok
+         with
+         | Developer owner -> owner
+         | Conversation _ -> failwith "expected developer owner"
+       in
+       let captured = Root_fixture.capture () in
+       let handle =
+         Run_store.admit_epoch
+           store
+           ~owner
+           ~capture_fingerprint:(Chatml_developer_capture.fingerprint captured)
+           ~previous:None
+         |> ok
+         |> fst
+       in
+       let selected =
+         Capabilities.create
+           ~owner:"model-runner-test"
+           ~resource_fingerprint:Digestif.SHA256.(digest_string "model-runner" |> to_hex)
+           []
+         |> ok
+       in
+       let capacity =
+         Agent_server.Job_capacity.create
+           ~limits:
+             { Agent_server.Config.Server.daemon_total = 4
+             ; per_principal = 4
+             ; per_prompt = 4
+             ; per_workspace = 4
+             ; per_session = 4
+             ; per_kind = 4
+             ; max_nested_depth = 2
+             }
+       in
+       let registry =
+         Root.Registry.create
+           ~sw
+           ~store
+           ~capacity
+           ~now:Root_fixture.now
+           ~limits:
+             (Root.Limits.create
+                ~max_active_runs:1
+                ~max_staged_jobs:1
+                ~max_native_occupancy:1
+                ~max_active_workers:2
+                ~max_quarantined_workers:2
+                ~max_active_inference_attempts:2
+                ~max_admitted_call_bindings:8
+              |> Or_error.ok_exn)
+       in
+       let root =
+         Root.Registry.admit
+           registry
+           ~actor:model_actor
+           ~capture:captured
+           ~registry:selected
+           ~selected
+           ~selected_model:(Some selected_model)
+           ~job_policy:Chat_response.One_off_request.default_policy
+           ~handle
+           ~workspace_conflict_domain:"model-runner-test"
+         |> ok
+       in
+       Eio.Path.save
+         ~create:(`Or_truncate 0o600)
+         Eio.Path.(anchor / "local-model.md")
+         "<developer>Reply briefly.</developer>";
+       let request =
+         P.Model_spawn_request.decode
+           (`Object
+               [ "prompt", `String "local-model.md"
+               ; "input", `String "hello"
+               ; "is_local", `True
+               ])
+         |> ok
+       in
+       let job_id =
+         Root.with_root_action
+           root
+           ~phase:Run_store.Checkpoint.Active
+           (fun ~action ~sw:_ ->
+              let job_id =
+                Root.Action.admit_external_model action ~request ~checkpoint:ignore |> ok
+              in
+              let sealed = Root.Action.seal action ~selected:[] |> ok in
+              Ok (job_id, sealed))
+         |> ok
+       in
+       let data_root = Session_store.data_root session in
+       let blobs =
+         Agent_store.Blob_store.create
+           ~env
+           ~temporary_directory:(Agent_store.Data_root.temporary_blobs_path data_root)
+           ~durable_directory:(Agent_store.Data_root.durable_blobs_path data_root)
+           ~max_upload_bytes:65536L
+         |> ok
+       in
+       Agent_store.Blob_store.bind_developer_runs blobs ~session_store:session store |> ok;
+       let results =
+         Root.Job_result.bind
+           root
+           ~blobs
+           ~limits:
+             (Agent_store.Developer_result_publisher.Limits.create
+                ~inline_bytes:1024
+                ~max_result_bytes:65536
+                ~max_pending:1
+              |> ok)
+           ~storage:Automatic
+         |> ok
+       in
+       assert (
+         Result.is_error
+           (Root.Job_result.bind
+              root
+              ~blobs
+              ~limits:
+                (Agent_store.Developer_result_publisher.Limits.create
+                   ~inline_bytes:1024
+                   ~max_result_bytes:65536
+                   ~max_pending:1
+                 |> ok)
+              ~storage:Automatic));
+       let runner =
+         Agent_server.Developer_model_job_runner.create
+           ~root
+           ~results
+           ~sources:
+             (Agent_server.Developer_model_job_runner.Sources.create
+                ~env
+                ~prompt_dir:anchor
+                ~tool_dir:anchor
+                ~response_dir:anchor
+                ~cache:(Chat_response.Cache.create ~max_size:1 ())
+                ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
+                ~approval_provider:Shell_runtime.Approval_broker.None_available)
+         |> ok
+       in
+       let candidate =
+         Root.Job_candidate.read_current root ~checkpoint:ignore
+         |> ok
+         |> List.find_exn ~f:(fun candidate ->
+           P.Id.Job.equal (P.Developer_job.id (Root.Job_candidate.job candidate)) job_id)
+       in
+       assert (
+         Agent_server.Developer_model_job_runner.Availability.equal
+           (Agent_server.Developer_model_job_runner.availability runner candidate |> ok)
+           Runnable);
+       let scheduler =
+         Agent_server.Job_scheduler.start
+           ~sw
+           ~clock:(Eio.Stdenv.clock env)
+           ~registry:(Agent_server.Session_registry.create ())
+           ~developer_registry:(Some registry)
+           ~capacity
+           ~model_job_inference:(fun _ _ ->
+             Error (P.Error.invalid_request "unused conversation inference"))
+       in
+       let await_succeeded job_id =
+         Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+           let rec await () =
+             let job =
+               Run_store.find_job (Run_store.observe handle |> ok) job_id
+               |> Option.value_exn
+             in
+             match (P.Developer_job.state job).status with
+             | Succeeded -> job
+             | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
+               Eio.Fiber.yield ();
+               await ()
+             | Failed _ | Cancelled | Interrupted _ ->
+               failwith "physical scheduler did not complete the developer job"
+           in
+           await ())
+       in
+       Exn.protect
+         ~finally:(fun () ->
+           Agent_server.Job_scheduler.close scheduler;
+           Agent_server.Job_scheduler.await_developer_scans_idle scheduler |> ok)
+         ~f:(fun () ->
+           Agent_server.Job_scheduler.attach_developer_model scheduler ~root ~runner |> ok;
+           Agent_server.Job_scheduler.wake_developer scheduler ~root;
+           let finished = await_succeeded job_id in
+           assert (P.Id.Job.equal (P.Developer_job.id finished) job_id);
+           assert (Int.equal !requests 1);
+           (match (P.Developer_job.state finished).result with
+            | Some (P.Developer_job.Result_value.Inline (P.Completion.Succeeded _)) -> ()
+            | None | Some _ -> failwith "claimed model did not publish Inline success");
+           let prepared =
+             Chat_response.One_off_script.prepare_in_domain
+               ~env
+               ~capabilities:selected
+               ~tools:[]
+               ~source:"let main input = Task.pure(input)"
+               ()
+             |> ok
+           in
+           let script_request =
+             Chat_response.Background_request.script
+               ~prepared
+               ~input:(`String "script answer")
+               ~policy:Chat_response.One_off_request.default_policy
+             |> ok
+           in
+           let script_id =
+             Root.with_root_action
+               root
+               ~phase:Run_store.Checkpoint.Active
+               (fun ~action ~sw:_ ->
+                  let id =
+                    Root.Action.stage_background
+                      action
+                      ~request:script_request
+                      ~checkpoint:ignore
+                    |> ok
+                  in
+                  let sealed = Root.Action.seal action ~selected:[ id ] |> ok in
+                  Ok (id, sealed))
+             |> ok
+           in
+           let disclosure =
+             Disclosure.create
+               ~runs:store
+               ~blobs
+               ~policy:(Disclosure.Policy.create ~authorize:(fun _ _ -> true))
+               ~limits:
+                 (Disclosure.Limits.create
+                    ~max_result_bytes:65536
+                    ~json:Document_schema.Limits.default
+                  |> ok)
+             |> ok
+           in
+           let jobs =
+             Jobs.create
+               ~root
+               ~store
+               ~disclosure
+               ~env
+               ~current_actor:(fun () -> model_actor)
+               ~prepare_source:(fun ~parent:_ ~binding:_ ~request:_ ~checkpoint ->
+                 checkpoint ();
+                 Ok None)
+             |> ok
+           in
+           let tools =
+             Agent_server.Developer_background_job_runner.create
+               ~root
+               ~results
+               ~env
+               ~managed:None
+               ~agent_runtime:None
+               ~jobs
+               ~authorize:(fun _ _ -> Ok ())
+               ~prepare_output:(function
+                 | Openai.Responses.Tool_output.Output.Text value -> Ok (`String value)
+                 | _ -> Error (P.Error.invalid_request "unexpected script output"))
+             |> ok
+           in
+           Agent_server.Job_scheduler.attach_developer scheduler ~root ~runner:tools |> ok;
+           Agent_server.Job_scheduler.wake_developer scheduler ~root;
+           let script = await_succeeded script_id in
+           match (P.Developer_job.state script).result with
+           | Some (P.Developer_job.Result_value.Inline (P.Completion.Succeeded _)) -> ()
+           | None | Some _ -> failwith "shared Tool/Model publisher did not settle script");
+       let cap_script =
+         Chat_response.One_off_script.prepare_in_domain
+           ~env
+           ~capabilities:selected
+           ~tools:[]
+           ~source:"let main input = Task.pure(input)"
+           ()
+         |> ok
+         |> fun prepared ->
+         Chat_response.Background_request.script
+           ~prepared
+           ~input:`Null
+           ~policy:Chat_response.One_off_request.default_policy
+         |> ok
+       in
+       let cap_model_id, cap_script_id =
+         Root.with_root_action
+           root
+           ~phase:Run_store.Checkpoint.Active
+           (fun ~action ~sw:_ ->
+              let model_id =
+                Root.Action.admit_external_model action ~request ~checkpoint:ignore |> ok
+              in
+              let script_id =
+                Root.Action.stage_background action ~request:cap_script ~checkpoint:ignore
+                |> ok
+              in
+              let sealed = Root.Action.seal action ~selected:[ script_id ] |> ok in
+              Ok ((model_id, script_id), sealed))
+         |> ok
+       in
+       let proposed claim =
+         let state = P.Developer_job.state (Run_store.Claim.job claim) in
+         { state with
+           status = P.Job.Succeeded
+         ; next_run_at = None
+         ; completed_at = Some (Root.native_now root)
+         ; result =
+             Some
+               (P.Developer_job.Result_value.Inline
+                  (P.Completion.Succeeded (`String (String.make 2048 'x'))))
+         ; retry_failure = None
+         }
+       in
+       let selected_first, selected_first_u = Eio.Promise.create () in
+       let release_first, release_first_u = Eio.Promise.create () in
+       let first_done, first_done_u = Eio.Promise.create () in
+       let first_observation = Run_store.observe handle |> ok in
+       Eio.Fiber.fork ~sw (fun () ->
+         Eio.Promise.resolve
+           first_done_u
+           (Root.with_claimed_job
+              root
+              ~expected:first_observation
+              ~lookup:(Run_store.find_job_exact first_observation cap_model_id)
+              ~select:(Root.Job_result.select results)
+              (fun ~active ~sw:_ ->
+                 let claim = Agent_session.Developer_job_scope.claim active in
+                 let after = proposed claim in
+                 ignore (Root.Job_result.select results ~claim ~proposed:after |> ok);
+                 Eio.Promise.resolve selected_first_u ();
+                 Eio.Promise.await release_first;
+                 Ok after)));
+       Eio.Promise.await selected_first;
+       let second_observation = Run_store.observe handle |> ok in
+       let second =
+         Root.with_claimed_job
+           root
+           ~expected:second_observation
+           ~lookup:(Run_store.find_job_exact second_observation cap_script_id)
+           (fun ~active ~sw:_ ->
+              let claim = Agent_session.Developer_job_scope.claim active in
+              let after = proposed claim in
+              let rejected = Root.Job_result.select results ~claim ~proposed:after in
+              assert (Result.is_error rejected);
+              Error (P.Error.invalid_request "shared pending result cap reached"))
+       in
+       Eio.Promise.resolve release_first_u ();
+       assert (Result.is_error second);
+       assert (Result.is_ok (Eio.Promise.await first_done));
+       let artifact_job =
+         Run_store.find_job (Run_store.observe handle |> ok) cap_model_id
+         |> Option.value_exn
+       in
+       (match (P.Developer_job.state artifact_job).result with
+        | Some
+            (P.Developer_job.Result_value.Artifact
+               { outcome = P.Stored_completion.Succeeded; _ }) -> ()
+        | None | Some _ -> failwith "shared Model result did not select Artifact");
+       let after_effect_job =
+         Root.with_root_action
+           root
+           ~phase:Run_store.Checkpoint.Active
+           (fun ~action ~sw:_ ->
+              let id =
+                Root.Action.admit_external_model action ~request ~checkpoint:ignore |> ok
+              in
+              let sealed = Root.Action.seal action ~selected:[] |> ok in
+              Ok (id, sealed))
+         |> ok
+       in
+       (on_submit := fun () -> if Int.equal !requests 2 then live := false);
+       let after_effect_candidate =
+         Root.Job_candidate.read_current root ~checkpoint:ignore
+         |> ok
+         |> List.find_exn ~f:(fun candidate ->
+           P.Id.Job.equal
+             (P.Developer_job.id (Root.Job_candidate.job candidate))
+             after_effect_job)
+       in
+       ignore
+         (Agent_server.Developer_model_job_runner.run_candidate
+            runner
+            after_effect_candidate
+          : (P.Developer_job.t option, P.Error.t) result);
+       let after_effect_saved =
+         Run_store.find_job (Run_store.observe handle |> ok) after_effect_job
+         |> Option.value_exn
+       in
+       (match (P.Developer_job.state after_effect_saved).result with
+        | Some (P.Developer_job.Result_value.Inline (P.Completion.Succeeded _)) -> ()
+        | None | Some _ -> failwith "completed provider effect lost its truthful result");
+       assert (not !live);
+       assert (Result.is_error (Root.Job_candidate.read_current root ~checkpoint:ignore));
+       Root.close_and_wait root |> ok;
+       Root.Registry.close_and_wait registry |> ok;
+       Run_store.close_and_wait store |> ok;
+       Session_store.close session |> ok;
+       Runtime.close runtime)
 ;;
 
 let%test_unit

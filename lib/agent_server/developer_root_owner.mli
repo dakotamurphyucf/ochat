@@ -526,6 +526,54 @@ val result_root
   :  t
   -> (Agent_store.Developer_run_store.Result_root.t, Agent_protocol.Error.t) result
 
+(** Immutable limits of this owner's actual Store handle. This is comparison
+    configuration for decoding a saved Model_call; it grants no Job Claim or
+    source/effect authority. The Store remains the final validator. *)
+val document_limits : t -> (Document_schema.Limits.t, Agent_protocol.Error.t) result
+
+module Job_result : sig
+  type t
+
+  (** Bind one result-publication owner to this physical run before installing
+      any Tool/Script or Model runner. [blobs] must be the shared coordinator
+      bound to the same Store; Publisher construction checks that physical
+      binding and the upload/whole-result limits. The Root's owning switch
+      outlives all joined Workers and retained selections. A successful bind
+      occupies the Root's sole publisher slot; a second bind conflicts rather
+      than creating an independent pending table or renewing [max_pending]. A
+      failure before installation leaves the slot empty for a corrected retry.
+      Closing the Root joins effects and reconciles exact publisher selections
+      through the existing Worker/Store path before releasing its run claim.
+      This is publication custody, not result-read or Blob disclosure. *)
+  val bind
+    :  run
+    -> blobs:Agent_store.Blob_store.t
+    -> limits:Agent_store.Developer_result_publisher.Limits.t
+    -> storage:Agent_store.Developer_result_publisher.Storage.t
+    -> (t, Agent_protocol.Error.t) result
+
+  (** Exact physical Root comparison only; matching owner/run coordinates or
+      another Result_root cannot attach this owner to a different run actor. *)
+  val issued_by_root : t -> run -> bool
+
+  (** Shared Tool/Script/Model selection policy over ONE Publisher instance and
+      [max_pending] table. The caller supplies the Worker's original physical
+      Claim and normalized proposal; this operation does not claim a job or
+      write a terminal state. [None] is valid only when the proposal has no
+      result. An Inline terminal is frozen once, potentially as Artifact under
+      the bound storage policy, and wrapped in the same Worker.Selected token.
+      An already-Artifact caller proposal rejects. Unknown intent/Blob/terminal
+      persistence retains the exact publisher token and capacity until Worker
+      reconciliation; no handler, selection or effect is replayed. A closing
+      Root may still finish exact already-entered Worker bookkeeping after its
+      callbacks join; this method never grants a fresh Claim or effect. *)
+  val select
+    :  t
+    -> claim:Agent_store.Developer_run_store.Claim.t
+    -> proposed:Agent_protocol.Developer_job.State.t
+    -> (Developer_job_worker.Selected.t option, Agent_protocol.Error.t) result
+end
+
 (** Read-only authentic data retained by the physical run owner. *)
 val native_ceiling : t -> Chat_response.Tool_capability.t
 
@@ -808,6 +856,18 @@ module Model_inference : sig
       actor, credential or effect lease. Use the strict ports and composed
       submission guard for every dispatch. *)
   val context : t -> Inference_runtime.Context.t
+
+  (** Strict source/host-service admission while this exact callback is live.
+      Yielding refresh verifies the original actor, entered Worker parent,
+      latest Root epoch and selected provider; a final nonyielding scope check
+      follows it. Invoke before source fetch and again after a yielding fetch or
+      approval wait. A typed denial raises this module's strict tracking
+      exception for the Worker to settle as failure; unexpected exceptions
+      and cancellation keep their original identity and backtrace. This is
+      not an enduring credential or transport lease: every
+      Prepared still uses [before_dispatch] and each HTTP/WS application write
+      uses the composed [submission_guard]. *)
+  val check_current : t -> unit
 
   (** Admit an external Model_call child at this exact claimed Model_call's
       application call boundary. The child is durably Queued under the current

@@ -582,9 +582,8 @@ let claim_developer developer batch =
        | Error _ ->
          Developer.clear_retry developer batch;
          Developer.Attempted
-       | Ok
-           ( Developer_background_job_runner.Availability.Runnable
-           | Developer_background_job_runner.Availability.Malformed_supported ) ->
+       | Ok (Developer.Availability.Runnable | Developer.Availability.Malformed_supported)
+         ->
          (match Developer.offer developer batch candidate with
           | Ok Developer.Attempted -> Developer.Attempted
           | Ok Developer.Unavailable -> Developer.Unavailable
@@ -593,9 +592,8 @@ let claim_developer developer batch =
             Developer.clear_retry developer batch;
             Developer.Attempted)
        | Ok
-           ( Developer_background_job_runner.Availability.Unsupported_kind
-           | Developer_background_job_runner.Availability
-             .Agent_artifact_installer_unavailable ) -> loop rest)
+           ( Developer.Availability.Executor_unavailable
+           | Developer.Availability.Artifact_installer_unavailable ) -> loop rest)
   in
   loop (Developer.Batch.candidates batch)
 ;;
@@ -826,6 +824,21 @@ let attach_developer t ~root ~runner =
     match t.developer with
     | None -> Error (P.Error.invalid_request "developer scheduler has no root registry")
     | Some developer -> Developer.attach developer ~root ~runner)
+;;
+
+let attach_developer_model t ~root ~runner =
+  if Atomic.get t.closed
+  then
+    Error
+      (P.Error.create
+         P.Error.Server_shutting_down
+         ~message:"developer scheduler is stopped"
+         ~retryable:true
+         ())
+  else (
+    match t.developer with
+    | None -> Error (P.Error.invalid_request "developer scheduler has no root registry")
+    | Some developer -> Developer.attach_model developer ~root ~runner)
 ;;
 
 let wake_developer t ~root =
