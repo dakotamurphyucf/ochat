@@ -683,7 +683,7 @@ let%test_unit "saved Agent source admits one selected provider attempt" =
           ~store
           ~blobs
           ~env
-          ~managed:None
+          ~managed_definition:None
           ~jobs
           ~storage:Agent_store.Developer_result_publisher.Storage.Automatic
       in
