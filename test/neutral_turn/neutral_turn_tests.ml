@@ -206,7 +206,16 @@ let%expect_test "early call retains arrival commit order and terminal unseen ite
       Openai.Responses.Tool_output.Output.Text "host output");
     let context =
       context
-        (fun _ ~sw:_ ~scope ~accounting_id ~note_delivery:_ ~on_event ~on_observation:_ ->
+        (fun
+            _
+             ~sw:_
+             ~scope
+             ~accounting_id
+             ~note_delivery:_
+             ~on_event
+             ~on_observation:_
+             ~submission_guard:_
+           ->
            Int.incr rounds;
            if !rounds = 1
            then (
@@ -270,6 +279,7 @@ let%expect_test "retained unsupported call is not execution eligibility" =
              ~note_delivery:_
              ~on_event:_
              ~on_observation:_
+             ~submission_guard:_
            ->
            receipt
              scope
@@ -297,6 +307,7 @@ let%expect_test
              ~note_delivery:_
              ~on_event:_
              ~on_observation:_
+             ~submission_guard:_
            ->
            called := true;
            receipt scope accounting_id [])
@@ -333,6 +344,7 @@ let%expect_test
              ~note_delivery:_
              ~on_event:_
              ~on_observation:_
+             ~submission_guard:_
            ->
            assert (
              Document_schema.Json.equal
@@ -359,7 +371,16 @@ let%expect_test "repeated provider alias executes distinct committed call occurr
       Openai.Responses.Tool_output.Output.Text "host output");
     let context =
       context
-        (fun _ ~sw:_ ~scope ~accounting_id ~note_delivery:_ ~on_event ~on_observation:_ ->
+        (fun
+            _
+             ~sw:_
+             ~scope
+             ~accounting_id
+             ~note_delivery:_
+             ~on_event
+             ~on_observation:_
+             ~submission_guard:_
+           ->
            Int.incr rounds;
            if !rounds = 1
            then (
@@ -400,6 +421,7 @@ let%expect_test
              ~note_delivery:_
              ~on_event:_
              ~on_observation:_
+             ~submission_guard:_
            ->
            let setting =
              R.Target.settings (R.target request)
@@ -453,6 +475,7 @@ let%expect_test "Driver rejects retired transport before document or model effec
              ~note_delivery:_
              ~on_event:_
              ~on_observation:_
+             ~submission_guard:_
            ->
            dispatched := true;
            failwith "retired transport dispatched")
@@ -525,6 +548,7 @@ let%expect_test
                ~note_delivery:_
                ~on_event:_
                ~on_observation:_
+               ~submission_guard:_
              ->
              match scope.relation with
              | Nested _ ->
@@ -573,6 +597,7 @@ let%expect_test "legacy wrapper fork depths retain the shared child bound" =
         let calls = ref 0 in
         let nested = ref 0 in
         let rejected = ref false in
+        let submission_checks = ref 0 in
         let context =
           context
             (fun
@@ -583,7 +608,9 @@ let%expect_test "legacy wrapper fork depths retain the shared child bound" =
                  ~note_delivery:_
                  ~on_event:_
                  ~on_observation:_
+                 ~submission_guard
                ->
+               Runtime.Submission_guard.check submission_guard;
                Int.incr calls;
                (match scope.relation with
                 | Root -> ()
@@ -619,6 +646,11 @@ let%expect_test "legacy wrapper fork depths retain the shared child bound" =
             ~tool_dir:dir
             ~cache:(C.Cache.create ~max_size:1 ())
             ()
+          |> fun ctx ->
+          C.Ctx.with_submission_guard
+            ctx
+            (Runtime.Submission_guard.create ~refresh:(fun () ->
+               fun () -> incr submission_checks))
         in
         let allocator =
           History_entry.Allocator.create ~namespace:"fork-bound" ~next_sequence:0 |> ok
@@ -643,6 +675,7 @@ let%expect_test "legacy wrapper fork depths retain the shared child bound" =
         in
         assert (List.length history = 3);
         assert !rejected;
+        assert (!submission_checks = !calls);
         print_s
           [%sexp (observed : bool), (fork_depth : int), (!calls : int), (!nested : int)])));
   [%expect
@@ -664,6 +697,7 @@ let%expect_test
       let active = ref false
       and guards = ref 0
       and upstream = ref 0
+      and submission_checks = ref 0
       and transports = ref 0 in
       let context =
         context
@@ -675,7 +709,9 @@ let%expect_test
                ~note_delivery
                ~on_event:_
                ~on_observation:_
+               ~submission_guard
              ->
+             Runtime.Submission_guard.check submission_guard;
              Int.incr transports;
              note_delivery E.Terminal.Response_started;
              receipt
@@ -695,6 +731,13 @@ let%expect_test
           ~tool_dir:dir
           ~cache:(C.Cache.create ~max_size:1 ())
           ()
+        |> fun ctx ->
+        C.Ctx.with_submission_guard
+          ctx
+          (Runtime.Submission_guard.create ~refresh:(fun () ->
+             fun () ->
+             incr submission_checks;
+             if not !active then raise C.Ctx.Inference_admission_rejected))
       in
       let guard _ =
         Int.incr guards;
@@ -726,6 +769,7 @@ let%expect_test
       [%test_eq: string] "done" (complete child);
       [%test_eq: int] 1 !upstream;
       [%test_eq: int] 1 !transports;
+      [%test_eq: int] 1 !submission_checks;
       active := false;
       let executor =
         C.Model_executor.create
@@ -760,6 +804,7 @@ let%expect_test
        | _ -> failwith "recipe did not report safe admission revocation");
       [%test_eq: int] 3 !guards;
       [%test_eq: int] 1 !upstream;
+      [%test_eq: int] 1 !submission_checks;
       [%test_eq: int] 1 !transports));
   print_endline
     "revoked derived and recipe attempts stop before upstream/transport; live control \
@@ -786,7 +831,8 @@ let%expect_test
             ~accounting_id
             ~note_delivery:_
             ~on_event:_
-            ~on_observation:_ ->
+            ~on_observation:_
+            ~submission_guard:_ ->
              receipt
                scope
                accounting_id

@@ -93,7 +93,14 @@ let%expect_test
           ~fingerprint:"captured-graph-fingerprint"
           ~run:
             (fun
-              ~sw:_ ~scope ~accounting_id ~note_delivery:_ ~on_event:_ ~on_observation ->
+              ~sw:_
+              ~scope
+              ~accounting_id
+              ~note_delivery:_
+              ~on_event:_
+              ~on_observation
+              ~submission_guard:_
+            ->
             let selection =
               O.Transport_selection.create
                 ~accounting_id

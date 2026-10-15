@@ -222,6 +222,7 @@ type ctx =
   ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
   ; on_inference_completion : Inference_client.Completion.t -> unit
   ; on_inference_observation : Inference.Observation.t -> unit
+  ; submission_guard : Inference_runtime.Submission_guard.t
   ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
   ; resolve_inference_assets : History_entry.t list -> Inference.Request.Asset.t list
   ; sw : Eio.Switch.t
@@ -289,6 +290,7 @@ type args =
   ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
   ; on_inference_completion : Inference_client.Completion.t -> unit
   ; on_inference_observation : Inference.Observation.t -> unit
+  ; submission_guard : Inference_runtime.Submission_guard.t
   ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
   ; resolve_inference_assets : History_entry.t list -> Inference.Request.Asset.t list
   ; datadir : Eio.Fs.dir_ty Eio.Path.t option
@@ -2241,6 +2243,7 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
         in
         let receipt =
           Neutral_turn.run
+            ~submission_guard:c.submission_guard
             c.inference_context
             ~sw
             ~identity:c.inference_identity
@@ -2373,6 +2376,7 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
     ; on_inference_attempt = a.on_inference_attempt
     ; on_inference_completion = a.on_inference_completion
     ; on_inference_observation = a.on_inference_observation
+    ; submission_guard = a.submission_guard
     ; before_inference_dispatch = a.before_inference_dispatch
     ; resolve_inference_assets = a.resolve_inference_assets
     ; sw
@@ -2441,6 +2445,7 @@ let run_completion_stream_in_memory_entries
       ~inference_identity
       ~on_inference_attempt
       ~on_inference_completion
+      ?(submission_guard = Inference_runtime.Submission_guard.empty)
       ?(inference_relation = Transcript.Scope.Root)
       ?(on_inference_observation = fun _ -> ())
       ?(before_inference_dispatch = fun _ -> ())
@@ -2555,6 +2560,7 @@ let run_completion_stream_in_memory_entries
     ; on_inference_attempt
     ; on_inference_completion
     ; on_inference_observation
+    ; submission_guard
     ; before_inference_dispatch
     ; resolve_inference_assets
     ; datadir

@@ -71,9 +71,14 @@ end
     receipt retains the runtime's explicit complete-response/prefix distinction.
     Finalized entries and Source_finished remain the host's responsibility after
     actual local admission. Strict callbacks, cancellation and unexpected
-    exceptions propagate unchanged. No retry or ambient context is available. *)
+    exceptions propagate unchanged. No retry or ambient context is available.
+    The optional [submission_guard] defaults to empty for existing callers; a
+    developer owner composes its physical currentness checks before the selected
+    backend admits an application request. This guard is not an identity or
+    credential lease. *)
 val run
-  :  Inference_runtime.Context.t
+  :  ?submission_guard:Inference_runtime.Submission_guard.t
+  -> Inference_runtime.Context.t
   -> sw:Eio.Switch.t
   -> identity:Identity.t
   -> relation:Transcript.Scope.relation
@@ -124,6 +129,12 @@ module Execution : sig
     -> t
 
   val context : t -> Inference_runtime.Context.t
+
+  (** Retain the existing host admission and append a scoped application-submit
+      guard. Neither guard can replace the other; all potentially yielding
+      refreshes precede every final nonyielding currentness check. The immutable
+      execution still has the same selected Context and tracking callbacks. *)
+  val with_submission_guard : t -> Inference_runtime.Submission_guard.t -> t
 
   val run
     :  t

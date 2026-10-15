@@ -1158,6 +1158,7 @@ let dispatch
       ~published
       ~submitted
       ~on_selected
+      ~submission_guard
       ~rejection_status
       ~rejection_emitted
   =
@@ -1185,6 +1186,7 @@ let dispatch
    | Ok () -> ()
    | Error error -> raise (Auth_invalidated error));
   on_selected ();
+  Inference_runtime.Submission_guard.check submission_guard;
   (match lease.Auth.check_current () with
    | Ok () -> ()
    | Error error -> raise (Auth_invalidated error));
@@ -1360,7 +1362,14 @@ let dispatch
   loop ()
 ;;
 
-let run ?(on_selected = fun () -> ()) t ~auth ~prepared ~on_event =
+let run
+      ?(on_selected = fun () -> ())
+      ?(submission_guard = Inference_runtime.Submission_guard.empty)
+      t
+      ~auth
+      ~prepared
+      ~on_event
+  =
   let authenticated = ref false in
   let submitted = ref false in
   let published = ref false in
@@ -1396,6 +1405,7 @@ let run ?(on_selected = fun () -> ()) t ~auth ~prepared ~on_event =
                    ~published
                    ~submitted
                    ~on_selected
+                   ~submission_guard
                    ~rejection_status
                    ~rejection_emitted)))
       with
@@ -1688,6 +1698,7 @@ let websocket_dispatch
       lease
       prepared
       ~on_selected
+      ~submission_guard
       ~on_event
       ~published
       ~submitted
@@ -1747,6 +1758,7 @@ let websocket_dispatch
   if String.length body > t.max_request_bytes then transport_failure Body_limit;
   check_auth lease;
   on_selected Inference.Observation.Transport_selection.Websocket None;
+  Inference_runtime.Submission_guard.check submission_guard;
   check_auth lease;
   (* From this point cancellation or partial write is uncertain; no resend. *)
   Responses_websocket.begin_response channel.websocket;
@@ -1840,6 +1852,7 @@ let websocket_dispatch
 
 let run_with_transport
       ?(cache_assets = [])
+      ?(submission_guard = Inference_runtime.Submission_guard.empty)
       t
       ~session
       ~policy
@@ -1852,6 +1865,7 @@ let run_with_transport
   let sse fallback =
     run
       ~on_selected:(fun () -> on_selected Transport_selection.Http_sse fallback)
+      ~submission_guard
       t
       ~auth
       ~prepared
@@ -1924,6 +1938,7 @@ let run_with_transport
                        lease
                        prepared
                        ~on_selected
+                       ~submission_guard
                        ~on_event
                        ~published
                        ~submitted
@@ -1932,6 +1947,12 @@ let run_with_transport
         let retire () =
           Option.iter !owned ~f:(fun session ->
             Option.iter session.Websocket_session.channel ~f:Websocket_session.retire)
+        in
+        let retire_and_reraise exn =
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          (try Eio.Cancel.protect retire with
+           | _ -> ());
+          Stdlib.Printexc.raise_with_backtrace exn backtrace
         in
         let result =
           try
@@ -1959,9 +1980,7 @@ let run_with_transport
           | Transport_failure reason ->
             retire ();
             `Failure reason
-          | exn ->
-            retire ();
-            raise exn
+          | exn -> retire_and_reraise exn
         in
         match result with
         | `Result (Error _ as error) ->
@@ -1972,9 +1991,7 @@ let run_with_transport
              on_event (Event.Terminal outcome);
              Ok outcome
            with
-           | exn ->
-             retire ();
-             raise exn)
+           | exn -> retire_and_reraise exn)
         | `Failure reason when prefer && (not !submitted) && not !published ->
           sse
             (Some

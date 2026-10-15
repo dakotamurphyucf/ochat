@@ -39,7 +39,15 @@ let%expect_test
   let record text = events := text :: !events in
   let context =
     context
-      (fun ~sw:_ ~scope ~accounting_id ~note_delivery:_ ~on_event:_ ~on_observation:_ ->
+      (fun
+          ~sw:_
+           ~scope
+           ~accounting_id
+           ~note_delivery:_
+           ~on_event:_
+           ~on_observation:_
+           ~submission_guard:_
+         ->
          record "dispatch";
          receipt ~scope ~accounting_id ())
   in
@@ -79,7 +87,15 @@ let%expect_test
   let completion_count = ref 0 in
   let context =
     context
-      (fun ~sw:_ ~scope ~accounting_id ~note_delivery:_ ~on_event:_ ~on_observation:_ ->
+      (fun
+          ~sw:_
+           ~scope
+           ~accounting_id
+           ~note_delivery:_
+           ~on_event:_
+           ~on_observation:_
+           ~submission_guard:_
+         ->
          dispatched := true;
          receipt ~scope ~accounting_id ())
   in
@@ -179,7 +195,15 @@ let%expect_test
   let dispatched = ref false in
   let selected =
     context
-      (fun ~sw:_ ~scope ~accounting_id ~note_delivery:_ ~on_event:_ ~on_observation:_ ->
+      (fun
+          ~sw:_
+           ~scope
+           ~accounting_id
+           ~note_delivery:_
+           ~on_event:_
+           ~on_observation:_
+           ~submission_guard:_
+         ->
          dispatched := true;
          receipt ~scope ~accounting_id ())
   in

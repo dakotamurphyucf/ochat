@@ -674,6 +674,7 @@ let rec run_agent_input
       ~on_inference_observation:ctx.on_inference_observation
       ~inference_relation:ctx.inference_relation
       ()
+    |> fun child -> Ctx.with_submission_guard child ctx.submission_guard
   in
   (* 1.  Build the full agent XML by adding any inline user items. *)
   let msg =
@@ -857,6 +858,7 @@ let rec run_agent_input
         ~on_inference_attempt:ctx.on_inference_attempt
         ~on_inference_completion:ctx.on_inference_completion
         ~on_inference_observation:ctx.on_inference_observation
+        ~submission_guard:ctx.submission_guard
         ~inference_relation:ctx.inference_relation
         ~env:(Ctx.env ctx)
         ~datadir:response_dir
@@ -1246,6 +1248,7 @@ and run_completion_stream
       ~on_inference_attempt:ctx.on_inference_attempt
       ~on_inference_completion:ctx.on_inference_completion
       ~on_inference_observation:ctx.on_inference_observation
+      ~submission_guard:ctx.submission_guard
       ~inference_relation:ctx.inference_relation
       ~datadir
       ~allocator
