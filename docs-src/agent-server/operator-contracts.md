@@ -220,6 +220,11 @@ module Prompt : sig
     ; allowed_workspaces : string list
     ; permission_profile : string
     ; runtime_policy : string option
+    ; tool_contract : Chatml_compilation.Tool_contract.t
+      (** Explicit compiler ABI for scripts in this published Prompt revision.
+          The config atom is [standard] or [developer_model_spawn]; absence
+          defaults to Standard. An unknown atom is a configuration error, never
+          a fallback. This is not execution permission or provider selection. *)
     ; enabled : bool
     }
   [@@deriving compare, equal, sexp]
