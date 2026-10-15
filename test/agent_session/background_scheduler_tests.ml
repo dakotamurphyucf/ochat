@@ -294,7 +294,7 @@ let with_physical_developer
             ~store
             ~blobs
             ~env
-            ~managed:None
+            ~managed_definition:None
             ~jobs
             ~storage:Agent_store.Developer_result_publisher.Storage.Automatic
         in
@@ -777,7 +777,7 @@ let%test_unit "a saturated developer root leaves another physical root runnable"
                     ~store
                     ~blobs
                     ~env
-                    ~managed:None
+                    ~managed_definition:None
                     ~jobs:other_jobs
                     ~storage:Agent_store.Developer_result_publisher.Storage.Automatic
                 in

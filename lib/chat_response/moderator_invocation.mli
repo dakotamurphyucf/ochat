@@ -88,6 +88,43 @@ val decode_outcome
   -> L.value
   -> (I.outcome, string) result
 
+module Owned : sig
+  type t
+
+  (** Pure owner-neutral projection of the exact managed implementation and
+      dispatched Host_invocation. Reuses the same bounded input, context and
+      output/schema helpers as the conversation ABI. Developer ownership uses
+      a namespaced string projection of the genuine run ID in the ABI's
+      session_id field and the real epoch as generation; this string is never
+      an Id.Session capability. No provider/event or conversation Invocation is
+      synthesized. [validate_work] checks only this physical lexical scope's
+      surviving supported work references. Unsupported kinds reject through
+      that validator; publication remains with the native terminal.
+      [limits] and the two call/depth fields are the selected invocation's
+      effective admitted ceilings, not a snapshot of fuel or calls already
+      consumed by its inherited execution context. Call count may be zero;
+      invocation depth must be positive. *)
+  val create_managed_standalone
+    :  control:L.execution_control option
+    -> execution:Managed_tool_registry.owned_execution
+    -> limits:Chatmd_shell_spec.Chatmd_script_spec.limits
+    -> max_nested_calls:int
+    -> max_invocation_depth:int
+    -> validate_work:(I.work -> (unit, string) result)
+    -> (t, string) result
+
+  val context : t -> L.value
+  val input : t -> L.value
+
+  (** Same finite Complete/Pending/Fail and exact prepared output-schema and
+      whole-envelope validation as [decode_outcome]. No effect or publication. *)
+  val decode_outcome
+    :  ?control:L.execution_control
+    -> t
+    -> L.value
+    -> (I.outcome, string) result
+end
+
 (** Add the v1 transactional resolution operation and JSON-only emit/timer
     adapters to the normal host registry. No tool implementation runs here. *)
 val operations : R.op_def list -> R.op_def list

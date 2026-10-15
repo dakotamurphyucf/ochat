@@ -17,7 +17,6 @@ type t =
   ; native : N.t
   ; results : O.Job_result.t
   ; env : Eio_unix.Stdenv.base
-  ; managed : Agent_session.Native_tool_invocation.selected_managed_dispatch option
   ; agent_runtime : Runtime.t option
   ; jobs : Jobs.t
   ; authorize : H.t -> C.binding -> (unit, P.Error.t) result
@@ -36,7 +35,16 @@ end
 let invalid message = Error (P.Error.invalid_request message)
 let ( let* ) result f = Result.bind result ~f
 
-let create ~root ~results ~env ~managed ~agent_runtime ~jobs ~authorize ~prepare_output =
+let create
+      ~root
+      ~results
+      ~env
+      ~managed_definition
+      ~agent_runtime
+      ~jobs
+      ~authorize
+      ~prepare_output
+  =
   if not (O.Job_result.issued_by_root results root)
   then invalid "developer Tool runner has another result owner"
   else
@@ -52,17 +60,12 @@ let create ~root ~results ~env ~managed ~agent_runtime ~jobs ~authorize ~prepare
     in
     let* native = N.create ~root in
     let* native = N.with_job_service native jobs in
-    Ok
-      { root
-      ; native
-      ; results
-      ; env
-      ; managed
-      ; agent_runtime
-      ; jobs
-      ; authorize
-      ; prepare_output
-      }
+    let* native =
+      match managed_definition with
+      | None -> Ok native
+      | Some definition -> N.with_managed_definition native ~definition ~env
+    in
+    Ok { root; native; results; env; agent_runtime; jobs; authorize; prepare_output }
 ;;
 
 let issued_by_root t root = phys_equal t.root root
@@ -108,16 +111,16 @@ let selected_schema t capabilities reference =
     C.resolve capabilities ~id:reference.C.id ~fingerprint:reference.fingerprint
     |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
   in
-  match C.implementation binding, t.managed with
+  match C.implementation binding, N.managed_definition t.native with
   | C.Native _, _ -> Ok (reference.implementation_revision, None)
   | Managed _, None -> invalid "managed Tool dispatcher is not installed"
   | Managed _, Some managed ->
     let* revision =
-      M.execution_revision managed.definition binding
+      M.execution_revision managed binding
       |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
     in
     let* prepared =
-      M.resolve managed.definition binding
+      M.resolve managed binding
       |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
     in
     let schema =
@@ -230,7 +233,6 @@ let execute_with_budget t active claim job request deadline effective control =
         ~selected:capabilities
         t.native
         ~active
-        ~managed:t.managed
         ~reference
         ~invocation
         ~authorize:t.authorize
@@ -364,7 +366,6 @@ let call_script_tool t ~active ~claim ~deadline ~prepared ~name ~args =
       ~selected:capabilities
       t.native
       ~active
-      ~managed:t.managed
       ~reference
       ~invocation
       ~authorize:t.authorize

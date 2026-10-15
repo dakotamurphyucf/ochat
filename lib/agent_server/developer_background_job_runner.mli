@@ -20,14 +20,14 @@ end
     exact physical Root, selected registry and original actor. [results] is
     issued by [Developer_root_owner.Job_result.bind] once for the run and is
     also borrowed by any installed Model runner; this package cannot create a
-    second pending table or independently renew its result cap. [managed]
-    is the host's selected managed dispatcher, not an authority supplied by a
+    second pending table or independently renew its result cap. [managed_definition]
+    is the exact definition from this Root's trusted live-resource package, not an authority supplied by a
     job payload. [agent_runtime] borrows the assembler's already constructed
     runtime for the same physical native implementations and switch lifetime;
     it is never reconstructed or owned by this runner. At construction, every
     binding in [root]'s native ceiling must resolve to the exact same live
     runtime reference and physical implementation (managed bindings remain
-    owned by [managed]). The finite root job-policy array ceiling bounds this
+    owned by the installed definition). The finite root job-policy array ceiling bounds this
     constructor comparison before selected-reference allocation. The separate
     registered-source traversal is bounded at dispatch under the same ceiling. A
     missing runtime permits ordinary Tool/Script work, but a valid saved
@@ -47,7 +47,7 @@ val create
   :  root:Developer_root_owner.run
   -> results:Developer_root_owner.Job_result.t
   -> env:Eio_unix.Stdenv.base
-  -> managed:Agent_session.Native_tool_invocation.selected_managed_dispatch option
+  -> managed_definition:Chat_response.Managed_tool_registry.t option
   -> agent_runtime:Chat_response.Agent_runtime.t option
   -> jobs:Developer_script_job_service.t
   -> authorize:

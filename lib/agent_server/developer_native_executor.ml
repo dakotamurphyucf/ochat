@@ -7,11 +7,13 @@ module C = Chat_response.Tool_capability
 module H = P.Host_invocation
 module Job_scope = Agent_session.Developer_job_scope
 module Jobs = Developer_script_job_service
+module Managed_tool = Developer_managed_tool_executor
 
 type t =
   { root : O.t
   ; issuer : D.t
   ; jobs : Jobs.t option
+  ; managed : Managed_tool.t option
   }
 
 let invalid message = Error (P.Error.invalid_request message)
@@ -36,14 +38,29 @@ let create ~root =
       ~current
       ~now:(fun () -> O.native_now root)
   in
-  Ok { root; issuer; jobs = None }
+  Ok { root; issuer; jobs = None; managed = None }
 ;;
 
 let with_job_service t jobs =
-  if Jobs.issued_by_root jobs t.root
-  then Ok { t with jobs = Some jobs }
-  else invalid "developer Job service belongs to another physical root"
+  if not (Jobs.issued_by_root jobs t.root)
+  then invalid "developer Job service belongs to another physical root"
+  else (
+    match t.jobs with
+    | None -> Ok { t with jobs = Some jobs }
+    | Some existing when phys_equal existing jobs -> Ok t
+    | Some _ -> invalid "developer native executor already owns another Job service")
 ;;
+
+let with_managed_definition t ~definition ~env =
+  match t.managed, t.jobs with
+  | Some _, _ -> invalid "managed developer executor is already configured"
+  | None, None -> invalid "managed developer executor requires its physical Job service"
+  | None, Some jobs ->
+    let* managed = Managed_tool.create ~root:t.root ~jobs ~definition ~env in
+    Ok { t with managed = Some managed }
+;;
+
+let managed_definition t = Option.map t.managed ~f:Managed_tool.definition
 
 let reselect_current t ceiling =
   let* current = D.selected t.issuer in
@@ -161,18 +178,17 @@ let recover_early scope =
     invalid "pre-dispatch failure left a durable or uncertain invocation"
 ;;
 
-let run
-      ?ceiling
-      t
-      ~parent
-      ~job_parent
-      ~borrowed
-      ~registry
-      ~managed
-      ~reference
-      ~invocation
-      ~authorize
-      ~prepare_output
+let rec run
+          ?ceiling
+          t
+          ~parent
+          ~job_parent
+          ~borrowed
+          ~registry
+          ~reference
+          ~invocation
+          ~authorize
+          ~prepare_output
   =
   let* entered =
     O.with_native_registration t.root ?job_parent ~invocation (fun ~scope ->
@@ -275,6 +291,19 @@ let run
               ~check_parent_now:(fun () -> D.check_parent_now t.issuer ~parent invocation)
           | Some lexical -> Jobs.Scope.stage_background lexical ~request ~checkpoint
         in
+        let* managed =
+          match t.managed, job_scope with
+          | None, _ -> Ok None
+          | Some _, None -> invalid "managed callback has no physical Job scope"
+          | Some managed, Some lexical ->
+            Managed_tool.bind
+              managed
+              ~terminal:scope
+              ~scope:lexical
+              ~call_child:(fun ~reference ~invocation ->
+                run_child t ~reference ~invocation ~authorize ~prepare_output)
+            |> Result.map ~f:Option.some
+        in
         match
           N.run_owned_selected
             ~admit_managed:(fun execution ->
@@ -358,23 +387,8 @@ let run
      with
      | _ -> ());
     Exn.raise_with_original_backtrace exn backtrace
-;;
 
-let run_root t ~managed ~reference ~invocation ~authorize ~prepare_output =
-  run
-    t
-    ~parent:D.Root
-    ~job_parent:None
-    ~borrowed:None
-    ~registry:(fun () -> D.selected t.issuer)
-    ~managed
-    ~reference
-    ~invocation
-    ~authorize
-    ~prepare_output
-;;
-
-let run_child t ~managed ~reference ~invocation ~authorize ~prepare_output =
+and run_child t ~reference ~invocation ~authorize ~prepare_output =
   let* borrowed = N.borrow_selected () in
   if not (D.same_issuer t.issuer (N.selected_borrowed_issuer borrowed))
   then invalid "selected child belongs to another native executor"
@@ -387,23 +401,26 @@ let run_child t ~managed ~reference ~invocation ~authorize ~prepare_output =
       ~job_parent
       ~borrowed:(Some borrowed)
       ~registry:(fun () -> narrowed_registry t borrowed)
-      ~managed
       ~reference
       ~invocation
       ~authorize
       ~prepare_output)
 ;;
 
-let run_job_child
-      ?selected
-      t
-      ~active
-      ~managed
-      ~reference
-      ~invocation
-      ~authorize
-      ~prepare_output
-  =
+let run_root t ~reference ~invocation ~authorize ~prepare_output =
+  run
+    t
+    ~parent:D.Root
+    ~job_parent:None
+    ~borrowed:None
+    ~registry:(fun () -> D.selected t.issuer)
+    ~reference
+    ~invocation
+    ~authorize
+    ~prepare_output
+;;
+
+let run_job_child ?selected t ~active ~reference ~invocation ~authorize ~prepare_output =
   let* job_parent = O.job_parent t.root active in
   run
     ?ceiling:selected
@@ -415,7 +432,6 @@ let run_job_child
       match selected with
       | None -> D.selected t.issuer
       | Some selected -> reselect_current t selected)
-    ~managed
     ~reference
     ~invocation
     ~authorize

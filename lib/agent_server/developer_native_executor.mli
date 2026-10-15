@@ -9,11 +9,33 @@ type t
 val create : root:Developer_root_owner.t -> (t, Agent_protocol.Error.t) result
 
 (** Compose one physically issued developer Script Job service with this same
-    selected executor; the ordinary no-Job caller keeps the original path. *)
+    selected executor; the ordinary no-Job caller keeps the original path.
+    Reattaching that exact physical service is idempotent, including after a
+    managed definition is installed. A different service cannot replace it. *)
 val with_job_service
   :  t
   -> Developer_script_job_service.t
   -> (t, Agent_protocol.Error.t) result
+
+(** Install the exact managed definition forwarded by the trusted host's one
+    prepared live-resource package, after this physical Root and its Job
+    service exist. The private adapter checks Root/Job and selected binding
+    affinity now; each call repeats genuine managed, terminal and scope
+    admission. The host must not substitute a definition from another live
+    package merely because its capability fingerprint compares equal after a
+    source rebind. Installation rejects on an already configured receiver;
+    the trusted host retains one configured executor value for this Root.
+    No interpreter or handler runs at installation. *)
+val with_managed_definition
+  :  t
+  -> definition:Chat_response.Managed_tool_registry.t
+  -> env:Eio_unix.Stdenv.base
+  -> (t, Agent_protocol.Error.t) result
+
+(** Comparison-only installed definition for a physically bound Worker caller
+    that must derive an exact managed revision/schema. This never authorizes
+    dispatch and returns None when the trusted host installed no managed tools. *)
+val managed_definition : t -> Chat_response.Managed_tool_registry.t option
 
 (** Function, Custom and owned managed calls use one existing native policy
     kernel. The host creates one bounded registered terminal scope per call;
@@ -22,7 +44,6 @@ val with_job_service
     terminal saves retain physical custody without handler replay. *)
 val run_root
   :  t
-  -> managed:Agent_session.Native_tool_invocation.selected_managed_dispatch option
   -> reference:Chat_response.Tool_capability.reference
   -> invocation:Agent_protocol.Host_invocation.t
   -> authorize:
@@ -41,7 +62,6 @@ val run_root
     Eio callback switch. *)
 val run_child
   :  t
-  -> managed:Agent_session.Native_tool_invocation.selected_managed_dispatch option
   -> reference:Chat_response.Tool_capability.reference
   -> invocation:Agent_protocol.Host_invocation.t
   -> authorize:
@@ -68,7 +88,6 @@ val run_job_child
   :  ?selected:Chat_response.Tool_capability.t
   -> t
   -> active:Agent_session.Developer_job_scope.active
-  -> managed:Agent_session.Native_tool_invocation.selected_managed_dispatch option
   -> reference:Chat_response.Tool_capability.reference
   -> invocation:Agent_protocol.Host_invocation.t
   -> authorize:

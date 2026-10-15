@@ -201,6 +201,99 @@ let prepare_input ?control ~prepared ~(limits : S.limits) value =
   input
 ;;
 
+let validate_limits (limits : S.limits) =
+  if
+    limits.fuel <= 0
+    || limits.fuel > 10_000_000
+    || limits.max_tasks <= 0
+    || limits.max_tasks > 100_000
+    || limits.max_depth <= 0
+    || limits.max_depth > 128
+    || limits.max_array_items <= 0
+    || limits.max_array_items > 100_000
+    || Int64.(
+         D.bytes_to_int64 limits.max_value_bytes <= 0L
+         || D.bytes_to_int64 limits.max_value_bytes > 8_388_608L)
+    || Int64.(
+         D.bytes_to_int64 limits.max_output_bytes <= 0L
+         || D.bytes_to_int64 limits.max_output_bytes > 1_048_576L)
+  then error "invocation.invalid_limits" "unsupported invocation limits"
+  else Ok ()
+;;
+
+let context_value
+      ~control
+      ~capabilities
+      ~(limits : S.limits)
+      ~max_nested_calls:admitted_nested_calls
+      ~max_invocation_depth:admitted_invocation_depth
+      ~invocation_id
+      ~provider_call_id
+      ~session_label
+      ~generation
+      ~origin
+      ~parent_invocation
+      ~parent_event
+      ~parent_job
+      ~tool_name
+      ~implementation_revision
+      ~capability_fingerprint
+      ~created_at
+      ~deadline
+  =
+  let record fields =
+    Option.iter control ~f:(fun c -> c.L.allocate (64 * List.length fields));
+    record fields
+  in
+  let capability (r : Tool_capability.reference) =
+    record
+      [ "id", string (Id.Capability.to_string r.id)
+      ; "name", string r.name
+      ; "implementation_revision", string r.implementation_revision
+      ; "fingerprint", string r.fingerprint
+      ; "input_schema", V.import_json ?control r.input_schema
+      ]
+  in
+  let limits_value =
+    record
+      [ "fuel", int limits.fuel
+      ; "max_tasks", int limits.max_tasks
+      ; "max_value_bytes", int (bytes limits.max_value_bytes)
+      ; "max_output_bytes", int (bytes limits.max_output_bytes)
+      ; "max_array_items", int limits.max_array_items
+      ; "max_depth", int limits.max_depth
+      ; "max_nested_calls", int admitted_nested_calls
+      ; "max_invocation_depth", int admitted_invocation_depth
+      ]
+  in
+  let references = Tool_capability.references capabilities in
+  Option.iter control ~f:(fun c -> c.L.allocate (16 * List.length references));
+  let context =
+    record
+      [ "version", int 1
+      ; "invocation_id", string (Id.Invocation.to_string invocation_id)
+      ; "provider_call_id", option string provider_call_id
+      ; "session_id", string session_label
+      ; "generation", int generation
+      ; "origin", origin_value origin
+      ; ( "parent_invocation"
+        , option (fun id -> string (Id.Invocation.to_string id)) parent_invocation )
+      ; ( "parent_event"
+        , option (fun id -> string (Id.Moderator_execution.to_string id)) parent_event )
+      ; "parent_job", option (fun id -> string (Id.Job.to_string id)) parent_job
+      ; "tool_name", string tool_name
+      ; "implementation_revision", string implementation_revision
+      ; "capability_fingerprint", string capability_fingerprint
+      ; "created_at_ms", int (ms created_at)
+      ; "deadline_ms", option (fun t -> int (ms t)) deadline
+      ; "limits", limits_value
+      ; "available_tools", L.VArray (references |> List.map ~f:capability |> Array.of_list)
+      ]
+  in
+  Option.iter control ~f:(fun c -> c.L.check_value context);
+  context
+;;
+
 let create_for
       ~control
       ~managed
@@ -211,25 +304,7 @@ let create_for
       ~validate_work
   =
   let open Result.Let_syntax in
-  let%bind () =
-    if
-      limits.fuel <= 0
-      || limits.fuel > 10_000_000
-      || limits.max_tasks <= 0
-      || limits.max_tasks > 100_000
-      || limits.max_depth <= 0
-      || limits.max_depth > 128
-      || limits.max_array_items <= 0
-      || limits.max_array_items > 100_000
-      || Int64.(
-           D.bytes_to_int64 limits.max_value_bytes <= 0L
-           || D.bytes_to_int64 limits.max_value_bytes > 8_388_608L)
-      || Int64.(
-           D.bytes_to_int64 limits.max_output_bytes <= 0L
-           || D.bytes_to_int64 limits.max_output_bytes > 1_048_576L)
-    then error "invocation.invalid_limits" "unsupported invocation limits"
-    else Ok ()
-  in
+  let%bind () = validate_limits limits in
   let%bind () = protocol (I.validate invocation) in
   let c = invocation.I.context in
   let%bind () =
@@ -258,58 +333,27 @@ let create_for
     else error "invocation.stale_binding" "invocation does not match the prepared handler"
   in
   let%bind input = prepare_input ?control ~prepared ~limits c.input in
-  let record fields =
-    Option.iter control ~f:(fun c -> c.L.allocate (64 * List.length fields));
-    record fields
-  in
-  let capability (r : Tool_capability.reference) =
-    record
-      [ "id", string (Id.Capability.to_string r.id)
-      ; "name", string r.name
-      ; "implementation_revision", string r.implementation_revision
-      ; "fingerprint", string r.fingerprint
-      ; "input_schema", V.import_json ?control r.input_schema
-      ]
-  in
-  let limits_value =
-    record
-      [ "fuel", int limits.fuel
-      ; "max_tasks", int limits.max_tasks
-      ; "max_value_bytes", int (bytes limits.max_value_bytes)
-      ; "max_output_bytes", int (bytes limits.max_output_bytes)
-      ; "max_array_items", int limits.max_array_items
-      ; "max_depth", int limits.max_depth
-      ; "max_nested_calls", int max_nested_calls
-      ; "max_invocation_depth", int 8
-      ]
-  in
-  let references = Tool_capability.references capabilities in
-  Option.iter control ~f:(fun c -> c.L.allocate (16 * List.length references));
   let context =
-    record
-      [ "version", int 1
-      ; "invocation_id", string (Id.Invocation.to_string c.id)
-      ; "provider_call_id", option string c.provider_call_id
-      ; "session_id", string (Id.Session.to_string c.session_id)
-      ; "generation", int c.generation
-      ; "origin", origin_value c.origin
-      ; ( "parent_invocation"
-        , option (fun id -> string (Id.Invocation.to_string id)) c.parent_invocation )
-      ; ( "parent_event"
-        , option
-            (fun id -> string (Id.Moderator_execution.to_string id))
-            invocation.parent_event )
-      ; "parent_job", option (fun id -> string (Id.Job.to_string id)) c.parent_job
-      ; "tool_name", string c.tool_name
-      ; "implementation_revision", string c.implementation_revision
-      ; "capability_fingerprint", string c.capability_fingerprint
-      ; "created_at_ms", int (ms c.created_at)
-      ; "deadline_ms", option (fun t -> int (ms t)) c.deadline
-      ; "limits", limits_value
-      ; "available_tools", L.VArray (references |> List.map ~f:capability |> Array.of_list)
-      ]
+    context_value
+      ~control
+      ~capabilities
+      ~limits
+      ~max_nested_calls
+      ~max_invocation_depth:8
+      ~invocation_id:c.id
+      ~provider_call_id:c.provider_call_id
+      ~session_label:(Id.Session.to_string c.session_id)
+      ~generation:c.generation
+      ~origin:c.origin
+      ~parent_invocation:c.parent_invocation
+      ~parent_event:invocation.parent_event
+      ~parent_job:c.parent_job
+      ~tool_name:c.tool_name
+      ~implementation_revision:c.implementation_revision
+      ~capability_fingerprint:c.capability_fingerprint
+      ~created_at:c.created_at
+      ~deadline:c.deadline
   in
-  Option.iter control ~f:(fun c -> c.L.check_value context);
   Ok { prepared; invocation; limits; validate_work; context; input }
 ;;
 
@@ -338,13 +382,13 @@ let create_managed ~control ~execution ~limits ~validate_work =
     ~validate_work
 ;;
 
-let decode ?control t value =
+let decode_projection ?control ~prepared ~(limits : S.limits) ~validate_work value =
   let open Result.Let_syntax in
-  let max_bytes = bytes t.limits.max_output_bytes in
+  let max_bytes = bytes limits.max_output_bytes in
   let%bind () =
     check_value
-      ~max_depth:t.limits.max_depth
-      ~max_array_items:t.limits.max_array_items
+      ~max_depth:limits.max_depth
+      ~max_array_items:limits.max_array_items
       ~max_bytes
       value
   in
@@ -388,7 +432,7 @@ let decode ?control t value =
   let%bind () =
     match outcome with
     | I.Complete value | Pending (_, value) ->
-      Schema.validate (EC.output_schema t.prepared) value
+      Schema.validate (EC.output_schema prepared) value
       |> Result.map_error ~f:(fun _ ->
         "invocation.invalid_output: output schema mismatch")
     | Fail _ -> Ok ()
@@ -396,7 +440,7 @@ let decode ?control t value =
   in
   let%bind () =
     match outcome with
-    | Pending (work, _) -> t.validate_work work
+    | Pending (work, _) -> validate_work work
     | _ -> Ok ()
   in
   if String.length (Jsonaf.to_string (I.outcome_to_json outcome)) > max_bytes
@@ -404,7 +448,97 @@ let decode ?control t value =
   else Ok outcome
 ;;
 
-let decode_outcome = decode
+let decode_outcome ?control t value =
+  decode_projection
+    ?control
+    ~prepared:t.prepared
+    ~limits:t.limits
+    ~validate_work:t.validate_work
+    value
+;;
+
+module Owned = struct
+  type t =
+    { prepared : EC.t
+    ; limits : S.limits
+    ; validate_work : I.work -> (unit, string) result
+    ; context : L.value
+    ; input : L.value
+    }
+
+  let create_managed_standalone
+        ~control
+        ~execution
+        ~limits
+        ~max_nested_calls
+        ~max_invocation_depth
+        ~validate_work
+    =
+    let open Result.Let_syntax in
+    let prepared = Managed_tool_registry.owned_prepared execution in
+    let invocation = Managed_tool_registry.owned_invocation execution in
+    let c = Agent_protocol.Host_invocation.context invocation in
+    let%bind () = validate_limits limits in
+    let%bind () =
+      if max_nested_calls < 0 || max_invocation_depth <= 0
+      then error "invocation.invalid_limits" "invalid managed call or depth limit"
+      else Ok ()
+    in
+    let%bind () = protocol (Agent_protocol.Host_invocation.validate invocation) in
+    let%bind owner =
+      match c.owner with
+      | Agent_protocol.Execution_owner.Developer owner -> Ok owner
+      | Conversation _ ->
+        error "invocation.invalid_owner" "expected a developer invocation"
+    in
+    let%bind () =
+      match
+        ( Agent_protocol.Host_invocation.status invocation
+        , (EC.declaration prepared).implementation )
+      with
+      | I.Dispatching, Standalone _ -> Ok ()
+      | I.Dispatching, Moderator _ | (Admitted | Resolved _ | Published _), _ ->
+        error "invocation.not_dispatched" "expected a dispatched standalone tool"
+    in
+    let%bind input = prepare_input ?control ~prepared ~limits c.input in
+    let capabilities = EC.capabilities prepared in
+    let context =
+      context_value
+        ~control
+        ~capabilities
+        ~limits
+        ~max_nested_calls
+        ~max_invocation_depth
+        ~invocation_id:c.id
+        ~provider_call_id:None
+        ~session_label:
+          ("developer-run:" ^ Agent_protocol.Id.Developer_run.to_string owner.run_id)
+        ~generation:owner.epoch
+        ~origin:c.origin
+        ~parent_invocation:c.parent_invocation
+        ~parent_event:None
+        ~parent_job:c.parent_job
+        ~tool_name:c.tool_name
+        ~implementation_revision:c.implementation_revision
+        ~capability_fingerprint:c.capability_fingerprint
+        ~created_at:c.created_at
+        ~deadline:c.deadline
+    in
+    Ok { prepared; limits; validate_work; context; input }
+  ;;
+
+  let context t = t.context
+  let input t = t.input
+
+  let decode_outcome ?control t value =
+    decode_projection
+      ?control
+      ~prepared:t.prepared
+      ~limits:t.limits
+      ~validate_work:t.validate_work
+      value
+  ;;
+end
 
 let snapshot_state ?control ~(limits : S.limits) value =
   let open Result.Let_syntax in
@@ -480,7 +614,7 @@ let run_impl ?control ?task_limits t ~runtime ~context ~prepare_commit ~failure_
       | [ { args = [ L.VString id; value ]; _ } ] ->
         if String.equal id (Id.Invocation.to_string t.invocation.context.id)
         then
-          decode ?control t value
+          decode_outcome ?control t value
           |> Result.map_error ~f:(fun message ->
             failure_kind := Invalid_output;
             message)
