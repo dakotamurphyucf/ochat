@@ -809,6 +809,22 @@ module Model_inference : sig
       submission guard for every dispatch. *)
   val context : t -> Inference_runtime.Context.t
 
+  (** Admit an external Model_call child at this exact claimed Model_call's
+      application call boundary. The child is durably Queued under the current
+      parent job/attempt at the next nested depth. This reuses the one external
+      model transaction, mutation gate and shared capacity reservation; it
+      rechecks the entered Worker Claim, current selected Target/actor/provider,
+      callback Switch and parent after each yield and immediately before the
+      first rename attempt. A copied job, request or context cannot authorize
+      the child. Unknown persistence retains exact Prepared/Handoff and capacity
+      beyond lexical unwind for Root recovery; no callback or effect is replayed.
+      Bare One_off worker scopes do not gain this operation. *)
+  val admit_external_model
+    :  t
+    -> request:Agent_protocol.Model_spawn_request.t
+    -> checkpoint:(unit -> unit)
+    -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result
+
   (** The one shared Inference_client allocation port. Its [with_attempt]
       admits Root or Nested only while this physical scope is live and the
       exact Worker Claim remains current. Nested also requires this scope's

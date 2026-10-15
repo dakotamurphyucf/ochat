@@ -101,9 +101,12 @@ val set_inference_record
   -> max_inference_bytes:int
   -> (t, Store_error.t) result
 
-(** A Model_call from the physical run root has no job ancestor and depth zero.
-    Invocation descendants carry comparison coordinates; their actual claimed
-    attempt and depth are proved by the host, not by this document predicate. *)
+(** Model_call launch shapes accepted by canonical persistence: a top-level
+    Run_root with no parent/depth, a claimed Model_call child with a Run_root
+    parent-job and positive depth, or an admitted Invocation parent. The
+    validator separately checks the claimed child's historical parent kind,
+    exact attempt/depth and owner/capture/epoch relation. This predicate alone
+    grants no admission authority. *)
 val valid_external_model_launch_shape : Agent_protocol.Developer_job.Launch.t -> bool
 
 (** Pure validated mutations. Each call advances the document revision; callers

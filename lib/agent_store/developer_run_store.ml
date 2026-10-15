@@ -240,6 +240,7 @@ module Prepared = struct
     ; token : unit ref
     ; kind : kind
     ; claim_data : claim_data option
+    ; external_model_claim : claim_data option
     ; mutable claim_status : claim_status
     ; mutable write_attempted : bool
     ; claimed_selection : claimed_selection option
@@ -1628,6 +1629,7 @@ let prepare_checkpoint handle ~expected ~phase =
             ; token = ref ()
             ; kind = Foundation_checkpoint
             ; claim_data = None
+            ; external_model_claim = None
             ; claim_status = Unsettled
             ; write_attempted = false
             ; claimed_selection = None
@@ -1688,6 +1690,7 @@ let prepare_change handle ~expected ~kind ~f =
             ; token = ref ()
             ; kind
             ; claim_data = None
+            ; external_model_claim = None
             ; claim_status = Unsettled
             ; write_attempted = false
             ; claimed_selection = None
@@ -1766,31 +1769,95 @@ module External_model_parent = struct
   type t =
     | Run_root
     | Dispatching of Invocation_lookup.t
+    | Claimed_model of Claim.t * Job_lookup.t
 end
+
+let external_model_claim_current (t : store) (handle : handle) claim document =
+  let parent_id = P.Developer_job.id claim.job in
+  phys_equal claim.store_token t.token
+  && phys_equal claim.handle_token handle.token
+  && P.Execution_owner.equal_developer claim.owner handle.owner
+  && equal_entry_state (Atomic.get claim.entry_state) Entered
+  && (match claim.issuing_domain with
+      | Some domain -> Int.equal domain (Stdlib.Domain.self () :> int)
+      | None -> false)
+  && with_run_lifecycle t (fun () ->
+    Option.value_map
+      (Hashtbl.find t.issued_claims handle.owner.run_id)
+      ~default:false
+      ~f:(fun claims ->
+        List.exists claims ~f:(fun issued ->
+          phys_equal issued.entry_state claim.entry_state)))
+  && Option.value_map (Doc.find_job document parent_id) ~default:false ~f:(fun current ->
+    P.Developer_job.same_immutable current claim.job
+    && Int.equal
+         (P.Developer_job.state current).attempt
+         (P.Developer_job.state claim.job).attempt
+    &&
+    match (P.Developer_job.state current).status with
+    | P.Job.Running -> true
+    | Queued
+    | Waiting_permission _
+    | Waiting_completion _
+    | Succeeded
+    | Failed _
+    | Cancelled
+    | Interrupted _ -> false)
+;;
 
 let prepare_external_model handle ~expected ~parent ~job =
   let launch = P.Developer_job.launch job in
   let parent =
     match parent, P.Developer_job.Launch.parent launch with
     | External_model_parent.Run_root, Run_root ->
-      Ok Developer_run_transition.External_model_parent.Run_root
+      Ok (None, Developer_run_transition.External_model_parent.Run_root)
+    | Claimed_model (claim, lookup), Run_root
+      when phys_equal lookup.Job_lookup.observation expected
+           && P.Id.Job.equal lookup.id (P.Developer_job.id claim.job) ->
+      (match Job_lookup.value lookup with
+       | Some observed
+         when P.Developer_job.same_immutable observed claim.job
+              && Int.equal
+                   (P.Developer_job.state observed).attempt
+                   (P.Developer_job.state claim.job).attempt ->
+         Ok
+           ( Some claim
+           , Developer_run_transition.External_model_parent.Claimed_model observed )
+       | None | Some _ -> Error Error.Conflict)
     | Dispatching lookup, Invocation id when matching_lookup expected lookup id ->
       (match observed_lookup lookup with
        | Some observed ->
          let revision, value = observed in
-         Ok (Developer_run_transition.External_model_parent.Dispatching (revision, value))
+         Ok
+           ( None
+           , Developer_run_transition.External_model_parent.Dispatching (revision, value)
+           )
        | None -> Error Error.Conflict)
-    | Run_root, Invocation _ | Dispatching _, Run_root | Dispatching _, Invocation _ ->
-      Error Error.Conflict
+    | Run_root, Invocation _
+    | Dispatching _, Run_root
+    | Dispatching _, Invocation _
+    | Claimed_model _, Run_root
+    | Claimed_model _, Invocation _ -> Error Error.Conflict
   in
-  let* parent = parent in
-  prepare_change handle ~expected ~kind:External_model ~f:(fun t document ~poll ->
-    Developer_run_transition.external_model
-      (transition t handle ~poll)
-      document
-      ~parent
-      ~job
-    |> transition_result)
+  let* claim, parent = parent in
+  let* prepared =
+    prepare_change handle ~expected ~kind:External_model ~f:(fun t document ~poll ->
+      let* () =
+        match claim with
+        | None -> Ok ()
+        | Some claim ->
+          if external_model_claim_current t handle claim document
+          then Ok ()
+          else Error Error.Foreign_or_stale
+      in
+      Developer_run_transition.external_model
+        (transition t handle ~poll)
+        document
+        ~parent
+        ~job
+      |> transition_result)
+  in
+  Ok { prepared with external_model_claim = claim }
 ;;
 
 let matching_job_lookup expected lookup id =
@@ -1945,6 +2012,7 @@ let prepare_claimed_transition_internal
               ; token = ref ()
               ; kind = Claimed_transition
               ; claim_data = Some claim
+              ; external_model_claim = None
               ; claim_status = Unsettled
               ; write_attempted = false
               ; claimed_selection =
@@ -2121,7 +2189,7 @@ let install_prepared ?(admit = fun () -> true) t handle prepared ~poll =
       Result.map (installed t prepared) ~f:(fun installed ->
         Settlement.Installed installed)
     else Ok Settlement.Prewrite_conflict
-  | Some (bytes, _) when String.equal bytes prepared.before_bytes ->
+  | Some (bytes, document) when String.equal bytes prepared.before_bytes ->
     poll ();
     let* () =
       Durable_file.replace_in
@@ -2129,7 +2197,12 @@ let install_prepared ?(admit = fun () -> true) t handle prepared ~poll =
         ~durability:Flush_file_and_directory
         ~basename:(basename handle.owner.run_id)
         ~before_rename:(fun () ->
-          if admit ()
+          if
+            admit ()
+            &&
+            match prepared.external_model_claim with
+            | None -> true
+            | Some claim -> external_model_claim_current t handle claim document
           then prepared.write_attempted <- true
           else raise Selected_admission_revoked)
         prepared.after_bytes
@@ -2930,6 +3003,7 @@ module Recovery = struct
                     ; token = ref ()
                     ; kind = Claimed_transition
                     ; claim_data = None
+                    ; external_model_claim = None
                     ; claim_status = Unsettled
                     ; write_attempted = false
                     ; claimed_selection = None
@@ -3127,6 +3201,7 @@ module Recovery = struct
                 ; token = ref ()
                 ; kind = Inference_recovery
                 ; claim_data = None
+                ; external_model_claim = None
                 ; claim_status = Unsettled
                 ; write_attempted = false
                 ; claimed_selection = None
@@ -3509,6 +3584,7 @@ module Tracking = struct
       ; token = ref ()
       ; kind = Inference_tracking
       ; claim_data = None
+      ; external_model_claim = None
       ; claim_status = Unsettled
       ; write_attempted = false
       ; claimed_selection = None

@@ -240,6 +240,7 @@ module External_model_parent = struct
   type t =
     | Run_root
     | Dispatching of int * P.Host_invocation.t
+    | Claimed_model of P.Developer_job.t
 end
 
 let external_model_job_parent_matches
@@ -277,7 +278,48 @@ let external_model t document ~parent ~job =
     let open Result.Let_syntax in
     let%bind () =
       match parent, P.Developer_job.Launch.parent launch with
-      | External_model_parent.Run_root, Run_root -> Ok ()
+      | External_model_parent.Run_root, Run_root ->
+        if
+          Option.is_none (P.Developer_job.Launch.parent_job launch)
+          && Int.equal (P.Developer_job.Launch.nested_depth launch) 0
+        then Ok ()
+        else Error Error.Conflict
+      | External_model_parent.Claimed_model observed, Run_root ->
+        let parent_launch = P.Developer_job.launch observed in
+        let parent_id = P.Developer_job.id observed in
+        let parent_depth = P.Developer_job.Launch.nested_depth parent_launch in
+        (match Doc.find_job document parent_id with
+         | Some current ->
+           if
+             P.Developer_job.same_immutable current observed
+             && Int.equal
+                  (P.Developer_job.state current).attempt
+                  (P.Developer_job.state observed).attempt
+             && (match (P.Developer_job.state current).status with
+                 | Running -> true
+                 | Queued
+                 | Waiting_permission _
+                 | Waiting_completion _
+                 | Succeeded
+                 | Failed _
+                 | Cancelled
+                 | Interrupted _ -> false)
+             && P.Job.equal_kind (P.Developer_job.kind current) Model_call
+             && P.Execution_owner.equal_developer (P.Developer_job.owner current) t.owner
+             && Chatml_source.Digest.equal
+                  (P.Developer_job.capture_fingerprint current)
+                  (P.Developer_job.capture_fingerprint job)
+             && parent_depth < Int.max_value
+             && Int.equal (P.Developer_job.Launch.nested_depth launch) (parent_depth + 1)
+             &&
+             match P.Developer_job.Launch.parent_job launch with
+             | Some (id, attempt) ->
+               P.Id.Job.equal id parent_id
+               && Int.equal attempt (P.Developer_job.state current).attempt
+             | None -> false
+           then Ok ()
+           else Error Error.Conflict
+         | None -> Error Error.Conflict)
       | External_model_parent.Dispatching (revision, observed), Invocation id ->
         (match Doc.find_invocation document id with
          | Some current
@@ -299,7 +341,8 @@ let external_model t document ~parent ~job =
                      ~owner:t.owner -> Ok ()
          | None | Some _ -> Error Error.Conflict)
       | External_model_parent.Run_root, Invocation _
-      | External_model_parent.Dispatching _, Run_root -> Error Error.Conflict
+      | External_model_parent.Dispatching _, Run_root
+      | External_model_parent.Claimed_model _, Invocation _ -> Error Error.Conflict
     in
     let%bind () =
       match

@@ -307,6 +307,199 @@ let%test_unit "external model append has one parent path and survives parent res
     R.close_and_wait run |> F.run_ok)
 ;;
 
+let%test_unit "claimed model children retain exact attempt ancestry after parent settles" =
+  F.with_root (fun _env _sw _root _session run ->
+    let owner = F.owner 0 in
+    let capture = F.digest "claimed model children" in
+    let handle, initial = F.admit run owner capture in
+    let payload = P.Developer_model_call.to_json (call request) in
+    let parent =
+      model_job owner capture ~name:"job_model_claimed_parent" ~parent:Run_root ~payload
+    in
+    let queued =
+      R.prepare_external_model
+        handle
+        ~expected:initial
+        ~parent:R.External_model_parent.Run_root
+        ~job:parent
+      |> F.run_ok
+      |> save handle
+    in
+    let claimed =
+      R.prepare_job_claim
+        handle
+        ~expected:queued
+        ~lookup:(R.find_job_exact queued (P.Developer_job.id parent))
+        ~now:Selected.timestamp
+      |> F.run_ok
+      |> R.commit_job_claim handle
+      |> F.run_ok
+    in
+    let claim = R.Claimed.claim claimed in
+    assert (
+      R.Claim.try_enter claim ~handle ~admit:(fun () -> true) ~on_enter:(fun () -> ())
+      |> F.run_ok);
+    let running = R.Claimed.observation claimed in
+    let child name =
+      model_job
+        ~parent_job:(Some (P.Developer_job.id parent, R.Claim.attempt claim))
+        ~nested_depth:1
+        owner
+        capture
+        ~name
+        ~parent:Run_root
+        ~payload
+    in
+    let first = child "job_model_claimed_first" in
+    assert (
+      Result.is_error
+        (R.prepare_external_model
+           handle
+           ~expected:running
+           ~parent:R.External_model_parent.Run_root
+           ~job:first));
+    let append observed child =
+      R.prepare_external_model
+        handle
+        ~expected:observed
+        ~parent:
+          (R.External_model_parent.Claimed_model
+             (claim, R.find_job_exact observed (P.Developer_job.id parent)))
+        ~job:child
+      |> F.run_ok
+      |> save handle
+    in
+    let after_first = append running first in
+    assert (
+      Result.is_error
+        (R.prepare_external_model
+           handle
+           ~expected:after_first
+           ~parent:
+             (R.External_model_parent.Claimed_model
+                (claim, R.find_job_exact running (P.Developer_job.id parent)))
+           ~job:(child "job_model_stale_lookup")));
+    assert (
+      Result.is_error
+        (R.prepare_external_model
+           handle
+           ~expected:after_first
+           ~parent:
+             (R.External_model_parent.Claimed_model
+                (claim, R.find_job_exact after_first (P.Developer_job.id parent)))
+           ~job:first));
+    let second = child "job_model_claimed_second" in
+    let after_second = append after_first second in
+    let running_job = R.Claim.job claim in
+    let terminal : P.Developer_job.State.t =
+      { (P.Developer_job.state running_job) with
+        status = P.Job.Succeeded
+      ; completed_at = Some Selected.timestamp
+      ; result = Some (P.Developer_job.Result_value.Inline (P.Completion.Succeeded `Null))
+      }
+    in
+    let settled =
+      R.prepare_claimed_transition
+        handle
+        ~expected:after_second
+        ~claim
+        ~after:terminal
+        ~revoked_after:terminal
+      |> F.run_ok
+      |> R.commit_claimed_transition handle
+      |> F.run_ok
+      |> R.Installed.observation
+    in
+    assert (Option.is_some (R.find_job settled (P.Developer_job.id first)));
+    assert (Option.is_some (R.find_job settled (P.Developer_job.id second)));
+    assert (
+      Result.is_error
+        (R.prepare_external_model
+           handle
+           ~expected:settled
+           ~parent:
+             (R.External_model_parent.Claimed_model
+                (claim, R.find_job_exact settled (P.Developer_job.id parent)))
+           ~job:(child "job_model_after_parent_terminal")));
+    let guard_owner =
+      F.owner ~run_id:(P.Id.Developer_run.of_string "dvr_model_claim_guard" |> F.ok) 0
+    in
+    let guard_handle, guard_initial = F.admit run guard_owner capture in
+    let guard_parent =
+      model_job
+        guard_owner
+        capture
+        ~name:"job_model_precommit_guard"
+        ~parent:Run_root
+        ~payload
+    in
+    let guard_queued =
+      R.prepare_external_model
+        guard_handle
+        ~expected:guard_initial
+        ~parent:R.External_model_parent.Run_root
+        ~job:guard_parent
+      |> F.run_ok
+      |> save guard_handle
+    in
+    let guard_claimed =
+      R.prepare_job_claim
+        guard_handle
+        ~expected:guard_queued
+        ~lookup:(R.find_job_exact guard_queued (P.Developer_job.id guard_parent))
+        ~now:Selected.timestamp
+      |> F.run_ok
+      |> R.commit_job_claim guard_handle
+      |> F.run_ok
+    in
+    let guard_claim = R.Claimed.claim guard_claimed in
+    assert (
+      R.Claim.try_enter
+        guard_claim
+        ~handle:guard_handle
+        ~admit:(fun () -> true)
+        ~on_enter:(fun () -> ())
+      |> F.run_ok);
+    let guard_running = R.Claimed.observation guard_claimed in
+    let guarded_child =
+      model_job
+        ~parent_job:(Some (P.Developer_job.id guard_parent, R.Claim.attempt guard_claim))
+        ~nested_depth:1
+        guard_owner
+        capture
+        ~name:"job_model_guarded_child"
+        ~parent:Run_root
+        ~payload
+    in
+    let guarded_prepared =
+      R.prepare_external_model
+        guard_handle
+        ~expected:guard_running
+        ~parent:
+          (R.External_model_parent.Claimed_model
+             ( guard_claim
+             , R.find_job_exact guard_running (P.Developer_job.id guard_parent) ))
+        ~job:guarded_child
+      |> F.run_ok
+    in
+    (* Trusted cleanup revokes the entered Claim before the caller can commit.
+       Even an always-true host admit callback cannot publish this child. *)
+    R.Claim.abandon_before_callback guard_claim ~handle:guard_handle |> F.run_ok;
+    assert (
+      match
+        R.commit_and_settle
+          guard_handle
+          guarded_prepared
+          (R.Handoff.create ~settle:(fun _ -> ()))
+          ~admit:(fun () -> true)
+      with
+      | Error R.Error.Foreign_or_stale -> true
+      | Ok _ | Error _ -> false);
+    let guard_after = R.observe guard_handle |> F.run_ok in
+    assert (Option.is_none (R.find_job guard_after (P.Developer_job.id guarded_child)));
+    R.close_and_wait run |> F.run_ok)
+;;
+
 let%test_unit "reopen validates the persisted model recipe before issuing a run" =
   F.with_temp_directory "ochat-developer-model-recovery" (fun env temporary ->
     Eio.Switch.run (fun sw ->

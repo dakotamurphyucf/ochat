@@ -49,17 +49,20 @@ module External_model_parent : sig
   type t =
     | Run_root
     | Dispatching of int * Agent_protocol.Host_invocation.t
+    | Claimed_model of Agent_protocol.Developer_job.t
 end
 
 (** Pure single-append transformation for a fresh queued Model_call with a
     validated Developer_model_call payload. A native parent must be the exact
     current same-epoch Dispatching invocation value and revision projected by
-    the Store from an authentic observation. A Run_root launch has no parent
-    job and depth zero; it adds no invented invocation. Structural parent-job
-    history and graph cycles remain checked by the one document validator;
-    actual native ancestry/depth belongs to the host. This uses the normal job/document payload
-    limits, independently of the selected-job per-commit count; no physical
-    capacity or live provider authority is minted. *)
+    the Store from an authentic observation. [Run_root] has no parent job and
+    depth zero. [Claimed_model] is a Run_root launch with exact parent-job ID,
+    positive claimed attempt and depth one greater than the observed Running
+    Model_call; the Store separately proves its physical Claim. Neither form
+    invents an invocation. Historical parent relations and graph cycles remain
+    checked by the one document validator. This uses the normal job/document
+    payload limits independently of the selected-job per-commit count; no
+    physical capacity or live provider authority is minted. *)
 val external_model
   :  t
   -> Developer_run_document.t
