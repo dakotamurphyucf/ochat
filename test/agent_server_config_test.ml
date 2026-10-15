@@ -103,6 +103,39 @@ let validated_exn env source_file contents =
       , (diagnostics : Agent_server.Config.Diagnostic.t list)]
 ;;
 
+let%test_unit "prompt compiler contract is explicit and defaults to Standard" =
+  with_fixture (fun env temporary workspace prompt _ ->
+    let source_file = Filename.concat temporary "server.sexp" in
+    let base = config_text ~workspace ~prompt ~http:"((enabled false))" in
+    let contract text =
+      (List.hd_exn (validated_exn env source_file text).prompts).tool_contract
+    in
+    [%test_eq: Chatml_compilation.Tool_contract.t]
+      (contract base)
+      Chatml_compilation.Tool_contract.Standard;
+    let developer =
+      String.substr_replace_first
+        base
+        ~pattern:"(enabled true)"
+        ~with_:"(tool_contract developer_model_spawn) (enabled true)"
+    in
+    [%test_eq: Chatml_compilation.Tool_contract.t]
+      (contract developer)
+      Chatml_compilation.Tool_contract.Developer_model_spawn;
+    let unknown =
+      String.substr_replace_first
+        base
+        ~pattern:"(enabled true)"
+        ~with_:"(tool_contract unknown_contract) (enabled true)"
+    in
+    match validate env source_file unknown with
+    | Ok _ -> assert false
+    | Error diagnostics ->
+      assert (
+        List.exists diagnostics ~f:(fun diagnostic ->
+          String.is_substring diagnostic.config_path ~substring:"tool_contract")))
+;;
+
 let%expect_test "authoring budgets validate as a captured server configuration" =
   with_fixture (fun env temporary workspace prompt _ ->
     let source_file = Filename.concat temporary "server.sexp" in

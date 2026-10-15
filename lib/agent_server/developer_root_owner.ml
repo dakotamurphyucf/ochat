@@ -4209,9 +4209,8 @@ module Registry = struct
     | `Raised (exn, backtrace), _ -> Exn.raise_with_original_backtrace exn backtrace
   ;;
 
-  let admit_with_recovery
+  let reserve_admission
         ?final_admission
-        ?checkpoint
         t
         ~actor
         ~capture
@@ -4221,12 +4220,11 @@ module Registry = struct
         ~job_policy
         ~handle
         ~workspace_conflict_domain
-        ~recover
     =
-    if Option.is_some final_admission && Option.is_none checkpoint
-    then invalid "developer final admission needs a fresh checkpoint"
-    else if t.closed || not (same_domain t)
+    if t.closed || not (same_domain t)
     then invalid "developer root registry is closed or foreign"
+    else if not (Store.issued_by t.store handle)
+    then invalid "developer root handle belongs to another Store"
     else (
       let run_id = (Store.owner handle).run_id in
       if
@@ -4254,11 +4252,158 @@ module Registry = struct
           }
         in
         Hashtbl.set t.owners ~key:run_id ~data:(Admitting admission);
-        drive_recovery
+        Ok admission))
+  ;;
+
+  let drive_finished t (admission : admission) ~transfer_finished_claim ~checkpoint =
+    let run_id = (Store.owner admission.handle).run_id in
+    let call = admission.call in
+    let transferred = ref false in
+    let outcome =
+      match
+        Eio.Cancel.sub (fun cancel ->
+          call.cancel <- Some cancel;
+          Eio.Fiber.with_binding admission_key t (fun () ->
+            let* () = verify_admission t admission in
+            let* () =
+              transfer_finished_claim ~accept:(fun ~claim ~window ->
+                if
+                  (not (Store.issued_by t.store admission.handle))
+                  || not
+                       (Store.Recovery.issued_finished
+                          window
+                          ~claim
+                          ~handle:admission.handle)
+                then invalid "developer finished claim belongs to another Store"
+                else if
+                  Option.is_some admission.claim || Option.is_some admission.recovery
+                then invalid "developer admission already owns a claim"
+                else (
+                  admission.claim <- Some claim;
+                  admission.recovery <- Some window;
+                  transferred := true;
+                  Ok ()))
+            in
+            publish_admission t admission ~checkpoint))
+      with
+      | value -> `Returned value
+      | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+    in
+    call.cancel <- None;
+    admission.running <- false;
+    Eio.Promise.resolve call.finish ();
+    match outcome with
+    | `Returned (Ok run) -> Ok run
+    | `Returned (Error error) ->
+      if not !transferred
+      then (
+        match Hashtbl.find t.owners run_id with
+        | Some (Admitting current) when phys_equal current admission ->
+          Hashtbl.remove t.owners run_id
+        | None | Some (Admitting _) | Some (Owned _) -> ());
+      Error error
+    | `Raised (exn, backtrace) ->
+      if not !transferred
+      then (
+        match Hashtbl.find t.owners run_id with
+        | Some (Admitting current) when phys_equal current admission ->
+          Hashtbl.remove t.owners run_id
+        | None | Some (Admitting _) | Some (Owned _) -> ());
+      Exn.raise_with_original_backtrace exn backtrace
+  ;;
+
+  let admit_with_recovery
+        ?final_admission
+        ?checkpoint
+        t
+        ~actor
+        ~capture
+        ~registry
+        ~selected
+        ~selected_model
+        ~job_policy
+        ~handle
+        ~workspace_conflict_domain
+        ~recover
+    =
+    if Option.is_some final_admission && Option.is_none checkpoint
+    then invalid "developer final admission needs a fresh checkpoint"
+    else
+      let* admission =
+        reserve_admission
+          ?final_admission
           t
-          admission
-          ~recover
-          ~checkpoint:(Option.value checkpoint ~default:Fn.id)))
+          ~actor
+          ~capture
+          ~registry
+          ~selected
+          ~selected_model
+          ~job_policy
+          ~handle
+          ~workspace_conflict_domain
+      in
+      drive_recovery
+        t
+        admission
+        ~recover
+        ~checkpoint:(Option.value checkpoint ~default:Fn.id)
+  ;;
+
+  let admit_recovered
+        ?final_admission
+        ?checkpoint
+        t
+        ~actor
+        ~capture
+        ~registry
+        ~selected
+        ~selected_model
+        ~job_policy
+        ~handle
+        ~workspace_conflict_domain
+        ~transfer_finished_claim
+    =
+    if Option.is_some final_admission && Option.is_none checkpoint
+    then invalid "developer final admission needs a fresh checkpoint"
+    else
+      let* admission =
+        reserve_admission
+          ?final_admission
+          t
+          ~actor
+          ~capture
+          ~registry
+          ~selected
+          ~selected_model
+          ~job_policy
+          ~handle
+          ~workspace_conflict_domain
+      in
+      drive_finished
+        t
+        admission
+        ~transfer_finished_claim
+        ~checkpoint:(Option.value checkpoint ~default:Fn.id)
+  ;;
+
+  let retire_admission t ~handle =
+    if not (same_domain t && Store.issued_by t.store handle)
+    then invalid "developer admission handle belongs to another Store or domain"
+    else if
+      Option.value_map (Eio.Fiber.get admission_key) ~default:false ~f:(fun current ->
+        phys_equal current t)
+    then invalid "developer admission cannot retire itself"
+    else (
+      let run_id = (Store.owner handle).run_id in
+      match Hashtbl.find t.owners run_id with
+      | None -> Ok ()
+      | Some (Owned _) -> invalid "developer Root is owned, not admitting"
+      | Some (Admitting admission) ->
+        if not (phys_equal admission.handle handle)
+        then invalid "developer admission handle changed"
+        else if admission.running
+        then invalid "developer admission callback is still running"
+        else Eio.Cancel.protect (fun () -> cleanup_admission t run_id admission))
   ;;
 
   let admit

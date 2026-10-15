@@ -235,12 +235,14 @@ module Capture = struct
     ; receipt : Receipt.t
     ; root_invocation :
         Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+    ; tool_contract : Chatml_compilation.Tool_contract.t
     ; affinity : unit ref
     }
 
   let value t = t.value
   let receipt t = t.receipt
   let root_invocation t = t.root_invocation
+  let tool_contract t = t.tool_contract
 
   module Route = struct
     type t =
@@ -506,6 +508,7 @@ module Scope = struct
                  { value
                  ; receipt
                  ; root_invocation = Prompt_definition.root_invocation definition
+                 ; tool_contract = Prompt_definition.tool_contract definition
                  ; affinity = t.owner.capture_affinity
                  }
                in

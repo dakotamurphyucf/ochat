@@ -100,9 +100,48 @@ module Child_source_policy : sig
     :  source:Agent_session.Captured_agent_runner.Source.t
     -> runtime_policy_revision:Chatml_source.Digest.t
     -> t
+
+  (** Bind the configured source acquisition policy to one authentic retained
+      Prompt revision's original source lease and selected compiler contract.
+      This creates no new source grant or child execution authority. *)
+  val bind
+    :  t
+    -> tool_contract:Chatml_compilation.Tool_contract.t
+    -> content_limits:Chatmd_prompt_content.Limits.t option
+    -> artifact_store:Agent_store.Prompt_artifact_store.t
+    -> source_lease:Agent_session.Prompt_source_lease.t
+    -> Agent_session.Captured_agent_runner.Source_binding.t
 end
 
 type t
+
+module Developer_catalog : sig
+  type t
+
+  module Admission : sig
+    module Error : sig
+      type t =
+        | Busy
+        | Publication_uncertain
+        | Foreign_domain
+      [@@deriving equal, sexp_of]
+    end
+  end
+
+  val workspace_definitions : t -> Agent_session.Workspace_definition.t list
+
+  val find_workspace
+    :  t
+    -> Agent_protocol.Id.Workspace_definition.t
+    -> Agent_session.Workspace_definition.t option
+
+  val manifest_grants : t -> Operator_manifest_grant.t list
+  val with_admission : t -> f:(unit -> 'a) -> ('a, Admission.Error.t) result
+end
+
+(** Read/admission projection of the factory's exact publication owner.
+    It exposes no replacement/seal and cannot be minted from copied lists. *)
+val developer_catalog : t -> Developer_catalog.t
 
 type generated_lifetime =
   | Owned

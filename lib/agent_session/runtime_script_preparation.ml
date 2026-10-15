@@ -124,7 +124,52 @@ let restore_programs t ~startup ~plan ~custody =
     Error (failure "script custody restoration exceeds host work allowance")
 ;;
 
-let restore_with_plan ?tool_contract policy ~startup ~revision ~invocation =
+let authored_of_revision ~startup revision =
+  let artifact = Prompt_revision.artifact revision in
+  Startup.checkpoint startup;
+  Prompt_program_custody.authored
+    ~root_file:artifact.root_relative_path
+    ~sources:
+      ((artifact.root_relative_path, artifact.root_chatmd)
+       :: List.map artifact.sources ~f:(fun source ->
+         Startup.checkpoint startup;
+         source.relative_path, source.contents))
+  |> Result.map_error ~f:(fun _ ->
+    failure "retained script selection lacks its verified authored inventory")
+;;
+
+let select_contract policy ~startup ~revision ~plan ~custody =
+  let open Result.Let_syntax in
+  let%bind authored = authored_of_revision ~startup revision in
+  Chat_response.Retained_selection.select
+    plan
+    ~custody
+    ~authored
+    ~limits:policy.restoration
+    ~max_work_steps:policy.max_custody_work_steps
+    ~checkpoint:(fun () -> Startup.checkpoint startup)
+  |> map_diagnostics ~to_string:Chatmd_shell_spec.Diagnostic.to_string
+;;
+
+let selected_custody = function
+  | Chat_response.Retained_selection.Legacy custody | Selected custody -> custody
+;;
+
+let restored_selection_matches selected programs =
+  match selected, programs with
+  | Chat_response.Retained_selection.Legacy _, None
+  | Chat_response.Retained_selection.Selected _, Some _ -> true
+  | Chat_response.Retained_selection.Legacy _, Some _
+  | Chat_response.Retained_selection.Selected _, None -> false
+;;
+
+let restore_with_plan
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
+      policy
+      ~startup
+      ~revision
+      ~invocation
+  =
   let artifact = Prompt_revision.artifact revision in
   if
     Option.is_some artifact.content_bundle
@@ -145,10 +190,25 @@ let restore_with_plan ?tool_contract policy ~startup ~revision ~invocation =
          Error (failure "owned script custody requires explicit host preparation policy")
        | Some policy ->
          let open Result.Let_syntax in
-         let%bind plan = plan ?tool_contract policy ~startup ~parsed ~invocation in
-         let%map programs =
+         let%bind plan = plan ~tool_contract policy ~startup ~parsed ~invocation in
+         let%bind selected =
+           match tool_contract with
+           | Chatml_compilation.Tool_contract.Standard -> Ok None
+           | Chatml_compilation.Tool_contract.Developer_model_spawn ->
+             select_contract policy ~startup ~revision ~plan ~custody
+             |> Result.map ~f:Option.some
+         in
+         let custody = Option.value_map selected ~default:custody ~f:selected_custody in
+         let%bind programs =
            Startup.within startup ~map_error:compilation_error ~f:(fun () ->
              restore_programs policy ~startup ~plan ~custody)
+         in
+         let%map () =
+           match selected with
+           | None -> Ok ()
+           | Some selected when restored_selection_matches selected programs -> Ok ()
+           | Some _ ->
+             Error (failure "selected script custody does not match restored programs")
          in
          Some plan, programs)
     | None, Some _ | Some _, None ->
@@ -162,9 +222,9 @@ let restore ?tool_contract policy ~startup ~revision ~invocation =
 ;;
 
 let with_revision_plan
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
       policy
       ?startup
-      ?tool_contract
       revision
       ~env
       ~invocation
@@ -183,7 +243,7 @@ let with_revision_plan
     ~f:(fun startup ->
       let open Result.Let_syntax in
       let%bind plan, programs =
-        restore_with_plan ?tool_contract policy ~startup ~revision ~invocation
+        restore_with_plan ~tool_contract policy ~startup ~revision ~invocation
       in
       f startup ~compilation_limits ~plan ~programs)
     ()
@@ -229,10 +289,6 @@ let select_child_role ?tool_contract policy ~startup ~invocation ~revision ~auth
        Some (plan, selected))
   | None, Some _ | Some _, None ->
     Error (failure "child custody is missing its matching original parser or inventory")
-;;
-
-let selected_custody = function
-  | Chat_response.Retained_selection.Legacy custody | Selected custody -> custody
 ;;
 
 let select_child ?tool_contract policy ~startup ~parent source =

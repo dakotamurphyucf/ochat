@@ -6,6 +6,11 @@ open Core
     cannot construct it, and an expiring child borrow cannot be used as Root. *)
 type t
 
+(** Comparison only: this package retains the exact physical Root. Equal
+    owner coordinates grant no invocation or effect; every call repeats its
+    own current actor, selected policy and parent checks. *)
+val issued_by_root : t -> Developer_root_owner.run -> bool
+
 val create : root:Developer_root_owner.t -> (t, Agent_protocol.Error.t) result
 
 (** Compose one physically issued developer Script Job service with this same

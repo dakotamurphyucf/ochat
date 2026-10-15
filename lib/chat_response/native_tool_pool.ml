@@ -399,6 +399,7 @@ let create_without_inference
       ~(host : Shell_runtime.Host.t)
       ~shell
       ~admin_policy
+      ?check_preparation_now
       ?native_service_revision
       ~registrations
       prompt_elements
@@ -408,7 +409,14 @@ let create_without_inference
     ~tool_dir:host.tool_dir
     ~allow_supplied_agent:true
     ~construct:(fun declaration ->
-      Tool.of_declaration_without_inference ~host ~sw declaration
+      Tool.of_declaration_without_inference
+        ~host
+        ~sw
+        ?check_preparation_now:
+          (Option.map check_preparation_now ~f:(fun check () ->
+             Result.map_error (check ()) ~f:(fun error ->
+               Tool.Native_error.{ code = error.Error.code; message = error.message })))
+        declaration
       |> Result.map_error ~f:(fun error ->
         Error.{ code = error.Tool.Native_error.code; message = error.message }))
     ~host

@@ -97,6 +97,7 @@ val create_without_inference
   -> host:Shell_runtime.Host.t
   -> shell:Shell_view.t
   -> admin_policy:Shell_runtime.Admin_policy.t
+  -> ?check_preparation_now:(unit -> (unit, Error.t) result)
   -> ?native_service_revision:string
   -> registrations:Registration.t list
   -> Prompt.Chat_markdown.top_level_elements list

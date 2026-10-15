@@ -468,6 +468,7 @@ let config
           ; allowed_workspaces = [ "restart.workspace" ]
           ; permission_profile = profile.id
           ; runtime_policy = None
+          ; tool_contract = Chatml_compilation.Tool_contract.Standard
           ; enabled = true
           }
         ]

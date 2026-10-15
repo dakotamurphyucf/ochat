@@ -4,10 +4,26 @@ open! Core
     revision. The owner constructs these functions before creating the developer
     Root, then binds them once to that exact Root/provider after native selection.
     This module owns no source resolver, provider, child scheduler or Store
-    tracker. Child Tool effects require a separate physical child capability
-    owner and are rejected before exposure here. A child with ordinary authored
-    literal content and no child effects remains executable. *)
+    tracker. Literal-only selected children remain supported. A selected Tool
+    child with effects requires an installed physical child capability owner. *)
 type t
+
+module Selected_target : sig
+  type mode =
+    | Literal_only
+    | Bound_runner
+
+  type runner =
+    target:Agent_session.Captured_agent_runner.Claimed_developer.Selected.Target.t
+    -> startup:Chat_response.Startup_compilation.t
+    -> compilation_limits:Chatml_compilation.limits
+    -> programs:Chatml_prompt_programs.Restored.t option
+    -> ctx:Eio_unix.Stdenv.base Chat_response.Ctx.t
+    -> input:Prompt.Chat_markdown.content_item list
+    -> observer:Chat_response.Driver.agent_observer option
+    -> source:string
+    -> (string, Agent_protocol.Error.t) result
+end
 
 module Limits : sig
   type t
@@ -29,9 +45,14 @@ end
     source/store/approval owners must outlive [sw], which joins active callbacks.
     A newly acquired File child is checked under the same source/contract policy
     before its own runtime is constructed. Driver receives only the exact
-    captured/selected child, never an unselected Fetch fallback. *)
+    captured/selected child, never an unselected Fetch fallback.
+    [Literal_only] passes no selected callback and preserves that strict path.
+    [Bound_runner] passes one state-reading callback: it denies while Unbound
+    or Revoked and never falls back after a selected handler error. The mode is
+    fixed before native registrations can be exposed. *)
 val prepare
-  :  source:Agent_session.Captured_agent_runner.Source_binding.t
+  :  selected_target:Selected_target.mode
+  -> source:Agent_session.Captured_agent_runner.Source_binding.t
   -> script_preparation:Agent_session.Runtime_script_preparation.t
   -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
   -> approval_provider:Shell_runtime.Approval_broker.provider
@@ -67,7 +88,17 @@ val bind
   -> root:Developer_root_owner.run
   -> models:Developer_model_job_runner.t
   -> agent_runtime:Chat_response.Agent_runtime.t
+  -> run_selected_target:Selected_target.runner option
   -> checkpoint:(unit -> unit)
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Comparison-only, nonyielding proof that this source runtime remains Bound
+    to the exact physical Root and native runtime. This grants no new source,
+    child invocation or Store authority. *)
+val bound_to
+  :  t
+  -> root:Developer_root_owner.run
+  -> agent_runtime:Chat_response.Agent_runtime.t
   -> (unit, Agent_protocol.Error.t) result
 
 (** Revoke before the host joins/closes the underlying switch and original

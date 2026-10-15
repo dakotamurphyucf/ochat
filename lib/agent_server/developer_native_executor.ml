@@ -28,6 +28,7 @@ type execution =
   ; selected_for_witness : O.Current.t -> (C.t, P.Error.t) result
   }
 
+let issued_by_root t root = phys_equal t.root root
 let invalid message = Error (P.Error.invalid_request message)
 let ( let* ) result f = Result.bind result ~f
 

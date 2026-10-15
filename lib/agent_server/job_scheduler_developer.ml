@@ -267,6 +267,7 @@ let scanner_current t scan =
 ;;
 
 let start_scan t attachment ~fallback_due =
+  Eio.Switch.check t.sw;
   let call = new_call () in
   let scan = { attachment; call } in
   t.scan <- Some scan;
@@ -399,6 +400,7 @@ let offer t (batch : batch) candidate =
       || List.length attachment.offers >= Root.Registry.max_active_workers t.registry
     then Ok Skipped
     else (
+      Eio.Switch.check t.sw;
       let call = new_call () in
       let decided, resolve_decided = Eio.Promise.create () in
       let decision_sent = ref false in

@@ -98,6 +98,13 @@ val start
         -> (Session_factory.model_job_inference, Agent_protocol.Error.t) Result.t)
   -> t
 
+(** Comparison only for trusted daemon installation: this scheduler was
+    constructed with the exact physical developer Registry returned by the
+    hosted service. A copied run ID or equal configuration is insufficient;
+    false covers closed/disabled or uninstalled/foreign registry. This performs no I/O, claim or
+    work offer and grants no execution authority. *)
+val uses_developer_registry : t -> Developer_root_owner.Registry.t -> bool
+
 (** Attach the physical Tool/Script package for [root]. The registry must be
     present and currently contain this same live Root instance, and [runner]
     must have been issued by it. An exact repeated attachment is idempotent;
@@ -171,8 +178,19 @@ val cancel_conversation
 
 (** Revoke new dispatch, cancel conversation workers and developer scan/offer
     tasks. Use [await_developer_scans_idle] before closing Root/Store; existing
-    conversation delivery wait remains separate. Idempotent. *)
+    conversation delivery wait remains separate. Idempotent. The scheduler and
+    its joined child bookkeeping belong to the creating Eio domain; calling
+    [close] from another domain raises [Invalid_argument] before mutation. *)
 val close : t -> unit
+
+(** Stop this SAME scheduler, join its existing polling fiber and its
+    developer scan/offer tasks before the developer Store or Root registry is
+    closed. Conversation worker cancellation is requested by [close]; the
+    daemon separately joins its Session_registry after this scheduler stops.
+    Called only by the owning daemon on the creating Eio domain, never from the
+    scheduler's own fiber. A foreign-domain call returns a typed error before
+    mutation. *)
+val close_and_wait : t -> (unit, Agent_protocol.Error.t) result
 
 (** After [close], wait for already-dispatched completion delivery callbacks.
     Running jobs are still cancelled by [close]; this does not await their

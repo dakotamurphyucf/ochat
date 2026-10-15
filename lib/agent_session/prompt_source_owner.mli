@@ -99,6 +99,11 @@ module Capture : sig
     :  t
     -> Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
 
+  (** Immutable compiler ABI copied from the SAME actual definition as
+      [root_invocation], before source capture can yield. Not execution
+      authority and never selected by looking up a mutable catalog later. *)
+  val tool_contract : t -> Chatml_compilation.Tool_contract.t
+
   module Route : sig
     (** Positive original-root member of an actual input from this capture. No
         native authority; permits207 to supply genuine file-member relationship. *)

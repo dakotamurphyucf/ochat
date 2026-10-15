@@ -89,6 +89,16 @@ module Child_source_policy = struct
     }
 
   let create ~source ~runtime_policy_revision = { source; runtime_policy_revision }
+
+  let bind t ~tool_contract ~content_limits ~artifact_store ~source_lease =
+    Agent_session.Captured_agent_runner.Source_binding.create
+      ~source:t.source
+      ~tool_contract
+      ~runtime_policy_revision:t.runtime_policy_revision
+      ~content_limits
+      ~artifact_store
+      ~source_lease
+  ;;
 end
 
 type t =
@@ -161,6 +171,27 @@ let install_catalogs t ~workspaces ~permission_profiles ~manifest_grants =
   Catalogs.install t.catalogs ~workspaces ~permission_profiles ~manifest_grants
 ;;
 
+module Developer_catalog = struct
+  type t = Catalogs.t
+
+  module Admission = struct
+    module Error = struct
+      type t = Catalogs.Admission.Error.t =
+        | Busy
+        | Publication_uncertain
+        | Foreign_domain
+      [@@deriving equal, sexp_of]
+    end
+  end
+
+  let workspace_definitions = Catalogs.workspace_definitions
+  let find_workspace = Catalogs.find_workspace
+  let manifest_grants = Catalogs.manifest_grants
+  let with_admission = Catalogs.with_admission
+end
+
+let developer_catalog t = t.catalogs
+
 let now t =
   Eio.Time.now (Eio.Stdenv.clock t.env)
   |> Time_ns.Span.of_sec
@@ -191,7 +222,14 @@ let resolve_prompt t = function
   | Catalog prompt_id ->
     (match Agent_session.Prompt_catalog.find t.prompts prompt_id with
      | None -> Error (unavailable Prompt_not_found "prompt is not in the catalog")
-     | Some { availability = Ready revision; definition } -> Ok (definition, revision)
+     | Some { availability = Ready revision; definition } ->
+       (match Agent_session.Prompt_definition.tool_contract definition with
+        | Chatml_compilation.Tool_contract.Standard -> Ok (definition, revision)
+        | Chatml_compilation.Tool_contract.Developer_model_spawn ->
+          Error
+            (unavailable
+               Prompt_unavailable
+               "developer tool contract is unavailable to conversation sessions"))
      | Some { availability = Disabled; _ } ->
        Error (unavailable Prompt_unavailable "prompt is disabled")
      | Some { availability = Unavailable _; _ } ->
@@ -2513,10 +2551,9 @@ let source_binding (t : t) ~source_lease =
       |> Result.map_error ~f:protocol_of_store
     in
     Some
-      (Agent_session.Captured_agent_runner.Source_binding.create
-         ~source:policy.source
+      (Child_source_policy.bind
+         policy
          ~tool_contract:Chatml_compilation.Tool_contract.Standard
-         ~runtime_policy_revision:policy.runtime_policy_revision
          ~content_limits:t.content_limits
          ~artifact_store:artifacts
          ~source_lease)
