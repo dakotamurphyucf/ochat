@@ -255,6 +255,15 @@ let selected_borrowed_issuer (scope : selected_borrowed) = scope.issuer
 let selected_borrowed_invocation (scope : selected_borrowed) = scope.invocation
 let selected_borrowed_parent (scope : selected_borrowed) = scope.parent_claim
 
+let selected_borrowed_execution_context (scope : selected_borrowed) =
+  match borrow_selected () with
+  | Ok current when phys_equal current scope -> Ok scope.execution_context
+  | Ok _ | Error _ ->
+    Error
+      (Agent_protocol.Error.invalid_request
+         "selected developer native invocation scope is not active")
+;;
+
 let selected_borrowed_capabilities (scope : selected_borrowed) =
   match selected_active scope, scope.ceiling with
   | true, Some selected -> Ok selected
