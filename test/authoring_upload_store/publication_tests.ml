@@ -1025,6 +1025,109 @@ let%test_unit
         (match P.Authoring.Context.basis context with
          | Project _ -> true
          | Document _ -> false);
+      let developer_ok = function
+        | Ok value -> value
+        | Error _ -> failwith "developer upload fixture admission failed"
+      in
+      let developer_contracts =
+        Agent_server.Authoring_standard_contracts.create
+          ~targets:[ One_off_v1 ]
+          ~max_identity_bytes:(16 * 1024 * 1024)
+          ~max_work_steps:1_000_000
+          ~checkpoint:Fn.id
+        |> developer_ok
+      in
+      let developer_selected =
+        Agent_server.Authoring_standard_contracts.find developer_contracts One_off_v1
+        |> Option.value_exn
+        |> Context_service.Developer.Selected_contract.of_standard_entry
+        |> developer_ok
+      in
+      let developer_allowed = ref true in
+      let developer_policy =
+        Context_service.Developer.Target_policy.create
+          ~local_project:(fun _ ~root:_ ~project:_ ~selection:_ -> None)
+          ~local_source:(fun _ ~root:_ ~member:_ -> None)
+          ~authoring_project:(fun _ ~context:_ ~current:_ ->
+            if !developer_allowed then Some developer_selected else None)
+          ~document_project:
+            (fun
+              _ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~build:_ ~metadata:_ ->
+            None)
+          ~document_source:
+            (fun
+              _ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~script:_ -> None)
+      in
+      let developer_limits =
+        Context_service.Developer.Limits.create
+          ~max_prepared_input_bytes:1_000_000
+          ~max_document_origin_bytes:16_384
+          ~max_editor_versions:8
+          ~build:
+            (Build.Limits.create
+               ~max_work_steps:1_000_000
+               ~max_input_bytes:(Some 1_000_000)
+               ~document:Document_schema.Limits.default
+             |> Or_error.ok_exn)
+        |> Or_error.ok_exn
+      in
+      let developer =
+        Context_service.Developer.create
+          ~owner:context_service
+          ~policy:developer_policy
+          ~limits:developer_limits
+      in
+      let developer_request =
+        Context_service.Developer.Request.create
+          ~entrypoint:"main"
+          ~input:`Null
+          ~fixtures:None
+          ~json_bounds:
+            (Chatml_developer_capture.Json_bounds.create
+               ~max_bytes:4096
+               ~max_depth:16
+               ~max_nodes:128
+             |> Or_error.ok_exn)
+          ~checkpoint:Fn.id
+        |> developer_ok
+      in
+      let candidate =
+        Context_service.Developer.prepare_authoring_project
+          developer
+          ~actor
+          ~connection
+          ~expected:(P.Authoring.Context.Expected.of_view context)
+          ~request:developer_request
+          ~checkpoint:Fn.id
+        |> developer_ok
+      in
+      let captured = Context_service.Developer.Candidate.capture candidate in
+      let admit () =
+        Context_service.Developer.Candidate.final_admission
+          candidate
+          ~actor
+          ~capture:captured
+          ~checkpoint:Fn.id
+        |> Result.bind ~f:(fun final -> final ())
+      in
+      check
+        "published upload can prepare its exact captured developer graph"
+        (Result.is_ok (admit ()));
+      read_allowed := false;
+      check
+        "developer capture repeats the current uploaded read grant"
+        (Result.is_error (admit ()));
+      read_allowed := true;
+      selected := selected_stale;
+      check
+        "developer capture repeats the current uploaded selection"
+        (Result.is_error (admit ()));
+      selected := selected_current;
+      developer_allowed := false;
+      check
+        "developer target policy remains current after upload capture"
+        (Result.is_error (admit ()));
+      developer_allowed := true;
       let prepared =
         Build.prepared (Chatml_authoring_bundle_project.Validated.build validated)
       in

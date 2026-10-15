@@ -120,8 +120,26 @@ let%test_unit "startup retains exact terminal selection and blocks revoked succe
       let owners =
         O.Registry.create ~sw ~store ~capacity:(Base.capacity ()) ~now:Base.now ~limits
       in
+      let recovered = ref false in
+      let prepared_final = ref 0 in
+      let checked_final = ref 0 in
+      let final_admission ~actor:actual ~capture ~checkpoint =
+        assert (phys_equal actual actor);
+        assert (phys_equal capture captured);
+        assert !recovered;
+        checkpoint ();
+        incr prepared_final;
+        Ok
+          (fun () ->
+            incr checked_final;
+            if Operator_authorization.is_current actor
+            then Ok ()
+            else Error (P.Error.invalid_request "stale final actor"))
+      in
       let common ~recover =
         O.Registry.admit_with_recovery
+          ~final_admission
+          ~checkpoint:ignore
           owners
           ~actor
           ~capture:captured
@@ -173,26 +191,46 @@ let%test_unit "startup retains exact terminal selection and blocks revoked succe
       actor_current := false;
       assert (
         Result.is_error
-          (O.Registry.resume_recovery owners ~actor ~handle ~recover:(fun recovery ->
-             ignore (recovery : R.Recovery.t);
-             failwith "revoked actor must not enter recovery callback")));
+          (O.Registry.resume_recovery
+             ~checkpoint:ignore
+             owners
+             ~actor
+             ~handle
+             ~recover:(fun recovery ->
+               ignore (recovery : R.Recovery.t);
+               failwith "revoked actor must not enter recovery callback")));
       let observed = R.observe handle |> Base.ok in
       let job = R.find_job observed id |> Option.value_exn in
       (match (P.Developer_job.state job).status with
        | Running -> ()
        | _ -> failwith "revoked actor changed selected outcome");
       actor_current := true;
+      (match
+         O.Registry.resume_recovery owners ~actor ~handle ~recover:(fun _ ->
+           failwith "missing checkpoint entered recovery")
+       with
+       | Error { P.Error.code = Invalid_request; _ } -> ()
+       | Ok _ | Error _ | (exception _) ->
+         failwith "resumed final admission accepted a missing checkpoint");
       let run =
-        O.Registry.resume_recovery owners ~actor ~handle ~recover:(fun recovery ->
-          let pending = R.Recovery.pending recovery |> Option.value_exn in
-          ignore
-            (R.Recovery.commit_terminal recovery pending ~admit:(fun () ->
-               Operator_authorization.is_current actor)
-             |> Base.ok
-             : R.Installed.t);
-          R.Recovery.finish recovery |> Result.map_error ~f:(fun _ -> original))
+        O.Registry.resume_recovery
+          ~checkpoint:ignore
+          owners
+          ~actor
+          ~handle
+          ~recover:(fun recovery ->
+            let pending = R.Recovery.pending recovery |> Option.value_exn in
+            ignore
+              (R.Recovery.commit_terminal recovery pending ~admit:(fun () ->
+                 Operator_authorization.is_current actor)
+               |> Base.ok
+               : R.Installed.t);
+            recovered := true;
+            R.Recovery.finish recovery |> Result.map_error ~f:(fun _ -> original))
         |> Base.ok
       in
+      [%test_eq: int] !prepared_final 1;
+      [%test_eq: int] !checked_final 1;
       O.close_and_wait run |> Base.ok;
       O.Registry.close_and_wait owners |> Base.ok;
       R.close_and_wait store |> Base.ok;

@@ -280,6 +280,7 @@ let%test_unit "an embedded source-only script keeps its parsed origin through fi
           ?(graph = P.fingerprint prepared)
           ?(script_source = script)
           ?(end_byte = Input.Range.end_byte range)
+          ?(max_identity_bytes = 16_384)
           ()
       =
       C.Origin.document_script
@@ -294,10 +295,14 @@ let%test_unit "an embedded source-only script keeps its parsed origin through fi
         ~declaration_end_byte:end_byte
         ~script_id:(CM.Declaration.script_id declaration)
         ~script_source
-        ~max_identity_bytes:16_384
+        ~max_identity_bytes
         ~checkpoint
     in
-    let origin = document_origin () |> Or_error.ok_exn in
+    let origin_ok = function
+      | Ok origin -> origin
+      | Error error -> Error.raise_s (C.Origin.Error.sexp_of_t error)
+    in
+    let origin = document_origin () |> origin_ok in
     let fixtures =
       C.Fixture.create ~steps:[] ~max_steps:8 ~max_bytes:4096 ~checkpoint
       |> Or_error.ok_exn
@@ -330,7 +335,7 @@ let%test_unit "an embedded source-only script keeps its parsed origin through fi
         ~checkpoint
       |> Or_error.ok_exn
     in
-    (match capture (document_origin ~script_source:changed () |> Or_error.ok_exn) with
+    (match capture (document_origin ~script_source:changed () |> origin_ok) with
      | Error (Stale_source stale) when S.Id.equal stale (S.id script) -> ()
      | Error _ | Ok _ -> failwith "changed script body reused prepared source");
     let other_id =
@@ -370,13 +375,18 @@ let%test_unit "an embedded source-only script keeps its parsed origin through fi
     (match
        capture
          ~prepared:wrong_entry
-         (document_origin ~graph:(P.fingerprint wrong_entry) () |> Or_error.ok_exn)
+         (document_origin ~graph:(P.fingerprint wrong_entry) () |> origin_ok)
      with
      | Error Invalid_origin -> ()
      | Error _ | Ok _ -> failwith "embedded script was only a dependency, not the entry");
-    assert (
-      Result.is_error
-        (document_origin ~end_byte:(Input.effective_byte_length declaring_input + 1) ()));
+    (match
+       document_origin ~end_byte:(Input.effective_byte_length declaring_input + 1) ()
+     with
+     | Error C.Origin.Error.Invalid_provenance -> ()
+     | Error Identity_limit | Ok _ -> failwith "invalid byte range was admitted");
+    (match document_origin ~max_identity_bytes:1 () with
+     | Error C.Origin.Error.Identity_limit -> ()
+     | Error Invalid_provenance | Ok _ -> failwith "identity work limit was not typed");
     let foreign =
       DC.Parsed_capture.parse_root_only
         ~limits:Chatmd_source_bundle.default_limits

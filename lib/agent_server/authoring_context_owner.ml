@@ -174,6 +174,110 @@ let check_context_selection_now ?ledger t context ~actor =
     check_context_owner ?ledger t context ~actor ~checkpoint:Fn.id
 ;;
 
+module Candidate_pin = struct
+  type t =
+    { owner : Authoring_context_service_core.t
+    ; connection : Connection_context.t
+    ; entry : connection_entry
+    ; negotiation : Connection_context.Authoring_negotiation.t
+    ; context : context_entry
+    ; expected : P.Authoring.Context.Expected.t
+    ; basis : Current.basis
+    ; document_head : Retained_document_capture.t option
+    }
+
+  let current_live (current : Current.t) =
+    !(current.live) && Int.equal current.domain (Stdlib.Domain.self () :> int)
+  ;;
+
+  let same_document_head t head =
+    match t.basis with
+    | Current.Project -> true
+    | Current.Document -> Retained_document_capture.same_head t.document_head head
+  ;;
+
+  let same_basis_now t =
+    match
+      ( t.basis
+      , Ledger.basis
+          (Project.Project_cache.contexts t.owner.project_cache)
+          ~identity:t.context.identity )
+    with
+    | Current.Project, Some Ledger.Basis.Project
+    | Current.Document, Some Ledger.Basis.Document -> true
+    | Current.Project, (Some Ledger.Basis.Document | None)
+    | Current.Document, (Some Ledger.Basis.Project | None) -> false
+  ;;
+
+  let of_current owner current ~connection =
+    if not (current_live current)
+    then Error Error.Stale_context
+    else (
+      match find_connection owner connection with
+      | None -> Error Error.Stale_negotiation
+      | Some entry ->
+        (match entry.negotiation with
+         | Some negotiation
+           when valid_negotiation entry
+                && Option.exists
+                     (find_context entry current.context.id)
+                     ~f:(phys_equal current.context)
+                && P.Authoring.Context.Expected.equal
+                     current.expected
+                     (P.Authoring.Context.Expected.of_view current.context.view) ->
+           Ok
+             { owner
+             ; connection
+             ; entry
+             ; negotiation
+             ; context = current.context
+             ; expected = current.expected
+             ; basis = Current.basis current
+             ; document_head = current.retained_document_capture
+             }
+         | Some _ | None -> Error Error.Stale_negotiation))
+  ;;
+
+  let matches_current t current =
+    if
+      current_live current
+      && phys_equal t.context current.context
+      && P.Authoring.Context.Expected.equal t.expected current.expected
+      && (match t.basis, Current.basis current with
+          | Current.Project, Current.Project | Current.Document, Current.Document -> true
+          | Current.Project, Current.Document | Current.Document, Current.Project -> false)
+      && same_document_head t current.retained_document_capture
+    then Ok ()
+    else Error Error.Stale_context
+  ;;
+
+  let check_now t ~actor =
+    let open Result.Let_syntax in
+    let%bind () = check_domain t.owner in
+    let%bind () = check_actor t.connection actor in
+    let%bind () = check_actor_context t.context.original_actor actor in
+    let%bind () =
+      try_with_gate t.owner (fun () ->
+        match find_connection t.owner t.connection with
+        | Some entry when phys_equal entry t.entry ->
+          let%bind () = check_entry t.owner entry in
+          if
+            valid_negotiation entry
+            && Option.exists entry.negotiation ~f:(phys_equal t.negotiation)
+            && Option.exists (find_context entry t.context.id) ~f:(phys_equal t.context)
+            && P.Authoring.Context.Expected.equal
+                 t.expected
+                 (P.Authoring.Context.Expected.of_view t.context.view)
+            && same_basis_now t
+            && same_document_head t t.owner.document_capture
+          then Ok ()
+          else Error Error.Stale_context
+        | Some _ | None -> Error Error.Stale_negotiation)
+    in
+    check_context_selection_now t.owner t.context ~actor
+  ;;
+end
+
 let with_current
       ?(feature = Selected_feature.Core_authoring)
       ?(final_check = fun () -> Ok ())

@@ -24,6 +24,7 @@
   ochat.chatml_prompt_binding
   ochat.chatml_project_build
   ochat.chatml_prepared_program
+  ochat.chatml_developer_capture
   ochat.chatml
   chatml_project_build_tests
   chatmd)

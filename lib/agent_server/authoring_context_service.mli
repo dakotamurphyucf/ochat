@@ -436,6 +436,174 @@ module Assistance : sig
     -> (W.Response.t, Error.t) result
 end
 
+(** Comparison-only developer capture through the SAME source and context
+    owners. Preparing a Candidate captures immutable code under an explicit
+    host-selected Standard One_off_v1 contract; it does not execute or create a
+    Root. The hosted runner installs the existing Root.Registry admission after the
+    Candidate's full/final checks. No transport method is advertised here. *)
+module Developer : sig
+  type t
+
+  module Limits : sig
+    type t
+
+    val create
+      :  max_prepared_input_bytes:int
+      -> max_document_origin_bytes:int
+      -> max_editor_versions:int
+      -> build:Chatml_project_build.Limits.t
+      -> t Or_error.t
+  end
+
+  module Selected_contract : sig
+    type t
+
+    (** Only the existing bounded Standard-contract cache can supply this
+        immutable One_off_v1 comparison identity. Host selection/currentness
+        remains independent. *)
+    val of_standard_entry : Authoring_standard_contracts.Entry.t -> (t, P.Error.t) result
+
+    val contract : t -> Chatml.Chatml_compiler_contract.t
+    val same_identity : t -> t -> bool
+  end
+
+  module Request : sig
+    type t
+
+    (** Bounded, inert input/fixture admission; no compilation or effects. *)
+    val create
+      :  entrypoint:string
+      -> input:Jsonaf.t
+      -> fixtures:Chatml_developer_capture.Fixture.t option
+      -> json_bounds:Chatml_developer_capture.Json_bounds.t
+      -> checkpoint:(unit -> unit)
+      -> (t, P.Error.t) result
+  end
+
+  module Target_policy : sig
+    type t
+
+    (** Trusted bounded NONYIELDING selectors from already admitted host
+        policy. Their arguments are comparison data, not source grants. The
+        candidate reselects both original and current actors after waits and
+        at Root's final admission; changed/missing identities reject. *)
+    val create
+      :  local_project:
+           (Operator_authorization.t
+            -> root:Sources.Root.t
+            -> project:Source.Portable_path.t
+            -> selection:Chatml_project.Selection.request
+            -> Selected_contract.t option)
+      -> local_source:
+           (Operator_authorization.t
+            -> root:Sources.Root.t
+            -> member:Source.Portable_path.t
+            -> Selected_contract.t option)
+      -> authoring_project:
+           (Operator_authorization.t
+            -> context:P.Authoring.Context.t
+            -> current:Ledger.Inputs.t
+            -> Selected_contract.t option)
+      -> document_project:
+           (Operator_authorization.t
+            -> context:P.Authoring.Context.t
+            -> current:Ledger.Document.Inputs.t
+            -> parsed:Prompt.Chat_markdown.Parsed.t
+            -> declaration:Prompt.Chat_markdown.Declaration.t
+            -> build:Chatml_project_build.t
+            -> metadata:Sources.Document_context.Project_capture.t option
+            -> Selected_contract.t option)
+      -> document_source:
+           (Operator_authorization.t
+            -> context:P.Authoring.Context.t
+            -> current:Ledger.Document.Inputs.t
+            -> parsed:Prompt.Chat_markdown.Parsed.t
+            -> declaration:Prompt.Chat_markdown.Declaration.t
+            -> script:Chatml_source.t
+            -> Selected_contract.t option)
+      -> t
+  end
+
+  module Local_project : sig
+    type t
+
+    val create
+      :  root:Sources.Root.t
+      -> dependency_roots:Sources.Root.t list
+      -> project:Source.Portable_path.t
+      -> selection:Chatml_project.Selection.request
+      -> t
+  end
+
+  module Local_source : sig
+    type t
+
+    val create : root:Sources.Root.t -> member:Source.Portable_path.t -> t
+  end
+
+  module Document_script : sig
+    type t
+
+    val create : selector:P.Authoring.Analysis.Target.selector -> t
+  end
+
+  module Candidate : sig
+    type t
+
+    val capture : t -> Chatml_developer_capture.t
+
+    (** The same closure survives a provisional Root recovery, but each
+        attempt's yielding full check mints a fresh final comparison. Root
+        supplies its physical original actor/capture and a fresh checkpoint. *)
+    val final_admission
+      :  t
+      -> actor:Operator_authorization.t
+      -> capture:Chatml_developer_capture.t
+      -> checkpoint:(unit -> unit)
+      -> (unit -> (unit, P.Error.t) result, P.Error.t) result
+  end
+
+  val create : owner:owner -> policy:Target_policy.t -> limits:Limits.t -> t
+
+  val prepare_local_project
+    :  t
+    -> original_actor:Operator_authorization.t
+    -> actor:Operator_authorization.t
+    -> local:Local_project.t
+    -> request:Request.t
+    -> clock:Eio.Time.Mono.ty Eio.Time.Mono.t
+    -> checkpoint:(unit -> unit)
+    -> (Candidate.t, P.Error.t) result
+
+  val prepare_local_source
+    :  t
+    -> original_actor:Operator_authorization.t
+    -> actor:Operator_authorization.t
+    -> source:Local_source.t
+    -> request:Request.t
+    -> checkpoint:(unit -> unit)
+    -> (Candidate.t, P.Error.t) result
+
+  val prepare_authoring_project
+    :  t
+    -> actor:Operator_authorization.t
+    -> connection:Connection_context.t
+    -> expected:P.Authoring.Context.Expected.t
+    -> request:Request.t
+    -> checkpoint:(unit -> unit)
+    -> (Candidate.t, P.Error.t) result
+
+  val prepare_document_script
+    :  t
+    -> actor:Operator_authorization.t
+    -> connection:Connection_context.t
+    -> expected:P.Authoring.Context.Expected.t
+    -> script:Document_script.t
+    -> request:Request.t
+    -> checkpoint:(unit -> unit)
+    -> (Candidate.t, P.Error.t) result
+end
+
 (** Deliberately narrow test-only view of the same owner. Its opaque receipts
     cannot grant source access or escape a live publication probe. *)
 module For_testing : sig

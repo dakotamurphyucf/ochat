@@ -41,6 +41,18 @@ end
 module Registry : sig
   type t
 
+  (** Trusted host check bound to one physical Candidate. The preparation may
+      yield and must prove current actor/source/selection/pin under the fresh
+      attempt checkpoint. It returns one bounded NONYIELDING check for that
+      exact proof. Neither callback grants a Root, Store writer or capability.
+      Root stores the same function in its existing provisional admission; a
+      recovery resume cannot replace it with a different capture candidate. *)
+  type final_admission =
+    actor:Operator_authorization.t
+    -> capture:Chatml_developer_capture.t
+    -> checkpoint:(unit -> unit)
+    -> (unit -> (unit, Agent_protocol.Error.t) result, Agent_protocol.Error.t) result
+
   (** Comparison only: the scheduler and this physical Root registry must use
       the same capacity ledger. This grants no reservation or Root admission. *)
   val uses_capacity : t -> Job_capacity.t -> bool
@@ -84,9 +96,18 @@ module Registry : sig
       None makes Model.spawn unavailable; there is no ambient fallback or
       in-place replacement.
       The host validates capture origin and workspace membership before calling
-      this trusted host API; its pure capture value alone grants neither. *)
+      this trusted host API; its pure capture value alone grants neither.
+      When [final_admission] is supplied, [checkpoint] is required before a
+      provisional slot is reserved. After all Store/tracking/worker waits,
+      Root invokes its yielding full check, repeats its own physical
+      [verify_admission], then invokes the returned nonyielding check immediately
+      before publishing Owned Live. No yield separates that check and the table
+      swap; a stale or Busy final check never exposes a Root. Existing callers
+      without [final_admission] retain their prior admission checks. *)
   val admit
-    :  t
+    :  ?final_admission:final_admission
+    -> ?checkpoint:(unit -> unit)
+    -> t
     -> actor:Operator_authorization.t
     -> capture:Chatml_developer_capture.t
     -> registry:Chat_response.Tool_capability.t
@@ -105,9 +126,15 @@ module Registry : sig
       Caller exceptions/cancellation keep their identity. A clean preselection
       failure can abort the empty window and release admission. An unresolved
       Pending retains the provisional slot and Run_claim, excluding any new
-      same-run owner or effect until [resume_recovery] settles it. *)
+      same-run owner or effect until [resume_recovery] settles it. A supplied
+      [final_admission] is retained with this same provisional slot and physical
+      claim. Its full check runs after the final Store/worker wait for THIS
+      attempt and returns a fresh nonyielding check; a failed check follows
+      existing joined cleanup without discarding unknown Store custody. *)
   val admit_with_recovery
-    :  t
+    :  ?final_admission:final_admission
+    -> ?checkpoint:(unit -> unit)
+    -> t
     -> actor:Operator_authorization.t
     -> capture:Chatml_developer_capture.t
     -> registry:Chat_response.Tool_capability.t
@@ -129,9 +156,13 @@ module Registry : sig
       original actor becomes current again, or a separately authorized future
       cleanup policy reconciles the exact frozen preparation. There is no
       fresh-actor rebind in this API.
-      Missing, foreign, closed, concurrent or already-owned slots reject. *)
+      Missing, foreign, closed, concurrent or already-owned slots reject. If
+      this provisional slot has [final_admission], a FRESH [checkpoint] is
+      required for resumed full verification of the SAME captured Candidate;
+      the earlier attempt's checked receipt cannot be reused. *)
   val resume_recovery
-    :  t
+    :  ?checkpoint:(unit -> unit)
+    -> t
     -> actor:Operator_authorization.t
     -> handle:Agent_store.Developer_run_store.handle
     -> recover:

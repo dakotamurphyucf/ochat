@@ -50,3 +50,17 @@ val prepare
   -> limits:Chatml_project_build.Limits.t
   -> checkpoint:(unit -> unit)
   -> (Prepared.t, Error.t) result
+
+(** Reuse the SAME current Inputs, fresh collision-checked lock and bounded
+    [Effective.validate_overlay] path with a separately host-admitted developer
+    contract. The original analysis contract/context is not replaced. The
+    caller has already proved this exact One_off contract is selected by its
+    execution policy and must reselect it after yields; this pure operation
+    cannot grant a target or source read. Both [prepare] variants use one
+    shared allowance over Inputs, lock discovery and overlay validation. *)
+val prepare_with_contract
+  :  Owner.Current.t
+  -> contract:Chatml.Chatml_compiler_contract.t
+  -> limits:Chatml_project_build.Limits.t
+  -> checkpoint:(unit -> unit)
+  -> (Prepared.t, Error.t) result

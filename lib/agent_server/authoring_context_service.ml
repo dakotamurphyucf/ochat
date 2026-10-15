@@ -58,4 +58,13 @@ module Semantic = struct
 end
 
 module Assistance = Authoring_context_assistance_service
+
+module Developer = struct
+  include Developer_capture_host
+
+  let create ~owner ~policy ~limits =
+    Developer_capture_host.create ~authoring:owner ~policy ~limits
+  ;;
+end
+
 module For_testing = Authoring_context_testing
