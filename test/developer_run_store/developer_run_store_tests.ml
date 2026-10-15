@@ -160,13 +160,19 @@ let replace_epoch_field json ~index ~name ~value =
       | _ -> failwith "expected two saved epochs"))
 ;;
 
-let limits ?(max_work_steps = 200) ?(max_jobs_per_run = 4) () =
+let limits
+      ?(max_work_steps = 200)
+      ?(max_jobs_per_run = 4)
+      ?(max_document_bytes = 4096)
+      ?max_inference_bytes_per_run
+      ()
+  =
   let document =
     Document_schema.Limits.create
-      ~max_bytes:4096
+      ~max_bytes:max_document_bytes
       ~max_depth:16
-      ~max_fields:256
-      ~max_nodes:512
+      ~max_fields:(max_document_bytes / 16)
+      ~max_nodes:(max_document_bytes / 8)
     |> ok
   in
   R.Limits.create
@@ -174,9 +180,12 @@ let limits ?(max_work_steps = 200) ?(max_jobs_per_run = 4) () =
     ~max_epochs_per_run:4
     ~max_jobs_per_run
     ~max_invocations_per_run:4
+    ~max_inference_attempts_per_run:256
+    ~max_inference_bytes_per_run:
+      (Option.value max_inference_bytes_per_run ~default:max_document_bytes)
     ~max_selected_per_commit:2
     ~max_job_payload_bytes:1024
-    ~max_document_bytes:4096
+    ~max_document_bytes
     ~max_recovery_entries:16
     ~max_recovery_bytes:16384
     ~max_work_steps
@@ -201,25 +210,46 @@ let open_run
       ?(checkpoint = fun () -> ())
       ?(max_work_steps = 200)
       ?(max_jobs_per_run = 4)
+      ?(max_document_bytes = 4096)
+      ?max_inference_bytes_per_run
       ()
   =
   match
     R.open_or_create
       session
       ~sw
-      ~limits:(limits ~max_work_steps ~max_jobs_per_run ())
+      ~limits:
+        (limits
+           ~max_work_steps
+           ~max_jobs_per_run
+           ~max_document_bytes
+           ?max_inference_bytes_per_run
+           ())
       ~checkpoint
   with
   | Ok value -> value
   | Error error -> raise_s [%sexp "developer run open failed", (error : R.Error.t)]
 ;;
 
-let with_root ?(checkpoint = fun () -> ()) f =
+let with_root
+      ?(checkpoint = fun () -> ())
+      ?(max_document_bytes = 4096)
+      ?max_inference_bytes_per_run
+      f
+  =
   with_temp_directory "ochat-developer-run" (fun env temporary ->
     Eio.Switch.run (fun sw ->
       let root = Filename.concat temporary "data" in
       let session = create_session env sw root in
-      let run = open_run session sw ~checkpoint () in
+      let run =
+        open_run
+          session
+          sw
+          ~checkpoint
+          ~max_document_bytes
+          ?max_inference_bytes_per_run
+          ()
+      in
       Exn.protect
         ~f:(fun () -> f env sw root session run)
         ~finally:(fun () ->

@@ -1284,6 +1284,8 @@ let%test_unit "cancelled large claim preparation joins its codec before close an
           ~max_epochs_per_run:1
           ~max_jobs_per_run:1
           ~max_invocations_per_run:1
+          ~max_inference_attempts_per_run:256
+          ~max_inference_bytes_per_run:max_bytes
           ~max_selected_per_commit:1
           ~max_job_payload_bytes:max_bytes
           ~max_document_bytes:max_bytes

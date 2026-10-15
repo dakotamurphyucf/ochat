@@ -2,6 +2,8 @@ open! Core
 module D = Document_schema
 module F = Document_fields
 module P = Agent_protocol
+module O = Inference.Observation
+module Inference_entry = Developer_inference_row
 
 module Member = struct
   type t =
@@ -35,12 +37,16 @@ type t =
   ; epochs : epoch list
   ; invocations : Invocation_entry.t list
   ; jobs : P.Developer_job.t list
+  ; last_inference_ordinal : int64
+  ; inference_entries : Inference_entry.t list
+  ; inference_bytes : int
   }
 
 let kind = "store.developer_run"
 let version = 1
 let ( let* ) result f = Result.bind result ~f
 let corrupt reason = Error (Store_error.Corrupt reason)
+let limit reason = Error (Store_error.Document (D.Error.Limit_exceeded reason))
 let invalid field reason = F.invalid field reason |> F.store
 let host_id t = t.host_id
 let run_id t = t.run_id
@@ -51,6 +57,25 @@ let epoch_number t = t.number
 let epoch_capture t = t.capture
 let epoch_phase t = t.phase
 let epoch_revision (t : epoch) = t.revision
+let inference_entries t = t.inference_entries
+let inference_count t = List.length t.inference_entries
+let inference_bytes t = t.inference_bytes
+let last_inference_ordinal t = t.last_inference_ordinal
+
+let next_inference_ordinal t =
+  if Int64.(t.last_inference_ordinal < zero || t.last_inference_ordinal >= max_value)
+  then None
+  else Some Int64.(t.last_inference_ordinal + one)
+;;
+
+let inference_scope t ~(owner : P.Execution_owner.developer) ~job_id ~ordinal ~relation =
+  if
+    P.Id.Server.equal t.host_id owner.host_id
+    && P.Id.Developer_run.equal t.run_id owner.run_id
+    && P.Id.Principal.equal t.principal_id owner.principal_id
+  then Inference_entry.scope ~owner ~job_id ~ordinal ~relation
+  else Error (Store_error.Corrupt "foreign inference scope owner")
+;;
 
 let find_invocation t id =
   List.find t.invocations ~f:(fun entry ->
@@ -94,6 +119,9 @@ let create ~(owner : P.Execution_owner.developer) ~capture_fingerprint =
       ]
   ; invocations = []
   ; jobs = []
+  ; last_inference_ordinal = 0L
+  ; inference_entries = []
+  ; inference_bytes = 0
   }
 ;;
 
@@ -280,6 +308,262 @@ let validate_relations t ~poll =
   if Int.equal !visited count
   then Ok ()
   else corrupt "developer run member ancestry contains a cycle"
+;;
+
+let validate_inference_relations
+      t
+      ~poll
+      ~limits
+      ~max_inference_attempts
+      ~max_inference_bytes
+  =
+  let open Result.Let_syntax in
+  if
+    List.length t.inference_entries > max_inference_attempts
+    || Int64.(t.last_inference_ordinal < zero)
+  then corrupt "developer inference row count or ordinal exceeds limit"
+  else (
+    let prior_by_scope = Hashtbl.create (module Transcript.Scope.Key) in
+    let epoch_by_number = Hashtbl.create (module Int) in
+    let job_by_id = Hashtbl.create (module P.Id.Job) in
+    List.iter t.epochs ~f:(fun epoch ->
+      poll ();
+      Hashtbl.set epoch_by_number ~key:epoch.number ~data:epoch);
+    List.iter t.jobs ~f:(fun job ->
+      poll ();
+      Hashtbl.set job_by_id ~key:(P.Developer_job.id job) ~data:job);
+    let rec check last total recovered_total active_count recovered = function
+      | [] ->
+        if
+          not
+            (Int64.equal last t.last_inference_ordinal
+             && Int.equal total t.inference_bytes)
+        then corrupt "developer inference ordinal or byte count disagrees with rows"
+        else if recovered_total > max_inference_bytes
+        then limit "developer inference recovery reserve exceeds aggregate limit"
+        else if Int64.(t.revision >= max_value - of_int active_count)
+        then limit "developer inference recovery exhausts document revision"
+        else
+          Ok
+            { t with
+              revision = Int64.(t.revision + of_int active_count)
+            ; inference_entries = List.rev recovered
+            ; inference_bytes = recovered_total
+            }
+      | entry :: rest ->
+        poll ();
+        let ordinal = Inference_entry.ordinal entry in
+        let owner = Inference_entry.owner entry in
+        let job_id = Inference_entry.job_id entry in
+        let attempt = Inference_entry.job_attempt entry in
+        let record = Inference_entry.record entry in
+        let scope = O.Attempt_record.scope record in
+        let%bind () =
+          if Int64.(ordinal <= last) || Int64.(ordinal <= zero)
+          then corrupt "developer inference ordinals are not strictly increasing"
+          else Ok ()
+        in
+        let%bind () =
+          match Hashtbl.find epoch_by_number owner.epoch with
+          | Some epoch
+            when Chatml_source.Digest.equal
+                   epoch.capture
+                   (Inference_entry.capture_fingerprint entry) -> Ok ()
+          | Some _ | None -> corrupt "developer inference has foreign epoch or capture"
+        in
+        let%bind () =
+          match Hashtbl.find job_by_id job_id with
+          | Some job
+            when P.Job.equal_kind (P.Developer_job.kind job) P.Job.Model_call
+                 && P.Execution_owner.equal_developer (P.Developer_job.owner job) owner
+                 && Chatml_source.Digest.equal
+                      (P.Developer_job.capture_fingerprint job)
+                      (Inference_entry.capture_fingerprint entry)
+                 && attempt > 0
+                 && attempt <= (P.Developer_job.state job).attempt -> Ok ()
+          | Some _ | None ->
+            corrupt "developer inference has no matching historical model attempt"
+        in
+        let%bind recreated =
+          Inference_entry.create
+            ~ordinal
+            ~owner
+            ~capture_fingerprint:(Inference_entry.capture_fingerprint entry)
+            ~job_id
+            ~job_attempt:attempt
+            ~context_id:(Inference_entry.context_id entry)
+            ~record
+            ~limits
+        in
+        let%bind recovery_entry, was_active =
+          let delivery =
+            match O.Attempt_record.state record with
+            | Prepared -> Some Inference.Event.Terminal.Definitely_not_submitted
+            | Running -> Some Inference.Event.Terminal.Possibly_submitted
+            | Terminal _ | Interrupted _ -> None
+          in
+          match delivery with
+          | None -> Ok (entry, false)
+          | Some delivery ->
+            (match
+               Developer_inference_transition.interrupted
+                 record
+                 ~reason:O.Attempt_record.Host_interrupted
+                 ~delivery
+             with
+             | Ok (Developer_inference_transition.Changed after) ->
+               Result.map (Inference_entry.with_record entry after ~limits) ~f:(fun row ->
+                 row, true)
+             | Error Developer_inference_transition.Limit_exceeded ->
+               limit "developer inference recovery row exceeds limit"
+             | Ok Developer_inference_transition.Unchanged
+             | Error Developer_inference_transition.Conflict ->
+               corrupt "developer inference recovery form is invalid")
+        in
+        let%bind () =
+          if Inference_entry.encoded_bytes recreated > max_inference_bytes - total
+          then corrupt "developer inference aggregate bytes exceed limit"
+          else Ok ()
+        in
+        let%bind () =
+          match scope.relation with
+          | Transcript.Scope.Root -> Ok ()
+          | Transcript.Scope.Nested parent ->
+            (match Hashtbl.find prior_by_scope parent.scope with
+             | Some prior
+               when P.Execution_owner.equal_developer (Inference_entry.owner prior) owner
+                    && P.Id.Job.equal (Inference_entry.job_id prior) job_id
+                    && Int.equal (Inference_entry.job_attempt prior) attempt
+                    && Int64.(Inference_entry.ordinal prior < ordinal) -> Ok ()
+             | Some _ | None -> corrupt "developer inference parent is missing or foreign")
+        in
+        let key = Transcript.Scope.key scope in
+        let%bind () =
+          if Hashtbl.mem prior_by_scope key
+          then corrupt "duplicate developer inference scope"
+          else Ok ()
+        in
+        Hashtbl.set prior_by_scope ~key ~data:entry;
+        let recovered_bytes = Inference_entry.encoded_bytes recovery_entry in
+        let%bind () =
+          if recovered_bytes > max_inference_bytes - recovered_total
+          then limit "developer inference recovery reserve exceeds aggregate limit"
+          else Ok ()
+        in
+        let active_count = active_count + if was_active then 1 else 0 in
+        check
+          ordinal
+          (total + Inference_entry.encoded_bytes recreated)
+          (recovered_total + recovered_bytes)
+          active_count
+          (recovery_entry :: recovered)
+          rest
+    in
+    check 0L 0 0 0 [] t.inference_entries)
+;;
+
+let append_inference
+      t
+      ~poll
+      ~limits
+      ~ordinal
+      ~owner
+      ~capture_fingerprint
+      ~job_id
+      ~job_attempt
+      ~context_id
+      ~record
+      ~max_inference_attempts
+      ~max_inference_bytes
+  =
+  let open Result.Let_syntax in
+  let%bind () =
+    if List.length t.inference_entries >= max_inference_attempts
+    then corrupt "developer inference row quota exceeded"
+    else Ok ()
+  in
+  let%bind () =
+    match next_inference_ordinal t with
+    | Some next when Int64.equal next ordinal -> Ok ()
+    | Some _ | None -> corrupt "developer inference next ordinal conflicts"
+  in
+  let%bind entry =
+    Inference_entry.create
+      ~ordinal
+      ~owner
+      ~capture_fingerprint
+      ~job_id
+      ~job_attempt
+      ~context_id
+      ~record
+      ~limits
+  in
+  let%bind () =
+    if Inference_entry.encoded_bytes entry > max_inference_bytes - inference_bytes t
+    then corrupt "developer inference aggregate bytes exceed limit"
+    else Ok ()
+  in
+  let%bind revision = next_revision t.revision in
+  let next =
+    { t with
+      revision
+    ; last_inference_ordinal = ordinal
+    ; inference_entries = t.inference_entries @ [ entry ]
+    ; inference_bytes = t.inference_bytes + Inference_entry.encoded_bytes entry
+    }
+  in
+  let%map _recovery =
+    validate_inference_relations
+      next
+      ~poll
+      ~limits
+      ~max_inference_attempts
+      ~max_inference_bytes
+  in
+  next
+;;
+
+let set_inference_record t ~poll ~limits ~ordinal ~expected ~after ~max_inference_bytes =
+  let open Result.Let_syntax in
+  let%bind prior =
+    match
+      List.find t.inference_entries ~f:(fun entry ->
+        Int64.equal (Inference_entry.ordinal entry) ordinal)
+    with
+    | None -> corrupt "developer inference row is missing"
+    | Some row -> Ok row
+  in
+  let%bind () =
+    if
+      Inference_entry.same_identity prior expected
+      && Jsonaf.exactly_equal
+           (O.Attempt_record.to_json (Inference_entry.record prior))
+           (O.Attempt_record.to_json (Inference_entry.record expected))
+    then Ok ()
+    else corrupt "developer inference expected row conflicts"
+  in
+  let%bind updated = Inference_entry.with_record prior after ~limits in
+  let%bind () =
+    if
+      Inference_entry.encoded_bytes updated
+      > max_inference_bytes - (inference_bytes t - Inference_entry.encoded_bytes prior)
+    then corrupt "developer inference aggregate bytes exceed limit"
+    else Ok ()
+  in
+  let%map revision = next_revision t.revision in
+  let inference_entries =
+    List.map t.inference_entries ~f:(fun entry ->
+      poll ();
+      if Int64.equal (Inference_entry.ordinal entry) ordinal then updated else entry)
+  in
+  { t with
+    revision
+  ; inference_entries
+  ; inference_bytes =
+      t.inference_bytes
+      - Inference_entry.encoded_bytes prior
+      + Inference_entry.encoded_bytes updated
+  }
 ;;
 
 let set_invocation t ~poll ~id ~expected_revision ~after ~max_invocations =
@@ -515,10 +799,25 @@ let to_payload t ~poll =
           (List.map t.jobs ~f:(fun job ->
              poll ();
              P.Developer_job.to_json job)) )
+    ; "last_inference_ordinal", F.decimal_json t.last_inference_ordinal
+    ; ( "inference_attempts"
+      , `Array
+          (List.map t.inference_entries ~f:(fun entry ->
+             poll ();
+             Inference_entry.to_json entry)) )
     ]
 ;;
 
-let validate t ~poll ~limits ~max_epochs ~max_jobs ~max_invocations ~max_job_payload_bytes
+let validate
+      t
+      ~poll
+      ~limits
+      ~max_epochs
+      ~max_jobs
+      ~max_invocations
+      ~max_job_payload_bytes
+      ~max_inference_attempts
+      ~max_inference_bytes
   =
   let open Result.Let_syntax in
   let%bind () =
@@ -587,6 +886,14 @@ let validate t ~poll ~limits ~max_epochs ~max_jobs ~max_invocations ~max_job_pay
       | Nested_agent | Scheduled_event | Async_tool | Shell_process | Compaction -> Ok ())
   in
   let%bind () = validate_relations t ~poll in
+  let%bind recovery =
+    validate_inference_relations
+      t
+      ~poll
+      ~limits
+      ~max_inference_attempts
+      ~max_inference_bytes
+  in
   let%map _payload_bytes =
     List.fold_result t.jobs ~init:0 ~f:(fun accumulated job ->
       poll ();
@@ -601,12 +908,13 @@ let validate t ~poll ~limits ~max_epochs ~max_jobs ~max_invocations ~max_job_pay
       then corrupt "developer job payload bytes exceed limit"
       else Ok (accumulated + length))
   in
-  ()
+  recovery
 ;;
 
 module Encode_input = struct
   type t =
     { payload : D.Json.t
+    ; recovery_payload : D.Json.t option
     ; limits : D.Limits.t
     }
 end
@@ -619,22 +927,55 @@ let prepare_encode
       ~max_jobs
       ~max_invocations
       ~max_job_payload_bytes
+      ~max_inference_attempts
+      ~max_inference_bytes
   =
   let open Result.Let_syntax in
-  let%bind () =
-    validate t ~poll ~limits ~max_epochs ~max_jobs ~max_invocations ~max_job_payload_bytes
+  let%bind recovery =
+    validate
+      t
+      ~poll
+      ~limits
+      ~max_epochs
+      ~max_jobs
+      ~max_invocations
+      ~max_job_payload_bytes
+      ~max_inference_attempts
+      ~max_inference_bytes
   in
-  let%map payload = to_payload t ~poll in
-  { Encode_input.payload; limits }
+  let%bind payload = to_payload t ~poll in
+  let%map recovery_payload =
+    if List.is_empty t.inference_entries || Int64.equal t.revision recovery.revision
+    then Ok None
+    else Result.map (to_payload recovery ~poll) ~f:Option.some
+  in
+  { Encode_input.payload; recovery_payload; limits }
 ;;
 
-let finish_encode { Encode_input.payload; limits } =
+let finish_encode { Encode_input.payload; recovery_payload; limits } =
   let open Result.Let_syntax in
-  let%map document = D.Document.create ~limits ~kind ~version ~payload |> F.store in
+  let%bind document = D.Document.create ~limits ~kind ~version ~payload |> F.store in
+  let%map () =
+    match recovery_payload with
+    | None -> Ok ()
+    | Some payload ->
+      D.Document.create ~limits ~kind ~version ~payload
+      |> F.store
+      |> Result.map ~f:(fun _ -> ())
+  in
   D.Document.to_string document
 ;;
 
-let to_bytes t ~poll ~limits ~max_epochs ~max_jobs ~max_invocations ~max_job_payload_bytes
+let to_bytes
+      t
+      ~poll
+      ~limits
+      ~max_epochs
+      ~max_jobs
+      ~max_invocations
+      ~max_job_payload_bytes
+      ~max_inference_attempts
+      ~max_inference_bytes
   =
   prepare_encode
     t
@@ -644,6 +985,8 @@ let to_bytes t ~poll ~limits ~max_epochs ~max_jobs ~max_invocations ~max_job_pay
     ~max_jobs
     ~max_invocations
     ~max_job_payload_bytes
+    ~max_inference_attempts
+    ~max_inference_bytes
   |> Result.bind ~f:finish_encode
 ;;
 
@@ -694,6 +1037,8 @@ let of_decoded_document
       ~max_jobs
       ~max_invocations
       ~max_job_payload_bytes
+      ~max_inference_attempts
+      ~max_inference_bytes
   =
   let open Result.Let_syntax in
   (* Document.decode recorded the exact admitted limits. With the Store's same
@@ -709,7 +1054,16 @@ let of_decoded_document
   let%bind () =
     exact_fields
       payload
-      [ "host_id"; "run_id"; "principal_id"; "revision"; "epochs"; "invocations"; "jobs" ]
+      [ "host_id"
+      ; "run_id"
+      ; "principal_id"
+      ; "revision"
+      ; "epochs"
+      ; "invocations"
+      ; "jobs"
+      ; "last_inference_ordinal"
+      ; "inference_attempts"
+      ]
   in
   let%bind host_id = required payload "host_id" (protocol P.Id.Server.of_json) in
   let%bind run_id = required payload "run_id" (protocol P.Id.Developer_run.of_json) in
@@ -731,8 +1085,13 @@ let of_decoded_document
   in
   let%bind invocations = required payload "invocations" F.array in
   let%bind jobs = required payload "jobs" F.array in
+  let%bind last_inference_ordinal = required payload "last_inference_ordinal" F.decimal in
+  let%bind inference_attempts = required payload "inference_attempts" F.array in
   let%bind () =
-    if List.length invocations > max_invocations || List.length jobs > max_jobs
+    if
+      List.length invocations > max_invocations
+      || List.length jobs > max_jobs
+      || List.length inference_attempts > max_inference_attempts
     then corrupt "developer run member count exceeds limit"
     else Ok ()
   in
@@ -760,9 +1119,48 @@ let of_decoded_document
       protocol P.Developer_job.of_json json |> F.store)
     |> Result.all
   in
-  let t = { host_id; run_id; principal_id; revision; epochs; invocations; jobs } in
+  let%bind inference_entries =
+    List.map inference_attempts ~f:(fun json ->
+      poll ();
+      Inference_entry.of_json json ~limits)
+    |> Result.all
+  in
+  let inference_bytes =
+    List.sum (module Int) inference_entries ~f:Inference_entry.encoded_bytes
+  in
+  let t =
+    { host_id
+    ; run_id
+    ; principal_id
+    ; revision
+    ; epochs
+    ; invocations
+    ; jobs
+    ; last_inference_ordinal
+    ; inference_entries
+    ; inference_bytes
+    }
+  in
+  let%bind recovery =
+    validate
+      t
+      ~poll
+      ~limits
+      ~max_epochs
+      ~max_jobs
+      ~max_invocations
+      ~max_job_payload_bytes
+      ~max_inference_attempts
+      ~max_inference_bytes
+  in
   let%map () =
-    validate t ~poll ~limits ~max_epochs ~max_jobs ~max_invocations ~max_job_payload_bytes
+    if Int64.equal recovery.revision t.revision
+    then Ok ()
+    else (
+      let%bind payload = to_payload recovery ~poll in
+      D.Document.create_with_checkpoint ~limits ~checkpoint:poll ~kind ~version ~payload
+      |> F.store
+      |> Result.map ~f:(fun _ -> ()))
   in
   t
 ;;
@@ -775,6 +1173,8 @@ let of_bytes_with_document
       ~max_jobs
       ~max_invocations
       ~max_job_payload_bytes
+      ~max_inference_attempts
+      ~max_inference_bytes
   =
   let open Result.Let_syntax in
   let%bind document = D.Document.decode ~limits bytes |> F.store in
@@ -787,6 +1187,8 @@ let of_bytes_with_document
       ~max_jobs
       ~max_invocations
       ~max_job_payload_bytes
+      ~max_inference_attempts
+      ~max_inference_bytes
   in
   t, document
 ;;
@@ -799,6 +1201,8 @@ let of_bytes
       ~max_jobs
       ~max_invocations
       ~max_job_payload_bytes
+      ~max_inference_attempts
+      ~max_inference_bytes
   =
   Result.map
     (of_bytes_with_document
@@ -808,6 +1212,8 @@ let of_bytes
        ~max_epochs
        ~max_jobs
        ~max_invocations
-       ~max_job_payload_bytes)
+       ~max_job_payload_bytes
+       ~max_inference_attempts
+       ~max_inference_bytes)
     ~f:fst
 ;;
