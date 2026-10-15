@@ -2,6 +2,13 @@
     module does not poll queues, dispatch native tools or disclose results. *)
 open! Core
 
+module Capacity_decision : sig
+  type t =
+    | Acquired
+    | Unavailable
+    | Rejected
+end
+
 type t
 
 type close_policy =
@@ -118,11 +125,21 @@ end
     Store validates the original Claim and permits only old-epoch terminal
     bookkeeping. Only an exact Installed receipt can trigger best-effort intent
     retirement. An unresolved selection retains capacity and blocks fresh
-    admission. The selector cannot invoke the terminal continuation twice. *)
+    admission. The selector cannot invoke the terminal continuation twice.
+    [on_capacity_decision] is a trusted nonyielding scheduling observer, called
+    at the shared capacity decision with [Acquired], [Unavailable] for [Ok None],
+    or [Rejected] for a typed admission error. It grants no Claim or effect
+    authority.
+    [before_claim] may yield for a fresh Root check after reservation and
+    before Store preparation; the Worker then rechecks its exact handle and
+    owner. A rejection releases the protected reservation. The runner handles
+    one-shot notification for exits before Worker admission. *)
 val with_claimed_attempt
   :  t
   -> expected:Agent_store.Developer_run_store.Observation.t
   -> lookup:Agent_store.Developer_run_store.Job_lookup.t
+  -> ?on_capacity_decision:(Capacity_decision.t -> unit)
+  -> ?before_claim:(unit -> (unit, Agent_protocol.Error.t) result)
   -> ?select:
        (claim:Agent_store.Developer_run_store.Claim.t
         -> proposed:Agent_protocol.Developer_job.State.t
@@ -222,6 +239,8 @@ val with_claimed_selected_attempt
   -> expected:Agent_store.Developer_run_store.Observation.t
   -> lookup:Agent_store.Developer_run_store.Job_lookup.t
   -> max_staged_jobs:int
+  -> ?on_capacity_decision:(Capacity_decision.t -> unit)
+  -> ?before_claim:(unit -> (unit, Agent_protocol.Error.t) result)
   -> ?select:
        (claim:Agent_store.Developer_run_store.Claim.t
         -> proposed:Agent_protocol.Developer_job.State.t

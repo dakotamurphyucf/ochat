@@ -240,6 +240,12 @@ and terminal_plan =
 
 type run = t
 
+type claim_preflight =
+  { preflight_root : run
+  ; preflight_selected : Capability.t
+  ; preflight_selection_revision : int
+  }
+
 let action_key : action Eio.Fiber.key = Eio.Fiber.create_key ()
 let root_call_key : t Eio.Fiber.key = Eio.Fiber.create_key ()
 let native_call_key : t Eio.Fiber.key = Eio.Fiber.create_key ()
@@ -412,6 +418,12 @@ module Current = struct
   let selected (t : t) = t.selected
 end
 
+module Claim_preflight = struct
+  type nonrec t = claim_preflight
+
+  let selected (t : t) = t.preflight_selected
+end
+
 let job_parent t active =
   let issuer = Developer_job_worker.issuer t.worker in
   let* parent = Job_scope.parent issuer active in
@@ -423,9 +435,34 @@ let job_parent t active =
   Ok parent
 ;;
 
-let with_claimed_job t ~expected ~lookup ?select f =
-  let* _ = current t in
-  Developer_job_worker.with_claimed_attempt t.worker ~expected ~lookup ?select f
+let claim_preflight t =
+  Result.map (current_local t) ~f:(fun (witness : current) ->
+    { preflight_root = t
+    ; preflight_selected = witness.selected
+    ; preflight_selection_revision = witness.selection_revision
+    })
+;;
+
+let check_claim_selection t (original : claim_preflight) =
+  let* latest = current t in
+  if
+    phys_equal original.preflight_root t
+    && phys_equal original.preflight_selected latest.selected
+    && Int.equal original.preflight_selection_revision latest.selection_revision
+  then Ok ()
+  else invalid "developer worker selection changed before claim"
+;;
+
+let with_claimed_job t ~expected ~lookup ?on_capacity_decision ?select f =
+  let* original = claim_preflight t in
+  Developer_job_worker.with_claimed_attempt
+    t.worker
+    ~expected
+    ~lookup
+    ?on_capacity_decision
+    ~before_claim:(fun () -> check_claim_selection t original)
+    ?select
+    f
 ;;
 
 module Worker_action = struct
@@ -561,7 +598,7 @@ module Job_candidate = struct
     Ok candidates
   ;;
 
-  let with_claimed issuer t ?select f =
+  let with_claimed issuer t ?on_capacity_decision ?select f =
     if not (phys_equal issuer t.issuer)
     then invalid "developer scheduler candidate belongs to another run"
     else
@@ -569,20 +606,30 @@ module Job_candidate = struct
         issuer
         ~expected:(Store.Scheduler_candidate.observation t.stored)
         ~lookup:(Store.Scheduler_candidate.lookup t.stored)
+        ?on_capacity_decision
         ?select
         f
   ;;
 
-  let with_claimed_selected issuer t ?select f =
+  let with_claimed_selected issuer t ?on_capacity_decision ?selection_witness ?select f =
     if not (phys_equal issuer t.issuer)
     then invalid "developer scheduler candidate belongs to another run"
     else
-      let* _ = current issuer in
+      let* original =
+        match selection_witness with
+        | None -> claim_preflight issuer
+        | Some (witness : claim_preflight) ->
+          if phys_equal witness.preflight_root issuer
+          then Ok witness
+          else invalid "developer worker selection came from another root"
+      in
       Developer_job_worker.with_claimed_selected_attempt
         issuer.worker
         ~expected:(Store.Scheduler_candidate.observation t.stored)
         ~lookup:(Store.Scheduler_candidate.lookup t.stored)
         ~max_staged_jobs:issuer.registry.limits.max_staged_jobs
+        ?on_capacity_decision
+        ~before_claim:(fun () -> check_claim_selection issuer original)
         ?select
         (fun ~active ~sw ~children ->
            let* action = Worker_action.create issuer ~active ~children in
@@ -2718,6 +2765,9 @@ let close_and_wait = close_owner
 
 module Registry = struct
   type nonrec t = registry
+
+  let uses_capacity t capacity = phys_equal t.capacity capacity
+  let max_active_workers t = t.limits.max_active_workers
 
   let active_for_scheduler t =
     if t.closed || not (same_domain t)

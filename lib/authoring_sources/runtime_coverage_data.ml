@@ -165,6 +165,7 @@ let shared_features =
     , "Claimed attempts, cancellation, waiting dependencies and interruption without \
        blind replay"
     , [ "lib/agent_server/job_scheduler.ml"
+      ; "lib/agent_server/job_scheduler_developer.ml"
       ; "lib/agent_session/background_execution.ml"
       ; "lib/agent_session/session_actor.ml"
       ]
@@ -334,13 +335,15 @@ let implementation_sources =
   ; ( "lib/agent_protocol/subscription.ml"
     , "a5447544cbe1cd55302cd70a3c50bf7f6b0ec07ad3af8ce1f70b7b90dfbd07bc" )
   ; ( "lib/agent_server/job_scheduler.ml"
-    , "df358d4533811f7cac2ce1e0251614538074d2ea013bcb97fdb2d53eebdf0e3c" )
+    , "3ab01ead9218e7d7516f6bf4b82f1aa38a3c490fd9669d3f2d333e61e54b437b" )
+  ; ( "lib/agent_server/job_scheduler_developer.ml"
+    , "b47829fd4e88d77ff6fbd9c75a375f8b99b145dec7f7e5d117c67018d1d37890" )
   ; ( "lib/agent_server/developer_background_job_runner.ml"
-    , "9e890818505752870ca4f8e43a55bd652da7ca163b3665ac71c87661bbcf4119" )
+    , "a3a61d53d809c07436e7e0f0ed4ddeabd787948dc5076a3d25ac988c8c4314a2" )
   ; ( "lib/agent_server/developer_script_job_execution.ml"
     , "4e30550f6585c6afa97ddd12a12042d0be26b84f18aad7f6f92b2f3a3bf4bb32" )
   ; ( "lib/agent_server/developer_script_job_service.ml"
-    , "f2a0f0ddb18d92142b2b858571578a1270e469635f9fa44546b1b85dc3d469aa" )
+    , "e5f620009034499dce25003374431d0ca0bc3a9b7cc756472746606ca5ea1463" )
   ; ( "lib/agent_server/schedule_scheduler.ml"
     , "37cf371632d8ad86693c162e0593d56866f76df577dceb06ddd2ac5fe5bfdae9" )
   ; ( "lib/agent_session/background_execution.ml"

@@ -1,8 +1,8 @@
 open! Core
 
-(** One daemon-owned fair dispatcher for conversation jobs, with a bounded
-    physical developer-candidate boundary ready for selected executors.
-    Developer jobs remain queued until those executors are installed.
+(** One daemon-owned fair dispatcher for conversation and physically attached
+    developer jobs. Developer candidates are observations only: the existing
+    Root/Worker path makes every claim with the shared capacity ledger.
     Conversation jobs retain typed Completion results and pending delivery;
     their event/notification adapter remains separate from legacy model events.
     A generic worker retains its completion and capacity lease while retrying a
@@ -37,6 +37,11 @@ module For_testing : sig
     :  after:Agent_protocol.Execution_owner.t option
     -> (Agent_protocol.Execution_owner.t * Agent_protocol.Job.t list) list
     -> Agent_protocol.Execution_owner.t list * Agent_protocol.Execution_owner.t option
+
+  (** Read-only synchronization for an actual capacity-unavailable developer
+      offer retained against this physical Root. Correctness must be asserted
+      from actual handler/capacity/durable state. *)
+  val developer_retry_pending : t -> root:Developer_root_owner.run -> bool
 end
 
 (** Recover complete private result preparations before durably interrupting the
@@ -60,14 +65,13 @@ val reconcile_entry
 
 (** Internal composition: false constructs a stopped service and starts no fiber.
     [developer_registry] is the actual physical root registry, not an owner-ID
-    resolver. Until the selected developer tool/model executor is installed,
-    the 50-ms production poll does not repeatedly read developer documents:
-    queued developer kinds stay untouched. The same bounded physical candidate
-    projection and owner-ordering policy are independently testable with real
-    Store/Root candidates now; the later executor attaches them to this ONE
-    poll, without creating a second scheduler or claiming unsupported work.
-    Conversation execution and delivery retain their existing actor/runtime
-    path. Production daemon registry creation/installation belongs to the
+    resolver, and must share this exact [capacity] value. A mismatch raises
+    [Invalid_argument] before starting a fiber (trusted host composition
+    invariant). With no attached executor the poll does not read developer
+    documents. Tool and Script packages attach to this ONE dispatcher; an
+    unsupported kind or absent package stays queued without a claim.
+    Conversation execution and delivery retain their actor/runtime path.
+    Production daemon registry creation and installation belong to the
     developer-run host assembly. *)
 val start_controlled
   :  enabled:bool
@@ -94,6 +98,47 @@ val start
         -> (Session_factory.model_job_inference, Agent_protocol.Error.t) Result.t)
   -> t
 
+(** Attach the one physical Tool/Script runner for [root]. The registry must be
+    present and currently contain this same live Root instance, and [runner]
+    must have been issued by it. An exact repeated attachment is idempotent;
+    a different package cannot replace a live one. The bounded attachment
+    table adds no execution authority or second Store/capacity owner. An
+    unavailable registry, stopped/closed scheduler, foreign/stale Root or mismatched
+    runner gives a finite typed error. No job is read or claimed here. *)
+val attach_developer
+  :  t
+  -> root:Developer_root_owner.run
+  -> runner:Developer_background_job_runner.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Coalesce a scan hint for the exact attached physical Root. Hints grant no
+    claim, are dropped for stale/unattached roots, and cannot disable the
+    finite periodic fallback scan. This call performs no Store read. *)
+val wake_developer : t -> root:Developer_root_owner.run -> unit
+
+(** Stop offering this exact Root. Cancel and join a scan or bounded offer
+    tasks that
+    borrowed it, discard its unclaimed batch, then remove only its physical
+    attachment. The host calls this before replacing/closing Root. Entered
+    Worker claims and result custody remain with Root/Worker and their own
+    joined close; cancelling an offer uses their established cleanup. A
+    foreign Root never removes an equal-ID attachment. A call from this
+    scanner/offer rejects self-join before changing state; cancellation keeps
+    its original exception identity. *)
+val retire_developer
+  :  t
+  -> root:Developer_root_owner.run
+  -> (unit, Agent_protocol.Error.t) result
+
+(** After [close], join the one in-flight developer scan and any bounded
+    developer offer tasks, then discard the unclaimed batch before physical
+    Root/Store teardown. Entered Worker effects retain Root/Worker custody;
+    this does not await conversation workers or deliveries. Calling before
+    [close], or from one of these tasks, returns a typed error without
+    mutating the scheduler. Cancellation/exception does not falsely report
+    joined work. *)
+val await_developer_scans_idle : t -> (unit, Agent_protocol.Error.t) result
+
 (** Signal only the conversation worker owned by this physical actor and exact
     returned job owner/generation/attempt. The caller must first perform the
     authenticated actor-owned durable cancellation and pass that returned
@@ -109,6 +154,9 @@ val cancel_conversation
   -> job:Agent_protocol.Job.t
   -> unit
 
+(** Revoke new dispatch, cancel conversation workers and developer scan/offer
+    tasks. Use [await_developer_scans_idle] before closing Root/Store; existing
+    conversation delivery wait remains separate. Idempotent. *)
 val close : t -> unit
 
 (** After [close], wait for already-dispatched completion delivery callbacks.

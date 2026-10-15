@@ -475,17 +475,16 @@ let with_root_action service ~phase f =
        Ok (value, ordinary))
 ;;
 
-let with_claimed_worker service ~candidate ?select f =
-  let* witness = O.current service.root in
+let with_claimed_worker service ~candidate ?on_capacity_decision ?select f =
+  let* witness = O.claim_preflight service.root in
   let* saved =
     B.of_json
       ~policy:(O.job_policy service.root)
       (P.Developer_job.payload (O.Job_candidate.job candidate))
   in
   let* selected =
-    B.selected_capabilities saved ~capabilities:(O.Current.selected witness)
+    B.selected_capabilities saved ~capabilities:(O.Claim_preflight.selected witness)
   in
-  let* () = O.check_effect_now service.root witness in
   let selected_now () =
     B.selected_capabilities saved ~capabilities:(O.native_selected service.root)
   in
@@ -507,6 +506,8 @@ let with_claimed_worker service ~candidate ?select f =
          O.Job_candidate.with_claimed_selected
            service.root
            candidate
+           ?on_capacity_decision
+           ~selection_witness:witness
            ?select
            (fun ~active ~action:issued ~sw ->
               action := Some issued;
