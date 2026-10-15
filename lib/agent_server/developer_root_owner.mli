@@ -241,7 +241,11 @@ module Worker_action : sig
       Derive Run_root plus the exact parent ID/attempt and incremented depth
       from the physical Worker Parent; never invent a native invocation.
       Recheck actor/selection/parent after yielding preparation and immediately
-      before the Worker's shared capacity reservation. The returned ID is
+      before the Worker's shared capacity reservation. Each check takes a fresh
+      nonyielding physical currentness witness while requiring the original selected
+      registry/revision: this Worker may perform a native Tool.call that advances
+      the Root effect generation between two legitimate Job.start operations,
+      but cannot inherit a changed selection. The returned ID is
       lexical comparison data only. *)
   val stage_background
     :  t

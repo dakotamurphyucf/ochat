@@ -106,28 +106,45 @@ let invocation owner selected reference ~custom =
   |> ok
 ;;
 
-let stage_root_job ?(tools = []) env root selected =
+let stage_root_job
+      ?(tools = [])
+      ?(source = "let main input = Task.pure(input)")
+      ?(input = `Null)
+      ?(policy = Chat_response.One_off_request.default_policy)
+      env
+      root
+      selected
+  =
   let prepared =
     Chat_response.One_off_script.prepare_in_domain
       ~env
       ~capabilities:selected
       ~tools
-      ~source:"let main input = Task.pure(input)"
+      ~source
       ()
-    |> ok
+    |> Result.map_error ~f:(fun diagnostics ->
+      Sexp.to_string_hum [%sexp (diagnostics : Chatmd_shell_spec.Diagnostic.t list)])
+    |> Result.ok_or_failwith
   in
   let request =
-    Chat_response.Background_request.script
-      ~prepared
-      ~input:`Null
-      ~policy:Chat_response.One_off_request.default_policy
-    |> ok
+    Chat_response.Background_request.script ~prepared ~input ~policy
+    |> Result.map_error ~f:(fun error -> error.P.Error.message)
+    |> Result.ok_or_failwith
   in
   O.with_root_action root ~phase:R.Checkpoint.Active (fun ~action ~sw:_ ->
-    let id = O.Action.stage_background action ~request ~checkpoint:ignore |> ok in
-    let selected = O.Action.seal action ~selected:[ id ] |> ok in
+    let id =
+      O.Action.stage_background action ~request ~checkpoint:ignore
+      |> Result.map_error ~f:(fun error -> error.P.Error.message)
+      |> Result.ok_or_failwith
+    in
+    let selected =
+      O.Action.seal action ~selected:[ id ]
+      |> Result.map_error ~f:(fun error -> error.P.Error.message)
+      |> Result.ok_or_failwith
+    in
     Ok (id, selected))
-  |> ok
+  |> Result.map_error ~f:(fun error -> error.P.Error.message)
+  |> Result.ok_or_failwith
 ;;
 
 let succeeded_claim claim =
@@ -144,6 +161,7 @@ let with_executor
       ?(on_current = ignore)
       ?on_store
       ?on_capacity
+      ?max_job_payload_bytes
       ?(per_session = 2)
       ?(wrap_env = Fn.id)
       ?(now = T.now)
@@ -151,7 +169,7 @@ let with_executor
       ~make_selected
       f
   =
-  T.with_store ~checkpoint ~wrap_env ?on_store (fun env sw store ->
+  T.with_store ~checkpoint ~wrap_env ?on_store ?max_job_payload_bytes (fun env sw store ->
     let captured = T.capture () in
     let owner = T.owner run_name 0 in
     let handle, _ =
@@ -204,7 +222,9 @@ let with_job_executor
       ?(wrap_env = Fn.id)
       ?(on_store = fun _ _ _ -> ())
       ?on_capacity
+      ?max_job_payload_bytes
       ?(per_session = 2)
+      ?(now = T.now)
       ~run_name
       ~make_selected
       f
@@ -214,7 +234,9 @@ let with_job_executor
     ~checkpoint
     ~wrap_env
     ?on_capacity
+    ?max_job_payload_bytes
     ~per_session
+    ~now
     ~run_name
     ~make_selected
     ~on_store:(fun env session store ->
@@ -359,6 +381,245 @@ let%test_unit "claimed Tool target uses one physical native and result publisher
                | _ -> false))))
 ;;
 
+let%test_unit "claimed Script executes selected native and retains its lexical child" =
+  let calls = ref 0 in
+  with_job_executor
+    ~run_name:"dvr_claimed_script_native_child"
+    ~max_job_payload_bytes:4096
+    ~make_selected:(fun _ -> registry ~custom:false calls)
+    (fun ~env ~root ~executor:_ ~handle ~owner:_ ~selected ~jobs ~store ~blobs ->
+       let source =
+         {|let main input =
+  Task.bind(
+    Task.catch(
+      Task.bind(Job.start_tool("read_file", input), fun discarded -> Task.fail("discard")),
+      fun ignored -> Task.pure(`Null)),
+    fun ignored -> Task.bind(Tool.call("read_file", input), fun result ->
+      match result with
+      | `Ok(value) -> Task.bind(Job.start_tool("read_file", input), fun id ->
+          match value with
+          | `String(text) -> Task.pure(`String(id ++ ":" ++ text))
+          | _ -> Task.fail("expected native text"))
+      | `Error(message) -> Task.fail(message)))|}
+       in
+       let parent_id =
+         stage_root_job
+           ~tools:[ "read_file" ]
+           ~source
+           ~input:(`Object [])
+           env
+           root
+           selected
+       in
+       Eio.Switch.run (fun sw ->
+         let runner =
+           background_runner
+             ~sw
+             ~root
+             ~store
+             ~blobs
+             ~env
+             ~managed:None
+             ~jobs
+             ~storage:Agent_store.Developer_result_publisher.Storage.Automatic
+         in
+         assert (Agent_server.Developer_background_job_runner.issued_by_root runner root);
+         let candidate =
+           O.Job_candidate.read_current root ~checkpoint:ignore |> ok |> List.hd_exn
+         in
+         assert (
+           Agent_server.Developer_background_job_runner.Availability.equal
+             (Agent_server.Developer_background_job_runner.availability runner candidate
+              |> ok)
+             Runnable);
+         let completed =
+           Agent_server.Developer_background_job_runner.run_candidate runner candidate
+           |> Result.map_error ~f:(fun error -> error.P.Error.message)
+           |> Result.ok_or_failwith
+           |> Option.value_exn
+         in
+         assert (Int.equal !calls 1);
+         assert (P.Id.Job.equal (P.Developer_job.id completed) parent_id);
+         let child_id =
+           match (P.Developer_job.state completed).result with
+           | Some (Inline (P.Completion.Succeeded (`String text))) ->
+             let id, native = String.lsplit2_exn text ~on:':' in
+             assert (String.equal native "private result");
+             P.Id.Job.of_string id |> ok
+           | _ -> failwith "claimed Script did not return selected native result"
+         in
+         let child = R.find_job (R.observe handle |> ok) child_id |> Option.value_exn in
+         let queued_ids =
+           O.Job_candidate.read_current root ~checkpoint:ignore
+           |> ok
+           |> List.map ~f:(fun candidate ->
+             P.Developer_job.id (O.Job_candidate.job candidate))
+         in
+         assert (List.equal P.Id.Job.equal queued_ids [ child_id ]);
+         let launch = P.Developer_job.launch child in
+         (match P.Developer_job.Launch.parent_job launch with
+          | Some (id, attempt) when P.Id.Job.equal id parent_id && Int.equal attempt 1 ->
+            ()
+          | None | Some _ -> failwith "Script child lost claimed parent attempt");
+         assert (Int.equal (P.Developer_job.Launch.nested_depth launch) 1)))
+;;
+
+let%test_unit "claimed Script cannot catch a physical admission error into another call" =
+  let calls = ref 0 in
+  let clock = ref (T.now ()) in
+  with_job_executor
+    ~run_name:"dvr_claimed_script_fatal_admission"
+    ~max_job_payload_bytes:4096
+    ~now:(fun () -> !clock)
+    ~make_selected:(fun _ -> registry ~custom:false calls)
+    (fun ~env ~root ~executor:_ ~handle ~owner:_ ~selected ~jobs ~store ~blobs ->
+       let parent_id =
+         stage_root_job
+           ~tools:[ "read_file" ]
+           ~source:
+             {|let main input = Task.bind(
+  Task.catch(Tool.call("not_selected", input), fun ignored -> Tool.call("read_file", input)),
+  fun ignored -> Task.pure(input))|}
+           ~input:(`Object [])
+           env
+           root
+           selected
+       in
+       Eio.Switch.run (fun sw ->
+         let runner =
+           background_runner
+             ~sw
+             ~root
+             ~store
+             ~blobs
+             ~env
+             ~managed:None
+             ~jobs
+             ~storage:Agent_store.Developer_result_publisher.Storage.Automatic
+         in
+         let candidate =
+           O.Job_candidate.read_current root ~checkpoint:ignore |> ok |> List.hd_exn
+         in
+         assert (
+           Result.is_error
+             (Agent_server.Developer_background_job_runner.run_candidate runner candidate));
+         assert (Int.equal !calls 0);
+         let persisted =
+           R.find_job (R.observe handle |> ok) parent_id |> Option.value_exn
+         in
+         assert (
+           match (P.Developer_job.state persisted).status with
+           | P.Job.Failed _ -> true
+           | _ -> false);
+         let tiny_policy =
+           { Chat_response.One_off_request.default_policy with max_output_bytes = 1 }
+         in
+         let expired_id = stage_root_job ~policy:tiny_policy env root selected in
+         clock := P.Timestamp.of_string "2026-10-14T00:00:00Z" |> ok;
+         let expired_candidate =
+           O.Job_candidate.read_current root ~checkpoint:ignore |> ok |> List.hd_exn
+         in
+         (match
+            Agent_server.Developer_background_job_runner.run_candidate
+              runner
+              expired_candidate
+          with
+          | Error error ->
+            assert (P.Error.equal_code error.code Resource_limit);
+            assert (
+              String.equal
+                error.message
+                "Script completion exceeds its saved output limit")
+          | Ok _ -> failwith "undersized expired Script completion was accepted");
+         assert (Int.equal !calls 0);
+         let expired =
+           R.find_job (R.observe handle |> ok) expired_id |> Option.value_exn
+         in
+         assert (
+           match (P.Developer_job.state expired).status with
+           | P.Job.Failed _ -> true
+           | _ -> false)))
+;;
+
+let%test_unit "malformed saved Async_tool enters one physical Failed attempt" =
+  let calls = ref 0 in
+  with_job_executor
+    ~run_name:"dvr_claimed_malformed_async"
+    ~make_selected:(fun _ -> registry ~custom:false calls)
+    (fun ~env ~root ~executor:_ ~handle ~owner:_ ~selected:_ ~jobs ~store ~blobs ->
+       let capture_fingerprint = Chatml_developer_capture.fingerprint (O.capture root) in
+       let id = Selected.job_id "job_claimed_malformed_async" in
+       let original =
+         Selected.job
+           (O.owner root)
+           capture_fingerprint
+           ~id
+           ~parent:P.Developer_job.Launch.Run_root
+       in
+       let malformed =
+         P.Developer_job.create
+           ~owner:(O.owner root)
+           ~capture_fingerprint
+           ~id
+           ~launch:(P.Developer_job.launch original)
+           ~kind:P.Job.Async_tool
+           ~payload:(`Object [ "not_a_background_request", `True ])
+           ~retry_policy:P.Job.Never
+           ~created_at:(P.Developer_job.created_at original)
+           ~state:(P.Developer_job.state original)
+         |> ok
+       in
+       let prepared =
+         R.prepare_root_selected
+           handle
+           ~expected:(R.observe handle |> ok)
+           ~phase:R.Checkpoint.Active
+           ~selected:[ malformed ]
+         |> ok
+       in
+       (match
+          R.commit_and_settle
+            handle
+            ~admit:(fun () -> true)
+            prepared
+            (R.Handoff.create ~settle:ignore)
+          |> ok
+        with
+        | R.Settlement.Installed _ -> ()
+        | Absent | Prewrite_conflict | Diverged ->
+          failwith "malformed queued fixture was not installed");
+       Eio.Switch.run (fun sw ->
+         let runner =
+           background_runner
+             ~sw
+             ~root
+             ~store
+             ~blobs
+             ~env
+             ~managed:None
+             ~jobs
+             ~storage:Agent_store.Developer_result_publisher.Storage.Automatic
+         in
+         let candidate =
+           O.Job_candidate.read_current root ~checkpoint:ignore |> ok |> List.hd_exn
+         in
+         assert (
+           Agent_server.Developer_background_job_runner.Availability.equal
+             (Agent_server.Developer_background_job_runner.availability runner candidate
+              |> ok)
+             Malformed_supported);
+         assert (
+           Result.is_error
+             (Agent_server.Developer_background_job_runner.run_candidate runner candidate));
+         assert (Int.equal !calls 0);
+         let persisted = R.find_job (R.observe handle |> ok) id |> Option.value_exn in
+         assert (Int.equal (P.Developer_job.state persisted).attempt 1);
+         assert (
+           match (P.Developer_job.state persisted).status with
+           | P.Job.Failed _ -> true
+           | _ -> false)))
+;;
+
 let%test_unit "claimed Tool keeps selected Artifact after uncertain terminal save" =
   let calls = ref 0 in
   let tracking = ref false in
@@ -433,6 +694,80 @@ let%test_unit "claimed Tool keeps selected Artifact after uncertain terminal sav
           | Ok None -> ()
           | Ok (Some _) | Error _ ->
             failwith "stale candidate restarted an uncertain claimed Tool");
+         assert (Int.equal !calls 1)))
+;;
+
+let%test_unit "claimed Script does not replay native effect after uncertain result save" =
+  let calls = ref 0 in
+  let tracking = ref false in
+  let writes = ref 0 in
+  let rename_armed = ref false in
+  let sync_blocked = ref false in
+  let parent_sync_blocked = ref false in
+  with_job_executor
+    ~run_name:"dvr_claimed_script_uncertain_artifact"
+    ~max_job_payload_bytes:4096
+    ~make_selected:(fun _ -> registry ~custom:false calls)
+    ~wrap_env:(fun env ->
+      F.fault_after_authority_rename_env
+        ~before_rename:(fun () ->
+          if !tracking
+          then (
+            Int.incr writes;
+            if Int.equal !writes 4 then rename_armed := true))
+        ~after_rename:(fun () -> sync_blocked := true)
+        env
+        ~rename_armed
+        ~sync_blocked
+        ~parent_sync_blocked)
+    (fun ~env ~root ~executor:_ ~handle ~owner:_ ~selected ~jobs ~store ~blobs ->
+       let id =
+         stage_root_job
+           ~tools:[ "read_file" ]
+           ~source:
+             {|let main input = Task.bind(Tool.call("read_file", input), fun result ->
+  match result with
+  | `Ok(value) -> Task.pure(value)
+  | `Error(message) -> Task.fail(message))|}
+           ~input:(`Object [])
+           env
+           root
+           selected
+       in
+       Eio.Switch.run (fun sw ->
+         let runner =
+           background_runner
+             ~sw
+             ~root
+             ~store
+             ~blobs
+             ~env
+             ~managed:None
+             ~jobs
+             ~storage:Agent_store.Developer_result_publisher.Storage.Artifact
+         in
+         let candidate =
+           O.Job_candidate.read_current root ~checkpoint:ignore |> ok |> List.hd_exn
+         in
+         tracking := true;
+         assert (
+           Result.is_error
+             (Agent_server.Developer_background_job_runner.run_candidate runner candidate));
+         tracking := false;
+         assert (Int.equal !calls 1);
+         assert (not !rename_armed);
+         sync_blocked := false;
+         let persisted = R.find_job (R.observe handle |> ok) id |> Option.value_exn in
+         assert (
+           match (P.Developer_job.state persisted).result with
+           | Some (Artifact { outcome = P.Stored_completion.Succeeded; _ }) -> true
+           | None | Some (Inline _) | Some (Artifact _) -> false);
+         (match
+            Agent_server.Developer_background_job_runner.run_candidate runner candidate
+          with
+          | Ok None -> ()
+          | Ok (Some _) | Error _ ->
+            failwith "stale candidate replayed an uncertain claimed Script");
          assert (Int.equal !calls 1)))
 ;;
 
@@ -1507,7 +1842,7 @@ let%test_unit "claimed worker alone admits job child and inherited nested ancest
 ;;
 
 let%test_unit "claimed worker action atomically installs its selected child" =
-  List.iter [ `Succeeded; `Queued ] ~f:(fun mode ->
+  List.iter [ `Succeeded; `Queued; `Selection_changed ] ~f:(fun mode ->
     let calls = ref 0 in
     with_executor
       ~run_name:"dvr_claimed_selected_action"
@@ -1588,31 +1923,46 @@ let%test_unit "claimed worker action atomically installs its selected child" =
                 in
                 dropped_child := Some dropped;
                 O.Worker_action.rollback_staged action dropped |> ok;
-                let child =
-                  O.Worker_action.stage_background action ~request ~checkpoint:ignore
-                  |> ok
-                in
-                selected_child := Some child;
-                let selection = O.Worker_action.seal action ~selected:[ child ] |> ok in
-                let after =
-                  match mode with
-                  | `Succeeded -> succeeded_claim (Scope.claim active)
-                  | `Queued ->
-                    { (P.Developer_job.state (R.Claim.job (Scope.claim active))) with
-                      status = P.Job.Queued
-                    ; started_at = None
-                    ; next_run_at = Some (T.now ())
-                    ; completed_at = None
-                    ; result = None
-                    ; retry_failure = Some (P.Error.invalid_request "retry")
-                    }
-                in
-                Ok (after, selection))
+                match mode with
+                | `Selection_changed ->
+                  O.narrow_selection root ~names:[] |> ok;
+                  (match
+                     O.Worker_action.stage_background action ~request ~checkpoint:ignore
+                   with
+                   | Error error ->
+                     assert (
+                       String.equal
+                         error.P.Error.message
+                         "developer worker selected registry changed")
+                   | Ok _ -> failwith "changed Worker selection staged a child");
+                  Error (P.Error.invalid_request "selected registry changed")
+                | `Succeeded | `Queued ->
+                  let child =
+                    O.Worker_action.stage_background action ~request ~checkpoint:ignore
+                    |> ok
+                  in
+                  selected_child := Some child;
+                  let selection = O.Worker_action.seal action ~selected:[ child ] |> ok in
+                  let after =
+                    match mode with
+                    | `Succeeded -> succeeded_claim (Scope.claim active)
+                    | `Queued ->
+                      { (P.Developer_job.state (R.Claim.job (Scope.claim active))) with
+                        status = P.Job.Queued
+                      ; started_at = None
+                      ; next_run_at = Some (T.now ())
+                      ; completed_at = None
+                      ; result = None
+                      ; retry_failure = Some (P.Error.invalid_request "retry")
+                      }
+                    | `Selection_changed -> assert false
+                  in
+                  Ok (after, selection))
          in
          let observed = R.observe handle |> ok in
-         let child_id = Option.value_exn !selected_child in
          (match mode, outcome with
           | `Succeeded, Ok (Some (parent, disposition)) ->
+            let child_id = Option.value_exn !selected_child in
             assert (P.Id.Job.equal (P.Developer_job.id parent) parent_id);
             (match disposition with
              | Agent_server.Developer_job_worker.Children.Settlement.Selected_installed ->
@@ -1630,6 +1980,7 @@ let%test_unit "claimed worker action atomically installs its selected child" =
              | None | Some _ -> failwith "claimed worker child lost exact parent attempt");
             assert (Int.equal (P.Developer_job.Launch.nested_depth launch) 1)
           | `Queued, Error error ->
+            let child_id = Option.value_exn !selected_child in
             assert (
               String.equal
                 error.P.Error.message
@@ -1640,8 +1991,14 @@ let%test_unit "claimed worker action atomically installs its selected child" =
              | P.Job.Failed _ -> ()
              | _ -> failwith "invalid selected parent did not fail durably");
             ignore (O.current root |> ok : O.Current.t)
-          | (`Succeeded | `Queued), (Ok None | Ok (Some _) | Error _) ->
-            failwith "claimed selected worker returned the wrong outcome");
+          | `Selection_changed, Error _ ->
+            assert (Option.is_none !selected_child);
+            let parent = R.find_job observed parent_id |> Option.value_exn in
+            (match (P.Developer_job.state parent).status with
+             | P.Job.Failed _ -> ()
+             | _ -> failwith "changed Worker selection did not fail durably")
+          | (`Succeeded | `Queued | `Selection_changed), (Ok None | Ok (Some _) | Error _)
+            -> failwith "claimed selected worker returned the wrong outcome");
          assert (Option.is_none (R.find_job observed (Option.value_exn !dropped_child)));
          assert (Int.equal !calls 1)))
 ;;

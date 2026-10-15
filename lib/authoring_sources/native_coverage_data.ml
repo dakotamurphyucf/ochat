@@ -17,6 +17,7 @@ let features =
       ; "lib/agent_session/native_tool_policy.ml"
       ; "lib/agent_session/script_tool_calls.ml"
       ; "lib/agent_server/developer_background_job_runner.ml"
+      ; "lib/agent_server/developer_script_job_execution.ml"
       ]
     , "runtime.native.requests"
     , [ "test/chatml_composition/one_off_tests.ml"
@@ -191,7 +192,9 @@ let implementation_sources =
   [ ( "lib/agent_protocol/invocation.ml"
     , "4d5abb95474bcdef6c360b666a3b57d2203a7b378193df5c49266897acac4981" )
   ; ( "lib/agent_server/developer_background_job_runner.ml"
-    , "e1700d443e49642242dc4a5173837446b820eaaaf373f380e9fdffe8510357a6" )
+    , "9e890818505752870ca4f8e43a55bd652da7ca163b3665ac71c87661bbcf4119" )
+  ; ( "lib/agent_server/developer_script_job_execution.ml"
+    , "4e30550f6585c6afa97ddd12a12042d0be26b84f18aad7f6f92b2f3a3bf4bb32" )
   ; ( "lib/agent_session/session_management_channel.ml"
     , "500d45a8cbe760a50bc256df47255dc6fa5e1305f74a543d49c9c2e02e36de51" )
   ; ( "lib/agent_server/session_helper_policy.ml"
