@@ -277,25 +277,11 @@ let capture_limits () =
   |> Or_error.ok_exn
 ;;
 
-let install artifact_store ~transaction_id artifact =
+let install artifact_store ~transaction_id artifact ~checkpoint =
   let module Store = Agent_store.Prompt_artifact_store in
-  let open Result.Let_syntax in
-  let%bind () =
-    match Store.exists artifact_store artifact.Store.Artifact.revision_id with
-    | true -> Ok ()
-    | false -> Store.install artifact_store ~transaction_id artifact
-  in
-  let%bind retained = Store.load artifact_store artifact.revision_id in
-  (* Revision IDs are content-derived, while the manifest includes the original
-     creation timestamp. Catalog rebuilds must return the installed manifest,
-     not a candidate with a new timestamp under the same revision ID. Verify all
-     other candidate metadata before reusing that immutable artifact. *)
-  match Store.Artifact.same_content artifact retained with
-  | true -> Ok retained
-  | false ->
-    Error
-      (Agent_store.Store_error.Corrupt
-         "existing prompt revision differs from captured source")
+  (* The returned artifact is the verified publication. Its original creation
+     timestamp and digest may differ from this freshly authored candidate. *)
+  Store.install_or_reuse artifact_store ~transaction_id artifact ~checkpoint
 ;;
 
 (* Use the same declaration/import semantics as restoration, without starting
@@ -700,7 +686,7 @@ let publish_capture
       in
       checkpoint ();
       let%bind artifact =
-        install artifact_store ~transaction_id artifact
+        install artifact_store ~transaction_id artifact ~checkpoint
         |> Result.map_error ~f:(fun e -> [ store_error e ])
       in
       let replayed =

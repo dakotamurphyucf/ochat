@@ -975,7 +975,69 @@ let%test_unit
          assert (
            Result.is_error
              (Agent_session.Captured_agent_runner.Claimed_developer.Selected.check_now
-                (Option.value_exn !borrowed_agent)))))
+                (Option.value_exn !borrowed_agent)));
+         borrowed_agent := None;
+         let second_id = stage_registered_agent_tool jobs in
+         let second_stored =
+           R.find_job (R.observe handle |> ok) second_id |> Option.value_exn
+         in
+         let second_request =
+           Chat_response.Background_request.of_json
+             ~policy:Chat_response.One_off_request.default_policy
+             (P.Developer_job.payload second_stored)
+           |> ok
+         in
+         let first_artifact =
+           Chat_response.Background_request.agent_artifact request |> Option.value_exn
+         in
+         let second_artifact =
+           Chat_response.Background_request.agent_artifact second_request
+           |> Option.value_exn
+         in
+         assert (
+           P.Id.Prompt_revision.equal
+             (Chat_response.Background_request.Agent_artifact.revision_id first_artifact)
+             (Chat_response.Background_request.Agent_artifact.revision_id second_artifact));
+         assert (
+           Chatml_source.Digest.equal
+             (Chat_response.Background_request.Agent_artifact.manifest_sha256
+                first_artifact)
+             (Chat_response.Background_request.Agent_artifact.manifest_sha256
+                second_artifact));
+         let observed_before_second = List.length !observed in
+         let second_candidate =
+           O.Job_candidate.read_current root ~checkpoint:ignore
+           |> ok
+           |> List.find_exn ~f:(fun candidate ->
+             P.Id.Job.equal second_id (P.Developer_job.id (O.Job_candidate.job candidate)))
+         in
+         let second_completed =
+           Agent_server.Developer_background_job_runner.run_candidate
+             runner
+             second_candidate
+           |> ok
+           |> Option.value_exn
+         in
+         assert (
+           match (P.Developer_job.state second_completed).status with
+           | P.Job.Succeeded -> true
+           | Failed _
+           | Queued
+           | Running
+           | Waiting_permission _
+           | Waiting_completion _
+           | Cancelled
+           | Interrupted _ -> false);
+         let second_observed =
+           List.take !observed (List.length !observed - observed_before_second)
+         in
+         assert (
+           List.exists second_observed ~f:(fun row ->
+             List.mem row "Original child instructions" ~equal:String.equal));
+         assert (
+           not
+             (List.exists second_observed ~f:(fun row ->
+                List.mem row "Revised child instructions" ~equal:String.equal)))))
 ;;
 
 let%test_unit "deferred saved Agent runs literal child and denies unselected effects" =

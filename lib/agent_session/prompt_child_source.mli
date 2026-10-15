@@ -39,7 +39,10 @@ val file
   -> (t, Agent_protocol.Error.t) Result.t
 
 (** New Captured selection: authentic retained child role under runtime semantic
-    policy, then install/verify its complete immutable artifact. No original
+    policy, then install or reuse its complete verified immutable artifact.
+    Repeated selection of the same captured source returns the original installed
+    publication and replays that tree; a conflicting or damaged installation
+    rejects. No original
     lease, current file read, Fetch or source grant is used. The selected child
     has its own materialized tree/replayed Parsed; original parent untouched.
     Actual complete role selection and restoration precede installation. *)
