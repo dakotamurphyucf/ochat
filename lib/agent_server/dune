@@ -37,6 +37,7 @@
   authoring_context_owner
   authoring_parent_scope
   developer_workspace_lifetime
+  developer_method_authorization
   authoring_analysis_publication
   authoring_semantic_project
   authoring_semantic_document

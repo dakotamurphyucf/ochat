@@ -1,0 +1,7 @@
+(library
+ (name developer_method_authorization_tests)
+ (modules authorization_tests)
+ (libraries core ochat.agent_protocol ochat.agent_store ochat.agent_server ochat.operator_authorization)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

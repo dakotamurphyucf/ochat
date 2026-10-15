@@ -15,6 +15,17 @@ issue a narrower token for the same principal and initialize its own connection.
 HTTP connection IDs bind scopes, authentication kind and attributes as well as
 principal ID, so a restricted token cannot borrow an admin connection's authority.
 
+Independent developer Check, Fixture run and Live run require the distinct
+`developer.check`, `developer.fixture.run` and `developer.live.run` scopes. None
+inherits `session.create` or another developer action. The shared method helper
+checks the original authenticated actor and current request actor; hosted
+commands must call it before admission and after yielding work. These method
+scopes do not grant source access, a
+configured prompt/workspace pair, native or shell effects, provider use,
+persisted-result disclosure or cancellation; each has its own owner or policy
+check. Defining these scopes does not install developer command methods. The
+daemon does not add them to anonymous development HTTP credentials.
+
 Unix clients use same-user peer credentials. HTTP supports hashed static tokens
 and explicitly trusted direct reverse-proxy peers. An OAuth validator is an
 embedding hook selected by ID, not a bundled authorization service. See

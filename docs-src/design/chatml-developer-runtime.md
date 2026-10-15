@@ -1,5 +1,11 @@
 # ChatML developer run/test and REPL design
 
+The protocol defines three independent method scopes for future hosted
+developer commands: `developer.check`, `developer.fixture.run`, and
+`developer.live.run`. Current source, selected prompt/workspace, native,
+provider, result-disclosure and cancellation authority remains separate.
+Defining the scopes alone does not install the hosted command service.
+
 Status: M5 design v1, 2026-10-15. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission, durable developer run checkpoint foundation, selected-document transactions, physical job-claim worker, compiler-side REPL typing transaction and incremental module registry described below are implemented. The developer root staging owner, bounded root/native terminal coordinator, selected native policy and claimed job-parent effect-entry proof are implemented. The owner-neutral lexical script-job kernel and its physical developer adapter are implemented. Actor-bound provider selection, the shared Model.spawn recipe decoder, durable intent, physical call-boundary admission, selected compiled-script adapter and claimed model-job runner are implemented. User-facing run/REPL services and hosted callback assembly remain pending. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
 
 The [authoring service design](chatml-authoring-services.md) owns source context,
