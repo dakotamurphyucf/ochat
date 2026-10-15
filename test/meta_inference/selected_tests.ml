@@ -70,7 +70,9 @@ let execution ~target ~answer ~on_observation =
               ~note_delivery:_
               ~on_event:_
               ~on_observation:_
+              ~submission_guard
             ->
+            Runtime.Submission_guard.check submission_guard;
             let text = answer () in
             let semantic =
               P.Semantic.create

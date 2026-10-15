@@ -185,8 +185,12 @@ let%test_unit "exact native association and post-yield cancellation preserve ide
     let registration =
       R.create
         ~implementation
-        ~prepare:(fun ~owner:actual ~request:actual_request ~checkpoint ->
-          assert (P.Job.equal_launch_owner owner actual);
+        ~prepare:(fun ~launch ~request:actual_request ~checkpoint ->
+          assert (
+            Option.equal
+              P.Job.equal_launch_owner
+              (Some owner)
+              (Chat_response.Source_launch.conversation_owner launch));
           [%test_eq: string] (B.fingerprint original) (B.fingerprint actual_request);
           checkpoint ();
           Eio.Fiber.yield ();
@@ -194,7 +198,12 @@ let%test_unit "exact native association and post-yield cancellation preserve ide
           Ok (Some artifact))
     in
     let invoke ?(checkpoint = Eio.Fiber.check) registration binding =
-      R.prepare registration ~binding ~owner ~request:original ~checkpoint
+      R.prepare
+        registration
+        ~binding
+        ~launch:(Chat_response.Source_launch.conversation owner)
+        ~request:original
+        ~checkpoint
     in
     assert (Option.is_some (invoke registration (binding registry) |> ok));
     let foreign = bindings (native native_calls) in
@@ -229,7 +238,7 @@ let%test_unit "exact native association and post-yield cancellation preserve ide
      | _ -> assert false
      | exception Callback_failed actual -> assert (phys_equal actual identity));
     let raising =
-      R.create ~implementation ~prepare:(fun ~owner:_ ~request:_ ~checkpoint:_ ->
+      R.create ~implementation ~prepare:(fun ~launch:_ ~request:_ ~checkpoint:_ ->
         raises ())
     in
     (match invoke raising (binding registry) with
@@ -239,7 +248,7 @@ let%test_unit "exact native association and post-yield cancellation preserve ide
     (match
        Eio.Cancel.sub (fun cancel ->
          let canceling =
-           R.create ~implementation ~prepare:(fun ~owner:_ ~request:_ ~checkpoint:_ ->
+           R.create ~implementation ~prepare:(fun ~launch:_ ~request:_ ~checkpoint:_ ->
              Eio.Fiber.yield ();
              Eio.Cancel.cancel cancel (Callback_failed identity);
              Ok (Some artifact))
