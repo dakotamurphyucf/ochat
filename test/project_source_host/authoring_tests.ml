@@ -2374,3 +2374,179 @@ let%test_unit "grant identity, actor lifetime and read budgets fail closed" =
        | Ok _ -> failwith "aggregate read cap bypassed");
       Authoring.close_and_wait host))
 ;;
+
+let%test_unit "developer local project and standalone source retain captured bytes" =
+  with_source_context (fun env _ context allowed _ _ sources _ root_path ->
+    Eio.Switch.run (fun sw ->
+      let module Service = Agent_server.Authoring_context_service in
+      let module Developer = Service.Developer in
+      let contract_cache =
+        Agent_server.Authoring_standard_contracts.create
+          ~targets:[ Chatml.Chatml_compiler_contract.Target.One_off_v1 ]
+          ~max_identity_bytes:(16 * 1024 * 1024)
+          ~max_work_steps:1_000_000
+          ~checkpoint:ignore
+        |> ok
+      in
+      let selected =
+        Agent_server.Authoring_standard_contracts.find
+          contract_cache
+          Chatml.Chatml_compiler_contract.Target.One_off_v1
+        |> Option.value_exn
+        |> Developer.Selected_contract.of_standard_entry
+        |> ok
+      in
+      let granted = ref true in
+      let pick actor =
+        if
+          !granted
+          && P.Id.Principal.equal
+               (Operator_authorization.principal actor).id
+               (Operator_authorization.principal allowed).id
+        then Some selected
+        else None
+      in
+      let policy =
+        Developer.Target_policy.create
+          ~local_project:(fun actor ~root:_ ~project:_ ~selection:_ -> pick actor)
+          ~local_source:(fun actor ~root:_ ~member:_ -> pick actor)
+          ~authoring_project:(fun _ ~context:_ ~current:_ -> None)
+          ~document_project:
+            (fun
+              _ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~build:_ ~metadata:_ ->
+            None)
+          ~document_source:
+            (fun
+              _ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~script:_ -> None)
+      in
+      let limits =
+        Developer.Limits.create
+          ~max_prepared_input_bytes:16_384
+          ~max_document_origin_bytes:16_384
+          ~max_editor_versions:8
+          ~build:
+            (Chatml_project_build.Limits.create
+               ~max_work_steps:100_000
+               ~max_input_bytes:(Some 16_384)
+               ~document:Document_schema.Limits.default
+             |> Or_error.ok_exn)
+        |> Or_error.ok_exn
+      in
+      let owner =
+        Service.create
+          ~sw
+          ~clock:env#mono_clock
+          ~host:(P.Id.Server.create ())
+          ~sources:(Some sources)
+          ~upload:None
+          ~supplied_document:None
+          ~selection_policy:
+            (Service.Selection_policy.create
+               ~project_contract:(fun _ ~root:_ ~project:_ ~selection:_ -> None)
+               ~document_static:(fun _ ~requested_environment:_ -> None))
+          ~context_limits:
+            (Chatml_authoring_context.Limits.create
+               ~max_contexts:1
+               ~max_sources:8
+               ~max_open_documents:1
+               ~max_document_bytes:4096
+               ~max_effective_input_bytes:16_384
+               ~max_context_source_bytes:16_384
+               ~max_total_source_bytes:16_384
+             |> Or_error.ok_exn)
+          ~analysis_policy:(analysis_policy ())
+          ~protocol_limits:
+            (P.Authoring.Limits.create
+               ~max_sources:8
+               ~max_source_bytes:4096
+               ~max_context_source_bytes:16_384
+               ~max_request_bytes:16_384
+               ~max_result_bytes:4096
+               ~max_path_candidates:8
+             |> ok)
+          ~limits:
+            (Service.Limits.create
+               ~max_connections:1
+               ~max_active_requests_per_connection:1
+               ~max_roots_per_connection:1
+               ~max_response_bytes:4096
+               ~max_provisional_results:1
+             |> Or_error.ok_exn)
+      in
+      Exn.protect
+        ~finally:(fun () -> Service.close_and_wait owner |> ok)
+        ~f:(fun () ->
+          let developer = Developer.create ~owner ~policy ~limits in
+          let request =
+            Developer.Request.create
+              ~entrypoint:"main"
+              ~input:`Null
+              ~fixtures:None
+              ~json_bounds:
+                (Chatml_developer_capture.Json_bounds.create
+                   ~max_bytes:4096
+                   ~max_depth:16
+                   ~max_nodes:128
+                 |> Or_error.ok_exn)
+              ~checkpoint:ignore
+            |> ok
+          in
+          let root = Authoring.Context.root context in
+          let project = Path.create "chatml.project.json" |> Or_error.ok_exn in
+          let project_candidate =
+            Developer.prepare_local_project
+              developer
+              ~original_actor:allowed
+              ~actor:allowed
+              ~local:
+                (Developer.Local_project.create
+                   ~root
+                   ~dependency_roots:[]
+                   ~project
+                   ~selection:(Entry { name = "main"; environment = None }))
+              ~request
+              ~clock:env#mono_clock
+              ~checkpoint:ignore
+            |> ok
+          in
+          let old_capture = Developer.Candidate.capture project_candidate in
+          Eio.Path.save
+            ~create:(`Or_truncate 0o600)
+            Eio.Path.(root_path / "main.chatml")
+            "let main = 2\n";
+          let old_check =
+            Developer.Candidate.final_admission
+              project_candidate
+              ~actor:allowed
+              ~capture:old_capture
+              ~checkpoint:ignore
+            |> ok
+          in
+          old_check () |> ok;
+          let standalone =
+            Developer.prepare_local_source
+              developer
+              ~original_actor:allowed
+              ~actor:allowed
+              ~source:
+                (Developer.Local_source.create
+                   ~root
+                   ~member:(Path.create "main.chatml" |> Or_error.ok_exn))
+              ~request
+              ~checkpoint:ignore
+            |> ok
+          in
+          let standalone_capture = Developer.Candidate.capture standalone in
+          let entry_contents capture =
+            let prepared = Chatml_developer_capture.prepared capture in
+            Prepared.find_source prepared (Prepared.entry prepared)
+            |> Option.value_exn
+            |> Captured.contents
+          in
+          [%test_eq: string] (entry_contents old_capture) "let main = 1\n";
+          [%test_eq: string] (entry_contents standalone_capture) "let main = 2\n";
+          granted := false;
+          match old_check () with
+          | Error { P.Error.code = Permission_denied; _ } -> ()
+          | Ok () | Error _ -> failwith "revoked local target admitted")))
+;;

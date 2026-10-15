@@ -47,7 +47,7 @@ let fresh_lock_id_from_sources ~sources ~prior_lock ~checkpoint =
       Error.Lock_identity_unavailable)
 ;;
 
-let prepare current ~limits ~checkpoint =
+let prepare_with_selection current ~select_contract ~limits ~checkpoint =
   let remaining = ref (Build.Limits.max_work_steps limits) in
   let poll () =
     if !remaining <= 0 then raise Stop_work;
@@ -60,9 +60,7 @@ let prepare current ~limits ~checkpoint =
       Owner.Current.project_inputs current ~checkpoint:poll
       |> Result.map_error ~f:(fun error -> Error.Context error)
     in
-    let%bind contract =
-      selected_contract current |> Result.of_option ~error:Error.No_selected_contract
-    in
+    let%bind contract = select_contract () in
     let%bind lock_id =
       fresh_lock_id_from_sources
         ~sources:(Ledger.Inputs.sources inputs)
@@ -76,4 +74,21 @@ let prepare current ~limits ~checkpoint =
     ({ overlay; contract } : Prepared.t)
   with
   | Stop_work -> Error Error.Work_limit
+;;
+
+let prepare current ~limits ~checkpoint =
+  prepare_with_selection
+    current
+    ~select_contract:(fun () ->
+      selected_contract current |> Result.of_option ~error:Error.No_selected_contract)
+    ~limits
+    ~checkpoint
+;;
+
+let prepare_with_contract current ~contract ~limits ~checkpoint =
+  prepare_with_selection
+    current
+    ~select_contract:(fun () -> Ok contract)
+    ~limits
+    ~checkpoint
 ;;

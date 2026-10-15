@@ -234,10 +234,39 @@ let%test_unit
         ~previous:None
       |> ok
     in
+    let other_actor = Operator_authorization.trusted_local principal in
+    let full_checks = ref 0 in
+    let final_checks = ref 0 in
+    let final_admission ~actor:admitted_actor ~capture ~checkpoint =
+      assert (phys_equal admitted_actor other_actor && phys_equal capture captured);
+      checkpoint ();
+      incr full_checks;
+      Ok
+        (fun () ->
+          incr final_checks;
+          Error (P.Error.invalid_request "current developer source revoked"))
+    in
+    assert (
+      Result.is_error
+        (O.Registry.admit
+           ~final_admission
+           ~checkpoint:ignore
+           owner_registry
+           ~actor:other_actor
+           ~capture:captured
+           ~registry
+           ~selected:registry
+           ~job_policy:Chat_response.One_off_request.default_policy
+           ~selected_model:None
+           ~handle:other_handle
+           ~workspace_conflict_domain:"root-owner-test"));
+    [%test_eq: int] !full_checks 1;
+    [%test_eq: int] !final_checks 1;
+    [%test_eq: int] (List.length (O.Registry.active_for_scheduler owner_registry |> ok)) 1;
     let other_run =
       O.Registry.admit
         owner_registry
-        ~actor:(Operator_authorization.trusted_local principal)
+        ~actor:other_actor
         ~capture:captured
         ~registry
         ~selected:registry

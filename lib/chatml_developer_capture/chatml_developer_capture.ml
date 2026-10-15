@@ -181,6 +181,13 @@ let bounded_label ~name value =
 ;;
 
 module Origin = struct
+  module Error = struct
+    type t =
+      | Invalid_provenance
+      | Identity_limit
+    [@@deriving sexp_of]
+  end
+
   type source_identity =
     { id : Captured.Id.t
     ; digest : Captured.Digest.t
@@ -293,7 +300,7 @@ module Origin = struct
       || (not (source_identity_consistent root declaring))
       || (not (source_identity_consistent root script))
       || not (source_identity_consistent declaring script)
-    then Or_error.error_string "invalid document script provenance"
+    then Error Error.Invalid_provenance
     else (
       let remaining = ref max_identity_bytes in
       let charge value =
@@ -326,7 +333,7 @@ module Origin = struct
         @ source_values script
       in
       if not (List.for_all values ~f:charge)
-      then Or_error.error_string "document script provenance exceeds bound"
+      then Error Error.Identity_limit
       else
         Ok
           { graph

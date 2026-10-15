@@ -633,3 +633,122 @@ let on_event ctx state event = Task.pure(state)|}
       (moderator complete 0 true true 1 1 (Truncated Item_limit))
       (delegated complete 0 true true 1 1 (Truncated Item_limit)) |}]
 ;;
+
+let%test_unit
+    "developer capture uses the retained supplied script and final current target"
+  =
+  let contents = {|<script id="s" language="chatml" kind="tool">let main = 1</script>|} in
+  Foundation_tests.with_supplied_owner
+    ~contents
+    (fun owner actor connection expected env ->
+       let target = Chatml.Chatml_compiler_contract.Target.One_off_v1 in
+       let contracts =
+         Agent_server.Authoring_standard_contracts.create
+           ~targets:[ target ]
+           ~max_identity_bytes:(16 * 1024 * 1024)
+           ~max_work_steps:1_000_000
+           ~checkpoint:ignore
+         |> ok
+       in
+       let entry =
+         Agent_server.Authoring_standard_contracts.find contracts target
+         |> Option.value_exn
+       in
+       let selected =
+         Core_owner.Developer.Selected_contract.of_standard_entry entry |> ok
+       in
+       let allowed = ref true in
+       let request_actor =
+         Operator_authorization.guarded
+           ~principal:(Operator_authorization.principal actor)
+           ~is_current:(fun () -> !allowed)
+       in
+       let policy =
+         Core_owner.Developer.Target_policy.create
+           ~local_project:(fun _ ~root:_ ~project:_ ~selection:_ -> None)
+           ~local_source:(fun _ ~root:_ ~member:_ -> None)
+           ~authoring_project:(fun _ ~context:_ ~current:_ -> None)
+           ~document_project:
+             (fun
+               _ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~build:_ ~metadata:_ ->
+             None)
+           ~document_source:
+             (fun
+               _ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~script:_ ->
+             if !allowed then Some selected else None)
+       in
+       let limits =
+         Core_owner.Developer.Limits.create
+           ~max_prepared_input_bytes:4096
+           ~max_document_origin_bytes:16_384
+           ~max_editor_versions:8
+           ~build:
+             (Build.Limits.create
+                ~max_work_steps:100_000
+                ~max_input_bytes:(Some 4096)
+                ~document:Document_schema.Limits.default
+              |> Or_error.ok_exn)
+         |> Or_error.ok_exn
+       in
+       let developer = Core_owner.Developer.create ~owner ~policy ~limits in
+       let analyze =
+         A.Analyze.Request.create
+           ~context:expected
+           ~target:(A.Target.selected_script "s" |> ok)
+         |> ok
+       in
+       (match Analyze.analyze (analyzer owner env) ~actor ~connection analyze with
+        | Ok (A.Analyze.Unavailable _) -> ()
+        | Ok _ | Error _ -> failwith "source-only Analyze did not retain Parsed script");
+       let request =
+         Core_owner.Developer.Request.create
+           ~entrypoint:"main"
+           ~input:`Null
+           ~fixtures:None
+           ~json_bounds:
+             (Chatml_developer_capture.Json_bounds.create
+                ~max_bytes:4096
+                ~max_depth:16
+                ~max_nodes:128
+              |> Or_error.ok_exn)
+           ~checkpoint:ignore
+         |> ok
+       in
+       let candidate =
+         match
+           Core_owner.Developer.prepare_document_script
+             developer
+             ~actor:request_actor
+             ~connection
+             ~expected
+             ~script:
+               (Core_owner.Developer.Document_script.create
+                  ~selector:(A.Target.selected_script "s" |> ok))
+             ~request
+             ~checkpoint:ignore
+         with
+         | Ok candidate -> candidate
+         | Error error -> failwith (Jsonaf.to_string (P.Error.to_json error))
+       in
+       let capture = Core_owner.Developer.Candidate.capture candidate in
+       let check =
+         Core_owner.Developer.Candidate.final_admission
+           candidate
+           ~actor:request_actor
+           ~capture
+           ~checkpoint:ignore
+         |> ok
+       in
+       check () |> ok;
+       assert (
+         Result.is_error
+           (Core_owner.Developer.Candidate.final_admission
+              candidate
+              ~actor
+              ~capture
+              ~checkpoint:ignore));
+       allowed := false;
+       match check () with
+       | Error { P.Error.code = Permission_denied; _ } -> ()
+       | Error _ | Ok () -> failwith "revoked developer target passed final check")
+;;

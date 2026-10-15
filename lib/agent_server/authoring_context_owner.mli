@@ -23,6 +23,37 @@ val check_context_selection_now
   -> actor:Operator_authorization.t
   -> (unit, Error.t) result
 
+module Candidate_pin : sig
+  type t
+
+  (** Freeze only comparison evidence while a genuine [Current] borrow is
+      live: the physical Core/connection/negotiation/context entries, exact
+      Expected identity+basis+generation, and a Document's retained Parsed
+      capture head. No Current borrow, live read grant or mutable cache owner
+      escapes. Unrelated analysis result heads need not remain unchanged. *)
+  val of_current
+    :  Authoring_context_service_core.t
+    -> Authoring_context_service_core.Current.t
+    -> connection:Connection_context.t
+    -> (t, Error.t) result
+
+  (** Called within each later [with_current] full check; rejects a replacement
+      context or Parsed head even when a label/digest happens to match. *)
+  val matches_current
+    :  t
+    -> Authoring_context_service_core.Current.t
+    -> (unit, Error.t) result
+
+  (** Bounded NONYIELDING final check on the creating domain. Core.try_with_gate
+      compares the active physical connection/negotiation lease, context object,
+      Expected generation/basis and relevant Document capture head. A busy gate
+      rejects instead of waiting. After releasing that short gate, the existing
+      original/current actor and source/upload/supplied selection checks run,
+      followed by the host's exact developer target-policy comparison. No
+      native read, Store I/O, callback or wait occurs under the Core gate. *)
+  val check_now : t -> actor:Operator_authorization.t -> (unit, Error.t) result
+end
+
 (** [feature] chooses the negotiated sibling; absent means Core authoring.
     [final_check] adds a bounded nonyielding current host selection check
     immediately before the final gate, after the ordinary actor/source/context
