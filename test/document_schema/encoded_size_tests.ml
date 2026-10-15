@@ -40,6 +40,16 @@ let%expect_test "encoded byte accounting matches the independent JSON serializer
       require
         [%here]
         (Result.equal
+           Int.equal
+           Error.equal
+           (Json.validate_and_measure ~limits:(limits encoded_bytes) json)
+           (Json.validate_and_measure_with_checkpoint
+              ~limits:(limits encoded_bytes)
+              ~checkpoint:ignore
+              json));
+      require
+        [%here]
+        (Result.equal
            Unit.equal
            Error.equal
            (Json.validate ~limits:(limits (encoded_bytes - 1)) json)
@@ -230,6 +240,13 @@ let%expect_test "validation preserves first error and nested paths" =
            Error.equal
            (Json.validate_and_measure ~limits json)
            (Error error));
+      require
+        [%here]
+        (Result.equal
+           Int.equal
+           Error.equal
+           (Json.validate_and_measure ~limits json)
+           (Json.validate_and_measure_with_checkpoint ~limits ~checkpoint:ignore json));
       print_endline label);
   [%expect
     {|
@@ -239,4 +256,66 @@ let%expect_test "validation preserves first error and nested paths" =
     invalid key before field bound
     duplicate before invalid value
     nested number path |}]
+;;
+
+let%test_unit "large canonical measurement checkpoints and propagates callback identity" =
+  let cancellation = Failure "canonical measurement cancelled" in
+  let cases =
+    [ `String (String.make (3 * 65_536) 'x'), 200_000, 1_000, 3
+    ; `Number ("1" ^ String.make (2 * 65_536) '2'), 200_000, 1_000, 2
+    ; `Array (List.init 768 ~f:(fun _ -> `Null)), 10_000, 1_000, 3
+    ]
+  in
+  List.iter cases ~f:(fun (json, max_bytes, max_nodes, min_checkpoints) ->
+    let limits =
+      Limits.create ~max_bytes ~max_depth:2 ~max_fields:1 ~max_nodes
+      |> Result.map_error ~f:(fun error -> Sexp.to_string_hum (Error.sexp_of_t error))
+      |> Result.ok_or_failwith
+    in
+    let checkpoints = ref 0 in
+    let measured =
+      Json.validate_and_measure_with_checkpoint
+        ~limits
+        ~checkpoint:(fun () -> incr checkpoints)
+        json
+    in
+    assert (!checkpoints >= min_checkpoints);
+    assert (
+      Result.equal Int.equal Error.equal measured (Json.validate_and_measure ~limits json));
+    match
+      Json.validate_and_measure_with_checkpoint
+        ~limits
+        ~checkpoint:(fun () -> raise cancellation)
+        json
+    with
+    | exception exn -> assert (phys_equal exn cancellation)
+    | Ok _ | Error _ -> failwith "checkpoint cancellation was swallowed")
+;;
+
+let%test_unit "UTF-8 validation preserves code points across checkpoint slices" =
+  let limits =
+    Limits.create ~max_bytes:200_000 ~max_depth:2 ~max_fields:1 ~max_nodes:1
+    |> Result.map_error ~f:(fun error -> Sexp.to_string_hum (Error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  List.iter [ 65_532; 65_533; 65_534; 65_535; 65_536; 65_537 ] ~f:(fun prefix ->
+    let base = String.make prefix 'x' in
+    List.iter [ "\195\169"; "\240\159\152\128"; "\195\040"; "\128" ] ~f:(fun suffix ->
+      let text = base ^ suffix ^ "tail" in
+      let valid = String.Utf8.is_valid text in
+      let checked =
+        Json.validate_and_measure_with_checkpoint
+          ~limits
+          ~checkpoint:ignore
+          (`String text)
+      in
+      assert (Bool.equal valid (Result.is_ok checked));
+      if valid
+      then
+        assert (
+          Result.equal
+            Int.equal
+            Error.equal
+            checked
+            (Ok (String.length (Jsonaf.to_string (`String text)))))))
 ;;

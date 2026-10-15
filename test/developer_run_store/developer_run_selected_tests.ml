@@ -3,6 +3,59 @@ module P = Agent_protocol
 module R = Agent_store.Developer_run_store
 module F = Developer_run_store_tests
 
+module Held_domain_manager = struct
+  type t =
+    { manager : Eio.Domain_manager.ty Eio.Resource.t
+    ; armed : bool Atomic.t
+    ; skip : int Atomic.t
+    ; entered : unit Eio.Promise.u
+    ; release : unit Eio.Promise.t
+    ; finished : bool Atomic.t
+    }
+
+  let run t f =
+    let (Eio.Resource.T (data, ops)) = t.manager in
+    let module Native = (val Eio.Resource.get ops Eio.Domain_manager.Pi.Mgr) in
+    Native.run data (fun ~cancelled ->
+      if Atomic.get t.armed && Atomic.get t.skip > 0
+      then (
+        Atomic.set t.skip 0;
+        f ~cancelled)
+      else if Atomic.exchange t.armed false
+      then
+        Exn.protect
+          ~finally:(fun () -> Atomic.set t.finished true)
+          ~f:(fun () ->
+            (* Run the real canonical codec, then hold its return while the
+               Domain_manager call still owns the Store lease. *)
+            let _decoded = f ~cancelled in
+            Eio.Promise.resolve t.entered ();
+            Eio.Cancel.protect (fun () -> Eio.Promise.await t.release);
+            raise (Eio.Promise.await cancelled))
+      else f ~cancelled)
+  ;;
+
+  let run_raw t f = Eio.Domain_manager.run_raw t.manager f
+end
+
+let with_domain_manager env manager : Eio_unix.Stdenv.base =
+  object
+    method domain_mgr = manager
+    method stdin = env#stdin
+    method stdout = env#stdout
+    method stderr = env#stderr
+    method net = env#net
+    method process_mgr = env#process_mgr
+    method clock = env#clock
+    method mono_clock = env#mono_clock
+    method fs = env#fs
+    method cwd = env#cwd
+    method secure_random = env#secure_random
+    method debug = env#debug
+    method backend_id = env#backend_id
+  end
+;;
+
 let timestamp = P.Timestamp.of_string "2026-10-13T00:00:00Z" |> F.ok
 let invocation_id = P.Id.Invocation.of_string "inv_developer_selected" |> F.ok
 let job_id name = P.Id.Job.of_string name |> F.ok
@@ -1189,4 +1242,180 @@ let%test_unit "selected rename admission rejects after staging without publishin
       match commit () with
       | exception actual -> assert (phys_equal actual original)
       | Ok _ | Error _ -> failwith "pre-rename exception identity was lost")
+;;
+
+let%test_unit "cancelled large claim preparation joins its codec before close and retry" =
+  F.with_temp_directory "ochat-developer-large-cpu" (fun env temporary ->
+    Eio.Switch.run (fun sw ->
+      let entered, entered_u = Eio.Promise.create () in
+      let release, release_u = Eio.Promise.create () in
+      let finished = Atomic.make false in
+      let armed = Atomic.make false in
+      (* Claim preparation first decodes the old document, then encodes the
+         proposed Running state. Hold that second pure CPU operation. *)
+      let skip = Atomic.make 1 in
+      let observed =
+        Held_domain_manager.
+          { manager = Eio.Stdenv.domain_mgr env
+          ; armed
+          ; skip
+          ; entered = entered_u
+          ; release
+          ; finished
+          }
+      in
+      let manager =
+        Eio.Resource.T (observed, Eio.Domain_manager.Pi.mgr (module Held_domain_manager))
+      in
+      let wrapped = with_domain_manager env manager in
+      let session = F.create_session wrapped sw (Filename.concat temporary "data") in
+      let max_bytes = 512 * 1024 in
+      let document =
+        Document_schema.Limits.create
+          ~max_bytes
+          ~max_depth:16
+          ~max_fields:1_000
+          ~max_nodes:2_000
+        |> F.ok
+      in
+      let limits =
+        R.Limits.create
+          ~max_runs:1
+          ~max_epochs_per_run:1
+          ~max_jobs_per_run:1
+          ~max_invocations_per_run:1
+          ~max_selected_per_commit:1
+          ~max_job_payload_bytes:max_bytes
+          ~max_document_bytes:max_bytes
+          ~max_recovery_entries:16
+          ~max_recovery_bytes:max_bytes
+          ~max_work_steps:10_000
+          ~document
+        |> Or_error.ok_exn
+      in
+      let store = R.open_or_create session ~sw ~limits ~checkpoint:ignore |> F.run_ok in
+      let owner = F.owner 0 in
+      let capture = F.digest "large developer CPU document" in
+      let handle, initial = F.admit store owner capture in
+      let id = job_id "job_large_cpu_document" in
+      let launch =
+        P.Developer_job.Launch.create
+          ~parent:P.Developer_job.Launch.Run_root
+          ~parent_job:None
+          ~nested_depth:0
+        |> F.ok
+      in
+      let payload = `Object [ "text", `String (String.make 128_000 'x') ] in
+      let state : P.Developer_job.State.t =
+        { status = P.Job.Queued
+        ; attempt = 0
+        ; started_at = None
+        ; next_run_at = None
+        ; completed_at = None
+        ; result = None
+        ; retry_failure = None
+        }
+      in
+      let selected =
+        P.Developer_job.create
+          ~owner
+          ~capture_fingerprint:capture
+          ~id
+          ~launch
+          ~kind:P.Job.Async_tool
+          ~payload
+          ~retry_policy:P.Job.Never
+          ~created_at:timestamp
+          ~state
+        |> F.ok
+      in
+      let prepared =
+        R.prepare_root_selected
+          handle
+          ~expected:initial
+          ~phase:R.Checkpoint.Active
+          ~selected:[ selected ]
+        |> F.run_ok
+      in
+      ignore
+        (R.commit_and_settle handle ~admit:(fun () -> true) prepared (handoff ())
+         |> F.run_ok
+         |> installed
+         : R.Observation.t);
+      let authority =
+        Eio.Path.(
+          Eio.Stdenv.fs env
+          / Filename.concat temporary "data"
+          / "developer-runs"
+          / ("run_" ^ P.Id.Developer_run.to_string F.run_id ^ ".json"))
+      in
+      let before = Eio.Path.load authority in
+      assert (String.length before > 64 * 1024);
+      let first_candidate =
+        R.scheduler_candidates handle ~checkpoint:ignore |> F.run_ok |> List.hd_exn
+      in
+      let reason = Failure "large claim preparation cancelled" in
+      let cancel_ready, cancel_ready_u = Eio.Promise.create () in
+      let scan_done, scan_done_u = Eio.Promise.create () in
+      Atomic.set armed true;
+      Eio.Fiber.fork ~sw (fun () ->
+        let outcome =
+          try
+            Eio.Cancel.sub (fun cancel ->
+              Eio.Promise.resolve cancel_ready_u cancel;
+              ignore
+                (R.prepare_job_claim
+                   handle
+                   ~expected:(R.Scheduler_candidate.observation first_candidate)
+                   ~lookup:(R.Scheduler_candidate.lookup first_candidate)
+                   ~now:timestamp
+                 : _ result));
+            `Unexpected_success
+          with
+          | Eio.Cancel.Cancelled actual -> `Cancelled actual
+        in
+        Eio.Promise.resolve scan_done_u outcome);
+      let cancel = Eio.Promise.await cancel_ready in
+      Eio.Promise.await entered;
+      let close_done, close_done_u = Eio.Promise.create () in
+      Exn.protect
+        ~finally:(fun () -> Eio.Promise.resolve release_u ())
+        ~f:(fun () ->
+          Eio.Cancel.cancel cancel reason;
+          Eio.Fiber.fork ~sw (fun () ->
+            Eio.Promise.resolve close_done_u (R.close_and_wait store));
+          Eio.Fiber.yield ();
+          assert (R.is_closed store);
+          assert (not (Eio.Promise.is_resolved close_done));
+          assert (not (Atomic.get finished)));
+      (match Eio.Promise.await scan_done with
+       | `Cancelled actual -> assert (phys_equal actual reason)
+       | `Unexpected_success -> failwith "claim preparation cancellation was lost");
+      assert (Atomic.get finished);
+      Eio.Promise.await close_done |> F.run_ok;
+      assert (String.equal before (Eio.Path.load authority));
+      let reopened =
+        R.open_or_create session ~sw ~limits ~checkpoint:ignore |> F.run_ok
+      in
+      let handle, _ = F.admit reopened owner capture in
+      let candidate =
+        R.scheduler_candidates handle ~checkpoint:ignore |> F.run_ok |> List.hd_exn
+      in
+      assert (
+        Jsonaf.exactly_equal
+          payload
+          (P.Developer_job.payload (R.Scheduler_candidate.job candidate)));
+      let claimed =
+        R.prepare_job_claim
+          handle
+          ~expected:(R.Scheduler_candidate.observation candidate)
+          ~lookup:(R.Scheduler_candidate.lookup candidate)
+          ~now:timestamp
+        |> F.run_ok
+        |> R.commit_job_claim handle
+        |> F.run_ok
+      in
+      R.Claim.abandon_before_callback (R.Claimed.claim claimed) ~handle |> F.run_ok;
+      R.close_and_wait reopened |> F.run_ok;
+      Agent_store.Session_store.close session |> F.store_ok))
 ;;

@@ -328,10 +328,19 @@ end
     temporary files are never treated as authority. No separate daemon lock or
     writer exists. Opening syncs the daemon root after finding or creating the
     subtree, including a retry after an uncertain subtree creation.
+    The issuing Store retains the actual Eio Domain_manager from this opening
+    environment solely for bounded pure canonical document CPU work. Physical
+    Store/Root/actor handles, directory I/O, leases, original callbacks and
+    final admission remain on their issuing domain. A joined in-flight read or
+    encode cannot outlive [close_and_wait].
     One final versioned document layout has checkpoint, invocation and job
     fields from the outset; the latter may be empty. Unknown versions fail
     closed. There is no intermediate milestone schema or migration. The caller
-    retains [sw] until [close_and_wait]. *)
+    retains [sw] until [close_and_wait]. [checkpoint] still runs on every
+    charged Store work step on the issuing domain. The Store also yields at a
+    finite charged cadence during typed traversal, even if the trusted
+    callback only checks cancellation; no yield is inserted between final
+    nonyielding before-rename admission and rename entry. *)
 val open_or_create
   :  Session_store.t
   -> sw:Eio.Switch.t
@@ -389,8 +398,11 @@ val observe_latest_active : handle -> (Observation.t, Error.t) result
     retained is charged before allocation to the same Store work allowance;
     [checkpoint] runs between bounded steps and propagates exception or
     cancellation unchanged. At most the Store's configured jobs-per-run limit
-    can be returned. This does not use the full retention inventory or grant
-    a worker Claim. A later claim must reread/revalidate the exact observed
+    can be returned. Large pure canonical decoding follows the same bounded
+    Store CPU path as physical claim preparation and commit; typed projection
+    yields at the charged cadence on the issuing domain. This does not use the
+    full retention inventory or grant a worker Claim. A later claim must
+    reread/revalidate the exact observed
     lookup and current owner. No partial candidate list escapes on error. *)
 val scheduler_candidates
   :  handle
@@ -736,7 +748,10 @@ val prepare_external_model
     Active epoch. A trusted host samples [now], proves due/current authority
     and acquires the existing shared capacity lease before this CAS. The
     resulting distinct Prepared changes only this job to Running, increments
-    the attempt once, starts it and clears retry wait. No callback can run yet. *)
+    the attempt once, starts it and clears retry wait. Its fresh read and
+    canonical encode use the same bounded cooperative CPU path as candidate
+    scanning; physical CAS/currentness remain under the original Store writer
+    lease. No callback can run yet. *)
 val prepare_job_claim
   :  handle
   -> expected:Observation.t

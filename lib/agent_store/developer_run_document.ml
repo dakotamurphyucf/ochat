@@ -352,7 +352,11 @@ let append_selected
     List.fold_result all ~init:0 ~f:(fun accumulated job ->
       poll ();
       let%bind length =
-        D.Json.validate_and_measure ~limits (P.Developer_job.payload job) |> F.store
+        D.Json.validate_and_measure_with_checkpoint
+          ~limits
+          ~checkpoint:poll
+          (P.Developer_job.payload job)
+        |> F.store
       in
       if length > max_job_payload_bytes - accumulated
       then corrupt "developer job payload bytes exceed limit"
@@ -587,7 +591,11 @@ let validate t ~poll ~limits ~max_epochs ~max_jobs ~max_invocations ~max_job_pay
     List.fold_result t.jobs ~init:0 ~f:(fun accumulated job ->
       poll ();
       let%bind length =
-        D.Json.validate_and_measure ~limits (P.Developer_job.payload job) |> F.store
+        D.Json.validate_and_measure_with_checkpoint
+          ~limits
+          ~checkpoint:poll
+          (P.Developer_job.payload job)
+        |> F.store
       in
       if length > max_job_payload_bytes - accumulated
       then corrupt "developer job payload bytes exceed limit"
@@ -596,15 +604,47 @@ let validate t ~poll ~limits ~max_epochs ~max_jobs ~max_invocations ~max_job_pay
   ()
 ;;
 
-let to_bytes t ~poll ~limits ~max_epochs ~max_jobs ~max_invocations ~max_job_payload_bytes
+module Encode_input = struct
+  type t =
+    { payload : D.Json.t
+    ; limits : D.Limits.t
+    }
+end
+
+let prepare_encode
+      t
+      ~poll
+      ~limits
+      ~max_epochs
+      ~max_jobs
+      ~max_invocations
+      ~max_job_payload_bytes
   =
   let open Result.Let_syntax in
   let%bind () =
     validate t ~poll ~limits ~max_epochs ~max_jobs ~max_invocations ~max_job_payload_bytes
   in
-  let%bind payload = to_payload t ~poll in
+  let%map payload = to_payload t ~poll in
+  { Encode_input.payload; limits }
+;;
+
+let finish_encode { Encode_input.payload; limits } =
+  let open Result.Let_syntax in
   let%map document = D.Document.create ~limits ~kind ~version ~payload |> F.store in
   D.Document.to_string document
+;;
+
+let to_bytes t ~poll ~limits ~max_epochs ~max_jobs ~max_invocations ~max_job_payload_bytes
+  =
+  prepare_encode
+    t
+    ~poll
+    ~limits
+    ~max_epochs
+    ~max_jobs
+    ~max_invocations
+    ~max_job_payload_bytes
+  |> Result.bind ~f:finish_encode
 ;;
 
 let required json name decode = F.required json name decode |> F.store
@@ -646,8 +686,8 @@ let invocation_entry_of_json json =
   { Invocation_entry.revision = Int64.to_int_exn revision; value }
 ;;
 
-let of_bytes_with_document
-      bytes
+let of_decoded_document
+      document
       ~poll
       ~limits
       ~max_epochs
@@ -656,7 +696,9 @@ let of_bytes_with_document
       ~max_job_payload_bytes
   =
   let open Result.Let_syntax in
-  let%bind document = D.Document.decode ~limits bytes |> F.store in
+  (* Document.decode recorded the exact admitted limits. With the Store's same
+     limits this is a constant-time proof, not a second JSON traversal. *)
+  let%bind () = D.Document.validate document ~limits |> F.store in
   let%bind () = F.expect document ~kind ~version |> F.store in
   let%bind () =
     exact_fields
@@ -698,7 +740,10 @@ let of_bytes_with_document
     List.fold_result jobs ~init:0 ~f:(fun accumulated job_json ->
       poll ();
       let%bind payload = required job_json "payload" (fun value -> Ok value) in
-      let%bind length = D.Json.validate_and_measure ~limits payload |> F.store in
+      let%bind length =
+        D.Json.validate_and_measure_with_checkpoint ~limits ~checkpoint:poll payload
+        |> F.store
+      in
       if length > max_job_payload_bytes - accumulated
       then corrupt "developer job payload bytes exceed limit"
       else Ok (accumulated + length))
@@ -718,6 +763,30 @@ let of_bytes_with_document
   let t = { host_id; run_id; principal_id; revision; epochs; invocations; jobs } in
   let%map () =
     validate t ~poll ~limits ~max_epochs ~max_jobs ~max_invocations ~max_job_payload_bytes
+  in
+  t
+;;
+
+let of_bytes_with_document
+      bytes
+      ~poll
+      ~limits
+      ~max_epochs
+      ~max_jobs
+      ~max_invocations
+      ~max_job_payload_bytes
+  =
+  let open Result.Let_syntax in
+  let%bind document = D.Document.decode ~limits bytes |> F.store in
+  let%map t =
+    of_decoded_document
+      document
+      ~poll
+      ~limits
+      ~max_epochs
+      ~max_jobs
+      ~max_invocations
+      ~max_job_payload_bytes
   in
   t, document
 ;;
