@@ -74,6 +74,13 @@ module Server : sig
           from root presence. Startup binds it to the actual opened source host.
           Like other Server fields, changes require daemon restart: the config
           watcher rejects a changed Server record before publication. *)
+    ; authoring_upload_access : Authoring_upload_access_configuration.t option
+          [@sexp.option]
+      (** Explicit independent upload-write, durable-publication, bundle-read,
+          and rebind grants. A configured target is only a comparison after
+          actual authentication; it grants no native source read. Changed
+          access requires daemon restart through the existing Server snapshot
+          guard. *)
     ; session_helpers : Session_helper_policy.t list [@sexp.list]
       (** Explicit operator grants for optional external helpers. Changes require
           restart. The helpers still require declared shell tools and normal

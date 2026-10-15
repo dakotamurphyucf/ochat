@@ -92,6 +92,12 @@ module Host_policy : sig
     -> analysis_policy:Chatml_authoring_analysis.Policy.t
     -> (t, P.Error.t) result
 
+  (** Add exactly one configured upload owner to an existing core policy,
+      preserving its native/supplied/semantic/assistance families. Reject an
+      already installed upload owner; an upload-only policy is built by
+      [upload_only] instead. This pure composition grants no source read. *)
+  val with_configured_upload : t -> upload:Upload.t -> (t, P.Error.t) result
+
   (** Install one real semantic sibling on the same core/source policy after
       finite lower admission. This is used by configured daemon composition;
       missing core/source origin or a second semantic sibling rejects. *)

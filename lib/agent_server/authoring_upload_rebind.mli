@@ -22,6 +22,15 @@ module Selected : sig
     -> contract:Chatml.Chatml_compiler_contract.t
     -> t Or_error.t
 
+  (** Startup-only selected comparison from an opaque Standard cache entry.
+      The cache already charged exact identity/fingerprint work once per
+      target; this validates environment and the existing rebind identity
+      ceiling without recomputing the contract. The entry grants no request. *)
+  val create_standard
+    :  environment:string
+    -> admitted:Authoring_standard_contracts.Entry.t
+    -> t Or_error.t
+
   val environment : t -> string
   val contract : t -> Chatml.Chatml_compiler_contract.t
 end
@@ -30,12 +39,14 @@ module Policy : sig
   type t
 
   (** Both callbacks are bounded and non-yielding reads of already admitted
-      host policy. [authorize_read] is independent of upload/write and message
-      scopes. [select] chooses actual current target/environment/compiler
+      host policy. [authorize_read] and [authorize_rebind] are independent of
+      upload/write, each other and message scopes; the host requires both for
+      restore and continuing uploaded-context use. [select] chooses actual current target/environment/compiler
       contract for the exact manifest selector; it cannot fetch host sources,
       reload a catalog or mint a project from receipt metadata. *)
   val create
     :  authorize_read:(Actor.t -> bool)
+    -> authorize_rebind:(Actor.t -> bool)
     -> select:
          (Actor.t
           -> Bundle.Manifest.t
@@ -44,6 +55,7 @@ module Policy : sig
     -> t
 
   val authorize_read : t -> Actor.t -> bool
+  val authorize_rebind : t -> Actor.t -> bool
 end
 
 module Rebound : sig

@@ -215,6 +215,7 @@ let%test_unit "configured grants retain physical source-host affinity" =
           source_a
           ~configuration:access
           ~project_sources:configuration
+          ~contracts:None
           ~max_contract_identity_bytes:(16 * 1024 * 1024)
           ~max_work_steps:1_000_000
           ~checkpoint:ignore
@@ -228,6 +229,7 @@ let%test_unit "configured grants retain physical source-host affinity" =
            source_a
            ~configuration:access
            ~project_sources:configuration
+           ~contracts:None
            ~max_contract_identity_bytes:1
            ~max_work_steps:1_000_000
            ~checkpoint:ignore
@@ -1074,6 +1076,7 @@ let%test_unit "declared project metadata follows the captured declaring input" =
                  source_host
                  ~configuration:access
                  ~project_sources:configuration
+                 ~contracts:None
                  ~max_contract_identity_bytes:(16 * 1024 * 1024)
                  ~max_work_steps:1_000_000
                  ~checkpoint:ignore

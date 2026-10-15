@@ -2,6 +2,7 @@ open! Core
 module P = Agent_protocol
 module S = Agent_server
 module Q = P.Authoring.Analysis.Query
+module B = P.Authoring_bundle.Bundle
 
 let () = Mirage_crypto_rng_unix.use_default ()
 
@@ -141,6 +142,269 @@ let upload_limits () =
   |> Or_error.ok_exn
 ;;
 
+let upload_document () =
+  let contents = "<developer>Uploaded authoring source.</developer>" in
+  let id =
+    Chatml_source.Id.create ~package_namespace:"uploaded" ~relative_path:"entry.chatmd"
+    |> Or_error.ok_exn
+  in
+  let source =
+    P.Authoring.Source.create
+      ~id
+      ~digest:(Chatml_source.Digest.of_contents contents ~checkpoint:Fn.id)
+      ~byte_length:(String.length contents)
+      ~editor_revision:None
+    |> ok
+  in
+  let member = B.Member.create ~source |> ok in
+  let document_member =
+    B.Manifest.Document_member.create
+      ~source:id
+      ~member:(Source.Portable_path.create "entry.chatmd" |> Or_error.ok_exn)
+    |> ok
+  in
+  let basis =
+    B.Manifest.Chatmd_document.create
+      ~root_source:id
+      ~document_members:[ document_member ]
+      ~scripts:[]
+    |> ok
+  in
+  let manifest =
+    B.Manifest.create ~basis:(Chatmd_document basis) ~members:[ member ] |> ok
+  in
+  id, contents, manifest
+;;
+
+let configured_upload_access mode grants =
+  S.Authoring_upload_access_configuration.
+    { mode
+    ; grants =
+        List.map grants ~f:(fun operation ->
+          Grant.
+            { principal_id = (Agent_server_test_support.principal ()).id
+            ; authentication_kind = "test"
+            ; operation
+            })
+    ; selections = []
+    }
+;;
+
+let publish_document transport ~key =
+  let id, contents, manifest = upload_document () in
+  let begin_key = P.Idempotency_key.of_string (key ^ "-begin") |> ok in
+  let begin_request = B.Begin.create_request ~idempotency_key:begin_key ~manifest () in
+  let upload_id =
+    match authoring transport (Bundle_begin begin_request) |> ok with
+    | Bundle_begin response -> B.Begin.upload_id response
+    | _ -> failwith "configured upload did not begin"
+  in
+  let chunk =
+    B.Chunk.create_request ~upload_id ~source:id ~byte_offset:0 ~bytes:contents |> ok
+  in
+  (match authoring transport (Bundle_chunk chunk) |> ok with
+   | Bundle_chunk _ -> ()
+   | _ -> failwith "configured upload did not accept bytes");
+  let commit_key = P.Idempotency_key.of_string (key ^ "-commit") |> ok in
+  let commit = B.Commit.create_request ~upload_id ~idempotency_key:commit_key in
+  (match authoring transport (Bundle_commit commit) |> ok with
+   | Bundle_commit response ->
+     (match B.Commit.outcome response with
+      | Published _ -> ()
+      | Accepted_for_validation | Rejected _ ->
+        failwith "configured upload did not publish")
+   | _ -> failwith "configured upload returned another method");
+  match
+    authoring transport (Bundle_status (B.Status.create_request ~upload_id)) |> ok
+  with
+  | Bundle_status status ->
+    (match B.Status.state status with
+     | Published _ -> ()
+     | _ -> failwith "configured publication was not durable")
+  | _ -> failwith "configured status returned another method"
+;;
+
+let project_upload () =
+  let module Project_fixture = Chatml_project_build_tests.Authoring_bundle_tests in
+  let module Support = Chatml_project_build_tests.Support in
+  let module Build = Chatml_project_build in
+  let contract =
+    Chatml.Chatml_compiler_contract.for_target One_off_v1 ~checkpoint:Fn.id
+  in
+  let declaration =
+    Support.capture
+      ~namespace:"uploaded"
+      "chatml.project.json"
+      {|{"schema_version":1,"namespace":"uploaded","source_dirs":["src"],"entries":{"main":{"source":"src/main.chatml","target":"one_off_v1"}}}|}
+  in
+  let main =
+    Support.capture
+      ~namespace:"uploaded"
+      "src/main.chatml"
+      "let main input = Task.pure(input)\n"
+  in
+  let catalog =
+    Support.catalog
+      declaration
+      ~request:(Entry { name = "main"; environment = None })
+      ~members:[ main ]
+  in
+  let root =
+    Build.Catalog_input.create
+      catalog
+      ~origin:Local
+      ~acquisition_key:"uploaded-project-test"
+      ~dependencies:[]
+  in
+  let limits = Support.limits () in
+  let gate, _ =
+    Build.Selection_gate.create Initial_prepare ~limits ~checkpoint:Fn.id |> Support.ok
+  in
+  let original =
+    Build.compose
+      root
+      ~catalogs:[]
+      ~entry:Declared
+      ~selection_gate:gate
+      ~contract
+      ~lock_id:(Support.id ~namespace:"uploaded" "original.lock.json")
+      ~limits
+      ~checkpoint:Fn.id
+    |> Support.ok
+  in
+  let sources = Support.without_lock original in
+  let project =
+    Project_fixture.project
+      original
+      ~source_members:sources
+      ~selection:(Project_fixture.selection (Entry "main"))
+      ~entry:Declared
+      ~mode:
+        (Compose
+           { selected_previous_lock = None
+           ; generated_lock =
+               Chatml_source.Id.create
+                 ~package_namespace:"uploaded"
+                 ~relative_path:"installed.lock.json"
+               |> Or_error.ok_exn
+           })
+  in
+  let manifest = Project_fixture.manifest project sources in
+  let environment =
+    Chatml_prepared_program.Environment.name
+      (Chatml_prepared_program.environment (Chatml_project_build.prepared original))
+  in
+  manifest, sources, environment
+;;
+
+let moderator_upload () =
+  let module Project_fixture = Chatml_project_build_tests.Authoring_bundle_tests in
+  let module Build = Chatml_project_build in
+  let module Support = Chatml_project_build_tests.Support in
+  let contract =
+    Chatml.Chatml_compiler_contract.for_target Moderator_v1 ~checkpoint:Fn.id
+  in
+  let declaration =
+    Support.capture
+      ~namespace:"role"
+      "chatml.project.json"
+      {|{"schema_version":1,"namespace":"role","source_dirs":["src"]}|}
+  in
+  let entry =
+    Support.capture
+      ~namespace:"role"
+      "moderator.chatml"
+      "let initial_state = 0 let on_event ctx state event = Task.pure(state)"
+  in
+  let catalog =
+    Support.catalog declaration ~request:(Library { environment = None }) ~members:[]
+  in
+  let root =
+    Build.Catalog_input.create
+      catalog
+      ~origin:Local
+      ~acquisition_key:"minimal-moderator"
+      ~dependencies:[]
+  in
+  let limits = Support.limits () in
+  let gate, _ =
+    Build.Selection_gate.create Initial_prepare ~limits ~checkpoint:Fn.id |> Support.ok
+  in
+  let original =
+    Build.compose
+      root
+      ~catalogs:[]
+      ~entry:(Captured entry)
+      ~selection_gate:gate
+      ~contract
+      ~lock_id:(Support.id ~namespace:"role" "moderator.lock.json")
+      ~limits
+      ~checkpoint:Fn.id
+    |> Support.ok
+  in
+  let sources = Support.without_lock original in
+  let entry = Project_fixture.find_entry original in
+  let project =
+    Project_fixture.project
+      original
+      ~source_members:sources
+      ~selection:(Project_fixture.selection Library)
+      ~entry:(Captured (Project_fixture.captured_entry entry))
+      ~mode:
+        (Compose
+           { selected_previous_lock = None
+           ; generated_lock =
+               Chatml_source.Id.create
+                 ~package_namespace:"role"
+                 ~relative_path:"installed.lock.json"
+               |> Or_error.ok_exn
+           })
+  in
+  let environment =
+    Chatml_prepared_program.Environment.name
+      (Chatml_prepared_program.environment (Chatml_project_build.prepared original))
+  in
+  Project_fixture.manifest project sources, sources, environment
+;;
+
+let publish_project transport ~key ~manifest ~sources =
+  let begin_key = P.Idempotency_key.of_string (key ^ "-begin") |> ok in
+  let upload_id =
+    match
+      authoring
+        transport
+        (Bundle_begin (B.Begin.create_request ~idempotency_key:begin_key ~manifest ()))
+      |> ok
+    with
+    | Bundle_begin response -> B.Begin.upload_id response
+    | _ -> failwith "configured Project upload did not begin"
+  in
+  List.iter sources ~f:(fun source ->
+    let chunk =
+      B.Chunk.create_request
+        ~upload_id
+        ~source:(Chatml_source.id source)
+        ~byte_offset:0
+        ~bytes:(Chatml_source.contents source)
+      |> ok
+    in
+    match authoring transport (Bundle_chunk chunk) |> ok with
+    | Bundle_chunk _ -> ()
+    | _ -> failwith "configured Project member was not accepted");
+  let commit =
+    B.Commit.create_request
+      ~upload_id
+      ~idempotency_key:(P.Idempotency_key.of_string (key ^ "-commit") |> ok)
+  in
+  match authoring transport (Bundle_commit commit) |> ok with
+  | Bundle_commit response ->
+    (match B.Commit.outcome response with
+     | Published receipt -> receipt
+     | Accepted_for_validation | Rejected _ ->
+       failwith "configured Project was not durably published")
+  | _ -> failwith "configured Project commit returned another method"
+;;
+
 let%expect_test
     "default daemon installs exact supplied authoring methods and revokes \
      reinitialization"
@@ -241,8 +505,9 @@ let%expect_test
       ~limits:(upload_limits ())
       ~grant:
         (S.Authoring_upload_host.Upload_policy.create
-           ~authorize_upload:Operator_authorization.is_current
-           ~authorize_parent:(fun _ _ -> false))
+           ~authorize_write:Operator_authorization.is_current
+           ~authorize_publish:Operator_authorization.is_current
+           ~authorize_parent:None)
       ~publication:None
       ~rebind:None
   in
@@ -288,6 +553,97 @@ let%expect_test
         | Ok _ -> failwith "upload-only daemon exposed native roots");
        print_endline "bundle only, no source positions: ok");
   [%expect {| bundle only, no source positions: ok |}]
+;;
+
+let%expect_test
+    "configured upload-only daemon publishes a parentless captured document under exact \
+     grants"
+  =
+  let access =
+    configured_upload_access
+      S.Authoring_upload_access_configuration.Upload_only
+      [ Upload_write; Publish; Bundle_read; Rebind ]
+  in
+  with_daemon
+    ~configure:(fun ~env:_ ~root:_ config ->
+      { config with
+        server = { config.server with authoring_upload_access = Some access }
+      })
+    (fun _ _ _ daemon ->
+       let _, transport = connect daemon in
+       let enabled =
+         (initialize transport [ P.Authoring.Features.core; P.Authoring.Features.bundle ])
+           .enabled_features
+       in
+       assert (List.mem enabled P.Authoring.Features.bundle ~equal:String.equal);
+       assert (not (List.mem enabled P.Authoring.Features.core ~equal:String.equal));
+       publish_document transport ~key:"configured-upload";
+       let foreign =
+         Operator_authorization.trusted_local
+           (Agent_server_test_support.principal_with_id "pri_upload_foreign")
+       in
+       let _, denied = connect ~actor:foreign daemon in
+       ignore
+         (initialize denied [ P.Authoring.Features.bundle ] : P.Initialize.Response.t);
+       let _, _, manifest = upload_document () in
+       let begin_request =
+         B.Begin.create_request
+           ~idempotency_key:(P.Idempotency_key.of_string "foreign-upload" |> ok)
+           ~manifest
+           ()
+       in
+       (match authoring denied (Bundle_begin begin_request) with
+        | Error failure -> assert (P.Error.equal_code failure.code Permission_denied)
+        | Ok _ -> failwith "foreign principal received configured write grant");
+       print_endline "configured bundle publication and principal denial: ok");
+  [%expect {| configured bundle publication and principal denial: ok |}]
+;;
+
+let%expect_test "configured Project upload cannot rebind with only a bundle-read grant" =
+  let manifest, sources, environment = project_upload () in
+  let base =
+    configured_upload_access
+      S.Authoring_upload_access_configuration.Augment_core
+      [ Upload_write; Publish; Bundle_read ]
+  in
+  let access =
+    S.Authoring_upload_access_configuration.
+      { base with
+        selections =
+          [ Selection.
+              { principal_id = (Agent_server_test_support.principal ()).id
+              ; authentication_kind = "test"
+              ; request =
+                  S.Authoring_project_access_configuration.Selection.Entry
+                    { name = "main"; environment = None }
+              ; selected_environment = environment
+              ; target = One_off_v1
+              }
+          ]
+      }
+  in
+  with_daemon
+    ~configure:(fun ~env:_ ~root:_ config ->
+      { config with
+        server = { config.server with authoring_upload_access = Some access }
+      })
+    (fun _ _ _ daemon ->
+       let _, transport = connect daemon in
+       ignore
+         (initialize transport [ P.Authoring.Features.core; P.Authoring.Features.bundle ]
+          : P.Initialize.Response.t);
+       let receipt =
+         publish_project transport ~key:"project-no-rebind" ~manifest ~sources
+       in
+       let request =
+         P.Authoring.Context.Open_request.create_uploaded_project
+           (B.Receipt.bundle_id receipt)
+       in
+       match authoring transport (Context_open request) with
+       | Error failure -> assert (P.Error.equal_code failure.code Permission_denied)
+       | Ok _ -> failwith "bundle read silently granted Project rebind");
+  print_endline "bundle read alone cannot rebind";
+  [%expect {| bundle read alone cannot rebind |}]
 ;;
 
 let%expect_test
@@ -384,6 +740,7 @@ let%expect_test
       |> to_hex)
     |> fun digest -> P.Id.Principal.of_string ("pri_" ^ digest) |> ok
   in
+  let _, _, upload_environment = moderator_upload () in
   let configure ~env ~root (config : S.Config.t) =
     let save name contents =
       Eio.Path.save
@@ -435,6 +792,14 @@ let%expect_test
       S.Authoring_project_access_configuration.Selection.
         { root; project; request; target }
     in
+    let upload_grants principal_id authentication_kind =
+      List.map
+        S.Authoring_upload_access_configuration.Grant.
+          [ Upload_write; Publish; Bundle_read; Rebind ]
+        ~f:(fun operation ->
+          S.Authoring_upload_access_configuration.Grant.
+            { principal_id; authentication_kind; operation })
+    in
     { config with
       server =
         { config.server with
@@ -477,6 +842,26 @@ let%expect_test
                         (Entry { name = "main"; environment = None })
                     ]
                 }
+        ; authoring_upload_access =
+            Some
+              S.Authoring_upload_access_configuration.
+                { mode = Augment_core
+                ; grants =
+                    upload_grants local.id "test"
+                    @ upload_grants local.id "http.static_bearer"
+                    @ upload_grants peer_id "unix.peer"
+                ; selections =
+                    [ S.Authoring_upload_access_configuration.Selection.
+                        { principal_id = local.id
+                        ; authentication_kind = "test"
+                        ; request =
+                            S.Authoring_project_access_configuration.Selection.Library
+                              { environment = None }
+                        ; selected_environment = upload_environment
+                        ; target = Moderator_v1
+                        }
+                    ]
+                }
         }
     }
   in
@@ -489,10 +874,12 @@ let%expect_test
            ; P.Authoring.Features.semantic
            ; P.Authoring.Features.lexical
            ; P.Authoring.Features.assistance
+           ; P.Authoring.Features.bundle
            ])
           .enabled_features
       in
       assert (List.mem enabled P.Authoring.Features.semantic ~equal:String.equal);
+      assert (List.mem enabled P.Authoring.Features.bundle ~equal:String.equal);
       let capability =
         match authoring connection P.Authoring.Wire.Request.Capabilities |> ok with
         | Capabilities value -> value
@@ -500,6 +887,7 @@ let%expect_test
       in
       assert (P.Authoring.Capabilities.supports capability Roots);
       assert (P.Authoring.Capabilities.supports capability Analyze);
+      assert (P.Authoring.Capabilities.supports capability Bundle_begin);
       let source_root =
         match authoring connection P.Authoring.Wire.Request.Roots |> ok with
         | Roots roots -> (List.hd_exn roots.roots).id
@@ -727,13 +1115,55 @@ let%expect_test
     let _, local_connection = connect daemon in
     Fun.protect
       ~finally:(fun () -> Agent_client.Connection.close local_connection)
-      (fun () -> exercise local_connection ~refresh:true);
+      (fun () ->
+         exercise local_connection ~refresh:true;
+         publish_document local_connection ~key:"native-local";
+         let manifest, sources, _ = moderator_upload () in
+         let receipt =
+           publish_project local_connection ~key:"native-project" ~manifest ~sources
+         in
+         let opened =
+           match
+             authoring
+               local_connection
+               (Context_open
+                  (P.Authoring.Context.Open_request.create_uploaded_project
+                     (B.Receipt.bundle_id receipt)))
+             |> ok
+           with
+           | Context_open context -> context
+           | _ -> failwith "configured Project rebind did not open"
+         in
+         match
+           authoring
+             local_connection
+             (Analyze
+                (P.Authoring.Analysis.Analyze.Request.create
+                   ~context:(P.Authoring.Context.Expected.of_view opened)
+                   ~target:P.Authoring.Analysis.Target.project
+                 |> ok))
+           |> ok
+         with
+         | Analyze (Complete _) -> ()
+         | Analyze (Unavailable { reason; _ }) ->
+           failwith
+             ("configured rebound Project unavailable: "
+              ^ Sexp.to_string_hum
+                  (P.Authoring.Analysis.Analyze.sexp_of_unavailable reason))
+         | Analyze (Failed { phase; _ }) ->
+           failwith
+             ("configured rebound Project failed: "
+              ^ Sexp.to_string_hum
+                  (P.Authoring.Analysis.Analyze.sexp_of_failure_phase phase))
+         | _ -> failwith "configured rebound Project response changed");
     let http =
       Agent_server_wire_fixture.http_connector ~sw ~env ~daemon ~root ~principal:local ()
     in
     Fun.protect
       ~finally:(fun () -> Agent_client.Connection.close http)
-      (fun () -> exercise http ~refresh:false);
+      (fun () ->
+         exercise http ~refresh:false;
+         publish_document http ~key:"native-http");
     let stdio =
       Agent_server_wire_fixture.connect_stdio
         ~sw
@@ -743,7 +1173,9 @@ let%expect_test
     in
     Fun.protect
       ~finally:(fun () -> Agent_client.Connection.close stdio)
-      (fun () -> exercise stdio ~refresh:false);
+      (fun () ->
+         exercise stdio ~refresh:false;
+         publish_document stdio ~key:"native-stdio");
     let current = ref true in
     let actor =
       Operator_authorization.guarded ~principal:local ~is_current:(fun () -> !current)
@@ -848,7 +1280,7 @@ let%expect_test "configured native grants reject an explicitly disabled authorin
           }
         in
         Eio.Switch.run (fun sw ->
-          let start options =
+          let start_config config options =
             S.Daemon.start
               ~sw
               ~env
@@ -859,6 +1291,7 @@ let%expect_test "configured native grants reject an explicitly disabled authorin
               ~options
               ()
           in
+          let start options = start_config config options in
           let invalid options =
             match start options with
             | Error failure when P.Error.equal_code failure.code Invalid_request -> ()
@@ -868,6 +1301,25 @@ let%expect_test "configured native grants reject an explicitly disabled authorin
               failwith "invalid configured authoring startup was admitted"
           in
           let base = { S.Daemon.default_options with startup_mode = Operator_only } in
+          let duplicate_grant =
+            { config with
+              server =
+                { config.server with
+                  authoring_project_access =
+                    Option.map config.server.authoring_project_access ~f:(fun access ->
+                      S.Authoring_project_access_configuration.
+                        { access with
+                          read_grants = access.read_grants @ access.read_grants
+                        })
+                }
+            }
+          in
+          (match start_config duplicate_grant base with
+           | Error failure when P.Error.equal_code failure.code Invalid_request -> ()
+           | Error failure -> raise_s [%sexp (failure : P.Error.t)]
+           | Ok daemon ->
+             S.Daemon.shutdown daemon |> ok;
+             failwith "direct invalid grant reached owner startup");
           invalid { base with authoring = None };
           invalid
             { base with

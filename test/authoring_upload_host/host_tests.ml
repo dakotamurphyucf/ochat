@@ -237,12 +237,14 @@ let wait_until label condition =
   loop 100
 ;;
 
-let make_policy allowed checks =
+let make_policy ?publish_allowed allowed checks =
+  let publish_allowed = Option.value publish_allowed ~default:allowed in
   Host.Upload_policy.create
-    ~authorize_upload:(fun _ ->
+    ~authorize_write:(fun _ ->
       Int.incr checks;
       !allowed)
-    ~authorize_parent:(fun _ _ -> false)
+    ~authorize_publish:(fun _ -> !publish_allowed)
+    ~authorize_parent:None
 ;;
 
 let with_host name f =
@@ -251,13 +253,29 @@ let with_host name f =
     Eio.Switch.run (fun host_sw ->
       let clock = Eio_mock.Clock.make () in
       let allowed = ref true in
+      let publish_allowed = ref true in
       let checks = ref 0 in
       let current = ref true in
       let actor = make_actor current in
       let host =
-        Host.create store ~sw:host_sw ~clock ~upload_policy:(make_policy allowed checks)
+        Host.create
+          store
+          ~sw:host_sw
+          ~clock
+          ~upload_policy:(make_policy ~publish_allowed allowed checks)
       in
-      f ~env ~sw ~root_handle ~store ~host ~clock ~actor ~current ~allowed ~checks;
+      f
+        ~env
+        ~sw
+        ~root_handle
+        ~store
+        ~host
+        ~clock
+        ~actor
+        ~current
+        ~allowed
+        ~publish_allowed
+        ~checks;
       Host.close_and_wait host |> host_ok))
 ;;
 
@@ -405,6 +423,7 @@ let with_bundle_service ~publish f =
                  ~max_active_requests_per_connection:2
                  ~max_roots_per_connection:2
                  ~max_response_bytes:65536
+                 ~max_provisional_results:2
                |> Or_error.ok_exn)
         in
         (Service.publish_initialize_and_wait
@@ -576,6 +595,7 @@ let%test_unit "host publishes only an actor-current captured source-only documen
       let rebind_policy =
         Host.Rebind_policy.create
           ~authorize_read:(fun _ -> !read_allowed)
+          ~authorize_rebind:(fun _ -> !read_allowed)
           ~select:(fun _ _ _ ->
             Int.incr selected;
             None)
@@ -763,6 +783,7 @@ let%test_unit "host grant, actor lifetime, reentrancy, and private lookup symmet
          ~actor
          ~current
          ~allowed
+         ~publish_allowed
          ~checks:_
        ->
        let response =
@@ -789,11 +810,11 @@ let%test_unit "host grant, actor lifetime, reentrancy, and private lookup symmet
            ()
        in
        check
-         "optional parent needs current read authority"
+         "uninstalled parent policy cannot grant current read authority"
          (match
             Host.begin_upload host ~actor ~request:parent_request ~checkpoint:Fn.id
           with
-          | Error Host.Error.Unauthorized -> true
+          | Error Host.Error.Selection_unavailable -> true
           | _ -> false);
        let upload_id = B.Begin.upload_id response in
        let request = status_request upload_id in
@@ -862,6 +883,32 @@ let%test_unit "host grant, actor lifetime, reentrancy, and private lookup symmet
           | ( Error (Host.Error.Store Host.Error.Store_code.Missing_or_foreign)
             , Error (Host.Error.Store Host.Error.Store_code.Missing_or_foreign) ) -> true
           | _ -> false);
+       List.iter
+         [ root, root_bytes; script, script_bytes ]
+         ~f:(fun (source, bytes) ->
+           let chunk =
+             B.Chunk.create_request ~upload_id ~source ~byte_offset:0 ~bytes
+             |> protocol_ok
+           in
+           Host.chunk host ~actor ~request:chunk ~checkpoint:Fn.id |> host_ok |> ignore);
+       let commit = B.Commit.create_request ~upload_id ~idempotency_key:commit_key in
+       publish_allowed := false;
+       check
+         "write-only actor cannot seal a publication"
+         (match Host.claim_commit host ~actor ~request:commit ~checkpoint:Fn.id with
+          | Error Host.Error.Unauthorized -> true
+          | _ -> false);
+       check
+         "write-only actor retains its own status access"
+         (match Host.status host ~actor ~request ~checkpoint:Fn.id with
+          | Ok (Store.Status.Open _) -> true
+          | _ -> false);
+       publish_allowed := true;
+       check
+         "both grants admit exact sealed claim"
+         (match Host.claim_commit host ~actor ~request:commit ~checkpoint:Fn.id with
+          | Ok (Store.Claim_result.Ready _) -> true
+          | _ -> false);
        allowed := false;
        check
          "grant checked before lookup"
@@ -890,6 +937,7 @@ let%test_unit "yielding checkpoint revocation leaves both gates usable" =
          ~actor
          ~current:_
          ~allowed
+         ~publish_allowed:_
          ~checks:_
        ->
        let upload_id =

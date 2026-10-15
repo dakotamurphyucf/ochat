@@ -126,6 +126,8 @@ val with_configured_projects
   -> analysis_policy:Chatml_authoring_analysis.Policy.t
   -> (t, P.Error.t) result
 
+val with_configured_upload : t -> upload:Upload.t -> (t, P.Error.t) result
+
 (** Add one real semantic sibling to an already admitted core/source policy.
     Reject a second semantic installation or a policy without both core and a
     usable source or supplied-document origin. The

@@ -30,12 +30,16 @@ end
     distinct target also has a fixed 16 MiB conversion-allocation and
     encoded-byte cap,
     so a larger aggregate allowance cannot admit an unbounded single target.
-    No Build is prepared here. Checkpoint and cancellation exceptions keep
-    identity. *)
+    A supplied shared cache must have been admitted under ceilings no wider
+    than these binding ceilings and must contain every selected target; a
+    wrong-ceiling or underprovisioned cache is a typed bind error, not a reason to
+    convert an extra target. No Build is prepared here. Checkpoint and
+    cancellation exceptions keep identity. *)
 val bind
   :  Project_source_host.t
   -> configuration:Configuration.t
   -> project_sources:Project_source_configuration.t
+  -> contracts:Authoring_standard_contracts.t option
   -> max_contract_identity_bytes:int
   -> max_work_steps:int
   -> checkpoint:(unit -> unit)

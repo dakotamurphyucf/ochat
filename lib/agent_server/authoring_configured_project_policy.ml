@@ -53,12 +53,18 @@ let bind
       host
       ~configuration
       ~project_sources
+      ~contracts:shared_contracts
       ~max_contract_identity_bytes
       ~max_work_steps
       ~checkpoint
   =
   let open Result.Let_syntax in
-  if max_contract_identity_bytes <= 0 || max_work_steps <= 0
+  if
+    max_contract_identity_bytes <= 0
+    || max_work_steps <= 0
+    || Option.value_map shared_contracts ~default:false ~f:(fun cache ->
+      Authoring_standard_contracts.max_identity_bytes cache > max_contract_identity_bytes
+      || Authoring_standard_contracts.max_work_steps cache > max_work_steps)
   then Error Error.Contract_limit
   else (
     let%bind () =
@@ -113,23 +119,34 @@ let bind
         | Some (_, contract) -> Ok contract
         | None ->
           poll ();
-          let contract = Contract.for_target target ~checkpoint:poll in
-          let remaining_member_bytes = ref max_member_identity_bytes in
-          let allocate bytes =
-            if
-              bytes < 0
-              || bytes > !remaining_identity_bytes
-              || bytes > !remaining_member_bytes
-            then raise Limit_exceeded;
-            remaining_member_bytes := !remaining_member_bytes - bytes;
-            remaining_identity_bytes := !remaining_identity_bytes - bytes
+          let admitted =
+            match shared_contracts with
+            | None ->
+              let contract = Contract.for_target target ~checkpoint:poll in
+              let remaining_member_bytes = ref max_member_identity_bytes in
+              let allocate bytes =
+                if
+                  bytes < 0
+                  || bytes > !remaining_identity_bytes
+                  || bytes > !remaining_member_bytes
+                then raise Limit_exceeded;
+                remaining_member_bytes := !remaining_member_bytes - bytes;
+                remaining_identity_bytes := !remaining_identity_bytes - bytes
+              in
+              let encoded = Contract.input_bytes contract ~checkpoint:poll ~allocate in
+              if
+                encoded > max_contract_identity_bytes
+                || encoded > max_member_identity_bytes
+              then Error Error.Contract_limit
+              else Ok contract
+            | Some cache ->
+              Authoring_standard_contracts.find cache target
+              |> Option.map ~f:Authoring_standard_contracts.Entry.contract
+              |> Result.of_option ~error:Error.Contract_limit
           in
-          let encoded = Contract.input_bytes contract ~checkpoint:poll ~allocate in
-          if encoded > max_contract_identity_bytes || encoded > max_member_identity_bytes
-          then Error Error.Contract_limit
-          else (
+          Result.map admitted ~f:(fun contract ->
             contracts := (target, contract) :: !contracts;
-            Ok contract)
+            contract)
       in
       let%map selections =
         List.map configuration.selections ~f:(fun selected ->

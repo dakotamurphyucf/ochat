@@ -55,7 +55,10 @@ reports the methods available under the current connection's selected features;
 uninstalled methods return `method_not_found`. The default daemon supplies
 core, lexical scanning and local assistance for caller-supplied documents.
 Native source access, durable upload and the semantic handler require explicit
-host policies. The default has no semantic handler, so semantic methods return
+host policies. `server.authoring_upload_access` can install upload alone or
+augment an installed core/native service without changing the dispatcher or
+connection lifecycle. Its write, publication, read and rebind grants are
+independent. The default has no semantic handler, so semantic methods return
 `method_not_found`; an installed semantic handler reports typed Unavailable
 when no authentic selected Build exists. Successful reinitialization
 retires old context generations and joins their work before the new feature
@@ -176,6 +179,13 @@ Entry request and a host ChatMD script's Library request are distinct configured
 selections. Analysis may return typed Unavailable when the selected source or
 environment is absent. Configure the actor's exact principal ID and
 authentication kind; feature negotiation does not grant source access.
+`server.authoring_upload_access` separately admits parentless durable bundle
+publication and rebind for exact authenticated principals. Clients select
+`authoring.bundle.v1`. An upload-only daemon does not advertise core or native
+methods. A configured native and upload daemon uses one service and Store; its
+native read grants never imply upload write or publication, and upload grants
+never imply native read. A parent-bearing begin needs an additional physical
+parent policy and is otherwise typed Unavailable before Store staging.
 
 Read-only attachments cannot authorize writer operations or permission answers.
 Ingress has separate authority: it needs its dedicated scope and matching
