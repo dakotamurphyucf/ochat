@@ -6,6 +6,7 @@ module Binding = Chatml_semantic_binding
 module Sites = Chatml.Chatml_syntax_sites
 module Syntax = Chatml.Chatml_type_expr
 module Frozen = Chatml_type_snapshot
+module Static = Chatml.Chatml_static_surface
 module Lookup = Chatml_configured_lookup
 module Parse = Chatml.Chatml_parse
 module Private = Binding.Private
@@ -204,6 +205,14 @@ module Context_pair = struct
   include Comparator.Make (T)
 end
 
+module Host_baseline_state = struct
+  type t =
+    { surface : Static.t
+    ; values : (string * Binding.t) list option
+    ; aliases : Binding.t Int.Map.t
+    }
+end
+
 type t =
   { input : Captured.Digest.t
   ; compiler_contract : Captured.Digest.t
@@ -228,6 +237,7 @@ type t =
   ; mutable signatures : Signature_stage.t list
   ; mutable exports : Fact.exports list
   ; mutable host_requirements : Fact.host_requirement list
+  ; mutable host_baseline : Host_baseline_state.t option
   }
 
 module Frame = struct
@@ -266,6 +276,7 @@ let create prepared ~limits =
   ; signatures = []
   ; exports = []
   ; host_requirements = []
+  ; host_baseline = None
   }
 ;;
 
@@ -354,6 +365,72 @@ let check_binding t binding =
   if not (Private.owns_symbol t.owner (Binding.symbol binding))
   then raise (Rejected Foreign_binding)
 ;;
+
+module Host_baseline = struct
+  let current t ~surface =
+    match t.host_baseline with
+    | Some cache when phys_equal cache.Host_baseline_state.surface surface -> Some cache
+    | None | Some _ -> None
+  ;;
+
+  let replace t ~surface ~values ~aliases =
+    t.host_baseline <- Some { Host_baseline_state.surface; values; aliases }
+  ;;
+
+  let check_host t binding =
+    check_binding t binding;
+    match Binding.definition binding with
+    | Host { contract; member_path = _ }
+      when Captured.Digest.equal contract t.compiler_contract -> ()
+    | Authored _ | Implicit_specification_parameter _ | Host _ ->
+      raise (Rejected Foreign_binding)
+  ;;
+
+  let values t ~surface ~checkpoint =
+    run t ~checkpoint ~f:(fun _ ->
+      Option.bind (current t ~surface) ~f:(fun cache -> cache.values))
+  ;;
+
+  let retain_values t ~surface rows ~checkpoint =
+    run t ~checkpoint ~f:(fun checkpoint ->
+      (match current t ~surface with
+       | Some { values = Some _; _ } ->
+         invalid_arg "Semantic_recorder.Host_baseline: duplicate values"
+       | None | Some { values = None; _ } -> ());
+      List.iter rows ~f:(fun (name, binding) ->
+        checkpoint ();
+        check_host t binding;
+        if not (Private.equal_name name (Binding.name binding) ~checkpoint)
+        then raise (Rejected Foreign_binding);
+        admit t ~facts:0 ~edges:1 ~labels:0);
+      let aliases =
+        Option.value_map (current t ~surface) ~default:Int.Map.empty ~f:(fun cache ->
+          cache.aliases)
+      in
+      replace t ~surface ~values:(Some rows) ~aliases)
+  ;;
+
+  let alias t ~surface ~ordinal ~checkpoint =
+    run t ~checkpoint ~f:(fun _ ->
+      Option.bind (current t ~surface) ~f:(fun cache -> Map.find cache.aliases ordinal))
+  ;;
+
+  let retain_alias t ~surface ~ordinal binding ~checkpoint =
+    run t ~checkpoint ~f:(fun checkpoint ->
+      if ordinal < 0 then invalid_arg "Semantic_recorder.Host_baseline: negative ordinal";
+      let cache = current t ~surface in
+      let aliases =
+        Option.value_map cache ~default:Int.Map.empty ~f:(fun cache -> cache.aliases)
+      in
+      if Map.mem aliases ordinal
+      then invalid_arg "Semantic_recorder.Host_baseline: duplicate alias";
+      checkpoint ();
+      check_host t binding;
+      admit t ~facts:0 ~edges:1 ~labels:0;
+      let values = Option.bind cache ~f:(fun cache -> cache.values) in
+      replace t ~surface ~values ~aliases:(Map.set aliases ~key:ordinal ~data:binding))
+  ;;
+end
 
 let check_root t root =
   if not (Private.owns_root t.owner root) then raise (Rejected Foreign_binding)

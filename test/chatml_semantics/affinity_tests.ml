@@ -191,12 +191,18 @@ let%test_unit
 let%test_unit "source-owned qualified components and host definitions have honest targets"
   =
   let contract = H.contract () in
-  let body = "let result = Catalog.Nested.item;; let length = String.length(\"x\")" in
+  let body =
+    "let result = Catalog.Nested.item;; let length = String.length(\"x\");; let \
+     async_string = Task.pure(\"s\");; let other = Catalog.async_int"
+  in
+  let catalog_body =
+    "module Nested = struct let item = 3 end;; let async_int = Task.pure(3)"
+  in
   let input =
     H.input
       contract
       [ "entry.chatml", body, [ "Catalog", "catalog.chatml" ]
-      ; "catalog.chatml", "module Nested = struct let item = 3 end", []
+      ; "catalog.chatml", catalog_body, []
       ]
   in
   let snapshot = H.complete contract input in
@@ -234,18 +240,29 @@ let%test_unit "source-owned qualified components and host definitions have hones
          (String.substr_index_exn body ~pattern:"String.length" + 7))
     |> List.hd_exn
   in
-  match Q.Reference.target host with
-  | Symbol id ->
-    let symbol = Q.symbol snapshot id |> Result.ok |> Option.value_exn in
-    (match Q.Symbol.origin symbol with
-     | Host { contract = owner; member_path } ->
-       assert (
-         A.Captured.Digest.equal
-           owner
-           (Chatml.Chatml_compiler_contract.fingerprint contract ~checkpoint:H.checkpoint));
-       [%test_eq: string list] member_path [ "String"; "length" ]
-     | _ -> failwith "host symbol has no fabricated source site")
-  | _ -> failwith "actual host member"
+  (match Q.Reference.target host with
+   | Symbol id ->
+     let symbol = Q.symbol snapshot id |> Result.ok |> Option.value_exn in
+     (match Q.Symbol.origin symbol with
+      | Host { contract = owner; member_path } ->
+        assert (
+          A.Captured.Digest.equal
+            owner
+            (Chatml.Chatml_compiler_contract.fingerprint
+               contract
+               ~checkpoint:H.checkpoint));
+        [%test_eq: string list] member_path [ "String"; "length" ]
+      | _ -> failwith "host symbol has no fabricated source site")
+   | _ -> failwith "actual host member");
+  let pure_symbol path body =
+    let offset = String.substr_index_exn body ~pattern:"Task.pure" + 6 in
+    H.references snapshot (H.point snapshot input path offset)
+    |> List.hd_exn
+    |> Q.Reference.target
+  in
+  match pure_symbol "entry.chatml" body, pure_symbol "catalog.chatml" catalog_body with
+  | Symbol string_use, Symbol int_use -> assert (Q.Symbol_id.equal string_use int_use)
+  | _ -> failwith "actual polymorphic host callback"
 ;;
 
 let%test_unit

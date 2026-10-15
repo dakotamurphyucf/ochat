@@ -113,14 +113,11 @@ let module_binding_exn frame group name inferred ~checkpoint =
   descend [] name inferred []
 ;;
 
-let values_exn frame values ~globals ~modules ~checkpoint =
+let values_exn frame values ~surface ~globals ~modules ~checkpoint =
   let recorder = Recorder.Frame.recorder frame in
   let unit = Recorder.Frame.unit frame in
-  let add values (name, inferred) =
-    checkpoint ();
-    let group = Recorder.stage_group recorder ~checkpoint |> take in
-    let binding = module_binding_exn frame group name inferred ~checkpoint in
-    Recorder.commit_group recorder group ~checkpoint |> take;
+  let poll () = Recorder.poll recorder ~checkpoint |> take in
+  let add values ~name ~binding =
     let context =
       Recorder.join_context
         recorder
@@ -143,26 +140,69 @@ let values_exn frame values ~globals ~modules ~checkpoint =
     in
     Values.with_semantic_exn values ~name ~binding ~context
   in
-  List.fold modules ~init:(List.fold globals ~init:values ~f:add) ~f:add
+  let definitions = globals @ modules in
+  match Recorder.Host_baseline.values recorder ~surface ~checkpoint |> take with
+  | Some cached ->
+    let rec reuse values definitions cached =
+      poll ();
+      match definitions, cached with
+      | [], [] -> values
+      | (name, _) :: definitions, (cached_name, binding) :: cached ->
+        if not (Binding.Private.equal_name name cached_name ~checkpoint:poll)
+        then invalid_arg "Semantic_host.values_exn: changed static surface";
+        reuse (add values ~name ~binding) definitions cached
+      | [], _ :: _ | _ :: _, [] ->
+        invalid_arg "Semantic_host.values_exn: changed static surface length"
+    in
+    reuse values definitions cached
+  | None ->
+    let values, reversed =
+      List.fold
+        definitions
+        ~init:(values, [])
+        ~f:(fun (values, reversed) (name, inferred) ->
+          checkpoint ();
+          let group = Recorder.stage_group recorder ~checkpoint |> take in
+          let binding = module_binding_exn frame group name inferred ~checkpoint in
+          Recorder.commit_group recorder group ~checkpoint |> take;
+          add values ~name ~binding, (name, binding) :: reversed)
+    in
+    Recorder.Host_baseline.retain_values recorder ~surface (List.rev reversed) ~checkpoint
+    |> take;
+    values
 ;;
 
-let alias_exn frame types ~name ~body ~checkpoint =
+let alias_exn frame types ~surface ~ordinal ~name ~body ~checkpoint =
   let recorder = Recorder.Frame.recorder frame in
   let unit = Recorder.Frame.unit frame in
-  let group = Recorder.stage_group recorder ~checkpoint |> take in
-  let root = Recorder.stage_root recorder group body ~checkpoint |> take in
   let binding =
-    Recorder.define_host
-      recorder
-      unit
-      ~name
-      ~kind:Type_alias
-      ~member_path_rev:[ name ]
-      ~scheme:(Recorder.Group_stage.id group, root)
-      ~checkpoint
-    |> take
+    match Recorder.Host_baseline.alias recorder ~surface ~ordinal ~checkpoint |> take with
+    | Some binding ->
+      let poll () = Recorder.poll recorder ~checkpoint |> take in
+      if
+        (not (Binding.Kind.equal (Binding.kind binding) Type_alias))
+        || not (Binding.Private.equal_name name (Binding.name binding) ~checkpoint:poll)
+      then invalid_arg "Semantic_host.alias_exn: changed static alias";
+      binding
+    | None ->
+      let group = Recorder.stage_group recorder ~checkpoint |> take in
+      let root = Recorder.stage_root recorder group body ~checkpoint |> take in
+      let binding =
+        Recorder.define_host
+          recorder
+          unit
+          ~name
+          ~kind:Type_alias
+          ~member_path_rev:[ name ]
+          ~scheme:(Recorder.Group_stage.id group, root)
+          ~checkpoint
+        |> take
+      in
+      Recorder.commit_group recorder group ~checkpoint |> take;
+      Recorder.Host_baseline.retain_alias recorder ~surface ~ordinal binding ~checkpoint
+      |> take;
+      binding
   in
-  Recorder.commit_group recorder group ~checkpoint |> take;
   let context =
     Recorder.join_context
       recorder

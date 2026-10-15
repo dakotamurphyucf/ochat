@@ -308,16 +308,26 @@ let moderator_upload () =
     Support.capture
       ~namespace:"role"
       "chatml.project.json"
-      {|{"schema_version":1,"namespace":"role","source_dirs":["src"]}|}
+      {|{"schema_version":1,"namespace":"role","source_dirs":["src"],"environments":{"default":{"modules":{"Counter":"self.Counter"}}}}|}
+  in
+  let counter =
+    Support.capture ~namespace:"role" "src/counter.chatml" "let initial = 0"
+  in
+  let interface =
+    Support.capture ~namespace:"role" "src/counter.chatmli" "val initial : int"
   in
   let entry =
     Support.capture
       ~namespace:"role"
       "moderator.chatml"
-      "let initial_state = 0 let on_event ctx state event = Task.pure(state)"
+      "let initial_state = Counter.initial let on_event ctx state event = \
+       Task.pure(state)"
   in
   let catalog =
-    Support.catalog declaration ~request:(Library { environment = None }) ~members:[]
+    Support.catalog
+      declaration
+      ~request:(Library { environment = None })
+      ~members:[ counter; interface ]
   in
   let root =
     Build.Catalog_input.create
