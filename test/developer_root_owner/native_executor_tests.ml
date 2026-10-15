@@ -13,6 +13,7 @@ module Jobs = Agent_server.Developer_script_job_service
 module Disclosure = Agent_server.Developer_result_disclosure
 module Blobs = Agent_store.Blob_store
 module F = Developer_run_store_test_suite.Developer_run_store_tests
+module Selected = Developer_run_store_test_suite.Developer_run_selected_tests
 
 let ok = T.ok
 
@@ -104,12 +105,12 @@ let invocation owner selected reference ~custom =
   |> ok
 ;;
 
-let stage_root_job env root selected =
+let stage_root_job ?(tools = []) env root selected =
   let prepared =
     Chat_response.One_off_script.prepare_in_domain
       ~env
       ~capabilities:selected
-      ~tools:[]
+      ~tools
       ~source:"let main input = Task.pure(input)"
       ()
     |> ok
@@ -986,6 +987,199 @@ let%test_unit "claimed worker alone admits job child and inherited nested ancest
               ~authorize:(fun _ _ -> Ok ())
               ~prepare_output:(fun _ -> Ok (`String "parent"))));
        assert (Int.equal !parent_calls 1))
+;;
+
+let%test_unit "claimed worker action atomically installs its selected child" =
+  List.iter [ `Succeeded; `Queued ] ~f:(fun mode ->
+    let calls = ref 0 in
+    with_executor
+      ~run_name:"dvr_claimed_selected_action"
+      ~make_selected:(fun env -> registry ~custom:false calls)
+      (fun ~env ~root ~executor:_ ~handle ~owner:_ ~selected ->
+         let parent_id = Selected.job_id "job_claimed_retry_selected_parent" in
+         let capture_fingerprint =
+           Chatml_developer_capture.fingerprint (O.capture root)
+         in
+         let original =
+           Selected.job
+             (O.owner root)
+             capture_fingerprint
+             ~id:parent_id
+             ~parent:P.Developer_job.Launch.Run_root
+         in
+         let parent =
+           P.Developer_job.create
+             ~owner:(O.owner root)
+             ~capture_fingerprint
+             ~id:parent_id
+             ~launch:(P.Developer_job.launch original)
+             ~kind:(P.Developer_job.kind original)
+             ~payload:(P.Developer_job.payload original)
+             ~retry_policy:(P.Job.Safe_retry { max_attempts = 2; backoff_ms = 0 })
+             ~created_at:(P.Developer_job.created_at original)
+             ~state:(P.Developer_job.state original)
+           |> ok
+         in
+         let prepared_root =
+           R.prepare_root_selected
+             handle
+             ~expected:(R.observe handle |> ok)
+             ~phase:R.Checkpoint.Active
+             ~selected:[ parent ]
+           |> ok
+         in
+         ignore
+           (R.commit_and_settle
+              handle
+              ~admit:(fun () -> true)
+              prepared_root
+              (R.Handoff.create ~settle:ignore)
+            |> ok
+            : R.Settlement.t);
+         let prepared =
+           Chat_response.One_off_script.prepare_in_domain
+             ~env
+             ~capabilities:selected
+             ~tools:[]
+             ~source:"let main input = Task.pure(input)"
+             ()
+           |> ok
+         in
+         let request =
+           Chat_response.Background_request.script
+             ~prepared
+             ~input:`Null
+             ~policy:Chat_response.One_off_request.default_policy
+           |> ok
+         in
+         let candidates = O.Job_candidate.read_current root ~checkpoint:ignore |> ok in
+         let candidate =
+           List.find_exn candidates ~f:(fun candidate ->
+             P.Id.Job.equal (P.Developer_job.id (O.Job_candidate.job candidate)) parent_id)
+         in
+         let selected_child = ref None in
+         let dropped_child = ref None in
+         let outcome =
+           O.Job_candidate.with_claimed_selected
+             root
+             candidate
+             (fun ~active ~action ~sw:_ ->
+                incr calls;
+                let dropped =
+                  O.Worker_action.stage_background action ~request ~checkpoint:ignore
+                  |> ok
+                in
+                dropped_child := Some dropped;
+                O.Worker_action.rollback_staged action dropped |> ok;
+                let child =
+                  O.Worker_action.stage_background action ~request ~checkpoint:ignore
+                  |> ok
+                in
+                selected_child := Some child;
+                let selection = O.Worker_action.seal action ~selected:[ child ] |> ok in
+                let after =
+                  match mode with
+                  | `Succeeded -> succeeded_claim (Scope.claim active)
+                  | `Queued ->
+                    { (P.Developer_job.state (R.Claim.job (Scope.claim active))) with
+                      status = P.Job.Queued
+                    ; started_at = None
+                    ; next_run_at = Some (T.now ())
+                    ; completed_at = None
+                    ; result = None
+                    ; retry_failure = Some (P.Error.invalid_request "retry")
+                    }
+                in
+                Ok (after, selection))
+         in
+         let observed = R.observe handle |> ok in
+         let child_id = Option.value_exn !selected_child in
+         (match mode, outcome with
+          | `Succeeded, Ok (Some (parent, disposition)) ->
+            assert (P.Id.Job.equal (P.Developer_job.id parent) parent_id);
+            (match disposition with
+             | Agent_server.Developer_job_worker.Children.Settlement.Selected_installed ->
+               ()
+             | Selected_omitted_after_epoch_change ->
+               failwith "active claimed selection was omitted");
+            let child = R.find_job observed child_id |> Option.value_exn in
+            let launch = P.Developer_job.launch child in
+            (match P.Developer_job.Launch.parent launch with
+             | Run_root -> ()
+             | Invocation _ -> failwith "claimed worker child invented invocation parent");
+            (match P.Developer_job.Launch.parent_job launch with
+             | Some (id, attempt) when P.Id.Job.equal id parent_id && Int.equal attempt 1
+               -> ()
+             | None | Some _ -> failwith "claimed worker child lost exact parent attempt");
+            assert (Int.equal (P.Developer_job.Launch.nested_depth launch) 1)
+          | `Queued, Error error ->
+            assert (
+              String.equal
+                error.P.Error.message
+                "developer queued completion cannot select child jobs");
+            assert (Option.is_none (R.find_job observed child_id));
+            let parent = R.find_job observed parent_id |> Option.value_exn in
+            (match (P.Developer_job.state parent).status with
+             | P.Job.Failed _ -> ()
+             | _ -> failwith "invalid selected parent did not fail durably");
+            ignore (O.current root |> ok : O.Current.t)
+          | (`Succeeded | `Queued), (Ok None | Ok (Some _) | Error _) ->
+            failwith "claimed selected worker returned the wrong outcome");
+         assert (Option.is_none (R.find_job observed (Option.value_exn !dropped_child)));
+         assert (Int.equal !calls 1)))
+;;
+
+let%test_unit "claimed worker lexical jobs retain the saved tool ceiling" =
+  let parent_calls = ref 0 in
+  let child_calls = ref 0 in
+  with_job_executor
+    ~run_name:"dvr_claimed_pinned_ceiling"
+    ~make_selected:(fun _ -> pair_registry ~on_parent:ignore parent_calls child_calls)
+    (fun ~env ~root ~executor:_ ~handle ~owner:_ ~selected ~jobs ->
+       let pinned = C.select selected ~names:[ "parent_tool" ] |> ok in
+       let parent_id = stage_root_job ~tools:[ "parent_tool" ] env root pinned in
+       let request capabilities name =
+         let binding = C.find capabilities ~name |> ok in
+         Chat_response.Background_request.tool
+           ~capabilities
+           ~reference:(C.reference binding)
+           ~input:(`Object [])
+           ~policy:Chat_response.One_off_request.default_policy
+         |> ok
+       in
+       let pinned_request = request pinned "parent_tool" in
+       let wider_request = request selected "child_tool" in
+       let unselected_child = ref None in
+       let candidate =
+         O.Job_candidate.read_current root ~checkpoint:ignore
+         |> ok
+         |> List.find_exn ~f:(fun candidate ->
+           P.Id.Job.equal (P.Developer_job.id (O.Job_candidate.job candidate)) parent_id)
+       in
+       let completed =
+         Jobs.with_claimed_worker jobs ~candidate (fun ~active ~scope ~sw:_ ->
+           assert (
+             Result.is_error
+               (Jobs.Scope.stage_background
+                  scope
+                  ~request:wider_request
+                  ~checkpoint:ignore));
+           unselected_child
+           := Some
+                (Jobs.Scope.stage_background
+                   scope
+                   ~request:pinned_request
+                   ~checkpoint:ignore
+                 |> ok);
+           Ok (succeeded_claim (Scope.claim active), []))
+         |> ok
+         |> Option.value_exn
+       in
+       assert (P.Id.Job.equal (P.Developer_job.id completed) parent_id);
+       let observed = R.observe handle |> ok in
+       assert (Option.is_none (R.find_job observed (Option.value_exn !unselected_child)));
+       assert (Int.equal !parent_calls 0);
+       assert (Int.equal !child_calls 0))
 ;;
 
 let%test_unit "job child permission wait rechecks selection and real deadline" =

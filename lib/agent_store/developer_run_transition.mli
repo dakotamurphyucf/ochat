@@ -102,3 +102,20 @@ val claimed_transition
   -> after:Agent_protocol.Developer_job.State.t
   -> current_epoch:bool
   -> (Developer_run_document.t, Error.t) result
+
+(** One document transition for a physically claimed parent's terminal or
+    Waiting_completion state and its exact selected children. The Store caller
+    separately proves the Claim. In an Active epoch every child is a new,
+    queued Async_tool under the same owner/capture, with Run_root launch,
+    parent_job exactly the claimed ID/attempt and depth one greater than that
+    parent's recorded depth. Reject duplicate/foreign/old-epoch children and
+    bounds before returning a document. Empty [selected] has the same state
+    policy as [claimed_transition]. This creates no worker or capacity grant. *)
+val claimed_selected
+  :  t
+  -> Developer_run_document.t
+  -> claimed:Agent_protocol.Developer_job.t
+  -> after:Agent_protocol.Developer_job.State.t
+  -> selected:Agent_protocol.Developer_job.t list
+  -> current_epoch:bool
+  -> (Developer_run_document.t, Error.t) result

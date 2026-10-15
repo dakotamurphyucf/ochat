@@ -375,7 +375,7 @@ let implementation_sources =
   ; ( "lib/chat_response/background_job_operations.ml"
     , "86e16c6df7d1eafcb41cb8b558318f7f5b310f9b356afc2412f0e0a32055fcb5" )
   ; ( "lib/chat_response/background_request.ml"
-    , "183733e4ffbe890f971d18219ff2ac69d45b6163cecc7b3403eb60c2ec973ac3" )
+    , "30f3ed701a932cff4fec1499b7763464fa9c43a56998807da5defd5eb1ff5b13" )
   ; ( "lib/chat_response/ingress_operations.ml"
     , "d8e2813f75f67ca4c4d3ee6fc264a9731889538987a53d1f80ff27c2c399c825" )
   ; ( "lib/chat_response/moderator_invocation.ml"

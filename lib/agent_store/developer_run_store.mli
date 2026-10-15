@@ -816,6 +816,43 @@ val prepare_claimed_transition
   -> revoked_after:Agent_protocol.Developer_job.State.t
   -> (Prepared.t, Error.t) result
 
+(** The same physical Claim/handle/domain, fresh Observation and one-shot
+    Prepared path as [prepare_claimed_transition]. In the latest Active epoch,
+    prepare one document containing [after] and the exact selected children;
+    after an epoch change prepare only terminal [revoked_after] bookkeeping
+    and omit all new children. Parent and child rows never use separate writes.
+    The caller's physical Worker retains child capacity until the exact
+    Prepared is installed, proven absent, or remains quarantined. *)
+val prepare_claimed_selected
+  :  handle
+  -> expected:Observation.t
+  -> claim:Claim.t
+  -> after:Agent_protocol.Developer_job.State.t
+  -> revoked_after:Agent_protocol.Developer_job.State.t
+  -> selected:Agent_protocol.Developer_job.t list
+  -> (Prepared.t, Error.t) result
+
+module Claimed_selection : sig
+  type disposition =
+    | Selected_installed
+    | Selected_omitted_after_epoch_change
+  [@@deriving sexp_of]
+
+  (** Read only after [commit_claimed_transition] or
+      [reconcile_claimed_transition] returned this exact Installed result.
+      Verify the Prepared and Installed belong to the same issuing Store,
+      handle/owner and after-document. Compare every selected immutable child
+      against that document: all exact rows yields Selected_installed; no rows
+      after an actual epoch change yields Selected_omitted_after_epoch_change;
+      partial, foreign or changed rows fail closed. Empty selection is
+      vacuously installed. A terminal parent status, copied child ID or
+      independently constructed DTO is never evidence of publication. *)
+  val installed_disposition
+    :  prepared:Prepared.t
+    -> installed:Installed.t
+    -> (disposition, Error.t) result
+end
+
 (** An issued Claim whose callback never entered can be abandoned exactly once
     by the trusted worker owner. This atomically closes its entry gate before
     preparing only Cancelled or Interrupted bookkeeping for the same Running

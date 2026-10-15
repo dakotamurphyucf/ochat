@@ -84,6 +84,15 @@ val rebind_capabilities
   -> capabilities:Tool_capability.t
   -> (Tool_capability.t, Agent_protocol.Error.t) result
 
+(** Rebind this exact saved request's selected names and permission fingerprints
+    against an independently current registry. The result is a ceiling for the
+    same request, never the host's full registry. This does not compile or
+    execute the request, and it confers no Job claim or source authority. *)
+val selected_capabilities
+  :  t
+  -> capabilities:Tool_capability.t
+  -> (Tool_capability.t, Agent_protocol.Error.t) result
+
 (** Pure authority-pin check, without compiling or executing the saved request.
     A job ID alone does not grant access to a different script's selected tools. *)
 val validate_capabilities

@@ -506,3 +506,43 @@ let claimed_transition
       Doc.set_job_state document ~poll:t.poll ~id ~expected_attempt:before.attempt ~after
       |> store
 ;;
+
+let claimed_selected t document ~claimed ~after ~selected ~current_epoch =
+  let* () =
+    if List.is_empty selected
+    then Ok ()
+    else (
+      match after.P.Developer_job.State.status with
+      | P.Job.Waiting_completion _ | Succeeded | Failed _ | Cancelled | Interrupted _ ->
+        Ok ()
+      | Queued | Running | Waiting_permission _ -> Error Error.Conflict)
+  in
+  let* next = claimed_transition t document ~claimed ~after ~current_epoch in
+  if (not current_epoch) || List.is_empty selected
+  then Ok next
+  else (
+    let parent_launch = P.Developer_job.launch claimed in
+    let parent_depth = P.Developer_job.Launch.nested_depth parent_launch in
+    let parent_id = P.Developer_job.id claimed in
+    let parent_attempt = (P.Developer_job.state claimed).attempt in
+    if
+      Int.equal parent_depth Int.max_value
+      || not
+           (List.for_all selected ~f:(fun job ->
+              let launch = P.Developer_job.launch job in
+              new_job t job
+              && P.Job.equal_kind (P.Developer_job.kind job) P.Job.Async_tool
+              && Int.equal (P.Developer_job.Launch.nested_depth launch) (parent_depth + 1)
+              &&
+              match P.Developer_job.Launch.parent launch with
+              | P.Developer_job.Launch.Invocation _ -> false
+              | Run_root ->
+                (match P.Developer_job.Launch.parent_job launch with
+                 | Some (id, attempt) ->
+                   P.Id.Job.equal id parent_id && Int.equal attempt parent_attempt
+                 | None -> false)))
+    then Error Error.Conflict
+    else
+      let* () = within_job_limits t next selected in
+      append_selected t next selected)
+;;

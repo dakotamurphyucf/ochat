@@ -194,6 +194,11 @@ type claim_data =
   }
 
 module Prepared = struct
+  type claimed_selection =
+    { selected : P.Developer_job.t list
+    ; effect_active : bool
+    }
+
   type kind =
     | Foundation_checkpoint
     | Developer_dispatch
@@ -222,6 +227,7 @@ module Prepared = struct
     ; claim_data : claim_data option
     ; mutable claim_status : claim_status
     ; mutable write_attempted : bool
+    ; claimed_selection : claimed_selection option
     }
 end
 
@@ -1574,6 +1580,7 @@ let prepare_checkpoint handle ~expected ~phase =
             ; claim_data = None
             ; claim_status = Unsettled
             ; write_attempted = false
+            ; claimed_selection = None
             })
 ;;
 
@@ -1630,6 +1637,7 @@ let prepare_change handle ~expected ~kind ~f =
             ; claim_data = None
             ; claim_status = Unsettled
             ; write_attempted = false
+            ; claimed_selection = None
             })
 ;;
 
@@ -1801,6 +1809,7 @@ let prepare_claimed_transition_internal
       ~after
       ~revoked_after
       ~required_entry
+      ~selected
   =
   let* t = valid_handle handle in
   if
@@ -1839,12 +1848,22 @@ let prepare_claimed_transition_internal
           in
           let after = if effect_active then after else revoked_after in
           let* next =
-            Developer_run_transition.claimed_transition
-              (transition t handle ~poll)
-              document
-              ~claimed:claim.job
-              ~after
-              ~current_epoch:effect_active
+            (match selected with
+             | None ->
+               Developer_run_transition.claimed_transition
+                 (transition t handle ~poll)
+                 document
+                 ~claimed:claim.job
+                 ~after
+                 ~current_epoch:effect_active
+             | Some selected ->
+               Developer_run_transition.claimed_selected
+                 (transition t handle ~poll)
+                 document
+                 ~claimed:claim.job
+                 ~after
+                 ~selected
+                 ~current_epoch:effect_active)
             |> transition_result
           in
           poll ();
@@ -1872,6 +1891,9 @@ let prepare_claimed_transition_internal
               ; claim_data = Some claim
               ; claim_status = Unsettled
               ; write_attempted = false
+              ; claimed_selection =
+                  Option.map selected ~f:(fun selected ->
+                    Prepared.{ selected; effect_active })
               })
 ;;
 
@@ -1883,6 +1905,18 @@ let prepare_claimed_transition handle ~expected ~claim ~after ~revoked_after =
     ~after
     ~revoked_after
     ~required_entry:Entered
+    ~selected:None
+;;
+
+let prepare_claimed_selected handle ~expected ~claim ~after ~revoked_after ~selected =
+  prepare_claimed_transition_internal
+    handle
+    ~expected
+    ~claim
+    ~after
+    ~revoked_after
+    ~required_entry:Entered
+    ~selected:(Some selected)
 ;;
 
 let prepare_unentered_claim_cleanup handle ~expected ~claim ~status ~now =
@@ -1922,6 +1956,7 @@ let prepare_unentered_claim_cleanup handle ~expected ~claim ~status ~now =
     ~after
     ~revoked_after:after
     ~required_entry:Abandoned
+    ~selected:None
 ;;
 
 let prepared_for handle prepared =
@@ -2406,6 +2441,46 @@ let commit_claimed_transition ?(admit = fun () -> true) handle prepared =
   commit_transition_using with_normal_lease ~path:Physical_claim ~admit handle prepared
 ;;
 
+module Claimed_selection = struct
+  type disposition =
+    | Selected_installed
+    | Selected_omitted_after_epoch_change
+  [@@deriving sexp_of]
+
+  let installed_disposition ~prepared ~installed =
+    let observed = Installed.observation installed in
+    match prepared.Prepared.claimed_selection, prepared.claim_status with
+    | Some { selected; effect_active }, Claim_installed
+      when phys_equal observed.store_token prepared.store_token
+           && P.Execution_owner.equal_developer observed.owner prepared.owner
+           && String.equal observed.document_bytes prepared.after_bytes
+           && Int64.equal
+                observed.document_revision
+                (Doc.revision prepared.after_document) ->
+      let exact_rows =
+        List.for_all selected ~f:(fun selected_job ->
+          match Doc.find_job observed.document (P.Developer_job.id selected_job) with
+          | Some actual ->
+            Jsonaf.exactly_equal
+              (P.Developer_job.to_json selected_job)
+              (P.Developer_job.to_json actual)
+          | None -> false)
+      in
+      if List.is_empty selected || (effect_active && exact_rows)
+      then Ok Selected_installed
+      else if
+        (not effect_active)
+        && List.for_all selected ~f:(fun selected_job ->
+          Option.is_none
+            (Doc.find_job observed.document (P.Developer_job.id selected_job)))
+      then Ok Selected_omitted_after_epoch_change
+      else Error Error.Conflict
+    | None, _
+    | Some _, (Unsettled | Claim_absent | Claim_diverged | Claim_prewrite_conflict)
+    | Some _, Claim_installed -> Error Error.Foreign_or_stale
+  ;;
+end
+
 let commit_inactive_cancel ?(admit = fun () -> true) handle prepared =
   commit_transition_using with_normal_lease ~path:Inactive_job ~admit handle prepared
 ;;
@@ -2717,6 +2792,7 @@ module Recovery = struct
                     ; claim_data = None
                     ; claim_status = Unsettled
                     ; write_attempted = false
+                    ; claimed_selection = None
                     }
                 in
                 let pending : Pending.t =

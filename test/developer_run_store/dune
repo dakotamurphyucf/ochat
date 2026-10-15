@@ -1,7 +1,7 @@
 (library
  (name developer_run_store_test_suite)
  (modules developer_run_store_tests developer_run_selected_tests developer_intent_fixture developer_job_claim_tests developer_blob_custody_tests developer_terminal_recovery_tests developer_result_recovery_tests developer_external_model_tests)
- (libraries core core_unix eio eio_main jsonaf mirage-crypto-rng.unix ochat.agent_store ochat.agent_protocol ochat.agent_session ochat.agent_server ochat.chatml_source ochat.document_schema)
+ (libraries core core_unix eio eio_main jsonaf mirage-crypto-rng.unix ochat.agent_store ochat.agent_protocol ochat.agent_session ochat.agent_server ochat.chat_response ochat.chatml_source ochat.document_schema)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
