@@ -21,3 +21,12 @@
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
+
+(library
+ (name native_inference_tests)
+ (modules native_inference_tests)
+ (libraries core eio eio_main mirage-crypto-rng.unix chatmd chat_response ochat_function openai
+  ochat.shell_runtime ochat.chatmd_shell_spec ochat.shell_access)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
