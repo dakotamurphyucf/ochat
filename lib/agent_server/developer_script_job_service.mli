@@ -12,6 +12,19 @@ val issued_by_root : t -> Developer_root_owner.run -> bool
 module Scope : sig
   type t
 
+  (** Trusted selected native kernel calls this once after its authentic
+      Managed.admit_owned succeeds and before invoking user code. The opaque
+      owned execution must name this physical terminal, original target and
+      Dispatching context. Its exact prepared declaration supplies the lexical
+      dependency ceiling; every pin is re-resolved against the current root.
+      The existing kernel may rebind only before any start, even a rolled-back
+      one. This comparison change grants no capability. The native dispatch
+      fingerprint remains the caller's original target selection. *)
+  val admit_managed
+    :  t
+    -> Chat_response.Managed_tool_registry.owned_execution
+    -> (unit, Agent_protocol.Error.t) result
+
   (** Physically stage one request returned by the existing selected native
       managed callback. Its effect-entry policy has already checked the exact
       binding; this method records the returned ID in the same lexical Job
@@ -125,7 +138,12 @@ end
     invocation; the parent's ID and narrowed capability ceiling are derived
     from that expiring proof and compared with the terminal context and root
     registry. Root and claimed-job children have no direct native borrow and
-    use the root's actual current selected registry. The existing selected
+    normally use the root's actual current selected registry. [ceiling], when
+    supplied for a claimed-job child, pins the admitted Tool request's exact
+    subset: every binding is re-resolved in the current root selection and the
+    terminal context must match its fingerprint. Job.start_tool/script cannot
+    regain other root-selected tools after a wait. A direct Child cannot
+    substitute [ceiling] for its expiring parent borrow. The existing selected
     invocation kernel still re-resolves its binding and checks direct-parent
     liveness at effect entry; this module repeats the borrowed ceiling after
     yielding request preparation and before physical staging.
@@ -141,6 +159,7 @@ val with_native_scope
   :  t
   -> terminal:Developer_root_owner.Native_terminal.t
   -> borrowed:Agent_session.Native_tool_invocation.selected_borrowed option
+  -> ?ceiling:Chat_response.Tool_capability.t
   -> check_parent_now:(unit -> (unit, Agent_protocol.Error.t) result)
   -> (scope:Scope.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result

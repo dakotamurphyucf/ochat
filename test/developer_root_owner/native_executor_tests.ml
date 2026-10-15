@@ -17,7 +17,7 @@ module Selected = Developer_run_store_test_suite.Developer_run_selected_tests
 
 let ok = T.ok
 
-let registry ~custom calls =
+let registry ?unrelated ~custom calls =
   let module Definition = struct
     type input = string
 
@@ -39,7 +39,8 @@ let registry ~custom calls =
   C.create
     ~owner:"selected-native-test"
     ~resource_fingerprint:(Chatmd_shell_spec.Source_ref.digest "selected-resource")
-    [ Chatmd_shell_spec.Source_ref.digest "selected-native-v1", implementation ]
+    ((Chatmd_shell_spec.Source_ref.digest "selected-native-v1", implementation)
+     :: Option.to_list unrelated)
   |> ok
 ;;
 
@@ -239,9 +240,9 @@ let with_job_executor
       in
       let policy = Disclosure.Policy.create ~authorize:(fun _ _ -> true) in
       let disclosure = Disclosure.create ~runs:store ~blobs ~policy ~limits |> ok in
-      resources := Some (store, disclosure))
+      resources := Some (store, disclosure, blobs))
     (fun ~env ~root ~executor ~handle ~owner ~selected ->
-       let store, disclosure = Option.value_exn !resources in
+       let store, disclosure, blobs = Option.value_exn !resources in
        let jobs =
          Jobs.create
            ~root
@@ -256,7 +257,183 @@ let with_job_executor
          |> Result.ok_or_failwith
        in
        let executor = X.with_job_service executor jobs |> ok in
-       f ~env ~root ~executor ~handle ~owner ~selected ~jobs)
+       f ~env ~root ~executor ~handle ~owner ~selected ~jobs ~store ~blobs)
+;;
+
+let background_runner ~sw ~root ~store ~blobs ~env ~managed ~jobs ~storage =
+  let limits =
+    Agent_store.Developer_result_publisher.Limits.create
+      ~inline_bytes:1024
+      ~max_result_bytes:65536
+      ~max_pending:2
+    |> ok
+  in
+  Agent_server.Developer_background_job_runner.create
+    ~sw
+    ~root
+    ~store
+    ~blobs
+    ~publisher_limits:limits
+    ~storage
+    ~env
+    ~managed
+    ~jobs
+    ~authorize:(fun _ _ -> Ok ())
+    ~prepare_output:(function
+      | Openai.Responses.Tool_output.Output.Text value -> Ok (`String value)
+      | _ -> Error (P.Error.invalid_request "unexpected output"))
+  |> ok
+;;
+
+let%test_unit "claimed Tool target uses one physical native and result publisher" =
+  List.iter
+    [ Agent_store.Developer_result_publisher.Storage.Automatic; Artifact ]
+    ~f:(fun storage ->
+      let parent_calls = ref 0 in
+      let child_calls = ref 0 in
+      with_job_executor
+        ~run_name:
+          (match storage with
+           | Automatic -> "dvr_claimed_tool_inline"
+           | Artifact -> "dvr_claimed_tool_artifact")
+        ~make_selected:(fun _ -> pair_registry ~on_parent:ignore parent_calls child_calls)
+        (fun ~env ~root ~executor:_ ~handle ~owner:_ ~selected ~jobs ~store ~blobs ->
+           let parent = C.find selected ~name:"parent_tool" |> ok in
+           let pinned = C.select selected ~names:[ "parent_tool" ] |> ok in
+           let request =
+             Chat_response.Background_request.tool
+               ~capabilities:pinned
+               ~reference:(C.reference parent)
+               ~input:(`Object [])
+               ~policy:Chat_response.One_off_request.default_policy
+             |> ok
+           in
+           let selected_id =
+             O.with_root_action root ~phase:R.Checkpoint.Active (fun ~action ~sw:_ ->
+               let id =
+                 O.Action.stage_background action ~request ~checkpoint:ignore |> ok
+               in
+               let selected = O.Action.seal action ~selected:[ id ] |> ok in
+               Ok (id, selected))
+             |> ok
+           in
+           Eio.Switch.run (fun sw ->
+             let runner =
+               background_runner ~sw ~root ~store ~blobs ~env ~managed:None ~jobs ~storage
+             in
+             let candidates =
+               O.Job_candidate.read_current root ~checkpoint:ignore |> ok
+             in
+             assert (Int.equal (List.length candidates) 1);
+             let candidate = List.hd_exn candidates in
+             assert (
+               P.Id.Job.equal
+                 selected_id
+                 (P.Developer_job.id (O.Job_candidate.job candidate)));
+             let available =
+               Agent_server.Developer_background_job_runner.availability runner candidate
+               |> ok
+             in
+             assert (
+               Agent_server.Developer_background_job_runner.Availability.equal
+                 available
+                 Runnable);
+             let completed =
+               Agent_server.Developer_background_job_runner.run_candidate runner candidate
+               |> ok
+               |> Option.value_exn
+             in
+             assert (Int.equal !parent_calls 1);
+             assert (Int.equal !child_calls 0);
+             assert (P.Id.Job.equal selected_id (P.Developer_job.id completed));
+             assert (
+               match (P.Developer_job.state completed).status with
+               | P.Job.Succeeded -> true
+               | _ -> false);
+             assert (
+               match storage, (P.Developer_job.state completed).result with
+               | Automatic, Some (Inline (P.Completion.Succeeded (`String "parent"))) ->
+                 true
+               | Artifact, Some (Artifact { outcome = P.Stored_completion.Succeeded; _ })
+                 -> true
+               | _ -> false))))
+;;
+
+let%test_unit "claimed Tool keeps selected Artifact after uncertain terminal save" =
+  let calls = ref 0 in
+  let tracking = ref false in
+  let writes = ref 0 in
+  let rename_armed = ref false in
+  let sync_blocked = ref false in
+  let parent_sync_blocked = ref false in
+  with_job_executor
+    ~run_name:"dvr_claimed_tool_uncertain_artifact"
+    ~make_selected:(fun _ -> registry ~custom:false calls)
+    ~wrap_env:(fun env ->
+      F.fault_after_authority_rename_env
+        ~before_rename:(fun () ->
+          if !tracking
+          then (
+            Int.incr writes;
+            if Int.equal !writes 4 then rename_armed := true))
+        ~after_rename:(fun () -> sync_blocked := true)
+        env
+        ~rename_armed
+        ~sync_blocked
+        ~parent_sync_blocked)
+    (fun ~env ~root ~executor:_ ~handle ~owner:_ ~selected ~jobs ~store ~blobs ->
+       let binding = C.find selected ~name:"read_file" |> ok in
+       let request =
+         Chat_response.Background_request.tool
+           ~capabilities:selected
+           ~reference:(C.reference binding)
+           ~input:(`Object [])
+           ~policy:Chat_response.One_off_request.default_policy
+         |> ok
+       in
+       let id =
+         O.with_root_action root ~phase:R.Checkpoint.Active (fun ~action ~sw:_ ->
+           let id = O.Action.stage_background action ~request ~checkpoint:ignore |> ok in
+           let selection = O.Action.seal action ~selected:[ id ] |> ok in
+           Ok (id, selection))
+         |> ok
+       in
+       Eio.Switch.run (fun sw ->
+         let runner =
+           background_runner
+             ~sw
+             ~root
+             ~store
+             ~blobs
+             ~env
+             ~managed:None
+             ~jobs
+             ~storage:Agent_store.Developer_result_publisher.Storage.Artifact
+         in
+         let candidate =
+           O.Job_candidate.read_current root ~checkpoint:ignore |> ok |> List.hd_exn
+         in
+         tracking := true;
+         assert (
+           Result.is_error
+             (Agent_server.Developer_background_job_runner.run_candidate runner candidate));
+         tracking := false;
+         assert (Int.equal !writes 4);
+         assert (not !rename_armed);
+         assert (Int.equal !calls 1);
+         sync_blocked := false;
+         let persisted = R.find_job (R.observe handle |> ok) id |> Option.value_exn in
+         assert (
+           match (P.Developer_job.state persisted).result with
+           | Some (Artifact { outcome = P.Stored_completion.Succeeded; _ }) -> true
+           | None | Some (Inline _) | Some (Artifact _) -> false);
+         (match
+            Agent_server.Developer_background_job_runner.run_candidate runner candidate
+          with
+          | Ok None -> ()
+          | Ok (Some _) | Error _ ->
+            failwith "stale candidate restarted an uncertain claimed Tool");
+         assert (Int.equal !calls 1)))
 ;;
 
 let%test_unit "developer root Job scope selects only the returned physical start" =
@@ -293,7 +470,7 @@ let%test_unit "developer root Job scope selects only the returned physical start
       else O.original_actor root)
     ~run_name:"dvr_script_root_job"
     ~make_selected:(fun _ -> registry ~custom:false calls)
-    (fun ~env ~root ~executor:_ ~handle ~owner:_ ~selected:_ ~jobs ->
+    (fun ~env ~root ~executor:_ ~handle ~owner:_ ~selected:_ ~jobs ~store:_ ~blobs:_ ->
        let module Runtime = Chatml_host_runtime in
        let module Value = Chatml.Chatml_value_codec in
        let persisted_job_ids () =
@@ -521,6 +698,8 @@ let%test_unit "developer root Job scope selects only the returned physical start
 
 let managed_job_registry
       ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
+      ?(completion_schema = false)
+      ?base_registry
       ?(source =
         "let run ctx input = Task.bind(Job.start_tool(\"read_file\", input), fun id ->\n\
         \  Task.pure(`Complete(input)))")
@@ -528,13 +707,18 @@ let managed_job_registry
       calls
   =
   let module M = Chat_response.Managed_tool_registry in
-  let base = registry ~custom:false calls in
+  let base =
+    Option.value_or_thunk base_registry ~default:(fun () -> registry ~custom:false calls)
+  in
   let dir = Eio.Stdenv.cwd env in
   let source_loader =
     Source_loader.captured_filesystem
       ~root:dir
       ~sources:
-        [ "input.json", {|{"type":"object"}|}; "output.json", {|{"type":"object"}|} ]
+        [ "input.json", {|{"type":"object"}|}
+        ; "output.json", {|{"type":"object"}|}
+        ; "completion.json", {|{"type":"string"}|}
+        ]
   in
   let elements =
     Prompt.Chat_markdown.parse_chat_inputs
@@ -545,8 +729,9 @@ let managed_job_registry
 <script id="owned" language="chatml" kind="tool">
 %s
 </script>
-<tool name="summary" type="chatml" script="owned" entrypoint="run" input_schema="input.json" output_schema="output.json"><uses tool="read_file"/></tool>|}
-         source)
+<tool name="summary" type="chatml" script="owned" entrypoint="run" input_schema="input.json" output_schema="output.json"%s><uses tool="read_file"/></tool>|}
+         source
+         (if completion_schema then {| completion_schema="completion.json"|} else ""))
   in
   let managed =
     M.prepare
@@ -562,6 +747,278 @@ let managed_job_registry
   managed, M.capabilities managed
 ;;
 
+let%test_unit "claimed managed Pending waits on selected owned Job and captured schema" =
+  let calls = ref 0 in
+  let prepared = ref None in
+  with_job_executor
+    ~run_name:"dvr_claimed_managed_pending"
+    ~make_selected:(fun env ->
+      let managed, selected = managed_job_registry ~completion_schema:true env calls in
+      prepared := Some managed;
+      selected)
+    (fun ~env ~root ~executor:_ ~handle ~owner:_ ~selected ~jobs ~store ~blobs ->
+       let module M = Chat_response.Managed_tool_registry in
+       let managed = Option.value_exn !prepared in
+       let binding = C.find selected ~name:"summary" |> ok in
+       let reference = C.reference binding in
+       let request =
+         Chat_response.Background_request.tool
+           ~capabilities:selected
+           ~reference
+           ~input:(`Object [])
+           ~policy:Chat_response.One_off_request.default_policy
+         |> ok
+       in
+       let id =
+         O.with_root_action root ~phase:R.Checkpoint.Active (fun ~action ~sw:_ ->
+           let id = O.Action.stage_background action ~request ~checkpoint:ignore |> ok in
+           let selected = O.Action.seal action ~selected:[ id ] |> ok in
+           Ok (id, selected))
+         |> ok
+       in
+       let child_id = ref None in
+       let service : Agent_session.Native_tool_invocation.selected_managed_dispatch =
+         { definition = managed
+         ; current = (fun () -> selected)
+         ; run =
+             (fun _execution
+               _borrowed
+               ~effect_entry
+               ~stage_background
+               ~install_jobs:_
+               continuation ->
+               effect_entry () |> ok;
+               let child_binding = C.find selected ~name:"read_file" |> ok in
+               let child =
+                 Chat_response.Background_request.tool
+                   ~capabilities:selected
+                   ~reference:(C.reference child_binding)
+                   ~input:(`Object [])
+                   ~policy:Chat_response.One_off_request.default_policy
+                 |> ok
+               in
+               let id = stage_background ~request:child ~checkpoint:ignore |> ok in
+               child_id := Some id;
+               continuation
+                 ~validate_work:(function
+                   | I.Job actual when P.Id.Job.equal actual id -> Ok ()
+                   | Job _ | Subscription _ -> Error "foreign managed child")
+                 ~outcome:(I.Pending (I.Job id, `Object []))
+                 ~selected_jobs:[ id ])
+         }
+       in
+       Eio.Switch.run (fun sw ->
+         let runner =
+           background_runner
+             ~sw
+             ~root
+             ~store
+             ~blobs
+             ~env
+             ~managed:(Some service)
+             ~jobs
+             ~storage:Agent_store.Developer_result_publisher.Storage.Automatic
+         in
+         let candidate =
+           O.Job_candidate.read_current root ~checkpoint:ignore |> ok |> List.hd_exn
+         in
+         let completed =
+           Agent_server.Developer_background_job_runner.run_candidate runner candidate
+           |> ok
+           |> Option.value_exn
+         in
+         assert (P.Id.Job.equal id (P.Developer_job.id completed));
+         assert (Int.equal !calls 0);
+         assert (
+           Option.is_some
+             (R.find_job (R.observe handle |> ok) (Option.value_exn !child_id)));
+         assert (
+           match (P.Developer_job.state completed).status with
+           | P.Job.Waiting_completion dependency ->
+             (match dependency.work with
+              | I.Job waited ->
+                P.Id.Job.equal waited (Option.value_exn !child_id)
+                && Jsonaf.exactly_equal
+                     (Option.value_exn dependency.completion_schema)
+                     (`Object [ "type", `String "string" ])
+              | Subscription _ -> false)
+           | _ -> false)))
+;;
+
+let%test_unit "claimed managed Job.start keeps the request's pinned tool subset" =
+  let read_calls = ref 0 in
+  let extra_calls = ref 0 in
+  let prepared = ref None in
+  let module Extra = struct
+    type input = string
+
+    let name = "child_tool"
+    let description = Some "unrelated current root tool"
+    let type_ = "function"
+    let parameters = `Object [ "type", `String "object" ]
+    let input_of_string input = input
+  end
+  in
+  let extra =
+    Ochat_function.create_function
+      (module Extra)
+      (fun _ ->
+         Int.incr extra_calls;
+         Openai.Responses.Tool_output.Output.Text "extra")
+  in
+  with_job_executor
+    ~run_name:"dvr_claimed_managed_subset"
+    ~make_selected:(fun env ->
+      let base =
+        registry
+          ~unrelated:(Chatmd_shell_spec.Source_ref.digest "unrelated-v1", extra)
+          ~custom:false
+          read_calls
+      in
+      let managed, selected = managed_job_registry ~base_registry:base env read_calls in
+      prepared := Some managed;
+      selected)
+    (fun ~env ~root ~executor:_ ~handle:_ ~owner:_ ~selected ~jobs ~store ~blobs ->
+       let module M = Chat_response.Managed_tool_registry in
+       let module Runtime = Chatml_host_runtime in
+       let module Value = Chatml.Chatml_value_codec in
+       let managed = Option.value_exn !prepared in
+       let summary = C.find selected ~name:"summary" |> ok in
+       let pinned = C.select selected ~names:[ "summary" ] |> ok in
+       assert (Result.is_ok (C.find selected ~name:"child_tool"));
+       let request =
+         Chat_response.Background_request.tool
+           ~capabilities:pinned
+           ~reference:(C.reference summary)
+           ~input:(`Object [])
+           ~policy:Chat_response.One_off_request.default_policy
+         |> ok
+       in
+       let id =
+         O.with_root_action root ~phase:R.Checkpoint.Active (fun ~action ~sw:_ ->
+           let id = O.Action.stage_background action ~request ~checkpoint:ignore |> ok in
+           let selection = O.Action.seal action ~selected:[ id ] |> ok in
+           Ok (id, selection))
+         |> ok
+       in
+       let selected_child = ref None in
+       let service : Agent_session.Native_tool_invocation.selected_managed_dispatch =
+         { definition = managed
+         ; current = (fun () -> selected)
+         ; run =
+             (fun execution
+               _borrowed
+               ~effect_entry
+               ~stage_background
+               ~install_jobs
+               continuation ->
+               effect_entry () |> ok;
+               let unrelated = C.find selected ~name:"child_tool" |> ok in
+               let unrelated_request =
+                 Chat_response.Background_request.tool
+                   ~capabilities:selected
+                   ~reference:(C.reference unrelated)
+                   ~input:(`Object [])
+                   ~policy:Chat_response.One_off_request.default_policy
+                 |> ok
+               in
+               assert (
+                 Result.is_error
+                   (stage_background ~request:unrelated_request ~checkpoint:ignore));
+               let config : Runtime.runtime_config =
+                 { surface = Chatml.Chatml_extension_surface.tool_v1
+                 ; operations =
+                     Runtime.default_operations ~handlers:Runtime.default_handlers ()
+                 }
+               in
+               let installed = install_jobs config in
+               let invoke_unrelated () =
+                 let compiled =
+                   Runtime.compile_script
+                     ~surface:config.surface
+                     ~source:{|let run ctx input = Job.start_tool("child_tool", input)|}
+                     ()
+                   |> Result.ok_or_failwith
+                 in
+                 Runtime.run_entrypoint
+                   ?scoped_async_operation:installed.scoped_async_operation
+                   ~prepare_result:(fun ~value:_ ~local_effects:_ -> Ok ignore)
+                   installed.config
+                   compiled
+                   ~entrypoint:"run"
+                   ~arguments:[ Value.import_json `Null; Value.import_json (`Object []) ]
+                   ()
+               in
+               assert (Result.is_error (invoke_unrelated ()));
+               let effects = ref [] in
+               let actual = M.owned_prepared execution in
+               ignore
+                 (Chat_response.Extension_compiler.Program.run_in_scope
+                    (Chat_response.Extension_compiler.program actual)
+                    ~prepare_result:(fun ~value:_ ~local_effects ->
+                      effects := local_effects;
+                      Ok ignore)
+                    ~control:None
+                    ?scoped_async_operation:installed.scoped_async_operation
+                    ~config:installed.config
+                    ~entrypoint:"run"
+                    ~arguments:[ Value.import_json `Null; Value.import_json (`Object []) ]
+                    ()
+                  |> Result.map_error ~f:(fun error -> error.Chatml_execution.message)
+                  |> Result.ok_or_failwith
+                  : Chatml.Chatml_lang.value);
+               let child_id =
+                 Chat_response.Background_job_operations.split_starts !effects
+                 |> Result.ok_or_failwith
+                 |> fst
+                 |> List.hd_exn
+               in
+               selected_child := Some child_id;
+               continuation
+                 ~validate_work:(function
+                   | I.Job actual when P.Id.Job.equal actual child_id -> Ok ()
+                   | Job _ | Subscription _ -> Error "foreign managed child")
+                 ~outcome:(I.Pending (I.Job child_id, `Object []))
+                 ~selected_jobs:[ child_id ])
+         }
+       in
+       Eio.Switch.run (fun sw ->
+         let runner =
+           background_runner
+             ~sw
+             ~root
+             ~store
+             ~blobs
+             ~env
+             ~managed:(Some service)
+             ~jobs
+             ~storage:Agent_store.Developer_result_publisher.Storage.Automatic
+         in
+         let candidate =
+           O.Job_candidate.read_current root ~checkpoint:ignore |> ok |> List.hd_exn
+         in
+         let completed =
+           Agent_server.Developer_background_job_runner.run_candidate runner candidate
+           |> ok
+           |> Option.value_exn
+         in
+         assert (P.Id.Job.equal id (P.Developer_job.id completed));
+         assert (Int.equal !extra_calls 0);
+         assert (Int.equal !read_calls 0);
+         if
+           not
+             (match (P.Developer_job.state completed).status with
+              | P.Job.Waiting_completion { work = I.Job actual; _ } ->
+                P.Id.Job.equal actual (Option.value_exn !selected_child)
+              | _ -> false)
+         then
+           raise_s
+             [%sexp
+               "unexpected claimed managed result"
+             , ((P.Developer_job.state completed).status : P.Job.status)
+             , (!selected_child : P.Id.Job.t option)]))
+;;
+
 let%test_unit
     "selected managed ChatML installs Job operations only in its live native scope"
   =
@@ -573,7 +1030,7 @@ let%test_unit
       let managed, selected = managed_job_registry env calls in
       prepared := Some managed;
       selected)
-    (fun ~env:_ ~root:_ ~executor ~handle ~owner ~selected ~jobs:_ ->
+    (fun ~env:_ ~root:_ ~executor ~handle ~owner ~selected ~jobs:_ ~store:_ ~blobs:_ ->
        let module M = Chat_response.Managed_tool_registry in
        let module EC = Chat_response.Extension_compiler in
        let module Runtime = Chatml_host_runtime in
@@ -692,7 +1149,7 @@ let%test_unit
         ~rename_armed
         ~sync_blocked
         ~parent_sync_blocked)
-    (fun ~env:_ ~root ~executor:_ ~handle ~owner:_ ~selected:_ ~jobs ->
+    (fun ~env:_ ~root ~executor:_ ~handle ~owner:_ ~selected:_ ~jobs ~store:_ ~blobs:_ ->
        let module Runtime = Chatml_host_runtime in
        let module Value = Chatml.Chatml_value_codec in
        let effects = ref [] in
@@ -970,6 +1427,66 @@ let%test_unit "claimed worker alone admits job child and inherited nested ancest
        let child_id = Option.value_exn !nested_id in
        assert (
          Option.is_some (R.Invocation_lookup.prior (R.find_invocation observed child_id)));
+       let pinned = C.select selected ~names:[ "parent_tool" ] |> ok in
+       let pinned_job = stage_root_job env root selected in
+       let pinned_parent =
+         let admitted = invocation owner pinned parent_reference ~custom:false in
+         H.create_developer { (H.context admitted) with parent_job = Some pinned_job }
+         |> ok
+       in
+       (invoke_nested
+        := fun () ->
+             let child =
+               H.create_developer
+                 { (H.context (invocation owner pinned child_reference ~custom:false)) with
+                   parent_invocation = Some (H.context pinned_parent).id
+                 ; parent_job = Some pinned_job
+                 }
+               |> ok
+             in
+             let result =
+               X.run_child
+                 executor
+                 ~managed:None
+                 ~reference:child_reference
+                 ~invocation:child
+                 ~authorize:(fun _ _ -> Ok ())
+                 ~prepare_output:(fun _ -> Ok (`String "child"))
+             in
+             match result with
+             | Ok terminal ->
+               (match H.status terminal with
+                | Resolved (Fail { code = "invocation.stale_binding"; _ }) -> ()
+                | _ -> failwith "pinned child was not rejected by selected binding")
+             | Error _ -> failwith "pinned child rejected before binding admission");
+       let expected = R.observe handle |> ok in
+       ignore
+         (O.with_claimed_job
+            root
+            ~expected
+            ~lookup:(R.find_job_exact expected pinned_job)
+            (fun ~active ~sw:_ ->
+               let terminal =
+                 X.run_job_child
+                   ~selected:pinned
+                   executor
+                   ~active
+                   ~managed:None
+                   ~reference:parent_reference
+                   ~invocation:pinned_parent
+                   ~authorize:(fun _ _ -> Ok ())
+                   ~prepare_output:(fun _ -> Ok (`String "parent"))
+                 |> ok
+               in
+               assert (
+                 I.equal_status
+                   (H.status terminal)
+                   (Resolved (Complete (`String "parent"))));
+               Ok (succeeded_claim (Scope.claim active)))
+          |> ok
+          : P.Developer_job.t option);
+       assert (Int.equal !parent_calls 2);
+       assert (Int.equal !child_calls 1);
        let expired = Option.value_exn !retained_active in
        let retry =
          H.create_developer
@@ -986,7 +1503,7 @@ let%test_unit "claimed worker alone admits job child and inherited nested ancest
               ~invocation:retry
               ~authorize:(fun _ _ -> Ok ())
               ~prepare_output:(fun _ -> Ok (`String "parent"))));
-       assert (Int.equal !parent_calls 1))
+       assert (Int.equal !parent_calls 2))
 ;;
 
 let%test_unit "claimed worker action atomically installs its selected child" =
@@ -1135,7 +1652,7 @@ let%test_unit "claimed worker lexical jobs retain the saved tool ceiling" =
   with_job_executor
     ~run_name:"dvr_claimed_pinned_ceiling"
     ~make_selected:(fun _ -> pair_registry ~on_parent:ignore parent_calls child_calls)
-    (fun ~env ~root ~executor:_ ~handle ~owner:_ ~selected ~jobs ->
+    (fun ~env ~root ~executor:_ ~handle ~owner:_ ~selected ~jobs ~store:_ ~blobs:_ ->
        let pinned = C.select selected ~names:[ "parent_tool" ] |> ok in
        let parent_id = stage_root_job ~tools:[ "parent_tool" ] env root pinned in
        let request capabilities name =

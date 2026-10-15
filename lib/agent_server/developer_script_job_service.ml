@@ -8,6 +8,7 @@ module Ops = Chat_response.Background_job_operations
 module C = Chat_response.Tool_capability
 module B = Chat_response.Background_request
 module N = Agent_session.Native_tool_invocation
+module M = Chat_response.Managed_tool_registry
 module H = P.Host_invocation
 module Runtime = Chatml_host_runtime
 module Value = Chatml.Chatml_value_codec
@@ -39,10 +40,11 @@ type native_selection =
 type scope =
   { service : t
   ; physical : physical
-  ; selected : C.t
-  ; selected_now : unit -> (C.t, P.Error.t) result
+  ; mutable selected : C.t
+  ; mutable selected_now : unit -> (C.t, P.Error.t) result
   ; kernel : K.t
   ; check_parent_now : unit -> (unit, P.Error.t) result
+  ; mutable managed_admitted : bool
   ; mutable frozen : (P.Invocation.outcome * native_selection) option
   }
 
@@ -297,6 +299,67 @@ let model_spawn_operation ?control scope =
 module Scope = struct
   type t = scope
 
+  let admit_managed t execution =
+    match t.physical with
+    | Root _ | Worker _ ->
+      Error (invalid "managed native admission requires a native scope")
+    | Native terminal ->
+      let* () = check t in
+      let* () =
+        if O.Native_terminal.effect_parent_live_now terminal
+        then Ok ()
+        else Error (invalid "managed native callback has ended")
+      in
+      let physical = O.Native_terminal.invocation terminal in
+      let admitted = M.owned_invocation execution in
+      let reference = C.reference (M.owned_binding execution) in
+      let* () =
+        if
+          t.managed_admitted
+          || (not (H.equal_context (H.context physical) (H.context admitted)))
+          || (not (P.Invocation.equal_status (H.status admitted) Dispatching))
+          || (not (String.equal (H.context physical).tool_name reference.name))
+          || not
+               (Result.is_ok
+                  (C.resolve
+                     t.selected
+                     ~id:reference.id
+                     ~fingerprint:reference.fingerprint))
+        then Error (invalid "managed preparation is foreign or already admitted")
+        else Ok ()
+      in
+      let prepared = M.owned_prepared execution in
+      let dependencies = Chat_response.Extension_compiler.capabilities prepared in
+      let selected_now () =
+        let current = O.native_selected t.service.root in
+        let* names =
+          List.fold_result (C.references dependencies) ~init:[] ~f:(fun names pin ->
+            let* _ =
+              C.resolve current ~id:pin.id ~fingerprint:pin.fingerprint
+              |> Result.map_error ~f:(fun error -> invalid error.message)
+            in
+            Ok (pin.name :: names))
+        in
+        C.select current ~names:(List.rev names)
+        |> Result.map_error ~f:(fun error -> invalid error.message)
+      in
+      let* exact = selected_now () in
+      let* () =
+        if String.equal (C.fingerprint exact) (C.fingerprint dependencies)
+        then Ok ()
+        else Error (invalid "managed dependency selection changed")
+      in
+      let* () =
+        K.rebind_selected t.kernel ~selected:exact ~current_capabilities:(fun () ->
+          O.native_selected t.service.root)
+        |> kernel_result
+      in
+      t.selected <- exact;
+      t.selected_now <- selected_now;
+      t.managed_admitted <- true;
+      Ok ()
+  ;;
+
   let stage_background t ~request ~checkpoint = stage t ~checkpoint request
 
   let install ?control t config =
@@ -349,6 +412,7 @@ let with_kernel service ~physical ~selected ~selected_now ~check_parent_now f =
          ; selected_now
          ; kernel
          ; check_parent_now
+         ; managed_admitted = false
          ; frozen = None
          })
 ;;
@@ -380,6 +444,7 @@ let with_root_action service ~phase f =
              ; selected_now = (fun () -> Ok (O.native_selected service.root))
              ; kernel
              ; check_parent_now = (fun () -> Ok ())
+             ; managed_admitted = false
              ; frozen = None
              }
            in
@@ -445,6 +510,7 @@ let with_claimed_worker service ~candidate ?select f =
                         parent
                         ~owner:(O.owner service.root)
                         ~capture_fingerprint)
+                ; managed_admitted = false
                 ; frozen = None
                 }
               in
@@ -474,7 +540,7 @@ module Native_selection = struct
   let physical (t : t) = t.physical
 end
 
-let borrowed_selected service terminal borrowed =
+let borrowed_selected service terminal borrowed ceiling =
   let context = H.context (O.Native_terminal.invocation terminal) in
   let* () =
     if P.Execution_owner.equal context.owner (Developer (O.owner service.root))
@@ -482,16 +548,19 @@ let borrowed_selected service terminal borrowed =
     else Error (invalid "native job owner differs from its physical root")
   in
   let* selected =
-    match context.parent_invocation, borrowed with
-    | None, None -> Ok (O.native_selected service.root)
-    | Some expected, Some borrowed ->
+    match context.parent_invocation, borrowed, ceiling with
+    | None, None, None -> Ok (O.native_selected service.root)
+    | None, None, Some selected when Option.is_some context.parent_job -> Ok selected
+    | None, None, Some _ ->
+      Error (invalid "root native scope cannot borrow a claimed job ceiling")
+    | Some expected, Some borrowed, None ->
       let parent = H.context (N.selected_borrowed_invocation borrowed) in
       if
         (not (P.Id.Invocation.equal expected parent.id))
         || not (P.Execution_owner.equal context.owner parent.owner)
       then Error (invalid "native job parent borrow is foreign")
       else N.selected_borrowed_capabilities borrowed
-    | None, Some _ | Some _, None ->
+    | None, Some _, _ | Some _, None, _ | Some _, Some _, Some _ ->
       Error (invalid "native job parent borrow is missing or unexpected")
   in
   let* current =
@@ -514,16 +583,16 @@ let borrowed_selected service terminal borrowed =
   else Error (invalid "native job borrow differs from admitted child selection")
 ;;
 
-let with_native_scope service ~terminal ~borrowed ~check_parent_now f =
+let with_native_scope service ~terminal ~borrowed ?ceiling ~check_parent_now f =
   if not (O.Native_terminal.issued_by_root terminal ~root:service.root)
   then Error (invalid "native job terminal belongs to another physical root")
   else
-    let* selected = borrowed_selected service terminal borrowed in
+    let* selected = borrowed_selected service terminal borrowed ceiling in
     with_kernel
       service
       ~physical:(Native terminal)
       ~selected
-      ~selected_now:(fun () -> borrowed_selected service terminal borrowed)
+      ~selected_now:(fun () -> borrowed_selected service terminal borrowed ceiling)
       ~check_parent_now
       (fun scope -> f ~scope)
 ;;

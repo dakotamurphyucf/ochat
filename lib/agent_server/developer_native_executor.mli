@@ -57,9 +57,16 @@ val run_child
     The root derives an abstract job-parent proof from its real Worker issuer;
     the same selected registry, policy, dispatch and terminal path is used as
     [run_root]. Invocation context must name the exact claimed job and no
-    parent invocation. This grants no authority from a saved Running row. *)
+    parent invocation. This grants no authority from a saved Running row.
+    [selected], when supplied, is the request's already re-admitted pinned
+    subset. Before every shared-policy registry read, each exact live binding
+    must still resolve inside this root's current selected registry. The
+    native kernel then uses only that subset as its caller ceiling; it cannot
+    silently inherit unrelated newly selected tools. Ordinary callers omit
+    it and retain the existing full-root selection behavior. *)
 val run_job_child
-  :  t
+  :  ?selected:Chat_response.Tool_capability.t
+  -> t
   -> active:Agent_session.Developer_job_scope.active
   -> managed:Agent_session.Native_tool_invocation.selected_managed_dispatch option
   -> reference:Chat_response.Tool_capability.reference

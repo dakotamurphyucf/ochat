@@ -139,6 +139,8 @@ let shared_features =
       ; "lib/agent_session/script_job_request.ml"
       ; "lib/agent_session/script_job_service.ml"
       ; "lib/agent_session/staged_jobs.ml"
+      ; "lib/agent_server/developer_script_job_service.ml"
+      ; "lib/agent_server/developer_background_job_runner.ml"
       ]
     , "runtime.jobs.owned"
     , [ "test/chatml_composition/background_tests.ml"
@@ -332,6 +334,10 @@ let implementation_sources =
     , "a5447544cbe1cd55302cd70a3c50bf7f6b0ec07ad3af8ce1f70b7b90dfbd07bc" )
   ; ( "lib/agent_server/job_scheduler.ml"
     , "df358d4533811f7cac2ce1e0251614538074d2ea013bcb97fdb2d53eebdf0e3c" )
+  ; ( "lib/agent_server/developer_background_job_runner.ml"
+    , "e1700d443e49642242dc4a5173837446b820eaaaf373f380e9fdffe8510357a6" )
+  ; ( "lib/agent_server/developer_script_job_service.ml"
+    , "6c6b3d64db0a1c623ef8595259bcc34e4b2b99e2e0576721d2afdcb82144f6de" )
   ; ( "lib/agent_server/schedule_scheduler.ml"
     , "37cf371632d8ad86693c162e0593d56866f76df577dceb06ddd2ac5fe5bfdae9" )
   ; ( "lib/agent_session/background_execution.ml"
@@ -351,7 +357,7 @@ let implementation_sources =
   ; ( "lib/agent_session/script_ingress_service.ml"
     , "0aaa0f00f9fe546c442cc7dcf1bf513d87797e9beea516222f08d17ef2f7a097" )
   ; ( "lib/agent_session/script_job_kernel.ml"
-    , "b9d98e0898745241b16656b8a5b4b234f26cf6ff822e1a352bcab50ea94212ae" )
+    , "04c1cfd48c30ab3982640f3f6f57d5d1e54df8306bf9de7253b131ac8795d9cb" )
   ; ( "lib/agent_session/script_job_request.ml"
     , "9fdedd1ec520d69cb2bd7d5d32639bcc84d6c0d2dad1835513d7c7feaaf0d9d7" )
   ; ( "lib/agent_session/script_job_service.ml"
@@ -375,7 +381,7 @@ let implementation_sources =
   ; ( "lib/chat_response/background_job_operations.ml"
     , "86e16c6df7d1eafcb41cb8b558318f7f5b310f9b356afc2412f0e0a32055fcb5" )
   ; ( "lib/chat_response/background_request.ml"
-    , "30f3ed701a932cff4fec1499b7763464fa9c43a56998807da5defd5eb1ff5b13" )
+    , "104350ca788bb88e626045dc5269080d8d5f5005b88898c3faa69d9377793788" )
   ; ( "lib/chat_response/ingress_operations.ml"
     , "d8e2813f75f67ca4c4d3ee6fc264a9731889538987a53d1f80ff27c2c399c825" )
   ; ( "lib/chat_response/moderator_invocation.ml"
