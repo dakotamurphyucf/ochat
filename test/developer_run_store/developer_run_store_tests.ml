@@ -133,6 +133,11 @@ let run_ok = function
   | Error error -> raise_s [%sexp "developer run operation failed", (error : R.Error.t)]
 ;;
 
+let command_prepared = function
+  | R.Command.Prepared pending -> pending
+  | Unchanged _ -> failwith "expected a fresh command mutation"
+;;
+
 let rejected_directory_sync = function
   | Error (R.Error.Store (Agent_store.Store_error.Io { operation; _ })) ->
     String.equal operation "sync directory"
@@ -181,13 +186,14 @@ let limits
     ~max_jobs_per_run
     ~max_invocations_per_run:4
     ~max_inference_attempts_per_run:256
+    ~commands:(Agent_store.Developer_command_limits.default ~document)
     ~max_inference_bytes_per_run:
       (Option.value max_inference_bytes_per_run ~default:max_document_bytes)
     ~max_selected_per_commit:2
     ~max_job_payload_bytes:1024
     ~max_document_bytes
     ~max_recovery_entries:16
-    ~max_recovery_bytes:16384
+    ~max_recovery_bytes:(Int.max 16384 max_document_bytes)
     ~max_work_steps
     ~document
   |> Or_error.ok_exn
@@ -712,7 +718,7 @@ let%test_unit "recovery rejects invalid epoch lineage and document identity" =
               replace_json_field payload ~name:"run_id" ~f:(fun _ ->
                 P.Id.Developer_run.to_json other_run)) )
         ; ( "unknown version"
-          , replace_json_field json ~name:"schema_version" ~f:(fun _ -> `Number "2") )
+          , replace_json_field json ~name:"schema_version" ~f:(fun _ -> `Number "3") )
         ]
       in
       List.iter cases ~f:(fun (label, mutated) ->
@@ -748,5 +754,366 @@ let%test_unit "recovery rejects invalid epoch lineage and document identity" =
           (R.Checkpoint.phase (R.Observation.checkpoint observed))
           Active);
       R.close_and_wait restored |> run_ok;
+      S.close reopened |> store_ok))
+;;
+
+let%test_unit
+    "command reservation, one-shot start and historical terminal retain identity"
+  =
+  with_root ~max_document_bytes:16384 (fun _env _sw _root _session run ->
+    let capture = digest "command capture" in
+    let request = digest "command request" in
+    let handle, _ = admit run (owner 0) capture in
+    let key = P.Idempotency_key.of_string "command-live-once" |> ok in
+    let module C = R.Command in
+    let pending =
+      C.prepare_reservation
+        handle
+        ~key
+        ~kind:C.Receipt.Kind.Live_run
+        ~request_fingerprint:request
+      |> run_ok
+      |> command_prepared
+    in
+    let reserved = C.commit handle pending ~admit:(fun () -> true) |> run_ok in
+    assert (Option.is_none reserved.execution_start);
+    let same =
+      C.prepare_reservation
+        handle
+        ~key
+        ~kind:C.Receipt.Kind.Live_run
+        ~request_fingerprint:request
+      |> run_ok
+    in
+    (match same with
+     | C.Unchanged view ->
+       assert (
+         C.Receipt.Id.equal
+           (C.Row.id (C.View.row view))
+           (C.Row.id (C.View.row reserved.view)))
+     | Prepared _ -> failwith "same key minted a second command");
+    assert (
+      Result.is_error
+        (C.prepare_reservation
+           handle
+           ~key
+           ~kind:C.Receipt.Kind.Live_run
+           ~request_fingerprint:(digest "changed request")));
+    let start =
+      C.prepare_change handle ~previous:reserved.view ~change:C.Row.Change.Start_execution
+      |> run_ok
+      |> command_prepared
+    in
+    let started = C.commit handle start ~admit:(fun () -> true) |> run_ok in
+    let ack = Option.value_exn started.execution_start in
+    C.Execution_start.consume ack |> run_ok;
+    assert (Result.is_error (C.Execution_start.consume ack));
+    let repeated = C.commit handle start ~admit:(fun () -> true) |> run_ok in
+    assert (Option.is_none repeated.execution_start);
+    let receipt =
+      C.Receipt.create
+        (C.Receipt.Live (C.Receipt.Live.Succeeded `Null))
+        ~limits:(R.document_limits handle |> run_ok)
+        ~poll:(fun () -> ())
+      |> ok
+    in
+    let abandoned_key = P.Idempotency_key.of_string "command-abandoned-admission" |> ok in
+    let abandoned =
+      C.prepare_reservation
+        handle
+        ~key:abandoned_key
+        ~kind:C.Receipt.Kind.Check
+        ~request_fingerprint:(digest "abandoned request")
+      |> run_ok
+      |> command_prepared
+    in
+    assert (Result.is_error (C.commit handle abandoned ~admit:(fun () -> false)));
+    assert (Option.is_some (C.pending handle |> run_ok));
+    let fresh = C.reprepare_same handle abandoned |> run_ok in
+    assert (Result.is_error (C.retire_absent_admission handle abandoned));
+    C.retire_absent_admission handle fresh |> run_ok;
+    assert (Option.is_none (C.observe handle ~key:abandoned_key |> run_ok));
+    let current = R.observe handle |> run_ok in
+    let newer, _ =
+      R.admit_epoch
+        run
+        ~owner:(owner 1)
+        ~capture_fingerprint:(digest "new epoch capture")
+        ~previous:(Some current)
+      |> run_ok
+    in
+    let historical = C.observe handle ~key |> run_ok |> Option.value_exn in
+    let newer_view = C.observe newer ~key |> run_ok |> Option.value_exn in
+    assert (
+      C.Receipt.Id.equal
+        (C.Row.id (C.View.row historical))
+        (C.Row.id (C.View.row started.view)));
+    assert (
+      Result.is_error
+        (C.prepare_change
+           newer
+           ~previous:newer_view
+           ~change:(C.Row.Change.Finish receipt)));
+    let terminal =
+      C.prepare_change handle ~previous:historical ~change:(C.Row.Change.Finish receipt)
+      |> run_ok
+      |> command_prepared
+    in
+    let completed = C.commit handle terminal ~admit:(fun () -> true) |> run_ok in
+    assert (
+      C.Receipt.Id.equal
+        (C.Row.id (C.View.row completed.view))
+        (C.Row.id (C.View.row started.view)));
+    assert (
+      Result.is_error
+        (C.prepare_change
+           handle
+           ~previous:historical
+           ~change:C.Row.Change.Start_execution)))
+;;
+
+let%test_unit "uncertain command Start retains exact custody without replay grant" =
+  with_temp_directory "ochat-command-unknown" (fun env temporary ->
+    Eio.Switch.run (fun sw ->
+      let root = Filename.concat temporary "data" in
+      let rename_armed = ref false in
+      let sync_blocked = ref false in
+      let parent_sync_blocked = ref false in
+      let wrapped =
+        fault_after_authority_rename_env
+          ~after_rename:(fun () -> sync_blocked := true)
+          env
+          ~rename_armed
+          ~sync_blocked
+          ~parent_sync_blocked
+      in
+      let session = create_session wrapped sw root in
+      let run = open_run session sw ~max_document_bytes:16384 () in
+      let handle, _ = admit run (owner 0) (digest "uncertain command capture") in
+      let module C = R.Command in
+      let key = P.Idempotency_key.of_string "command-unknown-start" |> ok in
+      let pending =
+        C.prepare_reservation
+          handle
+          ~key
+          ~kind:C.Receipt.Kind.Live_run
+          ~request_fingerprint:(digest "uncertain command request")
+        |> run_ok
+        |> command_prepared
+      in
+      let reserved = C.commit handle pending ~admit:(fun () -> true) |> run_ok in
+      let start =
+        C.prepare_change
+          handle
+          ~previous:reserved.view
+          ~change:C.Row.Change.Start_execution
+        |> run_ok
+        |> command_prepared
+      in
+      rename_armed := true;
+      assert (Result.is_error (C.commit handle start ~admit:(fun () -> true)));
+      assert (not !rename_armed);
+      assert !sync_blocked;
+      assert (Option.is_some (C.pending handle |> run_ok));
+      assert (Result.is_error (C.observe handle ~key));
+      sync_blocked := false;
+      (match C.reconcile handle start |> run_ok with
+       | C.Installed view ->
+         (match C.Row.phase (C.View.row view) with
+          | C.Row.Phase.Execution_started -> ()
+          | Reserved | Waiting_permission | Terminal _ ->
+            failwith "unknown Start did not install exact row")
+       | Absent | Diverged -> failwith "unknown Start lost installed custody");
+      assert (Option.is_none (C.pending handle |> run_ok));
+      let repeated = C.commit handle start ~admit:(fun () -> true) |> run_ok in
+      assert (Option.is_none repeated.execution_start);
+      R.close_and_wait run |> run_ok;
+      S.close session |> store_ok))
+;;
+
+let%test_unit "reopened recovery interrupts exact historical commands without replay" =
+  with_temp_directory "ochat-command-restart" (fun env temporary ->
+    Eio.Switch.run (fun sw ->
+      let root = Filename.concat temporary "data" in
+      let capture = digest "restarted command capture" in
+      let newer_capture = digest "restarted newer capture" in
+      let key = P.Idempotency_key.of_string "command-start-before-restart" |> ok in
+      let check_key = P.Idempotency_key.of_string "command-check-before-restart" |> ok in
+      let fixture_key =
+        P.Idempotency_key.of_string "command-terminal-before-restart" |> ok
+      in
+      let newer_key = P.Idempotency_key.of_string "command-wait-before-restart" |> ok in
+      let module C = R.Command in
+      let session = create_session env sw root in
+      let run = open_run session sw ~max_work_steps:10_000 ~max_document_bytes:32768 () in
+      let handle, _ = admit run (owner 0) capture in
+      let reserve handle key kind =
+        C.prepare_reservation
+          handle
+          ~key
+          ~kind
+          ~request_fingerprint:(digest (P.Idempotency_key.to_string key))
+        |> run_ok
+        |> command_prepared
+        |> fun pending -> C.commit handle pending ~admit:(fun () -> true) |> run_ok
+      in
+      let reserved = reserve handle key C.Receipt.Kind.Live_run in
+      let start =
+        C.prepare_change
+          handle
+          ~previous:reserved.view
+          ~change:C.Row.Change.Start_execution
+        |> run_ok
+        |> command_prepared
+      in
+      let started = C.commit handle start ~admit:(fun () -> true) |> run_ok in
+      assert (Option.is_some started.execution_start);
+      let checked = reserve handle check_key C.Receipt.Kind.Check in
+      let fixture = reserve handle fixture_key C.Receipt.Kind.Fixture_run in
+      let fixture_receipt =
+        C.Receipt.create
+          (C.Receipt.Fixture C.Receipt.Fixture.Cancelled)
+          ~limits:(R.document_limits handle |> run_ok)
+          ~poll:(fun () -> ())
+        |> ok
+      in
+      let fixture_terminal =
+        C.prepare_change
+          handle
+          ~previous:fixture.view
+          ~change:(C.Row.Change.Finish fixture_receipt)
+        |> run_ok
+        |> command_prepared
+        |> fun pending -> C.commit handle pending ~admit:(fun () -> true) |> run_ok
+      in
+      let first_observation = R.observe handle |> run_ok in
+      let newer, _ =
+        R.admit_epoch
+          run
+          ~owner:(owner 1)
+          ~capture_fingerprint:newer_capture
+          ~previous:(Some first_observation)
+        |> run_ok
+      in
+      let newer_reserved = reserve newer newer_key C.Receipt.Kind.Live_run in
+      let waiting =
+        C.prepare_change
+          newer
+          ~previous:newer_reserved.view
+          ~change:C.Row.Change.Wait_permission
+        |> run_ok
+        |> command_prepared
+        |> fun pending -> C.commit newer pending ~admit:(fun () -> true) |> run_ok
+      in
+      R.close_and_wait run |> run_ok;
+      S.close session |> store_ok;
+      let rename_armed = ref false in
+      let sync_blocked = ref false in
+      let parent_sync_blocked = ref false in
+      let wrapped =
+        fault_after_authority_rename_env
+          ~after_rename:(fun () -> sync_blocked := true)
+          env
+          ~rename_armed
+          ~sync_blocked
+          ~parent_sync_blocked
+      in
+      let reopened =
+        S.open_existing
+          ~env:wrapped
+          ~sw
+          ~root
+          ~process_start_identity:None
+          ~lock_nonce:"developer-command-restarted"
+        |> store_ok
+      in
+      let run =
+        open_run reopened sw ~max_work_steps:10_000 ~max_document_bytes:32768 ()
+      in
+      let root = R.Result_root.find_existing run run_id |> run_ok |> Option.value_exn in
+      let find key =
+        R.Result_root.find_command_snapshot root ~principal:principal_id ~key
+        |> run_ok
+        |> Option.value_exn
+      in
+      let historical = find key in
+      assert (
+        C.Receipt.Id.equal (C.Row.id historical) (C.Row.id (C.View.row started.view)));
+      (match C.Row.phase historical with
+       | C.Row.Phase.Execution_started -> ()
+       | Reserved | Waiting_permission | Terminal _ ->
+         failwith "reopened Store lost execution barrier");
+      assert (
+        Result.is_error
+          (R.Result_root.find_command_snapshot root ~principal:other_principal ~key));
+      assert (
+        C.Receipt.Id.equal
+          (C.Row.id (find check_key))
+          (C.Row.id (C.View.row checked.view)));
+      assert (
+        C.Receipt.Id.equal
+          (C.Row.id (find fixture_key))
+          (C.Row.id (C.View.row fixture_terminal.view)));
+      let latest = R.Result_root.observe_latest root |> run_ok in
+      let checkpoint = R.Observation.checkpoint latest in
+      let handle, _ =
+        R.admit_epoch
+          run
+          ~owner:(R.Checkpoint.owner checkpoint)
+          ~capture_fingerprint:(R.Checkpoint.capture_fingerprint checkpoint)
+          ~previous:(Some latest)
+        |> run_ok
+      in
+      let claim = R.Run_claim.acquire ~store:run ~handle |> run_ok in
+      let recovery = R.Recovery.open_ ~claim ~handle |> run_ok in
+      rename_armed := true;
+      let first_finish = R.Recovery.finish recovery in
+      assert (Result.is_error first_finish);
+      if !rename_armed || not !sync_blocked
+      then
+        raise_s
+          [%sexp
+            "recovery fault was not reached", (first_finish : (unit, R.Error.t) result)];
+      assert (not (R.Recovery.is_finished recovery));
+      assert (Result.is_error (R.Result_root.observe_latest root));
+      assert (
+        Result.is_error
+          (R.Result_root.find_command_snapshot root ~principal:principal_id ~key));
+      assert (
+        Result.is_error
+          (R.Result_root.find_command_snapshot
+             root
+             ~principal:principal_id
+             ~key:(P.Idempotency_key.of_string "missing-command" |> ok)));
+      assert (Result.is_error (R.Recovery.abort_clean recovery));
+      assert (Result.is_error (R.Run_claim.release claim));
+      sync_blocked := false;
+      R.Recovery.finish recovery |> run_ok;
+      assert (R.Recovery.is_finished recovery);
+      let interrupted row expected_started expected_kind =
+        match C.Row.phase row with
+        | C.Row.Phase.Terminal { execution_started; receipt } ->
+          assert (Bool.equal execution_started expected_started);
+          (match expected_kind, C.Receipt.value receipt with
+           | `Check, C.Receipt.Check C.Receipt.Check.Interrupted
+           | `Live, C.Receipt.Live C.Receipt.Live.Interrupted -> ()
+           | _ -> failwith "recovery selected a changed command terminal")
+        | Reserved | Waiting_permission | Execution_started ->
+          failwith "recovery retained a nonterminal command"
+      in
+      interrupted (find key) true `Live;
+      interrupted (find check_key) false `Check;
+      interrupted (find newer_key) false `Live;
+      assert (
+        C.Receipt.Id.equal (C.Row.id (find key)) (C.Row.id historical)
+        && C.Receipt.Id.equal
+             (C.Row.id (find newer_key))
+             (C.Row.id (C.View.row waiting.view)));
+      assert (
+        Document_schema.Json.equal
+          (C.Row.to_json (find fixture_key))
+          (C.Row.to_json (C.View.row fixture_terminal.view)));
+      R.Run_claim.release claim |> run_ok;
+      R.close_and_wait run |> run_ok;
       S.close reopened |> store_ok))
 ;;

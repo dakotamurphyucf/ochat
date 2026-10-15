@@ -28,6 +28,7 @@ val decode
   -> max_job_payload_bytes:int
   -> max_inference_attempts:int
   -> max_inference_bytes:int
+  -> commands:Developer_command_limits.t
   -> (Developer_run_document.t, Store_error.t) result
 
 (** Same decode, also retaining the original admitted envelope for existing
@@ -43,6 +44,7 @@ val decode_with_document
   -> max_job_payload_bytes:int
   -> max_inference_attempts:int
   -> max_inference_bytes:int
+  -> commands:Developer_command_limits.t
   -> (Developer_run_document.t * Document_schema.Document.t, Store_error.t) result
 
 (** Existing typed validation/payload work uses the caller's charged [poll]
@@ -62,4 +64,5 @@ val encode
   -> max_job_payload_bytes:int
   -> max_inference_attempts:int
   -> max_inference_bytes:int
+  -> commands:Developer_command_limits.t
   -> (string, Store_error.t) result

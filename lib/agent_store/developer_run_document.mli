@@ -1,5 +1,5 @@
-(** The single versioned developer-run authority document. Version one stores
-    bounded typed invocation, job and inference-attempt arrays, including exact
+(** The single versioned developer-run authority document. Version two stores
+    bounded typed invocation, job, inference-attempt and command arrays, including exact
     owner/epoch/capture membership and structural parent relationships. Its
     records alone grant no live execution or result-read authority. *)
 open! Core
@@ -18,6 +18,8 @@ end
     coordinates are persisted comparison data; a pure document row cannot
     admit work without the Store's entered physical Claim. *)
 module Inference_entry = Developer_inference_row
+
+module Command_row = Developer_command_row
 
 val create
   :  owner:Agent_protocol.Execution_owner.developer
@@ -44,6 +46,47 @@ val inference_count : t -> int
 (** Sum of complete canonical inference-entry JSON bytes, including ordinal,
     owner/job/context wrappers; not only Attempt_record payload bytes. *)
 val inference_bytes : t -> int
+
+(** Retained commands from every epoch. Keys and command IDs are unique across
+    the entire stable principal/run; rows keep their original owner/capture. *)
+val command_rows : t -> Command_row.t list
+
+val find_command : t -> Agent_protocol.Idempotency_key.t -> Command_row.t option
+val command_count : t -> int
+val command_bytes : t -> int
+
+(** Pure structural admission. Append requires an absent key/ID, exact stable
+    owner and an existing matching epoch/capture. Replacement requires the
+    current exact row and immutable identity; the canonical Row phase validator
+    checks [change]. Physical live authority and historical settlement policy
+    belong to Store, never to these comparison functions. *)
+val append_command
+  :  t
+  -> Command_row.t
+  -> commands:Developer_command_limits.t
+  -> poll:(unit -> unit)
+  -> (t, Store_error.t) result
+
+val change_command
+  :  t
+  -> expected:Command_row.t
+  -> change:Command_row.Change.t
+  -> limits:Document_schema.Limits.t
+  -> commands:Developer_command_limits.t
+  -> poll:(unit -> unit)
+  -> (t, Store_error.t) result
+
+(** One pure, bounded recovery projection: retain every command's immutable
+    owner/key/request/ID, and turn each nonterminal row into Interrupted while
+    preserving its execution-started bit. Return the original document when
+    nothing changes. The enclosing physical Recovery window alone may persist
+    this projection; calling it does not grant a writer or result disclosure. *)
+val command_recovery
+  :  t
+  -> limits:Document_schema.Limits.t
+  -> commands:Developer_command_limits.t
+  -> poll:(unit -> unit)
+  -> (t, Store_error.t) result
 
 val last_inference_ordinal : t -> int64
 
@@ -167,8 +210,11 @@ end
     inference rows to become Host_interrupted together, including their
     document revision increments. This bounds every intermediate subset:
     each such interruption expands the fixed state object, never shrinks it.
-    The reserve concerns inference rows; a later caller-chosen job terminal
-    result has its own admission limit. [poll] is called during traversal by
+    The same reserve includes interruption of ALL nonterminal command rows,
+    with their original execution_started flag and combined revision increments.
+    Command and inference headroom is checked together in one complete envelope,
+    not as independent alternatives. Later caller-chosen job/command terminal
+    results retain their own admission limits. [poll] is called during traversal by
     the owner of the operation. No canonical bytes are written or published. *)
 val prepare_encode
   :  t
@@ -180,6 +226,7 @@ val prepare_encode
   -> max_job_payload_bytes:int
   -> max_inference_attempts:int
   -> max_inference_bytes:int
+  -> commands:Developer_command_limits.t
   -> (Encode_input.t, Store_error.t) result
 
 (** The original Document_schema.Document.create and to_string on the opaque
@@ -199,6 +246,7 @@ val to_bytes
   -> max_job_payload_bytes:int
   -> max_inference_attempts:int
   -> max_inference_bytes:int
+  -> commands:Developer_command_limits.t
   -> (string, Store_error.t) result
 
 (** Typed/version/relationship admission of an already canonically decoded
@@ -219,6 +267,7 @@ val of_decoded_document
   -> max_job_payload_bytes:int
   -> max_inference_attempts:int
   -> max_inference_bytes:int
+  -> commands:Developer_command_limits.t
   -> (t, Store_error.t) result
 
 (** Direct pure wrapper over canonical Document_schema.Document.decode and
@@ -233,6 +282,7 @@ val of_bytes
   -> max_job_payload_bytes:int
   -> max_inference_attempts:int
   -> max_inference_bytes:int
+  -> commands:Developer_command_limits.t
   -> (t, Store_error.t) result
 
 (** The same bounded decoder also returning its original admitted document
@@ -250,4 +300,5 @@ val of_bytes_with_document
   -> max_job_payload_bytes:int
   -> max_inference_attempts:int
   -> max_inference_bytes:int
+  -> commands:Developer_command_limits.t
   -> (t * Document_schema.Document.t, Store_error.t) result
