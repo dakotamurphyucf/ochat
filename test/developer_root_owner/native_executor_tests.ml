@@ -385,21 +385,27 @@ type installed_agent_fixture =
   ; response_root : Eio.Fs.dir_ty Eio.Path.t
   }
 
+type installed_agent_source =
+  { source_root : Eio.Fs.dir_ty Eio.Path.t
+  ; response_root : Eio.Fs.dir_ty Eio.Path.t
+  ; source : Agent_session.Captured_agent_runner.Source.t
+  ; parent : Agent_session.Prompt_revision.t
+  ; artifacts : Agent_store.Prompt_artifact_store.t
+  ; policy : Agent_session.Runtime_script_preparation.t
+  }
+
 let default_child_contents =
   {|<developer>Original child instructions</developer>
 <developer><agent src="content.chatmd" local source_mode="captured"/></developer>|}
 ;;
 
-let installed_agent_fixture_with_contents
-      ~deferred
+let installed_agent_source_with_contents
+      ?(agent_names = [ "child" ])
       ~child_contents
-      ~on_run
       ~env
-      ~sw
       ~data_root
-      ~observed
+      ()
   =
-  let module Revision = Agent_session.Prompt_revision in
   let module Builder = Agent_session.Prompt_revision_builder in
   let module Runner = Agent_session.Captured_agent_runner in
   let source_root = Eio.Path.(Eio.Stdenv.fs env / data_root / "agent-source") in
@@ -411,8 +417,14 @@ let installed_agent_fixture_with_contents
   in
   save
     "root.chatmd"
-    {|<tool name="child" agent="child.chatmd" local source_mode="captured"/>|};
-  save "child.chatmd" child_contents;
+    (String.concat
+       ~sep:"\n"
+       (List.map agent_names ~f:(fun name ->
+          sprintf
+            {|<tool name="%s" agent="%s.chatmd" local source_mode="captured"/>|}
+            name
+            name)));
+  List.iter agent_names ~f:(fun name -> save (name ^ ".chatmd") child_contents);
   save "content.chatmd" "<developer>Content own instructions</developer>";
   save "input.json" {|{"type":"object"}|};
   save "output.json" {|{"type":"string"}|};
@@ -461,6 +473,23 @@ let installed_agent_fixture_with_contents
       ~prepare_programs:(fun _ ~tool_contract:_ ~invocation:_ _ _ ->
         failwith "saved Agent artifact must not prepare a new file source")
     |> Or_error.ok_exn
+  in
+  { source_root; response_root; source; parent; artifacts; policy }
+;;
+
+let installed_agent_fixture_with_contents
+      ~deferred
+      ~child_contents
+      ~on_run
+      ~env
+      ~sw
+      ~data_root
+      ~observed
+  =
+  let module Revision = Agent_session.Prompt_revision in
+  let module Runner = Agent_session.Captured_agent_runner in
+  let { source_root; response_root; source; parent; artifacts; policy } =
+    installed_agent_source_with_contents ~child_contents ~env ~data_root ()
   in
   let runner =
     Runner.create
@@ -650,14 +679,16 @@ let installed_agent_fixture ~on_run ~env ~sw ~data_root ~observed =
     ~observed
 ;;
 
-let stage_registered_agent_tool jobs =
+let stage_registered_agent_tool ?(name = "child") jobs =
   let module Runtime = Chatml_host_runtime in
   let module Value = Chatml.Chatml_value_codec in
   let compiled =
     Runtime.compile_script
       ~surface:Chatml.Chatml_extension_surface.one_off_v1
       ~source:
-        {|let main input = Job.start_tool("child", `Object([{key="input"; value=`String("go")}]))|}
+        (sprintf
+           {|let main input = Job.start_tool("%s", `Object([{key="input"; value=`String("go")}]))|}
+           name)
       ()
     |> Result.ok_or_failwith
   in
@@ -682,7 +713,8 @@ let stage_registered_agent_tool jobs =
       |> Result.map_error ~f:P.Error.invalid_request
     in
     Result.map value ~f:(fun value -> value, !effects))
-  |> ok
+  |> Result.map_error ~f:(fun error -> error.P.Error.message)
+  |> Result.ok_or_failwith
   |> fst
   |> function
   | Chatml.Chatml_lang.VString id -> P.Id.Job.of_string id |> ok
