@@ -191,7 +191,7 @@ let components = [ S.Name.create "authority" |> ok ]
 let namespace = Secret.Namespace.create "runtime-host-test" |> ok
 let server_id = P.Id.Server.of_string "srv_runtime_host" |> ok
 
-let local_model_endpoint env sw requests on_submit =
+let local_model_endpoint env sw requests on_submit on_body =
   let socket =
     Eio.Net.listen
       ~sw
@@ -231,8 +231,9 @@ let local_model_endpoint env sw requests on_submit =
                    else length))
             in
             let body_length = headers 0 in
-            ignore (Eio.Buf_read.take body_length reader : string);
+            let body = Eio.Buf_read.take body_length reader in
             incr requests;
+            on_body body;
             on_submit ();
             Eio.Flow.copy_string
               (sprintf
@@ -250,7 +251,7 @@ let local_model_endpoint env sw requests on_submit =
   sprintf "http://127.0.0.1:%d/v1/responses" port
 ;;
 
-let with_fixture ?model_requests ?(on_model_submit = ignore) f =
+let with_fixture ?model_requests ?(on_model_submit = ignore) ?(on_model_body = ignore) f =
   Mirage_crypto_rng_unix.use_default ();
   Eio_main.run (fun env ->
     let suffix = P.Id.Transaction.create () |> P.Id.Transaction.to_string in
@@ -265,7 +266,8 @@ let with_fixture ?model_requests ?(on_model_submit = ignore) f =
           let model_endpoint =
             match model_requests with
             | None -> "http://127.0.0.1:9/v1/responses"
-            | Some requests -> local_model_endpoint env sw requests on_model_submit
+            | Some requests ->
+              local_model_endpoint env sw requests on_model_submit on_model_body
           in
           let driver =
             Openai.Responses_driver.create
@@ -348,7 +350,10 @@ let with_fixture ?model_requests ?(on_model_submit = ignore) f =
                 incr serial;
                 id (sprintf "operation-%d" !serial)
               in
-              let create () =
+              let create ?runtime_sw ?runtime_server_id ?runtime_anchor () =
+                let sw = Option.value runtime_sw ~default:sw in
+                let server_id = Option.value runtime_server_id ~default:server_id in
+                let anchor = Option.value runtime_anchor ~default:anchor in
                 Provider_runtime_host.create
                   ~compatible_profiles:[]
                   ~sw
