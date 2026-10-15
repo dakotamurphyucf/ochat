@@ -9,6 +9,9 @@ module Prompt = Agent_session.Prompt_catalog
 module Revision = Agent_session.Prompt_revision
 module Definition = Agent_session.Prompt_definition
 module Store = Agent_store.Developer_run_store
+module Root = Developer_root_owner
+module Saved = Agent_session.Captured_agent_runner.Claimed_developer.Selected
+module Target = Saved.Target
 
 module Owner = struct
   exception Stop
@@ -110,8 +113,11 @@ type t =
 
 type live =
   { owner : Owner.t
+  ; switch : Eio.Switch.t
   ; host : t
   ; workspace_owner : Workspace.t
+  ; paths : Agent_session.Runtime_paths.t
+  ; shell_owner_id : string
   ; revision : Revision.t
   ; definition : Definition.t
   ; workspace_definition : Agent_session.Workspace_definition.t
@@ -371,6 +377,9 @@ let prepare_on_switch t ~owner ~sw ~handle ~original_actor ~prompt ~workspace ~c
             invalid "developer runtime paths are unavailable")
         in
         let elements = Revision.elements revision in
+        let shell_owner_id =
+          "developer:" ^ P.Id.Developer_run.to_string (Store.owner handle).run_id
+        in
         let%bind shell_host =
           Runtime.host
             ~env:t.env
@@ -380,8 +389,7 @@ let prepare_on_switch t ~owner ~sw ~handle ~original_actor ~prompt ~workspace ~c
             ~session_dir:paths.session_dir
             ~cache_dir:paths.cache_dir
             ~home:paths.home
-            ~session_id:
-              ("developer:" ^ P.Id.Developer_run.to_string (Store.owner handle).run_id)
+            ~session_id:shell_owner_id
             ~prompt_elements:elements
           |> Result.map_error ~f:diagnostic_error
         in
@@ -544,8 +552,11 @@ let prepare_on_switch t ~owner ~sw ~handle ~original_actor ~prompt ~workspace ~c
           in
           Ok
             { owner
+            ; switch = sw
             ; host = t
             ; workspace_owner
+            ; paths
+            ; shell_owner_id
             ; revision
             ; definition
             ; workspace_definition
@@ -659,6 +670,302 @@ let check_current t =
       ~workspace_definition:t.workspace_definition
       ~original_actor:t.original_actor
       t.workspace_owner
+;;
+
+let check_pair_now t =
+  if
+    same_pair
+      t.host
+      ~prompt:t.definition.id
+      ~workspace:t.workspace_definition.id
+      ~definition:t.definition
+      ~revision:t.revision
+      ~workspace_definition:t.workspace_definition
+  then Ok ()
+  else Error (invalid "developer prompt or workspace selection changed")
+;;
+
+let check_source_bound_now live ~root =
+  let open Result.Let_syntax in
+  let%bind source_runtime =
+    live.agent_source_runtime
+    |> Result.of_option ~error:(invalid "developer saved-Agent source is unavailable")
+  in
+  Developer_agent_source_runtime.bound_to source_runtime ~root ~agent_runtime:live.runtime
+;;
+
+type child_prepared =
+  { live : live
+  ; root : Root.run
+  ; target : Target.t
+  ; revision : Revision.t
+  ; switch : Eio.Switch.t
+  ; active : bool ref
+  ; runtime : Runtime.t
+  ; selected : Capabilities.t
+  ; managed : Chat_response.Managed_tool_registry.t
+  }
+
+module Child_prepared = struct
+  type t = child_prepared
+
+  module Admission_data = struct
+    type mode =
+      | Direct
+      | Descendant of Agent_session.Native_tool_invocation.selected_borrowed
+
+    type t =
+      { prepared : child_prepared
+      ; witness : Root.Current.t
+      ; mode : mode
+      }
+  end
+
+  let matches_target t target = phys_equal t.target target
+  let revision t = t.revision
+  let runtime t = t.runtime
+  let selected_native t = t.selected
+  let managed_definition t = t.managed
+  let tool_contract t = Definition.tool_contract t.live.definition
+
+  let check_scope_now t witness =
+    Eio.Switch.check t.switch;
+    Eio.Switch.check t.live.switch;
+    if (not !(t.active)) || t.live.closing || t.live.closed
+    then Error (invalid "developer child resource scope has expired")
+    else if not (Operator_authorization.is_current t.live.original_actor)
+    then Error (invalid "developer actor is no longer current")
+    else
+      let open Result.Let_syntax in
+      let%bind () = check_pair_now t.live in
+      let%bind () = check_source_bound_now t.live ~root:t.root in
+      Root.check_effect_now t.root witness
+  ;;
+
+  let check_source_full t =
+    let open Result.Let_syntax in
+    let%bind () = check_source_bound_now t.live ~root:t.root in
+    check_current t.live
+  ;;
+
+  let check_direct_full t =
+    let open Result.Let_syntax in
+    let%bind () = Target.check t.target in
+    let%bind () =
+      Root.Model_inference.check_saved_agent_source
+        t.root
+        ~selected:(Target.saved t.target)
+    in
+    check_source_full t
+  ;;
+
+  let check_descendant_full t ~child =
+    let open Result.Let_syntax in
+    let%bind () = check_source_full t in
+    let%bind () = Target.check_descendant_now t.target ~child in
+    Root.Model_inference.check_saved_agent_source_descendant_now
+      t.root
+      ~selected:(Target.saved t.target)
+      ~child
+  ;;
+
+  let check_admission_now (admission : Admission_data.t) =
+    let open Result.Let_syntax in
+    let t = admission.prepared in
+    let%bind () = check_scope_now t admission.witness in
+    match admission.mode with
+    | Admission_data.Direct -> Target.check_now t.target
+    | Admission_data.Descendant child ->
+      let%bind () = Target.check_descendant_now t.target ~child in
+      Root.Model_inference.check_saved_agent_source_descendant_now
+        t.root
+        ~selected:(Target.saved t.target)
+        ~child
+  ;;
+
+  let refresh_with t ~mode ~check_full =
+    let open Result.Let_syntax in
+    let%bind () = check_full () in
+    let%bind witness = Root.current t.root in
+    let%bind () = check_full () in
+    let admission : Admission_data.t = { prepared = t; witness; mode } in
+    let%map () = check_admission_now admission in
+    admission
+  ;;
+
+  let refresh t =
+    refresh_with t ~mode:Admission_data.Direct ~check_full:(fun () -> check_direct_full t)
+  ;;
+
+  let refresh_descendant t ~child =
+    refresh_with t ~mode:(Admission_data.Descendant child) ~check_full:(fun () ->
+      check_descendant_full t ~child)
+  ;;
+
+  module Admission = struct
+    type t = Admission_data.t
+
+    let check_now = check_admission_now
+  end
+end
+
+let with_saved_child live ~root ~target ~startup ~compilation_limits ~programs ~input ~f =
+  let open Result.Let_syntax in
+  let checkpoint () = Chat_response.Startup_compilation.checkpoint startup in
+  let check_full () =
+    let%bind () = check_source_bound_now live ~root in
+    let%bind () = Target.check target in
+    let%bind () =
+      Root.Model_inference.check_saved_agent_source root ~selected:(Target.saved target)
+    in
+    check_current live
+  in
+  let owner = Owner.create () in
+  let ready =
+    Owner.start owner ~daemon_sw:live.switch ~build:(fun sw ->
+      let%bind () = check_full () in
+      let revision = Target.revision target in
+      let%bind parsed =
+        Revision.parser_context revision
+        |> Result.of_option
+             ~error:(invalid "selected child has no retained parser context")
+      in
+      let%bind () =
+        Agent_session.Developer_child_preflight.admit_selected
+          ~revision
+          ~parsed
+          ~input
+          ~checkpoint
+      in
+      let%bind () = check_full () in
+      let%bind () =
+        Agent_store.Prompt_artifact_store.verify_tree_with_checkpoint
+          ~root:(Revision.materialized_tree revision)
+          (Revision.artifact revision)
+          ~checkpoint
+        |> Result.map_error ~f:(fun _ -> invalid "developer child artifact changed")
+      in
+      let%bind () = check_full () in
+      let prompt_dir =
+        Eio.Path.(
+          Revision.materialized_tree revision
+          / Filename.dirname (Revision.root_relative_path revision))
+      in
+      let elements = Revision.elements revision in
+      let%bind host =
+        Runtime.host
+          ~env:live.host.env
+          ~workspace:live.paths.workspace
+          ~tool_dir:live.paths.tool_dir
+          ~prompt_dir
+          ~session_dir:live.paths.session_dir
+          ~cache_dir:live.paths.cache_dir
+          ~home:live.paths.home
+          ~session_id:live.shell_owner_id
+          ~prompt_elements:elements
+        |> Result.map_error ~f:diagnostic_error
+      in
+      let authorizer =
+        manifest_authorizer
+          live.host
+          ~definition:live.definition
+          ~workspace_definition:live.workspace_definition
+          ~revision
+          ~original_actor:live.original_actor
+      in
+      let preparation_denial = ref None in
+      let check_preparation_now () =
+        let check () =
+          let%bind () = check_full () in
+          let%bind witness = Root.current root in
+          let%bind () = check_pair_now live in
+          let%bind () =
+            if Operator_authorization.is_current live.original_actor
+            then Ok ()
+            else Error (invalid "developer actor is no longer current")
+          in
+          let%bind () = check_source_bound_now live ~root in
+          let%bind () = Target.check_now target in
+          Root.check_effect_now root witness
+        in
+        match check () with
+        | Ok () -> Ok ()
+        | Error error ->
+          preparation_denial := Some error;
+          Error
+            Runtime.
+              { code = "developer.child_preparation_revoked"
+              ; message = "developer child preparation authority expired"
+              ; source = None
+              }
+      in
+      let%bind resources =
+        Runtime.prepare_extensions_without_inference
+          ~startup
+          ~tool_contract:(Definition.tool_contract live.definition)
+          ~compilation_limits
+          ?programs
+          ~checkpoint
+          ~check_preparation_now
+          ~native_registrations:[]
+          ~sw
+          ~host
+          ~platform:(Runtime.platform ())
+          ~prompt_elements:elements
+          ~manifest_authorizer:authorizer
+          ~approval_provider:live.approval_provider
+          ~approval_store:(approval_store ())
+          ()
+        |> Result.map_error ~f:(fun diagnostics ->
+          match !preparation_denial with
+          | Some error -> error
+          | None -> diagnostic_error diagnostics)
+      in
+      let selected = Chat_response.Managed_tool_registry.capabilities resources.managed in
+      if Capabilities.length selected > live.host.max_native_bindings
+      then Error (invalid "developer child native binding limit exceeded")
+      else (
+        let%bind () = check_full () in
+        let active = ref true in
+        let prepared =
+          { live
+          ; root
+          ; target
+          ; revision
+          ; switch = sw
+          ; active
+          ; runtime = resources.native
+          ; selected
+          ; managed = resources.managed
+          }
+        in
+        let run () =
+          let%bind admission = Child_prepared.refresh prepared in
+          let%bind () = Child_prepared.Admission.check_now admission in
+          f prepared
+        in
+        match run () with
+        | result ->
+          active := false;
+          result
+        | exception exn ->
+          active := false;
+          Exn.raise_with_original_backtrace exn (Stdlib.Printexc.get_raw_backtrace ())))
+  in
+  let primary =
+    try `Ready (Eio.Promise.await ready) with
+    | exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+  in
+  let joined = Owner.join owner in
+  match primary, joined with
+  | `Raised (exn, backtrace), (Ok () | Error _) ->
+    Stdlib.Printexc.raise_with_backtrace exn backtrace
+  | `Ready (Error (exn, backtrace)), (Ok () | Error _) ->
+    Stdlib.Printexc.raise_with_backtrace exn backtrace
+  | `Ready (Ok (Error error)), (Ok () | Error _) -> Error error
+  | `Ready (Ok (Ok value)), Ok () -> Ok value
+  | `Ready (Ok (Ok _)), Error (exn, backtrace) ->
+    Stdlib.Printexc.raise_with_backtrace exn backtrace
 ;;
 
 let bind_agent_sources t ~root ~models ~checkpoint =

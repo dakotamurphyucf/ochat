@@ -125,6 +125,80 @@ val bind_agent_sources
   -> checkpoint:(unit -> unit)
   -> (unit, P.Error.t) result
 
+module Child_prepared : sig
+  type t
+
+  module Admission : sig
+    type t
+
+    (** The final, nonyielding check for one attempt-local refreshed Root
+        witness. It repeats the exact active child switch, Target/descendant,
+        SourceRuntime, selected Prompt/Workspace pair, original actor and Root
+        effect-revision proofs. A caller
+        must invoke it immediately before that attempt's effect entry. It
+        cannot be shared as a refreshed mutable grant across sibling calls.
+        The receipt is immutable rather than consumable: repeated checks may
+        pass before a revision changes, but each new effect attempt refreshes
+        after its own waits and checks immediately before effect entry. *)
+    val check_now : t -> (unit, P.Error.t) result
+  end
+
+  (** Comparison only: this receipt belongs to the exact selected saved-Agent
+      target lent by [with_saved_child]. It grants no source or Root access. *)
+  val matches_target
+    :  t
+    -> Agent_session.Captured_agent_runner.Claimed_developer.Selected.Target.t
+    -> bool
+
+  val revision : t -> Agent_session.Prompt_revision.t
+  val runtime : t -> Chat_response.Agent_runtime.t
+  val selected_native : t -> Chat_response.Tool_capability.t
+  val managed_definition : t -> Chat_response.Managed_tool_registry.t
+  val tool_contract : t -> Chatml_compilation.Tool_contract.t
+
+  (** Refresh a direct saved-parent effect after any yielding work. The full
+      source/Workspace/Root checks may yield; obtain a fresh Root witness and
+      repeat them before issuing an attempt-local [Admission.t]. *)
+  val refresh : t -> (Admission.t, P.Error.t) result
+
+  (** Refresh inside an actual child selected borrow after any yielding work.
+      The lower target and Root checks prove the saved parent ancestry and
+      dispatched child terminal; no direct parent fiber binding is assumed. *)
+  val refresh_descendant
+    :  t
+    -> child:Agent_session.Native_tool_invocation.selected_borrowed
+    -> (Admission.t, P.Error.t) result
+end
+
+(** Lend resources for one exact restored saved-Agent target callback. Check
+    Target, Root saved-source, Live actor/Prompt/Workspace and SourceRuntime's
+    physical Bound Root/runtime before any effect and after yielding work.
+    The bounded pure Developer_child_preflight scans the original parser view
+    and callback [input] before constructing child MCP/shell resources; it
+    creates no source or implementation authority. The child Shell host uses
+    this target revision's elements, nested prompt directory and own retained
+    manifest digest with the same original actor and configured pair. Borrowed
+    [startup], [compilation_limits], [programs] and selected Tool contract are
+    forwarded unchanged.
+
+    [f] runs in a nested owner fiber that inherits the saved target's lexical
+    fiber context. The owner preserves the original cancellation/exception and
+    backtrace while canceling and joining the child switch's background
+    resources. [Child_prepared] expires on every exit even
+    if the outer saved source remains active. An installed selected handler
+    never falls back to ordinary Driver on failure. Actual child effect
+    dispatch still requires its physical native/managed terminal proof. *)
+val with_saved_child
+  :  live
+  -> root:Developer_root_owner.run
+  -> target:Agent_session.Captured_agent_runner.Claimed_developer.Selected.Target.t
+  -> startup:Chat_response.Startup_compilation.t
+  -> compilation_limits:Chatml_compilation.limits
+  -> programs:Chatml_prompt_programs.Restored.t option
+  -> input:Prompt.Chat_markdown.content_item list
+  -> f:(Child_prepared.t -> (string, P.Error.t) result)
+  -> (string, P.Error.t) result
+
 (** Comparison/currentness only: exact workspace lease and directory, Prompt
     revision/catalog generation, original actor and native selection are still
     live. Root and each effect repeat their physical/provider checks;
