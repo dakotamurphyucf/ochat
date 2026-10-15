@@ -5,6 +5,13 @@ open! Core
 module Limits : sig
   type t
 
+  (** Read-only configured bounds. These project the exact immutable limits
+      accepted by [create]; they grant no Store handle or admission. *)
+  val document : t -> Document_schema.Limits.t
+
+  val commands : t -> Developer_command_limits.t
+  val max_runs : t -> int
+
   (** Every bound is positive and finite. Inference row count is bounded by
       16,384 and encoded aggregate inference bytes by the configured whole
       document cap (itself at most 16 MiB); each Attempt_record also passes
@@ -681,6 +688,11 @@ val is_closed : t -> bool
     capacity. This is not admission authority; the Store repeats all current
     job, aggregate payload and document checks under its writer lease. *)
 val document_limits : handle -> (Document_schema.Limits.t, Error.t) result
+
+(** Comparison-only exact immutable limits configured on this physical live
+    Store. A caller-supplied wider policy cannot replace them. Closed Store
+    rejects. No I/O, command reservation or result disclosure follows. *)
+val limits : t -> (Limits.t, Error.t) result
 
 (** Physical issuer comparison for host wiring of the one shared blob
     coordinator. IDs, root paths and host labels do not substitute for this. *)
@@ -1431,6 +1443,20 @@ module Command : sig
       an installed Start can never be made executable again. No terminal
       result is selected again and no runtime callback is invoked. *)
   val reprepare_same : handle -> Pending.t -> (Pending.t, Error.t) result
+
+  (** Rebase ONLY an exact physically retained Pending whose first write never
+      began and whose fresh before/after classifier proves Prewrite_conflict
+      from another same-run document writer. Re-read the current document,
+      prove the original command row/owner/phase is unchanged (or the reserved
+      key is still absent), and rebuild this SAME immutable action and selected
+      terminal through the existing bounded full-image encoder. Replace only
+      that Pending in the existing map. Unknown, attempted, installed, Absent
+      and Diverged writes cannot rebase; no callback or result is reselected,
+      and a Start acknowledgement is never minted by this preparation. *)
+  val reprepare_after_prewrite_conflict
+    :  handle
+    -> Pending.t
+    -> (Pending.t, Error.t) result
 
   (** Retire only a reserve/wait/Start whose complete before-image is freshly
       proved present under the writer. This allows cancellation or revocation

@@ -27,6 +27,10 @@ module Limits = struct
     ; document : Document_schema.Limits.t
     }
 
+  let document t = t.document
+  let commands t = t.commands
+  let max_runs t = t.max_runs
+
   let create
         ~max_runs
         ~max_epochs_per_run
@@ -301,6 +305,7 @@ and command_action =
 
 and command_pending =
   { prepared : Prepared.t
+  ; before_row : Command_row.t option
   ; after_row : Command_row.t
   ; action : command_action
   ; mutable settled_observation : Observation.t option
@@ -472,6 +477,10 @@ let valid_handle handle =
 
 let document_limits handle =
   Result.map (valid_handle handle) ~f:(fun t -> t.limits.document)
+;;
+
+let limits t =
+  if Atomic.get t.closed || Atomic.get t.closing then Error Error.Closed else Ok t.limits
 ;;
 
 module Run_claim = struct
@@ -4732,6 +4741,7 @@ module Command = struct
         t
         (handle : handle)
         ~before_bytes
+        ~before_row
         ~after_document
         ~after_row
         ~action
@@ -4769,7 +4779,10 @@ module Command = struct
         ; claimed_selection = None
         }
     in
-    register t handle { prepared; after_row; action; settled_observation = None }
+    register
+      t
+      handle
+      { prepared; before_row; after_row; action; settled_observation = None }
   ;;
 
   let observe handle ~key =
@@ -4847,6 +4860,7 @@ module Command = struct
             t
             handle
             ~before_bytes:observed.document_bytes
+            ~before_row:None
             ~after_document
             ~after_row:row
             ~action:Command_reserve
@@ -4932,6 +4946,7 @@ module Command = struct
             t
             handle
             ~before_bytes:observed.document_bytes
+            ~before_row:(Some row)
             ~after_document
             ~after_row
             ~action
@@ -5031,6 +5046,7 @@ module Command = struct
           | Error error -> Error error
         in
         (match install_prepared ~admit:admitted t handle pending.prepared ~poll with
+         | Ok Settlement.Prewrite_conflict -> Error Error.Prewrite_conflict
          | Ok value -> finish value
          | Error original ->
            reconcile_after_failure t handle pending ~poll;
@@ -5101,6 +5117,110 @@ module Command = struct
           Ok fresh
         | None | Some (Selected _ | Claim _ | Transition _ | Command _) ->
           Error Error.Conflict))
+  ;;
+
+  let reprepare_after_prewrite_conflict handle pending =
+    let* t = valid_handle handle in
+    with_normal_lease t handle (fun ~env:_ ~root:_ ->
+      let* () = pending_exact t handle pending in
+      if pending.prepared.write_attempted
+      then Error Error.Conflict
+      else (
+        let poll = work t t.checkpoint in
+        let* disposition = classify_prepared t handle pending.prepared ~poll in
+        match disposition with
+        | Settlement.Prewrite_conflict ->
+          let* before_bytes, before_document =
+            read t ~poll handle.owner.run_id
+            |> Result.bind ~f:(function
+              | Some value -> Ok value
+              | None -> Error Error.Conflict)
+          in
+          let key = Row.key pending.after_row in
+          let* after_document =
+            match pending.action, pending.before_row with
+            | Command_reserve, None ->
+              if Option.is_some (Doc.find_command before_document key)
+              then Error Error.Conflict
+              else
+                let* () = live_original handle before_document in
+                Doc.append_command
+                  before_document
+                  pending.after_row
+                  ~commands:t.limits.commands
+                  ~poll
+                |> store
+            | (Command_wait | Command_start | Command_finish), Some original ->
+              (match Doc.find_command before_document key with
+               | Some current when same_row current original ->
+                 let* () =
+                   match pending.action with
+                   | Command_wait | Command_start -> live_original handle before_document
+                   | Command_finish -> Ok ()
+                   | Command_reserve -> Error Error.Conflict
+                 in
+                 let* change =
+                   match pending.action, Row.phase pending.after_row with
+                   | Command_wait, _ -> Ok Row.Change.Wait_permission
+                   | Command_start, _ -> Ok Row.Change.Start_execution
+                   | Command_finish, Row.Phase.Terminal { receipt; _ } ->
+                     Ok (Row.Change.Finish receipt)
+                   | (Command_reserve | Command_finish), _ -> Error Error.Conflict
+                 in
+                 Doc.change_command
+                   before_document
+                   ~expected:original
+                   ~change
+                   ~limits:t.limits.document
+                   ~commands:t.limits.commands
+                   ~poll
+                 |> store
+               | None | Some _ -> Error Error.Conflict)
+            | Command_reserve, Some _
+            | (Command_wait | Command_start | Command_finish), None ->
+              Error Error.Conflict
+          in
+          let* after_row =
+            Doc.find_command after_document key |> Result.of_option ~error:Error.Conflict
+          in
+          if not (same_row after_row pending.after_row)
+          then Error Error.Conflict
+          else
+            let* after_bytes =
+              Cpu.encode
+                t.cpu
+                after_document
+                ~poll
+                ~limits:t.limits.document
+                ~max_epochs:t.limits.max_epochs_per_run
+                ~max_jobs:t.limits.max_jobs_per_run
+                ~max_invocations:t.limits.max_invocations_per_run
+                ~max_job_payload_bytes:t.limits.max_job_payload_bytes
+                ~max_inference_attempts:t.limits.max_inference_attempts_per_run
+                ~max_inference_bytes:t.limits.max_inference_bytes_per_run
+                ~commands:t.limits.commands
+              |> store
+            in
+            let prepared =
+              Prepared.
+                { pending.prepared with
+                  before_bytes
+                ; after_bytes
+                ; after_document
+                ; token = ref ()
+                ; claim_status = Unsettled
+                ; write_attempted = false
+                }
+            in
+            let fresh = { pending with prepared; settled_observation = None } in
+            with_run_lifecycle t (fun () ->
+              match Hashtbl.find t.pending handle.owner.run_id with
+              | Some (Command current) when phys_equal current pending ->
+                Hashtbl.set t.pending ~key:handle.owner.run_id ~data:(Command fresh);
+                Ok fresh
+              | None | Some (Selected _ | Claim _ | Transition _ | Command _) ->
+                Error Error.Conflict)
+        | Settlement.Installed _ | Absent | Diverged -> Error Error.Conflict))
   ;;
 
   let retire_absent_admission handle pending =
