@@ -252,6 +252,188 @@ let record_state json =
   |> O.Attempt_record.state
 ;;
 
+let%test_unit "saved Agent v2 has a distinct physically claimed inference admission" =
+  F.with_root ~max_document_bytes:16384 (fun _env _sw _root _session store ->
+    let owner = F.owner 0 in
+    let capture = F.digest "saved Agent inference" in
+    let handle, initial = F.admit store owner capture in
+    let artifact =
+      P.Developer_agent_artifact.create
+        ~revision_id:(P.Id.Prompt_revision.create ())
+        ~manifest_sha256:(F.digest "selected saved Agent manifest")
+        ~root_relative_path:(Source.Portable_path.create "child.chatmd" |> F.ok)
+    in
+    let pin = Chatml_source.Digest.to_hex (F.digest "selected saved Agent pin") in
+    let payload =
+      `Object
+        [ "version", `Number "2"
+        ; "target", `Object [ "kind", `String "tool"; "name", `String "agent" ]
+        ; "input", `Null
+        ; "pins", `Object [ "agent", `String pin ]
+        ; "policy", `Object []
+        ; "agent_artifact", P.Developer_agent_artifact.to_json artifact
+        ]
+    in
+    let launch =
+      P.Developer_job.Launch.create ~parent:Run_root ~parent_job:None ~nested_depth:0
+      |> F.ok
+    in
+    let make_job ~name ~payload =
+      P.Developer_job.create
+        ~owner
+        ~capture_fingerprint:capture
+        ~id:(Selected.job_id name)
+        ~launch
+        ~kind:P.Job.Async_tool
+        ~payload
+        ~retry_policy:P.Job.Never
+        ~created_at:Selected.timestamp
+        ~state:
+          { status = P.Job.Queued
+          ; attempt = 0
+          ; started_at = None
+          ; next_run_at = None
+          ; completed_at = None
+          ; result = None
+          ; retry_failure = None
+          }
+      |> F.ok
+    in
+    let job = make_job ~name:"job_saved_agent_inference" ~payload in
+    let general =
+      make_job
+        ~name:"job_general_async_no_inference"
+        ~payload:
+          (`Object
+              [ "version", `Number "1"
+              ; "target", `Object [ "kind", `String "tool"; "name", `String "agent" ]
+              ; "input", `Null
+              ; "pins", `Object [ "agent", `String pin ]
+              ; "policy", `Object []
+              ])
+    in
+    let saved =
+      R.prepare_root_selected
+        handle
+        ~expected:initial
+        ~phase:R.Checkpoint.Active
+        ~selected:[ job; general ]
+      |> F.run_ok
+      |> External.save handle
+    in
+    let run_claim = R.Run_claim.acquire ~store ~handle |> F.run_ok in
+    let recovery = R.Recovery.open_ ~claim:run_claim ~handle |> F.run_ok in
+    R.Recovery.finish recovery |> F.run_ok;
+    let manager = T.open_ ~claim:run_claim ~handle |> F.run_ok in
+    let claim =
+      R.prepare_job_claim
+        handle
+        ~expected:saved
+        ~lookup:(R.find_job_exact saved (P.Developer_job.id job))
+        ~now:Selected.timestamp
+      |> F.run_ok
+      |> R.commit_job_claim handle
+      |> F.run_ok
+      |> R.Claimed.claim
+    in
+    assert (
+      R.Claim.try_enter claim ~handle ~admit:(fun () -> true) ~on_enter:(fun () -> ())
+      |> F.run_ok);
+    assert (
+      match T.prepare_admit manager ~claim ~relation:T.Root ~configuration with
+      | Error R.Error.Foreign_or_stale -> true
+      | Ok _ | Error _ -> false);
+    let pending =
+      T.prepare_admit_saved_agent manager ~claim ~relation:T.Root ~configuration
+      |> F.run_ok
+    in
+    let registration =
+      match T.commit manager pending ~admit:(fun () -> true) |> F.run_ok with
+      | T.Admitted registration -> registration
+      | Updated _ -> failwith "saved Agent admission changed an existing row"
+    in
+    assert (
+      Int64.equal
+        (R.Inference_row.ordinal
+           (T.View.row (T.observe manager registration |> F.run_ok)))
+        1L);
+    ignore (update manager ~claim registration T.Started : T.View.t);
+    ignore
+      (update
+         manager
+         ~claim
+         registration
+         (T.Interrupted { reason = Host_interrupted; delivery = Definitely_not_submitted })
+       : T.View.t);
+    let current = R.observe handle |> F.run_ok in
+    let state = P.Developer_job.state (R.Claim.job claim) in
+    let after : P.Developer_job.State.t =
+      { state with
+        status = Interrupted "fixture worker stopped"
+      ; completed_at = Some Selected.timestamp
+      }
+    in
+    let terminal =
+      R.prepare_claimed_transition
+        handle
+        ~expected:current
+        ~claim
+        ~after
+        ~revoked_after:after
+      |> F.run_ok
+    in
+    ignore (R.commit_claimed_transition handle terminal |> F.run_ok : R.Installed.t);
+    let observed = R.observe handle |> F.run_ok in
+    let general_claim =
+      R.prepare_job_claim
+        handle
+        ~expected:observed
+        ~lookup:(R.find_job_exact observed (P.Developer_job.id general))
+        ~now:Selected.timestamp
+      |> F.run_ok
+      |> R.commit_job_claim handle
+      |> F.run_ok
+      |> R.Claimed.claim
+    in
+    assert (
+      R.Claim.try_enter
+        general_claim
+        ~handle
+        ~admit:(fun () -> true)
+        ~on_enter:(fun () -> ())
+      |> F.run_ok);
+    assert (
+      match
+        T.prepare_admit_saved_agent
+          manager
+          ~claim:general_claim
+          ~relation:T.Root
+          ~configuration
+      with
+      | Error R.Error.Foreign_or_stale -> true
+      | Ok _ | Error _ -> false);
+    let current = R.observe handle |> F.run_ok in
+    let state = P.Developer_job.state (R.Claim.job general_claim) in
+    let after : P.Developer_job.State.t =
+      { state with
+        status = Interrupted "general tool fixture stopped"
+      ; completed_at = Some Selected.timestamp
+      }
+    in
+    let terminal =
+      R.prepare_claimed_transition
+        handle
+        ~expected:current
+        ~claim:general_claim
+        ~after
+        ~revoked_after:after
+      |> F.run_ok
+    in
+    ignore (R.commit_claimed_transition handle terminal |> F.run_ok : R.Installed.t);
+    T.finish manager |> F.run_ok;
+    R.Run_claim.release run_claim |> F.run_ok)
+;;
+
 let%test_unit "all active inference rows retain aggregate recovery capacity" =
   let exercise
         ?(with_command = false)

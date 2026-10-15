@@ -361,6 +361,9 @@ module Claimed_developer = struct
         ~policy
         ~prepared
         ~binding
+        ~agent_runtime
+        ~max_registrations
+        ~checkpoint
         ~invocation
         ~check_current
         f
@@ -403,6 +406,13 @@ module Claimed_developer = struct
           && Option.is_some (C.native_implementation binding)
         then B.validate_capabilities stored ~capabilities
         else invalid "saved Agent artifact has a foreign selected native binding"
+    in
+    let%bind () =
+      Chat_response.Agent_runtime.require_saved_agent_source
+        agent_runtime
+        ~binding
+        ~max_registrations
+        ~checkpoint
     in
     let%bind () = check_current () in
     let scoped =
@@ -456,6 +466,63 @@ module Claimed_developer = struct
            if live scoped
            then Ok (Some scoped.artifact)
            else invalid "saved Agent scope ended"))
+  ;;
+
+  module Selected = struct
+    type nonrec t =
+      { scope : t
+      ; borrowed : N.selected_borrowed
+      ; implementation : Ochat_function.t
+      ; live : bool Atomic.t
+      }
+
+    let active t = t.scope.active
+    let invocation t = t.scope.invocation
+
+    let check_now t =
+      let open Result.Let_syntax in
+      let%bind current = N.borrow_selected () in
+      if
+        (not (Atomic.get t.live))
+        || (not (phys_equal current t.borrowed))
+        || (not (live t.scope))
+        || (not (J.Parent.same_active t.scope.parent t.scope.active))
+        ||
+        match C.native_implementation t.scope.binding with
+        | Some implementation -> not (phys_equal implementation t.implementation)
+        | None -> true
+      then invalid "saved Agent source callback is no longer selected"
+      else (
+        let%map _ = N.selected_borrowed_capabilities t.borrowed in
+        ())
+    ;;
+
+    let check t =
+      let open Result.Let_syntax in
+      let%bind () = check_now t in
+      let%bind artifact =
+        selected ~borrowed:t.borrowed ~implementation:t.implementation
+      in
+      match artifact with
+      | Some artifact when phys_equal artifact t.scope.artifact -> check_now t
+      | Some _ | None -> invalid "saved Agent source changed after selected admission"
+    ;;
+  end
+
+  let with_selected ~borrowed ~implementation f =
+    let open Result.Let_syntax in
+    let%bind artifact = selected ~borrowed ~implementation in
+    match Eio.Fiber.get key, artifact with
+    | Some scope, Some artifact when phys_equal artifact scope.artifact ->
+      let selected =
+        Selected.{ scope; borrowed; implementation; live = Atomic.make true }
+      in
+      let%bind () = Selected.check_now selected in
+      Exn.protect
+        ~finally:(fun () -> Atomic.set selected.live false)
+        ~f:(fun () -> f selected)
+    | Some _, (None | Some _) | None, _ ->
+      invalid "saved Agent source was not selected by this native callback"
   ;;
 end
 

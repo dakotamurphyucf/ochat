@@ -882,6 +882,33 @@ module Model_inference : sig
     -> f:(t -> sw:Eio.Switch.t -> 'a)
     -> ('a, Agent_protocol.Error.t) result
 
+  (** A distinct entry to this SAME joined inference scope and Store Tracking
+      manager for an already entered saved Agent.run v2 Tool callback. Require
+      [selected] from the exact registered runtime source and physical selected
+      native borrow. Root resolves its OWN durably Dispatching Native_terminal
+      by that proof's exact Host invocation, then checks the same Worker Claim,
+      selected implementation and entered native callback. No caller-supplied
+      terminal or wire ID can select a different native owner. The immutable
+      Async_tool v2 payload is classification, not admission. The scope retains
+      both physical proofs and rechecks them with
+      original/current actor, Root epoch, Worker Parent and selected provider
+      after yields and nonyieldingly before Tracking admission/dispatch. It
+      owns the same bounded attempts, committed-call bindings, child Switch,
+      submission guards, pending reconciliation and cancellation behavior as
+      [with_claimed]. An unrelated/v1 Async_tool or an expired/foreign copied
+      artifact cannot enter. [with_claimed] remains strictly Model_call-only.
+
+      An external Model.spawn issued from this Agent context uses the existing
+      Native_model parent for that terminal's actual Dispatching invocation and
+      entered Async_tool job/attempt/next depth. It never recasts that job as
+      a Claimed_model Model_call parent. No native callback or provider effect
+      is replayed after uncertain storage. *)
+  val with_claimed_agent
+    :  run
+    -> selected:Agent_session.Captured_agent_runner.Claimed_developer.Selected.t
+    -> f:(t -> sw:Eio.Switch.t -> 'a)
+    -> ('a, Agent_protocol.Error.t) result
+
   (** The original bridge-issued selected Context borrowed for this lexical
       scope. It is input data for the shared Inference_client, not a renewed
       actor, credential or effect lease. Use the strict ports and composed

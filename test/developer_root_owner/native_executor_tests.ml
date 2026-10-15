@@ -666,24 +666,56 @@ let%test_unit
     "claimed Tool runs its exact saved Agent artifact through the installed runtime"
   =
   let observed = ref [] in
+  let selected_registry = ref None in
+  let current_root = ref None in
+  let borrowed_agent = ref None in
   with_registered_agent
     ~run_name:"dvr_claimed_agent_artifact"
     ~observed
-    ~on_run:ignore
-    (fun
-        ~env
-         ~root
-         ~executor:_
-         ~handle
-         ~owner:_
-         ~selected:_
-         ~jobs
-         ~store
-         ~blobs
-         ~fixture
-         ~preparations
-       ->
+    ~on_run:(fun () ->
+      if Option.is_none !borrowed_agent
+      then (
+        let borrowed = Agent_session.Native_tool_invocation.borrow_selected () |> ok in
+        let binding = C.find (Option.value_exn !selected_registry) ~name:"child" |> ok in
+        let implementation = C.native_implementation binding |> Option.value_exn in
+        let result =
+          Agent_session.Captured_agent_runner.Claimed_developer.with_selected
+            ~borrowed
+            ~implementation
+            (fun selected ->
+               let module Selected =
+                 Agent_session.Captured_agent_runner.Claimed_developer.Selected
+               in
+               Selected.check selected |> ok;
+               borrowed_agent := Some selected;
+               match
+                 O.Model_inference.with_claimed_agent
+                   (Option.value_exn !current_root)
+                   ~selected
+                   ~f:(fun _ ~sw:_ -> ())
+               with
+               | Error { message = "developer inference provider is unavailable"; _ } ->
+                 Ok ()
+               | Ok () | Error _ ->
+                 Error
+                   (P.Error.invalid_request
+                      "saved Agent Root proof did not reach provider selection"))
+        in
+        ignore (result |> ok : unit)))
+    (fun ~env
+      ~root
+      ~executor:_
+      ~handle
+      ~owner:_
+      ~selected
+      ~jobs
+      ~store
+      ~blobs
+      ~fixture
+      ~preparations ->
        let id = stage_registered_agent_tool jobs in
+       selected_registry := Some selected;
+       current_root := Some root;
        assert (Int.equal !preparations 1);
        let stored = R.find_job (R.observe handle |> ok) id |> Option.value_exn in
        let request =
@@ -747,7 +779,11 @@ let%test_unit
            P.Id.Job.equal
              id
              (P.Developer_job.id
-                (R.find_job (R.observe handle |> ok) id |> Option.value_exn)))))
+                (R.find_job (R.observe handle |> ok) id |> Option.value_exn)));
+         assert (
+           Result.is_error
+             (Agent_session.Captured_agent_runner.Claimed_developer.Selected.check_now
+                (Option.value_exn !borrowed_agent)))))
 ;;
 
 let%test_unit "claimed Agent source rejects actor revocation during its Claim read" =
@@ -850,7 +886,7 @@ let%test_unit "nested Agent callback cannot consume outer saved artifact pin" =
       ~jobs
       ~store:_
       ~blobs:_
-      ~fixture:_
+      ~fixture
       ~preparations ->
        let id = stage_registered_agent_tool jobs in
        assert (Int.equal !preparations 1);
@@ -951,6 +987,9 @@ let%test_unit "nested Agent callback cannot consume outer saved artifact pin" =
                   ~policy
                   ~prepared
                   ~binding
+                  ~agent_runtime:fixture.runtime
+                  ~max_registrations:16
+                  ~checkpoint:ignore
                   ~invocation
                   ~check_current
                   run_native

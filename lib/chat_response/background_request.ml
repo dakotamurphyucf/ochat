@@ -3,22 +3,7 @@ module C = Tool_capability
 module P = One_off_request
 module J = Agent_protocol.Json_codec
 module Schema = Chatmd_shell_spec.Tool_schema
-
-module Agent_artifact = struct
-  type t =
-    { revision_id : Agent_protocol.Id.Prompt_revision.t
-    ; manifest_sha256 : Chatml_source.Digest.t
-    ; root_relative_path : Source.Portable_path.t
-    }
-
-  let create ~revision_id ~manifest_sha256 ~root_relative_path =
-    { revision_id; manifest_sha256; root_relative_path }
-  ;;
-
-  let revision_id t = t.revision_id
-  let manifest_sha256 t = t.manifest_sha256
-  let root_relative_path t = t.root_relative_path
-end
+module Agent_artifact = Agent_protocol.Developer_agent_artifact
 
 type target =
   | Tool_target of string
@@ -116,40 +101,6 @@ let strict_fields names json =
     | _ -> invalid "expected a JSON object"
   in
   J.fields json
-;;
-
-let agent_artifact_to_json t =
-  `Object
-    [ ( "revision_id"
-      , Agent_protocol.Id.Prompt_revision.to_json (Agent_artifact.revision_id t) )
-    ; ( "manifest_sha256"
-      , `String (Chatml_source.Digest.to_hex (Agent_artifact.manifest_sha256 t)) )
-    ; ( "root_relative_path"
-      , `String (Source.Portable_path.to_string (Agent_artifact.root_relative_path t)) )
-    ]
-;;
-
-let agent_artifact_of_json json =
-  let open Result.Let_syntax in
-  let%bind fields =
-    strict_fields [ "revision_id"; "manifest_sha256"; "root_relative_path" ] json
-  in
-  let%bind revision_id =
-    J.required_as fields "revision_id" Agent_protocol.Id.Prompt_revision.of_json
-  in
-  let%bind manifest_sha256 = J.required_as fields "manifest_sha256" J.string in
-  let%bind manifest_sha256 =
-    Chatml_source.Digest.of_hex manifest_sha256
-    |> Result.map_error ~f:(fun _ ->
-      Agent_protocol.Error.invalid_request "invalid selected artifact digest")
-  in
-  let%bind root_relative_path = J.required_as fields "root_relative_path" J.string in
-  let%map root_relative_path =
-    Source.Portable_path.create root_relative_path
-    |> Result.map_error ~f:(fun _ ->
-      Agent_protocol.Error.invalid_request "invalid selected artifact root member")
-  in
-  Agent_artifact.create ~revision_id ~manifest_sha256 ~root_relative_path
 ;;
 
 let with_agent_artifact t selected =
@@ -265,7 +216,7 @@ let to_json t =
      ]
      @ Option.to_list
          (Option.map t.agent_artifact ~f:(fun artifact ->
-            "agent_artifact", agent_artifact_to_json artifact)))
+            "agent_artifact", Agent_artifact.to_json artifact)))
 ;;
 
 let source = function
@@ -372,7 +323,7 @@ let of_json ~policy json =
   let%bind agent_artifact =
     match version, J.optional fields "agent_artifact" with
     | 1, None -> Ok None
-    | 2, Some json -> agent_artifact_of_json json |> Result.map ~f:Option.some
+    | 2, Some json -> Agent_artifact.of_json json |> Result.map ~f:Option.some
     | 1, Some _ -> invalid "version 1 cannot select agent code"
     | 2, None -> invalid "version 2 requires selected agent code"
     | _ -> assert false

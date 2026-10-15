@@ -110,8 +110,11 @@ val inference_scope
     structural ancestry under the same bounded traversal as [to_bytes]. Every
     row references a positive historical attempt no greater than that
     job's latest recorded attempt; a later retry never invalidates prior
-    inference evidence. A nested row references a preceding retained ordinal
-    for the same immutable Model_call job and exact historical attempt. Parent
+    inference evidence. A row belongs either to the immutable Model_call job
+    or to an Async_tool job whose persisted request has the strict saved-Agent
+    v2 structural form. A copied artifact remains data, never effect authority.
+    A nested row references a preceding retained ordinal
+    for the same immutable tracked job and exact historical attempt. Parent
     inference may already be Terminal when a
     delayed admitted tool call starts a nested inference; the physical Store
     manager requires a genuinely issued retained parent registration and the

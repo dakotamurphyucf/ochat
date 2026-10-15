@@ -193,7 +193,7 @@ let implementation_sources =
   [ ( "lib/agent_protocol/invocation.ml"
     , "4d5abb95474bcdef6c360b666a3b57d2203a7b378193df5c49266897acac4981" )
   ; ( "lib/agent_server/developer_background_job_runner.ml"
-    , "9694ea1078897434f69f9c03f10f1ce5393443bf5a8c42e6b1f04d100eab5ce0" )
+    , "6f5137851d5bdb58fc3e65a7a4824249d4e6d661ce261d2cab7de7040a7aa976" )
   ; ( "lib/agent_server/developer_managed_tool_executor.ml"
     , "3befc8189100e09f54c94db05ddfecde36823ac292992b4d23090fe7102f2f3f" )
   ; ( "lib/agent_server/developer_script_job_execution.ml"

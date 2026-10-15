@@ -112,6 +112,15 @@ let%test_unit "v1 independent byte oracle and strict selected-code admission" =
     let artifact = selected () in
     let captured = B.with_agent_artifact original artifact |> ok in
     let wire = B.to_json captured in
+    let saved = P.Developer_agent_artifact.Saved_tool_request.of_payload wire |> ok in
+    [%test_eq: string]
+      (P.Developer_agent_artifact.Saved_tool_request.selected_name saved)
+      "agent";
+    [%test_eq: string]
+      (P.Id.Prompt_revision.to_string
+         (P.Developer_agent_artifact.revision_id
+            (P.Developer_agent_artifact.Saved_tool_request.artifact saved)))
+      (P.Id.Prompt_revision.to_string (A.revision_id artifact));
     let restored = B.of_json ~policy wire |> ok in
     let admitted = B.agent_artifact restored |> Option.value_exn in
     [%test_eq: string]
@@ -159,6 +168,28 @@ let%test_unit "v1 independent byte oracle and strict selected-code admission" =
           ~f:(fun value -> invalid_reference "root_relative_path" (`String value))
     in
     List.iter malformed ~f:(fun json -> assert (Result.is_error (B.of_json ~policy json)));
+    List.iter
+      [ replace wire "version" (`Number "1")
+      ; remove wire "agent_artifact"
+      ; replace
+          wire
+          "target"
+          (`Object [ "kind", `String "tool"; "name", `String "agent"; "extra", `Null ])
+      ; replace wire "pins" (`Object [ "foreign", `String (digest "pin") ])
+      ; replace
+          wire
+          "pins"
+          (`Object [ "agent", `String (digest "pin"); "agent", `String (digest "pin") ])
+      ; `Object
+          (("version", `Number "2")
+           ::
+           (match wire with
+            | `Object fields -> fields
+            | _ -> assert false))
+      ]
+      ~f:(fun json ->
+        assert (
+          Result.is_error (P.Developer_agent_artifact.Saved_tool_request.of_payload json)));
     (match
        B.prepare ~env ~current_capabilities:(fun () -> registry) ~policy restored |> ok
      with

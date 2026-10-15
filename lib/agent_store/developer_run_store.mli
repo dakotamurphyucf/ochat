@@ -477,7 +477,7 @@ end
     It shares this Store's document writer, bounded codec, run-lifecycle gate
     and single per-run pending barrier. This lower layer never constructs an
     Inference_client.Identity, provider request, fake Session or worker lease.
-    Root owns this manager until all model callbacks have joined and their
+    Root owns this manager until all inference callbacks have joined and their
     exact tracking writes are settled. All operations use the issuing domain;
     a DTO with matching IDs is not physical authority. *)
 module Tracking : sig
@@ -541,7 +541,7 @@ module Tracking : sig
         }
 
   (** Register exactly once for the physical Run_claim, after its one-shot
-      Recovery window finished and before exposing any Model_call callback.
+      Recovery window finished and before exposing any inference callback.
       The Store rejects a second manager even if it has the same handle/claim.
       Registration occurs before a yielding read; foreign Store/handle/domain,
       closed claim, unfinished recovery or a live same-run pending reject. *)
@@ -567,6 +567,25 @@ module Tracking : sig
       prepares exact before/after bytes and reserves the manager's one Pending
       slot. No inference callback may begin until [commit] yields Admitted. *)
   val prepare_admit
+    :  t
+    -> claim:Claim.t
+    -> relation:relation
+    -> configuration:Inference.Observation.Configuration.t
+    -> (Pending.t, Error.t) result
+
+  (** Separate saved-Agent admission into the SAME manager, writer, Pending
+      barrier, row limits and recovery. Require a physically entered Running
+      Async_tool Claim whose immutable payload has a structurally valid
+      Developer_agent_artifact.Saved_tool_request v2 Tool reference. Version 1,
+      Script and general Async_tool requests remain ineligible. This Store
+      classification proves neither the referenced artifact's bytes nor
+      source/native/actor/provider permission: Root must first hold and keep
+      checking its genuine selected saved-source and dispatched native scopes.
+      [prepare_admit] above remains strictly Model_call-only. All later changes
+      use the exact Registration and physical Claim issued by this manager;
+      they cannot select a different job kind or infer authority from a copied
+      payload. The remaining preparation/commit contract is identical. *)
+  val prepare_admit_saved_agent
     :  t
     -> claim:Claim.t
     -> relation:relation

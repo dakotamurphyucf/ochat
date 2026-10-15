@@ -4138,6 +4138,17 @@ module Tracking = struct
         | Some _ | None -> Error Error.Conflict))
   ;;
 
+  let saved_agent_job job =
+    P.Job.equal_kind (P.Developer_job.kind job) P.Job.Async_tool
+    && Result.is_ok
+         (P.Developer_agent_artifact.Saved_tool_request.of_payload
+            (P.Developer_job.payload job))
+  ;;
+
+  let tracked_job job =
+    P.Job.equal_kind (P.Developer_job.kind job) P.Job.Model_call || saved_agent_job job
+  ;;
+
   let valid_claim t claim =
     if
       (not (Claim.issued_by claim t.store))
@@ -4147,7 +4158,7 @@ module Tracking = struct
       || (match claim.issuing_domain with
           | Some domain -> not (Int.equal domain (Stdlib.Domain.self () :> int))
           | None -> true)
-      || not (P.Job.equal_kind (P.Developer_job.kind claim.job) P.Job.Model_call)
+      || not (tracked_job claim.job)
     then Error Error.Foreign_or_stale
     else Ok ()
   ;;
@@ -4299,10 +4310,15 @@ module Tracking = struct
       Ok value
   ;;
 
-  let prepare_admit t ~claim ~relation ~configuration =
+  let prepare_admit_for t ~saved_agent ~claim ~relation ~configuration =
     with_operation t (fun () ->
       let* () = valid_live_claim t claim in
-      if Option.is_some t.pending
+      if
+        if saved_agent
+        then not (saved_agent_job claim.job)
+        else not (P.Job.equal_kind (P.Developer_job.kind claim.job) P.Job.Model_call)
+      then Error Error.Foreign_or_stale
+      else if Option.is_some t.pending
       then Error Error.Conflict
       else
         with_lease t.store (fun ~env:_ ~root:_ ->
@@ -4435,6 +4451,14 @@ module Tracking = struct
           in
           t.pending <- Some pending;
           Ok pending))
+  ;;
+
+  let prepare_admit t ~claim ~relation ~configuration =
+    prepare_admit_for t ~saved_agent:false ~claim ~relation ~configuration
+  ;;
+
+  let prepare_admit_saved_agent t ~claim ~relation ~configuration =
+    prepare_admit_for t ~saved_agent:true ~claim ~relation ~configuration
   ;;
 
   let observe t (registration : Registration.t) =
