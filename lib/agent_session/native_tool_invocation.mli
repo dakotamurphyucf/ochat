@@ -82,6 +82,20 @@ val selected_borrowed_capabilities
   :  selected_borrowed
   -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
 
+(** Nonyielding physical ancestry comparison for an entered selected child.
+    Only [with_selected_scope] records the ambient selected borrow when it
+    installs the child binding; an invocation ID or copied owner cannot create
+    this link. Require [child] to be the current selected fiber binding and
+    every link through [ancestor] to remain live on this domain. Same-invocation
+    narrowing retains the exact context; a distinct invocation must name its
+    immediate parent's invocation ID, and at least one such child edge is
+    required. This grants no binding or effect by itself; saved source, Root,
+    terminal, Claim and child selection checks remain required before execution. *)
+val check_selected_ancestor
+  :  ancestor:selected_borrowed
+  -> child:selected_borrowed
+  -> (unit, Agent_protocol.Error.t) result
+
 (** Recheck the actual selected callback's original parent/actor, current host
     registry and unchanged physical native function after a yielding source
     restoration. The implementation must match both the callback's retained

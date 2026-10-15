@@ -16,6 +16,19 @@ type t =
   ; managed : Managed_tool.t option
   }
 
+(* One private execution selection is carried through native dispatch, lexical
+   Jobs and managed dependencies. The ordinary Root constructor below retains
+   exactly the preexisting selection; a source-bound child constructor may be
+   installed only after its physical selected-target admission. *)
+type execution =
+  { base : t
+  ; issuer : D.t
+  ; managed : Managed_tool.t option
+  ; selected_current : unit -> (C.t, P.Error.t) result
+  ; selected_for_witness : O.Current.t -> (C.t, P.Error.t) result
+  }
+
+let issued_by_root t root = phys_equal t.root root
 let invalid message = Error (P.Error.invalid_request message)
 let ( let* ) result f = Result.bind result ~f
 
@@ -51,7 +64,7 @@ let with_job_service t jobs =
     | Some _ -> invalid "developer native executor already owns another Job service")
 ;;
 
-let with_managed_definition t ~definition ~env =
+let with_managed_definition (t : t) ~definition ~env =
   match t.managed, t.jobs with
   | Some _, _ -> invalid "managed developer executor is already configured"
   | None, None -> invalid "managed developer executor requires its physical Job service"
@@ -60,10 +73,18 @@ let with_managed_definition t ~definition ~env =
     Ok { t with managed = Some managed }
 ;;
 
-let managed_definition t = Option.map t.managed ~f:Managed_tool.definition
+let managed_definition (t : t) = Option.map t.managed ~f:Managed_tool.definition
 
-let reselect_current t ceiling =
-  let* current = D.selected t.issuer in
+let root_execution (t : t) =
+  { base = t
+  ; issuer = t.issuer
+  ; managed = t.managed
+  ; selected_current = (fun () -> Ok (O.native_selected t.root))
+  ; selected_for_witness = (fun witness -> Ok (O.Current.selected witness))
+  }
+;;
+
+let reselect current ceiling =
   let* names =
     List.fold_result (C.references ceiling) ~init:[] ~f:(fun names reference ->
       C.resolve current ~id:reference.id ~fingerprint:reference.fingerprint
@@ -74,9 +95,15 @@ let reselect_current t ceiling =
   |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
 ;;
 
-let narrowed_registry t parent =
+let reselect_current (t : t) ceiling =
+  let* current = D.selected t.issuer in
+  reselect current ceiling
+;;
+
+let narrowed_registry execution parent =
   let* ceiling = N.selected_borrowed_capabilities parent in
-  reselect_current t ceiling
+  let* current = execution.selected_current () in
+  reselect current ceiling
 ;;
 
 let finish_completion completion settlement = D.Completion.finish completion ~settlement
@@ -180,7 +207,7 @@ let recover_early scope =
 
 let rec run
           ?ceiling
-          t
+          execution
           ~parent
           ~job_parent
           ~borrowed
@@ -190,6 +217,7 @@ let rec run
           ~authorize
           ~prepare_output
   =
+  let t = execution.base in
   let* entered =
     O.with_native_registration t.root ?job_parent ~invocation (fun ~scope ->
       let execute job_scope =
@@ -200,7 +228,7 @@ let rec run
         in
         let effect_entry binding =
           let* witness = O.current t.root in
-          let selected = O.Current.selected witness in
+          let* selected = execution.selected_for_witness witness in
           let reference = C.reference binding in
           let* narrowed = registry () in
           let* narrowed_binding =
@@ -233,6 +261,23 @@ let rec run
                 ~capture_fingerprint:
                   (Chatml_developer_capture.fingerprint (O.capture t.root))
           in
+          (* The parent read above may yield. Resolve the SAME execution
+             selection again before the final nonyielding Root/parent gate. *)
+          let* current_selected = execution.selected_current () in
+          let* current_binding =
+            C.resolve current_selected ~id:reference.id ~fingerprint:reference.fingerprint
+            |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
+          in
+          let* () =
+            match
+              C.native_implementation binding, C.native_implementation current_binding
+            with
+            | Some expected, Some current when phys_equal expected current -> Ok ()
+            | None, None -> Ok ()
+            | Some _, _ | None, Some _ ->
+              invalid
+                "selected native implementation changed before final effect admission"
+          in
           let* () = O.check_effect_now t.root witness in
           let* () =
             match job_parent with
@@ -244,7 +289,7 @@ let rec run
                 ~capture_fingerprint:
                   (Chatml_developer_capture.fingerprint (O.capture t.root))
           in
-          D.check_parent_now t.issuer ~parent invocation
+          D.check_parent_now execution.issuer ~parent invocation
         in
         let seal outcome ~selected_jobs =
           let physical selection =
@@ -288,11 +333,12 @@ let rec run
               scope
               ~request
               ~checkpoint
-              ~check_parent_now:(fun () -> D.check_parent_now t.issuer ~parent invocation)
+              ~check_parent_now:(fun () ->
+                D.check_parent_now execution.issuer ~parent invocation)
           | Some lexical -> Jobs.Scope.stage_background lexical ~request ~checkpoint
         in
         let* managed =
-          match t.managed, job_scope with
+          match execution.managed, job_scope with
           | None, _ -> Ok None
           | Some _, None -> invalid "managed callback has no physical Job scope"
           | Some managed, Some lexical ->
@@ -301,7 +347,7 @@ let rec run
               ~terminal:scope
               ~scope:lexical
               ~call_child:(fun ~reference ~invocation ->
-                run_child t ~reference ~invocation ~authorize ~prepare_output)
+                run_nested execution ~reference ~invocation ~authorize ~prepare_output)
             |> Result.map ~f:Option.some
         in
         match
@@ -314,7 +360,7 @@ let rec run
               match job_scope with
               | None -> N.{ config; scoped_async_operation = None }
               | Some lexical -> Jobs.Scope.install_selected lexical ~prepared config)
-            ~owner:t.issuer
+            ~owner:execution.issuer
             ~parent
             ~dispatch
             ~parent_live_now:(fun () -> O.Native_terminal.effect_parent_live_now scope)
@@ -371,7 +417,9 @@ let rec run
           ~terminal:scope
           ~borrowed
           ?ceiling
-          ~check_parent_now:(fun () -> D.check_parent_now t.issuer ~parent invocation)
+          ~selected_current:execution.selected_current
+          ~check_parent_now:(fun () ->
+            D.check_parent_now execution.issuer ~parent invocation)
           (fun ~scope:lexical -> execute (Some lexical)))
   in
   match entered with
@@ -388,28 +436,32 @@ let rec run
      | _ -> ());
     Exn.raise_with_original_backtrace exn backtrace
 
-and run_child t ~reference ~invocation ~authorize ~prepare_output =
+and run_nested execution ~reference ~invocation ~authorize ~prepare_output =
   let* borrowed = N.borrow_selected () in
-  if not (D.same_issuer t.issuer (N.selected_borrowed_issuer borrowed))
+  if not (D.same_issuer execution.issuer (N.selected_borrowed_issuer borrowed))
   then invalid "selected child belongs to another native executor"
   else (
     let parent = N.selected_borrowed_parent borrowed in
-    let* job_parent = D.inherited_job_parent t.issuer parent in
+    let* job_parent = D.inherited_job_parent execution.issuer parent in
     run
-      t
+      execution
       ~parent:(D.Child parent)
       ~job_parent
       ~borrowed:(Some borrowed)
-      ~registry:(fun () -> narrowed_registry t borrowed)
+      ~registry:(fun () -> narrowed_registry execution borrowed)
       ~reference
       ~invocation
       ~authorize
       ~prepare_output)
 ;;
 
+let run_child t ~reference ~invocation ~authorize ~prepare_output =
+  run_nested (root_execution t) ~reference ~invocation ~authorize ~prepare_output
+;;
+
 let run_root t ~reference ~invocation ~authorize ~prepare_output =
   run
-    t
+    (root_execution t)
     ~parent:D.Root
     ~job_parent:None
     ~borrowed:None
@@ -424,7 +476,7 @@ let run_job_child ?selected t ~active ~reference ~invocation ~authorize ~prepare
   let* job_parent = O.job_parent t.root active in
   run
     ?ceiling:selected
-    t
+    (root_execution t)
     ~parent:(D.Job_child job_parent)
     ~job_parent:(Some job_parent)
     ~borrowed:None

@@ -186,6 +186,7 @@
   operation_worker
   turn_worker
   runtime_script_preparation
+  developer_child_preflight
   captured_agent_runner
   runtime_builder
   runtime_activity

@@ -30,5 +30,14 @@ type 'a t
 
 val create : now:(unit -> float) -> load:(unit -> 'a) -> 'a t
 val get : 'a t -> 'a
+
+(** Like [get], but call [before_load] under this cache's mutex immediately
+    before an actual loader call (including an invalidated retry). A cache hit
+    does not call it. The check is borrowed for this call only and is never
+    retained by the cache, so a construction-time guard cannot become an
+    invocation-time authority. A rejected check leaves the cache unchanged;
+    loader exceptions keep their original backtrace after unlocking. *)
+val get_checked : 'a t -> before_load:(unit -> (unit, 'e) result) -> ('a, 'e) result
+
 val invalidate : 'a t -> unit
 ```

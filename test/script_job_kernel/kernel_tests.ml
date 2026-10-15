@@ -49,35 +49,29 @@ let%test_unit "lexical selected starts and aborts follow a bounded reference mod
     for count = 1 to 4 do
       let capabilities = selected ("owner_" ^ Int.to_string count) in
       let current = ref capabilities in
+      let revoked = ref false in
+      let current_capabilities () =
+        if !revoked then Error "selected source revoked" else Ok !current
+      in
       let aborted = ref [] in
       let ids = List.init count ~f:job in
       let result =
         K.with_scope
           ~selected:capabilities
-          ~current_capabilities:(fun () -> !current)
+          ~current_capabilities
           ~abort:(fun id -> aborted := id :: !aborted)
           ~error:Fn.id
           (fun scope ->
              if Int.equal count 1
              then (
-               K.rebind_selected
-                 scope
-                 ~selected:capabilities
-                 ~current_capabilities:(fun () -> !current)
-               |> ok;
+               K.rebind_selected scope ~selected:capabilities ~current_capabilities |> ok;
                assert (
                  Result.is_error
-                   (K.rebind_selected
-                      scope
-                      ~selected:capabilities
-                      ~current_capabilities:(fun () -> !current))));
+                   (K.rebind_selected scope ~selected:capabilities ~current_capabilities)));
              List.iter ids ~f:(fun id -> K.record_start scope id |> ok);
              assert (
                Result.is_error
-                 (K.rebind_selected
-                    scope
-                    ~selected:capabilities
-                    ~current_capabilities:(fun () -> !current)));
+                 (K.rebind_selected scope ~selected:capabilities ~current_capabilities));
              let selected_ids = List.filteri ids ~f:(fun index _ -> index % 2 = 0) in
              let effects = List.map selected_ids ~f:start in
              let actual, ordinary = K.split_starts scope effects |> ok in
@@ -88,6 +82,15 @@ let%test_unit "lexical selected starts and aborts follow a bounded reference mod
              assert (
                List.for_all ids ~f:(fun id ->
                  Result.is_ok (K.validate_work scope (P.Invocation.Job id))));
+             revoked := true;
+             assert (
+               Result.equal
+                 Unit.equal
+                 String.equal
+                 (K.check_selection scope)
+                 (Error "selected source revoked"));
+             revoked := false;
+             assert (Result.is_ok (K.check_selection scope));
              current := selected "replacement";
              assert (Result.is_error (K.record_start scope (job 100)));
              Error "selected binding changed")
@@ -108,7 +111,7 @@ let%test_unit "all provisional starts are attempted on cleanup and original caus
     let run callback =
       K.with_scope
         ~selected:capabilities
-        ~current_capabilities:(fun () -> capabilities)
+        ~current_capabilities:(fun () -> Ok capabilities)
         ~abort:(fun id ->
           attempted := id :: !attempted;
           if P.Id.Job.equal id second then raise cleanup_failure)
@@ -138,7 +141,7 @@ let%test_unit "acknowledgment is lexical and cancellation retains its cause" =
     let scope callback =
       K.with_scope
         ~selected:capabilities
-        ~current_capabilities:(fun () -> capabilities)
+        ~current_capabilities:(fun () -> Ok capabilities)
         ~abort:(fun _ -> Int.incr aborted)
         ~error:Fn.id
         (fun active ->

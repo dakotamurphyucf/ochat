@@ -25,14 +25,10 @@ type identity =
       -> capture_fingerprint:Chatml_source.Digest.t
       -> (unit, E.t) result
   ; now : unit -> Agent_protocol.Timestamp.t
+  ; source_parent : active option
   }
 
-type t =
-  { identity : identity
-  ; storage : storage
-  }
-
-type active =
+and active =
   { issuer : identity
   ; context : H.context
   ; job_parent : Job_scope.Parent.t option
@@ -41,9 +37,15 @@ type active =
   ; live : bool Atomic.t
   }
 
+type t =
+  { identity : identity
+  ; storage : storage
+  }
+
 type parent =
   | Root
   | Child of active
+  | Source_child of active
   | Job_child of Job_scope.Parent.t
 
 let invalid message = Error (E.invalid_request message)
@@ -68,7 +70,17 @@ let create
   let%bind () = O.validate (O.Developer owner) in
   let%bind () = current ~owner ~capture_fingerprint in
   let%map () = validate_selection ~ceiling (selected ()) in
-  { identity = { owner; capture_fingerprint; ceiling; selected; current; now }; storage }
+  { identity =
+      { owner
+      ; capture_fingerprint
+      ; ceiling
+      ; selected
+      ; current
+      ; now
+      ; source_parent = None
+      }
+  ; storage
+  }
 ;;
 
 let owner t = t.identity.owner
@@ -97,6 +109,18 @@ let same_owner t context =
 
 let same_domain active = Int.equal active.domain_id (Stdlib.Domain.self () :> int)
 
+let source_parent_active_now active =
+  if same_domain active && Atomic.get active.live && active.parent_live_now ()
+  then Ok ()
+  else invalid "saved-source parent is no longer entered"
+;;
+
+let retained_source_parent_now identity =
+  match identity.source_parent with
+  | None -> Ok ()
+  | Some active -> source_parent_active_now active
+;;
+
 let job_parent_id = function
   | None -> None
   | Some parent -> Some (Job_scope.Parent.job_id parent)
@@ -104,12 +128,23 @@ let job_parent_id = function
 
 let inherited_parent = function
   | Root -> None
-  | Child active -> active.job_parent
+  | Child active | Source_child active -> active.job_parent
   | Job_child parent -> Some parent
 ;;
 
 let valid_parent_shape t ~parent (context : H.context) =
   let open Result.Let_syntax in
+  let%bind () = retained_source_parent_now t in
+  let%bind () =
+    match t.source_parent, parent with
+    | None, Source_child _ ->
+      invalid "ordinary developer issuer cannot claim a saved-source parent"
+    | Some expected, Source_child actual when phys_equal expected actual -> Ok ()
+    | Some _, Source_child _ -> invalid "saved-source parent is not the retained active"
+    | Some _, (Root | Job_child _) ->
+      invalid "saved-source child issuer cannot enter as root or worker"
+    | None, (Root | Child _ | Job_child _) | Some _, Child _ -> Ok ()
+  in
   match parent, context.parent_invocation, context.parent_job with
   | Root, None, None -> Ok ()
   | Root, None, Some _ -> invalid "developer root invocation cannot claim a job parent"
@@ -121,11 +156,18 @@ let valid_parent_shape t ~parent (context : H.context) =
   | Job_child _, Some _, _ ->
     invalid "developer job child cannot claim an invocation parent"
   | Job_child _, None, None -> invalid "developer job child requires its claimed job"
-  | Child active, Some id, claimed_job_id ->
+  | (Child active | Source_child active), Some id, claimed_job_id ->
     let parent_context = active.context in
     let%bind () =
+      let matching_issuer =
+        match parent with
+        | Child _ -> phys_equal active.issuer t
+        | Source_child _ ->
+          Option.value_map t.source_parent ~default:false ~f:(phys_equal active)
+        | Root | Job_child _ -> false
+      in
       if
-        phys_equal active.issuer t
+        matching_issuer
         && same_domain active
         && Atomic.get active.live
         && active.parent_live_now ()
@@ -149,7 +191,8 @@ let valid_parent_shape t ~parent (context : H.context) =
      | Some parent_deadline, Some child_deadline
        when Agent_protocol.Timestamp.compare child_deadline parent_deadline <= 0 -> Ok ()
      | Some _, Some _ -> invalid "developer invocation deadline exceeds parent")
-  | Child _, None, _ -> invalid "developer child invocation requires its direct parent"
+  | (Child _ | Source_child _), None, _ ->
+    invalid "developer child invocation requires its direct parent"
 ;;
 
 let valid_parent_now t ~parent context =
@@ -374,6 +417,7 @@ module Selected = struct
   type nonrec parent = parent =
     | Root
     | Child of active
+    | Source_child of active
     | Job_child of Job_scope.Parent.t
 
   type dispatch_storage =
@@ -403,7 +447,42 @@ module Selected = struct
     let%bind () = O.validate (O.Developer owner) in
     let%bind () = current ~owner ~capture_fingerprint in
     let%map () = validate_selection ~ceiling (selected ()) in
-    { owner; capture_fingerprint; ceiling; selected; current; now }
+    { owner; capture_fingerprint; ceiling; selected; current; now; source_parent = None }
+  ;;
+
+  let create_source_child ~parent_issuer ~parent_active ~ceiling ~current_child =
+    let open Result.Let_syntax in
+    let%bind () =
+      if phys_equal parent_active.issuer parent_issuer
+      then source_parent_active_now parent_active
+      else invalid "saved-source child parent is not the entered selected issuer"
+    in
+    let current ~owner ~capture_fingerprint =
+      let%bind () =
+        if
+          O.equal_developer owner parent_issuer.owner
+          && Chatml_source.Digest.equal
+               capture_fingerprint
+               parent_issuer.capture_fingerprint
+        then Ok ()
+        else invalid "saved-source child differs from its parent root"
+      in
+      let%bind () = source_parent_active_now parent_active in
+      let%bind () = current_identity parent_issuer in
+      let%bind () = current_child () in
+      source_parent_active_now parent_active
+    in
+    let%map () =
+      current
+        ~owner:parent_issuer.owner
+        ~capture_fingerprint:parent_issuer.capture_fingerprint
+    in
+    { parent_issuer with
+      ceiling
+    ; selected = (fun () -> ceiling)
+    ; current
+    ; source_parent = Some parent_active
+    }
   ;;
 
   let ceiling t = t.ceiling
@@ -413,6 +492,8 @@ module Selected = struct
   let check_parent_now = check_parent_now
 
   let inherited_job_parent t active =
+    let open Result.Let_syntax in
+    let%bind () = retained_source_parent_now t in
     if
       phys_equal active.issuer t
       && same_domain active

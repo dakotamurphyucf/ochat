@@ -68,6 +68,7 @@ type selected_borrowed =
   ; effect_entry : (C.binding -> (unit, Agent_protocol.Error.t) result) option
   ; execution_context : Chatml_execution.context
   ; runtime_context : Chat_response.Runtime_request_scope.t option
+  ; selected_ancestor : selected_borrowed option
   }
 
 type managed_dispatch =
@@ -273,6 +274,45 @@ let selected_borrowed_capabilities (scope : selected_borrowed) =
          "selected developer borrow has no live verified capabilities")
 ;;
 
+let check_selected_ancestor ~ancestor ~child =
+  let invalid () =
+    Error
+      (Agent_protocol.Error.invalid_request
+         "selected developer child has no live physical saved-source ancestor")
+  in
+  match borrow_selected () with
+  | Error _ -> invalid ()
+  | Ok current when (not (phys_equal current child)) || phys_equal child ancestor ->
+    invalid ()
+  | Ok _ ->
+    let rec walk scope crossed_invocation =
+      if not (selected_active scope)
+      then false
+      else if phys_equal scope ancestor
+      then crossed_invocation
+      else (
+        match scope.selected_ancestor with
+        | None -> false
+        | Some parent ->
+          let child_context = H.context scope.invocation in
+          let parent_context = H.context parent.invocation in
+          let same_invocation =
+            Agent_protocol.Id.Invocation.equal child_context.id parent_context.id
+          in
+          if
+            (same_invocation && not (H.equal_context child_context parent_context))
+            || ((not same_invocation)
+                && not
+                     (Option.value_map
+                        child_context.parent_invocation
+                        ~default:false
+                        ~f:(Agent_protocol.Id.Invocation.equal parent_context.id)))
+          then false
+          else walk parent (crossed_invocation || not same_invocation))
+    in
+    if walk child false then Ok () else invalid ()
+;;
+
 let check_selected_source (scope : selected_borrowed) ~implementation =
   let open Result.Let_syntax in
   let invalid message = Error (Agent_protocol.Error.invalid_request message) in
@@ -476,6 +516,7 @@ let with_selected_scope
       runtime_context
       ~default:Chat_response.Runtime_request_scope.capture
   in
+  let selected_ancestor = Eio.Fiber.get selected_scope_key in
   let scope =
     { invocation
     ; issuer
@@ -486,6 +527,7 @@ let with_selected_scope
     ; effect_entry
     ; execution_context
     ; runtime_context
+    ; selected_ancestor
     }
   in
   Exn.protect

@@ -46,6 +46,7 @@ and scope =
   ; worker_parent : Agent_session.Developer_job_scope.Parent.t option
   ; mutable selected : C.t
   ; mutable selected_now : unit -> (C.t, P.Error.t) result
+  ; current_capabilities : unit -> (C.t, P.Error.t) result
   ; kernel : K.t
   ; check_parent_now : unit -> (unit, P.Error.t) result
   ; mutable managed_admitted : bool
@@ -68,13 +69,14 @@ let issued_by_root t root = phys_equal t.root root
 let current scope =
   let* witness = O.current scope.service.root in
   let* selected_now = scope.selected_now () in
+  let* current_capabilities = scope.current_capabilities () in
   if
     (not (String.equal (C.fingerprint scope.selected) (C.fingerprint selected_now)))
     || not
          (List.for_all (C.references scope.selected) ~f:(fun reference ->
             Result.is_ok
               (C.resolve
-                 (O.Current.selected witness)
+                 current_capabilities
                  ~id:reference.id
                  ~fingerprint:reference.fingerprint)))
   then Error (invalid "developer job selection changed")
@@ -86,17 +88,20 @@ let current scope =
 let completion_current scope terminal =
   let* () = O.Native_terminal.check_completion_now terminal in
   let* selected_now = scope.selected_now () in
+  let* current_capabilities = scope.current_capabilities () in
   if
     (not (String.equal (C.fingerprint scope.selected) (C.fingerprint selected_now)))
     || not
          (List.for_all (C.references scope.selected) ~f:(fun reference ->
             Result.is_ok
               (C.resolve
-                 (O.native_selected scope.service.root)
+                 current_capabilities
                  ~id:reference.id
                  ~fingerprint:reference.fingerprint)))
   then Error (invalid "developer job selection changed")
-  else scope.check_parent_now ()
+  else
+    let* () = O.Native_terminal.check_completion_now terminal in
+    scope.check_parent_now ()
 ;;
 
 let check scope =
@@ -116,11 +121,9 @@ module Source_parent = struct
       C.resolve t.scope.selected ~id:reference.id ~fingerprint:reference.fingerprint
       |> Result.map_error ~f:(fun error -> invalid error.C.message)
     in
+    let* current_capabilities = t.scope.current_capabilities () in
     let* current =
-      C.resolve
-        (O.native_selected t.scope.service.root)
-        ~id:reference.id
-        ~fingerprint:reference.fingerprint
+      C.resolve current_capabilities ~id:reference.id ~fingerprint:reference.fingerprint
       |> Result.map_error ~f:(fun error -> invalid error.C.message)
     in
     match C.native_implementation binding with
@@ -424,7 +427,7 @@ module Scope = struct
       let prepared = M.owned_prepared execution in
       let dependencies = Chat_response.Extension_compiler.capabilities prepared in
       let selected_now () =
-        let current = O.native_selected t.service.root in
+        let* current = t.current_capabilities () in
         let* names =
           List.fold_result (C.references dependencies) ~init:[] ~f:(fun names pin ->
             let* _ =
@@ -444,7 +447,8 @@ module Scope = struct
       in
       let* () =
         K.rebind_selected t.kernel ~selected:exact ~current_capabilities:(fun () ->
-          O.native_selected t.service.root)
+          Result.map_error (t.current_capabilities ()) ~f:(fun (error : P.Error.t) ->
+            error.message))
         |> kernel_result
       in
       t.selected <- exact;
@@ -485,13 +489,20 @@ module Scope = struct
   let validate_work t work = kernel_result (K.validate_work t.kernel work)
 end
 
-let with_kernel service ~physical ~selected ~selected_now ~check_parent_now f =
+let with_kernel
+      service
+      ~physical
+      ~selected
+      ~selected_now
+      ~current_capabilities
+      ~check_parent_now
+      f
+  =
   K.with_scope
     ~selected
     ~current_capabilities:(fun () ->
-      match selected_now () with
-      | Ok selected -> selected
-      | Error _ -> O.native_selected service.root)
+      Result.map_error (current_capabilities ()) ~f:(fun (error : P.Error.t) ->
+        error.message))
     ~abort:(fun id ->
       match cleanup_physical physical id with
       | Ok O.Action.Aborted | Ok Physically_owned -> ()
@@ -504,6 +515,7 @@ let with_kernel service ~physical ~selected ~selected_now ~check_parent_now f =
          ; worker_parent = None
          ; selected
          ; selected_now
+         ; current_capabilities
          ; kernel
          ; check_parent_now
          ; managed_admitted = false
@@ -518,7 +530,7 @@ let with_root_action service ~phase f =
   let action = ref None in
   K.with_scope
     ~selected
-    ~current_capabilities:(fun () -> O.native_selected service.root)
+    ~current_capabilities:(fun () -> Ok (O.native_selected service.root))
     ~abort:(fun id ->
       match !action with
       | None -> failwith "root job stage has no issuing physical action"
@@ -537,6 +549,7 @@ let with_root_action service ~phase f =
              ; worker_parent = None
              ; selected
              ; selected_now = (fun () -> Ok (O.native_selected service.root))
+             ; current_capabilities = (fun () -> Ok (O.native_selected service.root))
              ; kernel
              ; check_parent_now = (fun () -> Ok ())
              ; managed_admitted = false
@@ -570,7 +583,7 @@ let with_claimed_worker service ~candidate ?on_capacity_decision ?select f =
   let action = ref None in
   K.with_scope
     ~selected
-    ~current_capabilities:(fun () -> O.native_selected service.root)
+    ~current_capabilities:(fun () -> Ok (O.native_selected service.root))
     ~abort:(fun id ->
       match !action with
       | None -> failwith "claimed job stage has no issuing physical action"
@@ -600,6 +613,7 @@ let with_claimed_worker service ~candidate ?on_capacity_decision ?select f =
                 ; worker_parent = Some parent
                 ; selected
                 ; selected_now
+                ; current_capabilities = (fun () -> Ok (O.native_selected service.root))
                 ; kernel
                 ; check_parent_now =
                     (fun () ->
@@ -637,7 +651,7 @@ module Native_selection = struct
   let physical (t : t) = t.physical
 end
 
-let borrowed_selected service terminal borrowed ceiling =
+let borrowed_selected service terminal borrowed ceiling ~selected_current =
   let context = H.context (O.Native_terminal.invocation terminal) in
   let* () =
     if P.Execution_owner.equal context.owner (Developer (O.owner service.root))
@@ -646,7 +660,7 @@ let borrowed_selected service terminal borrowed ceiling =
   in
   let* selected =
     match context.parent_invocation, borrowed, ceiling with
-    | None, None, None -> Ok (O.native_selected service.root)
+    | None, None, None -> selected_current ()
     | None, None, Some selected when Option.is_some context.parent_job -> Ok selected
     | None, None, Some _ ->
       Error (invalid "root native scope cannot borrow a claimed job ceiling")
@@ -660,19 +674,17 @@ let borrowed_selected service terminal borrowed ceiling =
     | None, Some _, _ | Some _, None, _ | Some _, Some _, Some _ ->
       Error (invalid "native job parent borrow is missing or unexpected")
   in
+  let* current_capabilities = selected_current () in
   let* current =
     List.fold_result (C.references selected) ~init:[] ~f:(fun names reference ->
       let* _actual =
-        C.resolve
-          (O.native_selected service.root)
-          ~id:reference.id
-          ~fingerprint:reference.fingerprint
+        C.resolve current_capabilities ~id:reference.id ~fingerprint:reference.fingerprint
         |> Result.map_error ~f:(fun error -> invalid error.message)
       in
       Ok (reference.name :: names))
   in
   let* narrowed =
-    C.select (O.native_selected service.root) ~names:(List.rev current)
+    C.select current_capabilities ~names:(List.rev current)
     |> Result.map_error ~f:(fun error -> invalid error.message)
   in
   if String.equal context.capability_fingerprint (C.fingerprint narrowed)
@@ -680,16 +692,28 @@ let borrowed_selected service terminal borrowed ceiling =
   else Error (invalid "native job borrow differs from admitted child selection")
 ;;
 
-let with_native_scope service ~terminal ~borrowed ?ceiling ~check_parent_now f =
+let with_native_scope
+      service
+      ~terminal
+      ~borrowed
+      ?ceiling
+      ?(selected_current = fun () -> Ok (O.native_selected service.root))
+      ~check_parent_now
+      f
+  =
   if not (O.Native_terminal.issued_by_root terminal ~root:service.root)
   then Error (invalid "native job terminal belongs to another physical root")
   else
-    let* selected = borrowed_selected service terminal borrowed ceiling in
+    let* selected =
+      borrowed_selected service terminal borrowed ceiling ~selected_current
+    in
     with_kernel
       service
       ~physical:(Native terminal)
       ~selected
-      ~selected_now:(fun () -> borrowed_selected service terminal borrowed ceiling)
+      ~selected_now:(fun () ->
+        borrowed_selected service terminal borrowed ceiling ~selected_current)
+      ~current_capabilities:selected_current
       ~check_parent_now
       (fun scope -> f ~scope)
 ;;

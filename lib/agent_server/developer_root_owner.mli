@@ -118,6 +118,52 @@ module Registry : sig
     -> workspace_conflict_domain:string
     -> (run, Agent_protocol.Error.t) result
 
+  (** Adopt the exact already-finished Startup claim from a currently entered
+      Live command callback. The caller established this same physical
+      Store/handle/claim/window before ANY current-epoch Reserve and consumed
+      its durable Start before effectful native preparation. Registry first
+      installs its bounded Admitting slot. It then invokes the trusted
+      NONYIELDING [transfer_finished_claim] callback, whose [accept] verifies
+      Store.issued_by plus exact Recovery.issued_finished and installs both
+      tokens before Lifecycle relinquishes custody. A rejection leaves
+      Lifecycle owner; an accepted transfer remains in Admitting on any later
+      failure, exception or cancellation. Publication reuses the ordinary
+      Tracking/Worker/final-admission kernel. It never opens Recovery again or
+      interrupts concurrent same-run Check/Fixture callbacks. *)
+  val admit_recovered
+    :  ?final_admission:final_admission
+    -> ?checkpoint:(unit -> unit)
+    -> t
+    -> actor:Operator_authorization.t
+    -> capture:Chatml_developer_capture.t
+    -> registry:Chat_response.Tool_capability.t
+    -> selected:Chat_response.Tool_capability.t
+    -> selected_model:Provider_operator_port.Model_selection.t option
+    -> job_policy:Chat_response.One_off_request.policy
+    -> handle:Agent_store.Developer_run_store.handle
+    -> workspace_conflict_domain:string
+    -> transfer_finished_claim:
+         (accept:
+            (claim:Agent_store.Developer_run_store.Run_claim.t
+             -> window:Agent_store.Developer_run_store.Recovery.t
+             -> (unit, Agent_protocol.Error.t) result)
+          -> (unit, Agent_protocol.Error.t) result)
+    -> (run, Agent_protocol.Error.t) result
+
+  (** Trusted daemon cleanup after Host has authorized retirement and joined
+      ALL same-run command callbacks. The exact physical handle selects one
+      retained Admitting entry; no principal/ID-only lookup can release it.
+      This cleanup remains retryable after the original actor expires, since
+      retirement was already authorized before cancellation began. It closes
+      provisional Worker/Tracking and releases the exact claim through the
+      existing cleanup kernel. An unresolved write or cleanup error retains
+      Admitting; an Owned Root must use its ordinary close path. A missing
+      entry is harmless only when no transfer occurred. No Recovery reruns. *)
+  val retire_admission
+    :  t
+    -> handle:Agent_store.Developer_run_store.handle
+    -> (unit, Agent_protocol.Error.t) result
+
   (** The startup form of [admit]. After acquiring the same physical Run_claim
       and authenticating the original actor/capture, open the one-shot Store
       recovery window and call [recover] BEFORE creating or exposing a worker.
@@ -855,6 +901,30 @@ val with_native_callback
     composed by the higher model runner. *)
 module Model_inference : sig
   type t
+
+  (** Compare a saved Agent.run source with this exact physical Root before
+      preparing child MCP/shell/native resources. This factors the existing
+      [with_claimed_agent] admission: current saved source and Worker, exact
+      registered Host invocation object in this Root's native_calls, entered
+      native callback key, live Native_terminal and current Root. It creates
+      no inference scope or Store tracker. A copied owner/artifact/ID cannot
+      substitute for the entered callback. Expected denial is typed; original
+      cancellation and unexpected exception identity are preserved. *)
+  val check_saved_agent_source
+    :  run
+    -> selected:Agent_session.Captured_agent_runner.Claimed_developer.Selected.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Nonyielding recheck after a child selected borrow shadows the saved
+      parent's direct fiber binding. The exact physical selected-ancestor
+      proof, registered invocation/entered native callback, terminal and Root
+      local currentness all remain required. Call immediately before child
+      native/managed effect admission, with no intervening yield. *)
+  val check_saved_agent_source_descendant_now
+    :  run
+    -> selected:Agent_session.Captured_agent_runner.Claimed_developer.Selected.t
+    -> child:Agent_session.Native_tool_invocation.selected_borrowed
+    -> (unit, Agent_protocol.Error.t) result
 
   (** Borrow this root's actual entered, durably Running Model_call Claim. The
       scope checks exact Worker issuer, saved job/attempt/capture and current

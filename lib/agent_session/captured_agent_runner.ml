@@ -181,64 +181,7 @@ let admit_developer_literal_child t revision parsed ~checkpoint =
   then Ok ()
   else
     bounded t ~checkpoint ~f:(fun checkpoint ->
-      let open Result.Let_syntax in
-      let denied () =
-        Error (failure "developer child effect needs a selected child owner")
-      in
-      let elements =
-        match Prompt_revision.document_projection revision with
-        | None -> CM.Parsed.elements parsed
-        | Some projection ->
-          if not (phys_equal parsed (CM.Document_projection.parsed projection))
-          then invalid_arg "developer child projection belongs to another parser";
-          CM.Document_projection.elements projection
-      in
-      let admit_content = function
-        | CM.Basic basic ->
-          if
-            String.equal basic.type_ "text"
-            && Option.is_none basic.image_url
-            && Option.is_none basic.document_url
-            && (not basic.is_local)
-            && (not basic.cleanup_html)
-            && not basic.markdown
-          then Ok ()
-          else denied ()
-        | CM.Agent _ -> denied ()
-      in
-      let admit_message (message : CM.msg) =
-        if
-          Option.is_some message.function_call
-          || Option.is_some message.tool_call
-          || Option.is_some message.tool_call_id
-        then denied ()
-        else (
-          match message.content with
-          | None | Some (Text _) -> Ok ()
-          | Some (Items items) ->
-            List.fold_result items ~init:() ~f:(fun () item ->
-              checkpoint ();
-              admit_content item))
-      in
-      List.fold_result elements ~init:() ~f:(fun () element ->
-        checkpoint ();
-        match element with
-        | CM.Msg message
-        | Developer message
-        | System message
-        | User message
-        | Assistant message -> admit_message message
-        | Config _ | Reasoning _ -> Ok ()
-        | Tool_call _
-        | Tool_response _
-        | Tool _
-        | Shell_runtime _
-        | Moderator_runtime _
-        | Script _
-        | Shell_script _
-        | Extension_script _
-        | Authoring_context _
-        | Authoring_help _ -> denied ()))
+      Developer_child_preflight.admit_literal ~revision ~parsed ~checkpoint)
 ;;
 
 let compilation_error (error : Chatml_compilation.error) =
@@ -552,8 +495,12 @@ module Claimed_developer = struct
       ; live : bool Atomic.t
       }
 
+    type selected = t
+
+    let key : t Eio.Fiber.key = Eio.Fiber.create_key ()
     let active t = t.scope.active
     let invocation t = t.scope.invocation
+    let matches_borrowed t borrowed = phys_equal t.borrowed borrowed
 
     let check_now t =
       let open Result.Let_syntax in
@@ -583,6 +530,78 @@ module Claimed_developer = struct
       | Some artifact when phys_equal artifact t.scope.artifact -> check_now t
       | Some _ | None -> invalid "saved Agent source changed after selected admission"
     ;;
+
+    let check_descendant_now t ~child =
+      let open Result.Let_syntax in
+      if
+        (not (Atomic.get t.live))
+        || (not (live t.scope))
+        || (not (J.Parent.same_active t.scope.parent t.scope.active))
+        ||
+        match C.native_implementation t.scope.binding with
+        | Some implementation -> not (phys_equal implementation t.implementation)
+        | None -> true
+      then invalid "saved Agent source callback is no longer selected"
+      else (
+        let%bind () = N.check_selected_ancestor ~ancestor:t.borrowed ~child in
+        let%map _ = N.selected_borrowed_capabilities t.borrowed in
+        ())
+    ;;
+
+    module Target = struct
+      type t =
+        { saved : selected
+        ; source : Prompt_child_source.t
+        }
+
+      let revision t = Prompt_child_source.revision t.source
+      let saved t = t.saved
+
+      let same_reference left right =
+        P.Id.Prompt_revision.equal
+          (B.Agent_artifact.revision_id left)
+          (B.Agent_artifact.revision_id right)
+        && Chatml_source.Digest.equal
+             (B.Agent_artifact.manifest_sha256 left)
+             (B.Agent_artifact.manifest_sha256 right)
+        && Portable_path.equal
+             (B.Agent_artifact.root_relative_path left)
+             (B.Agent_artifact.root_relative_path right)
+      ;;
+
+      let check_reference t =
+        if same_reference (Prompt_child_source.reference t.source) t.saved.scope.artifact
+        then Ok ()
+        else invalid "saved Agent target differs from its selected artifact"
+      ;;
+
+      let check t =
+        let open Result.Let_syntax in
+        let%bind () = check t.saved in
+        let%bind () = check_reference t in
+        check t.saved
+      ;;
+
+      let check_now t =
+        let open Result.Let_syntax in
+        let%bind () = check_now t.saved in
+        check_reference t
+      ;;
+
+      let check_descendant_now t ~child =
+        let open Result.Let_syntax in
+        let%bind () = check_descendant_now t.saved ~child in
+        check_reference t
+      ;;
+    end
+
+    let target_for_current source =
+      match Eio.Fiber.get key with
+      | None -> invalid "saved Agent target has no selected source callback"
+      | Some selected ->
+        let target = Target.{ saved = selected; source } in
+        Result.map (Target.check target) ~f:(fun () -> target)
+    ;;
   end
 
   let with_selected ~borrowed ~implementation f =
@@ -596,13 +615,13 @@ module Claimed_developer = struct
       let%bind () = Selected.check_now selected in
       Exn.protect
         ~finally:(fun () -> Atomic.set selected.live false)
-        ~f:(fun () -> f selected)
+        ~f:(fun () -> Eio.Fiber.with_binding Selected.key selected (fun () -> f selected))
     | Some _, (None | Some _) | None, _ ->
       invalid "saved Agent source was not selected by this native callback"
   ;;
 end
 
-let rec bind_with_checkpoint ?installed t ~revision ~sw ~checkpoint =
+let rec bind_with_checkpoint ?installed ?run_selected_target t ~revision ~sw ~checkpoint =
   let open Result.Let_syntax in
   let%map parsed, projection, identity = admit_revision t revision ~checkpoint in
   let identity =
@@ -624,6 +643,7 @@ let rec bind_with_checkpoint ?installed t ~revision ~sw ~checkpoint =
           invoke
             t
             ?installed
+            ?run_selected_target
             ~activity
             ~parent:revision
             ~caller:port
@@ -655,6 +675,7 @@ let rec bind_with_checkpoint ?installed t ~revision ~sw ~checkpoint =
           invoke
             t
             ?installed
+            ?run_selected_target
             ~activity
             ~parent:revision
             ~caller:port
@@ -677,6 +698,7 @@ let rec bind_with_checkpoint ?installed t ~revision ~sw ~checkpoint =
 
 and invoke
       ?installed
+      ?run_selected_target
       t
       ~activity
       ~parent
@@ -873,7 +895,19 @@ and invoke
           |> Result.of_option
                ~error:(failure "selected developer child has no owned parser")
         in
-        let%bind () = admit_developer_literal_child t revision parsed ~checkpoint in
+        let selected_target_handler =
+          match run_selected_target, target, selected_source with
+          | Some run_selected_target, Tool_target (Some _), Selected_tool_source _ ->
+            Some run_selected_target
+          | Some _, (Content_target | Tool_target None), _
+          | Some _, Tool_target (Some _), (No_selected_source | Selected_content_context _)
+          | None, _, _ -> None
+        in
+        let%bind () =
+          match selected_target_handler with
+          | Some _ -> Ok ()
+          | None -> admit_developer_literal_child t revision parsed ~checkpoint
+        in
         Preparation.with_revision
           (Some t.script_preparation)
           ~tool_contract:t.tool_contract
@@ -881,7 +915,22 @@ and invoke
           ~env
           ~invocation:Headless
           ~checkpoint
-          ~f:(run ~check_selected caller ~revision)
+          ~f:(fun startup ~compilation_limits ~programs ->
+            match selected_target_handler with
+            | None ->
+              run ~check_selected caller startup ~revision ~compilation_limits ~programs
+            | Some run_selected_target ->
+              let%bind target = Claimed_developer.Selected.target_for_current selected in
+              let%bind () = check_selected () in
+              run_selected_target
+                ~target
+                ~startup
+                ~compilation_limits
+                ~programs
+                ~ctx
+                ~input:items
+                ~observer
+                ~source)
     in
     runner_result result)
 ;;
@@ -892,7 +941,16 @@ let bind t ~revision ~sw =
   bind_with_checkpoint t ~revision ~sw ~checkpoint:Eio.Fiber.check
 ;;
 
-let bind_installed t ~source ~artifact_store ~source_lease ~env ~revision ~sw =
+let bind_installed_with_selected
+      ?run_selected_target
+      t
+      ~source
+      ~artifact_store
+      ~source_lease
+      ~env
+      ~revision
+      ~sw
+  =
   let open Result.Let_syntax in
   let%bind () = check_domain t in
   let installed =
@@ -903,7 +961,17 @@ let bind_installed t ~source ~artifact_store ~source_lease ~env ~revision ~sw =
       ; env
       }
   in
-  bind_with_checkpoint ~installed t ~revision ~sw ~checkpoint:Eio.Fiber.check
+  bind_with_checkpoint
+    ~installed
+    ?run_selected_target
+    t
+    ~revision
+    ~sw
+    ~checkpoint:Eio.Fiber.check
+;;
+
+let bind_installed t ~source ~artifact_store ~source_lease ~env ~revision ~sw =
+  bind_installed_with_selected t ~source ~artifact_store ~source_lease ~env ~revision ~sw
 ;;
 
 let create_runner = create
@@ -938,6 +1006,7 @@ module Source_binding = struct
   ;;
 
   let bind_with_literal_policy
+        ?run_selected_target
         t
         ~developer_literal_child
         ~script_preparation
@@ -969,11 +1038,16 @@ module Source_binding = struct
           ; policy_revision =
               numeric_identity
                 runner.policy_revision
-                [%sexp ("developer-literal-child.v1" : string)]
+                [%sexp
+                  (if Option.is_some run_selected_target
+                   then "developer-selected-child.v1"
+                   else "developer-literal-child.v1"
+                   : string)]
           }
         else runner
       in
-      bind_installed
+      bind_installed_with_selected
+        ?run_selected_target
         runner
         ~source:t.source
         ~artifact_store:t.artifact_store
@@ -1006,6 +1080,7 @@ module Source_binding = struct
   ;;
 
   let bind_developer_literal
+        ?run_selected_target
         t
         ~script_preparation
         ~manifest_authorizer
@@ -1016,6 +1091,7 @@ module Source_binding = struct
         ~sw
     =
     bind_with_literal_policy
+      ?run_selected_target
       t
       ~developer_literal_child:true
       ~script_preparation
@@ -1070,6 +1146,7 @@ module Deferred_developer = struct
   let registrations t = t.registrations
 
   let prepare
+        ?run_selected_target
         source
         ~script_preparation
         ~manifest_authorizer
@@ -1101,6 +1178,7 @@ module Deferred_developer = struct
         let open Result.Let_syntax in
         let%bind port =
           Source_binding.bind_developer_literal
+            ?run_selected_target
             source
             ~script_preparation
             ~manifest_authorizer

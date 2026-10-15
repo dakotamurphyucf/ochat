@@ -385,21 +385,27 @@ type installed_agent_fixture =
   ; response_root : Eio.Fs.dir_ty Eio.Path.t
   }
 
+type installed_agent_source =
+  { source_root : Eio.Fs.dir_ty Eio.Path.t
+  ; response_root : Eio.Fs.dir_ty Eio.Path.t
+  ; source : Agent_session.Captured_agent_runner.Source.t
+  ; parent : Agent_session.Prompt_revision.t
+  ; artifacts : Agent_store.Prompt_artifact_store.t
+  ; policy : Agent_session.Runtime_script_preparation.t
+  }
+
 let default_child_contents =
   {|<developer>Original child instructions</developer>
 <developer><agent src="content.chatmd" local source_mode="captured"/></developer>|}
 ;;
 
-let installed_agent_fixture_with_contents
-      ~deferred
+let installed_agent_source_with_contents
+      ?(agent_names = [ "child" ])
       ~child_contents
-      ~on_run
       ~env
-      ~sw
       ~data_root
-      ~observed
+      ()
   =
-  let module Revision = Agent_session.Prompt_revision in
   let module Builder = Agent_session.Prompt_revision_builder in
   let module Runner = Agent_session.Captured_agent_runner in
   let source_root = Eio.Path.(Eio.Stdenv.fs env / data_root / "agent-source") in
@@ -411,8 +417,14 @@ let installed_agent_fixture_with_contents
   in
   save
     "root.chatmd"
-    {|<tool name="child" agent="child.chatmd" local source_mode="captured"/>|};
-  save "child.chatmd" child_contents;
+    (String.concat
+       ~sep:"\n"
+       (List.map agent_names ~f:(fun name ->
+          sprintf
+            {|<tool name="%s" agent="%s.chatmd" local source_mode="captured"/>|}
+            name
+            name)));
+  List.iter agent_names ~f:(fun name -> save (name ^ ".chatmd") child_contents);
   save "content.chatmd" "<developer>Content own instructions</developer>";
   save "input.json" {|{"type":"object"}|};
   save "output.json" {|{"type":"string"}|};
@@ -461,6 +473,23 @@ let installed_agent_fixture_with_contents
       ~prepare_programs:(fun _ ~tool_contract:_ ~invocation:_ _ _ ->
         failwith "saved Agent artifact must not prepare a new file source")
     |> Or_error.ok_exn
+  in
+  { source_root; response_root; source; parent; artifacts; policy }
+;;
+
+let installed_agent_fixture_with_contents
+      ~deferred
+      ~child_contents
+      ~on_run
+      ~env
+      ~sw
+      ~data_root
+      ~observed
+  =
+  let module Revision = Agent_session.Prompt_revision in
+  let module Runner = Agent_session.Captured_agent_runner in
+  let { source_root; response_root; source; parent; artifacts; policy } =
+    installed_agent_source_with_contents ~child_contents ~env ~data_root ()
   in
   let runner =
     Runner.create
@@ -650,14 +679,16 @@ let installed_agent_fixture ~on_run ~env ~sw ~data_root ~observed =
     ~observed
 ;;
 
-let stage_registered_agent_tool jobs =
+let stage_registered_agent_tool ?(name = "child") jobs =
   let module Runtime = Chatml_host_runtime in
   let module Value = Chatml.Chatml_value_codec in
   let compiled =
     Runtime.compile_script
       ~surface:Chatml.Chatml_extension_surface.one_off_v1
       ~source:
-        {|let main input = Job.start_tool("child", `Object([{key="input"; value=`String("go")}]))|}
+        (sprintf
+           {|let main input = Job.start_tool("%s", `Object([{key="input"; value=`String("go")}]))|}
+           name)
       ()
     |> Result.ok_or_failwith
   in
@@ -682,7 +713,8 @@ let stage_registered_agent_tool jobs =
       |> Result.map_error ~f:P.Error.invalid_request
     in
     Result.map value ~f:(fun value -> value, !effects))
-  |> ok
+  |> Result.map_error ~f:(fun error -> error.P.Error.message)
+  |> Result.ok_or_failwith
   |> fst
   |> function
   | Chatml.Chatml_lang.VString id -> P.Id.Job.of_string id |> ok
@@ -1115,6 +1147,12 @@ let%test_unit "nested Agent callback cannot consume outer saved artifact pin" =
   let observed = ref [] in
   let source_calls = ref 0 in
   let rejected = ref false in
+  let descendant_checked = ref false in
+  let descendant_error = ref None in
+  let saved_selected = ref None in
+  let nested_invocation = ref None in
+  let current_root = ref None in
+  let selected_registry = ref None in
   let run_nested = ref (fun () -> ()) in
   with_registered_agent
     ~run_name:"dvr_nested_agent_artifact"
@@ -1122,9 +1160,40 @@ let%test_unit "nested Agent callback cannot consume outer saved artifact pin" =
     ~on_run:(fun () ->
       Int.incr source_calls;
       if Int.equal !source_calls 1
-      then !run_nested ()
+      then (
+        let borrowed = Agent_session.Native_tool_invocation.borrow_selected () |> ok in
+        let binding = C.find (Option.value_exn !selected_registry) ~name:"child" |> ok in
+        let implementation = C.native_implementation binding |> Option.value_exn in
+        Agent_session.Captured_agent_runner.Claimed_developer.with_selected
+          ~borrowed
+          ~implementation
+          (fun selected ->
+             saved_selected := Some selected;
+             O.Model_inference.check_saved_agent_source
+               (Option.value_exn !current_root)
+               ~selected
+             |> ok;
+             !run_nested ();
+             Ok ())
+        |> ok)
       else if Int.equal !source_calls 2
-      then ()
+      then (
+        let child = Agent_session.Native_tool_invocation.borrow_selected () |> ok in
+        let actual =
+          Agent_session.Native_tool_invocation.selected_borrowed_invocation child
+        in
+        let expected = Option.value_exn !nested_invocation in
+        if not (P.Id.Invocation.equal (H.context actual).id (H.context expected).id)
+        then descendant_error := Some "second source call retained parent selected borrow"
+        else (
+          match
+            O.Model_inference.check_saved_agent_source_descendant_now
+              (Option.value_exn !current_root)
+              ~selected:(Option.value_exn !saved_selected)
+              ~child
+          with
+          | Ok () -> descendant_checked := true
+          | Error error -> descendant_error := Some error.message))
       else failwith "Agent source entered an unexpected invocation")
     (fun ~env
       ~root
@@ -1139,6 +1208,8 @@ let%test_unit "nested Agent callback cannot consume outer saved artifact pin" =
       ~preparations ->
        let id = stage_registered_agent_tool jobs in
        assert (Int.equal !preparations 1);
+       current_root := Some root;
+       selected_registry := Some selected;
        let binding = C.find selected ~name:"child" |> ok in
        let reference = C.reference binding in
        (run_nested
@@ -1159,6 +1230,7 @@ let%test_unit "nested Agent callback cannot consume outer saved artifact pin" =
                  }
                |> ok
              in
+             nested_invocation := Some child;
              let terminal =
                X.run_child
                  executor
@@ -1262,6 +1334,13 @@ let%test_unit "nested Agent callback cannot consume outer saved artifact pin" =
          | Cancelled
          | Interrupted _ -> false);
        assert !rejected;
+       if not !descendant_checked
+       then
+         failwithf
+           "nested descendant proof failed (%d calls): %s"
+           !source_calls
+           (Option.value !descendant_error ~default:"no result")
+           ();
        assert (Int.equal !source_calls 2))
 ;;
 
@@ -1343,9 +1422,24 @@ let%test_unit "shared scheduler overlaps two physically admitted jobs of one roo
          Exn.protect
            ~finally:(fun () ->
              unblock ();
-             Agent_server.Job_scheduler.close scheduler;
-             Agent_server.Job_scheduler.await_developer_scans_idle scheduler |> ok)
+             Agent_server.Job_scheduler.close_and_wait scheduler |> ok)
            ~f:(fun () ->
+             let foreign =
+               Stdlib.Domain.spawn (fun () ->
+                 let joined = Agent_server.Job_scheduler.close_and_wait scheduler in
+                 let closed =
+                   try
+                     Agent_server.Job_scheduler.close scheduler;
+                     false
+                   with
+                   | Invalid_argument _ -> true
+                 in
+                 joined, closed)
+             in
+             (match Stdlib.Domain.join foreign with
+              | Error { P.Error.code = Invalid_state; _ }, true -> ()
+              | _ -> failwith "foreign scheduler shutdown mutated the owner");
+             assert (Agent_server.Job_scheduler.is_running scheduler);
              Agent_server.Job_scheduler.attach_developer scheduler ~root ~runner |> ok;
              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
                Eio.Promise.await both_entered);
@@ -1422,8 +1516,7 @@ let%test_unit "developer scheduler retirement joins an entered protected handler
            ~finally:(fun () ->
              if not (Eio.Promise.is_resolved release)
              then Eio.Promise.resolve resolve_release ();
-             Agent_server.Job_scheduler.close scheduler;
-             Agent_server.Job_scheduler.await_developer_scans_idle scheduler |> ok)
+             Agent_server.Job_scheduler.close_and_wait scheduler |> ok)
            ~f:(fun () ->
              Agent_server.Job_scheduler.attach_developer scheduler ~root ~runner |> ok;
              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
@@ -1824,9 +1917,7 @@ let%test_unit "malformed saved Async_tool enters one physical Failed attempt" =
                Error (P.Error.invalid_request "unused conversation inference"))
          in
          Exn.protect
-           ~finally:(fun () ->
-             Agent_server.Job_scheduler.close scheduler;
-             Agent_server.Job_scheduler.await_developer_scans_idle scheduler |> ok)
+           ~finally:(fun () -> Agent_server.Job_scheduler.close_and_wait scheduler |> ok)
            ~f:(fun () ->
              Agent_server.Job_scheduler.attach_developer scheduler ~root ~runner |> ok;
              let state =
@@ -3487,6 +3578,172 @@ let%test_unit "cancelled claimed parent cannot start an effect while child joins
         | Ok _ | Error _ -> failwith "claimed worker cancellation identity was lost");
        assert !child_denied;
        assert (Int.equal !calls 0))
+;;
+
+let%test_unit "saved-source child retains its exact entered parent active" =
+  let effects = ref 0 in
+  with_executor
+    ~run_name:"dvr_source_child_parent"
+    ~make_selected:(fun _env -> registry ~custom:false effects)
+    (fun ~env:_ ~root ~executor:_ ~handle:_ ~owner ~selected ->
+       let reference = List.hd_exn (C.references selected) in
+       let admitted = invocation owner selected reference ~custom:false in
+       let issuer =
+         D.create
+           ~owner
+           ~capture_fingerprint:(Chatml_developer_capture.fingerprint (O.capture root))
+           ~ceiling:(O.native_ceiling root)
+           ~selected:(fun () -> O.native_selected root)
+           ~current:(fun ~owner:_ ~capture_fingerprint:_ ->
+             Result.map (O.current root) ~f:ignore)
+           ~now:(fun () -> O.native_now root)
+         |> ok
+       in
+       let parent_live = ref true in
+       let retained = ref None in
+       let revision, completion =
+         O.with_native_registration root ~invocation:admitted (fun ~scope ->
+           let dispatch : D.dispatch_storage =
+             { read = O.Native_terminal.read_dispatch scope
+             ; save_dispatch = O.Native_terminal.save_dispatch scope
+             }
+           in
+           let sealed = ref None in
+           let completion =
+             D.with_invocation
+               issuer
+               ~parent:D.Root
+               ~invocation:admitted
+               ~dispatch
+               ~parent_live_now:(fun () ->
+                 !parent_live && O.Native_terminal.effect_parent_live_now scope)
+               ~frozen:(fun () -> None)
+               (fun ~active ~dispatched ->
+                  O.with_native_callback scope ~dispatched (fun ~sw:_ ->
+                    let source_child =
+                      D.create_source_child
+                        ~parent_issuer:issuer
+                        ~parent_active:active
+                        ~ceiling:selected
+                        ~current_child:(fun () -> Ok ())
+                      |> ok
+                    in
+                    let child_of parent =
+                      H.create_developer
+                        { (H.context admitted) with
+                          id = P.Id.Invocation.create ()
+                        ; parent_invocation = Some (H.context parent).id
+                        }
+                      |> ok
+                    in
+                    let child = child_of dispatched in
+                    retained := Some (source_child, active, child);
+                    assert (
+                      Result.is_ok
+                        (D.check_invocation
+                           source_child
+                           ~parent:(D.Source_child active)
+                           child));
+                    assert (
+                      Result.is_error
+                        (D.check_invocation source_child ~parent:D.Root admitted));
+                    let other = child_of dispatched in
+                    let other_dispatch : D.dispatch_storage =
+                      { read = (fun _ -> Ok None)
+                      ; save_dispatch =
+                          (fun ~expected_revision ~dispatched:_ ->
+                            assert (Option.is_none expected_revision);
+                            Ok 1)
+                      }
+                    in
+                    let child_completion =
+                      D.with_invocation
+                        source_child
+                        ~parent:(D.Source_child active)
+                        ~invocation:child
+                        ~dispatch:other_dispatch
+                        ~parent_live_now:(fun () -> true)
+                        ~frozen:(fun () -> None)
+                        (fun ~active:child_active ~dispatched:child_dispatched ->
+                           let nested = child_of child_dispatched in
+                           assert (
+                             Result.is_ok
+                               (D.check_invocation
+                                  source_child
+                                  ~parent:(D.Child child_active)
+                                  nested));
+                           parent_live := false;
+                           assert (
+                             Result.is_error
+                               (D.check_invocation
+                                  source_child
+                                  ~parent:(D.Child child_active)
+                                  nested));
+                           assert (
+                             Result.is_error
+                               (D.check_parent_now
+                                  source_child
+                                  ~parent:(D.Child child_active)
+                                  nested));
+                           assert (
+                             Result.is_error
+                               (D.inherited_job_parent source_child child_active));
+                           parent_live := true;
+                           Ok (I.Complete `Null, None))
+                      |> ok
+                    in
+                    ignore
+                      (D.Completion.finish child_completion ~settlement:(Terminal_saved 2)
+                       |> ok);
+                    let other_completion =
+                      D.with_invocation
+                        issuer
+                        ~parent:(D.Child active)
+                        ~invocation:other
+                        ~dispatch:other_dispatch
+                        ~parent_live_now:(fun () -> true)
+                        ~frozen:(fun () -> None)
+                        (fun ~active:other_active ~dispatched:other_dispatched ->
+                           let wrong_child = child_of other_dispatched in
+                           assert (
+                             Result.is_error
+                               (D.check_invocation
+                                  source_child
+                                  ~parent:(D.Source_child other_active)
+                                  wrong_child));
+                           Ok (I.Complete `Null, None))
+                      |> ok
+                    in
+                    ignore
+                      (D.Completion.finish other_completion ~settlement:(Terminal_saved 2)
+                       |> ok);
+                    sealed
+                    := Some
+                         (O.Native_terminal.seal
+                            scope
+                            ~outcome:(I.Complete `Null)
+                            ~selected:[]
+                          |> ok);
+                    Ok (I.Complete `Null, None)))
+             |> ok
+           in
+           let selected = Option.value_exn !sealed in
+           let revision =
+             O.Native_terminal.submit
+               scope
+               ~terminal:(D.Completion.terminal completion)
+               ~selected:(Some selected)
+             |> ok
+           in
+           Ok (revision, completion))
+         |> ok
+       in
+       ignore (D.Completion.finish completion ~settlement:(Terminal_saved revision) |> ok);
+       let source_child, parent_active, child = Option.value_exn !retained in
+       assert (
+         Result.is_error
+           (D.check_parent_now source_child ~parent:(D.Source_child parent_active) child));
+       assert (Int.equal !effects 0))
 ;;
 
 let%test_unit "cancelled native parent switch rejects protected nested child" =

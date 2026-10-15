@@ -102,6 +102,7 @@
     lib/agent_server/schedule_scheduler.ml %{dep:../agent_server/schedule_scheduler.ml}
     lib/agent_session/background_execution.ml %{dep:../agent_session/background_execution.ml}
     lib/agent_session/captured_agent_runner.ml %{dep:../agent_session/captured_agent_runner.ml}
+    lib/agent_session/developer_child_preflight.ml %{dep:../agent_session/developer_child_preflight.ml}
     lib/agent_store/developer_run_document.ml %{dep:../agent_store/developer_run_document.ml}
     lib/agent_store/developer_run_store.ml %{dep:../agent_store/developer_run_store.ml}
     lib/agent_session/background_job_event.ml %{dep:../agent_session/background_job_event.ml}
@@ -175,6 +176,7 @@
     lib/agent_server/session_factory.ml %{dep:../agent_server/session_factory.ml}
     lib/agent_server/developer_background_job_runner.ml %{dep:../agent_server/developer_background_job_runner.ml}
     lib/agent_server/developer_managed_tool_executor.ml %{dep:../agent_server/developer_managed_tool_executor.ml}
+    lib/agent_server/developer_native_executor.ml %{dep:../agent_server/developer_native_executor.ml}
     lib/agent_server/developer_script_job_execution.ml %{dep:../agent_server/developer_script_job_execution.ml}
     lib/agent_server/developer_script_job_service.ml %{dep:../agent_server/developer_script_job_service.ml}
     lib/agent_session/authoring_context_tool.ml %{dep:../agent_session/authoring_context_tool.ml}

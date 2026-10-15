@@ -192,6 +192,7 @@ end
     this constructor returns typed errors only for expected missing inference. *)
 val of_declaration_without_inference
   :  ?shell_registry:Shell_runtime.Registry.t
+  -> ?check_preparation_now:(unit -> (unit, Native_error.t) result)
   -> sw:Eio.Switch.t
   -> host:Shell_runtime.Host.t
   -> Prompt.Chat_markdown.tool

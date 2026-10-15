@@ -13,7 +13,7 @@ module Tool_contract = struct
   type t =
     | Standard
     | Developer_model_spawn
-  [@@deriving sexp, equal]
+  [@@deriving sexp, equal, compare]
 
   let target = function
     | Standard -> Tool_v1

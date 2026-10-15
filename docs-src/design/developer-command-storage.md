@@ -100,7 +100,26 @@ Callbacks run under a daemon-owned switch, each with a joined child switch.
 The submitting request can end while the callback and its capacity charge
 remain. Explicit cancellation checks a separate control policy, cancels and
 joins that callback, then settles its receipt. Passive waiting only reads a
-result after a fresh disclosure check. A live callback must cross the physical
-Root check and consume a fresh one-use execution acknowledgement before
-starting effects; neither historical receipts nor recovered Starts can supply
-it. The lifecycle does not select source, grant tools or schedule jobs.
+result after a fresh disclosure check. A live callback consumes its fresh
+durable Start before native preparation: MCP connection and shell activation
+can already perform external effects. Only that fresh Start issues a one-shot
+preparation proof. After preparing the exact selected runtime, the host admits
+Root and binds the proof to that physical Root before entering user code. An
+uncertain or recovered Start issues no proof and creates no native runtime.
+A preparation failure finishes the already started command truthfully; it
+cannot replay setup effects. Short-lived actor, Prompt and Workspace checks
+run before native connection, initial discovery loads and shell activation,
+while later invocation effects use their separate physical Root and selected
+tool checks. The lifecycle does not select source, grant tools or schedule jobs.
+
+An epoch replacement holds that run's same admission slot while retiring its
+old callbacks. Retirement rejects a call from an old callback before it sends
+any cancellation. It checks separate current control permission for every
+active old command kind before entering the host's Retiring state; a retained
+Live Root also requires control on its authentic originating row after that
+command has finished. Retirement then cancels and joins the callbacks and reconciles
+their exact selected receipts. Unknown writes keep their pending ownership and
+capacity charge for retry. The host authenticates the replacement request
+against the persisted principal and current method and source policy before
+retirement; receipt-read permission alone cannot cancel a run. The host then
+retires its scheduler and Root owners before admitting the new epoch.

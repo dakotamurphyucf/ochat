@@ -165,6 +165,19 @@ val create
     this inventory. *)
 val available_features : t -> string list
 
+(** Borrow the exact existing joined Service owner as a Developer
+    capture facade. No second source/context owner is constructed. Closed
+    installation rejects; a missing source route or selected Standard contract
+    fails the relevant later preparation, not a synthetic constructor grant.
+    The facade remains bound to this installation's original actor/source
+    checks and expires when the installation closes; policy and limits cannot
+    widen its admitted source grants. *)
+val developer_capture
+  :  t
+  -> policy:Service.Developer.Target_policy.t
+  -> limits:Service.Developer.Limits.t
+  -> (Service.Developer.t, P.Error.t) result
+
 (** The sole typed command route. Capabilities is admitted through the same
     joined Service request lifetime and lists only installed methods callable
     under this connection's current selected feature epoch. Bundle-only has

@@ -2079,7 +2079,7 @@ module Native_terminal = struct
   let callback_complete (t : t) = t.callback_complete
   let effect_parent_live_now = native_effect_parent_live_now
 
-  let check_completion_now (scope : t) =
+  let check_completion_state_now (scope : t) ~require_action_fiber =
     let issuer = scope.issuer in
     let context = H.context scope.registration.invocation in
     let dispatched =
@@ -2103,7 +2103,7 @@ module Native_terminal = struct
       || Option.is_some scope.sealed
       || (not dispatched)
       || (not (native_effect_parent_live_now scope))
-      || (not (same_action_fiber scope.action))
+      || (require_action_fiber && not (same_action_fiber scope.action))
       || (not (phys_equal scope.action.snapshot.issuer issuer))
       || (not (phys_equal scope.action.snapshot.selected issuer.selected))
       || (not
@@ -2121,6 +2121,21 @@ module Native_terminal = struct
               ~f:(phys_equal scope))
     then invalid "native callback completion is no longer current"
     else Ok ()
+  ;;
+
+  let check_completion_now scope =
+    check_completion_state_now scope ~require_action_fiber:true
+  ;;
+
+  (* Only a physically entered descendant native callback can use the saved
+     parent's terminal state while its own action shadows the parent's key. *)
+  let check_descendant_parent_now ~(parent : t) ~(child : t) =
+    let* () = check_completion_now child in
+    if phys_equal parent child
+    then invalid "saved Agent callback did not enter a distinct native child"
+    else if not (phys_equal parent.issuer child.issuer)
+    then invalid "saved Agent child belongs to another physical Root"
+    else check_completion_state_now parent ~require_action_fiber:false
   ;;
 
   let sealed (t : t) =
@@ -2669,6 +2684,9 @@ end
 
 module Model_inference = struct
   type nonrec t = inference_scope
+
+  module Saved_selected = Agent_session.Captured_agent_runner.Claimed_developer.Selected
+  module Native_invocation = Agent_session.Native_tool_invocation
 
   exception Tracking_failure of P.Error.t
 
@@ -3356,28 +3374,61 @@ module Model_inference = struct
     with_claimed_origin issuer ~active ~origin:Claimed_model_job ~f
   ;;
 
-  let with_claimed_agent issuer ~selected ~f =
-    let module Selected = Agent_session.Captured_agent_runner.Claimed_developer.Selected
-    in
-    let* () = Selected.check selected in
-    let invocation = Selected.invocation selected in
+  let registered_saved_terminal issuer selected =
+    let invocation = Saved_selected.invocation selected in
     let context = H.context invocation in
-    let* terminal =
+    match Hashtbl.find issuer.native_calls context.id with
+    | Some registration when phys_equal registration.invocation invocation ->
+      (match registration.scope with
+       | Some terminal
+         when phys_equal terminal.issuer issuer
+              && Option.value_map
+                   (Eio.Fiber.get native_call_key)
+                   ~default:false
+                   ~f:(phys_equal issuer) -> Ok terminal
+       | Some _ | None -> invalid "saved Agent native callback is not entered")
+    | Some _ | None -> invalid "saved Agent native invocation is not registered"
+  ;;
+
+  let check_saved_agent_source issuer ~selected =
+    let* () = Saved_selected.check selected in
+    let* terminal = registered_saved_terminal issuer selected in
+    let* () = Native_terminal.check_completion_now terminal in
+    let* _ = current_local issuer in
+    let* () = Saved_selected.check_now selected in
+    Ok ()
+  ;;
+
+  let check_saved_agent_source_descendant_now issuer ~selected ~child =
+    let* () = Saved_selected.check_descendant_now selected ~child in
+    let* parent = registered_saved_terminal issuer selected in
+    let invocation = Native_invocation.selected_borrowed_invocation child in
+    let context = H.context invocation in
+    let* child_terminal =
       match Hashtbl.find issuer.native_calls context.id with
-      | Some registration when phys_equal registration.invocation invocation ->
+      | Some registration when H.equal_context (H.context registration.invocation) context
+        ->
         (match registration.scope with
          | Some terminal
-           when Option.value_map
-                  (Eio.Fiber.get native_call_key)
-                  ~default:false
-                  ~f:(phys_equal issuer) -> Ok terminal
-         | Some _ | None -> invalid "saved Agent native callback is not entered")
-      | Some _ | None -> invalid "saved Agent native invocation is not registered"
+           when phys_equal terminal.issuer issuer
+                && Option.value_map
+                     terminal.dispatched
+                     ~default:false
+                     ~f:(phys_equal invocation) -> Ok terminal
+         | Some _ | None -> invalid "saved Agent child native callback is not entered")
+      | Some _ | None -> invalid "saved Agent child native invocation is not registered"
     in
-    let* () = Native_terminal.check_completion_now terminal in
+    let* () = Native_terminal.check_descendant_parent_now ~parent ~child:child_terminal in
+    let* _ = current_local issuer in
+    Saved_selected.check_descendant_now selected ~child
+  ;;
+
+  let with_claimed_agent issuer ~selected ~f =
+    let* () = check_saved_agent_source issuer ~selected in
+    let* terminal = registered_saved_terminal issuer selected in
     with_claimed_origin
       issuer
-      ~active:(Selected.active selected)
+      ~active:(Saved_selected.active selected)
       ~origin:(Claimed_saved_agent { selected; terminal })
       ~f
   ;;
@@ -4158,9 +4209,8 @@ module Registry = struct
     | `Raised (exn, backtrace), _ -> Exn.raise_with_original_backtrace exn backtrace
   ;;
 
-  let admit_with_recovery
+  let reserve_admission
         ?final_admission
-        ?checkpoint
         t
         ~actor
         ~capture
@@ -4170,12 +4220,11 @@ module Registry = struct
         ~job_policy
         ~handle
         ~workspace_conflict_domain
-        ~recover
     =
-    if Option.is_some final_admission && Option.is_none checkpoint
-    then invalid "developer final admission needs a fresh checkpoint"
-    else if t.closed || not (same_domain t)
+    if t.closed || not (same_domain t)
     then invalid "developer root registry is closed or foreign"
+    else if not (Store.issued_by t.store handle)
+    then invalid "developer root handle belongs to another Store"
     else (
       let run_id = (Store.owner handle).run_id in
       if
@@ -4203,11 +4252,158 @@ module Registry = struct
           }
         in
         Hashtbl.set t.owners ~key:run_id ~data:(Admitting admission);
-        drive_recovery
+        Ok admission))
+  ;;
+
+  let drive_finished t (admission : admission) ~transfer_finished_claim ~checkpoint =
+    let run_id = (Store.owner admission.handle).run_id in
+    let call = admission.call in
+    let transferred = ref false in
+    let outcome =
+      match
+        Eio.Cancel.sub (fun cancel ->
+          call.cancel <- Some cancel;
+          Eio.Fiber.with_binding admission_key t (fun () ->
+            let* () = verify_admission t admission in
+            let* () =
+              transfer_finished_claim ~accept:(fun ~claim ~window ->
+                if
+                  (not (Store.issued_by t.store admission.handle))
+                  || not
+                       (Store.Recovery.issued_finished
+                          window
+                          ~claim
+                          ~handle:admission.handle)
+                then invalid "developer finished claim belongs to another Store"
+                else if
+                  Option.is_some admission.claim || Option.is_some admission.recovery
+                then invalid "developer admission already owns a claim"
+                else (
+                  admission.claim <- Some claim;
+                  admission.recovery <- Some window;
+                  transferred := true;
+                  Ok ()))
+            in
+            publish_admission t admission ~checkpoint))
+      with
+      | value -> `Returned value
+      | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+    in
+    call.cancel <- None;
+    admission.running <- false;
+    Eio.Promise.resolve call.finish ();
+    match outcome with
+    | `Returned (Ok run) -> Ok run
+    | `Returned (Error error) ->
+      if not !transferred
+      then (
+        match Hashtbl.find t.owners run_id with
+        | Some (Admitting current) when phys_equal current admission ->
+          Hashtbl.remove t.owners run_id
+        | None | Some (Admitting _) | Some (Owned _) -> ());
+      Error error
+    | `Raised (exn, backtrace) ->
+      if not !transferred
+      then (
+        match Hashtbl.find t.owners run_id with
+        | Some (Admitting current) when phys_equal current admission ->
+          Hashtbl.remove t.owners run_id
+        | None | Some (Admitting _) | Some (Owned _) -> ());
+      Exn.raise_with_original_backtrace exn backtrace
+  ;;
+
+  let admit_with_recovery
+        ?final_admission
+        ?checkpoint
+        t
+        ~actor
+        ~capture
+        ~registry
+        ~selected
+        ~selected_model
+        ~job_policy
+        ~handle
+        ~workspace_conflict_domain
+        ~recover
+    =
+    if Option.is_some final_admission && Option.is_none checkpoint
+    then invalid "developer final admission needs a fresh checkpoint"
+    else
+      let* admission =
+        reserve_admission
+          ?final_admission
           t
-          admission
-          ~recover
-          ~checkpoint:(Option.value checkpoint ~default:Fn.id)))
+          ~actor
+          ~capture
+          ~registry
+          ~selected
+          ~selected_model
+          ~job_policy
+          ~handle
+          ~workspace_conflict_domain
+      in
+      drive_recovery
+        t
+        admission
+        ~recover
+        ~checkpoint:(Option.value checkpoint ~default:Fn.id)
+  ;;
+
+  let admit_recovered
+        ?final_admission
+        ?checkpoint
+        t
+        ~actor
+        ~capture
+        ~registry
+        ~selected
+        ~selected_model
+        ~job_policy
+        ~handle
+        ~workspace_conflict_domain
+        ~transfer_finished_claim
+    =
+    if Option.is_some final_admission && Option.is_none checkpoint
+    then invalid "developer final admission needs a fresh checkpoint"
+    else
+      let* admission =
+        reserve_admission
+          ?final_admission
+          t
+          ~actor
+          ~capture
+          ~registry
+          ~selected
+          ~selected_model
+          ~job_policy
+          ~handle
+          ~workspace_conflict_domain
+      in
+      drive_finished
+        t
+        admission
+        ~transfer_finished_claim
+        ~checkpoint:(Option.value checkpoint ~default:Fn.id)
+  ;;
+
+  let retire_admission t ~handle =
+    if not (same_domain t && Store.issued_by t.store handle)
+    then invalid "developer admission handle belongs to another Store or domain"
+    else if
+      Option.value_map (Eio.Fiber.get admission_key) ~default:false ~f:(fun current ->
+        phys_equal current t)
+    then invalid "developer admission cannot retire itself"
+    else (
+      let run_id = (Store.owner handle).run_id in
+      match Hashtbl.find t.owners run_id with
+      | None -> Ok ()
+      | Some (Owned _) -> invalid "developer Root is owned, not admitting"
+      | Some (Admitting admission) ->
+        if not (phys_equal admission.handle handle)
+        then invalid "developer admission handle changed"
+        else if admission.running
+        then invalid "developer admission callback is still running"
+        else Eio.Cancel.protect (fun () -> cleanup_admission t run_id admission))
   ;;
 
   let admit

@@ -34,6 +34,17 @@ let open_existing store ~run_id ~on_claim =
     Some { Acquired.handle; claim; window }
 ;;
 
+let open_admitted store ~handle ~on_claim =
+  let open Result.Let_syntax in
+  if not (Store.issued_by store handle)
+  then Error Store.Error.Foreign_or_stale
+  else (
+    let%bind claim = Store.Run_claim.acquire ~store ~handle in
+    on_claim claim;
+    let%map window = Store.Recovery.open_ ~claim ~handle in
+    { Acquired.handle; claim; window })
+;;
+
 let finish acquired ~recover ~map_store_error =
   if Store.Recovery.is_finished (Acquired.window acquired)
   then Ok ()

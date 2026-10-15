@@ -161,6 +161,7 @@ let runtime_map
       ~model_completion
       ~prepare_extension
       ~check_execution
+      ~check_preparation_now
       runtimes
   =
   Result.bind
@@ -189,26 +190,27 @@ let runtime_map
       in
       runtime_order manifest runtimes
       |> List.fold_result ~init:String.Map.empty ~f:(fun worker_runtimes specification ->
-        instantiate_runtime
-          ~sw
-          ~host
-          ~manifest
-          ~approval_provider
-          ~admin_policy
-          ~approval_store
-          ~audit_sequence
-          ~extensions
-          ~runtime_instances
-          ~register_extension_instance
-          ~worker_runtimes
-          ~model_completion
-          ~prepare_extension
-          ~check_execution
-          specification
-        |> Result.map_error ~f:(List.map ~f:runtime_error)
-        |> Result.map ~f:(fun runtime ->
-          created_runtimes := runtime :: !created_runtimes;
-          Map.set worker_runtimes ~key:(Runtime.id runtime) ~data:runtime))
+        Result.bind (check_preparation_now ()) ~f:(fun () ->
+          instantiate_runtime
+            ~sw
+            ~host
+            ~manifest
+            ~approval_provider
+            ~admin_policy
+            ~approval_store
+            ~audit_sequence
+            ~extensions
+            ~runtime_instances
+            ~register_extension_instance
+            ~worker_runtimes
+            ~model_completion
+            ~prepare_extension
+            ~check_execution
+            specification
+          |> Result.map_error ~f:(List.map ~f:runtime_error)
+          |> Result.map ~f:(fun runtime ->
+            created_runtimes := runtime :: !created_runtimes;
+            Map.set worker_runtimes ~key:(Runtime.id runtime) ~data:runtime)))
       |> Result.map ~f:(fun runtimes ->
         runtimes, List.rev !extension_bindings, List.rev !created_runtimes))
 ;;
@@ -558,6 +560,7 @@ let instantiate_prepared_after
       ~host
       ~grant
       ~approval_provider
+      ?(check_preparation_now = fun () -> Ok ())
       ?(approval_store = Shell_access.Approval.create_store ())
       ?model_completion
       ?(extension_snapshots = [])
@@ -587,6 +590,7 @@ let instantiate_prepared_after
           Manifest_authorizer.verify grant manifest
           |> Result.map_error ~f:(fun error -> [ authorizer_error error ])
         in
+        let%bind () = check_preparation_now () in
         let%bind runtimes, extension_bindings, runtime_order =
           runtime_map
             ~sw
@@ -599,6 +603,7 @@ let instantiate_prepared_after
             ~model_completion
             ~prepare_extension
             ~check_execution:(fun () -> Activation_gate.check gate)
+            ~check_preparation_now
             prepared.runtimes
         in
         Eio.Fiber.check ();
@@ -620,9 +625,11 @@ let instantiate_prepared_after
         let%bind () =
           List.fold_result (List.rev !instances) ~init:() ~f:(fun () instance ->
             Eio.Fiber.check ();
-            Chatml_extension.activate instance
-            |> Result.map_error ~f:(fun diagnostic -> [ diagnostic_error diagnostic ]))
+            Result.bind (check_preparation_now ()) ~f:(fun () ->
+              Chatml_extension.activate instance
+              |> Result.map_error ~f:(fun diagnostic -> [ diagnostic_error diagnostic ])))
         in
+        let%bind () = check_preparation_now () in
         let%bind () =
           configure_extension_snapshots
             host
@@ -633,6 +640,7 @@ let instantiate_prepared_after
           |> Result.map_error ~f:List.return
         in
         Eio.Fiber.check ();
+        let%bind () = check_preparation_now () in
         (* Install last so ready access is revoked before native release hooks. *)
         Eio.Switch.on_release sw close;
         let%map () =

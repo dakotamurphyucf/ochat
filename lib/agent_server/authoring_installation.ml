@@ -390,6 +390,12 @@ let publish_initialize_and_wait (t : t) ~connection ~response =
     |> Result.map_error ~f:Service.Error.to_protocol
 ;;
 
+let developer_capture (t : t) ~policy ~limits =
+  if t.closed
+  then Error (error Server_shutting_down "authoring is closed" ~retryable:true)
+  else Ok (Service.Developer.create ~owner:t.service ~policy ~limits)
+;;
+
 let close_connection_and_wait (t : t) connection =
   Service.close_connection_and_wait t.service connection
   |> Result.map_error ~f:Service.Error.to_protocol

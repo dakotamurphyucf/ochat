@@ -24,6 +24,16 @@ val open_existing
   -> on_claim:(Store.Run_claim.t -> unit)
   -> (Acquired.t option, Store.Error.t) result
 
+(** Acquire the exact already-admitted handle before any current-epoch command
+    reservation. The caller has proved that no same-run callback is active,
+    holds the run admission Slot, and retains the claim through [on_claim]
+    before this helper opens Recovery. No epoch is appended here. *)
+val open_admitted
+  :  Store.t
+  -> handle:Store.handle
+  -> on_claim:(Store.Run_claim.t -> unit)
+  -> (Acquired.t, Store.Error.t) result
+
 (** The host adapter settles authentic abandoned job/inference inventory. This
     helper only finishes the exact existing Recovery window after that adapter
     succeeds; release of the physical claim belongs to the lifecycle. *)
