@@ -115,6 +115,7 @@
   developer_root_owner
   developer_script_job_service
   developer_native_executor
+  developer_background_job_runner
   job_scheduler
   permission_review_service
   permission_scheduler

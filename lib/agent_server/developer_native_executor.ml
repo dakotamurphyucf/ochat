@@ -45,8 +45,7 @@ let with_job_service t jobs =
   else invalid "developer Job service belongs to another physical root"
 ;;
 
-let narrowed_registry t parent =
-  let* ceiling = N.selected_borrowed_capabilities parent in
+let reselect_current t ceiling =
   let* current = D.selected t.issuer in
   let* names =
     List.fold_result (C.references ceiling) ~init:[] ~f:(fun names reference ->
@@ -56,6 +55,11 @@ let narrowed_registry t parent =
   in
   C.select current ~names:(List.rev names)
   |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
+;;
+
+let narrowed_registry t parent =
+  let* ceiling = N.selected_borrowed_capabilities parent in
+  reselect_current t ceiling
 ;;
 
 let finish_completion completion settlement = D.Completion.finish completion ~settlement
@@ -158,6 +162,7 @@ let recover_early scope =
 ;;
 
 let run
+      ?ceiling
       t
       ~parent
       ~job_parent
@@ -181,15 +186,25 @@ let run
           let* witness = O.current t.root in
           let selected = O.Current.selected witness in
           let reference = C.reference binding in
+          let* narrowed = registry () in
+          let* narrowed_binding =
+            C.resolve narrowed ~id:reference.id ~fingerprint:reference.fingerprint
+            |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
+          in
           let* actual =
             C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
             |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
           in
           let* () =
-            match C.native_implementation binding, C.native_implementation actual with
-            | Some expected, Some actual when phys_equal expected actual -> Ok ()
-            | None, None -> Ok ()
-            | Some _, Some _ | Some _, None | None, Some _ ->
+            match
+              ( C.native_implementation binding
+              , C.native_implementation narrowed_binding
+              , C.native_implementation actual )
+            with
+            | Some expected, Some narrowed, Some actual
+              when phys_equal expected narrowed && phys_equal expected actual -> Ok ()
+            | None, None, None -> Ok ()
+            | Some _, _, _ | None, _, _ ->
               invalid "selected native implementation changed before effect entry"
           in
           let* () =
@@ -262,6 +277,10 @@ let run
         in
         match
           N.run_owned_selected
+            ~admit_managed:(fun execution ->
+              match job_scope with
+              | None -> Ok ()
+              | Some lexical -> Jobs.Scope.admit_managed lexical execution)
             ~install_jobs:(fun prepared config ->
               match job_scope with
               | None -> N.{ config; scoped_async_operation = None }
@@ -322,6 +341,7 @@ let run
           jobs
           ~terminal:scope
           ~borrowed
+          ?ceiling
           ~check_parent_now:(fun () -> D.check_parent_now t.issuer ~parent invocation)
           (fun ~scope:lexical -> execute (Some lexical)))
   in
@@ -374,14 +394,27 @@ let run_child t ~managed ~reference ~invocation ~authorize ~prepare_output =
       ~prepare_output)
 ;;
 
-let run_job_child t ~active ~managed ~reference ~invocation ~authorize ~prepare_output =
+let run_job_child
+      ?selected
+      t
+      ~active
+      ~managed
+      ~reference
+      ~invocation
+      ~authorize
+      ~prepare_output
+  =
   let* job_parent = O.job_parent t.root active in
   run
+    ?ceiling:selected
     t
     ~parent:(D.Job_child job_parent)
     ~job_parent:(Some job_parent)
     ~borrowed:None
-    ~registry:(fun () -> D.selected t.issuer)
+    ~registry:(fun () ->
+      match selected with
+      | None -> D.selected t.issuer
+      | Some selected -> reselect_current t selected)
     ~managed
     ~reference
     ~invocation

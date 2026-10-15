@@ -34,6 +34,20 @@ val with_agent_artifact : t -> Agent_artifact.t -> (t, Agent_protocol.Error.t) r
 
 val agent_artifact : t -> Agent_artifact.t option
 
+module Target_kind : sig
+  type t =
+    | Tool
+    | Script
+  [@@deriving equal, sexp_of]
+end
+
+(** Pure projection of the request's validated private target variant. This
+    lets a scheduler leave an uninstalled target Queued without compiling a
+    script, inspecting raw JSON tags, or granting execution authority. The
+    physical worker still decodes and re-admits the saved payload from its
+    active Claim. *)
+val target_kind : t -> Target_kind.t
+
 (** Capture exactly one already selected tool, checking its live reference and
     input schema. Managed implementations retain their full revision pin, including
     the dependencies captured by their host registration. Does not execute. *)

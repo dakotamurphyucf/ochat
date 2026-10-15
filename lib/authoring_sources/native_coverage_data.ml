@@ -16,11 +16,13 @@ let features =
       ; "lib/agent_session/native_tool_invocation.ml"
       ; "lib/agent_session/native_tool_policy.ml"
       ; "lib/agent_session/script_tool_calls.ml"
+      ; "lib/agent_server/developer_background_job_runner.ml"
       ]
     , "runtime.native.requests"
     , [ "test/chatml_composition/one_off_tests.ml"
       ; "test/chatml_composition/native_contract_tests.ml"
       ; "test/chatml_script_routing/routing_tests.ml"
+      ; "test/developer_root_owner/native_executor_tests.ml"
       ] )
   ; ( "computation.outcomes"
     , "Structured complete/fail/cancelled results and preparation diagnostics"
@@ -188,6 +190,8 @@ let features =
 let implementation_sources =
   [ ( "lib/agent_protocol/invocation.ml"
     , "4d5abb95474bcdef6c360b666a3b57d2203a7b378193df5c49266897acac4981" )
+  ; ( "lib/agent_server/developer_background_job_runner.ml"
+    , "e1700d443e49642242dc4a5173837446b820eaaaf373f380e9fdffe8510357a6" )
   ; ( "lib/agent_session/session_management_channel.ml"
     , "500d45a8cbe760a50bc256df47255dc6fa5e1305f74a543d49c9c2e02e36de51" )
   ; ( "lib/agent_server/session_helper_policy.ml"
@@ -239,7 +243,7 @@ let implementation_sources =
   ; ( "lib/agent_session/managed_wait_tool.ml"
     , "2482da27415b0f542bbf5e2fa61bf97de70fb047790cb6ee5100ced465b43708" )
   ; ( "lib/agent_session/native_tool_invocation.ml"
-    , "f0dcf162d3d0117303ba11c411d817a263db4d3daf98312e612ccf10a68a3229" )
+    , "6cf9b95ffb7801d1f85a59fb7533e40b233b115d9ec776f844335ee68c1bb273" )
   ; ( "lib/agent_session/native_tool_policy.ml"
     , "c3ab2528769b5737c2b4cc22edb01e01c75222ee42520aaa12527414437463fc" )
   ; ( "lib/agent_session/one_off_execution.ml"
