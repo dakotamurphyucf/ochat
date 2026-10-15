@@ -33,6 +33,12 @@ module Model_selection : sig
       conversation service principal can choose this binding. *)
   val target : t -> Inference.Request.Target.t
 
+  (** Borrow the original Context issued by this selected bridge after an
+      actual currentness check. The value is configuration/data, not an
+      enduring credential or effect lease. The caller must retain this
+      selection and recheck physical authority at every effect boundary. *)
+  val context : t -> (Inference_runtime.Context.t, P.Error.t) result
+
   (** Nonyielding. Requires this selection's physical port still Open, its
       original actor current, the trusted current bridge getter still returning
       the same physical bridge, and same-target Context.derive still accepting

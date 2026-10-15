@@ -15,15 +15,26 @@ module Limits : sig
 
   (** Positive finite bounds for one active root callback, provisional jobs,
       active PLUS completed/retained native terminal scopes, and
-      worker/quarantine scopes. One root terminal intent occupies a separate
-      fixed slot. The Store's one-pending-per-run barrier, document/selection
-      limits and shared Job_capacity limits remain binding. *)
+      worker/quarantine scopes, active inference attempts and physically
+      admitted call bindings. One root terminal intent occupies a separate
+      fixed slot. The active-attempt bound is positive and at most 256; an
+      attempt reserves its slot before Prepared/effect and retains it through
+      exact terminal bookkeeping, including uncertain quarantine. The call
+      binding bound is positive and at most 16384 per run; the actual selected
+      inference Context further bounds each parent Registration by its
+      candidate limit. A full map rejects the strict producer hook before tool
+      execution; it never evicts a live delayed-call parent. Durable historical
+      inference rows have the Store's separate configured limit. The Store's
+      one-pending-per-run barrier, document/selection limits and shared
+      Job_capacity limits remain binding. *)
   val create
     :  max_active_runs:int
     -> max_staged_jobs:int
     -> max_native_occupancy:int
     -> max_active_workers:int
     -> max_quarantined_workers:int
+    -> max_active_inference_attempts:int
+    -> max_admitted_call_bindings:int
     -> t Or_error.t
 end
 
@@ -757,7 +768,102 @@ val with_native_callback
   -> (sw:Eio.Switch.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
-(** One bounded pass over the physically retained root/native terminal head
+(** Physical inference bookkeeping for one entered Model_call Worker callback.
+    This is a lexical Root/Store/Claim owner, not a second inference algorithm,
+    provider resolver, capacity ledger or document writer. The shared
+    Inference_client remains responsible for preparation, actual attempt and
+    completion callback order. The selected provider and actor guard are
+    composed by the higher model runner. *)
+module Model_inference : sig
+  type t
+
+  (** Borrow this root's actual entered, durably Running Model_call Claim. The
+      scope checks exact Worker issuer, saved job/attempt/capture and current
+      original actor, epoch and pinned model target. It borrows the exact
+      bridge-issued Context from this Root's physical Model_selection; its
+      immutable adapter limits bound candidates per admitted parent Registration. The
+      Root also enforces [Limits.max_admitted_call_bindings] across all its live
+      brackets, at most 16384. This callback owns a child Switch beneath the
+      Worker switch. Children join before call bindings retire and before this
+      borrow expires, including on error/cancellation. No second Claim or
+      capacity reservation is made. The strict admitted-call hook runs during
+      its owning inference attempt; after that attempt settles, only the
+      bounded committed-call binding remains until this scope's child Switch
+      joins. Each physical Attempt reserves a separate
+      Root active-attempt slot BEFORE its Prepared/effect path; a full bound
+      rejects with a typed resource error without waiting under the mutation
+      gate. That slot remains owned until exact terminal/interruption storage
+      settles, even if the lexical callback unwinds or Root quarantines. An
+      escaped port cannot begin new work.
+      Original exception/backtrace survives joined cleanup and exact retained
+      Store bookkeeping. *)
+  val with_claimed
+    :  run
+    -> active:Agent_session.Developer_job_scope.active
+    -> f:(t -> sw:Eio.Switch.t -> 'a)
+    -> ('a, Agent_protocol.Error.t) result
+
+  (** The original bridge-issued selected Context borrowed for this lexical
+      scope. It is input data for the shared Inference_client, not a renewed
+      actor, credential or effect lease. Use the strict ports and composed
+      submission guard for every dispatch. *)
+  val context : t -> Inference_runtime.Context.t
+
+  (** The one shared Inference_client allocation port. Its [with_attempt]
+      admits Root or Nested only while this physical scope is live and the
+      exact Worker Claim remains current. Nested also requires this scope's
+      retained committed-call binding for the full parent Scope/entry/alias;
+      copied Scope values and a valid row from another Root never suffice.
+      An acknowledged Prepared row is durable before the attempt callback,
+      credential lookup or network submission. A parent row may already be
+      Terminal while a delayed admitted child begins, provided this Worker,
+      actor and selected provider still authorize the new effect. *)
+  val identity : t -> Inference_client.Identity.t
+
+  (** Run after yielding request preparation. Check the Prepared target against
+      the original selected model and recheck Root/Worker currentness. The full
+      prepared configuration and accounting identity are checked at [on_attempt]
+      against the acknowledged registration. This is a host pre-dispatch check,
+      not a provider credential lease. *)
+  val before_dispatch : t -> Inference_runtime.Prepared.t -> unit
+
+  (** Strict producer callback from the real In_memory_stream call commit.
+      Compare the token's exact physical Attempt to the current Started
+      registration acknowledged under this scope, before the parent attempt
+      reaches Terminal. Retain only the bounded validated Scope/History_entry
+      ID/alias binding after the attempt settles. The run-wide and per-parent
+      candidate caps reject before tool
+      execution; no live delayed-call binding is evicted. A foreign real stream
+      with copied IDs and a different Attempt object rejects. This token is
+      provenance, not permission for a later effect. *)
+  val on_admitted_call : t -> Chat_response.In_memory_stream.Admitted_call.t -> unit
+
+  (** Strict callbacks for the shared Inference_client. All preparation and
+      settlement uses this Root's existing mutation gate and the Store's sole
+      writer/pending barrier. The gate is never held across user code,
+      credential/network I/O or child joins. [on_attempt] durably acknowledges
+      Started before a provider effect. Observations use complete snapshots;
+      terminal/interruption outcomes remain immutable truth. If a Started or
+      Observed write is uncertain, retain its exact Tracking.Pending plus a
+      bounded immutable deferred outcome per physically issued Registration,
+      rather than replaying a callback or
+      replacing the primary cancellation/exception. Late observations and
+      completion may settle an issued historical registration after new-effect
+      eligibility ends. *)
+  val on_attempt : t -> Inference_runtime.Attempt.t -> unit
+
+  val on_observation : t -> Inference.Observation.t -> unit
+  val on_completion : t -> Inference_client.Completion.t -> unit
+
+  (** Root/entered-Claim component only. The selected provider/actor guard is
+      composed by the higher runner. Each refresh may yield; its returned
+      attempt-local final check is nonyielding at HTTP/WS submit admission. *)
+  val submission_guard : t -> Inference_runtime.Submission_guard.t
+end
+
+(** One bounded pass over exact inference Tracking.Pending and immutable
+    deferred observation/completion, then the physically retained root/native
+    terminal head
     and later immutable intents, any exact inactive-cancel Prepared in this
     owner's finite control-recovery slot, and one exact externally admitted
     Model_call Prepared/Handoff. It reconciles each owned Store write
@@ -768,10 +874,11 @@ val with_native_callback
     reservation once; a proven absent write aborts it; a proven prewrite CAS
     conflict may reprepare only the same immutable job within the finite
     retry budget. An attempted unknown write retains its exact Handoff,
-    reservation and mutation exclusion. No callback reruns. Unknown/divergent state
+    reservation and mutation exclusion. No inference application callback or
+    transport reruns. Unknown/divergent state
     keeps the run quarantined and
     blocks new actions/mutations until trusted recovery resolves it. This
-    requires the issuing Eio domain and no active root/native callback or
+    requires the issuing Eio domain and no active root/native/model callback or
     terminal drainer, including
     when there is currently no pending handoff. Only one public reconciliation
     may be in flight for this owner: a second returns a retryable Conflict
@@ -786,10 +893,13 @@ val with_native_callback
     claim/capacity. *)
 val reconcile_pending : t -> (unit, Agent_protocol.Error.t) result
 
-(** Exclude admission, cancel/join root and native callbacks and worker
-    children BEFORE draining the pending handoff and bounded terminal queue, so
-    newly published queued jobs cannot start through this owner. Then retire
-    only this run's unclaimed capacity, then release
+(** Exclude admission, cancel/join root, native and model callbacks and worker
+    children BEFORE draining inference Tracking, the pending handoff and bounded
+    terminal queue, so newly published queued jobs cannot start through this
+    owner. Finish this run's exact Tracking manager only after Pending/deferred
+    state settles and every issued inference row is terminal/interrupted; a
+    failed finish retains the Run_claim and capacity. Then retire only this
+    run's unclaimed capacity, then release
     Store.Run_claim. The daemon-owned Store remains open for unrelated runs. A
     self-close rejects before revocation. If quarantine is unresolved, remain
     closed with the claim and permits retained; a same-run replacement cannot

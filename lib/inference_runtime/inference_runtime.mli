@@ -288,6 +288,12 @@ module Context : sig
   val target : t -> Inference.Request.Target.t
   val transport_policy : t -> Inference.Observation.Transport_policy.t
 
+  (** Comparison/configuration data from this context's actual immutable
+      adapter. It does not authorize a provider, actor, credential or effect.
+      A physical host can use the admitted candidate ceiling when bounding
+      retained call provenance without accepting a caller-supplied integer. *)
+  val limits : t -> Limits.t
+
   (** Retains requested policy when detaching. Auxiliary/child execution uses an
       ephemeral per-attempt WS owner where supported; require never becomes SSE. *)
   val detach : t -> t

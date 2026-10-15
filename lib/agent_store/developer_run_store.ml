@@ -4050,6 +4050,64 @@ module Tracking = struct
         Ok ())
   ;;
 
+  let retire_fresh_absent t pending =
+    with_lease t.store (fun ~env:_ ~root:_ ->
+      let prepared = pending.Pending.prepared in
+      let* () = bind_transition Tracking_path t.store t.handle prepared in
+      match prepared.claim_status with
+      | Claim_installed | Claim_diverged | Claim_prewrite_conflict -> Error Error.Conflict
+      | Unsettled | Claim_absent ->
+        let poll = work t.store t.store.checkpoint in
+        let* settlement = classify_prepared t.store t.handle prepared ~poll in
+        let* () = settle_worker_prepared t.store t.handle prepared settlement in
+        (match settlement with
+         | Absent ->
+           let* () =
+             with_run_lifecycle t.store (fun () ->
+               match Hashtbl.find t.store.pending t.run_claim.run_id with
+               | Some (Transition current) when phys_equal current.token prepared.token ->
+                 Hashtbl.remove t.store.pending t.run_claim.run_id;
+                 Ok ()
+               | None | Some (Selected _ | Claim _ | Transition _) -> Error Error.Conflict)
+           in
+           t.pending <- None;
+           Ok ()
+         | Installed _ | Prewrite_conflict | Diverged -> Error Error.Conflict))
+  ;;
+
+  let retire_absent_admission t pending =
+    with_operation t (fun () ->
+      let* () = valid_pending t pending in
+      match pending.original, pending.prior, pending.receipt with
+      | None, None, None -> retire_fresh_absent t pending
+      | None, None, Some _ | None, Some _, _ | Some _, _, _ -> Error Error.Conflict)
+  ;;
+
+  let retire_absent_start t pending =
+    with_operation t (fun () ->
+      let* () = valid_pending t pending in
+      match pending.original, pending.prior, pending.receipt with
+      | Some registration, Some prior, None ->
+        if
+          (not (phys_equal registration.claim pending.claim))
+          || not (Inference_row.same_identity prior pending.after)
+        then Error Error.Conflict
+        else
+          let* () = valid_registration t pending.claim registration in
+          (match
+             ( O.Attempt_record.state (Inference_row.record prior)
+             , O.Attempt_record.state (Inference_row.record pending.after) )
+           with
+           | Prepared, Running -> retire_fresh_absent t pending
+           | Prepared, Prepared
+           | Prepared, Terminal _
+           | Prepared, Interrupted _
+           | Running, _
+           | Terminal _, _
+           | Interrupted _, _ -> Error Error.Conflict)
+      | None, _, _ | Some _, None, _ | Some _, Some _, Some _ -> Error Error.Conflict)
+  ;;
+
   let finish t =
     with_operation t (fun () ->
       if Option.is_some t.pending
