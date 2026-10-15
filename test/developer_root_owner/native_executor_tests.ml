@@ -3548,6 +3548,172 @@ let%test_unit "cancelled claimed parent cannot start an effect while child joins
        assert (Int.equal !calls 0))
 ;;
 
+let%test_unit "saved-source child retains its exact entered parent active" =
+  let effects = ref 0 in
+  with_executor
+    ~run_name:"dvr_source_child_parent"
+    ~make_selected:(fun _env -> registry ~custom:false effects)
+    (fun ~env:_ ~root ~executor:_ ~handle:_ ~owner ~selected ->
+       let reference = List.hd_exn (C.references selected) in
+       let admitted = invocation owner selected reference ~custom:false in
+       let issuer =
+         D.create
+           ~owner
+           ~capture_fingerprint:(Chatml_developer_capture.fingerprint (O.capture root))
+           ~ceiling:(O.native_ceiling root)
+           ~selected:(fun () -> O.native_selected root)
+           ~current:(fun ~owner:_ ~capture_fingerprint:_ ->
+             Result.map (O.current root) ~f:ignore)
+           ~now:(fun () -> O.native_now root)
+         |> ok
+       in
+       let parent_live = ref true in
+       let retained = ref None in
+       let revision, completion =
+         O.with_native_registration root ~invocation:admitted (fun ~scope ->
+           let dispatch : D.dispatch_storage =
+             { read = O.Native_terminal.read_dispatch scope
+             ; save_dispatch = O.Native_terminal.save_dispatch scope
+             }
+           in
+           let sealed = ref None in
+           let completion =
+             D.with_invocation
+               issuer
+               ~parent:D.Root
+               ~invocation:admitted
+               ~dispatch
+               ~parent_live_now:(fun () ->
+                 !parent_live && O.Native_terminal.effect_parent_live_now scope)
+               ~frozen:(fun () -> None)
+               (fun ~active ~dispatched ->
+                  O.with_native_callback scope ~dispatched (fun ~sw:_ ->
+                    let source_child =
+                      D.create_source_child
+                        ~parent_issuer:issuer
+                        ~parent_active:active
+                        ~ceiling:selected
+                        ~current_child:(fun () -> Ok ())
+                      |> ok
+                    in
+                    let child_of parent =
+                      H.create_developer
+                        { (H.context admitted) with
+                          id = P.Id.Invocation.create ()
+                        ; parent_invocation = Some (H.context parent).id
+                        }
+                      |> ok
+                    in
+                    let child = child_of dispatched in
+                    retained := Some (source_child, active, child);
+                    assert (
+                      Result.is_ok
+                        (D.check_invocation
+                           source_child
+                           ~parent:(D.Source_child active)
+                           child));
+                    assert (
+                      Result.is_error
+                        (D.check_invocation source_child ~parent:D.Root admitted));
+                    let other = child_of dispatched in
+                    let other_dispatch : D.dispatch_storage =
+                      { read = (fun _ -> Ok None)
+                      ; save_dispatch =
+                          (fun ~expected_revision ~dispatched:_ ->
+                            assert (Option.is_none expected_revision);
+                            Ok 1)
+                      }
+                    in
+                    let child_completion =
+                      D.with_invocation
+                        source_child
+                        ~parent:(D.Source_child active)
+                        ~invocation:child
+                        ~dispatch:other_dispatch
+                        ~parent_live_now:(fun () -> true)
+                        ~frozen:(fun () -> None)
+                        (fun ~active:child_active ~dispatched:child_dispatched ->
+                           let nested = child_of child_dispatched in
+                           assert (
+                             Result.is_ok
+                               (D.check_invocation
+                                  source_child
+                                  ~parent:(D.Child child_active)
+                                  nested));
+                           parent_live := false;
+                           assert (
+                             Result.is_error
+                               (D.check_invocation
+                                  source_child
+                                  ~parent:(D.Child child_active)
+                                  nested));
+                           assert (
+                             Result.is_error
+                               (D.check_parent_now
+                                  source_child
+                                  ~parent:(D.Child child_active)
+                                  nested));
+                           assert (
+                             Result.is_error
+                               (D.inherited_job_parent source_child child_active));
+                           parent_live := true;
+                           Ok (I.Complete `Null, None))
+                      |> ok
+                    in
+                    ignore
+                      (D.Completion.finish child_completion ~settlement:(Terminal_saved 2)
+                       |> ok);
+                    let other_completion =
+                      D.with_invocation
+                        issuer
+                        ~parent:(D.Child active)
+                        ~invocation:other
+                        ~dispatch:other_dispatch
+                        ~parent_live_now:(fun () -> true)
+                        ~frozen:(fun () -> None)
+                        (fun ~active:other_active ~dispatched:other_dispatched ->
+                           let wrong_child = child_of other_dispatched in
+                           assert (
+                             Result.is_error
+                               (D.check_invocation
+                                  source_child
+                                  ~parent:(D.Source_child other_active)
+                                  wrong_child));
+                           Ok (I.Complete `Null, None))
+                      |> ok
+                    in
+                    ignore
+                      (D.Completion.finish other_completion ~settlement:(Terminal_saved 2)
+                       |> ok);
+                    sealed
+                    := Some
+                         (O.Native_terminal.seal
+                            scope
+                            ~outcome:(I.Complete `Null)
+                            ~selected:[]
+                          |> ok);
+                    Ok (I.Complete `Null, None)))
+             |> ok
+           in
+           let selected = Option.value_exn !sealed in
+           let revision =
+             O.Native_terminal.submit
+               scope
+               ~terminal:(D.Completion.terminal completion)
+               ~selected:(Some selected)
+             |> ok
+           in
+           Ok (revision, completion))
+         |> ok
+       in
+       ignore (D.Completion.finish completion ~settlement:(Terminal_saved revision) |> ok);
+       let source_child, parent_active, child = Option.value_exn !retained in
+       assert (
+         Result.is_error
+           (D.check_parent_now source_child ~parent:(D.Source_child parent_active) child));
+       assert (Int.equal !effects 0))
+;;
+
 let%test_unit "cancelled native parent switch rejects protected nested child" =
   let original = Failure "native parent switch failed before child join" in
   let ready, ready_u = Eio.Promise.create () in
