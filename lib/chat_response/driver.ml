@@ -632,6 +632,47 @@ let run_entries
       history
 ;;
 
+let run_stream_entries
+      ~ctx
+      ~allocator
+      ~history
+      ~tools
+      ~tool_tbl
+      ~moderator
+      ~history_compaction
+      ~response_dir
+      ?observer
+      ?source
+      ?parent_call_id
+      ()
+  =
+  In_memory_stream.run_completion_stream_in_memory_entries
+    ~inference_context:ctx.inference_context
+    ~inference_identity:ctx.inference_identity
+    ~on_inference_attempt:ctx.on_inference_attempt
+    ~on_inference_completion:ctx.on_inference_completion
+    ~on_inference_observation:ctx.on_inference_observation
+    ~on_admitted_call:ctx.on_admitted_call
+    ~submission_guard:ctx.submission_guard
+    ~before_inference_dispatch:ctx.before_inference_dispatch
+    ~inference_relation:ctx.inference_relation
+    ~env:(Ctx.env ctx)
+    ~datadir:response_dir
+    ~allocator
+    ~history
+    ~tools:(Some tools)
+    ~tool_tbl
+    ?moderator
+    ?on_transcript_event:(Option.map observer ~f:(fun observer -> observer.on_event))
+    ?source
+    ?parent_call_id
+    ?on_tool_execution:
+      (Option.map observer ~f:(fun observer -> observer.on_tool_execution))
+    ~history_compaction
+    ~parallel_tool_calls:true
+    ()
+;;
+
 type agent_input =
   | Authored of string
   | Prepared of
@@ -860,30 +901,18 @@ let rec run_agent_input
            ~session_id:m.session_id
            ~manager:m.manager
        | None, Some _ | Some _, None | None, None -> ());
-      In_memory_stream.run_completion_stream_in_memory_entries
-        ~inference_context:ctx.inference_context
-        ~inference_identity:ctx.inference_identity
-        ~on_inference_attempt:ctx.on_inference_attempt
-        ~on_inference_completion:ctx.on_inference_completion
-        ~on_inference_observation:ctx.on_inference_observation
-        ~on_admitted_call:ctx.on_admitted_call
-        ~submission_guard:ctx.submission_guard
-        ~before_inference_dispatch:ctx.before_inference_dispatch
-        ~inference_relation:ctx.inference_relation
-        ~env:(Ctx.env ctx)
-        ~datadir:response_dir
+      run_stream_entries
+        ~ctx
         ~allocator
         ~history:init_entries
-        ~tools:(Some tools_req)
+        ~tools:tools_req
         ~tool_tbl
-        ?moderator
-        ?on_transcript_event:(Option.map observer ~f:(fun observer -> observer.on_event))
+        ~moderator
+        ~history_compaction
+        ~response_dir
+        ?observer
         ?source
         ?parent_call_id
-        ?on_tool_execution:
-          (Option.map observer ~f:(fun observer -> observer.on_tool_execution))
-        ~history_compaction
-        ~parallel_tool_calls:true
         ()
       |> extension_entries ~prefix:init_entries)
     else (

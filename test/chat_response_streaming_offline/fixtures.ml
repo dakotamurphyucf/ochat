@@ -62,6 +62,7 @@ let entry_kind entry =
 let moderator_of_source
       ?(surface = Chatml.Chatml_builtin_surface.moderator_surface)
       ?(runtime_policy = Chat_response.Runtime_semantics.default_policy)
+      ?allocator
       source
   =
   let script =
@@ -79,7 +80,12 @@ let moderator_of_source
     |> snd
   in
   let capabilities = Chat_response.Moderation.Capabilities.default in
-  let manager = ok_or_fail (Manager.create ~artifact ~capabilities ()) in
+  let manager =
+    match allocator with
+    | None -> ok_or_fail (Manager.create ~artifact ~capabilities ())
+    | Some allocator ->
+      ok_or_fail (Manager.create_entries ~artifact ~capabilities ~allocator ())
+  in
   Stream.
     { manager
     ; session_id = "session-1"
