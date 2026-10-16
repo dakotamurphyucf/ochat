@@ -377,9 +377,9 @@ let implementation_sources =
   ; ( "lib/agent_session/background_execution.ml"
     , "2149c979ce81c6c851c8d8cbe749c622334f3c43d05b72b17ae89873e5d563c3" )
   ; ( "lib/agent_session/captured_agent_runner.ml"
-    , "bab8c5b7e28689f1366c3e781b0a7f490705ad23a7bb40e360e68b599c6ff09a" )
+    , "82fd956ec8bf00904b37fd5580bd52b68a480f99dd885adf4d06c38112d15ac9" )
   ; ( "lib/agent_session/developer_child_preflight.ml"
-    , "8a954694e652731261f32fb0eeedfd2dbb79a626198cef88150333dfa7772514" )
+    , "09a4f1a82ca10ff2b41f4d039a749ad599331b29c4d32f630a5f33a0e41ff432" )
   ; ( "lib/agent_store/developer_run_document.ml"
     , "7274f5aa4214a9fe6fd16614e6f9163d2aeb36b72e12160adb4389f45566fcf7" )
   ; ( "lib/agent_store/developer_run_store.ml"

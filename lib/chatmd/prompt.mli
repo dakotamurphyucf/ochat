@@ -234,6 +234,22 @@ module Chat_markdown : sig
     val markdown : t -> bool
   end
 
+  module Content_origin : sig
+    (** Provenance for one actually emitted image or document Basic item.
+        An imported item retains the input that declared it. The locator is
+        authored spelling, never a native pathname or source grant. *)
+    type t
+
+    type kind =
+      | Image
+      | Document of Document_occurrence.Selection.t
+    [@@deriving equal, sexp_of]
+
+    val kind : t -> kind
+    val range : t -> Chatmd_parser_input.Range.t
+    val locator : t -> string
+  end
+
   module Declaration : sig
     type t
 
@@ -438,6 +454,24 @@ module Chat_markdown : sig
     -> checkpoint:(unit -> unit)
     -> agent_content
     -> Agent_reference.t Core.Or_error.t
+
+  (** Resolve a Basic image/document to its original parser-owned occurrence.
+      With [projection], require the SAME Parsed; unchanged Basic objects keep
+      their original physical identity through document materialization,
+      whereas replaced captured-document literals have no dynamic origin.
+      Without a projection, require the original emitted Basic object. Equal
+      structure, URL, source_context or parser-input path is insufficient.
+      Plain literal text and foreign/model-created Basic items reject. The
+      complete lookup is bounded by the positive work limit and polls before
+      traversal; borrowed checkpoint exceptions propagate unchanged. The
+      origin does not authorize a read. *)
+  val content_origin
+    :  Parsed.t
+    -> ?projection:Document_projection.t
+    -> max_work_steps:int
+    -> checkpoint:(unit -> unit)
+    -> basic_content_item
+    -> Content_origin.t Core.Or_error.t
 
   (** Replace exact actual Local_capture/Builtin slots with literal Basic text.
       Reject foreign, duplicate, surplus or missing occurrences before projection

@@ -126,6 +126,10 @@ module Claimed_developer : sig
           a saved selected callback. *)
       val revision : t -> Prompt_revision.t
 
+      (** Comparison-only original caller revision from the selected invoke
+          triple; dynamic reads still require the bound caller source port. *)
+      val caller_revision : t -> Prompt_revision.t
+
       val saved : t -> selected
 
       (** Full source, Worker and original/current actor check before and after
@@ -239,6 +243,50 @@ module Source_binding : sig
       switch. Join them before releasing the borrowed host owners. *)
   type t
 
+  module Content_source : sig
+    type t
+
+    type side =
+      | Declaring
+      | Caller
+
+    (** Current saved Target and exact binding issuer, without opening a root
+        Scope. Captured/builtin/literal conversion remains valid if the
+        original lease is unavailable; this check is not a source grant. *)
+    val check : t -> (unit, Agent_protocol.Error.t) result
+
+    (** Comparison only; a caller must still use this port's checked read. *)
+    val matches_revision : t -> side:side -> Prompt_revision.t -> bool
+
+    (** A short exact original-lease bind/check for a dynamic operation after
+        a yielding transport phase; no parser lookup or source read. *)
+    val check_dynamic : t -> side:side -> (unit, Agent_protocol.Error.t) result
+
+    (** Each operation opens the genuine original Scope, binds the exact
+        selected declaration or post-code-view caller revision separately,
+        performs ONE bounded lookup/read, then joins/closes Scope before
+        returning. A missing, foreign or revoked caller denies dynamic input.
+        No network I/O occurs while Scope is held. Work/byte observations are
+        returned for the one aggregate upper budget. *)
+    val read_local
+      :  t
+      -> side:side
+      -> item:Prompt.Chat_markdown.basic_content_item
+      -> max_bytes:int
+      -> max_work_steps:int
+      -> checkpoint:(unit -> unit)
+      -> on_acquire:(unit -> unit)
+      -> (Prompt_source_owner.Scope.Content_read.t, Agent_protocol.Error.t) result
+
+    val remote_origin
+      :  t
+      -> side:side
+      -> item:Prompt.Chat_markdown.basic_content_item
+      -> max_work_steps:int
+      -> checkpoint:(unit -> unit)
+      -> (Prompt_source_owner.Scope.Origin_read.t, Agent_protocol.Error.t) result
+  end
+
   val create
     :  source:Source.t
     -> tool_contract:Chatml_compilation.Tool_contract.t
@@ -247,6 +295,17 @@ module Source_binding : sig
     -> artifact_store:Agent_store.Prompt_artifact_store.t
     -> source_lease:Prompt_source_lease.t
     -> t
+
+  (** Make a strict source-read port for this exact saved callback. [target]
+      must carry THIS physical Source_binding issuer; an equal receipt or
+      arbitrary revision is insufficient. No Scope remains open across
+      Converter traversal, nested Agent invocation or provider entry. The
+      port expires with the selected callback; each read rechecks Target and
+      opens/closes its own short Scope. *)
+  val selected_content_source
+    :  t
+    -> target:Claimed_developer.Selected.Target.t
+    -> (Content_source.t, Agent_protocol.Error.t) result
 
   (** Select installed child code through this genuine borrowed source template.
       The caller authenticates its original wrapper/request and holds the native

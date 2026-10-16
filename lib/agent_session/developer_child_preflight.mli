@@ -22,10 +22,24 @@ val admit_literal
     Actual child resources remain unavailable until the owning host proves
     and installs every selected implementation. Nested Agent, Persistent and
     Inherited Tool declarations, authored call/response, image/document/Agent
-    content, moderation and authoring effects reject before host activation. *)
+    Agent content, moderation and authoring effects reject before host
+    activation. Image/document Basic items pass only a finite structural
+    preflight; the selected source projector must subsequently authenticate
+    each parser-owned occurrence and admit any read before Driver entry. This
+    preflight grants no local or remote source access. *)
 val admit_selected
   :  revision:Prompt_revision.t
   -> parsed:Prompt.Chat_markdown.Parsed.t
   -> input:Prompt.Chat_markdown.content_item list
   -> checkpoint:(unit -> unit)
   -> (unit, Agent_protocol.Error.t) result
+
+(** The same bounded selected preflight, returning whether any genuine parsed
+    image/document Basic requires dynamic source admission. A false result is
+    structural captured/literal input, not a fallback after a failed read. *)
+val classify_selected
+  :  revision:Prompt_revision.t
+  -> parsed:Prompt.Chat_markdown.Parsed.t
+  -> input:Prompt.Chat_markdown.content_item list
+  -> checkpoint:(unit -> unit)
+  -> (bool, Agent_protocol.Error.t) result

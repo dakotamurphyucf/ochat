@@ -8,6 +8,12 @@ module Port = Chat_response.Tool.Agent_source_runner
 module Preparation = Runtime_script_preparation
 module Portable_path = Source.Portable_path
 
+module Binding_issuer = struct
+  type t = unit ref
+
+  let create () = ref ()
+end
+
 let numeric_identity host_tag policy =
   [%sexp (Chatml_source.Digest.to_hex host_tag : string), (policy : Sexp.t)]
   |> Sexp.to_string_mach
@@ -99,6 +105,7 @@ module Installed = struct
     ; artifact_store : Agent_store.Prompt_artifact_store.t
     ; source_lease : Prompt_source_lease.t
     ; env : Eio_unix.Stdenv.base
+    ; binding_issuer : Binding_issuer.t option
     }
 end
 
@@ -552,9 +559,13 @@ module Claimed_developer = struct
       type t =
         { saved : selected
         ; source : Prompt_child_source.t
+        ; parent : Prompt_revision.t
+        ; caller : Port.t
+        ; binding_issuer : Binding_issuer.t option
         }
 
       let revision t = Prompt_child_source.revision t.source
+      let caller_revision t = t.parent
       let saved t = t.saved
 
       let same_reference left right =
@@ -595,11 +606,13 @@ module Claimed_developer = struct
       ;;
     end
 
-    let target_for_current source =
+    let target_for_current source ~parent ~caller ~binding_issuer =
       match Eio.Fiber.get key with
       | None -> invalid "saved Agent target has no selected source callback"
       | Some selected ->
-        let target = Target.{ saved = selected; source } in
+        let target =
+          Target.{ saved = selected; source; parent; caller; binding_issuer }
+        in
         Result.map (Target.check target) ~f:(fun () -> target)
     ;;
   end
@@ -920,7 +933,13 @@ and invoke
             | None ->
               run ~check_selected caller startup ~revision ~compilation_limits ~programs
             | Some run_selected_target ->
-              let%bind target = Claimed_developer.Selected.target_for_current selected in
+              let%bind target =
+                Claimed_developer.Selected.target_for_current
+                  selected
+                  ~parent
+                  ~caller
+                  ~binding_issuer:installed.binding_issuer
+              in
               let%bind () = check_selected () in
               run_selected_target
                 ~target
@@ -943,6 +962,7 @@ let bind t ~revision ~sw =
 
 let bind_installed_with_selected
       ?run_selected_target
+      ?binding_issuer
       t
       ~source
       ~artifact_store
@@ -959,6 +979,7 @@ let bind_installed_with_selected
       ; artifact_store
       ; source_lease = Prompt_source_lease.borrow source_lease
       ; env
+      ; binding_issuer
       }
   in
   bind_with_checkpoint
@@ -977,8 +998,11 @@ let bind_installed t ~source ~artifact_store ~source_lease ~env ~revision ~sw =
 let create_runner = create
 
 module Source_binding = struct
+  module P = Agent_protocol
+
   type t =
     { domain_id : int
+    ; issuer : Binding_issuer.t
     ; source : Source.t
     ; tool_contract : Chatml_compilation.Tool_contract.t
     ; runtime_policy_revision : Chatml_source.Digest.t
@@ -996,6 +1020,7 @@ module Source_binding = struct
         ~source_lease
     =
     { domain_id = (Stdlib.Domain.self () :> int)
+    ; issuer = Binding_issuer.create ()
     ; source
     ; tool_contract
     ; runtime_policy_revision
@@ -1003,6 +1028,110 @@ module Source_binding = struct
     ; artifact_store
     ; source_lease = Prompt_source_lease.borrow source_lease
     }
+  ;;
+
+  let content_source_error failure =
+    let module E = Prompt_source_owner.Error in
+    let open P.Error in
+    let code, retryable =
+      match E.code failure with
+      | Busy -> P.Error.Conflict, true
+      | Revoked | Closed | Missing_live_root -> Lease_stale, false
+      | Lease_limit -> Resource_limit, false
+      | Invalid_binding
+      | Foreign_receipt
+      | Foreign_capture
+      | Filesystem
+      | Capture
+      | Project_preparation
+      | Document_capture -> Invalid_state, false
+    in
+    P.Error.create code ~message:"selected child source is unavailable" ~retryable ()
+  ;;
+
+  module Content_source = struct
+    type binding = t
+
+    type t =
+      { binding : binding
+      ; target : Claimed_developer.Selected.Target.t
+      }
+
+    type side =
+      | Declaring
+      | Caller
+
+    let check t =
+      let module Target = Claimed_developer.Selected.Target in
+      let open Result.Let_syntax in
+      let%bind () =
+        if Int.equal t.binding.domain_id (Stdlib.Domain.self () :> int)
+        then Ok ()
+        else Error (failure "selected child source belongs to another Eio domain")
+      in
+      let%bind () =
+        match t.target.Target.binding_issuer with
+        | Some issuer when phys_equal issuer t.binding.issuer -> Ok ()
+        | None | Some _ ->
+          Error (failure "selected child belongs to another source binding")
+      in
+      Target.check t.target
+    ;;
+
+    let revision t = function
+      | Declaring -> Claimed_developer.Selected.Target.revision t.target
+      | Caller -> t.target.parent
+    ;;
+
+    let matches_revision t ~side selected = phys_equal (revision t side) selected
+
+    let with_read t ~side ~f =
+      let module Owner = Prompt_source_owner in
+      let open Result.Let_syntax in
+      let%bind () = check t in
+      let%bind read =
+        Prompt_source_lease.with_scope t.binding.source_lease ~f:(fun scope ->
+          let open Result.Let_syntax in
+          let%bind content =
+            Owner.Scope.bind_content_revision scope ~revision:(revision t side)
+          in
+          let%bind value = f scope content in
+          let%map () = Owner.Scope.check scope in
+          value)
+        |> Result.map_error ~f:content_source_error
+      in
+      let%map () = check t in
+      read
+    ;;
+
+    let check_dynamic t ~side = with_read t ~side ~f:(fun _ _ -> Ok ())
+
+    let read_local t ~side ~item ~max_bytes ~max_work_steps ~checkpoint ~on_acquire =
+      with_read t ~side ~f:(fun scope content ->
+        Prompt_source_owner.Scope.read_dynamic_content
+          scope
+          ~content
+          ~item
+          ~max_bytes
+          ~max_work_steps
+          ~checkpoint
+          ~on_acquire)
+    ;;
+
+    let remote_origin t ~side ~item ~max_work_steps ~checkpoint =
+      with_read t ~side ~f:(fun scope content ->
+        Prompt_source_owner.Scope.content_origin
+          scope
+          ~content
+          ~item
+          ~max_work_steps
+          ~checkpoint)
+    ;;
+  end
+
+  let selected_content_source t ~target =
+    let port : Content_source.t = { binding = t; target } in
+    Result.map (Content_source.check port) ~f:(fun () -> port)
   ;;
 
   let bind_with_literal_policy
@@ -1048,6 +1177,7 @@ module Source_binding = struct
       in
       bind_installed_with_selected
         ?run_selected_target
+        ~binding_issuer:t.issuer
         runner
         ~source:t.source
         ~artifact_store:t.artifact_store
@@ -1122,6 +1252,7 @@ module Source_binding = struct
           ; artifact_store = t.artifact_store
           ; source_lease = Prompt_source_lease.borrow t.source_lease
           ; env
+          ; binding_issuer = Some t.issuer
           }
       in
       select_installed_child

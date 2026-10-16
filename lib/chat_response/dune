@@ -5,6 +5,7 @@
   cache
   config
   converter
+  converter_source
   ctx
   driver
   agent_response_loop

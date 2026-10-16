@@ -32,6 +32,7 @@ val create
   -> max_native_bindings:int
   -> child_sources:Session_factory.Child_source_policy.t option
   -> content_limits:Chatmd_prompt_content.Limits.t option
+  -> remote_content:Developer_child_remote_content.Policy.t option
   -> artifact_store:Agent_store.Prompt_artifact_store.t
   -> agent_source_limits:Developer_agent_source_runtime.Limits.t
   -> (t, P.Error.t) result
@@ -163,6 +164,28 @@ module Child_prepared : sig
   val runtime : t -> Chat_response.Agent_runtime.t
   val selected_native : t -> Chat_response.Tool_capability.t
   val managed_definition : t -> Chat_response.Managed_tool_registry.t
+
+  (** True only when the bounded parsed preflight found image/document source
+      content. This structural choice is made before any attempted read. *)
+  val needs_dynamic_source : t -> bool
+
+  (** The daemon's explicitly configured bounded remote transport. No policy
+      means remote content is denied before network I/O. *)
+  val remote_content : t -> Developer_child_remote_content.t option
+
+  val content_limits : t -> Chatmd_prompt_content.Limits.t option
+
+  (** A selected callback-local source-read port, without a retained Scope.
+      Every dynamic operation opens and closes its own original-source Scope;
+      captured/literal conversion needs no live source. The caller also passes
+      [refresh]/[Admission.check_now] as the projector's Root/currentness check
+      around each yielding conversion and remote transport. *)
+  val content_source
+    :  t
+    -> ( Agent_session.Captured_agent_runner.Source_binding.Content_source.t
+         , P.Error.t )
+         result
+
   val tool_contract : t -> Chatml_compilation.Tool_contract.t
 
   (** The exact Live-owned response directory already supplied to the saved

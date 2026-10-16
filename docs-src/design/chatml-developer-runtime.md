@@ -52,28 +52,33 @@ The [lexical script-job kernel](../../lib/agent_session/script_job_kernel.mli) s
 
 The [managed developer executor](../../lib/agent_server/developer_managed_tool_executor.mli) binds the prepared standalone definition after Root admission to that same native terminal and lexical Job scope. The native policy still admits the exact selected implementation and dispatched invocation. Before interpretation and after yielding checks, the executor rechecks the physical callback, current selected borrow and binding. It runs the existing compiled program under the inherited execution budget, projects the narrower host/deadline/output limits into the tool ABI, sends nested `Tool.call` through the selected native child path, and seals only the returned Job subset. `Developer_tool_v1` receives Model.spawn only when the Root retains an authenticated provider selection; ordinary `Tool_v1` and a providerless Root cannot obtain it. The prepared definition must come from the same trusted live-resource package used to construct the Root; equal capability fingerprints alone do not prove that provenance.
 
-The deferred Agent source producer prepares ordinary `Agent.run` functions from
-the selected Prompt revision before Root construction. Its one-time bridge
-checks the same physical function and source preparer in the installed runtime
-and Root registry. A saved Tool callback then borrows the exact captured Agent
+The Agent source producer prepares ordinary `Agent.run` functions from the
+selected Prompt revision before Root construction. Its one-time bridge checks
+the same physical function and source preparer in the installed runtime and
+Root registry. A saved Tool callback then borrows the exact captured Agent
 artifact and entered native invocation before lending the Root's tracked model
 context; editing the original file does not replace that artifact. The selected
-Prompt tool contract also governs child preparation and restoration. Until a
-separate physical child capability owner admits child effects, this developer
-path accepts only literal child messages, config and reasoning. Child tools,
-scripts, nested Agent content and document/image fetches reject before Driver
-can expose them. This is an interim lower runtime boundary; hosted assembly and
-full nested child capabilities remain separate M5 work.
+Prompt tool contract also governs child preparation and restoration. The
+[hosted child runner](../../lib/agent_server/developer_child_agent_runner.mli)
+installs the selected child's native and managed tools under that physical Root
+and callback. Source-dependent child messages use parser-owned document and
+image occurrences: captured content keeps its immutable bytes, local reads use
+the occurrence's declaring source, and remote reads require explicit bounded
+host configuration. Declaration and caller content retain distinct source
+origins and share one finite conversion budget. A selected source read checks
+the live owner before and after yielding acquisition; the existing Converter
+keeps its role and inline-image rendering. Executable nested Agent content and
+immediate moderator/model orchestration still require a descendant owner.
 
 The [child preflight](../../lib/agent_session/developer_child_preflight.mli)
-reads the genuine parser projection and bounded caller input before any
-selected-child host prepares effects. Its literal mode retains the strict
-lower boundary. Its selected mode rejects content fetches, moderation,
-unowned nested Agents and the Driver's special `fork` route; a host must still
-prove the saved target, physical Root and child policy before installing any
-tool. The scan admits at most 16,384 nodes and 8 MiB of text and propagates
-the caller's cancellation checkpoint. Passing it is classification, not an
-execution grant. The selected-child host remains to be installed.
+reads the genuine parser projection and bounded caller input before the child
+prepares effects. Its literal mode retains the strict lower boundary. Its
+selected mode classifies document and image content without reading it, and
+rejects moderation, unowned nested Agents and the Driver's special `fork`
+route. The host must prove the saved target, physical Root and child policy
+before installing any tool or acquiring dynamic content. The scan admits at
+most 16,384 nodes and 8 MiB of text and propagates the caller's cancellation
+checkpoint. Passing it is classification, not an execution grant.
 
 A physically claimed developer Worker borrows the same lexical kernel through a
 [Worker action](../../lib/agent_server/developer_root_owner.mli). It derives the

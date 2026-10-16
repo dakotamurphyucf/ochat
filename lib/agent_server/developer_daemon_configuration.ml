@@ -1,5 +1,11 @@
 open! Core
 
+module Remote_content = struct
+  type t = Developer_child_remote_content.Policy.t
+
+  let create = Developer_child_remote_content.Policy.create
+end
+
 module Limits = struct
   type t =
     { store : Agent_store.Developer_run_store.Limits.t
@@ -77,6 +83,7 @@ type t =
   ; publisher_limits : Agent_store.Developer_result_publisher.Limits.t
   ; publisher_storage : Agent_store.Developer_result_publisher.Storage.t
   ; model_target : Inference.Request.Target.t option
+  ; remote_content : Remote_content.t option
   ; authorize_native :
       Agent_protocol.Host_invocation.t
       -> Chat_response.Tool_capability.binding
@@ -108,7 +115,10 @@ let create
     ; publisher_limits
     ; publisher_storage
     ; model_target
+    ; remote_content = None
     ; authorize_native
     ; prepare_output
     }
 ;;
+
+let with_remote_content t remote_content = { t with remote_content = Some remote_content }
