@@ -165,7 +165,7 @@ let%test_unit
      | Rejected _ -> failwith "standalone source did not check");
     match T.Receipt.outcome (run env captured checked "standalone") with
     | Succeeded (`String "captured") -> ()
-    | Succeeded _ | Failed _ -> failwith "standalone fixture did not run")
+    | Succeeded _ | Tool_failed _ | Failed _ -> failwith "standalone fixture did not run")
 ;;
 
 let%test_unit "an embedded source-only script keeps its parsed origin through fixture" =
@@ -325,7 +325,7 @@ let%test_unit "an embedded source-only script keeps its parsed origin through fi
      | Rejected _ -> failwith "embedded script did not check");
     (match T.Receipt.outcome (run env captured checked "embedded") with
      | Succeeded (`String "embedded") -> ()
-     | Succeeded _ | Failed _ -> failwith "embedded fixture did not run");
+     | Succeeded _ | Tool_failed _ | Failed _ -> failwith "embedded fixture did not run");
     let changed =
       S.create
         (S.id script)
@@ -437,6 +437,7 @@ let%expect_test "pure empty fixtures and exact ordered tool fixture both run" =
       let outcome =
         match T.Receipt.outcome receipt with
         | Succeeded json -> Jsonaf.to_string json
+        | Tool_failed _ -> "tool_failed"
         | Failed _ -> "failed"
       in
       print_s [%sexp (id : T.Run_id.t), (matched : int), (outcome : string)]
@@ -773,26 +774,190 @@ let%test_unit "JSON admission preserves Exit and rejects a huge numeric lexeme f
   [%test_eq: int] !polls 1
 ;;
 
-let%test_unit "Tool_v1 requires a separate authenticated invocation contract" =
-  let contract = Chatml.Chatml_compiler_contract.for_target Tool_v1 ~checkpoint in
-  let fixture = Fixtures.make ~library:true ~contract () in
-  let entry = Support.capture ~namespace:"root" "src/developer.chatml" pure in
-  let build = Fixtures.compose fixture ~entry:(B.Entry.Captured entry) |> Support.ok in
-  let graph = B.prepared build |> P.fingerprint in
-  let origin = C.Origin.local_saved ~graph ~source_revision:"saved" |> Or_error.ok_exn in
-  match
-    C.create
-      ~build
-      ~origin
-      ~target:Tool_v1
-      ~entrypoint:"run"
-      ~input:`Null
-      ~fixtures:None
-      ~json_bounds
-      ~checkpoint
-  with
-  | Error Unsupported_target -> ()
-  | _ -> failwith "Tool_v1 host context was fabricated"
+let%expect_test "Tool_v1 fixture keeps inert context, Fail and unowned Pending distinct" =
+  Eio_main.run (fun env ->
+    let contract = Chatml.Chatml_compiler_contract.for_target Tool_v1 ~checkpoint in
+    let fixture = Fixtures.make ~library:true ~contract () in
+    let source =
+      {|let run ctx input =
+  match input with
+  | `String("fail") -> Task.pure(`Fail({code = "declined"; message = "declined"; retryable = false; details = `Null}))
+  | `String("pending") -> Task.pure(`Pending(`Job("job_unowned"), `Null))
+  | `Array(_) -> Task.bind(Tool.call("fixture", input), fun _ -> Task.pure(`Complete(`Null)))
+  | _ -> Task.pure(`Complete(`Object([
+      {key = "origin"; value = `String(variant_tag(ctx.origin))},
+      {key = "tool_name"; value = `String(ctx.tool_name)},
+      {key = "provider"; value = (match ctx.provider_call_id with | `None -> `Null | `Some(value) -> `String(value))},
+      {key = "available"; value = `Array(Array.map(ctx.available_tools, fun tool -> `String(tool.name)))}
+  ])))|}
+    in
+    let entry = Support.capture ~namespace:"root" "src/developer.chatml" source in
+    let build = Fixtures.compose fixture ~entry:(B.Entry.Captured entry) |> Support.ok in
+    let graph = B.prepared build |> P.fingerprint in
+    let origin =
+      C.Origin.local_saved ~graph ~source_revision:"saved" |> Or_error.ok_exn
+    in
+    let schema =
+      match Chatmd_shell_spec.Tool_schema.compile `True with
+      | Ok schema -> schema
+      | Error diagnostics ->
+        Error.raise_s
+          [%sexp (diagnostics : Chatmd_shell_spec.Tool_schema.diagnostic list)]
+    in
+    let large_input =
+      Jsonaf.of_string
+        ("[" ^ String.concat ~sep:"," (List.init 96 ~f:(fun _ -> "0")) ^ "]")
+    in
+    let cases =
+      [ "complete", `Null
+      ; "fail", `String "fail"
+      ; "pending", `String "pending"
+      ; "entry", `String "entry"
+      ; "effect", large_input
+      ]
+    in
+    List.iter cases ~f:(fun (label, input) ->
+      let fixtures =
+        C.Fixture.create ~steps:[] ~max_steps:8 ~max_bytes:4096 ~checkpoint
+        |> Or_error.ok_exn
+      in
+      let captured =
+        C.create
+          ~build
+          ~origin
+          ~target:Tool_v1
+          ~entrypoint:"run"
+          ~input
+          ~fixtures:(Some fixtures)
+          ~json_bounds
+          ~checkpoint
+        |> capture_ok
+      in
+      let checked = check env captured in
+      let id = T.Run_id.create label |> Or_error.ok_exn in
+      (match
+         T.run
+           captured
+           ~check:checked
+           ~id
+           ~limits:Chatml_execution.default_limits
+           ~max_output_bytes:4096
+           ~env
+       with
+       | Error T.Error.Invalid_selection -> ()
+       | Error _ | Ok _ -> failwith "Tool_v1 ran without exact selection");
+      let selection =
+        T.Tool_v1.Selection.create
+          ~capture:captured
+          ~contract
+          ~run:(Agent_protocol.Id.Developer_run.of_string "dvr_fixture" |> Support.ok)
+          ~id
+          ~generation:1
+          ~tool_name:"example"
+          ~input_schema:schema
+          ~output_schema:schema
+          ~created_at:(Agent_protocol.Timestamp.now ())
+          ~deadline:None
+          ~limits:Chatml_execution.default_limits
+          ~max_output_bytes:4096
+          ~checkpoint
+        |> run_ok
+      in
+      let other_id = T.Run_id.create (label ^ "-other") |> Or_error.ok_exn in
+      assert (
+        not
+          (T.Tool_v1.Selection.matches_execution
+             selection
+             ~id:other_id
+             ~limits:Chatml_execution.default_limits
+             ~max_output_bytes:4096));
+      let effects = ref 0 in
+      (match
+         T.Tool_v1.run
+           captured
+           ~check:checked
+           ~selection
+           ~id:other_id
+           ~limits:Chatml_execution.default_limits
+           ~max_output_bytes:4096
+           ~admit:(fun () ->
+             incr effects;
+             true)
+           ~env
+       with
+       | Error T.Error.Invalid_selection -> ()
+       | Error _ | Ok _ -> failwith "crossed Tool_v1 row executed");
+      (match
+         T.Tool_v1.run
+           captured
+           ~check:checked
+           ~selection
+           ~id
+           ~limits:Chatml_execution.default_limits
+           ~max_output_bytes:4095
+           ~admit:(fun () ->
+             incr effects;
+             true)
+           ~env
+       with
+       | Error T.Error.Invalid_selection -> ()
+       | Error _ | Ok _ -> failwith "crossed Tool_v1 output cap executed");
+      [%test_eq: int] !effects 0;
+      let run_selected ?admit () =
+        T.Tool_v1.run
+          ?admit
+          captured
+          ~check:checked
+          ~selection
+          ~id
+          ~limits:Chatml_execution.default_limits
+          ~max_output_bytes:4096
+          ~env
+        |> run_ok
+      in
+      let receipt =
+        match label with
+        | "entry" ->
+          Eio.Switch.run (fun sw ->
+            let revoked = ref false in
+            Eio.Fiber.fork ~sw (fun () ->
+              Eio.Fiber.yield ();
+              revoked := true);
+            run_selected ~admit:(fun () -> not !revoked) ())
+        | "effect" ->
+          Eio.Switch.run (fun sw ->
+            let revoked = ref false in
+            let checks = ref 0 in
+            let admit () =
+              incr checks;
+              if Int.equal !checks 2
+              then
+                Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Fiber.yield ();
+                  revoked := true);
+              not !revoked
+            in
+            run_selected ~admit ())
+        | _ -> run_selected ()
+      in
+      assert (Option.is_some (T.Receipt.tool_selection_fingerprint receipt));
+      let result =
+        match T.Receipt.outcome receipt with
+        | Succeeded value -> "complete:" ^ Jsonaf.to_string value
+        | Tool_failed error -> "tool_failed:" ^ error.code
+        | Failed T.Failure.Pending_without_owner -> "pending_without_owner"
+        | Failed T.Failure.Admission_revoked -> "admission_revoked"
+        | Failed _ -> "failed"
+      in
+      print_endline (label ^ "=" ^ result)));
+  [%expect
+    {|
+    complete=complete:{"origin":"Script","tool_name":"example","provider":null,"available":[]}
+    fail=tool_failed:declined
+    pending=pending_without_owner
+    entry=admission_revoked
+    effect=admission_revoked
+    |}]
 ;;
 
 let inert_initializer =

@@ -597,8 +597,8 @@ let create_prepared
   let open Result.Let_syntax in
   let%bind () =
     match target with
-    | Contract.Target.One_off_v1 -> Ok ()
-    | Tool_v1 | Developer_tool_v1 | Moderator_v1 | Delegated_moderator_v1 ->
+    | Contract.Target.One_off_v1 | Tool_v1 -> Ok ()
+    | Developer_tool_v1 | Moderator_v1 | Delegated_moderator_v1 ->
       Error Error.Unsupported_target
   in
   let graph_fingerprint = Prepared.fingerprint prepared in
@@ -656,7 +656,15 @@ let create_prepared
     then Error Error.Invalid_entrypoint
     else (
       match
-        Contract.Invocation.standalone contract ~entrypoint ~argument_count:1 ~checkpoint
+        Contract.Invocation.standalone
+          contract
+          ~entrypoint
+          ~argument_count:
+            (match target with
+             | One_off_v1 -> 1
+             | Tool_v1 -> 2
+             | _ -> assert false)
+          ~checkpoint
       with
       | Ok _ -> Ok ()
       | Error _ -> Error Error.Invalid_entrypoint)

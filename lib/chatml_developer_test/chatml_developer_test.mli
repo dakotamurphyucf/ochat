@@ -71,6 +71,8 @@ module Failure : sig
     | Unsupported_effect of { operation : string }
     | Runtime of Diagnostic.t
     | Invalid_result of Diagnostic.t
+    | Pending_without_owner
+    | Admission_revoked
     | Output_limit
 end
 
@@ -78,6 +80,7 @@ module Error : sig
   type t =
     | No_fixtures
     | Mismatched_check
+    | Invalid_selection
     | Invalid_output_limit
     | Invalid_execution_limits
   [@@deriving equal, sexp_of]
@@ -86,6 +89,7 @@ end
 module Receipt : sig
   type outcome =
     | Succeeded of Jsonaf.t
+    | Tool_failed of Agent_protocol.Invocation.tool_error
     | Failed of Failure.t
 
   type t
@@ -101,6 +105,7 @@ module Receipt : sig
   val capture_fingerprint : t -> Chatml_source.Digest.t
   val graph_fingerprint : t -> Chatml_source.Digest.t
   val fixture_digest : t -> Chatml_source.Digest.t
+  val tool_selection_fingerprint : t -> Chatml_source.Digest.t option
   val matched_steps : t -> int
   val logs : t -> Log.t list
   val outcome : t -> outcome
@@ -131,10 +136,75 @@ end
     a 1 MiB structural ceiling and is measured before serialization inside the
     active execution scope. *)
 val run
-  :  Chatml_developer_capture.t
+  :  ?admit:(unit -> bool)
+  -> Chatml_developer_capture.t
   -> check:Check.t
   -> id:Run_id.t
   -> limits:Chatml_execution.limits
   -> max_output_bytes:int
   -> env:Eio_unix.Stdenv.base
   -> (Receipt.t, Error.t) Result.t
+
+module Tool_v1 : sig
+  module Selection : sig
+    type t
+
+    (** Comparison-only fixture ABI selection. The host supplies the exact
+        already selected Standard Tool_v1 contract, top-level tool label and
+        schemas, actual developer run/epoch and persisted receipt ID. The
+        constructor compares the physical capture and selected contract,
+        validates the Tool_v1 two-argument entrypoint and bounded context
+        fields, and retains no Source, Session, Invocation or capability.
+        Source/current actor and policy admission remain with the host. *)
+    val create
+      :  capture:Chatml_developer_capture.t
+      -> contract:Chatml.Chatml_compiler_contract.t
+      -> run:Agent_protocol.Id.Developer_run.t
+      -> id:Run_id.t
+      -> generation:int
+      -> tool_name:string
+      -> input_schema:Chatmd_shell_spec.Tool_schema.t
+      -> output_schema:Chatmd_shell_spec.Tool_schema.t
+      -> created_at:Agent_protocol.Timestamp.t
+      -> deadline:Agent_protocol.Timestamp.t option
+      -> limits:Chatml_execution.limits
+      -> max_output_bytes:int
+      -> checkpoint:(unit -> unit)
+      -> (t, Error.t) result
+
+    (** Includes the exact selected ABI/schema/tool/context policy. This is
+        separate from the capture graph/input/fixture fingerprint and never
+        replaces the original request digest or current target re-selection. *)
+    val fingerprint : t -> Chatml_source.Digest.t
+
+    (** Before execution, prove this selection belongs to the actual persisted
+        receipt and exact effective budget supplied by the host. The capture
+        itself is checked separately by [run]. *)
+    val matches_execution
+      :  t
+      -> id:Run_id.t
+      -> limits:Chatml_execution.limits
+      -> max_output_bytes:int
+      -> bool
+  end
+
+  (** Same joined interpreter and ordered inert Tool.call fixture kernel as
+      [run]. The caller supplies its actual persisted [id] and effective
+      [limits]/[max_output_bytes]; [run] compares them with [selection] and
+      proves [check] belongs to the same physical capture before any effect.
+      It then uses Tool_v1's two arguments and bounded Complete/Fail/Pending
+      decoder. Complete and Fail remain different receipt outcomes. Pending
+      cannot pass without a real owned completion path and is recorded as
+      [Pending_without_owner]; no work is scheduled or resumed. Any prohibited
+      effect remains sticky across Task.catch. Cancellation propagates. *)
+  val run
+    :  ?admit:(unit -> bool)
+    -> Chatml_developer_capture.t
+    -> check:Check.t
+    -> selection:Selection.t
+    -> id:Run_id.t
+    -> limits:Chatml_execution.limits
+    -> max_output_bytes:int
+    -> env:Eio_unix.Stdenv.base
+    -> (Receipt.t, Error.t) result
+end

@@ -315,6 +315,7 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
                 S.Daemon.Developer.Request.create
                   ~route:(Document_script { expected; selector })
                   ~kind:Live_run
+                  ~target:Chatml.Chatml_compiler_contract.Target.One_off_v1
                   ~prompt:(Some (S.Catalog_identity.prompt_definition "restart.prompt"))
                   ~workspace:
                     (Some (S.Catalog_identity.workspace_definition "restart.workspace"))

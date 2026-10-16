@@ -82,10 +82,23 @@ module Limits = struct
 end
 
 module Selected_contract = struct
+  module Tool_fixture = struct
+    type t =
+      { name : string
+      ; input_schema : Chatmd_shell_spec.Tool_schema.t
+      ; output_schema : Chatmd_shell_spec.Tool_schema.t
+      }
+
+    let name t = t.name
+    let input_schema t = t.input_schema
+    let output_schema t = t.output_schema
+  end
+
   type t =
     { contract : Contract.t
     ; fingerprint : Captured.Digest.t
     ; identity_bytes : int
+    ; tool_fixture : Tool_fixture.t option
     }
 
   let of_standard_entry entry =
@@ -101,10 +114,70 @@ module Selected_contract = struct
         { contract
         ; fingerprint = Authoring_standard_contracts.Entry.fingerprint entry
         ; identity_bytes = Authoring_standard_contracts.Entry.identity_bytes entry
+        ; tool_fixture = None
         }
   ;;
 
+  let of_standard_tool_entry entry ~tool_name ~input_schema ~output_schema =
+    let contract = Authoring_standard_contracts.Entry.contract entry in
+    if
+      String.is_empty tool_name
+      || String.length tool_name > 256
+      || not
+           (match Contract.kind contract with
+            | Contract.Kind.Standard Contract.Target.Tool_v1 -> true
+            | Standard _ | Native -> false)
+    then Error (invalid ())
+    else (
+      let input = Chatmd_shell_spec.Tool_schema.to_json input_schema
+      and output = Chatmd_shell_spec.Tool_schema.to_json output_schema in
+      let limits =
+        Document_schema.Limits.create
+          ~max_bytes:1_048_576
+          ~max_depth:128
+          ~max_fields:100_000
+          ~max_nodes:100_000
+      in
+      let open Result.Let_syntax in
+      let%bind limits = limits |> Result.map_error ~f:(fun _ -> invalid ()) in
+      let%bind input_bytes =
+        Document_schema.Json.validate_and_measure_with_checkpoint
+          ~limits
+          ~checkpoint:(fun () -> ())
+          input
+        |> Result.map_error ~f:(fun _ -> invalid ())
+      in
+      let%bind output_bytes =
+        Document_schema.Json.validate_and_measure_with_checkpoint
+          ~limits
+          ~checkpoint:(fun () -> ())
+          output
+        |> Result.map_error ~f:(fun _ -> invalid ())
+      in
+      let identity =
+        [%sexp
+          (Captured.Digest.to_hex (Authoring_standard_contracts.Entry.fingerprint entry)
+           : string)
+        , (tool_name : string)
+        , (Jsonaf.to_string input : string)
+        , (Jsonaf.to_string output : string)]
+        |> Sexp.to_string_mach
+      in
+      Ok
+        { contract
+        ; fingerprint = Captured.Digest.of_contents identity ~checkpoint:(fun () -> ())
+        ; identity_bytes =
+            Authoring_standard_contracts.Entry.identity_bytes entry
+            + String.length tool_name
+            + input_bytes
+            + output_bytes
+        ; tool_fixture =
+            Some { Tool_fixture.name = tool_name; input_schema; output_schema }
+        })
+  ;;
+
   let contract t = t.contract
+  let tool_fixture t = t.tool_fixture
 
   let same_identity a b =
     Int.equal a.identity_bytes b.identity_bytes
@@ -115,18 +188,19 @@ end
 module Request = struct
   type t =
     { entrypoint : string
+    ; target : Contract.Target.t
     ; input : Jsonaf.t
     ; fixtures : Capture.Fixture.t option
     ; json_bounds : Capture.Json_bounds.t
     }
 
-  let create ~entrypoint ~input ~fixtures ~json_bounds ~checkpoint =
+  let create ~entrypoint ~target ~input ~fixtures ~json_bounds ~checkpoint =
     if String.is_empty entrypoint || String.length entrypoint > 256
     then Error (invalid ())
     else (
       match Capture.Json_bounds.measure json_bounds input ~checkpoint with
       | Error _ -> Error (limit ())
-      | Ok _ -> Ok { entrypoint; input; fixtures; json_bounds })
+      | Ok _ -> Ok { entrypoint; target; input; fixtures; json_bounds })
   ;;
 end
 
@@ -265,6 +339,7 @@ module Candidate = struct
   end
 
   let capture t = t.capture
+  let selected_contract t = t.selected
 
   let check_domain t =
     if Int.equal t.domain (Stdlib.Domain.self () :> int) then Ok () else Error (stale ())
@@ -367,17 +442,30 @@ let selected_initial ~original_actor ~actor select =
     | Some _, None | None, Some _ | None, None -> Error (denied ()))
 ;;
 
-let capture_program ~prepared ~origin ~request ~checkpoint =
-  Capture.create_prepared
-    ~prepared
-    ~origin
-    ~target:Contract.Target.One_off_v1
-    ~entrypoint:request.Request.entrypoint
-    ~input:request.input
-    ~fixtures:request.fixtures
-    ~json_bounds:request.json_bounds
-    ~checkpoint
-  |> Result.map_error ~f:capture_error
+let capture_program ~prepared ~origin ~selected ~request ~checkpoint =
+  let selected_target =
+    match Contract.kind (Selected_contract.contract selected) with
+    | Contract.Kind.Standard target -> Some target
+    | Native -> None
+  in
+  if
+    not
+      (Option.value_map
+         selected_target
+         ~default:false
+         ~f:(Contract.Target.equal request.Request.target))
+  then Error (stale ())
+  else
+    Capture.create_prepared
+      ~prepared
+      ~origin
+      ~target:request.Request.target
+      ~entrypoint:request.Request.entrypoint
+      ~input:request.input
+      ~fixtures:request.fixtures
+      ~json_bounds:request.json_bounds
+      ~checkpoint
+    |> Result.map_error ~f:capture_error
 ;;
 
 let local_revision digest = "capture:" ^ Captured.Digest.to_hex digest
@@ -434,7 +522,7 @@ let prepare_local_project
   in
   let prepared = Sources.Capture.prepared acquired in
   let%bind origin = local_origin prepared in
-  let%bind capture = capture_program ~prepared ~origin ~request ~checkpoint in
+  let%bind capture = capture_program ~prepared ~origin ~selected ~request ~checkpoint in
   let roots = local.root :: local.dependency_roots in
   let owner_now ~actor = local_owner_now sources roots ~actor in
   let full_owner ~actor ~checkpoint =
@@ -489,7 +577,7 @@ let prepare_local_source
     |> Result.map_error ~f:(fun _ -> limit ())
   in
   let%bind origin = local_origin prepared in
-  let%bind capture = capture_program ~prepared ~origin ~request ~checkpoint in
+  let%bind capture = capture_program ~prepared ~origin ~selected ~request ~checkpoint in
   let owner_now ~actor = local_owner_now sources [ source.root ] ~actor in
   let full_owner ~actor ~checkpoint =
     checkpoint ();
@@ -632,7 +720,9 @@ let prepare_authoring_project t ~actor ~connection ~expected ~request ~checkpoin
         let%bind origin =
           project_origin current inputs prepared ~limits:t.limits ~checkpoint
         in
-        let%bind capture = capture_program ~prepared ~origin ~request ~checkpoint in
+        let%bind capture =
+          capture_program ~prepared ~origin ~selected ~request ~checkpoint
+        in
         let owner_now ~actor =
           Scope.Candidate_pin.check_now pin ~actor |> Result.map_error ~f:owner_error
         in
@@ -905,7 +995,9 @@ let prepare_document_script
           ~prepared
           ~checkpoint
       in
-      let%bind capture = capture_program ~prepared ~origin ~request ~checkpoint in
+      let%bind capture =
+        capture_program ~prepared ~origin ~selected ~request ~checkpoint
+      in
       let owner_now ~actor =
         Scope.Candidate_pin.check_now pin ~actor |> Result.map_error ~f:owner_error
       in

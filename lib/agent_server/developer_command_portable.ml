@@ -118,6 +118,8 @@ module Fixture = struct
     | Unsupported_effect { operation } -> Unsupported_effect { operation }
     | Runtime value -> Runtime (diagnostic capture value)
     | Invalid_result value -> Invalid_result (diagnostic capture value)
+    | Pending_without_owner -> Pending_without_owner
+    | Admission_revoked -> Admission_revoked
     | Output_limit -> Output_limit
   ;;
 
@@ -132,6 +134,7 @@ module Fixture = struct
     let outcome =
       match Portable.Receipt.outcome value with
       | Portable.Receipt.Succeeded output -> Fixture_value.Succeeded output
+      | Tool_failed error -> Fixture_value.Tool_failed error
       | Failed problem -> Fixture_value.Failed (failure capture problem)
     in
     let logs =
@@ -144,6 +147,7 @@ module Fixture = struct
       (Fixture_value.Completed
          { graph_fingerprint = Portable.Receipt.graph_fingerprint value
          ; fixture_digest = Portable.Receipt.fixture_digest value
+         ; tool_selection_fingerprint = Portable.Receipt.tool_selection_fingerprint value
          ; matched_steps = Portable.Receipt.matched_steps value
          ; logs
          ; outcome
@@ -152,30 +156,57 @@ module Fixture = struct
 
   let output_limited (value : Portable.Receipt.t) =
     Developer_command_projection_fallback.fixture_output_limit
+      ~tool_selection_fingerprint:(Portable.Receipt.tool_selection_fingerprint value)
       ~graph_fingerprint:(Portable.Receipt.graph_fingerprint value)
       ~fixture_digest:(Portable.Receipt.fixture_digest value)
       ~matched_steps:(Portable.Receipt.matched_steps value)
   ;;
 
-  let run ~capture ~check ~id ~budgets ~env =
+  let run ~capture ~check ~tool_selection ~admit ~id ~budgets ~env =
     let open Result.Let_syntax in
     let%bind run_id =
       Portable.Run_id.create (Receipt.Id.to_string id)
       |> Result.map_error ~f:(fun _ -> P.Error.invalid_request "invalid fixture identity")
     in
+    let%bind () =
+      if admit ()
+      then Ok ()
+      else
+        Error
+          (P.Error.create
+             P.Error.Permission_denied
+             ~message:"developer fixture admission changed"
+             ~retryable:false
+             ())
+    in
     let%bind completed =
-      Portable.run
-        capture
-        ~check
-        ~id:run_id
-        ~limits:(Budgets.execution budgets)
-        ~max_output_bytes:(Budgets.max_output_bytes budgets)
-        ~env
+      (match tool_selection with
+       | None ->
+         Portable.run
+           ~admit
+           capture
+           ~check
+           ~id:run_id
+           ~limits:(Budgets.execution budgets)
+           ~max_output_bytes:(Budgets.max_output_bytes budgets)
+           ~env
+       | Some selection ->
+         Portable.Tool_v1.run
+           ~admit
+           capture
+           ~check
+           ~selection
+           ~id:run_id
+           ~limits:(Budgets.execution budgets)
+           ~max_output_bytes:(Budgets.max_output_bytes budgets)
+           ~env)
       |> Result.map_error ~f:(function
         | Portable.Error.No_fixtures ->
           P.Error.invalid_request "developer fixture run requires admitted fixtures"
         | Mismatched_check ->
           P.Error.invalid_request "developer fixture check does not match capture"
+        | Invalid_selection ->
+          P.Error.invalid_request "developer fixture Tool_v1 selection changed"
         | Invalid_output_limit | Invalid_execution_limits ->
           P.Error.invalid_request "invalid developer fixture budget")
     in
@@ -188,15 +219,27 @@ module Fixture = struct
   ;;
 end
 
-let run_kind ~kind ~capture ~id ~budgets ~env =
+let run_kind ~kind ~capture ~tool_selection ~admit ~id ~budgets ~env =
   let open Result.Let_syntax in
   match kind with
   | Receipt.Kind.Check ->
+    let%bind () =
+      match tool_selection with
+      | None -> Ok ()
+      | Some _ -> Error (P.Error.invalid_request "check cannot execute Tool_v1 fixture")
+    in
     let%map _checked, receipt = Check.run ~capture ~id ~budgets ~env in
     receipt
   | Fixture_run ->
     let%bind checked, _ = Check.run ~capture ~id ~budgets ~env in
-    Fixture.run ~capture ~check:(Check.checked checked) ~id ~budgets ~env
+    Fixture.run
+      ~capture
+      ~check:(Check.checked checked)
+      ~tool_selection
+      ~admit
+      ~id
+      ~budgets
+      ~env
   | Live_run ->
     Error (P.Error.invalid_request "live developer command requires its physical Root")
 ;;

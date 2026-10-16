@@ -3,7 +3,9 @@ module P = Agent_protocol
 module Receipt = Agent_store.Developer_command_receipt
 
 (** Pure Check and bounded fixture projections over the existing captured
-    One_off_v1 engine. This module has no Root, Store writer or scheduler. *)
+    One_off_v1 or Tool_v1 engine. This module has no Root, Store writer or
+    scheduler. The Tool_v1 selection comes from the same source Candidate and
+    authenticated host policy; an ordered Tool.call step never selects it. *)
 
 (** Admit the whole completed receipt under the Store-bound effective terminal
     cap before handing it to Lifecycle.Finish. *)
@@ -34,6 +36,8 @@ module Fixture : sig
   val run
     :  capture:Chatml_developer_capture.t
     -> check:Chatml_developer_test.Check.t
+    -> tool_selection:Chatml_developer_test.Tool_v1.Selection.t option
+    -> admit:(unit -> bool)
     -> id:Receipt.Id.t
     -> budgets:Developer_command_budgets.t
     -> env:Eio_unix.Stdenv.base
@@ -50,6 +54,8 @@ end
 val run_kind
   :  kind:Receipt.Kind.t
   -> capture:Chatml_developer_capture.t
+  -> tool_selection:Chatml_developer_test.Tool_v1.Selection.t option
+  -> admit:(unit -> bool)
   -> id:Receipt.Id.t
   -> budgets:Developer_command_budgets.t
   -> env:Eio_unix.Stdenv.base

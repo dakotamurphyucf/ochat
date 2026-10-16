@@ -163,8 +163,8 @@ module Error : sig
   [@@deriving sexp_of]
 end
 
-(** Freeze exact admitted Prepared graph, selected standard standalone contract,
-    entry, bounded JSON input, and optional finite fixture set into one
+(** Freeze exact admitted Prepared graph, selected Standard One_off_v1 or Tool_v1
+    standalone contract, entry, bounded JSON input, and optional finite fixture set into one
     fingerprint. The graph/source/origin checks are identical to [create].
     A host can use an authentic [Prepared.single_captured] without fabricating
     a Project Build. Origin labels remain comparison data; the host separately
@@ -180,15 +180,15 @@ val create_prepared
   -> checkpoint:(unit -> unit)
   -> (t, Error.t) Result.t
 
-(** Freeze exact admitted build, selected standard standalone contract, entry,
+(** Freeze exact admitted build, selected Standard standalone contract, entry,
     bounded JSON input, and optional finite fixture set into one fingerprint.
     The source graph fingerprint already binds contract/environment/provenance
     and every source ID/digest. This capture fingerprint additionally binds the
     origin label, entrypoint, input and fixture digest. It never rewrites source
-    or selects a filesystem path. OCH-265 executes One_off_v1. Tool_v1's
-    two-argument run role needs a separate host-owned invocation/context
-    contract. Other targets fail explicitly before compilation.
-    A fixture capture cannot silently become Live. This wrapper delegates to
+    or selects a filesystem path. Tool_v1's two-argument run role also needs
+    exact host-owned inert context/schema selection before fixture execution.
+    Other targets fail explicitly before compilation. A fixture capture cannot
+    silently become Live. This wrapper delegates to
     [create_prepared ~prepared:(Build.prepared build)] with no weaker checks. *)
 val create
   :  build:Chatml_project_build.t

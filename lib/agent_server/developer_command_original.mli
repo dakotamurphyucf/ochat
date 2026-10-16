@@ -46,7 +46,8 @@ module Fresh_source : sig
       omit it entirely for a historical same-request retry. *)
 end
 
-(** One versioned canonical digest over command kind, stable route/selector,
+(** One versioned canonical digest over command kind and explicit compiler ABI
+    target, stable route/selector,
     explicit requested environment/editor revision, entrypoint, bounded JSON
     input/fixtures and requested budget/output options. A Live command requires
     explicit configured Prompt and Workspace definition IDs, both included in
@@ -63,6 +64,7 @@ end
 val create
   :  route:Route.t
   -> kind:Agent_store.Developer_command_receipt.Kind.t
+  -> target:Chatml.Chatml_compiler_contract.Target.t
   -> prompt:P.Id.Prompt_definition.t option
   -> workspace:P.Id.Workspace_definition.t option
   -> entrypoint:string
@@ -75,6 +77,7 @@ val create
   -> (t, P.Error.t) result
 
 val kind : t -> Agent_store.Developer_command_receipt.Kind.t
+val target : t -> Chatml.Chatml_compiler_contract.Target.t
 val route : t -> Route.t
 val prompt : t -> P.Id.Prompt_definition.t option
 val workspace : t -> P.Id.Workspace_definition.t option
