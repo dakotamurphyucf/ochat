@@ -114,14 +114,23 @@ val managed_definition : live -> Chat_response.Managed_tool_registry.t
 val model_sources : live -> Developer_model_job_runner.Sources.t
 
 (** Bind only the saved-Agent registrations prepared inside this Live owner to
-    its exact admitted Root, native runtime and selected Model package. A
-    missing source policy is harmless only when there are no Agent
-    declarations; genuine Agent registrations never become name-only grants.
-    No separate source or provider context is supplied by the caller. *)
+    its exact admitted Root, native runtime and selected Model package. The
+    trusted host supplies one runner constructed from this same Live owner and
+    the Root's actual Jobs/Native services after those services exist, before
+    any executor is exposed. The callback is a trusted Host composition
+    invariant; this module cannot infer its physical provenance from a
+    function value. SourceRuntime was prepared in Bound_runner mode, and a
+    selected Tool target never falls back to literal-only execution after a
+    runner failure. Literal content children retain their existing strict
+    path. A missing source policy is harmless only when there
+    are no Agent declarations; genuine Agent registrations never become
+    name-only grants. No separate source or provider context is supplied by
+    the caller. *)
 val bind_agent_sources
   :  live
   -> root:Developer_root_owner.run
   -> models:Developer_model_job_runner.t option
+  -> run_selected_target:Developer_agent_source_runtime.Selected_target.runner
   -> checkpoint:(unit -> unit)
   -> (unit, P.Error.t) result
 
@@ -155,6 +164,12 @@ module Child_prepared : sig
   val selected_native : t -> Chat_response.Tool_capability.t
   val managed_definition : t -> Chat_response.Managed_tool_registry.t
   val tool_contract : t -> Chatml_compilation.Tool_contract.t
+
+  (** The exact Live-owned response directory already supplied to the saved
+      Agent source and Model runner, for Driver.run_entries' explicit output
+      routing. The trusted child runner borrows it only while this prepared
+      child is active; it is not a source or execution admission. *)
+  val response_dir : t -> Eio.Fs.dir_ty Eio.Path.t
 
   (** Refresh a direct saved-parent effect after any yielding work. The full
       source/Workspace/Root checks may yield; obtain a fresh Root witness and

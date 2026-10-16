@@ -169,6 +169,15 @@ let%test_unit "acknowledgment is lexical and cancellation retains its cause" =
     in
     assert (Result.is_ok acknowledged);
     assert (Int.equal !aborted 1);
+    let rejected_after_mark =
+      scope (fun active ->
+        let _ack = K.mark_prepared active |> ok in
+        Error "selection revoked after preparation")
+    in
+    (match rejected_after_mark with
+     | Error "selection revoked after preparation" -> ()
+     | Ok () | Error _ -> failwith "post-mark rejection lost its cause");
+    assert (Int.equal !aborted 2);
     let original = Failure "cancelled" in
     (match
        Eio.Cancel.sub (fun cancellation ->
@@ -179,5 +188,5 @@ let%test_unit "acknowledgment is lexical and cancellation retains its cause" =
      with
      | exception Eio.Cancel.Cancelled actual -> assert (phys_equal actual original)
      | Ok _ | Error _ -> failwith "cancellation identity was lost");
-    assert (Int.equal !aborted 2))
+    assert (Int.equal !aborted 3))
 ;;

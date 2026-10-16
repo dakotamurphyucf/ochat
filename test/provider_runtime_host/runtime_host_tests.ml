@@ -191,7 +191,7 @@ let components = [ S.Name.create "authority" |> ok ]
 let namespace = Secret.Namespace.create "runtime-host-test" |> ok
 let server_id = P.Id.Server.of_string "srv_runtime_host" |> ok
 
-let local_model_endpoint env sw requests on_submit on_body =
+let local_model_endpoint ?response_body env sw requests on_submit on_body =
   let socket =
     Eio.Net.listen
       ~sw
@@ -235,6 +235,10 @@ let local_model_endpoint env sw requests on_submit on_body =
             incr requests;
             on_body body;
             on_submit ();
+            let response =
+              Option.bind response_body ~f:(fun respond -> respond !requests body)
+              |> Option.value ~default:completed
+            in
             Eio.Flow.copy_string
               (sprintf
                  "HTTP/1.1 200 OK\r\n\
@@ -243,15 +247,22 @@ let local_model_endpoint env sw requests on_submit on_body =
                   Connection: close\r\n\
                   \r\n\
                   %s"
-                 (String.length completed)
-                 completed)
+                 (String.length response)
+                 response)
               flow);
         `Stop_daemon)
     done);
   sprintf "http://127.0.0.1:%d/v1/responses" port
 ;;
 
-let with_fixture ?model_requests ?(on_model_submit = ignore) ?(on_model_body = ignore) f =
+let with_fixture
+      ?model_requests
+      ?response_body
+      ?(model_function_tools = false)
+      ?(on_model_submit = ignore)
+      ?(on_model_body = ignore)
+      f
+  =
   Mirage_crypto_rng_unix.use_default ();
   Eio_main.run (fun env ->
     let suffix = P.Id.Transaction.create () |> P.Id.Transaction.to_string in
@@ -267,7 +278,13 @@ let with_fixture ?model_requests ?(on_model_submit = ignore) ?(on_model_body = i
             match model_requests with
             | None -> "http://127.0.0.1:9/v1/responses"
             | Some requests ->
-              local_model_endpoint env sw requests on_model_submit on_model_body
+              local_model_endpoint
+                ?response_body
+                env
+                sw
+                requests
+                on_model_submit
+                on_model_body
           in
           let driver =
             Openai.Responses_driver.create
@@ -313,7 +330,19 @@ let with_fixture ?model_requests ?(on_model_submit = ignore) ?(on_model_body = i
                     ~endpoint:model_endpoint
                     ~capabilities:
                       (Openai.Responses_driver.Capability.create
-                         ~baseline:[ Text_input, Supported ]
+                         ~baseline:
+                           ([ ( Openai.Responses_driver.Capability.Text_input
+                              , Openai.Responses_driver.Capability.Supported )
+                            ]
+                            @
+                            if model_function_tools
+                            then
+                              [ ( Openai.Responses_driver.Capability.Function_tools
+                                , Openai.Responses_driver.Capability.Supported )
+                              ; ( Openai.Responses_driver.Capability.Opaque_replay
+                                , Openai.Responses_driver.Capability.Supported )
+                              ]
+                            else [])
                          ~models:[]
                        |> ok)
                     ~defaults:[]

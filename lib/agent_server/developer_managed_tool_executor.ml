@@ -7,6 +7,7 @@ module Jobs = Developer_script_job_service
 module N = Agent_session.Native_tool_invocation
 module C = Chat_response.Tool_capability
 module M = Chat_response.Managed_tool_registry
+module Child = Developer_child_selection
 module EC = Chat_response.Extension_compiler
 module ABI = Chat_response.Moderator_invocation.Owned
 module X = Chatml_execution
@@ -19,6 +20,7 @@ type t =
   { root : O.run
   ; definition : M.t
   ; env : Eio_unix.Stdenv.base
+  ; child : Child.t option
   }
 
 exception Fatal_effect of P.Error.t
@@ -62,7 +64,34 @@ let create ~root ~jobs ~definition ~env =
           |> Result.map ~f:ignore
           |> Result.map_error ~f:(fun error -> invalid error.message))
     in
-    Ok { root; definition; env })
+    Ok { root; definition; env; child = None })
+;;
+
+let create_child ~root ~jobs ~selection ~env =
+  let* admission = Child.refresh selection in
+  let* () = Child.Admission.check_now admission in
+  let definition = Child.managed_definition selection in
+  let available = M.capabilities definition in
+  let selected = Child.Admission.capabilities admission in
+  let* () =
+    if Jobs.issued_by_root jobs root && Child.issued_by_root selection root
+    then Ok ()
+    else Error (invalid "child managed Job service belongs to another Root")
+  in
+  let* () =
+    List.fold_result (C.references selected) ~init:() ~f:(fun () reference ->
+      let* binding =
+        C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
+        |> Result.map_error ~f:(fun error -> invalid error.message)
+      in
+      match C.implementation binding with
+      | Native _ -> Ok ()
+      | Managed _ ->
+        C.resolve available ~id:reference.id ~fingerprint:reference.fingerprint
+        |> Result.map ~f:ignore
+        |> Result.map_error ~f:(fun error -> invalid error.message))
+  in
+  Ok { root; definition; env; child = Some selection }
 ;;
 
 let issued_by_root t root = phys_equal t.root root
@@ -124,11 +153,26 @@ let effective_abi_limits t prepared (limits : X.limits) =
       }
 ;;
 
-let check_run_now t ~terminal ~scope ~execution ~borrowed =
+let refresh_child t =
+  match t.child with
+  | None -> Ok None
+  | Some child -> Result.map (Child.refresh child) ~f:Option.some
+;;
+
+let selected_now t admission =
+  match admission with
+  | None -> Ok (O.native_selected t.root)
+  | Some admission ->
+    let* () = Child.Admission.check_now admission in
+    Ok (Child.Admission.source_capabilities admission)
+;;
+
+let check_run_now t ~terminal ~scope ~execution ~borrowed ~admission =
   let admitted = M.owned_invocation execution in
   let current = N.borrow_selected () in
   let reference = C.reference (M.owned_binding execution) in
   let* () = O.Native_terminal.check_completion_now terminal in
+  let* selected = selected_now t admission in
   if
     (not (Jobs.Scope.issued_by_terminal scope terminal))
     || (not (O.Native_terminal.issued_by_root terminal ~root:t.root))
@@ -144,10 +188,7 @@ let check_run_now t ~terminal ~scope ~execution ~borrowed =
     || (not (P.Invocation.equal_status (H.status admitted) Dispatching))
     || not
          (Result.is_ok
-            (C.resolve
-               (O.native_selected t.root)
-               ~id:reference.id
-               ~fingerprint:reference.fingerprint))
+            (C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint))
   then Error (invalid "managed dispatch belongs to another or expired native scope")
   else Ok ()
 ;;
@@ -226,8 +267,9 @@ let run_handler
   =
   let prepared = M.owned_prepared execution in
   let parent = M.owned_invocation execution in
+  let* admission = refresh_child t |> Result.map_error ~f:error_outcome in
   let* () =
-    check_run_now t ~terminal ~scope ~execution ~borrowed
+    check_run_now t ~terminal ~scope ~execution ~borrowed ~admission
     |> Result.map_error ~f:error_outcome
   in
   let* context =
@@ -242,8 +284,9 @@ let run_handler
     in
     let evaluate control =
       let* () = effect_entry () |> Result.map_error ~f:error_outcome in
+      let* admission = refresh_child t |> Result.map_error ~f:error_outcome in
       let* () =
-        check_run_now t ~terminal ~scope ~execution ~borrowed
+        check_run_now t ~terminal ~scope ~execution ~borrowed ~admission
         |> Result.map_error ~f:error_outcome
       in
       let validate_work work =
@@ -304,8 +347,9 @@ let run_handler
           fail error.Chatml_execution.code error.message)
       in
       let* () = effect_entry () |> Result.map_error ~f:error_outcome in
+      let* admission = refresh_child t |> Result.map_error ~f:error_outcome in
       let* () =
-        check_run_now t ~terminal ~scope ~execution ~borrowed
+        check_run_now t ~terminal ~scope ~execution ~borrowed ~admission
         |> Result.map_error ~f:error_outcome
       in
       let* outcome =
@@ -339,7 +383,10 @@ let bind t ~terminal ~scope ~call_child =
     Ok
       N.
         { definition = t.definition
-        ; current = (fun () -> O.native_selected t.root)
+        ; current =
+            (fun () ->
+              let* admission = refresh_child t in
+              selected_now t admission)
         ; run =
             (fun execution
               borrowed

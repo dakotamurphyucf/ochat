@@ -104,7 +104,7 @@ type managed_script_install =
 
 type selected_managed_dispatch =
   { definition : Managed.t
-  ; current : unit -> C.t
+  ; current : unit -> (C.t, Agent_protocol.Error.t) result
   ; run :
       'a.
       Managed.owned_execution
@@ -1088,9 +1088,15 @@ let selected_managed_target
       ~stage_background
       ~install_jobs
   =
+  let open Result.Let_syntax in
+  let%bind current =
+    service.current ()
+    |> Result.map_error ~f:(fun (error : Agent_protocol.Error.t) ->
+      C.{ code = "capability.current"; message = error.message })
+  in
   Managed.admit_owned
     service.definition
-    ~current:(service.current ())
+    ~current
     ~selected
     ~reference
     ~invocation:dispatched
@@ -1154,6 +1160,7 @@ let run_with_native
   Native_tool_policy.run_policy
     ~run_native
     ~on_progress
+    ~native_invocation:None
     ~managed_revision
     ~managed_admit
     ~execute:scoped_execute
@@ -1200,6 +1207,7 @@ let run_owned
   Native_tool_policy.run_policy
     ~run_native:None
     ~on_progress:None
+    ~native_invocation:None
     ~managed_revision
     ~managed_admit
     ~execute
@@ -1301,6 +1309,7 @@ let run_owned_selected
       ~registry
       ~(reference : C.reference)
       ~invocation
+      ~native_invocation
       ~authorize
       ~prepare_output
       ~effect_entry
@@ -1370,6 +1379,7 @@ let run_owned_selected
   Native_tool_policy.run_policy
     ~run_native:None
     ~on_progress:None
+    ~native_invocation
     ~managed_revision
     ~managed_admit
     ~execute
