@@ -1,9 +1,11 @@
 (** One portable, actor-serialized ChatML REPL execution epoch. This owner
     composes the existing transactional typing owner, source-affine resolver,
     incremental configured-module runtime and ONE persistent execution runner.
-    It neither selects a host source/contract nor grants native operations or
-    interprets a deferred task. The caller supplies a trusted selected runtime
-    surface and joins any execution before close/reset. *)
+    It neither selects a host source/contract nor grants native operations.
+    Expression evaluation retains Task values inertly; only an explicit
+    [drive_retained] call interprets one under caller-supplied operations and
+    action budget. The caller supplies a trusted selected runtime surface and
+    joins any execution before close/reset. *)
 
 open Core
 module Typing = Chatml_repl_typing
@@ -33,6 +35,8 @@ module Error : sig
     | Closed
     | Faulted_owner
     | Busy
+    | Foreign_task_handle
+    | Stale_task_handle
     | Typing of Typing.Error.t
     | Modules of Modules.Error.t
     | Lowering of Chatml_diagnostic.t
@@ -122,6 +126,31 @@ module Receipt : sig
   val task_retention : t -> task_retention
 end
 
+module Task_result : sig
+  type failure_kind =
+    | Runtime
+    | Budget
+  [@@deriving equal, sexp_of]
+
+  type outcome =
+    | Succeeded
+    | Failed of failure_kind
+  [@@deriving equal, sexp_of]
+
+  type t
+
+  val outcome : t -> outcome
+
+  (** The Task is interpreted once per explicit call; no live language value,
+      mutable cell, Task or host operation result escapes this immutable
+      projection. The preview and owned diagnostic use this epoch's existing
+      independent byte/node/depth limits. A successful Task need not return a
+      value printable at full size. *)
+  val value_preview : t -> string option
+
+  val diagnostic : t -> Diagnostic.t option
+end
+
 (** Execute one exact current Typing candidate. Validate owner/epoch and lower
     ONLY its indexed checked statement before any effect. Then Modules.reserve
     lowers dependency artifacts and acquires the unique Typing reservation.
@@ -155,6 +184,45 @@ val execute_next
 
 (** Nonyielding comparison-only check. It cannot borrow or run the task. *)
 val current_task_handle : t -> Task_handle.t -> bool
+
+(** Borrow one exact retained Task and drive it through the existing interpreter
+    on this epoch's single runner. [operations] are a trusted host-selected
+    registry, not authority derived from the handle; the runtime filters them
+    to its standalone effect families. The evaluator constructs the runtime
+    configuration from its own pinned [surface]. [prepare_result] is a borrowed
+    host transaction callback: it may inspect the raw result/surviving effects
+    only during this call and returns an infallible installer. No raw Task or
+    result is returned to the caller. A later hosted adapter must authenticate
+    the action and current operation authority independently.
+
+    [action_policy] opens an additional host budget around the SAME runner. It
+    never resets the epoch runner or inherited ancestry. Interpreter fuel and
+    task bounds use the stricter of the epoch and action policies. Handle owner,
+    membership, closed/faulted state and serialization are checked before any
+    operation. The same handle may be used by a separately admitted later
+    action; catch/local rollback and earlier completed effects follow the
+    existing task interpreter. Runtime/budget failures return a bounded
+    [Task_result.Failed]; cancellation and unexpected callback exceptions
+    propagate with their original backtraces after the busy loan ends. A host
+    that reserves resources during an action still owns whole-execution abort
+    and release when result preparation rejects, the action fails, or an
+    exception/deadline interrupts it; catch rollback only releases effects
+    discarded by that catch. The retained Task carries the exact captured
+    source that returned it;
+    owned sites within it may independently refer to earlier closures or
+    modules. *)
+val drive_retained
+  :  t
+  -> Task_handle.t
+  -> operations:Chatml_host_runtime.op_def list
+  -> ?scoped_async_operation:Chatml_host_runtime.scoped_async_operation
+  -> ?prepare_result:
+       (value:Chatml.Chatml_lang.value
+        -> local_effects:Chatml.Chatml_lang.eff list
+        -> (unit -> unit, string) result)
+  -> action_policy:Execution.policy
+  -> unit
+  -> (Task_result.t, Error.t) result
 
 (** Close only after the actor has joined any running statement; rejects Busy.
     Revoke all handles and close this owner's Modules and Typing. Old escaped

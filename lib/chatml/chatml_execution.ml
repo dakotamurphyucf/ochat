@@ -41,6 +41,7 @@ type budget =
   { limits : limits
   ; active : bool Atomic.t
   ; failure : error option Atomic.t
+  ; deadline_elapsed : unit -> bool
   }
 
 type frame =
@@ -91,6 +92,39 @@ let check_budget (budget : budget) =
   | true, None -> ()
 ;;
 
+let timeout_failure =
+  { code = "chatml.execution_timeout"; message = "ChatML execution deadline exceeded" }
+;;
+
+let check_budget_now budget =
+  check_budget budget;
+  if budget.deadline_elapsed () then exhaust budget timeout_failure
+;;
+
+let check_current_frame_now () =
+  match Eio.Fiber.get frame_key with
+  | None ->
+    raise
+      (Budget_exhausted
+         { code = "chatml.inactive_scope"; message = "The execution scope has ended." })
+  | Some frame ->
+    if not (Atomic.get frame.active)
+    then
+      raise
+        (Budget_exhausted
+           { code = "chatml.inactive_scope"; message = "The execution scope has ended." });
+    List.iter frame.ancestors ~f:(fun ancestor ->
+      if not (Atomic.get ancestor.active)
+      then
+        raise
+          (Budget_exhausted
+             { code = "chatml.inactive_scope"
+             ; message = "The owning execution scope has ended."
+             }));
+    List.iter frame.budgets ~f:(fun (_, budget, _) -> check_budget_now budget);
+    Eio.Fiber.check ()
+;;
+
 let rec consume budget counter amount failure =
   check_budget budget;
   let remaining = Atomic.get counter in
@@ -115,7 +149,7 @@ let valid_limits limits =
      || limits.max_invocation_depth <= 0)
 ;;
 
-let make_control ~env budget =
+let make_control budget =
   let limits = budget.limits in
   let fuel_failure =
     { code = "chatml.execution_limit"; message = "ChatML execution fuel exhausted" }
@@ -132,8 +166,6 @@ let make_control ~env budget =
   in
   let remaining = Atomic.make limits.fuel in
   let until_poll = Atomic.make 0 in
-  let clock = Eio.Stdenv.mono_clock env in
-  let started = Eio.Time.Mono.now clock in
   let diagnostic_checkpoint () =
     check_budget budget;
     if Atomic.fetch_and_add until_poll (-1) <= 0
@@ -141,14 +173,7 @@ let make_control ~env budget =
       Atomic.set until_poll 64;
       Eio.Fiber.yield ();
       check_budget budget;
-      let elapsed = Mtime.span started (Eio.Time.Mono.now clock) in
-      if Float.(Mtime.Span.to_float_ns elapsed >= limits.wall_seconds *. 1e9)
-      then
-        exhaust
-          budget
-          { code = "chatml.execution_timeout"
-          ; message = "ChatML execution deadline exceeded"
-          })
+      if budget.deadline_elapsed () then exhaust budget timeout_failure)
   in
   let checkpoint () =
     consume budget remaining 1 fuel_failure;
@@ -501,7 +526,13 @@ let with_scope
       match policy with
       | Unrestricted -> inherited
       | Bounded limits ->
-        let budget = { limits; active; failure = Atomic.make None } in
+        let clock = Eio.Stdenv.mono_clock env in
+        let started = Eio.Time.Mono.now clock in
+        let deadline_elapsed () =
+          let elapsed = Mtime.span started (Eio.Time.Mono.now clock) in
+          Float.(Mtime.Span.to_float_ns elapsed >= limits.wall_seconds *. 1e9)
+        in
+        let budget = { limits; active; failure = Atomic.make None; deadline_elapsed } in
         let depth = Int64.of_int limits.max_invocation_depth in
         (* Host-only scopes have no current ChatML frame. The extra slot is
            consumed by the first actual invocation. Int64 can represent the
@@ -511,7 +542,7 @@ let with_scope
           | true -> depth
           | false -> Int64.succ depth
         in
-        inherited @ [ depth, budget, make_control ~env budget ]
+        inherited @ [ depth, budget, make_control budget ]
     in
     let frame = { active; ancestors; budgets } in
     let each f =
@@ -578,6 +609,9 @@ let with_scope
 type runner =
   { control : Chatml.Chatml_lang.execution_control
   ; run : 'a. ?context:context -> (unit -> 'a) -> ('a, error) result
+  ; check_now : unit -> unit
+  ; run_with_host_budget :
+      'a. ?context:context -> policy:policy -> (unit -> 'a) -> ('a, error) result
   }
 
 let create_runner ~env ~policy () =
@@ -608,19 +642,38 @@ let create_runner ~env ~policy () =
     ; after_effect = (fun value -> apply (fun c -> c.after_effect value))
     }
   in
+  let run ?context f =
+    with_scope ?context ~env ~policy (fun control ->
+      let active = Atomic.make true in
+      Exn.protect
+        ~finally:(fun () -> Atomic.set active false)
+        ~f:(fun () -> Eio.Fiber.with_binding key (active, control) f))
+  in
   { control
-  ; run =
-      (fun ?context f ->
-        with_scope ?context ~env ~policy (fun control ->
-          let active = Atomic.make true in
-          Exn.protect
-            ~finally:(fun () -> Atomic.set active false)
-            ~f:(fun () -> Eio.Fiber.with_binding key (active, control) f)))
+  ; run
+  ; check_now =
+      (fun () ->
+        match Eio.Fiber.get key with
+        | Some (active, _) when Atomic.get active -> check_current_frame_now ()
+        | Some _ | None -> inactive ())
+  ; run_with_host_budget =
+      (fun ?context ~policy:host_policy f ->
+        match
+          with_scope ~invocation:false ?context ~env ~policy:host_policy (fun _ -> run f)
+        with
+        | Error error -> Error error
+        | Ok result -> result)
   }
 ;;
 
 let runner_control runner = runner.control
 let run_scoped ?context runner f = runner.run ?context f
+let check_runner_now runner = runner.check_now ()
+
+let run_scoped_with_host_budget ?context runner ~policy f =
+  runner.run_with_host_budget ?context ~policy f
+;;
+
 let with_control ?policy ?context ~env f = with_scope ?policy ?context ~env f
 
 let with_host_budget ?context ~policy ~env f =

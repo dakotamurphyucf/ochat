@@ -80,6 +80,29 @@ val runner_control : runner -> Chatml.Chatml_lang.execution_control
     preserving their lifetimes and ceilings across host domain handoffs. *)
 val run_scoped : ?context:context -> runner -> (unit -> 'a) -> ('a, error) result
 
+(** Run one action on the SAME persistent runner under an additional host
+    budget. The extra scope does not count as a ChatML invocation; [run_scoped]
+    still enters the runner once. The new policy only narrows the runner's
+    policy and ambient ancestry, including deadline, fuel, calls and depth.
+    [Unrestricted] adds no ceiling but cannot remove existing ones. Both
+    lexical controls expire on return; cancellation and unexpected callback
+    exceptions retain their identity/backtrace. No new runner is created. *)
+val run_scoped_with_host_budget
+  :  ?context:context
+  -> runner
+  -> policy:policy
+  -> (unit -> 'a)
+  -> ('a, error) result
+
+(** Nonyielding final execution-lifetime check for this exact runner's active
+    fiber binding. It checks that binding and every current/inherited budget's
+    active/failure state and elapsed monotonic deadline, then pending Eio
+    cancellation. This consumes no fuel or invocation depth. It raises the
+    existing [Budget_exhausted] or cancellation exception on expiry; it grants
+    no actor, source or operation authority. Call immediately before an
+    infallible nonyielding installer after any yielding result preparation. *)
+val check_runner_now : runner -> unit
+
 (** Share one execution budget across host projection, program evaluation and
     result conversion. The supplied control must be passed to controlled codecs
     and [run_in_scope]; it expires when the callback returns. The callback must
