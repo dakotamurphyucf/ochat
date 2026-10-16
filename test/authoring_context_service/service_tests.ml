@@ -647,6 +647,101 @@ let%test_unit "host root read is fresh while project context remains captured" =
              | Ok _ | Error _ -> failwith "actual project context open failed"
            in
            let expected = P.Authoring.Context.Expected.of_view context in
+           let standard =
+             Agent_server.Authoring_standard_contracts.create
+               ~targets:[ One_off_v1 ]
+               ~max_identity_bytes:(16 * 1024 * 1024)
+               ~max_work_steps:1_000_000
+               ~checkpoint:ignore
+             |> ok
+           in
+           let selected =
+             Agent_server.Authoring_standard_contracts.find standard One_off_v1
+             |> Option.value_exn
+             |> S.Developer.Selected_contract.of_standard_entry
+             |> ok
+           in
+           let developer =
+             S.Developer.create
+               ~owner:service
+               ~policy:
+                 (S.Developer.Target_policy.create
+                    ~local_project:(fun _ ~root:_ ~project:_ ~selection:_ -> None)
+                    ~local_source:(fun _ ~root:_ ~member:_ -> None)
+                    ~authoring_project:(fun _ ~context:_ ~current:_ ->
+                      if !project_allowed then Some selected else None)
+                    ~document_project:
+                      (fun
+                        _
+                        ~context:_
+                        ~current:_
+                        ~parsed:_
+                        ~declaration:_
+                        ~build:_
+                        ~metadata:_ -> None)
+                    ~document_source:
+                      (fun
+                        _ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~script:_ ->
+                      None))
+               ~limits:
+                 (S.Developer.Limits.create
+                    ~max_prepared_input_bytes:4096
+                    ~max_document_origin_bytes:8192
+                    ~max_editor_versions:4
+                    ~build:
+                      (Chatml_project_build.Limits.create
+                         ~max_work_steps:100_000
+                         ~max_input_bytes:(Some 4096)
+                         ~document:Document_schema.Limits.default
+                       |> Or_error.ok_exn)
+                  |> Or_error.ok_exn)
+           in
+           let shared_selection =
+             S.Developer.prepare_authoring_project_selection
+               developer
+               ~actor
+               ~connection
+               ~expected
+               ~checkpoint:ignore
+             |> ok
+           in
+           let module Selection = S.Developer.Source_selection in
+           let shared_a =
+             Selection.Shared.check_current shared_selection ~actor ~checkpoint:ignore
+             |> ok
+           in
+           let shared_b =
+             Selection.Shared.check_current shared_selection ~actor ~checkpoint:ignore
+             |> ok
+           in
+           Selection.Shared.check_now shared_selection ~checked:shared_a ~actor |> ok;
+           Selection.Shared.check_now shared_selection ~checked:shared_b ~actor |> ok;
+           let exclusive_c =
+             Selection.check_current shared_selection ~actor ~checkpoint:ignore |> ok
+           in
+           let exclusive_d =
+             Selection.check_current shared_selection ~actor ~checkpoint:ignore |> ok
+           in
+           assert (
+             Result.is_error
+               (Selection.check_now shared_selection ~checked:exclusive_c ~actor));
+           Selection.check_now shared_selection ~checked:exclusive_d ~actor |> ok;
+           Selection.Shared.check_now shared_selection ~checked:shared_a ~actor |> ok;
+           let foreign =
+             P.Principal.create
+               ~id:(P.Id.Principal.of_string "pri_foreign_authoring" |> ok)
+               ~authentication_kind:"test"
+               ~scopes:P.Scope.Set.empty
+               ~attributes:[]
+             |> ok
+             |> Operator_authorization.trusted_local
+           in
+           assert (
+             Result.is_error
+               (Selection.Shared.check_now
+                  shared_selection
+                  ~checked:shared_a
+                  ~actor:foreign));
            let analyze =
              S.Semantic.create
                ~owner:service
@@ -904,6 +999,9 @@ let%test_unit "host root read is fresh while project context remains captured" =
            in
            assert_checked_project expected script_source;
            project_allowed := false;
+           assert (
+             Result.is_error
+               (Selection.Shared.check_now shared_selection ~checked:shared_a ~actor));
            (match project_assistance expected script_source with
             | Error S.Error.Selection_unavailable -> ()
             | Ok _ | Error _ ->
@@ -1004,6 +1102,9 @@ let%test_unit "host root read is fresh while project context remains captured" =
              | Ok (Context_refresh context) -> context
              | Ok _ | Error _ -> failwith "explicit project refresh failed"
            in
+           assert (
+             Result.is_error
+               (Selection.Shared.check_now shared_selection ~checked:shared_a ~actor));
            [%test_eq: int]
              (S.For_testing.provisional_count
                 service

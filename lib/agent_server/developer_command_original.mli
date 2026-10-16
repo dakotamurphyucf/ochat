@@ -93,3 +93,15 @@ val fingerprint : t -> Chatml_source.Digest.t
 val capture_request
   :  t
   -> (Authoring_context_service.Developer.Request.t, P.Error.t) result
+
+module Identity : sig
+  (** Shared bounded canonical representation for the same stable source route
+      and requested execution limits. REPL create uses a distinct action/version
+      envelope around these values; it never creates a dummy command kind. *)
+  val valid_route : Route.t -> bool
+
+  val route_json : Route.t -> Jsonaf.t
+  val execution_json : Chatml_execution.limits -> Jsonaf.t
+  val target_name : Chatml.Chatml_compiler_contract.Target.t -> string
+  val digest_json : Jsonaf.t -> checkpoint:(unit -> unit) -> Chatml_source.Digest.t
+end

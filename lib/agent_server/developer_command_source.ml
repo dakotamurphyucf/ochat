@@ -8,10 +8,8 @@ let mismatch () =
   P.Error.invalid_request "developer command source does not match request"
 ;;
 
-let prepare source ~original ~fresh ~actor ~clock ~checkpoint =
-  let open Result.Let_syntax in
-  let%bind request = Original.capture_request original in
-  match Original.route original, fresh with
+let prepare_selection source ~route ~fresh ~actor ~clock ~checkpoint =
+  match route, fresh with
   | ( Original.Route.Local_project
         { root_index; dependency_root_indices; project; selection }
     , Original.Fresh_source.Local_project { root; dependency_roots } ) ->
@@ -24,12 +22,11 @@ let prepare source ~original ~fresh ~actor ~clock ~checkpoint =
               (List.map dependency_roots ~f:Root.index))
     then Error (mismatch ())
     else
-      Source.prepare_local_project
+      Source.prepare_local_project_selection
         source
         ~original_actor:actor
         ~actor
         ~local:(Source.Local_project.create ~root ~dependency_roots ~project ~selection)
-        ~request
         ~clock
         ~checkpoint
   | ( Original.Route.Local_source { root_index; member }
@@ -37,31 +34,28 @@ let prepare source ~original ~fresh ~actor ~clock ~checkpoint =
     if not (Int.equal root_index (Root.index root))
     then Error (mismatch ())
     else
-      Source.prepare_local_source
+      Source.prepare_local_source_selection
         source
         ~original_actor:actor
         ~actor
         ~source:(Source.Local_source.create ~root ~member)
-        ~request
         ~checkpoint
   | ( Original.Route.Authoring_project { expected }
     , Original.Fresh_source.Authoring_project { connection } ) ->
-    Source.prepare_authoring_project
+    Source.prepare_authoring_project_selection
       source
       ~actor
       ~connection
       ~expected
-      ~request
       ~checkpoint
   | ( Original.Route.Document_script { expected; selector }
     , Original.Fresh_source.Document_script { connection } ) ->
-    Source.prepare_document_script
+    Source.prepare_document_script_selection
       source
       ~actor
       ~connection
       ~expected
       ~script:(Source.Document_script.create ~selector)
-      ~request
       ~checkpoint
   | ( Original.Route.Local_project _
     , ( Original.Fresh_source.Local_source _
@@ -79,4 +73,19 @@ let prepare source ~original ~fresh ~actor ~clock ~checkpoint =
     , ( Original.Fresh_source.Local_project _
       | Original.Fresh_source.Local_source _
       | Original.Fresh_source.Authoring_project _ ) ) -> Error (mismatch ())
+;;
+
+let prepare source ~original ~fresh ~actor ~clock ~checkpoint =
+  let open Result.Let_syntax in
+  let%bind selection =
+    prepare_selection
+      source
+      ~route:(Original.route original)
+      ~fresh
+      ~actor
+      ~clock
+      ~checkpoint
+  in
+  let%bind request = Original.capture_request original in
+  Source.capture_selection selection ~request ~checkpoint
 ;;

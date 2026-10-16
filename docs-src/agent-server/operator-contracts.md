@@ -324,6 +324,7 @@ module T = struct
     | Developer_check
     | Developer_fixture_run
     | Developer_live_run
+    | Developer_repl
   [@@deriving compare, equal, sexp]
 end
 
@@ -354,6 +355,7 @@ let to_string = function
   | Developer_check -> "developer.check"
   | Developer_fixture_run -> "developer.fixture.run"
   | Developer_live_run -> "developer.live.run"
+  | Developer_repl -> "developer.repl"
 ;;
 
 let of_string = function
@@ -380,6 +382,7 @@ let of_string = function
   | "developer.check" -> Ok Developer_check
   | "developer.fixture.run" -> Ok Developer_fixture_run
   | "developer.live.run" -> Ok Developer_live_run
+  | "developer.repl" -> Ok Developer_repl
   | encoded -> Error (Protocol_error.invalid_request ("unknown scope: " ^ encoded))
 ;;
 
