@@ -98,8 +98,15 @@ effects remain. Earlier closures keep the source and module map they captured.
 
 The portable result contains bounded frozen type/value text and an opaque
 epoch-scoped handle when an expression returns a Task. Producing a Task does not
-interpret it. An authenticated host action and its own execution receipt are
-required to drive a retained task; this library supplies no such authority.
+interpret it. The portable evaluator can later resolve that exact live handle
+and interpret the retained Task through the existing task, catch and operation
+kernel on its one runner. The caller supplies a selected operation registry and
+an action budget that adds ceilings without removing the epoch or inherited
+ceilings. It receives bounded immutable value or diagnostic text; the raw Task,
+mutable result and captured source remain inside the evaluator. A host must
+separately authenticate the action, authorize each operation and own its
+execution receipt. The portable driver itself supplies no such authority or
+durable replay protection.
 
 ### Builtins / standard library
 
