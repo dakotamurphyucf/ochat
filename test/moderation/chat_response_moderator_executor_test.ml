@@ -308,6 +308,451 @@ let moderator_artifact () =
   compiled
 ;;
 
+let model_payload prompt : Jsonaf.t =
+  `Object [ "prompt", `String prompt; "input", `String "hi" ]
+;;
+
+let%test_unit "strict settlement observes a failing worker before a blocked sibling" =
+  Eio_main.run (fun env ->
+    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+      let blocked_joined = ref false in
+      let marker = Failure "selected model cancellation" in
+      let escaped = Eio.Cancel.Cancelled marker in
+      let observed = ref false in
+      let () =
+        try
+          Eio.Switch.run (fun sw ->
+            let cwd = Eio.Stdenv.cwd env in
+            let cache = Cache.create ~max_size:1 () in
+            let ctx = fixture_ctx ~env ~dir:cwd ~tool_dir:cwd ~cache () in
+            let never, _ = Eio.Promise.create () in
+            let started, mark_started = Eio.Promise.create () in
+            let exec_context : Model_executor.exec_context =
+              { ctx
+              ; run_agent =
+                  (fun ?history_compaction:_
+                    ?prompt_dir:_
+                    ?session_id:_
+                    ~ctx:_
+                    prompt
+                    _ ->
+                    if String.equal prompt "<user>blocked</user>"
+                    then
+                      Exn.protect
+                        ~f:(fun () ->
+                          Eio.Promise.resolve mark_started ();
+                          Eio.Promise.await never)
+                        ~finally:(fun () -> blocked_joined := true)
+                    else raise escaped)
+              ; fetch_prompt =
+                  (fun ~ctx:_ ~prompt ~is_local:_ ->
+                    Ok ("<user>" ^ prompt ^ "</user>", None))
+              }
+            in
+            let executor = Model_executor.create ~sw ~exec_context () in
+            let recipe =
+              Model_executor.recipe_agent_prompt_v1 executor ~session_id:"strict" ()
+            in
+            ignore (ok_or_fail (recipe.spawn ~payload:(model_payload "blocked")));
+            Eio.Promise.await started;
+            let manager =
+              Manager.create
+                ~artifact:(moderator_artifact ())
+                ~capabilities:Moderation.Capabilities.default
+                ()
+              |> ok_or_fail
+            in
+            Model_executor.register_session executor ~session_id:"strict" ~manager;
+            let policy = Chat_response.Runtime_semantics.default_policy in
+            let paused_policy =
+              { policy with
+                budget =
+                  { policy.budget with
+                    pause_conditions =
+                      [ Chat_response.Runtime_semantics.Pause_internal_event_drains ]
+                  }
+              }
+            in
+            let moderator : Chat_response.In_memory_stream.moderator =
+              { manager
+              ; session_id = "strict"
+              ; session_meta = `Null
+              ; runtime_policy = paused_policy
+              ; event_handlers = None
+              }
+            in
+            let paused =
+              Chat_response.Model_completion_drain.run_entries
+                ~executor
+                ~moderator
+                ~now_ms:(fun () -> 1)
+                ~history:[]
+                ~available_tools:[]
+              |> ok_or_fail
+            in
+            (match paused.stop with
+             | Paused -> ()
+             | _ -> failwith "Paused completion waited on a blocked Model job");
+            assert (Int.equal paused.spawned_jobs 1);
+            ignore (ok_or_fail (recipe.spawn ~payload:(model_payload "fail")));
+            (match Model_executor.settle_session executor ~session_id:"strict" with
+             | exception exn ->
+               assert (phys_equal exn escaped);
+               observed := true
+             | Ok _ | Error _ -> failwith "Expected escaped worker cancellation");
+            Eio.Switch.fail sw Exit)
+        with
+        | Exit | Eio.Cancel.Cancelled Exit -> ()
+      in
+      assert !observed;
+      assert !blocked_joined))
+;;
+
+let%test_unit "cancelled wakeup retains one delivered event" =
+  Eio_main.run (fun env ->
+    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+      Eio.Switch.run (fun sw ->
+        let cwd = Eio.Stdenv.cwd env in
+        let ctx =
+          fixture_ctx ~env ~dir:cwd ~tool_dir:cwd ~cache:(Cache.create ~max_size:1 ()) ()
+        in
+        let exec_context : Model_executor.exec_context =
+          { ctx
+          ; run_agent =
+              (fun ?history_compaction:_ ?prompt_dir:_ ?session_id:_ ~ctx:_ _ _ -> "ok")
+          ; fetch_prompt = (fun ~ctx:_ ~prompt:_ ~is_local:_ -> Ok ("text", None))
+          }
+        in
+        let executor = Model_executor.create ~sw ~exec_context () in
+        let manager =
+          ok_or_fail
+            (Manager.create
+               ~artifact:(moderator_artifact ())
+               ~capabilities:Moderation.Capabilities.default
+               ())
+        in
+        let marker = Failure "wakeup cancelled" in
+        let escaped = Eio.Cancel.Cancelled marker in
+        Model_executor.register_session
+          executor
+          ~session_id:"wake"
+          ~manager
+          ~on_wakeup:(fun () -> raise escaped);
+        let recipe =
+          Model_executor.recipe_agent_prompt_v1 executor ~session_id:"wake" ()
+        in
+        let job_id = ok_or_fail (recipe.spawn ~payload:(model_payload "text")) in
+        (match Model_executor.settle_session executor ~session_id:"wake" with
+         | exception exn -> assert (phys_equal exn escaped)
+         | Ok _ | Error _ -> failwith "Expected original wakeup cancellation");
+        assert (Option.is_some (Model_executor.job_state executor ~job_id));
+        let queued () =
+          ok_or_fail (Manager.snapshot manager)
+          |> fun snapshot ->
+          List.length snapshot.Session.Moderator_snapshot.queued_internal_events
+        in
+        assert (Int.equal (queued ()) 1);
+        Model_executor.register_session executor ~session_id:"wake" ~manager;
+        assert (Int.equal (queued ()) 1))))
+;;
+
+let%test_unit "entry completion stops before a queued event after End_session" =
+  Eio_main.run (fun env ->
+    Eio.Switch.run (fun sw ->
+      let cwd = Eio.Stdenv.cwd env in
+      let ctx =
+        fixture_ctx ~env ~dir:cwd ~tool_dir:cwd ~cache:(Cache.create ~max_size:1 ()) ()
+      in
+      let exec_context : Model_executor.exec_context =
+        { ctx
+        ; run_agent =
+            (fun ?history_compaction:_ ?prompt_dir:_ ?session_id:_ ~ctx:_ _ _ -> "ok")
+        ; fetch_prompt = (fun ~ctx:_ ~prompt:_ ~is_local:_ -> Ok ("text", None))
+        }
+      in
+      let executor = Model_executor.create ~sw ~exec_context () in
+      let script =
+        CM.
+          { id = "completion-stop"
+          ; language = "chatml"
+          ; project_selection = None
+          ; kind = "moderator"
+          ; source_ref = None
+          ; source =
+              Inline
+                {|
+                  type event = [ `Session_start | `Internal_done(string) ]
+                  let initial_state = 0
+                  let on_event : context -> int -> event -> int task = fun ctx st ev ->
+                    match ev with
+                    | `Session_start -> Task.pure(st)
+                    | `Internal_done(_) ->
+                      Task.bind(Runtime.end_session("done"), fun ignored -> Task.pure(st + 1))
+                |}
+          }
+      in
+      let _, artifact =
+        Manager.Registry.compile_script Manager.Registry.empty script |> ok_or_fail
+      in
+      let allocator =
+        History_entry.Allocator.create ~namespace:"completion-stop" ~next_sequence:0
+        |> ok_or_fail
+      in
+      let manager =
+        Manager.create_entries
+          ~artifact
+          ~capabilities:Moderation.Capabilities.default
+          ~allocator
+          ()
+        |> ok_or_fail
+      in
+      let event = Lang.VVariant ("Internal_done", [ Lang.VString "queued" ]) in
+      Manager.enqueue_internal_event manager event |> ok_or_fail;
+      Manager.enqueue_internal_event manager event |> ok_or_fail;
+      let moderator : Chat_response.In_memory_stream.moderator =
+        { manager
+        ; session_id = "completion-stop"
+        ; session_meta = `Null
+        ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+        ; event_handlers = None
+        }
+      in
+      let result =
+        Chat_response.Model_completion_drain.run_entries
+          ~executor
+          ~moderator
+          ~now_ms:(fun () -> 1)
+          ~history:[]
+          ~available_tools:[]
+        |> ok_or_fail
+      in
+      (match result.stop with
+       | End_session_requested "done" -> ()
+       | _ -> failwith "Expected End_session stop");
+      assert (Int.equal result.processed_events 1);
+      let snapshot = Manager.snapshot manager |> ok_or_fail in
+      assert (Int.equal (List.length snapshot.queued_internal_events) 1)))
+;;
+
+let%test_unit "entry completion joins jobs spawned by a completed-job handler" =
+  Eio_main.run (fun env ->
+    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+      Eio.Switch.run (fun sw ->
+        let completed_calls = ref 0 in
+        let sampled_times = ref [] in
+        let release_first, first_released = Eio.Promise.create () in
+        let release_blocked, blocked_released = Eio.Promise.create () in
+        let blocked_started, mark_blocked_started = Eio.Promise.create () in
+        let empty_observed, mark_empty_observed = Eio.Promise.create () in
+        let saw_initial_observation = ref false in
+        let cwd = Eio.Stdenv.cwd env in
+        let ctx =
+          fixture_ctx ~env ~dir:cwd ~tool_dir:cwd ~cache:(Cache.create ~max_size:1 ()) ()
+        in
+        let exec_context : Model_executor.exec_context =
+          { ctx
+          ; run_agent =
+              (fun ?history_compaction:_ ?prompt_dir:_ ?session_id:_ ~ctx:_ prompt _ ->
+                (match prompt with
+                 | "<user>first</user>" -> Eio.Promise.await release_first
+                 | "<user>blocked</user>" ->
+                   Eio.Promise.resolve mark_blocked_started ();
+                   Eio.Promise.await release_blocked
+                 | "<user>next</user>" -> ()
+                 | _ -> failwith "Unexpected model prompt");
+                Int.incr completed_calls;
+                "ok")
+          ; fetch_prompt =
+              (fun ~ctx:_ ~prompt ~is_local:_ -> Ok ("<user>" ^ prompt ^ "</user>", None))
+          }
+        in
+        let executor = Model_executor.create ~sw ~exec_context ~max_spawned_jobs:3 () in
+        let recipe =
+          Model_executor.recipe_agent_prompt_v1 executor ~session_id:"chain" ()
+        in
+        let capabilities =
+          { Moderation.Capabilities.default with
+            model_recipes = Map.singleton (module String) "agent_prompt_v1" recipe
+          ; on_tool_call =
+              (fun ~name:_ ~args:_ ->
+                Eio.Promise.resolve blocked_released ();
+                Ok (Tool_ok `Null))
+          }
+        in
+        let script =
+          CM.
+            { id = "completion-chain"
+            ; language = "chatml"
+            ; project_selection = None
+            ; kind = "moderator"
+            ; source_ref = None
+            ; source =
+                Inline
+                  {|
+                    type event =
+                      [ `Model_job_succeeded(string, string, json)
+                      | `Model_job_failed(string, string, string) ]
+                    let initial_state = 0
+                    let on_event : context -> int -> event -> int task = fun ctx st ev ->
+                      match ev with
+                      | `Model_job_succeeded(_, _, _) ->
+                        if st == 0 then
+                          Task.bind(Tool.call("release", `Null), fun ignored_tool ->
+                            Task.bind(
+                              Model.spawn("agent_prompt_v1", Json.parse("{\"prompt\":\"next\",\"input\":\"hi\"}")),
+                              fun ignored -> Task.pure(st + 1)))
+                        else Task.pure(st + 1)
+                      | `Model_job_failed(_, _, _) -> Task.pure(st + 1)
+                  |}
+            }
+        in
+        let _, artifact =
+          Manager.Registry.compile_script Manager.Registry.empty script |> ok_or_fail
+        in
+        let allocator =
+          History_entry.Allocator.create ~namespace:"completion-chain" ~next_sequence:0
+          |> ok_or_fail
+        in
+        let manager =
+          Manager.create_entries ~artifact ~capabilities ~allocator () |> ok_or_fail
+        in
+        Model_executor.register_session executor ~session_id:"chain" ~manager;
+        let moderator : Chat_response.In_memory_stream.moderator =
+          { manager
+          ; session_id = "chain"
+          ; session_meta = `Null
+          ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+          ; event_handlers = None
+          }
+        in
+        ignore (ok_or_fail (recipe.spawn ~payload:(model_payload "first")));
+        ignore (ok_or_fail (recipe.spawn ~payload:(model_payload "blocked")));
+        Eio.Promise.await blocked_started;
+        let completed_promise =
+          Eio.Fiber.fork_promise ~sw (fun () ->
+            Chat_response.Model_completion_drain.run_entries
+              ~executor
+              ~moderator
+              ~now_ms:(fun () ->
+                let now = !completed_calls in
+                sampled_times := now :: !sampled_times;
+                if not !saw_initial_observation
+                then (
+                  saw_initial_observation := true;
+                  Eio.Promise.resolve mark_empty_observed ());
+                now)
+              ~history:[]
+              ~available_tools:[]
+            |> ok_or_fail)
+        in
+        Eio.Promise.await empty_observed;
+        Eio.Promise.resolve first_released ();
+        let completed = Eio.Promise.await_exn completed_promise in
+        (match completed.stop with
+         | Quiescent -> ()
+         | _ -> failwith "Expected completion quiescence");
+        assert (Int.equal completed.processed_events 3);
+        assert (Int.equal completed.spawned_jobs 3);
+        assert (List.mem !sampled_times 3 ~equal:Int.equal);
+        let snapshot = Manager.snapshot manager |> ok_or_fail in
+        (match snapshot.current_state with
+         | Session.Snapshot.Int 3 -> ()
+         | _ -> failwith "Expected three handled model completion events");
+        assert (List.is_empty snapshot.queued_internal_events))))
+;;
+
+let%test_unit "concurrent completed-job delivery enqueues only once" =
+  Eio_main.run (fun env ->
+    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+      Eio.Switch.run (fun sw ->
+        let cwd = Eio.Stdenv.cwd env in
+        let ctx =
+          fixture_ctx ~env ~dir:cwd ~tool_dir:cwd ~cache:(Cache.create ~max_size:1 ()) ()
+        in
+        let exec_context : Model_executor.exec_context =
+          { ctx
+          ; run_agent =
+              (fun ?history_compaction:_ ?prompt_dir:_ ?session_id:_ ~ctx:_ _ _ -> "ok")
+          ; fetch_prompt =
+              (fun ~ctx:_ ~prompt:_ ~is_local:_ -> Ok ("<user>ok</user>", None))
+          }
+        in
+        let executor = Model_executor.create ~sw ~exec_context () in
+        let recipe =
+          Model_executor.recipe_agent_prompt_v1 executor ~session_id:"race" ()
+        in
+        let job_id = ok_or_fail (recipe.spawn ~payload:(model_payload "ok")) in
+        Model_executor.await_job executor ~job_id |> ok_or_fail;
+        let held, entered = Eio.Promise.create () in
+        let release, released = Eio.Promise.create () in
+        let capabilities =
+          { Moderation.Capabilities.default with
+            on_tool_call =
+              (fun ~name:_ ~args:_ ->
+                Eio.Promise.resolve entered ();
+                Eio.Promise.await release;
+                Ok (Tool_ok `Null))
+          }
+        in
+        let script =
+          CM.
+            { id = "delivery-race"
+            ; language = "chatml"
+            ; project_selection = None
+            ; kind = "moderator"
+            ; source_ref = None
+            ; source =
+                Inline
+                  {|
+                    type event = [ `Session_start ]
+                    let initial_state = 0
+                    let on_event : context -> int -> event -> int task = fun ctx st ev ->
+                      match ev with
+                      | `Session_start ->
+                        Task.bind(Tool.call("hold", `Null), fun ignored -> Task.pure(st + 1))
+                  |}
+            }
+        in
+        let _, artifact =
+          Manager.Registry.compile_script Manager.Registry.empty script |> ok_or_fail
+        in
+        let manager = Manager.create ~artifact ~capabilities () |> ok_or_fail in
+        let handler =
+          Eio.Fiber.fork_promise ~sw (fun () ->
+            Manager.handle_event
+              manager
+              ~session_id:"race"
+              ~now_ms:0
+              ~history:[]
+              ~available_tools:[]
+              ~session_meta:`Null
+              ~event:Moderation.Event.Session_start
+            |> ok_or_fail
+            |> ignore)
+        in
+        Eio.Promise.await held;
+        let registration =
+          Eio.Fiber.fork_promise ~sw (fun () ->
+            Model_executor.register_session executor ~session_id:"race" ~manager)
+        in
+        (match Model_executor.settle_session executor ~session_id:"race" with
+         | Error reason ->
+           assert (String.equal reason "Model job delivery is already in progress.")
+         | Ok _ -> failwith "Concurrent delivery should be busy");
+        Eio.Promise.resolve released ();
+        Eio.Promise.await_exn registration;
+        Eio.Promise.await_exn handler;
+        let settled = Model_executor.settle_session executor ~session_id:"race" in
+        ignore (ok_or_fail settled : Model_executor.Session_settlement.t);
+        let queued =
+          Manager.snapshot manager
+          |> ok_or_fail
+          |> fun snapshot ->
+          List.length snapshot.Session.Moderator_snapshot.queued_internal_events
+        in
+        assert (Int.equal queued 1))))
+;;
+
 let%test_unit
     "background completion waits for an active moderator without false recursion"
   =

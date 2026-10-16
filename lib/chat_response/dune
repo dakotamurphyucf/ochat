@@ -19,6 +19,7 @@
   neutral_turn
   in_memory_stream
   model_executor
+  model_completion_drain
   model_spawn_request
   runtime_semantics
   automatic_turn_policy

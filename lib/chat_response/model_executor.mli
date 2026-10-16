@@ -27,6 +27,14 @@ type job_state =
 
 type t
 
+module Session_settlement : sig
+  type t =
+    { spawned_jobs : int
+    ; delivered_events : int
+    }
+  [@@deriving sexp_of]
+end
+
 (** [create ~sw ~exec_context ?max_spawned_jobs ()] creates the model-executor
     capability used by moderator-driven async model work.
 
@@ -101,6 +109,64 @@ val unregister_session_wakeup : t -> session_id:string -> unit
     This waits for executor completion, not for the host to drain the
     reinjected internal event. *)
 val await_job : t -> job_id:string -> (unit, string) result
+
+(** Observe and join jobs currently spawned for [session_id] under the executor's
+    live switch, then retry delivery of every terminal result to its registered
+    moderator manager. The returned counts are cumulative for this session at
+    return: [delivered_events] counts results enqueued, not events handled.
+    A failed enqueue or missing manager returns [Error] and retains the
+    undelivered result for a later attempt, never apparent quiescence. Event
+    handlers can spawn more jobs after this call; the selected host repeats
+    settlement after each bounded drain and closes other spawn producers before
+    its final observation. The constructor's finite [max_spawned_jobs] bounds
+    the cumulative chain.
+
+    This is the strict, opt-in hosted completion boundary. Recipe-domain
+    Model_error/Model_refused results are delivered as failed job events.
+    An escaped cancellation or unexpected worker exception is observed promptly
+    even when another job is blocked, and retains its original identity and
+    backtrace. The enclosing owner then cancels and joins the live switch; this
+    call does not await blocked siblings before raising. A cancelled waiter
+    likewise propagates cancellation. The operation does not drain moderator
+    events, and callers must not hold the manager or source execution gate. *)
+val settle_session : t -> session_id:string -> (Session_settlement.t, string) result
+
+module Session_progress : sig
+  type cursor
+
+  type stop =
+    | Progressed
+    | All_completed
+end
+
+(** Capture one opaque, process-local progress point for this executor/session
+    before observing the moderator queue. Counts are cumulative; this is not
+    permission to deliver or drain. Call on the executor's owning Eio domain. *)
+val session_progress_cursor : t -> session_id:string -> Session_progress.cursor
+
+(** After the caller's queue observation, wait on the executor's existing
+    condition for a new spawn or enqueued completion relative to [cursor], or
+    for all current jobs to complete. Escaped exceptions/cancellation take
+    priority and propagate with original identity/backtrace. A completed but
+    undelivered job is retried before waiting, returning a typed [Error] on
+    failed enqueue even if a sibling is still Pending. Successful enqueue
+    broadcasts progress before a potentially yielding wakeup callback. This
+    avoids waiting behind a blocked job whose release depends on the newly
+    queued event. [Progressed] requires the caller to re-observe/drain the
+    manager; [All_completed] requires strict [settle_session] and a final queue
+    observation before claiming quiescence. The cursor must belong physically
+    to [t]. Other spawn producers have been closed by the live owner before
+    the final quiescence observation. *)
+val await_session_progress
+  :  t
+  -> Session_progress.cursor
+  -> (Session_progress.stop, string) result
+
+(** Cumulative local job count for a session at this nonyielding observation.
+    It includes still-running jobs and conveys no delivery or source authority.
+    Call from the executor's owning Eio domain; a foreign-domain call is
+    rejected before reading the mutable job table. *)
+val session_job_count : t -> session_id:string -> int
 
 (** [job_state t ~job_id] reports executor-local job completion state.
 
