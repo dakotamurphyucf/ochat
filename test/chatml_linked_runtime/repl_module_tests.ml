@@ -692,6 +692,346 @@ let%expect_test "portable REPL stages names, preserves old cells and keeps Tasks
     |}]
 ;;
 
+let%expect_test "retained Task installer rejects elapsed action and ancestor deadlines" =
+  Eio_main.run (fun _ ->
+    let run ~inherited =
+      let clock = Eio_mock.Clock.Mono.make () in
+      let timed_env =
+        object
+          method mono_clock = clock
+        end
+      in
+      let typing =
+        owner
+          ~catalog_body:"let value = 1"
+          ~contract:(Contract.for_target One_off_v1 ~checkpoint)
+          ()
+      in
+      let repl =
+        Repl.create
+          ~typing
+          ~surface:Surface.one_off_v1
+          ~env:timed_env
+          ~policy:(Bounded Execution.default_limits)
+          ~limits:(repl_limits ())
+          ~checkpoint
+        |> ok_repl
+      in
+      let receipt =
+        Repl.execute_next
+          repl
+          (candidate typing "deadline-task.chatml" "Task.pure(7)")
+          ~checkpoint
+        |> ok_repl
+      in
+      let handle =
+        match Repl.Receipt.task_retention receipt with
+        | Retained handle -> handle
+        | Not_a_task | Limit_reached -> failwith "Task was not retained"
+      in
+      let prepared = ref false in
+      let installed = ref false in
+      let prepare_result ~value:_ ~local_effects:_ =
+        prepared := true;
+        Eio_mock.Clock.Mono.set_time clock (Mtime.of_uint64_ns 11_000_000L);
+        Ok (fun () -> installed := true)
+      in
+      let deadline =
+        Execution.Bounded { Execution.default_limits with wall_seconds = 0.01 }
+      in
+      let drive () =
+        Repl.drive_retained
+          repl
+          handle
+          ~operations:[]
+          ~prepare_result
+          ~action_policy:(if inherited then Execution.Unrestricted else deadline)
+          ()
+        |> ok_repl
+      in
+      let result =
+        if inherited
+        then (
+          match
+            Execution.with_host_budget ~policy:deadline ~env:timed_env (fun _ -> drive ())
+          with
+          | Ok result -> Repl.Task_result.outcome result
+          | Error error ->
+            [%test_eq: string] error.code "chatml.execution_timeout";
+            Repl.Task_result.Failed Budget)
+        else Repl.Task_result.outcome (drive ())
+      in
+      [%test_eq: bool] !prepared true;
+      [%test_eq: bool] !installed false;
+      (match result with
+       | Failed Budget -> ()
+       | Succeeded | Failed Runtime -> failwith "elapsed deadline was not enforced");
+      Repl.close repl |> ok_repl
+    in
+    run ~inherited:false;
+    run ~inherited:true);
+  [%expect
+    {|
+    +mock time is now 0.011
+    +mock time is now 0.011
+    |}]
+;;
+
+let%test_unit
+    "retained Tasks use the same live environment and preserve catch and failure"
+  =
+  Eio_main.run (fun env ->
+    let make () =
+      let typing =
+        owner
+          ~catalog_body:"let value = 1"
+          ~contract:(Contract.for_target One_off_v1 ~checkpoint)
+          ()
+      in
+      let limits =
+        Repl.Limits.create
+          ~max_preview_bytes:128
+          ~max_preview_nodes:64
+          ~max_preview_depth:16
+          ~max_diagnostic_bytes:128
+          ~max_retained_tasks:3
+        |> Or_error.ok_exn
+      in
+      let repl =
+        Repl.create
+          ~typing
+          ~surface:Surface.one_off_v1
+          ~env
+          ~policy:(Bounded Execution.default_limits)
+          ~limits
+          ~checkpoint
+        |> ok_repl
+      in
+      typing, repl
+    in
+    let typing, repl = make () in
+    let execute path body =
+      Repl.execute_next repl (candidate typing path body) ~checkpoint |> ok_repl
+    in
+    let retained path body =
+      match Repl.Receipt.task_retention (execute path body) with
+      | Retained handle -> handle
+      | Not_a_task | Limit_reached -> failwith "Task was not retained"
+    in
+    ignore (execute "cell.chatml" "let cell = ref(1)" : Repl.Receipt.t);
+    let live =
+      retained "live.chatml" "Task.bind(Task.pure(()), fun ignored -> Task.pure(!cell))"
+    in
+    let caught =
+      retained
+        "caught.chatml"
+        "Task.catch(Task.fail(\"deferred\"), fun ignored -> Task.pure(9))"
+    in
+    let failed = retained "failed-task.chatml" "Task.fail(\"deferred\")" in
+    ignore (execute "update.chatml" "cell := 2" : Repl.Receipt.t);
+    let drive owner handle =
+      Repl.drive_retained
+        owner
+        handle
+        ~operations:[]
+        ~action_policy:Execution.Unrestricted
+        ()
+      |> ok_repl
+    in
+    let first = drive repl live in
+    let second = drive repl live in
+    let recovered = drive repl caught in
+    let failure = drive repl failed in
+    let succeeded preview result =
+      match Repl.Task_result.outcome result, Repl.Task_result.value_preview result with
+      | Succeeded, Some actual -> [%test_eq: string] actual preview
+      | _ -> failwith "Task did not return the expected value"
+    in
+    succeeded "2" first;
+    succeeded "2" second;
+    succeeded "9" recovered;
+    (match Repl.Task_result.outcome failure with
+     | Failed Runtime -> ()
+     | Succeeded | Failed Budget -> failwith "Task.fail did not report runtime failure");
+    let diagnostic = Option.value_exn (Repl.Task_result.diagnostic failure) in
+    [%test_eq: string] (Repl.Diagnostic.message diagnostic) "deferred";
+    let marker = Failure "retained callback raised" in
+    (match
+       Repl.drive_retained
+         repl
+         live
+         ~operations:[]
+         ~prepare_result:(fun ~value:_ ~local_effects:_ ->
+           (match
+              Repl.drive_retained
+                repl
+                live
+                ~operations:[]
+                ~action_policy:Execution.Unrestricted
+                ()
+            with
+            | Error Busy -> ()
+            | Ok _ | Error _ -> failwith "reentrant Task drive was accepted");
+           raise marker)
+         ~action_policy:Execution.Unrestricted
+         ()
+     with
+     | exception actual when phys_equal actual marker -> ()
+     | Ok _ | Error _ | (exception _) ->
+       failwith "retained callback exception identity was lost");
+    succeeded "2" (drive repl live);
+    let cancellation_marker = Failure "retained callback cancelled" in
+    (match
+       Eio.Cancel.sub (fun cancellation ->
+         Repl.drive_retained
+           repl
+           live
+           ~operations:[]
+           ~prepare_result:(fun ~value:_ ~local_effects:_ ->
+             Eio.Cancel.cancel cancellation cancellation_marker;
+             Eio.Fiber.yield ();
+             Ok ignore)
+           ~action_policy:Execution.Unrestricted
+           ())
+     with
+     | exception Eio.Cancel.Cancelled actual ->
+       assert (phys_equal actual cancellation_marker)
+     | Ok _ | Error _ | (exception _) ->
+       failwith "retained callback cancellation identity was lost");
+    succeeded "2" (drive repl live);
+    let foreign_typing, foreign_repl = make () in
+    ignore (foreign_typing : Typing.t);
+    (match
+       Repl.drive_retained
+         foreign_repl
+         live
+         ~operations:[]
+         ~action_policy:Execution.Unrestricted
+         ()
+     with
+     | Error Foreign_task_handle -> ()
+     | Ok _ | Error _ -> failwith "foreign Task handle was accepted");
+    Repl.close foreign_repl |> ok_repl;
+    Repl.close repl |> ok_repl;
+    match
+      Repl.drive_retained
+        repl
+        live
+        ~operations:[]
+        ~action_policy:Execution.Unrestricted
+        ()
+    with
+    | Error Closed -> ()
+    | Ok _ | Error _ -> failwith "closed Task owner was accepted")
+;;
+
+let%test_unit "retained Task keeps catch rollback and prepares one surviving result" =
+  Eio_main.run (fun env ->
+    let reserve_builtin : B.builtin =
+      { name = "reserve"
+      ; scheme = B.TFun ([ B.TString ], B.task_ty B.TString)
+      ; impl =
+          (fun args ->
+            Lang.VTask (Lang.Task.create (TPerform { op = "Reservation.reserve"; args })))
+      }
+    in
+    let surface =
+      Chatml.Chatml_builtin_surface.merge
+        { Chatml.Chatml_builtin_surface.empty with
+          modules = [ { name = "Reservation"; exports = [ reserve_builtin ] } ]
+        }
+        Surface.one_off_v1
+    in
+    let typing =
+      owner
+        ~catalog_body:"let value = 1"
+        ~contract:(Support.native_contract ~surface ())
+        ()
+    in
+    let repl =
+      Repl.create
+        ~typing
+        ~surface
+        ~env
+        ~policy:(Bounded Execution.default_limits)
+        ~limits:(repl_limits ())
+        ~checkpoint
+      |> ok_repl
+    in
+    let receipt =
+      Repl.execute_next
+        repl
+        (candidate
+           typing
+           "reservation.chatml"
+           "Task.bind(Task.catch(Task.bind(Reservation.reserve(\"same\"), fun discarded \
+            -> Task.fail(\"undo\")), fun failure -> Task.pure(\"caught\")), fun ignored \
+            -> Reservation.reserve(\"same\"))")
+        ~checkpoint
+      |> ok_repl
+    in
+    let handle =
+      match Repl.Receipt.task_retention receipt with
+      | Retained handle -> handle
+      | Not_a_task | Limit_reached -> failwith "reservation Task was not retained"
+    in
+    let issued = ref 0 in
+    let rolled_back = ref [] in
+    let operation : Chatml_host_runtime.op_def =
+      { name = "Reservation.reserve"
+      ; kind =
+          Local_transactional_with_result
+            { rollback =
+                (function
+                  | Lang.VString id :: _ -> rolled_back := id :: !rolled_back
+                  | _ -> failwith "rollback lost reservation identity")
+            }
+      ; phase_check = (fun _ -> Ok ())
+      ; perform =
+          (fun _ args ->
+            match args with
+            | [ Lang.VString "same" ] ->
+              incr issued;
+              Ok (Lang.VString ("ticket-" ^ Int.to_string !issued))
+            | _ -> Error "wrong reservation request")
+      }
+    in
+    let drive ?prepare_result () =
+      Repl.drive_retained
+        repl
+        handle
+        ~operations:[ operation ]
+        ?prepare_result
+        ~action_policy:Execution.Unrestricted
+        ()
+      |> ok_repl
+    in
+    let disabled = drive () in
+    (match Repl.Task_result.outcome disabled with
+     | Failed Runtime -> ()
+     | Succeeded | Failed Budget -> failwith "local operation lacked result admission");
+    [%test_eq: int] !issued 0;
+    let installed = ref 0 in
+    let prepare_result ~value ~local_effects =
+      (match value, local_effects with
+       | ( Lang.VString "ticket-2"
+         , [ { Lang.op = "Reservation.reserve"
+             ; args = [ Lang.VString "ticket-2"; Lang.VString "same" ]
+             }
+           ] ) -> ()
+       | _ -> failwith "surviving result did not match its reservation");
+      Ok (fun () -> incr installed)
+    in
+    let admitted = drive ~prepare_result () in
+    (match Repl.Task_result.outcome admitted, Repl.Task_result.value_preview admitted with
+     | Succeeded, Some "ticket-2" -> ()
+     | _ -> failwith "retained result transaction was not installed");
+    [%test_eq: int] !issued 2;
+    [%test_eq: string list] !rolled_back [ "ticket-1" ];
+    [%test_eq: int] !installed 1;
+    Repl.close repl |> ok_repl)
+;;
+
 let%test_unit "portable REPL finalizes cancellation and budget without replay" =
   Eio_main.run (fun env ->
     let calls = ref 0 in

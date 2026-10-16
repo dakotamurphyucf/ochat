@@ -344,6 +344,43 @@ val run_entrypoint_detailed
   -> unit
   -> (value, Chatml_diagnostic.t) result
 
+(** Interpret an already evaluated, retained Task through the same standalone
+    task/catch/operation and transactional-result kernel as [run_entrypoint_detailed].
+    This entry has no function call, synthetic [on_event], program initializer or
+    session event. [environment], [task] and [source] are borrowed from one
+    serially owned evaluator; the caller must establish that physical pairing.
+    [source] is the retained captured statement which returned the Task and is
+    used only for legacy unowned-range formatting. Owned failure sites,
+    including sites from older closures or configured modules, render against
+    their own exact captured source and are never relabelled to this statement.
+
+    Operation filtering and [prepare_result] have the standalone contract above:
+    ordinary session mutations/UI suspension are unavailable, a caught local
+    reservation is rolled back, and only surviving transactional effects reach
+    the infallible installer. Synchronous external effects already completed
+    before a later failure are not undone. [control] checks the final value
+    before an installer runs; cancellation and unexpected callback exceptions
+    retain their original identity/backtrace. This function supplies no source,
+    actor, Task-handle or operation authority. The raw value is lent only to
+    this lower runtime's caller; a public REPL receipt must project it.
+    [check_now] must be the borrowed nonyielding execution-lifetime/deadline
+    check from the same active runner, repeated after any yielding
+    [prepare_result] and immediately before its installer. It is not host
+    actor/source/Store admission. *)
+val run_retained_task_detailed
+  :  ?control:execution_control
+  -> ?scoped_async_operation:scoped_async_operation
+  -> ?limits:execution_limits
+  -> ?prepare_result:
+       (value:value -> local_effects:eff list -> (unit -> unit, string) result)
+  -> runtime_config
+  -> environment:env
+  -> task:Task.t
+  -> source:Chatml_source.t
+  -> check_now:(unit -> unit)
+  -> unit
+  -> (value, Chatml_diagnostic.t) result
+
 (** Initialize the linked value dependency closure once for a persistent session.
     Validate exact static installer metadata and compiled selected names before
     effects. Reuse the existing session/interpreter/events; companions restrict

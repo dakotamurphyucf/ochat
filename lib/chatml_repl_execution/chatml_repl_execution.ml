@@ -7,6 +7,7 @@ module Snapshot = Chatml_typechecker.Type_snapshot
 module Lang = Chatml.Chatml_lang
 module Eval = Chatml.Chatml_eval
 module Builtins = Chatml.Chatml_builtin_spec
+module Runtime = Chatml_host_runtime
 
 module Limits = struct
   type t =
@@ -50,6 +51,8 @@ module Error = struct
     | Closed
     | Faulted_owner
     | Busy
+    | Foreign_task_handle
+    | Stale_task_handle
     | Typing of Typing.Error.t
     | Modules of Modules.Error.t
     | Lowering of Chatml_diagnostic.t
@@ -106,15 +109,40 @@ module Receipt = struct
   let task_retention t = t.task_retention
 end
 
+module Task_result = struct
+  type failure_kind =
+    | Runtime
+    | Budget
+  [@@deriving equal, sexp_of]
+
+  type outcome =
+    | Succeeded
+    | Failed of failure_kind
+  [@@deriving equal, sexp_of]
+
+  type t =
+    { outcome : outcome
+    ; value_preview : string option
+    ; diagnostic : Diagnostic.t option
+    }
+
+  let outcome t = t.outcome
+  let value_preview t = t.value_preview
+  let diagnostic t = t.diagnostic
+end
+
 type retained_task =
   { handle : Task_handle.t
   ; task : Lang.Task.t
+  ; source : Chatml_source.t
   }
 
 type t =
   { typing : Typing.t
   ; modules : Modules.t
   ; runner : Execution.runner
+  ; surface : Surface.surface
+  ; policy : Execution.policy
   ; limits : Limits.t
   ; owner : unit ref
   ; mutable environment : Lang.env
@@ -209,6 +237,8 @@ let create ~typing ~surface ~env ~policy ~limits ~checkpoint =
          { typing
          ; modules
          ; runner
+         ; surface
+         ; policy
          ; limits
          ; owner = ref ()
          ; environment
@@ -352,7 +382,8 @@ let execute_next t candidate ~checkpoint =
               Receipt.Limit_reached, t.tasks
             | Success { task = Some task; _ } ->
               let handle = { Task_handle.owner = t.owner } in
-              Retained handle, { handle; task } :: t.tasks
+              ( Retained handle
+              , { handle; task; source = Typing.Candidate.source candidate } :: t.tasks )
           in
           let outcome =
             match attempted with
@@ -386,6 +417,98 @@ let execute_next t candidate ~checkpoint =
                ; diagnostic = None
                ; task_retention
                })))
+;;
+
+let interpreter_limits epoch_policy action_policy =
+  let of_policy = function
+    | Execution.Unrestricted -> None
+    | Bounded limits -> Some Runtime.{ fuel = limits.fuel; max_tasks = limits.max_tasks }
+  in
+  match of_policy epoch_policy, of_policy action_policy with
+  | None, None -> None
+  | Some limits, None | None, Some limits -> Some limits
+  | Some epoch, Some action ->
+    Some
+      Runtime.
+        { fuel = Int.min epoch.fuel action.fuel
+        ; max_tasks = Int.min epoch.max_tasks action.max_tasks
+        }
+;;
+
+let drive_retained
+      t
+      handle
+      ~operations
+      ?scoped_async_operation
+      ?prepare_result
+      ~action_policy
+      ()
+  =
+  if t.closed
+  then Error Error.Closed
+  else if t.faulted
+  then Error Error.Faulted_owner
+  else if t.busy
+  then Error Error.Busy
+  else if not (phys_equal handle.Task_handle.owner t.owner)
+  then Error Error.Foreign_task_handle
+  else (
+    match
+      List.find t.tasks ~f:(fun retained -> Task_handle.equal retained.handle handle)
+    with
+    | None -> Error Error.Stale_task_handle
+    | Some retained ->
+      t.busy <- true;
+      Exn.protect
+        ~finally:(fun () -> t.busy <- false)
+        ~f:(fun () ->
+          let projected = ref None in
+          let prepare_result =
+            Option.map prepare_result ~f:(fun prepare ~value ~local_effects ->
+              projected := Some (preview t.limits value);
+              prepare ~value ~local_effects)
+          in
+          let config : Runtime.runtime_config = { surface = t.surface; operations } in
+          let executed =
+            Execution.run_scoped_with_host_budget
+              t.runner
+              ~policy:action_policy
+              (fun () ->
+                 Runtime.run_retained_task_detailed
+                   ~control:(Execution.runner_control t.runner)
+                   ?scoped_async_operation
+                   ?limits:(interpreter_limits t.policy action_policy)
+                   ?prepare_result
+                   config
+                   ~environment:t.environment
+                   ~task:retained.task
+                   ~source:retained.source
+                   ~check_now:(fun () -> Execution.check_runner_now t.runner)
+                   ()
+                 |> Result.map ~f:(fun value ->
+                   match !projected with
+                   | Some preview -> preview
+                   | None -> preview t.limits value))
+          in
+          match executed with
+          | Error error ->
+            Ok
+              { Task_result.outcome = Failed Budget
+              ; value_preview = None
+              ; diagnostic = Some (diagnostic_of_text t.limits error.message)
+              }
+          | Ok (Error diagnostic) ->
+            Ok
+              { Task_result.outcome = Failed Runtime
+              ; value_preview = None
+              ; diagnostic = Some (diagnostic_of_owned t.limits diagnostic)
+              }
+          | Ok (Ok value_preview) ->
+            Ok
+              { Task_result.outcome = Succeeded
+              ; value_preview = Some value_preview
+              ; diagnostic = None
+              }))
 ;;
 
 let close t =

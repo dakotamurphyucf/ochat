@@ -202,7 +202,7 @@ and suspended_exec =
 and session =
   { env : Lang.env
   ; mutable state : Lang.value
-  ; on_event : Lang.value
+  ; on_event : Lang.value option
   ; event_arguments : event_arguments
   ; queue : Lang.value Queue.t
   ; operations : op_def String.Map.t
@@ -929,9 +929,9 @@ let compiled_surface (compiled : compiled_script) : Builtin_surface.surface =
 
 let create_session
       ?(event_arguments = Context_state_event)
+      ?on_event
       env
       ~state
-      ~on_event
       ~operations
       ~source_text
       ~current_exec
@@ -1485,14 +1485,16 @@ let standalone_operations
   |> operations_map
 ;;
 
-let run_initialized_entrypoint
+let run_initialized_task
       ?limits
       ?prepare_result
+      ?on_event
       env
       ~source_text
       ~operations
-      fn
-      ~arguments
+      ~start_task
+      ~validate_result
+      ~check_now
   =
   let failure message = Error (Failure.plain message) in
   let open Result.Let_syntax in
@@ -1508,9 +1510,9 @@ let run_initialized_entrypoint
   in
   let session =
     create_session
+      ?on_event
       env
       ~state:Lang.VUnit
-      ~on_event:fn
       ~operations
       ~source_text
       ~current_exec:(Some exec)
@@ -1522,13 +1524,11 @@ let run_initialized_entrypoint
     Exn.protect
       ~finally:(fun () -> session.current_exec <- None)
       ~f:(fun () ->
-        let%bind value =
-          Eval.apply_value_result fn arguments |> Result.map_error ~f:Failure.runtime
-        in
-        let%bind task = expect_task_value value |> host_result in
+        let%bind task = start_task () in
         let%bind outcome = interpret_task session exec ~frames:[] task in
         match outcome with
         | Task_value value ->
+          let () = validate_result value in
           let%map install =
             match prepare_result with
             | None -> Ok ignore
@@ -1536,6 +1536,9 @@ let run_initialized_entrypoint
               prepare ~value ~local_effects:(List.rev exec.local_effects_rev)
               |> host_result
           in
+          validate_result value;
+          Option.iter session.env.control ~f:(fun control -> control.allocate 0);
+          check_now ();
           install ();
           value
         | Task_suspend _ -> failure "Standalone execution cannot suspend for UI input")
@@ -1554,6 +1557,66 @@ let run_initialized_entrypoint
          ~site:(Failure.diagnostic failure).site
          ~correlation:None);
   result
+;;
+
+let run_initialized_entrypoint
+      ?limits
+      ?prepare_result
+      env
+      ~source_text
+      ~operations
+      fn
+      ~arguments
+  =
+  run_initialized_task
+    ?limits
+    ?prepare_result
+    ~on_event:fn
+    env
+    ~source_text
+    ~operations
+    ~start_task:(fun () ->
+      let open Result.Let_syntax in
+      let%bind value =
+        Eval.apply_value_result fn arguments |> Result.map_error ~f:Failure.runtime
+      in
+      expect_task_value value |> host_result)
+    ~validate_result:(fun _ -> ())
+    ~check_now:(fun () -> if Option.is_some env.control then Eio.Fiber.check ())
+;;
+
+let run_retained_task_detailed
+      ?control
+      ?scoped_async_operation
+      ?limits
+      ?prepare_result
+      (config : runtime_config)
+      ~(environment : Lang.env)
+      ~task
+      ~source
+      ~check_now
+      ()
+  =
+  match standalone_operations config ~prepare_result ~scoped_async_operation with
+  | Error message -> Error (Diagnostic.create message)
+  | Ok operations ->
+    let env =
+      { environment with
+        control = Option.first_some control environment.control
+      ; source = Some source
+      }
+    in
+    run_initialized_task
+      ?limits
+      ?prepare_result
+      env
+      ~source_text:(Captured.contents source)
+      ~operations
+      ~start_task:(fun () -> Ok task)
+      ~validate_result:(fun value ->
+        Option.iter env.control ~f:(fun control -> control.check_value value))
+      ~check_now
+    |> Result.map_error ~f:Failure.diagnostic
 ;;
 
 let run_entrypoint_internal
@@ -1814,12 +1877,15 @@ let handle_event_impl_detailed
                   | Context_state_event -> [ context; execution_state; event ]
                   | Event_state -> [ event; execution_state ]
                 in
-                match Eval.apply_value_result session.on_event arguments with
-                | Error err -> Error (Failure.runtime err)
-                | Ok value ->
-                  (match expect_task_value value with
-                   | Error msg -> Error (Failure.plain msg)
-                   | Ok task -> interpret_task session exec ~frames:[] task))
+                match session.on_event with
+                | None -> Error (Failure.plain "Session has no event handler")
+                | Some on_event ->
+                  (match Eval.apply_value_result on_event arguments with
+                   | Error err -> Error (Failure.runtime err)
+                   | Ok value ->
+                     (match expect_task_value value with
+                      | Error msg -> Error (Failure.plain msg)
+                      | Ok task -> interpret_task session exec ~frames:[] task)))
               ~finally:(fun () -> session.current_exec <- None)
           in
           match result with
