@@ -425,6 +425,38 @@ val drain_internal_events_entries
   -> session_meta:Jsonaf.t
   -> (Moderation.Outcome.t list, string) result
 
+module Bounded_drain : sig
+  type stop =
+    | Empty
+    | Halted
+    | Waiting_for_ui of pending_ui_request
+    | Limit_reached
+
+  type t =
+    { outcomes : Moderation.Outcome.t list
+    ; stop : stop
+    }
+end
+
+(** Drain at most [max_events] queued entries under one manager execution lock.
+    A negative limit returns [Error] before handling any event; zero only
+    observes the stop state. The stop reason is observed under that same lock
+    after the last handler. Priority is [Halted], [Waiting_for_ui], then queue
+    state: [Empty] proves no queued event remains, including at the exact limit;
+    [Limit_reached] proves at least one remains. Halt and UI suspension are
+    explicit, so a completion host cannot mistake either for quiescence.
+    The caller owns the cumulative limit across repeated drains, since event
+    handlers may spawn further work. Existing ordinary drains are unchanged. *)
+val drain_internal_events_entries_bounded
+  :  max_events:int
+  -> t
+  -> session_id:string
+  -> now_ms:int
+  -> history:History_entry.t list
+  -> available_tools:Res.Request.Tool.t list
+  -> session_meta:Jsonaf.t
+  -> (Bounded_drain.t, string) result
+
 val effective_entries : t -> History_entry.t list -> Moderation.Effective_entry.t list
 val effective_history_entries : t -> History_entry.t list -> History_entry.t list
 

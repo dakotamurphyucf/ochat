@@ -447,7 +447,7 @@ let implementation_sources =
   ; ( "lib/chat_response/moderator_invocation.ml"
     , "445f7e4a6597b27d3af34905fee56441bcf82285fd52eb8d9f0c400379b28deb" )
   ; ( "lib/chat_response/moderator_manager.ml"
-    , "6bae9c06304bdcbfefc7979d759a9c012540cd46d98bc1b055da9b8a154259a6" )
+    , "85bdbac427071ad2ed53220b8436ee7612a61cd91b2692808e6e8b720a81d63a" )
   ; ( "lib/chat_response/notification_operations.ml"
     , "1e67db1e69921f11f0c28798e340e7e23dc5436eb492bb79a12a0125b0f69e29" )
   ; ( "lib/chat_response/runtime_semantics.ml"
