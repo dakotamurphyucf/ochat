@@ -194,6 +194,7 @@ module Developer : sig
     val create
       :  route:Route.t
       -> kind:Agent_store.Developer_command_receipt.Kind.t
+      -> target:Chatml.Chatml_compiler_contract.Target.t
       -> prompt:Agent_protocol.Id.Prompt_definition.t option
       -> workspace:Agent_protocol.Id.Workspace_definition.t option
       -> entrypoint:string

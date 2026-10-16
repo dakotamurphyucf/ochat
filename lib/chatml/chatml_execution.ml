@@ -676,6 +676,7 @@ let run ?policy ?context ~env ~config ~program ~entrypoint ~arguments () =
 let run_prepared_in_scope
       program
       ?scoped_async_operation
+      ?before_entry
       ~control
       ~config
       ~entrypoint
@@ -684,6 +685,7 @@ let run_prepared_in_scope
       ()
   =
   checked_run ~control ~arguments ~prepare_result ~f:(fun prepare_result ->
+    Option.iter before_entry ~f:(fun check -> check ());
     Chatml_host_runtime.run_prepared_entrypoint_detailed
       config
       program

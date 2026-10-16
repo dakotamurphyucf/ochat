@@ -378,7 +378,5 @@ let resolve t ~id ~fingerprint =
 let fingerprint t =
   references t
   |> List.map ~f:(fun reference -> reference.fingerprint)
-  |> [%sexp_of: string list]
-  |> Sexp.to_string
-  |> digest
+  |> Chatml_tool_codec.Context.capability_fingerprint
 ;;

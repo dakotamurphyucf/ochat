@@ -35,7 +35,30 @@ module Selected_contract : sig
       Neither the entry nor this comparison wrapper grants execution. *)
   val of_standard_entry : Authoring_standard_contracts.Entry.t -> (t, P.Error.t) result
 
+  (** Trusted policy pairs an actual configured Standard Tool_v1 entry with its
+      selected top-level tool label and already compiled input/output schemas.
+      These are not inferred from source text or an ordered Tool.call fixture.
+      The name is at most 256 bytes and the two already bounded 1 MiB schemas
+      are charged before canonical identity retention. Their identity
+      participates in [same_identity], so
+      post-wait/final current selection cannot substitute a different policy. *)
+  val of_standard_tool_entry
+    :  Authoring_standard_contracts.Entry.t
+    -> tool_name:string
+    -> input_schema:Chatmd_shell_spec.Tool_schema.t
+    -> output_schema:Chatmd_shell_spec.Tool_schema.t
+    -> (t, P.Error.t) result
+
+  module Tool_fixture : sig
+    type t
+
+    val name : t -> string
+    val input_schema : t -> Chatmd_shell_spec.Tool_schema.t
+    val output_schema : t -> Chatmd_shell_spec.Tool_schema.t
+  end
+
   val contract : t -> Contract.t
+  val tool_fixture : t -> Tool_fixture.t option
   val same_identity : t -> t -> bool
 end
 
@@ -48,6 +71,7 @@ module Request : sig
       revalidated by Capture.create_prepared against exact Prepared. *)
   val create
     :  entrypoint:string
+    -> target:Contract.Target.t
     -> input:Jsonaf.t
     -> fixtures:Capture.Fixture.t option
     -> json_bounds:Capture.Json_bounds.t
@@ -63,7 +87,7 @@ module Target_policy : sig
       execution grants. They return only previously admitted Selected_contract
       values, or None. Each route reselects original and current actors after
       waits and at final publication, comparing the EXACT admitted identity;
-      a newly authorized different One_off contract is stale. *)
+      a newly authorized different target/tool/schema identity is stale. *)
   val create
     :  local_project:
          (Operator_authorization.t
@@ -147,6 +171,11 @@ module Candidate : sig
 
   val capture : t -> Capture.t
 
+  (** Original selected contract and optional Tool_v1 schema comparison data.
+      The host may inspect these only after the Candidate's full currentness
+      check and must repeat its final check before a durable result write. *)
+  val selected_contract : t -> Selected_contract.t
+
   (** Complete owner/actor/source/upload currentness and exact selected
       contract check. May yield, including Store pin verification. The already
       captured code remains immutable; this admission check is required only
@@ -168,7 +197,7 @@ module Candidate : sig
       be invoked INSIDE the Root.Registry provisional-to-Live transition after
       its last Store wait.
       A different/stale Checked receipt rejects. No Current borrow, Eio wait
-      or native read occurs here. The developer target uses a preadmitted fixed
+      or native read occurs here. The developer target/tool schema uses a preadmitted fixed
       identity; the existing authoring owner may separately rederive its
       bounded analysis-contract identity during its final selection check. *)
   val check_now

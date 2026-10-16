@@ -459,11 +459,27 @@ module Developer : sig
     type t
 
     (** Only the existing bounded Standard-contract cache can supply this
-        immutable One_off_v1 comparison identity. Host selection/currentness
+        immutable One_off_v1 or explicit Tool_v1 comparison identity. Host selection/currentness
         remains independent. *)
     val of_standard_entry : Authoring_standard_contracts.Entry.t -> (t, P.Error.t) result
 
+    val of_standard_tool_entry
+      :  Authoring_standard_contracts.Entry.t
+      -> tool_name:string
+      -> input_schema:Chatmd_shell_spec.Tool_schema.t
+      -> output_schema:Chatmd_shell_spec.Tool_schema.t
+      -> (t, P.Error.t) result
+
+    module Tool_fixture : sig
+      type t
+
+      val name : t -> string
+      val input_schema : t -> Chatmd_shell_spec.Tool_schema.t
+      val output_schema : t -> Chatmd_shell_spec.Tool_schema.t
+    end
+
     val contract : t -> Chatml.Chatml_compiler_contract.t
+    val tool_fixture : t -> Tool_fixture.t option
     val same_identity : t -> t -> bool
   end
 
@@ -473,6 +489,7 @@ module Developer : sig
     (** Bounded, inert input/fixture admission; no compilation or effects. *)
     val create
       :  entrypoint:string
+      -> target:Chatml.Chatml_compiler_contract.Target.t
       -> input:Jsonaf.t
       -> fixtures:Chatml_developer_capture.Fixture.t option
       -> json_bounds:Chatml_developer_capture.Json_bounds.t
@@ -551,6 +568,7 @@ module Developer : sig
     type t
 
     val capture : t -> Chatml_developer_capture.t
+    val selected_contract : t -> Selected_contract.t
 
     (** The same closure survives a provisional Root recovery, but each
         attempt's yielding full check mints a fresh final comparison. Root

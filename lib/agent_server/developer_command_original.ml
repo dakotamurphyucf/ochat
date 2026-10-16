@@ -36,6 +36,7 @@ end
 type t =
   { route : Route.t
   ; kind : Agent_store.Developer_command_receipt.Kind.t
+  ; target : Chatml.Chatml_compiler_contract.Target.t
   ; prompt : P.Id.Prompt_definition.t option
   ; workspace : P.Id.Workspace_definition.t option
   ; request : Developer.Request.t
@@ -190,6 +191,14 @@ let kind = function
   | Live_run -> "live_run"
 ;;
 
+let target_name = function
+  | Chatml.Chatml_compiler_contract.Target.One_off_v1 -> "one_off_v1"
+  | Tool_v1 -> "tool_v1"
+  | Developer_tool_v1 -> "developer_tool_v1"
+  | Moderator_v1 -> "moderator_v1"
+  | Delegated_moderator_v1 -> "delegated_moderator_v1"
+;;
+
 let execution (limits : Chatml_execution.limits) =
   `Object
     [ "fuel", number limits.fuel
@@ -233,6 +242,7 @@ let validate_route = function
 let create
       ~route:source_route
       ~kind:command_kind
+      ~target
       ~prompt
       ~workspace
       ~entrypoint
@@ -256,6 +266,12 @@ let create
   if
     (not (validate_route source_route))
     || (not valid_resources)
+    || (not
+          (match command_kind, target with
+           | ( (Check | Fixture_run)
+             , (Chatml.Chatml_compiler_contract.Target.One_off_v1 | Tool_v1) )
+           | Live_run, One_off_v1 -> true
+           | _ -> false))
     || Option.exists requested_execution ~f:(fun limits ->
       not (Chatml_execution.valid_limits limits))
     || Option.exists requested_max_output_bytes ~f:(fun bytes -> bytes <= 0)
@@ -264,6 +280,7 @@ let create
     let%bind request =
       Developer.Request.create
         ~entrypoint
+        ~target
         ~input
         ~fixtures
         ~json_bounds:bounds
@@ -286,6 +303,7 @@ let create
       `Object
         [ "version", number 1
         ; "kind", string (kind command_kind)
+        ; "target", string (target_name target)
         ; "prompt", option (fun id -> string (P.Id.Prompt_definition.to_string id)) prompt
         ; ( "workspace"
           , option (fun id -> string (P.Id.Workspace_definition.to_string id)) workspace )
@@ -306,6 +324,7 @@ let create
     Ok
       { route = source_route
       ; kind = command_kind
+      ; target
       ; prompt
       ; workspace
       ; request
@@ -316,6 +335,7 @@ let create
 ;;
 
 let kind t = t.kind
+let target t = t.target
 let route t = t.route
 let prompt t = t.prompt
 let workspace t = t.workspace

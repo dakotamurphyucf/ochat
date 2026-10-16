@@ -160,10 +160,15 @@ val run
 (** Linked execution under the caller's current scope. Exact installer validation,
     every initializer and invocation share one budget/control/depth level. Only
     compiled selected descriptors may run. Same argument/result checks and
-    prepare_result commit boundary as run_in_scope; no implicit source capture. *)
+    prepare_result commit boundary as run_in_scope; no implicit source capture.
+    [before_entry], when supplied, runs after the last potentially yielding
+    argument value check and immediately before interpreter entry. It grants no
+    authority itself; the owning host uses it for a current admission check.
+    Exceptions, including cancellation, propagate unchanged. *)
 val run_prepared_in_scope
   :  Chatml_linked_program.t
   -> ?scoped_async_operation:Chatml_host_runtime.scoped_async_operation
+  -> ?before_entry:(unit -> unit)
   -> control:Chatml.Chatml_lang.execution_control option
   -> config:Chatml_host_runtime.runtime_config
   -> entrypoint:string

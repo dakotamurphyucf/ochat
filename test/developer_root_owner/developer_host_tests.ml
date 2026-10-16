@@ -15,8 +15,10 @@ let checked = function
   | Error _ -> failwith "fixture admission failed"
 ;;
 
-let developer_configuration () =
-  let target = Chatml.Chatml_compiler_contract.Target.One_off_v1 in
+let developer_configuration ?(tool_fixture = false) () =
+  let target =
+    if tool_fixture then Chatml.Chatml_compiler_contract.Target.Tool_v1 else One_off_v1
+  in
   let contracts =
     S.Authoring_standard_contracts.create
       ~targets:[ target ]
@@ -26,10 +28,25 @@ let developer_configuration () =
     |> checked
   in
   let selected =
-    S.Authoring_standard_contracts.find contracts target
-    |> Option.value_exn
-    |> S.Authoring_context_service.Developer.Selected_contract.of_standard_entry
-    |> ok
+    let entry =
+      S.Authoring_standard_contracts.find contracts target |> Option.value_exn
+    in
+    if tool_fixture
+    then (
+      let schema =
+        match Chatmd_shell_spec.Tool_schema.compile `True with
+        | Ok schema -> schema
+        | Error _ -> failwith "fixture schema unavailable"
+      in
+      S.Authoring_context_service.Developer.Selected_contract.of_standard_tool_entry
+        entry
+        ~tool_name:"developer_fixture"
+        ~input_schema:schema
+        ~output_schema:schema
+      |> ok)
+    else
+      S.Authoring_context_service.Developer.Selected_contract.of_standard_entry entry
+      |> ok
   in
   let capture_policy =
     S.Authoring_context_service.Developer.Target_policy.create
@@ -196,7 +213,7 @@ let semantic_authoring_policy env =
   Policy.with_semantic base ~semantic |> ok
 ;;
 
-let with_daemon f =
+let with_daemon ?(tool_fixture = false) f =
   Eio_main.run (fun env ->
     let root =
       Filename.concat
@@ -238,7 +255,7 @@ let with_daemon f =
           let options =
             { S.Daemon.default_options with
               authoring = Some (semantic_authoring_policy env)
-            ; developer = Some (developer_configuration ())
+            ; developer = Some (developer_configuration ~tool_fixture ())
             }
           in
           let daemon =
@@ -258,7 +275,7 @@ let with_daemon f =
             (fun () -> f daemon))))
 ;;
 
-let open_document daemon actor =
+let open_document ?(source = "let main input = Task.pure(input)") daemon actor =
   let connection =
     S.Connection_context.create_authenticated
       ~actor
@@ -301,7 +318,7 @@ let open_document daemon actor =
       ~member:"draft.chatmd"
       ~default_environment:None
       ~contents:
-        {|<script id="s" language="chatml" kind="tool">let main input = Task.pure(input)</script>|}
+        ("<script id=\"s\" language=\"chatml\" kind=\"tool\">" ^ source ^ "</script>")
     |> ok
   in
   let expected =
@@ -365,6 +382,7 @@ let%expect_test
       S.Daemon.Developer.Request.create
         ~route
         ~kind
+        ~target:Chatml.Chatml_compiler_contract.Target.One_off_v1
         ~prompt:(Option.map prompt ~f:S.Catalog_identity.prompt_definition)
         ~workspace:
           (Option.map prompt ~f:(fun _ ->
@@ -416,4 +434,118 @@ let%expect_test
        owner after");
   [%expect
     {| four durable Live successes; Check Ready; same owner before changed Prompt, new owner after |}]
+;;
+
+let%expect_test "hosted Tool_v1 fixture binds selected ABI and durable row" =
+  with_daemon ~tool_fixture:true (fun daemon ->
+    let scopes = Set.add Agent_server_test_support.scopes Developer_fixture_run in
+    let principal =
+      Agent_server_test_support.principal_with_scopes "pri_developer_tool" scopes
+    in
+    let actor = Operator_authorization.trusted_local principal in
+    let source =
+      {|let run ctx input =
+  let* result = Tool.call("fixture", input) in
+  match result with
+  | `Ok(value) -> Task.pure(`Complete(value))
+  | `Error(message) -> Task.fail(message)|}
+    in
+    let connection, _transport, expected = open_document ~source daemon actor in
+    let selector = P.Authoring.Analysis.Target.selected_script "s" |> ok in
+    let route = S.Daemon.Developer.Request.Route.Document_script { expected; selector } in
+    let fresh =
+      Some (S.Daemon.Developer.Request.Fresh_source.Document_script { connection })
+    in
+    let bounds =
+      Chatml_developer_capture.Json_bounds.create
+        ~max_bytes:4096
+        ~max_depth:16
+        ~max_nodes:128
+      |> Or_error.ok_exn
+    in
+    let step =
+      Chatml_developer_capture.Fixture.Step.create
+        ~tool_name:"fixture"
+        ~input_schema:(`Object [])
+        ~output_schema:(`Object [])
+        ~expected_input:`Null
+        ~response:(Return (`String "world"))
+        ~json_bounds:bounds
+        ~checkpoint:ignore
+      |> Or_error.ok_exn
+    in
+    let fixtures =
+      Chatml_developer_capture.Fixture.create
+        ~steps:[ step ]
+        ~max_steps:4
+        ~max_bytes:8192
+        ~checkpoint:ignore
+      |> Or_error.ok_exn
+    in
+    let request target =
+      S.Daemon.Developer.Request.create
+        ~route
+        ~kind:Fixture_run
+        ~target
+        ~prompt:None
+        ~workspace:None
+        ~entrypoint:"run"
+        ~input:`Null
+        ~fixtures:(Some fixtures)
+        ~requested_execution:None
+        ~requested_max_output_bytes:None
+        ~bounds
+        ~checkpoint:ignore
+      |> ok
+    in
+    let run_id = P.Id.Developer_run.create () in
+    let key = P.Idempotency_key.of_string "tool-v1-fixture" |> checked in
+    let selected = request Chatml.Chatml_compiler_contract.Target.Tool_v1 in
+    ignore
+      (S.Daemon.Developer.submit
+         daemon
+         ~actor
+         ~run_id
+         ~key
+         ~request:selected
+         ~fresh_source:fresh
+       |> ok);
+    let terminal = S.Daemon.Developer.await_terminal daemon ~actor ~run_id ~key |> ok in
+    (match Option.map (S.Daemon.Developer.View.receipt terminal) ~f:R.value with
+     | Some
+         (Fixture
+            (Completed
+               { outcome = Succeeded (`String "world")
+               ; tool_selection_fingerprint = Some _
+               ; matched_steps = 1
+               ; _
+               })) -> ()
+     | other -> raise_s [%sexp "unexpected Tool_v1 fixture", (other : R.value option)]);
+    let retry =
+      S.Daemon.Developer.submit
+        daemon
+        ~actor
+        ~run_id
+        ~key
+        ~request:selected
+        ~fresh_source:None
+      |> ok
+    in
+    assert (
+      R.Id.equal (S.Daemon.Developer.View.id terminal) (S.Daemon.Developer.View.id retry));
+    let wrong = request Chatml.Chatml_compiler_contract.Target.One_off_v1 in
+    let changed_target_conflicts =
+      Result.is_error
+        (S.Daemon.Developer.submit
+           daemon
+           ~actor
+           ~run_id
+           ~key
+           ~request:wrong
+           ~fresh_source:None)
+    in
+    printf
+      "tool_success=true same_row=true changed_target_conflicts=%b\n"
+      changed_target_conflicts);
+  [%expect {| tool_success=true same_row=true changed_target_conflicts=true |}]
 ;;

@@ -1,0 +1,6 @@
+(library
+ (name chatml_tool_codec)
+ (public_name ochat.chatml_tool_codec)
+ (libraries core jsonaf chatml chatml_execution chatmd_shell_spec agent_protocol ochat.document_schema)
+ (preprocess
+  (pps ppx_jane)))

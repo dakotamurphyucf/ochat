@@ -101,6 +101,7 @@
   chatml_compilation
   chatml_prompt_programs
   chatml_execution
+  ochat.chatml_tool_codec
   chatml_moderator_runtime
   session
   lru_cache

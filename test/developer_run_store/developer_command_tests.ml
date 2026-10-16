@@ -54,6 +54,61 @@ let replace object_ name value =
   | _ -> failwith "expected named receipt fixture"
 ;;
 
+let%expect_test "Tool_v1 failure keeps selection and rejects invented work custody" =
+  let selection = Chatml_source.Digest.of_contents "selected ABI" ~checkpoint:poll in
+  let completed outcome =
+    R.Fixture
+      (R.Fixture.Completed
+         { graph_fingerprint = capture_fingerprint
+         ; fixture_digest = request_fingerprint
+         ; tool_selection_fingerprint = Some selection
+         ; matched_steps = 0
+         ; logs = []
+         ; outcome
+         })
+  in
+  let failure : P.Invocation.tool_error =
+    { code = "declined"
+    ; message = "selected tool refused"
+    ; retryable = false
+    ; details = `Null
+    }
+  in
+  let stored = receipt (completed (R.Fixture.Tool_failed failure)) in
+  let decoded = roundtrip stored in
+  let selection_retained =
+    match R.value decoded with
+    | R.Fixture (Completed value) ->
+      Option.value_map
+        value.tool_selection_fingerprint
+        ~default:false
+        ~f:(Chatml_source.Digest.equal selection)
+    | _ -> false
+  in
+  printf
+    "tool_failed_roundtrip=%b selection_retained=%b\n"
+    (R.equal stored decoded)
+    selection_retained;
+  let missing_selection =
+    match R.to_json stored with
+    | `Object fields ->
+      `Object
+        (List.filter fields ~f:(fun (name, _) ->
+           not (String.equal name "tool_selection_fingerprint")))
+    | _ -> failwith "expected fixture receipt"
+  in
+  printf
+    "missing_selection_rejected=%b pending_without_owner_roundtrip=%b\n"
+    (Result.is_error (R.of_json missing_selection ~limits ~poll))
+    (let pending = receipt (completed (R.Fixture.Failed Pending_without_owner)) in
+     R.equal pending (roundtrip pending));
+  [%expect
+    {|
+    tool_failed_roundtrip=true selection_retained=true
+    missing_selection_rejected=true pending_without_owner_roundtrip=true
+    |}]
+;;
+
 let%expect_test "command receipt nested values roundtrip and strict optional location" =
   let diagnostic : R.Diagnostic.t =
     { code = "chatml.invalid"; message = ""; location = None }
@@ -65,6 +120,7 @@ let%expect_test "command receipt nested values roundtrip and strict optional loc
          (R.Fixture.Completed
             { R.Fixture.graph_fingerprint = capture_fingerprint
             ; fixture_digest = request_fingerprint
+            ; tool_selection_fingerprint = None
             ; matched_steps = 1
             ; logs =
                 [ { R.Fixture.Log.level = R.Fixture.Log.Level.Info
@@ -91,6 +147,7 @@ let%expect_test "command receipt nested values roundtrip and strict optional loc
       (R.Fixture.Completed
          { graph_fingerprint = capture_fingerprint
          ; fixture_digest = request_fingerprint
+         ; tool_selection_fingerprint = None
          ; matched_steps = 0
          ; logs = []
          ; outcome = R.Fixture.Failed error
