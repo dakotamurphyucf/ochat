@@ -35,6 +35,15 @@ grant source access or authenticate bytes. Result JSON may contain null, while a
 optional diagnostic location is omitted when absent. Explicit null is rejected
 for that optional location.
 
+A Fixture_run receipt may retain the selected Standard `Tool_v1` ABI fingerprint
+separately from its capture and fixture digests. The host derives it from the
+actual selected top-level name, schemas, contract and inert context policy for
+that command ID and epoch. `Tool_failed` retains the Tool domain error rather
+than flattening it to a host runtime failure. A `Pending` value with no owned
+work path and a changed effect-time admission have distinct bounded failures.
+The selection fingerprint and failure category remain inspectable on historical
+reads; none is an execution or retry grant.
+
 ## Bounded recovery
 
 Command limits bound row count, the aggregate encoded size of complete rows and

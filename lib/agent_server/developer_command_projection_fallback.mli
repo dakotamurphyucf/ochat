@@ -13,7 +13,8 @@ val check_rejected : Receipt.value
 (** Keep the actual completed fixture identity and matched-step count while
     reporting that its detailed result exceeded the receipt limit. *)
 val fixture_output_limit
-  :  graph_fingerprint:Chatml_source.Digest.t
+  :  tool_selection_fingerprint:Chatml_source.Digest.t option
+  -> graph_fingerprint:Chatml_source.Digest.t
   -> fixture_digest:Chatml_source.Digest.t
   -> matched_steps:int
   -> Receipt.value

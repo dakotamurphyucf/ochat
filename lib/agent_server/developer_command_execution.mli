@@ -40,6 +40,8 @@ module Fixture : sig
   val run
     :  capture:Chatml_developer_capture.t
     -> check:Chatml_developer_test.Check.t
+    -> tool_selection:Chatml_developer_test.Tool_v1.Selection.t option
+    -> admit:(unit -> bool)
     -> id:Receipt.Id.t
     -> budgets:Developer_command_budgets.t
     -> env:Eio_unix.Stdenv.base

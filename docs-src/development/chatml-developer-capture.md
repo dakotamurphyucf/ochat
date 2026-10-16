@@ -16,10 +16,10 @@ to an editor buffer or native source.
 Local saved revisions, editor versions and upload receipt IDs are comparison
 data, not authorizations. The host must obtain the build or source and provenance
 through its current actor/source or bundle admission; a capture never saves a
-file or reads a path. This core runs One_off_v1. Tool_v1
-needs a host-owned two-argument tool context and outcome contract, so it rejects
-explicitly until that separate admitted developer fixture path is implemented.
-Moderator/session targets also reject before execution.
+file or reads a path. The portable core admits `One_off_v1` and an explicitly
+selected Standard `Tool_v1` capture. A Tool fixture requires the host's current
+target selection, top-level tool name and input/output schemas; fixture steps
+cannot choose those values. Moderator/session targets reject before execution.
 
 Every fixture step names one `Tool.call`, has bounded compiled input and output
 schemas, an exact expected JSON input, and a bounded response. Every step is
@@ -63,7 +63,24 @@ artifact. Compilation failure returns a failed run receipt with zero runtime
 calls or logs. Cancellation and unexpected exceptions propagate through the
 existing compiler/runtime cleanup boundaries.
 
-OCH-266 will attach this core to a developer host owner, task scheduler,
-permission checks and durable receipts. OCH-263/264 will supply admitted upload
-receipts and complete changed-closure validation. This core does not add a
-resolver, writable host root or live capability fallback.
+For `Tool_v1`, the host also binds the actual persisted command ID, run epoch,
+selected compiler contract and effective execution/output limits before the
+two-argument `run context input` entrypoint. Its context uses a namespaced
+developer fixture label and `Script` origin, with no fabricated Session,
+Invocation, provider call, parent or callable capability. Input and output use
+the same bounded schema and JSON projection as managed Tool invocations. The
+selected ABI, schemas, tool label and context policy have a separate fingerprint
+retained in the terminal fixture receipt. A `Complete` value succeeds; a Tool
+`Fail` remains a distinct `Tool_failed` outcome; `Pending` is a typed failure
+because an inert fixture owns no resumable work. Current admission is repeated
+at interpreter entry after yielding projection and inside fixture effect
+handlers after argument validation. A changed admission produces an explicit
+`Admission_revoked` failure before a new fixture effect; it does not erase an
+already completed effect.
+
+The daemon's developer Host binds this portable core to current source and
+method admission, a persisted command row, bounded receipt and historical
+same-key reads. The Host separately owns scheduler and live Root effects; this
+fixture core grants neither. An admitted upload is one possible authentic
+source route, with its own current receipt and changed-closure checks. This
+core adds no resolver, writable host root or live capability fallback.

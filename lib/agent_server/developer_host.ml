@@ -1047,17 +1047,57 @@ let submit_pure t ~actor ~run_id ~key ~original ~fresh_source ~kind =
     ~kind
     ~run:
       (fun
-        t
-        ~actor:_
-        ~candidate:_
-        ~admitted:_
+        t ~actor:_ ~candidate ~admitted ~capture ~budgets ~id ~active:_ ~sw:_ ~admit ->
+      let open Result.Let_syntax in
+      let open Chatml.Chatml_compiler_contract.Target in
+      let selected = Capture.Candidate.selected_contract candidate in
+      let%bind tool_selection =
+        match kind, Original.target original with
+        | Receipt.Kind.Check, _ | Fixture_run, One_off_v1 -> Ok None
+        | Fixture_run, Tool_v1 ->
+          (match Capture.Selected_contract.tool_fixture selected with
+           | None ->
+             Error (P.Error.invalid_request "Tool_v1 policy has no selected schema")
+           | Some selected_tool ->
+             let%bind run_id =
+               Chatml_developer_test.Run_id.create (Receipt.Id.to_string id)
+               |> Result.map_error ~f:(fun _ ->
+                 P.Error.invalid_request "invalid developer fixture identity")
+             in
+             let owner = Store.owner admitted.handle in
+             Chatml_developer_test.Tool_v1.Selection.create
+               ~capture
+               ~contract:(Capture.Selected_contract.contract selected)
+               ~run:owner.run_id
+               ~id:run_id
+               ~generation:owner.epoch
+               ~tool_name:(Capture.Selected_contract.Tool_fixture.name selected_tool)
+               ~input_schema:
+                 (Capture.Selected_contract.Tool_fixture.input_schema selected_tool)
+               ~output_schema:
+                 (Capture.Selected_contract.Tool_fixture.output_schema selected_tool)
+               ~created_at:(t.now ())
+               ~deadline:None
+               ~limits:(Budgets.execution budgets)
+               ~max_output_bytes:(Budgets.max_output_bytes budgets)
+               ~checkpoint:t.checkpoint
+             |> Result.map ~f:Option.some
+             |> Result.map_error ~f:(fun _ ->
+               P.Error.invalid_request "Tool_v1 fixture selection is invalid"))
+        | ( (Fixture_run | Live_run)
+          , (Developer_tool_v1 | Moderator_v1 | Delegated_moderator_v1) ) ->
+          Error (P.Error.invalid_request "unsupported developer fixture target")
+        | Live_run, (One_off_v1 | Tool_v1) ->
+          Error (P.Error.invalid_request "live command cannot use fixture runner")
+      in
+      Developer_command_portable.run_kind
+        ~kind
         ~capture
-        ~budgets
+        ~tool_selection
+        ~admit
         ~id
-        ~active:_
-        ~sw:_
-        ~admit:_
-      -> Developer_command_portable.run_kind ~kind ~capture ~id ~budgets ~env:t.env)
+        ~budgets
+        ~env:t.env)
 ;;
 
 let run_live_locked

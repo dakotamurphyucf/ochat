@@ -245,6 +245,12 @@ let decode_failure json =
   | "output_limit" ->
     let* () = exact json ~required:[ "kind" ] ~optional:[] in
     Ok Fixture.Failure.Output_limit
+  | "pending_without_owner" ->
+    let* () = exact json ~required:[ "kind" ] ~optional:[] in
+    Ok Fixture.Failure.Pending_without_owner
+  | "admission_revoked" ->
+    let* () = exact json ~required:[ "kind" ] ~optional:[] in
+    Ok Fixture.Failure.Admission_revoked
   | _ -> invalid "kind" "unsupported fixture failure"
 ;;
 
@@ -285,6 +291,24 @@ let decode_fixture_outcome json =
     let* () = exact json ~required:[ "kind"; "failure" ] ~optional:[] in
     let* failure = field json "failure" |> Result.bind ~f:decode_failure in
     Ok (Fixture.Failed failure)
+  | "tool_failed" ->
+    let* () =
+      exact
+        json
+        ~required:[ "kind"; "code"; "message"; "retryable"; "details" ]
+        ~optional:[]
+    in
+    let* code = text json "code" in
+    let* message = text json "message" in
+    let* retryable =
+      match D.Json.field json ~name:"retryable" with
+      | Value `True -> Ok true
+      | Value `False -> Ok false
+      | Absent | Null | Value _ -> invalid "retryable" "expected boolean"
+    in
+    let* details = present_field json "details" in
+    Ok
+      (Fixture.Tool_failed { Agent_protocol.Invocation.code; message; retryable; details })
   | _ -> invalid "kind" "unsupported fixture outcome"
 ;;
 
@@ -309,17 +333,30 @@ let decode_fixture json ~poll =
           ; "logs"
           ; "outcome"
           ]
-        ~optional:[]
+        ~optional:[ "tool_selection_fingerprint" ]
     in
     let* graph_fingerprint = digest_field json "graph_fingerprint" in
     let* fixture_digest = digest_field json "fixture_digest" in
+    let* tool_selection_fingerprint =
+      match D.Json.field json ~name:"tool_selection_fingerprint" with
+      | Absent -> Ok None
+      | Null -> invalid "tool_selection_fingerprint" "explicit null is not absence"
+      | Value _ ->
+        Result.map (digest_field json "tool_selection_fingerprint") ~f:Option.some
+    in
     let* matched_steps = nonnegative json "matched_steps" in
     let* logs = decode_logs json ~poll in
     let* outcome = field json "outcome" |> Result.bind ~f:decode_fixture_outcome in
     Ok
       (Fixture
          (Completed
-            { Fixture.graph_fingerprint; fixture_digest; matched_steps; logs; outcome }))
+            { Fixture.graph_fingerprint
+            ; fixture_digest
+            ; tool_selection_fingerprint
+            ; matched_steps
+            ; logs
+            ; outcome
+            }))
   | _ -> invalid "state" "unsupported fixture state"
 ;;
 

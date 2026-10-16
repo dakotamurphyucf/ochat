@@ -12,6 +12,9 @@
   chatml_linked_program
   chatml_compilation
   chatml_execution
-  chatml_host_runtime)
+  chatml_host_runtime
+  chatml_tool_codec
+  agent_protocol
+  chatmd_shell_spec)
  (preprocess
   (pps ppx_jane)))

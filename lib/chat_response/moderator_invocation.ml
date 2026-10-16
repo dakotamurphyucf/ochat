@@ -8,17 +8,11 @@ module S = Chatmd_shell_spec.Chatmd_script_spec
 module D = Chatmd_shell_spec.Duration
 module Schema = Chatmd_shell_spec.Tool_schema
 module EC = Extension_compiler
+module Tool_codec = Chatml_tool_codec
 
 let error code message = Error (code ^ ": " ^ message)
 let protocol result = Result.map_error result ~f:(fun e -> e.Agent_protocol.Error.message)
 let record fields = L.VRecord (String.Map.of_alist_exn fields)
-
-let option f = function
-  | None -> L.VVariant ("None", [])
-  | Some x -> L.VVariant ("Some", [ f x ])
-;;
-
-let string x = L.VString x
 let int x = L.VInt x
 
 let origin_value = function
@@ -32,74 +26,9 @@ let origin_value = function
 let max_nested_calls = 100
 let bytes x = D.bytes_to_int64 x |> Int64.to_int_exn
 
-(* Bound traversal before recursive conversion/serialization, including cyclic
-   arrays created by script code. Runtime-only values cannot become tool output. *)
-let check_value
-      ?(code = "invocation.invalid_output")
-      ?(max_depth = 128)
-      ?(max_array_items = 100_000)
-      ~max_bytes
-      value
-  =
-  let remaining = ref max_bytes
-  and nodes = ref 100_000 in
-  let rec walk depth value =
-    decr nodes;
-    if depth > max_depth || !nodes < 0 then failwith "value depth/node limit";
-    let consume n =
-      if n > !remaining then failwith "value byte limit";
-      remaining := !remaining - n
-    in
-    consume 1;
-    let child = walk (depth + 1) in
-    match value with
-    | L.VUnit | VInt _ | VBool _ -> ()
-    | VFloat f -> if not (Float.is_finite f) then failwith "non-finite number"
-    | VString s -> consume (String.length s)
-    | VArray values ->
-      if Array.length values > max_array_items then failwith "array item limit";
-      Array.iter values ~f:child
-    | VTuple values ->
-      if Chatml.Chatml_tuple.length values > max_array_items
-      then failwith "tuple item limit";
-      Chatml.Chatml_tuple.iter values ~f:child
-    | VRecord fields ->
-      Map.iteri fields ~f:(fun ~key ~data ->
-        consume (String.length key);
-        child data)
-    | VVariant (tag, args) ->
-      consume (String.length tag);
-      List.iter args ~f:child
-    | _ -> failwith "runtime-only value"
-  in
-  try
-    walk 0 value;
-    Ok ()
-  with
-  | Failure message -> error code message
-;;
-
-let json ?control ~max_bytes value =
-  let open Result.Let_syntax in
-  let%bind () = check_value ~max_bytes value in
-  let%bind json = V.export_json ?control value in
-  (* The shared schema validator also rejects duplicate object keys and invalid
-     JSON numbers before any payload reaches the protocol. *)
-  let%bind any =
-    Schema.compile `True |> Result.map_error ~f:(fun _ -> "invalid JSON validator")
-  in
-  let%bind () =
-    Schema.validate any json
-    |> Result.map_error ~f:(fun _ -> "invocation.invalid_output: invalid JSON value")
-  in
-  if String.length (Jsonaf.to_string json) > max_bytes
-  then error "invocation.output_limit" "encoded result exceeds its byte limit"
-  else Ok json
-;;
-
 let internal_event ?control payload =
   let open Result.Let_syntax in
-  let%map _ = json ?control ~max_bytes:(1024 * 1024) payload in
+  let%map _ = Tool_codec.Json.project ?control ~max_bytes:(1024 * 1024) payload in
   L.VVariant ("Internal_event", [ payload ])
 ;;
 
@@ -176,49 +105,22 @@ let event t =
 
 let invocation t = t.invocation
 
-let ms timestamp =
-  Agent_protocol.Timestamp.to_time_ns timestamp
-  |> Time_ns.to_int63_ns_since_epoch
-  |> fun ns -> Int63.(to_int_exn (ns / of_int 1_000_000))
-;;
-
 let prepare_input ?control ~prepared ~(limits : S.limits) value =
   let open Result.Let_syntax in
-  let%bind () = protocol (I.validate_outcome (Complete value)) in
-  let%bind () =
-    Schema.validate (EC.input_schema prepared) value
-    |> Result.map_error ~f:(fun _ -> "invocation.invalid_input: input schema mismatch")
+  let%bind selected =
+    Tool_codec.Context.Limits.of_script limits ~max_nested_calls ~max_invocation_depth:8
   in
-  let input = V.import_json ?control value in
-  let%map () =
-    check_value
-      ~code:"invocation.invalid_input"
-      ~max_depth:limits.max_depth
-      ~max_array_items:limits.max_array_items
-      ~max_bytes:(bytes limits.max_value_bytes)
-      input
-  in
-  input
+  Tool_codec.Input.prepare
+    ?control
+    ~schema:(EC.input_schema prepared)
+    ~limits:selected
+    value
 ;;
 
 let validate_limits (limits : S.limits) =
-  if
-    limits.fuel <= 0
-    || limits.fuel > 10_000_000
-    || limits.max_tasks <= 0
-    || limits.max_tasks > 100_000
-    || limits.max_depth <= 0
-    || limits.max_depth > 128
-    || limits.max_array_items <= 0
-    || limits.max_array_items > 100_000
-    || Int64.(
-         D.bytes_to_int64 limits.max_value_bytes <= 0L
-         || D.bytes_to_int64 limits.max_value_bytes > 8_388_608L)
-    || Int64.(
-         D.bytes_to_int64 limits.max_output_bytes <= 0L
-         || D.bytes_to_int64 limits.max_output_bytes > 1_048_576L)
-  then error "invocation.invalid_limits" "unsupported invocation limits"
-  else Ok ()
+  Result.map
+    (Tool_codec.Context.Limits.of_script limits ~max_nested_calls ~max_invocation_depth:8)
+    ~f:ignore
 ;;
 
 let context_value
@@ -241,57 +143,45 @@ let context_value
       ~created_at
       ~deadline
   =
-  let record fields =
-    Option.iter control ~f:(fun c -> c.L.allocate (64 * List.length fields));
-    record fields
-  in
-  let capability (r : Tool_capability.reference) =
-    record
-      [ "id", string (Id.Capability.to_string r.id)
-      ; "name", string r.name
-      ; "implementation_revision", string r.implementation_revision
-      ; "fingerprint", string r.fingerprint
-      ; "input_schema", V.import_json ?control r.input_schema
-      ]
-  in
-  let limits_value =
-    record
-      [ "fuel", int limits.fuel
-      ; "max_tasks", int limits.max_tasks
-      ; "max_value_bytes", int (bytes limits.max_value_bytes)
-      ; "max_output_bytes", int (bytes limits.max_output_bytes)
-      ; "max_array_items", int limits.max_array_items
-      ; "max_depth", int limits.max_depth
-      ; "max_nested_calls", int admitted_nested_calls
-      ; "max_invocation_depth", int admitted_invocation_depth
-      ]
+  let open Result.Let_syntax in
+  let%bind selected =
+    Tool_codec.Context.Limits.of_script
+      limits
+      ~max_nested_calls:admitted_nested_calls
+      ~max_invocation_depth:admitted_invocation_depth
   in
   let references = Tool_capability.references capabilities in
-  Option.iter control ~f:(fun c -> c.L.allocate (16 * List.length references));
-  let context =
-    record
-      [ "version", int 1
-      ; "invocation_id", string (Id.Invocation.to_string invocation_id)
-      ; "provider_call_id", option string provider_call_id
-      ; "session_id", string session_label
-      ; "generation", int generation
-      ; "origin", origin_value origin
-      ; ( "parent_invocation"
-        , option (fun id -> string (Id.Invocation.to_string id)) parent_invocation )
-      ; ( "parent_event"
-        , option (fun id -> string (Id.Moderator_execution.to_string id)) parent_event )
-      ; "parent_job", option (fun id -> string (Id.Job.to_string id)) parent_job
-      ; "tool_name", string tool_name
-      ; "implementation_revision", string implementation_revision
-      ; "capability_fingerprint", string capability_fingerprint
-      ; "created_at_ms", int (ms created_at)
-      ; "deadline_ms", option (fun t -> int (ms t)) deadline
-      ; "limits", limits_value
-      ; "available_tools", L.VArray (references |> List.map ~f:capability |> Array.of_list)
-      ]
+  let available_tools =
+    List.map references ~f:(fun (reference : Tool_capability.reference) ->
+      Tool_codec.Context.
+        { id = Id.Capability.to_string reference.id
+        ; name = reference.name
+        ; implementation_revision = reference.implementation_revision
+        ; fingerprint = reference.fingerprint
+        ; input_schema = reference.input_schema
+        })
   in
-  Option.iter control ~f:(fun c -> c.L.check_value context);
-  context
+  let%bind context =
+    Tool_codec.Context.create
+      ~invocation_id:(Id.Invocation.to_string invocation_id)
+      ~provider_call_id
+      ~session_label
+      ~generation
+      ~origin
+      ~parent_invocation:(Option.map parent_invocation ~f:Id.Invocation.to_string)
+      ~parent_event:(Option.map parent_event ~f:Id.Moderator_execution.to_string)
+      ~parent_job:(Option.map parent_job ~f:Id.Job.to_string)
+      ~tool_name
+      ~implementation_revision
+      ~capability_fingerprint
+      ~created_at
+      ~deadline
+      ~limits:selected
+      ~available_tools
+      ~checkpoint:(fun () ->
+        Option.iter control ~f:(fun value -> value.L.diagnostic_checkpoint ()))
+  in
+  Tool_codec.Context.project ?control context
 ;;
 
 let create_for
@@ -333,7 +223,7 @@ let create_for
     else error "invocation.stale_binding" "invocation does not match the prepared handler"
   in
   let%bind input = prepare_input ?control ~prepared ~limits c.input in
-  let context =
+  let%bind context =
     context_value
       ~control
       ~capabilities
@@ -384,68 +274,17 @@ let create_managed ~control ~execution ~limits ~validate_work =
 
 let decode_projection ?control ~prepared ~(limits : S.limits) ~validate_work value =
   let open Result.Let_syntax in
-  let max_bytes = bytes limits.max_output_bytes in
-  let%bind () =
-    check_value
-      ~max_depth:limits.max_depth
-      ~max_array_items:limits.max_array_items
-      ~max_bytes
-      value
+  let%bind selected =
+    Tool_codec.Context.Limits.of_script limits ~max_nested_calls ~max_invocation_depth:8
   in
-  let%bind outcome =
-    match value with
-    | L.VVariant ("Complete", [ value ]) ->
-      Result.map (json ?control ~max_bytes value) ~f:(fun value -> I.Complete value)
-    | VVariant ("Pending", [ VVariant (tag, [ VString id ]); value ]) ->
-      let%bind work =
-        match tag with
-        | "Job" -> protocol (Id.Job.of_string id) |> Result.map ~f:(fun id -> I.Job id)
-        | "Subscription" ->
-          protocol (Id.Subscription.of_string id)
-          |> Result.map ~f:(fun id -> I.Subscription id)
-        | _ -> error "invocation.invalid_work" "expected Job or Subscription"
-      in
-      let%map value = json ?control ~max_bytes value in
-      I.Pending (work, value)
-    | VVariant ("Fail", [ VRecord fields ]) when Map.length fields = 4 ->
-      let%bind code =
-        V.expect_record_field "tool_error" fields "code"
-        |> Result.bind ~f:(V.expect_string "code")
-      in
-      let%bind message =
-        V.expect_record_field "tool_error" fields "message"
-        |> Result.bind ~f:(V.expect_string "message")
-      in
-      let%bind retryable =
-        match Map.find fields "retryable" with
-        | Some (VBool b) -> Ok b
-        | _ -> Error "invalid retryable flag"
-      in
-      let%map details =
-        V.expect_record_field "tool_error" fields "details"
-        |> Result.bind ~f:(json ?control ~max_bytes)
-      in
-      I.Fail { code; message; retryable; details }
-    | _ -> error "invocation.invalid_output" "expected Complete, Pending or Fail"
-  in
-  let%bind () = protocol (I.validate_outcome outcome) in
-  let%bind () =
-    match outcome with
-    | I.Complete value | Pending (_, value) ->
-      Schema.validate (EC.output_schema prepared) value
-      |> Result.map_error ~f:(fun _ ->
-        "invocation.invalid_output: output schema mismatch")
-    | Fail _ -> Ok ()
-    | Cancelled _ -> assert false
-  in
-  let%bind () =
-    match outcome with
-    | Pending (work, _) -> validate_work work
-    | _ -> Ok ()
-  in
-  if String.length (Jsonaf.to_string (I.outcome_to_json outcome)) > max_bytes
-  then error "invocation.output_limit" "outcome envelope exceeds its byte limit"
-  else Ok outcome
+  Tool_codec.Outcome.decode
+    ?control
+    ~output_schema:(EC.output_schema prepared)
+    ~limits:selected
+    ~validate_work
+    value
+  |> Result.map_error ~f:(function
+      | Tool_codec.Outcome.Invalid message | Work_rejected message -> message)
 ;;
 
 let decode_outcome ?control t value =
@@ -502,7 +341,7 @@ module Owned = struct
     in
     let%bind input = prepare_input ?control ~prepared ~limits c.input in
     let capabilities = EC.capabilities prepared in
-    let context =
+    let%bind context =
       context_value
         ~control
         ~capabilities
@@ -543,7 +382,7 @@ end
 let snapshot_state ?control ~(limits : S.limits) value =
   let open Result.Let_syntax in
   let%bind () =
-    check_value
+    Tool_codec.Json.check_value
       ~code:"invocation.invalid_state"
       ~max_depth:limits.max_depth
       ~max_array_items:limits.max_array_items

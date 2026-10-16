@@ -12,11 +12,17 @@ let check_rejected =
        })
 ;;
 
-let fixture_output_limit ~graph_fingerprint ~fixture_digest ~matched_steps =
+let fixture_output_limit
+      ~tool_selection_fingerprint
+      ~graph_fingerprint
+      ~fixture_digest
+      ~matched_steps
+  =
   Receipt.Fixture
     (Fixture.Completed
        { Fixture.graph_fingerprint
        ; fixture_digest
+       ; tool_selection_fingerprint
        ; matched_steps
        ; logs = []
        ; outcome = Fixture.Failed Fixture.Failure.Output_limit
@@ -26,6 +32,7 @@ let fixture_output_limit ~graph_fingerprint ~fixture_digest ~matched_steps =
 let fixture_max_size_probe =
   let digest = Chatml_source.Digest.of_contents ~checkpoint:(fun () -> ()) "" in
   fixture_output_limit
+    ~tool_selection_fingerprint:(Some digest)
     ~graph_fingerprint:digest
     ~fixture_digest:digest
     ~matched_steps:Int.max_value
