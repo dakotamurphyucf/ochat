@@ -90,9 +90,18 @@ let admit_surface ~selected ~revision ~parsed ~input ~checkpoint =
       Option.value_map basic.text ~default:(Ok ()) ~f:text
     | Some _, Some _ | Some _, None | None, Some _ -> denied ~selected ()
   in
-  let content ~inline_image = function
+  let rec content ~inline_image ~depth = function
     | CM.Basic basic -> admit_basic ~inline_image basic
-    | CM.Agent _ -> denied ~selected ()
+    | CM.Agent agent ->
+      if not selected
+      then denied ~selected ()
+      else if depth >= 128
+      then limited ()
+      else (
+        let%bind () = poll () in
+        let%bind () = text agent.url in
+        List.fold_result agent.items ~init:() ~f:(fun () item ->
+          content ~inline_image:false ~depth:(depth + 1) item))
   in
   let admit_message (message : CM.msg) =
     let%bind () = poll () in
@@ -113,7 +122,7 @@ let admit_surface ~selected ~revision ~parsed ~input ~checkpoint =
       | Some (Text text_value) -> text text_value
       | Some (Items items) ->
         List.fold_result items ~init:() ~f:(fun () item ->
-          content ~inline_image:(String.equal message.role "assistant") item))
+          content ~inline_image:(String.equal message.role "assistant") ~depth:0 item))
   in
   let tool (declaration : CM.tool) =
     match declaration with
@@ -164,7 +173,8 @@ let admit_surface ~selected ~revision ~parsed ~input ~checkpoint =
     List.fold_result actual_elements ~init:() ~f:(fun () item -> element item)
   in
   let%map () =
-    List.fold_result input ~init:() ~f:(fun () item -> content ~inline_image:false item)
+    List.fold_result input ~init:() ~f:(fun () item ->
+      content ~inline_image:false ~depth:0 item)
   in
   !needs_dynamic_source
 ;;

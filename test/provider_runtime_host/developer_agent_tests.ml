@@ -73,7 +73,7 @@ let developer_configuration ?remote_content target =
   in
   let roots =
     S.Developer_root_owner.Limits.create
-      ~max_active_runs:2
+      ~max_active_runs:3
       ~max_staged_jobs:4
       ~max_native_occupancy:2
       ~max_active_workers:1
@@ -137,7 +137,7 @@ let developer_configuration ?remote_content target =
               (P.Host_invocation.context invocation).origin
               P.Invocation.Delegated_agent);
           Ok ())
-        else if List.mem [ "child"; "child_tools" ] name ~equal:String.equal
+        else if List.mem [ "child"; "child_tools"; "deep" ] name ~equal:String.equal
         then Ok ()
         else Error (P.Error.invalid_request "unexpected native binding"))
       ~prepare_output:(function
@@ -193,7 +193,8 @@ let open_document daemon actor =
       ~default_environment:None
       ~contents:
         {|<script id="s" language="chatml" kind="tool">let main input = Task.bind(Job.start_tool("child", input), fun first -> Task.bind(Job.start_tool("child", input), fun second -> Task.pure(`Object([{key="first"; value=`String(first)}, {key="second"; value=`String(second)}]))))</script>
-<script id="tool_child" language="chatml" kind="tool">let main input = Task.bind(Job.start_tool("child_tools", input), fun id -> Task.pure(`String(id)))</script>|}
+<script id="tool_child" language="chatml" kind="tool">let main input = Task.bind(Job.start_tool("child_tools", input), fun id -> Task.pure(`String(id)))</script>
+<script id="deep_child" language="chatml" kind="tool">let main input = Task.bind(Job.start_tool("deep", input), fun id -> Task.pure(`String(id)))</script>|}
     |> ok
   in
   let expected =
@@ -224,7 +225,7 @@ let open_document daemon actor =
   connection, expected
 ;;
 
-let selected_tools_response () =
+let selected_tools_response ?(include_undeclared = true) () =
   let call name call_id arguments =
     `Object
       [ "type", `String "function_call"
@@ -238,8 +239,11 @@ let selected_tools_response () =
   let output =
     [ call "read_file" "read-child-file" {|{"file":"sample.txt"}|}
     ; call "summary" "managed-child-summary" {|{"message":"go"}|}
-    ; call "undeclared" "managed-child-undeclared" {|{"file":"sample.txt"}|}
     ]
+    @
+    if include_undeclared
+    then [ call "undeclared" "managed-child-undeclared" {|{"file":"sample.txt"}|} ]
+    else []
   in
   let event =
     `Object
@@ -260,6 +264,7 @@ let selected_tools_response () =
 let%expect_test "hosted captured Agent child uses its saved source and tracked model" =
   let requests = ref 0 in
   let model_bodies = ref [] in
+  let deep_tools_sent = ref false in
   let first_entered, first_entered_u = Eio.Promise.create () in
   let second_entered, second_entered_u = Eio.Promise.create () in
   let release_first, release_first_u = Eio.Promise.create () in
@@ -268,8 +273,16 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
     ~model_requests:requests
     ~model_function_tools:true
     ~model_image_input:true
-    ~response_body:(fun number _body ->
-      if Int.equal number 3 then Some (selected_tools_response ()) else None)
+    ~response_body:(fun number body ->
+      if Int.equal number 3
+      then Some (selected_tools_response ())
+      else if
+        String.is_substring body ~substring:"Deep level three instructions"
+        && not !deep_tools_sent
+      then (
+        deep_tools_sent := true;
+        Some (selected_tools_response ~include_undeclared:false ()))
+      else None)
     ~on_model_body:(fun body -> model_bodies := body :: !model_bodies)
     ~on_model_submit:(fun () ->
       if Int.equal !requests 1
@@ -347,6 +360,9 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
               let nested_dir = Filename.concat prompt_dir "agents" in
               Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / nested_dir);
               let tool_child = Filename.concat nested_dir "child.chatmd" in
+              let deep_one = Filename.concat nested_dir "deep-one.chatmd" in
+              let deep_two = Filename.concat nested_dir "deep-two.chatmd" in
+              let deep_three = Filename.concat nested_dir "deep-three.chatmd" in
               let notes_dir = Filename.concat prompt_dir "notes" in
               Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / notes_dir);
               Eio.Path.save
@@ -365,7 +381,8 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
                 ~create:(`Or_truncate 0o600)
                 Eio.Path.(Eio.Stdenv.fs env / prompt)
                 {|<tool name="child" agent="child.chatmd" local source_mode="file"/>
-<tool name="child_tools" agent="agents/child.chatmd" local source_mode="file"/>|};
+<tool name="child_tools" agent="agents/child.chatmd" local source_mode="file"/>
+<tool name="deep" agent="agents/deep-one.chatmd" local source_mode="file"/>|};
               Eio.Path.save
                 ~create:(`Or_truncate 0o600)
                 Eio.Path.(Eio.Stdenv.fs env / child)
@@ -392,6 +409,26 @@ let run ctx input = Task.bind(Tool.call("read_file", input), fun result ->
 <tool name="summary" type="chatml" script="owned" entrypoint="run" input_schema="input.json" output_schema="output.json"/>
 <tool name="undeclared" type="chatml" script="unowned" entrypoint="run" input_schema="input.json" output_schema="output.json"/>|}
                    ]);
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / deep_one)
+                {|<developer>Deep level one instructions</developer>
+<user><agent src="deep-two.chatmd" local>caller level one</agent></user>|};
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / deep_two)
+                {|<developer>Deep level two instructions</developer>
+<user><agent src="deep-three.chatmd" local source_mode="captured">caller level two</agent></user>|};
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / deep_three)
+                {|<developer>Deep level three instructions</developer>
+<user>deep selected native and managed effects</user>
+<tool name="read_file"/>
+<script id="owned" language="chatml" kind="tool">
+let run ctx input = Task.pure(`Complete(input))
+</script>
+<tool name="summary" type="chatml" script="owned" entrypoint="run" input_schema="input.json" output_schema="output.json"/>|};
               List.iter [ "input.json"; "output.json" ] ~f:(fun name ->
                 Eio.Path.save
                   ~create:(`Or_truncate 0o600)
@@ -696,7 +733,6 @@ let run ctx input = Task.bind(Tool.call("read_file", input), fun result ->
                     await_tool ()
                 in
                 await_tool ());
-              S.Daemon.shutdown daemon |> ok;
               assert (Int.equal !requests 4);
               (match List.rev !model_bodies with
                | [ _first; _second; tool_request; tool_result ] ->
@@ -784,7 +820,164 @@ let run ctx input = Task.bind(Tool.call("read_file", input), fun result ->
                         "tool is not in the selected capability set")
                   | _ -> failwith "selected child returned unexpected tool results")
                | _ -> failwith "selected child model request count changed");
+              let deep_request =
+                S.Daemon.Developer.Request.create
+                  ~route:
+                    (Document_script
+                       { expected
+                       ; selector =
+                           P.Authoring.Analysis.Target.selected_script "deep_child" |> ok
+                       })
+                  ~kind:Live_run
+                  ~target:Chatml.Chatml_compiler_contract.Target.One_off_v1
+                  ~prompt:(Some (S.Catalog_identity.prompt_definition "restart.prompt"))
+                  ~workspace:
+                    (Some (S.Catalog_identity.workspace_definition "restart.workspace"))
+                  ~entrypoint:"main"
+                  ~input:(`Object [ "input", `String "deep" ])
+                  ~fixtures:None
+                  ~requested_execution:None
+                  ~requested_max_output_bytes:None
+                  ~bounds
+                  ~checkpoint:ignore
+                |> ok
+              in
+              let deep_run_id = P.Id.Developer_run.create () in
+              let deep_key = P.Idempotency_key.of_string "hosted-deep-content" |> ok in
+              ignore
+                (S.Daemon.Developer.submit
+                   daemon
+                   ~actor
+                   ~run_id:deep_run_id
+                   ~key:deep_key
+                   ~request:deep_request
+                   ~fresh_source:(Some (Document_script { connection = _connection }))
+                 |> ok
+                 : S.Daemon.Developer.View.t);
+              let deep_view =
+                S.Daemon.Developer.await_terminal
+                  daemon
+                  ~actor
+                  ~run_id:deep_run_id
+                  ~key:deep_key
+                |> ok
+              in
+              let deep_job =
+                match
+                  Option.map (S.Daemon.Developer.View.receipt deep_view) ~f:R.value
+                with
+                | Some (Live (Succeeded (`String id))) -> P.Id.Job.of_string id |> ok
+                | result ->
+                  raise_s [%sexp "expected deep content Job", (result : R.value option)]
+              in
+              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. (fun () ->
+                let rec await_deep () =
+                  match
+                    (P.Developer_job.state (job ~run:deep_run_id deep_job)).status
+                  with
+                  | Succeeded -> ()
+                  | Failed _ ->
+                    failwithf
+                      "deep child failed after %d model requests: %s"
+                      !requests
+                      (P.Developer_job.to_json (job ~run:deep_run_id deep_job)
+                       |> Jsonaf.to_string)
+                      ()
+                  | Cancelled | Interrupted _ -> failwith "deep child stopped"
+                  | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
+                    Eio.Fiber.yield ();
+                    await_deep ()
+                in
+                await_deep ());
+              assert !deep_tools_sent;
+              let deep_bodies = List.drop (List.rev !model_bodies) 4 in
+              assert (List.length deep_bodies >= 4);
+              assert (
+                List.exists deep_bodies ~f:(fun body ->
+                  String.is_substring body ~substring:"Deep level two instructions"
+                  && String.is_substring body ~substring:"caller level one"));
+              assert (
+                List.exists deep_bodies ~f:(fun body ->
+                  String.is_substring body ~substring:"Deep level three instructions"
+                  && String.is_substring body ~substring:"caller level two"));
+              let field value name =
+                match value with
+                | `Object fields -> List.Assoc.find_exn fields ~equal:String.equal name
+                | _ -> failwith "deep provider request is not an object"
+              in
+              let string = function
+                | `String value -> value
+                | _ -> failwith "deep provider field is not a string"
+              in
+              let deep_result =
+                List.find_exn deep_bodies ~f:(fun body ->
+                  String.is_substring body ~substring:"function_call_output")
+                |> Jsonaf.of_string
+              in
+              let outputs =
+                match field deep_result "input" with
+                | `Array items ->
+                  List.filter items ~f:(fun item ->
+                    match field item "type" with
+                    | `String "function_call_output" -> true
+                    | `String _ -> false
+                    | _ -> failwith "invalid deep provider input type")
+                | _ -> failwith "deep provider input is not an array"
+              in
+              (match outputs with
+               | [ read; managed ] ->
+                 [%test_eq: string] (field read "call_id" |> string) "read-child-file";
+                 [%test_eq: string]
+                   (field managed "call_id" |> string)
+                   "managed-child-summary";
+                 let read = field read "output" |> string |> Jsonaf.of_string in
+                 let managed = field managed "output" |> string |> Jsonaf.of_string in
+                 [%test_eq: string] (field read "type" |> string) "complete";
+                 assert (
+                   String.is_substring
+                     (field read "value" |> string)
+                     ~substring:"selected child file contents");
+                 [%test_eq: string] (field managed "type" |> string) "complete";
+                 [%test_eq: string]
+                   (field (field managed "value") "message" |> string)
+                   "go"
+               | _ -> failwith "grandchild returned unexpected native/managed results");
+              let model_requests_before_denial = !requests in
+              let jobs_before_denial = List.length (jobs ~run:deep_run_id ()) in
+              Eio.Path.unlink Eio.Path.(Eio.Stdenv.fs env / deep_two);
+              let missing_key = P.Idempotency_key.of_string "hosted-deep-missing" |> ok in
+              ignore
+                (S.Daemon.Developer.submit
+                   daemon
+                   ~actor
+                   ~run_id:deep_run_id
+                   ~key:missing_key
+                   ~request:deep_request
+                   ~fresh_source:(Some (Document_script { connection = _connection }))
+                 |> ok
+                 : S.Daemon.Developer.View.t);
+              let missing_view =
+                S.Daemon.Developer.await_terminal
+                  daemon
+                  ~actor
+                  ~run_id:deep_run_id
+                  ~key:missing_key
+                |> ok
+              in
+              (match
+                 Option.map (S.Daemon.Developer.View.receipt missing_view) ~f:R.value
+               with
+               | Some (Live (Failed error)) ->
+                 assert (P.Error.equal_code error.code P.Error.Invalid_request)
+               | result ->
+                 raise_s
+                   [%sexp
+                     "missing nested File source was not denied"
+                   , (result : R.value option)]);
+              [%test_eq: int] !requests model_requests_before_denial;
+              [%test_eq: int] (List.length (jobs ~run:deep_run_id ())) jobs_before_denial;
+              S.Daemon.shutdown daemon |> ok;
               print_endline
-                "hosted captured child used saved instructions and selected tools")));
-  [%expect {| hosted captured child used saved instructions and selected tools |}]
+                "hosted captured child and two content levels used selected tools")));
+  [%expect {| hosted captured child and two content levels used selected tools |}]
 ;;

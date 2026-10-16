@@ -535,11 +535,7 @@ module Child = struct
     ; selection : Child_selection.t
     }
 
-  let with_target ~parent ~target ~prepared f =
-    let* borrowed = N.borrow_selected () in
-    let* selection =
-      Child_selection.create ~root:parent.root ~target ~prepared ~parent:borrowed
-    in
+  let with_selection ~parent ~selection f =
     let* managed =
       match parent.jobs, parent.managed_env with
       | None, None -> Ok None
@@ -564,6 +560,27 @@ module Child = struct
       }
     in
     f { execution; selection }
+  ;;
+
+  let with_target ~parent ~target ~prepared f =
+    let* borrowed = N.borrow_selected () in
+    let* selection =
+      Child_selection.create ~root:parent.root ~target ~prepared ~parent:borrowed
+    in
+    with_selection ~parent ~selection f
+  ;;
+
+  let with_content_target ~parent ~target ~prepared f =
+    let* borrowed = N.borrow_selected () in
+    let* selection =
+      Child_selection.create_content
+        ~root:parent.execution.base.root
+        ~parent:parent.selection
+        ~target
+        ~prepared
+        ~borrowed
+    in
+    with_selection ~parent:parent.execution.base ~selection f
   ;;
 
   let current_capabilities t = t.execution.selected_current ()

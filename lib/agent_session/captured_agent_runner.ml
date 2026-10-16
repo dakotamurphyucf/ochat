@@ -634,6 +634,100 @@ module Claimed_developer = struct
   ;;
 end
 
+module Selected_content_target = struct
+  module Saved_target = Claimed_developer.Selected.Target
+  module N = Native_tool_invocation
+
+  type t =
+    { parent : parent
+    ; source : Prompt_child_source.t
+    ; caller_revision : Prompt_revision.t
+    ; caller : Port.t
+    ; borrowed : N.selected_borrowed
+    ; binding_issuer : Binding_issuer.t option
+    ; live : bool Atomic.t
+    }
+
+  and parent =
+    | Saved of Saved_target.t
+    | Content of t
+
+  let revision t = Prompt_child_source.revision t.source
+  let caller_revision t = t.caller_revision
+
+  let matches_parent t parent =
+    match t.parent, parent with
+    | Saved actual, Saved expected -> phys_equal actual expected
+    | Content actual, Content expected -> phys_equal actual expected
+    | Saved _, Content _ | Content _, Saved _ -> false
+  ;;
+
+  let invalid message = Error (Agent_protocol.Error.invalid_request message)
+
+  let rec check_descendant_now t ~child =
+    let open Result.Let_syntax in
+    if not (Atomic.get t.live)
+    then invalid "selected content target has expired"
+    else (
+      let%bind () = N.check_selected_ancestor ~ancestor:t.borrowed ~child in
+      match t.parent with
+      | Saved parent -> Saved_target.check_descendant_now parent ~child
+      | Content parent -> check_descendant_now parent ~child)
+  ;;
+
+  let rec check_now t =
+    let open Result.Let_syntax in
+    let%bind current = N.borrow_selected () in
+    if (not (Atomic.get t.live)) || not (phys_equal current t.borrowed)
+    then invalid "selected content target is not the current native callback"
+    else (
+      match t.parent with
+      | Saved parent ->
+        if Claimed_developer.Selected.matches_borrowed (Saved_target.saved parent) current
+        then Saved_target.check_now parent
+        else Saved_target.check_descendant_now parent ~child:current
+      | Content parent ->
+        if phys_equal parent.borrowed current
+        then check_now parent
+        else check_descendant_now parent ~child:current)
+  ;;
+
+  let check t =
+    let open Result.Let_syntax in
+    let%bind () = check_now t in
+    let%bind () = N.check_selected_content_context t.borrowed in
+    check_now t
+  ;;
+end
+
+type selected_content_runner =
+  target:Selected_content_target.t
+  -> startup:Chat_response.Startup_compilation.t
+  -> compilation_limits:Chatml_compilation.limits
+  -> programs:Chatml_prompt_programs.Restored.t option
+  -> ctx:Eio_unix.Stdenv.base Chat_response.Ctx.t
+  -> input:Prompt.Chat_markdown.content_item list
+  -> source:string
+  -> (string, Agent_protocol.Error.t) result
+
+exception Selected_content_denied of Agent_protocol.Error.t
+
+let check_selected_content_parent = function
+  | Selected_content_target.Saved target -> Claimed_developer.Selected.Target.check target
+  | Content target -> Selected_content_target.check target
+;;
+
+module Content_selection = struct
+  type t =
+    { parent : Selected_content_target.parent
+    ; run : selected_content_runner
+    ; binding_issuer : Binding_issuer.t
+    ; live : bool Atomic.t
+    }
+
+  let key : t Eio.Fiber.key = Eio.Fiber.create_key ()
+end
+
 let rec bind_with_checkpoint ?installed ?run_selected_target t ~revision ~sw ~checkpoint =
   let open Result.Let_syntax in
   let%map parsed, projection, identity = admit_revision t revision ~checkpoint in
@@ -724,6 +818,11 @@ and invoke
       items
   =
   check_domain t |> runner_result;
+  let selected_content =
+    match target with
+    | Content_target -> Eio.Fiber.get Content_selection.key
+    | Tool_target _ -> None
+  in
   Runtime_activity.with_switch activity (fun ~sw ->
     let env = Chat_response.Ctx.env ctx in
     let checkpoint = Eio.Fiber.check in
@@ -916,42 +1015,102 @@ and invoke
           | Some _, Tool_target (Some _), (No_selected_source | Selected_content_context _)
           | None, _, _ -> None
         in
-        let%bind () =
-          match selected_target_handler with
-          | Some _ -> Ok ()
-          | None -> admit_developer_literal_child t revision parsed ~checkpoint
+        let%bind selected_content_handler =
+          match selected_content with
+          | None -> Ok None
+          | Some scope ->
+            let%bind () =
+              if Atomic.get scope.live
+              then Ok ()
+              else Error (failure "selected Content child port has expired")
+            in
+            let%bind () =
+              match installed.binding_issuer with
+              | Some issuer when phys_equal issuer scope.binding_issuer -> Ok ()
+              | None | Some _ ->
+                Error (failure "selected Content child has a foreign source binding")
+            in
+            let%bind () = check_selected_content_parent scope.parent in
+            let%bind borrowed = Native_tool_invocation.borrow_selected () in
+            let child =
+              Selected_content_target.
+                { parent = scope.parent
+                ; source = selected
+                ; caller_revision = parent
+                ; caller
+                ; borrowed
+                ; binding_issuer = installed.binding_issuer
+                ; live = Atomic.make true
+                }
+            in
+            let%map () = Selected_content_target.check child in
+            Some (scope.run, child)
         in
-        Preparation.with_revision
-          (Some t.script_preparation)
-          ~tool_contract:t.tool_contract
-          revision
-          ~env
-          ~invocation:Headless
-          ~checkpoint
-          ~f:(fun startup ~compilation_limits ~programs ->
-            match selected_target_handler with
-            | None ->
-              run ~check_selected caller startup ~revision ~compilation_limits ~programs
-            | Some run_selected_target ->
-              let%bind target =
-                Claimed_developer.Selected.target_for_current
-                  selected
-                  ~parent
-                  ~caller
-                  ~binding_issuer:installed.binding_issuer
-              in
-              let%bind () = check_selected () in
-              run_selected_target
-                ~target
-                ~startup
-                ~compilation_limits
-                ~programs
-                ~ctx
-                ~input:items
-                ~observer
-                ~source)
+        let%bind () =
+          match selected_target_handler, selected_content_handler with
+          | Some _, None | None, Some _ -> Ok ()
+          | None, None -> admit_developer_literal_child t revision parsed ~checkpoint
+          | Some _, Some _ ->
+            Error (failure "selected Tool and Content handlers cannot overlap")
+        in
+        Exn.protect
+          ~finally:(fun () ->
+            Option.iter selected_content_handler ~f:(fun (_, target) ->
+              Atomic.set target.Selected_content_target.live false))
+          ~f:(fun () ->
+            Preparation.with_revision
+              (Some t.script_preparation)
+              ~tool_contract:t.tool_contract
+              revision
+              ~env
+              ~invocation:Headless
+              ~checkpoint
+              ~f:(fun startup ~compilation_limits ~programs ->
+                match selected_target_handler, selected_content_handler with
+                | None, None ->
+                  run
+                    ~check_selected
+                    caller
+                    startup
+                    ~revision
+                    ~compilation_limits
+                    ~programs
+                | Some run_selected_target, None ->
+                  let%bind target =
+                    Claimed_developer.Selected.target_for_current
+                      selected
+                      ~parent
+                      ~caller
+                      ~binding_issuer:installed.binding_issuer
+                  in
+                  let%bind () = check_selected () in
+                  run_selected_target
+                    ~target
+                    ~startup
+                    ~compilation_limits
+                    ~programs
+                    ~ctx
+                    ~input:items
+                    ~observer
+                    ~source
+                | None, Some (run_selected_content, target) ->
+                  let%bind () = check_selected () in
+                  let%bind () = Selected_content_target.check target in
+                  run_selected_content
+                    ~target
+                    ~startup
+                    ~compilation_limits
+                    ~programs
+                    ~ctx
+                    ~input:items
+                    ~source
+                | Some _, Some _ ->
+                  Error (failure "selected Tool and Content handlers cannot overlap")))
     in
-    runner_result result)
+    match selected_content, result with
+    | Some _, Error error -> raise (Selected_content_denied error)
+    | Some _, Ok value -> value
+    | None, _ -> runner_result result)
 ;;
 
 let bind t ~revision ~sw =
@@ -1052,9 +1211,13 @@ module Source_binding = struct
   module Content_source = struct
     type binding = t
 
+    type target =
+      | Saved of Claimed_developer.Selected.Target.t
+      | Content of Selected_content_target.t
+
     type t =
       { binding : binding
-      ; target : Claimed_developer.Selected.Target.t
+      ; target : target
       }
 
     type side =
@@ -1062,25 +1225,40 @@ module Source_binding = struct
       | Caller
 
     let check t =
-      let module Target = Claimed_developer.Selected.Target in
       let open Result.Let_syntax in
       let%bind () =
         if Int.equal t.binding.domain_id (Stdlib.Domain.self () :> int)
         then Ok ()
         else Error (failure "selected child source belongs to another Eio domain")
       in
-      let%bind () =
-        match t.target.Target.binding_issuer with
-        | Some issuer when phys_equal issuer t.binding.issuer -> Ok ()
-        | None | Some _ ->
-          Error (failure "selected child belongs to another source binding")
-      in
-      Target.check t.target
+      match t.target with
+      | Saved target ->
+        let%bind () =
+          match target.Claimed_developer.Selected.Target.binding_issuer with
+          | Some issuer when phys_equal issuer t.binding.issuer -> Ok ()
+          | None | Some _ ->
+            Error (failure "selected child belongs to another source binding")
+        in
+        Claimed_developer.Selected.Target.check target
+      | Content target ->
+        let%bind () =
+          match target.Selected_content_target.binding_issuer with
+          | Some issuer when phys_equal issuer t.binding.issuer -> Ok ()
+          | None | Some _ ->
+            Error (failure "selected content belongs to another source binding")
+        in
+        Selected_content_target.check target
     ;;
 
     let revision t = function
-      | Declaring -> Claimed_developer.Selected.Target.revision t.target
-      | Caller -> t.target.parent
+      | Declaring ->
+        (match t.target with
+         | Saved target -> Claimed_developer.Selected.Target.revision target
+         | Content target -> Selected_content_target.revision target)
+      | Caller ->
+        (match t.target with
+         | Saved target -> Claimed_developer.Selected.Target.caller_revision target
+         | Content target -> Selected_content_target.caller_revision target)
     ;;
 
     let matches_revision t ~side selected = phys_equal (revision t side) selected
@@ -1130,9 +1308,77 @@ module Source_binding = struct
   end
 
   let selected_content_source t ~target =
-    let port : Content_source.t = { binding = t; target } in
+    let port : Content_source.t = { binding = t; target = Saved target } in
     Result.map (Content_source.check port) ~f:(fun () -> port)
   ;;
+
+  let selected_descendant_content_source t ~target =
+    let port : Content_source.t = { binding = t; target = Content target } in
+    Result.map (Content_source.check port) ~f:(fun () -> port)
+  ;;
+
+  let selected_parent_revision = function
+    | Selected_content_target.Saved target ->
+      Claimed_developer.Selected.Target.revision target
+    | Content target -> Selected_content_target.revision target
+  ;;
+
+  let selected_parent_caller = function
+    | Selected_content_target.Saved target -> target.caller
+    | Content target -> target.caller
+  ;;
+
+  let selected_parent_issuer = function
+    | Selected_content_target.Saved target -> target.binding_issuer
+    | Content target -> target.binding_issuer
+  ;;
+
+  module Content_ports = struct
+    type binding = t
+
+    type t =
+      { binding : binding
+      ; parent : Selected_content_target.parent
+      ; declaring : Port.t
+      ; caller : Port.t
+      ; run_selected_content : selected_content_runner
+      ; live : bool Atomic.t
+      }
+
+    let run t ~side ~declaration ~ctx =
+      let open Result.Let_syntax in
+      if
+        (not (Atomic.get t.live))
+        || not (Int.equal t.binding.domain_id (Stdlib.Domain.self () :> int))
+      then Error (failure "selected child Agent ports have expired")
+      else (
+        let%bind () = check_selected_content_parent t.parent in
+        let port =
+          match side with
+          | Content_source.Declaring -> t.declaring
+          | Caller -> t.caller
+        in
+        let selected =
+          Content_selection.
+            { parent = t.parent
+            ; run = t.run_selected_content
+            ; binding_issuer = t.binding.issuer
+            ; live = t.live
+            }
+        in
+        let value =
+          try
+            Ok
+              (Eio.Fiber.with_binding Content_selection.key selected (fun () ->
+                 port.run_content ~declaration ~ctx))
+          with
+          | Selected_content_denied error -> Error error
+        in
+        let%bind value = value in
+        let%map () = check_selected_content_parent t.parent in
+        value)
+    ;;
+  end
 
   let bind_with_literal_policy
         ?run_selected_target
@@ -1231,6 +1477,56 @@ module Source_binding = struct
       ~env
       ~revision
       ~sw
+  ;;
+
+  let bind_selected_child
+        t
+        ~parent
+        ~run_selected_content
+        ~script_preparation
+        ~manifest_authorizer
+        ~approval_provider
+        ~response_dir
+        ~env
+        ~revision
+        ~sw
+    =
+    let open Result.Let_syntax in
+    let%bind () =
+      if phys_equal revision (selected_parent_revision parent)
+      then Ok ()
+      else Error (failure "selected content parser differs from its child target")
+    in
+    let%bind () =
+      match selected_parent_issuer parent with
+      | Some issuer when phys_equal issuer t.issuer -> Ok ()
+      | None | Some _ ->
+        Error (failure "selected content belongs to another source binding")
+    in
+    let%bind () = check_selected_content_parent parent in
+    let%bind declaring =
+      bind_developer_literal
+        t
+        ~script_preparation
+        ~manifest_authorizer
+        ~approval_provider
+        ~response_dir
+        ~env
+        ~revision
+        ~sw
+    in
+    let%bind () = check_selected_content_parent parent in
+    let live = Atomic.make true in
+    Eio.Switch.on_release sw (fun () -> Atomic.set live false);
+    Ok
+      Content_ports.
+        { binding = t
+        ; parent
+        ; declaring
+        ; caller = selected_parent_caller parent
+        ; run_selected_content
+        ; live
+        }
   ;;
 
   let select_child
