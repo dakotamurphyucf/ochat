@@ -16,6 +16,17 @@ val create
   -> env:Eio_unix.Stdenv.base
   -> (t, Agent_protocol.Error.t) result
 
+(** Child-only variant. The opaque selection supplies both current child
+    capabilities and the exact managed definition minted by its Live owner;
+    callers cannot pair a different definition with the child registry. The
+    existing [create] remains the ordinary Root path. *)
+val create_child
+  :  root:Developer_root_owner.run
+  -> jobs:Developer_script_job_service.t
+  -> selection:Developer_child_selection.t
+  -> env:Eio_unix.Stdenv.base
+  -> (t, Agent_protocol.Error.t) result
+
 val issued_by_root : t -> Developer_root_owner.run -> bool
 
 (** Comparison-only prepared definition retained from the trusted live package.

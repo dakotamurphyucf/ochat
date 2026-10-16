@@ -42,6 +42,53 @@ val with_managed_definition
     dispatch and returns None when the trusted host installed no managed tools. *)
 val managed_definition : t -> Chat_response.Managed_tool_registry.t option
 
+module Child : sig
+  type parent = t
+  type t
+
+  (** Enter only from the physically selected saved-Agent callback. The
+      selected [target] is already the exact restored child: this constructor
+      does not select a File role again. [prepared] is the joined child
+      resource receipt from the same Live Root and target, never a record of
+      caller-supplied registries. The first invocation uses the restricted
+      Source_child issuer; nested invocations use that issuer's ordinary Child
+      ancestry. A failed source/Root/Live proof denies without falling back to
+      the parent Root registry or executor. *)
+  val with_target
+    :  parent:parent
+    -> target:Agent_session.Captured_agent_runner.Claimed_developer.Selected.Target.t
+    -> prepared:Developer_live_resources.Child_prepared.t
+    -> (t -> ('a, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
+
+  (** Checked current projection for constructing this child's exact provider
+      descriptors and Host_invocation fingerprint. It refreshes the same
+      source/Root/Live admission used by [run], including descendant narrowing;
+      it grants no execution without the subsequent physical [run] check. *)
+  val current_capabilities
+    :  t
+    -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
+
+  (** The existing physical native policy, terminal, Job and managed kernel
+      with the child-only admitted selection. [native_invocation] is the exact
+      Driver tool-call observer and inference parent; the kernel lends it to
+      the native implementation only during this invocation. Each attempt
+      refreshes its source/Root witness and checks it after waits. *)
+  val run
+    :  t
+    -> reference:Chat_response.Tool_capability.reference
+    -> invocation:Agent_protocol.Host_invocation.t
+    -> native_invocation:Ochat_function.Invocation.t
+    -> authorize:
+         (Agent_protocol.Host_invocation.t
+          -> Chat_response.Tool_capability.binding
+          -> (unit, Agent_protocol.Error.t) result)
+    -> prepare_output:
+         (Openai.Responses.Tool_output.Output.t
+          -> (Jsonaf.t, Agent_protocol.Error.t) result)
+    -> (Agent_protocol.Host_invocation.t, Agent_protocol.Error.t) result
+end
+
 (** Function, Custom and owned managed calls use one existing native policy
     kernel. The host creates one bounded registered terminal scope per call;
     Dispatching is durable before effect and a terminal plus exact selected

@@ -67,6 +67,61 @@ val run_prepared_agent
   -> Prompt.Chat_markdown.content_item list
   -> string
 
+module Prepared_inputs : sig
+  type t
+
+  module Materialized : sig
+    type t
+
+    val allocator : t -> History_entry.Allocator.t
+    val initial_history : t -> History_entry.t list
+
+    (** Require the inference result to preserve this preparation's exact
+        identity-bearing initial prefix, then return only new semantic
+        assistant text. *)
+    val completion_text : t -> History_entry.t list -> string
+  end
+
+  (** Select the actual Parsed/document projection, child prompt directory and
+      Config overrides while preserving the supplied Context's inference,
+      submission and observation hooks. A foreign document projection rejects.
+      No source is parsed or fetched. *)
+  val select_prepared
+    :  ctx:Eio_unix.Stdenv.base Ctx.t
+    -> prompt_dir:Eio.Fs.dir_ty Eio.Path.t
+    -> parsed:Prompt.Chat_markdown.Parsed.t
+    -> ?document_projection:Prompt.Chat_markdown.Document_projection.t
+    -> input:Prompt.Chat_markdown.content_item list
+    -> unit
+    -> t
+
+  val context : t -> Eio_unix.Stdenv.base Ctx.t
+  val elements : t -> Prompt.Chat_markdown.top_level_elements list
+  val config : t -> Prompt.Chat_markdown.config
+
+  (** Ordinary effectful Converter projection and canonical history identity.
+      Prompt and caller content use distinct optional source runners. Omission
+      preserves the existing dynamic content behavior; the saved developer
+      child caller first admits literal-only AST/input and supplies a
+      fail-closed nested-agent callback. This function is data preparation,
+      not source/runtime or tool authority. *)
+  val materialize
+    :  t
+    -> session_id:string
+    -> ?source:string
+    -> ?agent_source_runner:Tool.Agent_source_runner.t
+    -> ?input_agent_source_runner:Tool.Agent_source_runner.t
+    -> run_agent:
+         (?prompt_dir:Eio.Fs.dir_ty Eio.Path.t
+          -> ?session_id:string
+          -> ctx:Eio_unix.Stdenv.base Ctx.t
+          -> string
+          -> Prompt.Chat_markdown.content_item list
+          -> string)
+    -> unit
+    -> Materialized.t
+end
+
 (** Generation options are explicit overrides; omitted model/settings inherit.
     Supplied legacy provider post/post_stream callbacks reject before effects. *)
 val run_entries

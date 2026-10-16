@@ -13,6 +13,7 @@ module Native = Developer_native_executor
 module Background = Developer_background_job_runner
 module Model = Developer_model_job_runner
 module Live_resources = Developer_live_resources
+module Child_runner = Developer_child_agent_runner
 
 type live_services =
   { jobs : Jobs.t
@@ -294,11 +295,20 @@ let create_live_services t ~root ~resources ~current_actor =
       Model.create ~root ~results ~sources:(Live_resources.model_sources resources)
       |> Result.map ~f:Option.some
   in
+  let%bind run_selected_target =
+    Child_runner.create
+      ~live:resources
+      ~root
+      ~native
+      ~authorize:t.authorize_native
+      ~prepare_output:t.prepare_output
+  in
   let%map () =
     Live_resources.bind_agent_sources
       resources
       ~root
       ~models:model
+      ~run_selected_target
       ~checkpoint:t.checkpoint
   in
   { jobs; native; background; model }

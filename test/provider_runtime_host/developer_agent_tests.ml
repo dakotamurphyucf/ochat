@@ -127,8 +127,16 @@ let developer_configuration target =
        |> ok)
     ~publisher_storage:Agent_store.Developer_result_publisher.Storage.Automatic
     ~model_target:(Some target)
-    ~authorize_native:(fun _ binding ->
-      if String.equal (Chat_response.Tool_capability.reference binding).name "child"
+    ~authorize_native:(fun invocation binding ->
+      let name = (Chat_response.Tool_capability.reference binding).name in
+      if List.mem [ "read_file"; "summary"; "undeclared" ] name ~equal:String.equal
+      then (
+        assert (
+          P.Invocation.equal_origin
+            (P.Host_invocation.context invocation).origin
+            P.Invocation.Delegated_agent);
+        Ok ())
+      else if List.mem [ "child"; "child_tools" ] name ~equal:String.equal
       then Ok ()
       else Error (P.Error.invalid_request "unexpected native binding"))
     ~prepare_output:(function
@@ -180,7 +188,8 @@ let open_document daemon actor =
       ~member:"draft.chatmd"
       ~default_environment:None
       ~contents:
-        {|<script id="s" language="chatml" kind="tool">let main input = Task.bind(Job.start_tool("child", input), fun first -> Task.bind(Job.start_tool("child", input), fun second -> Task.pure(`Object([{key="first"; value=`String(first)}, {key="second"; value=`String(second)}]))))</script>|}
+        {|<script id="s" language="chatml" kind="tool">let main input = Task.bind(Job.start_tool("child", input), fun first -> Task.bind(Job.start_tool("child", input), fun second -> Task.pure(`Object([{key="first"; value=`String(first)}, {key="second"; value=`String(second)}]))))</script>
+<script id="tool_child" language="chatml" kind="tool">let main input = Task.bind(Job.start_tool("child_tools", input), fun id -> Task.pure(`String(id)))</script>|}
     |> ok
   in
   let expected =
@@ -211,6 +220,39 @@ let open_document daemon actor =
   connection, expected
 ;;
 
+let selected_tools_response () =
+  let call name call_id arguments =
+    `Object
+      [ "type", `String "function_call"
+      ; "id", `String ("item-" ^ call_id)
+      ; "call_id", `String call_id
+      ; "name", `String name
+      ; "arguments", `String arguments
+      ; "status", `String "completed"
+      ]
+  in
+  let output =
+    [ call "read_file" "read-child-file" {|{"file":"sample.txt"}|}
+    ; call "summary" "managed-child-summary" {|{"message":"go"}|}
+    ; call "undeclared" "managed-child-undeclared" {|{"file":"sample.txt"}|}
+    ]
+  in
+  let event =
+    `Object
+      [ "type", `String "response.completed"
+      ; "sequence_number", `Number "1"
+      ; ( "response"
+        , `Object
+            [ "object", `String "response"
+            ; "id", `String "selected-child-tools"
+            ; "status", `String "completed"
+            ; "output", `Array output
+            ] )
+      ]
+  in
+  "data: " ^ Jsonaf.to_string event ^ "\n\n"
+;;
+
 let%expect_test "hosted captured Agent child uses its saved source and tracked model" =
   let requests = ref 0 in
   let model_bodies = ref [] in
@@ -220,6 +262,9 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
   let first_released = ref false in
   RH.with_fixture
     ~model_requests:requests
+    ~model_function_tools:true
+    ~response_body:(fun number _body ->
+      if Int.equal number 3 then Some (selected_tools_response ()) else None)
     ~on_model_body:(fun body -> model_bodies := body :: !model_bodies)
     ~on_model_submit:(fun () ->
       if Int.equal !requests 1
@@ -247,14 +292,43 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
               Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / prompt_dir);
               let prompt = Filename.concat prompt_dir "prompt.chatmd" in
               let child = Filename.concat prompt_dir "child.chatmd" in
+              let nested_dir = Filename.concat prompt_dir "agents" in
+              Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / nested_dir);
+              let tool_child = Filename.concat nested_dir "child.chatmd" in
               Eio.Path.save
                 ~create:(`Or_truncate 0o600)
                 Eio.Path.(Eio.Stdenv.fs env / prompt)
-                {|<tool name="child" agent="child.chatmd" local source_mode="file"/>|};
+                {|<tool name="child" agent="child.chatmd" local source_mode="file"/>
+<tool name="child_tools" agent="agents/child.chatmd" local source_mode="file"/>|};
               Eio.Path.save
                 ~create:(`Or_truncate 0o600)
                 Eio.Path.(Eio.Stdenv.fs env / child)
                 "<developer>Original hosted child instructions</developer>";
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / tool_child)
+                {|<developer>Call read_file and summary.</developer>
+<tool name="read_file"/>
+<script id="owned" language="chatml" kind="tool">
+let run ctx input = Task.pure(`Complete(input))
+</script>
+<script id="unowned" language="chatml" kind="tool">
+let run ctx input = Task.bind(Tool.call("read_file", input), fun result ->
+  match result with
+  | `Ok(value) -> Task.pure(`Complete(value))
+  | `Error(code) -> Task.pure(`Fail({code = code; message = "undeclared child call"; retryable = false; details = `Null})))
+</script>
+<tool name="summary" type="chatml" script="owned" entrypoint="run" input_schema="input.json" output_schema="output.json"/>
+<tool name="undeclared" type="chatml" script="unowned" entrypoint="run" input_schema="input.json" output_schema="output.json"/>|};
+              List.iter [ "input.json"; "output.json" ] ~f:(fun name ->
+                Eio.Path.save
+                  ~create:(`Or_truncate 0o600)
+                  Eio.Path.(Eio.Stdenv.fs env / nested_dir / name)
+                  {|{"type":"object"}|});
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / root / "sample.txt")
+                "selected child file contents";
               let provider_anchor = Eio.Path.(anchor / "daemon-provider") in
               Eio.Path.mkdir ~perm:0o700 provider_anchor;
               let provider_factory ~sw:provider_sw ~server_id:provider_server_id =
@@ -357,14 +431,14 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
               in
               assert (not (P.Id.Job.equal first_id second_id));
               Eio.Promise.await first_entered;
-              let path =
-                Eio.Path.(
-                  Eio.Stdenv.fs env
-                  / data_root
-                  / "developer-runs"
-                  / ("run_" ^ P.Id.Developer_run.to_string run_id ^ ".json"))
-              in
-              let payload () =
+              let payload ?(run = run_id) () =
+                let path =
+                  Eio.Path.(
+                    Eio.Stdenv.fs env
+                    / data_root
+                    / "developer-runs"
+                    / ("run_" ^ P.Id.Developer_run.to_string run ^ ".json"))
+                in
                 match Eio.Path.load path |> Jsonaf.parse |> Or_error.ok_exn with
                 | `Object fields ->
                   (match List.Assoc.find_exn fields ~equal:String.equal "payload" with
@@ -372,20 +446,20 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
                    | _ -> failwith "invalid run payload")
                 | _ -> failwith "invalid run envelope"
               in
-              let rows field =
-                match List.Assoc.find_exn (payload ()) ~equal:String.equal field with
+              let rows ?(run = run_id) field =
+                match List.Assoc.find_exn (payload ~run ()) ~equal:String.equal field with
                 | `Array rows -> rows
                 | _ -> failwith "invalid run rows"
               in
-              let jobs () =
-                List.map (rows "jobs") ~f:(fun json ->
+              let jobs ?(run = run_id) () =
+                List.map (rows ~run "jobs") ~f:(fun json ->
                   P.Developer_job.of_json json
                   |> Result.map_error ~f:(fun error ->
                     Sexp.to_string_hum [%sexp (error : P.Protocol_error.t)])
                   |> Result.ok_or_failwith)
               in
-              let job id =
-                List.find_exn (jobs ()) ~f:(fun value ->
+              let job ?(run = run_id) id =
+                List.find_exn (jobs ~run ()) ~f:(fun value ->
                   P.Id.Job.equal (P.Developer_job.id value) id)
               in
               let queued_second = job second_id in
@@ -433,7 +507,6 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
                     await_both ()
                 in
                 await_both ());
-              S.Daemon.shutdown daemon |> ok;
               assert (Int.equal !requests 2);
               let inference = rows "inference_attempts" in
               assert (Int.equal (List.length inference) 2);
@@ -479,7 +552,152 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
                     (String.is_substring
                        body
                        ~substring:"Edited hosted child instructions")));
+              let tool_request =
+                S.Daemon.Developer.Request.create
+                  ~route:
+                    (Document_script
+                       { expected
+                       ; selector =
+                           P.Authoring.Analysis.Target.selected_script "tool_child" |> ok
+                       })
+                  ~kind:Live_run
+                  ~prompt:(Some (S.Catalog_identity.prompt_definition "restart.prompt"))
+                  ~workspace:
+                    (Some (S.Catalog_identity.workspace_definition "restart.workspace"))
+                  ~entrypoint:"main"
+                  ~input:(`Object [ "input", `String "go" ])
+                  ~fixtures:None
+                  ~requested_execution:None
+                  ~requested_max_output_bytes:None
+                  ~bounds
+                  ~checkpoint:ignore
+                |> ok
+              in
+              let tool_key =
+                P.Idempotency_key.of_string "hosted-selected-child-tools" |> ok
+              in
+              let tool_run_id = P.Id.Developer_run.create () in
+              ignore
+                (S.Daemon.Developer.submit
+                   daemon
+                   ~actor
+                   ~run_id:tool_run_id
+                   ~key:tool_key
+                   ~request:tool_request
+                   ~fresh_source:(Some (Document_script { connection = _connection }))
+                 |> ok
+                 : S.Daemon.Developer.View.t);
+              let tool_view =
+                S.Daemon.Developer.await_terminal
+                  daemon
+                  ~actor
+                  ~run_id:tool_run_id
+                  ~key:tool_key
+                |> ok
+              in
+              let tool_job =
+                match
+                  Option.map (S.Daemon.Developer.View.receipt tool_view) ~f:R.value
+                with
+                | Some (Live (Succeeded (`String id))) -> P.Id.Job.of_string id |> ok
+                | result ->
+                  raise_s [%sexp "expected selected child Job", (result : R.value option)]
+              in
+              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. (fun () ->
+                let rec await_tool () =
+                  match
+                    (P.Developer_job.state (job ~run:tool_run_id tool_job)).status
+                  with
+                  | Succeeded -> ()
+                  | Failed _ ->
+                    failwithf
+                      "selected child failed after %d model requests: %s"
+                      !requests
+                      (P.Developer_job.to_json (job ~run:tool_run_id tool_job)
+                       |> Jsonaf.to_string)
+                      ()
+                  | Cancelled | Interrupted _ -> failwith "selected child stopped"
+                  | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
+                    Eio.Fiber.yield ();
+                    await_tool ()
+                in
+                await_tool ());
+              S.Daemon.shutdown daemon |> ok;
+              assert (Int.equal !requests 4);
+              (match List.rev !model_bodies with
+               | [ _first; _second; tool_request; tool_result ] ->
+                 let field value name =
+                   match value with
+                   | `Object fields -> List.Assoc.find_exn fields ~equal:String.equal name
+                   | _ -> failwith "expected provider request object"
+                 in
+                 let string = function
+                   | `String value -> value
+                   | _ -> failwith "expected provider string"
+                 in
+                 let array = function
+                   | `Array values -> values
+                   | _ -> failwith "expected provider array"
+                 in
+                 let request = Jsonaf.of_string tool_request in
+                 let names =
+                   field request "tools"
+                   |> array
+                   |> List.map ~f:(fun tool -> field tool "name" |> string)
+                 in
+                 assert (
+                   List.equal String.equal names [ "read_file"; "summary"; "undeclared" ]);
+                 assert (
+                   String.is_substring
+                     tool_request
+                     ~substring:"Call read_file and summary");
+                 let outputs =
+                   field (Jsonaf.of_string tool_result) "input"
+                   |> array
+                   |> List.filter ~f:(fun item ->
+                     match field item "type" with
+                     | `String "function_call_output" -> true
+                     | `String _ -> false
+                     | _ -> failwith "invalid provider input type")
+                 in
+                 (match outputs with
+                  | [ read; managed; denied ] ->
+                    assert (
+                      String.equal (field read "call_id" |> string) "read-child-file");
+                    assert (
+                      String.equal
+                        (field managed "call_id" |> string)
+                        "managed-child-summary");
+                    assert (
+                      String.equal
+                        (field denied "call_id" |> string)
+                        "managed-child-undeclared");
+                    let read = field read "output" |> string |> Jsonaf.of_string in
+                    let managed = field managed "output" |> string |> Jsonaf.of_string in
+                    let denied = field denied "output" |> string |> Jsonaf.of_string in
+                    assert (String.equal (field read "type" |> string) "complete");
+                    assert (
+                      String.is_substring
+                        (field read "value" |> string)
+                        ~substring:"selected child file contents");
+                    if not (String.equal (field managed "type" |> string) "complete")
+                    then failwithf "managed result: %s" (Jsonaf.to_string managed) ();
+                    assert (
+                      String.equal
+                        (field (field managed "value") "message" |> string)
+                        "go");
+                    assert (String.equal (field denied "type" |> string) "fail");
+                    assert (
+                      String.equal
+                        (field denied "code" |> string)
+                        "invocation.handler_failed");
+                    assert (
+                      String.equal
+                        (field denied "message" |> string)
+                        "tool is not in the selected capability set")
+                  | _ -> failwith "selected child returned unexpected tool results")
+               | _ -> failwith "selected child model request count changed");
               print_endline
-                "hosted captured child used saved instructions with tracked provider")));
-  [%expect {| hosted captured child used saved instructions with tracked provider |}]
+                "hosted captured child used saved instructions and selected tools")));
+  [%expect {| hosted captured child used saved instructions and selected tools |}]
 ;;

@@ -117,6 +117,7 @@ type live =
   ; host : t
   ; workspace_owner : Workspace.t
   ; paths : Agent_session.Runtime_paths.t
+  ; response_dir : Eio.Fs.dir_ty Eio.Path.t
   ; shell_owner_id : string
   ; revision : Revision.t
   ; definition : Definition.t
@@ -377,6 +378,9 @@ let prepare_on_switch t ~owner ~sw ~handle ~original_actor ~prompt ~workspace ~c
             invalid "developer runtime paths are unavailable")
         in
         let elements = Revision.elements revision in
+        let response_dir =
+          Eio.Path.(t.env#fs / Workspace.response_directory workspace_owner)
+        in
         let shell_owner_id =
           "developer:" ^ P.Id.Developer_run.to_string (Store.owner handle).run_id
         in
@@ -436,13 +440,12 @@ let prepare_on_switch t ~owner ~sw ~handle ~original_actor ~prompt ~workspace ~c
             let%map source_runtime =
               Developer_agent_source_runtime.prepare
                 ~selected_target:
-                  Developer_agent_source_runtime.Selected_target.Literal_only
+                  Developer_agent_source_runtime.Selected_target.Bound_runner
                 ~source:source_binding
                 ~script_preparation
                 ~manifest_authorizer:authorizer
                 ~approval_provider
-                ~response_dir:
-                  Eio.Path.(t.env#fs / Workspace.response_directory workspace_owner)
+                ~response_dir
                 ~env:t.env
                 ~revision
                 ~sw
@@ -544,8 +547,7 @@ let prepare_on_switch t ~owner ~sw ~handle ~original_actor ~prompt ~workspace ~c
               ~env:t.env
               ~prompt_dir:paths.prompt_dir
               ~tool_dir:paths.tool_dir
-              ~response_dir:
-                Eio.Path.(t.env#fs / Workspace.response_directory workspace_owner)
+              ~response_dir
               ~cache:t.cache
               ~manifest_authorizer:authorizer
               ~approval_provider
@@ -556,6 +558,7 @@ let prepare_on_switch t ~owner ~sw ~handle ~original_actor ~prompt ~workspace ~c
             ; host = t
             ; workspace_owner
             ; paths
+            ; response_dir
             ; shell_owner_id
             ; revision
             ; definition
@@ -727,6 +730,7 @@ module Child_prepared = struct
   let selected_native t = t.selected
   let managed_definition t = t.managed
   let tool_contract t = Definition.tool_contract t.live.definition
+  let response_dir t = t.live.response_dir
 
   let check_scope_now t witness =
     Eio.Switch.check t.switch;
@@ -968,7 +972,7 @@ let with_saved_child live ~root ~target ~startup ~compilation_limits ~programs ~
     Stdlib.Printexc.raise_with_backtrace exn backtrace
 ;;
 
-let bind_agent_sources t ~root ~models ~checkpoint =
+let bind_agent_sources t ~root ~models ~run_selected_target ~checkpoint =
   let open Result.Let_syntax in
   let%bind () = check_current t in
   match t.agent_source_runtime with
@@ -984,7 +988,7 @@ let bind_agent_sources t ~root ~models ~checkpoint =
          ~root
          ~models
          ~agent_runtime:t.runtime
-         ~run_selected_target:None
+         ~run_selected_target:(Some run_selected_target)
          ~checkpoint)
 ;;
 
