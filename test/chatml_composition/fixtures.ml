@@ -67,12 +67,20 @@ let call_events calls =
   |> Stdlib.List.to_seq
 ;;
 
-(* Fixture polling and safety deadlines retain the real environment. Paused
-   daemon clocks must be released before the switch joins scheduler fibers,
-   including when construction or a fixture assertion raises. *)
+(* Fixture polling and safety deadlines retain the real environment. The
+   callback receives an idempotent clock release and must call it before
+   explicitly joining daemon resources. The outer finalizer also releases
+   clocks on construction failure, before the switch joins scheduler fibers. *)
 let with_daemon_switch env ~clocks f =
   Eio.Switch.run (fun sw ->
-    let clock, mono_clock, release_clocks = clocks env in
+    let clock, mono_clock, release = clocks env in
+    let released = ref false in
+    let release_clocks () =
+      if not !released
+      then (
+        released := true;
+        release ())
+    in
     Exn.protect ~finally:release_clocks ~f:(fun () ->
       let daemon_env =
         object
@@ -91,7 +99,7 @@ let with_daemon_switch env ~clocks f =
           method backend_id = env#backend_id
         end
       in
-      f sw daemon_env))
+      f sw daemon_env ~release_clocks))
 ;;
 
 let with_daemon
@@ -198,7 +206,7 @@ let with_daemon
             provider_failure := Some error;
             raise error
         in
-        with_daemon_switch env ~clocks:daemon_clocks (fun sw daemon_env ->
+        with_daemon_switch env ~clocks:daemon_clocks (fun sw daemon_env ~release_clocks ->
           let daemon =
             Agent_server.Daemon.start
               ~sw
@@ -221,7 +229,9 @@ let with_daemon
             |> protocol_ok
           in
           Exn.protect
-            ~finally:(fun () -> Agent_server.Daemon.shutdown daemon |> protocol_ok)
+            ~finally:(fun () ->
+              release_clocks ();
+              Agent_server.Daemon.shutdown daemon |> protocol_ok)
             ~f:(fun () ->
               List.iter
                 (Agent_session.Prompt_catalog.entries
