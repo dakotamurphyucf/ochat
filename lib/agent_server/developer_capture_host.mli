@@ -157,6 +157,105 @@ module Document_script : sig
   val create : selector:P.Authoring.Analysis.Target.selector -> t
 end
 
+type t
+
+module Source_selection : sig
+  (** The source/contract half of the existing developer capture. A REPL epoch
+      and a command Candidate can use the same authenticated route, selected
+      Prepared inventory, original actor and current policy checks. It is
+      minted only by [prepare_source_selection], never from a digest, client
+      path or caller-supplied Prepared value. It performs no command capture,
+      entrypoint check, Store write or runtime effect. *)
+  type t
+
+  type checked
+
+  val prepared : t -> Chatml_prepared_program.t
+
+  (* [Prepared.create] guarantees that its entry ID resolves to a captured
+     source. This accessor preserves that constructor invariant. *)
+  val entry_source : t -> Chatml_source.t
+  val selected_contract : t -> Selected_contract.t
+
+  (** Full original/current actor, route/source and selected-contract check.
+      The returned attempt-local proof belongs to this physical selection. *)
+  val check_current
+    :  t
+    -> actor:Operator_authorization.t
+    -> checkpoint:(unit -> unit)
+    -> (checked, P.Error.t) result
+
+  (** Nonyielding final comparison after the last wait. This is source and
+      compiler selection admission, not permission for a Task effect. *)
+  val check_now
+    :  t
+    -> checked:checked
+    -> actor:Operator_authorization.t
+    -> (unit, P.Error.t) result
+
+  module Shared : sig
+    type checked
+
+    (** The same full source/contract admission for a process-local owner with
+        concurrent authenticated reads. A second read never revokes another
+        read's proof. This does not lend Candidate's exclusive admission proof
+        or bypass the final nonyielding owner/selection check. *)
+    val check_current
+      :  t
+      -> actor:Operator_authorization.t
+      -> checkpoint:(unit -> unit)
+      -> (checked, P.Error.t) result
+
+    val check_now
+      :  t
+      -> checked:checked
+      -> actor:Operator_authorization.t
+      -> (unit, P.Error.t) result
+  end
+end
+
+(** Shared route acquisition below command-specific [Request]/[Candidate].
+    Select the actual configured Standard contract for both original and
+    current actors, then capture one immutable Prepared graph under existing
+    source bounds. No dummy Check/Live command or entrypoint is created.
+    Existing command preparers use these same kernels before building their
+    Candidate; REPL selects the exact resulting graph/contract for its epoch.
+    The upper caller compares its stable route with these genuine capabilities
+    BEFORE invoking the corresponding operation. *)
+val prepare_local_project_selection
+  :  t
+  -> original_actor:Operator_authorization.t
+  -> actor:Operator_authorization.t
+  -> local:Local_project.t
+  -> clock:Eio.Time.Mono.ty Eio.Time.Mono.t
+  -> checkpoint:(unit -> unit)
+  -> (Source_selection.t, P.Error.t) result
+
+val prepare_local_source_selection
+  :  t
+  -> original_actor:Operator_authorization.t
+  -> actor:Operator_authorization.t
+  -> source:Local_source.t
+  -> checkpoint:(unit -> unit)
+  -> (Source_selection.t, P.Error.t) result
+
+val prepare_authoring_project_selection
+  :  t
+  -> actor:Operator_authorization.t
+  -> connection:Connection_context.t
+  -> expected:P.Authoring.Context.Expected.t
+  -> checkpoint:(unit -> unit)
+  -> (Source_selection.t, P.Error.t) result
+
+val prepare_document_script_selection
+  :  t
+  -> actor:Operator_authorization.t
+  -> connection:Connection_context.t
+  -> expected:P.Authoring.Context.Expected.t
+  -> script:Document_script.t
+  -> checkpoint:(unit -> unit)
+  -> (Source_selection.t, P.Error.t) result
+
 module Candidate : sig
   type t
 
@@ -222,7 +321,14 @@ module Candidate : sig
     -> (unit -> (unit, P.Error.t) result, P.Error.t) result
 end
 
-type t
+(** Command-only capture over the same selected source. The REPL retains the
+    selection without manufacturing a command request or capture. Full source
+    and current actor checks are repeated after the yielding capture. *)
+val capture_selection
+  :  Source_selection.t
+  -> request:Request.t
+  -> checkpoint:(unit -> unit)
+  -> (Candidate.t, P.Error.t) result
 
 (** Borrows the SAME Source_host and Authoring_context_service/Core owner used
     by installed authoring methods; no new opener, ledger, resolver or Store. *)

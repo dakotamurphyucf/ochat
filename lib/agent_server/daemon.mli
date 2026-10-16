@@ -34,6 +34,31 @@ module Developer_configuration : sig
       -> t Core.Or_error.t
   end
 
+  module Repl : sig
+    type t
+
+    (** Validated, inert REPL actor policy. It selects no new language ABI and
+        grants no source, method, Task or native authority. *)
+    val create
+      :  scope_limits:Chatml_configured_lookup.Repl_scope.Limits.t
+      -> root_limits:Chatml_dependency_session.Roots.Limits.t
+      -> typing_limits:Chatml_repl_typing.Limits.t
+      -> evaluator_limits:Chatml_repl_execution.Limits.t
+      -> execution_policy:Chatml_execution.policy
+      -> max_instances:int
+      -> max_keys_per_instance:int
+      -> max_submissions_per_epoch:int
+      -> max_source_bytes:int
+      -> max_receipt_bytes:int
+      -> max_total_receipt_bytes:int
+      -> max_task_origins:int
+      -> (t, Agent_protocol.Error.t) result
+  end
+
+  (** Opt in one process-local REPL actor under the same installed Developer
+      host and capture owner. The base configuration leaves REPL disabled. *)
+  val with_repl : t -> Repl.t -> t
+
   module Limits : sig
     type t
 
@@ -269,6 +294,146 @@ module Developer : sig
     -> run_id:Agent_protocol.Id.Developer_run.t
     -> key:Agent_protocol.Idempotency_key.t
     -> (View.t, Agent_protocol.Error.t) result
+
+  (** Process-local developer REPL over this daemon's authenticated source
+      owner. Instances, epochs, revisions and Task handles expire at reset,
+      close or daemon restart. The Standard surface keeps Task construction
+      inert; executing a Task requires a separate authorized Host action. *)
+  module Repl : sig
+    module Original : sig
+      type t
+
+      val create
+        :  route:Request.Route.t
+        -> target:Chatml.Chatml_compiler_contract.Target.t
+        -> prompt:Agent_protocol.Id.Prompt_definition.t
+        -> workspace:Agent_protocol.Id.Workspace_definition.t
+        -> requested_execution:Chatml_execution.limits option
+        -> requested_max_output_bytes:int option
+        -> checkpoint:(unit -> unit)
+        -> (t, Agent_protocol.Error.t) result
+    end
+
+    module Instance : sig
+      type t
+
+      val equal : t -> t -> bool
+    end
+
+    module Epoch : sig
+      type t
+
+      val equal : t -> t -> bool
+    end
+
+    module Revision : sig
+      type t
+
+      val equal : t -> t -> bool
+    end
+
+    module View : sig
+      type t
+
+      val instance : t -> Instance.t
+      val epoch : t -> Epoch.t
+      val revision : t -> Revision.t
+      val run_id : t -> Agent_protocol.Id.Developer_run.t
+      val capture_fingerprint : t -> Chatml_source.Digest.t
+    end
+
+    module Submission : sig
+      type t
+
+      module Diagnostic : sig
+        type t
+
+        val message : t -> string
+        val location : t -> Chatml_source.Location.t option
+      end
+
+      type status =
+        | Need_more of
+            Chatml.Chatml_parse.Submission.Need_more.reason * Chatml_source.Location.t
+        | Rejected of Diagnostic.t
+        | Finished
+        | Stopped of Diagnostic.t option
+
+      type details =
+        | Available
+        | Output_limited
+
+      (** [status] preserves the execution outcome even when oversized detail
+          is omitted. [completed_statements] counts successful statements;
+          a failed final receipt remains visible when its detail fits. *)
+      val status : t -> status
+
+      val details : t -> details
+      val completed_statements : t -> int
+      val revision : t -> Revision.t
+      val statements : t -> Chatml_repl_execution.Receipt.t list
+      val task_handles : t -> Chatml_repl_execution.Task_handle.t list
+    end
+
+    (** Same run/key/original request reuses its authenticated instance without
+        recapture; changed payload conflicts. A current actor with the same
+        principal/authentication kind must still pass source and method policy. *)
+    val create
+      :  t
+      -> actor:Operator_authorization.t
+      -> run_id:Agent_protocol.Id.Developer_run.t
+      -> key:Agent_protocol.Idempotency_key.t
+      -> original:Original.t
+      -> fresh_source:Request.Fresh_source.t option
+      -> (View.t, Agent_protocol.Error.t) result
+
+    (** Optimistic epoch/revision and exact-key admission. Need_more and
+        Rejected execute no statement; earlier successes survive a later
+        failure. Same-key retry never executes again. Unexpected callback
+        exceptions preserve their original backtrace for the submitting
+        waiter; a bounded partial outcome and consumed key remain observable. *)
+    val submit
+      :  t
+      -> actor:Operator_authorization.t
+      -> instance:Instance.t
+      -> epoch:Epoch.t
+      -> expected_revision:Revision.t
+      -> key:Agent_protocol.Idempotency_key.t
+      -> source:string
+      -> (Submission.t, Agent_protocol.Error.t) result
+
+    val observe
+      :  t
+      -> actor:Operator_authorization.t
+      -> instance:Instance.t
+      -> key:Agent_protocol.Idempotency_key.t
+      -> (Submission.t option, Agent_protocol.Error.t) result
+
+    val cancel_and_wait
+      :  t
+      -> actor:Operator_authorization.t
+      -> instance:Instance.t
+      -> key:Agent_protocol.Idempotency_key.t
+      -> (Submission.t, Agent_protocol.Error.t) result
+
+    (** Signal and join the active statement before invalidating this epoch's
+        evaluator and Task handles. Reset retains prior key evidence; close
+        consumes the reserved final ledger slot even when work keys are full. *)
+    val reset_and_wait
+      :  t
+      -> actor:Operator_authorization.t
+      -> instance:Instance.t
+      -> expected_epoch:Epoch.t
+      -> key:Agent_protocol.Idempotency_key.t
+      -> (View.t, Agent_protocol.Error.t) result
+
+    val close_and_wait
+      :  t
+      -> actor:Operator_authorization.t
+      -> instance:Instance.t
+      -> key:Agent_protocol.Idempotency_key.t
+      -> (unit, Agent_protocol.Error.t) result
+  end
 end
 
 (** The default inference policy permits storage inspection but refuses target

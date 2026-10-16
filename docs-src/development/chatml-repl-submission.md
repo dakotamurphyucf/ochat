@@ -28,3 +28,40 @@ their batch behavior. `Submission` does not typecheck, execute, run dependency
 initializers or mutate a REPL session. Its `Need_more` result does not commit a
 typing namespace. The [developer runtime design](../design/chatml-developer-runtime.md)
 defines the later session revision and sequential statement commit policy.
+
+## Hosted process-local foundation
+
+The optional `Daemon.Developer.Repl` service uses the daemon's installed
+Developer source owner. A create request selects an authentic Standard
+`One_off_v1` or `Tool_v1` capture, retains its original authenticated actor,
+and binds one typing owner and evaluator to that captured contract. A current
+reconnected actor must have the same principal ID and authentication kind;
+both actors and the selected source are checked again after waits. This source
+selection admits no native or Task effect by itself. The selected Standard
+surfaces have no `print` operation, so the service does not install a process
+wide output sink.
+
+Concurrent authenticated reads repeat the same source and actor validation
+without replacing an active statement's admission proof. At its effect entry,
+the statement still checks the current source owner and exact selected
+contract. Revoked source policy or a refreshed authoring context denies that
+proof.
+
+Each submission carries an opaque instance, epoch, expected revision and
+idempotency key. The parser returns bounded `Need_more` or `Rejected` detail
+without running a statement. A complete submission commits successful
+statements in order. If a later statement fails, the result is `Stopped` with
+the count of completed statements and any admitted bounded receipts; earlier
+successes remain committed. `Output_limited` can omit receipt detail without
+turning a finished or stopped operation into the other. A Task expression may
+return a scoped inert handle, but submitting it never drives the Task.
+
+The bounded per-instance key ledger retains a result or an expired-result
+tombstone. Same-key retries with the original epoch, revision and payload
+never re-execute; a changed request conflicts. A final key slot is reserved
+for authenticated close after fresh work keys are exhausted. Cancel signals
+the exact active callback and joins its finalization; reset joins work,
+invalidates the epoch's Task handles and retains old-key replay evidence.
+Close joins work and releases the evaluator. Instances and handles expire on
+daemon restart. The daemon joins its REPL callbacks before closing their
+shared source owner.

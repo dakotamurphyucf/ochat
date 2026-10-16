@@ -703,6 +703,7 @@ let%test_unit
        let request =
          Core_owner.Developer.Request.create
            ~entrypoint:"main"
+           ~target:One_off_v1
            ~input:`Null
            ~fixtures:None
            ~json_bounds:

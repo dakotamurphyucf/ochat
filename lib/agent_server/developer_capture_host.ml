@@ -311,12 +311,13 @@ let selected_for_pair ~original_actor ~actor ~selected select =
     | Some _, None | None, Some _ | None, None -> Error (denied ()))
 ;;
 
-module Candidate = struct
+module Source_selection = struct
   type t =
-    { capture : Capture.t
+    { prepared : Prepared.t
+    ; origin : Capture.Origin.t
+    ; selected : Selected_contract.t
     ; original_actor : Operator_authorization.t
     ; request_actor : Operator_authorization.t
-    ; selected : Selected_contract.t
     ; full_owner :
         actor:Operator_authorization.t
         -> checkpoint:(unit -> unit)
@@ -328,88 +329,112 @@ module Candidate = struct
     ; mutable checked_nonce : unit ref option
     }
 
-  type candidate = t
+  type checked =
+    { source : t
+    ; actor : Operator_authorization.t
+    ; nonce : unit ref
+    }
 
-  module Checked = struct
-    type t =
-      { candidate : candidate
-      ; actor : Operator_authorization.t
-      ; nonce : unit ref
-      }
-  end
+  let prepared t = t.prepared
 
-  let capture t = t.capture
+  let entry_source t =
+    Prepared.find_source t.prepared (Prepared.entry t.prepared) |> Option.value_exn
+  ;;
+
   let selected_contract t = t.selected
 
   let check_domain t =
     if Int.equal t.domain (Stdlib.Domain.self () :> int) then Ok () else Error (stale ())
   ;;
 
+  let validate_full t ~actor ~checkpoint =
+    let open Result.Let_syntax in
+    let%bind () =
+      selected_for_pair
+        ~original_actor:t.original_actor
+        ~actor
+        ~selected:t.selected
+        t.selection
+    in
+    let%bind () = t.full_owner ~actor ~checkpoint in
+    let%bind () = t.owner_now ~actor in
+    selected_for_pair
+      ~original_actor:t.original_actor
+      ~actor
+      ~selected:t.selected
+      t.selection
+  ;;
+
+  let validate_now t ~actor =
+    let open Result.Let_syntax in
+    let%bind () = t.owner_now ~actor in
+    selected_for_pair
+      ~original_actor:t.original_actor
+      ~actor
+      ~selected:t.selected
+      t.selection
+  ;;
+
   let check_current t ~actor ~checkpoint =
     let open Result.Let_syntax in
     let%bind () = check_domain t in
     if t.busy
-    then Error (error P.Error.Conflict "developer capture busy")
+    then Error (error P.Error.Conflict "developer source selection busy")
     else (
       t.busy <- true;
       t.checked_nonce <- None;
       let nonce = ref () in
       let outcome =
         Exn.protect
-          ~f:(fun () ->
-            let%bind () =
-              selected_for_pair
-                ~original_actor:t.original_actor
-                ~actor
-                ~selected:t.selected
-                t.selection
-            in
-            let%bind () = t.full_owner ~actor ~checkpoint in
-            let%bind () = t.owner_now ~actor in
-            selected_for_pair
-              ~original_actor:t.original_actor
-              ~actor
-              ~selected:t.selected
-              t.selection)
+          ~f:(fun () -> validate_full t ~actor ~checkpoint)
           ~finally:(fun () -> t.busy <- false)
       in
       match outcome with
       | Error _ as error -> error
       | Ok () ->
         t.checked_nonce <- Some nonce;
-        Ok { Checked.candidate = t; actor; nonce })
+        Ok { source = t; actor; nonce })
   ;;
 
-  let check_now t ~(checked : Checked.t) ~actor =
+  let check_now t ~checked ~actor =
     let open Result.Let_syntax in
     let%bind () = check_domain t in
     if
       t.busy
-      || (not (phys_equal checked.candidate t))
+      || (not (phys_equal checked.source t))
       || (not (phys_equal checked.actor actor))
       || not
            (Option.value_map t.checked_nonce ~default:false ~f:(phys_equal checked.nonce))
     then Error (stale ())
-    else (
-      let%bind () = t.owner_now ~actor in
-      selected_for_pair
-        ~original_actor:t.original_actor
-        ~actor
-        ~selected:t.selected
-        t.selection)
+    else validate_now t ~actor
   ;;
 
-  let final_admission t ~actor ~capture ~checkpoint =
-    if not (phys_equal capture t.capture && phys_equal actor t.request_actor)
-    then Error (stale ())
-    else
-      Result.map (check_current t ~actor ~checkpoint) ~f:(fun checked () ->
-        check_now t ~checked ~actor)
-  ;;
+  module Shared = struct
+    type checked =
+      { source : t
+      ; actor : Operator_authorization.t
+      }
+
+    let check_current t ~actor ~checkpoint =
+      let open Result.Let_syntax in
+      let%bind () = check_domain t in
+      let%map () = validate_full t ~actor ~checkpoint in
+      { source = t; actor }
+    ;;
+
+    let check_now t ~checked ~actor =
+      let open Result.Let_syntax in
+      let%bind () = check_domain t in
+      if not (phys_equal checked.source t && phys_equal checked.actor actor)
+      then Error (stale ())
+      else validate_now t ~actor
+    ;;
+  end
 end
 
-let make_candidate
-      ~capture
+let make_source_selection
+      ~prepared
+      ~origin
       ~original_actor
       ~request_actor
       ~selected
@@ -417,7 +442,8 @@ let make_candidate
       ~owner_now
       ~selection
   =
-  ({ Candidate.capture
+  ({ Source_selection.prepared
+   ; origin
    ; original_actor
    ; request_actor
    ; selected
@@ -428,8 +454,49 @@ let make_candidate
    ; busy = false
    ; checked_nonce = None
    }
-   : Candidate.t)
+   : Source_selection.t)
 ;;
+
+module Candidate = struct
+  type t =
+    { capture : Capture.t
+    ; source : Source_selection.t
+    }
+
+  type candidate = t
+
+  module Checked = struct
+    type t =
+      { candidate : candidate
+      ; source_checked : Source_selection.checked
+      }
+  end
+
+  let capture t = t.capture
+  let selected_contract t = Source_selection.selected_contract t.source
+
+  let check_current t ~actor ~checkpoint =
+    Source_selection.check_current t.source ~actor ~checkpoint
+    |> Result.map ~f:(fun source_checked -> { Checked.candidate = t; source_checked })
+  ;;
+
+  let check_now t ~(checked : Checked.t) ~actor =
+    if not (phys_equal checked.candidate t)
+    then Error (stale ())
+    else Source_selection.check_now t.source ~checked:checked.source_checked ~actor
+  ;;
+
+  let final_admission t ~actor ~capture ~checkpoint =
+    if
+      not
+        (phys_equal capture t.capture
+         && phys_equal actor t.source.Source_selection.request_actor)
+    then Error (stale ())
+    else
+      Result.map (check_current t ~actor ~checkpoint) ~f:(fun checked () ->
+        check_now t ~checked ~actor)
+  ;;
+end
 
 let selected_initial ~original_actor ~actor select =
   if not (same_actor original_actor actor)
@@ -483,12 +550,11 @@ let local_owner_now sources roots ~actor =
     Sources.check_root_current sources ~actor root |> Result.map_error ~f:source_error)
 ;;
 
-let prepare_local_project
+let prepare_local_project_selection
       t
       ~original_actor
       ~actor
       ~(local : Local_project.t)
-      ~request
       ~clock
       ~checkpoint
   =
@@ -522,7 +588,6 @@ let prepare_local_project
   in
   let prepared = Sources.Capture.prepared acquired in
   let%bind origin = local_origin prepared in
-  let%bind capture = capture_program ~prepared ~origin ~selected ~request ~checkpoint in
   let roots = local.root :: local.dependency_roots in
   let owner_now ~actor = local_owner_now sources roots ~actor in
   let full_owner ~actor ~checkpoint =
@@ -532,8 +597,9 @@ let prepare_local_project
   let%bind () = owner_now ~actor in
   let%bind () = selected_for_pair ~original_actor ~actor ~selected select in
   Ok
-    (make_candidate
-       ~capture
+    (make_source_selection
+       ~prepared
+       ~origin
        ~original_actor
        ~request_actor:actor
        ~selected
@@ -542,12 +608,40 @@ let prepare_local_project
        ~selection:select)
 ;;
 
-let prepare_local_source
+let candidate_of_source selection ~request ~checkpoint =
+  let open Result.Let_syntax in
+  let%bind capture =
+    capture_program
+      ~prepared:selection.Source_selection.prepared
+      ~origin:selection.origin
+      ~selected:selection.selected
+      ~request
+      ~checkpoint
+  in
+  let%bind checked =
+    Source_selection.check_current selection ~actor:selection.request_actor ~checkpoint
+  in
+  let%map () =
+    Source_selection.check_now selection ~checked ~actor:selection.request_actor
+  in
+  ({ Candidate.capture; source = selection } : Candidate.t)
+;;
+
+let capture_selection = candidate_of_source
+
+let prepare_local_project t ~original_actor ~actor ~local ~request ~clock ~checkpoint =
+  let open Result.Let_syntax in
+  let%bind selection =
+    prepare_local_project_selection t ~original_actor ~actor ~local ~clock ~checkpoint
+  in
+  candidate_of_source selection ~request ~checkpoint
+;;
+
+let prepare_local_source_selection
       t
       ~original_actor
       ~actor
       ~(source : Local_source.t)
-      ~request
       ~checkpoint
   =
   let open Result.Let_syntax in
@@ -577,7 +671,6 @@ let prepare_local_source
     |> Result.map_error ~f:(fun _ -> limit ())
   in
   let%bind origin = local_origin prepared in
-  let%bind capture = capture_program ~prepared ~origin ~selected ~request ~checkpoint in
   let owner_now ~actor = local_owner_now sources [ source.root ] ~actor in
   let full_owner ~actor ~checkpoint =
     checkpoint ();
@@ -586,14 +679,23 @@ let prepare_local_source
   let%bind () = owner_now ~actor in
   let%bind () = selected_for_pair ~original_actor ~actor ~selected select in
   Ok
-    (make_candidate
-       ~capture
+    (make_source_selection
+       ~prepared
+       ~origin
        ~original_actor
        ~request_actor:actor
        ~selected
        ~full_owner
        ~owner_now
        ~selection:select)
+;;
+
+let prepare_local_source t ~original_actor ~actor ~source ~request ~checkpoint =
+  let open Result.Let_syntax in
+  let%bind selection =
+    prepare_local_source_selection t ~original_actor ~actor ~source ~checkpoint
+  in
+  candidate_of_source selection ~request ~checkpoint
 ;;
 
 let overlay_error = function
@@ -683,7 +785,7 @@ let with_authoring_current t ~actor ~connection ~expected ~checkpoint ~f =
   | exception Host_preparation_error error -> Error error
 ;;
 
-let prepare_authoring_project t ~actor ~connection ~expected ~request ~checkpoint =
+let prepare_authoring_project_selection t ~actor ~connection ~expected ~checkpoint =
   let open Result.Let_syntax in
   let result =
     with_authoring_current
@@ -720,9 +822,6 @@ let prepare_authoring_project t ~actor ~connection ~expected ~request ~checkpoin
         let%bind origin =
           project_origin current inputs prepared ~limits:t.limits ~checkpoint
         in
-        let%bind capture =
-          capture_program ~prepared ~origin ~selected ~request ~checkpoint
-        in
         let owner_now ~actor =
           Scope.Candidate_pin.check_now pin ~actor |> Result.map_error ~f:owner_error
         in
@@ -754,8 +853,9 @@ let prepare_authoring_project t ~actor ~connection ~expected ~request ~checkpoin
         let%bind () = owner_now ~actor in
         let%bind () = selected_for_pair ~original_actor ~actor ~selected select in
         Ok
-          (make_candidate
-             ~capture
+          (make_source_selection
+             ~prepared
+             ~origin
              ~original_actor
              ~request_actor:actor
              ~selected
@@ -764,6 +864,14 @@ let prepare_authoring_project t ~actor ~connection ~expected ~request ~checkpoin
              ~selection:select))
   in
   result
+;;
+
+let prepare_authoring_project t ~actor ~connection ~expected ~request ~checkpoint =
+  let open Result.Let_syntax in
+  let%bind selection =
+    prepare_authoring_project_selection t ~actor ~connection ~expected ~checkpoint
+  in
+  candidate_of_source selection ~request ~checkpoint
 ;;
 
 let selected_declaration parsed selector ~checkpoint =
@@ -855,13 +963,12 @@ let selected_document_build row ~declaration ~contract ~limits ~checkpoint =
   Ok (raw_build, build)
 ;;
 
-let prepare_document_script
+let prepare_document_script_selection
       t
       ~actor
       ~connection
       ~expected
       ~(script : Document_script.t)
-      ~request
       ~checkpoint
   =
   with_authoring_current
@@ -995,9 +1102,6 @@ let prepare_document_script
           ~prepared
           ~checkpoint
       in
-      let%bind capture =
-        capture_program ~prepared ~origin ~selected ~request ~checkpoint
-      in
       let owner_now ~actor =
         Scope.Candidate_pin.check_now pin ~actor |> Result.map_error ~f:owner_error
       in
@@ -1029,12 +1133,21 @@ let prepare_document_script
       let%bind () = owner_now ~actor in
       let%bind () = selected_for_pair ~original_actor ~actor ~selected select in
       Ok
-        (make_candidate
-           ~capture
+        (make_source_selection
+           ~prepared
+           ~origin
            ~original_actor
            ~request_actor:actor
            ~selected
            ~full_owner
            ~owner_now
            ~selection:select))
+;;
+
+let prepare_document_script t ~actor ~connection ~expected ~script ~request ~checkpoint =
+  let open Result.Let_syntax in
+  let%bind selection =
+    prepare_document_script_selection t ~actor ~connection ~expected ~script ~checkpoint
+  in
+  candidate_of_source selection ~request ~checkpoint
 ;;
