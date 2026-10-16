@@ -12,6 +12,8 @@ module Store = Agent_store.Developer_run_store
 module Root = Developer_root_owner
 module Saved = Agent_session.Captured_agent_runner.Claimed_developer.Selected
 module Target = Saved.Target
+module Content_target = Agent_session.Captured_agent_runner.Selected_content_target
+module Source_binding = Agent_session.Captured_agent_runner.Source_binding
 
 module Owner = struct
   exception Stop
@@ -133,6 +135,8 @@ type live =
   ; approval_provider : Shell_runtime.Approval_broker.provider
   ; source_binding : Agent_session.Captured_agent_runner.Source_binding.t option
   ; agent_source_runtime : Developer_agent_source_runtime.t option
+  ; mutable selected_content_runner :
+      Agent_session.Captured_agent_runner.selected_content_runner option
   ; mutable closing : bool
   ; mutable closed : bool
   }
@@ -587,6 +591,7 @@ let prepare_on_switch t ~owner ~sw ~handle ~original_actor ~prompt ~workspace ~c
             ; approval_provider
             ; source_binding
             ; agent_source_runtime
+            ; selected_content_runner = None
             ; closing = false
             ; closed = false
             })
@@ -711,10 +716,16 @@ let check_source_bound_now live ~root =
   Developer_agent_source_runtime.bound_to source_runtime ~root ~agent_runtime:live.runtime
 ;;
 
+type child_target =
+  | Saved of Target.t
+  | Content of Content_target.t
+
 type child_prepared =
   { live : live
   ; root : Root.run
-  ; target : Target.t
+  ; target : child_target
+  ; saved_ancestor : Target.t
+  ; content_ports : Source_binding.Content_ports.t
   ; revision : Revision.t
   ; switch : Eio.Switch.t
   ; active : bool ref
@@ -739,7 +750,36 @@ module Child_prepared = struct
       }
   end
 
-  let matches_target t target = phys_equal t.target target
+  let matches_target t target =
+    match t.target with
+    | Saved actual -> phys_equal actual target
+    | Content _ -> false
+  ;;
+
+  let matches_content_target t target =
+    match t.target with
+    | Content actual -> phys_equal actual target
+    | Saved _ -> false
+  ;;
+
+  let check_target t =
+    match t.target with
+    | Saved target -> Target.check target
+    | Content target -> Content_target.check target
+  ;;
+
+  let check_target_now t =
+    match t.target with
+    | Saved target -> Target.check_now target
+    | Content target -> Content_target.check_now target
+  ;;
+
+  let check_target_descendant_now t ~child =
+    match t.target with
+    | Saved target -> Target.check_descendant_now target ~child
+    | Content target -> Content_target.check_descendant_now target ~child
+  ;;
+
   let revision t = t.revision
   let runtime t = t.runtime
   let selected_native t = t.selected
@@ -772,11 +812,19 @@ module Child_prepared = struct
 
   let check_direct_full t =
     let open Result.Let_syntax in
-    let%bind () = Target.check t.target in
+    let%bind () = check_target t in
+    let%bind borrowed = Agent_session.Native_tool_invocation.borrow_selected () in
     let%bind () =
-      Root.Model_inference.check_saved_agent_source
-        t.root
-        ~selected:(Target.saved t.target)
+      if Saved.matches_borrowed (Target.saved t.saved_ancestor) borrowed
+      then
+        Root.Model_inference.check_saved_agent_source
+          t.root
+          ~selected:(Target.saved t.saved_ancestor)
+      else
+        Root.Model_inference.check_saved_agent_source_descendant_now
+          t.root
+          ~selected:(Target.saved t.saved_ancestor)
+          ~child:borrowed
     in
     check_source_full t
   ;;
@@ -784,10 +832,10 @@ module Child_prepared = struct
   let check_descendant_full t ~child =
     let open Result.Let_syntax in
     let%bind () = check_source_full t in
-    let%bind () = Target.check_descendant_now t.target ~child in
+    let%bind () = check_target_descendant_now t ~child in
     Root.Model_inference.check_saved_agent_source_descendant_now
       t.root
-      ~selected:(Target.saved t.target)
+      ~selected:(Target.saved t.saved_ancestor)
       ~child
   ;;
 
@@ -796,12 +844,12 @@ module Child_prepared = struct
     let t = admission.prepared in
     let%bind () = check_scope_now t admission.witness in
     match admission.mode with
-    | Admission_data.Direct -> Target.check_now t.target
+    | Admission_data.Direct -> check_target_now t
     | Admission_data.Descendant child ->
-      let%bind () = Target.check_descendant_now t.target ~child in
+      let%bind () = check_target_descendant_now t ~child in
       Root.Model_inference.check_saved_agent_source_descendant_now
         t.root
-        ~selected:(Target.saved t.target)
+        ~selected:(Target.saved t.saved_ancestor)
         ~child
   ;;
 
@@ -839,32 +887,77 @@ module Child_prepared = struct
     let%bind admission = refresh t in
     let%bind () = Admission.check_now admission in
     let%bind port =
-      Agent_session.Captured_agent_runner.Source_binding.selected_content_source
-        source
-        ~target:t.target
+      match t.target with
+      | Saved target -> Source_binding.selected_content_source source ~target
+      | Content target -> Source_binding.selected_descendant_content_source source ~target
     in
     let%bind current = refresh t in
     let%map () = Admission.check_now current in
     port
   ;;
+
+  let run_content_agent t ~side ~declaration ~ctx =
+    let open Result.Let_syntax in
+    let%bind admission = refresh t in
+    let%bind () = Admission.check_now admission in
+    let%bind result =
+      Source_binding.Content_ports.run t.content_ports ~side ~declaration ~ctx
+    in
+    let%bind after = refresh t in
+    let%map () = Admission.check_now after in
+    result
+  ;;
 end
 
-let with_saved_child live ~root ~target ~startup ~compilation_limits ~programs ~input ~f =
+let with_child
+      live
+      ~root
+      ~target
+      ~saved_ancestor
+      ~daemon_sw
+      ~startup
+      ~compilation_limits
+      ~programs
+      ~input
+      ~f
+  =
   let open Result.Let_syntax in
   let checkpoint () = Chat_response.Startup_compilation.checkpoint startup in
+  let check_target () =
+    match target with
+    | Saved target -> Target.check target
+    | Content target -> Content_target.check target
+  in
+  let check_target_now () =
+    match target with
+    | Saved target -> Target.check_now target
+    | Content target -> Content_target.check_now target
+  in
+  let revision =
+    match target with
+    | Saved target -> Target.revision target
+    | Content target -> Content_target.revision target
+  in
   let check_full () =
     let%bind () = check_source_bound_now live ~root in
-    let%bind () = Target.check target in
+    let%bind () = check_target () in
     let%bind () =
-      Root.Model_inference.check_saved_agent_source root ~selected:(Target.saved target)
+      let saved = Target.saved saved_ancestor in
+      let%bind borrowed = Agent_session.Native_tool_invocation.borrow_selected () in
+      if Saved.matches_borrowed saved borrowed
+      then Root.Model_inference.check_saved_agent_source root ~selected:saved
+      else
+        Root.Model_inference.check_saved_agent_source_descendant_now
+          root
+          ~selected:saved
+          ~child:borrowed
     in
     check_current live
   in
   let owner = Owner.create () in
   let ready =
-    Owner.start owner ~daemon_sw:live.switch ~build:(fun sw ->
+    Owner.start owner ~daemon_sw ~build:(fun sw ->
       let%bind () = check_full () in
-      let revision = Target.revision target in
       let%bind parsed =
         Revision.parser_context revision
         |> Result.of_option
@@ -925,7 +1018,7 @@ let with_saved_child live ~root ~target ~startup ~compilation_limits ~programs ~
             else Error (invalid "developer actor is no longer current")
           in
           let%bind () = check_source_bound_now live ~root in
-          let%bind () = Target.check_now target in
+          let%bind () = check_target_now () in
           Root.check_effect_now root witness
         in
         match check () with
@@ -966,11 +1059,47 @@ let with_saved_child live ~root ~target ~startup ~compilation_limits ~programs ~
       then Error (invalid "developer child native binding limit exceeded")
       else (
         let%bind () = check_full () in
+        let%bind binding =
+          live.source_binding
+          |> Result.of_option
+               ~error:(invalid "selected child has no original source binding")
+        in
+        let%bind run_selected_content =
+          live.selected_content_runner
+          |> Result.of_option
+               ~error:(invalid "selected child content runner is unavailable")
+        in
+        let%bind script_preparation =
+          live.host.script_preparation
+          |> Result.of_option
+               ~error:(invalid "selected child script preparation is unavailable")
+        in
+        let parent =
+          match target with
+          | Saved target -> Content_target.Saved target
+          | Content target -> Content_target.Content target
+        in
+        let%bind content_ports =
+          Source_binding.bind_selected_child
+            binding
+            ~parent
+            ~run_selected_content
+            ~script_preparation
+            ~manifest_authorizer:authorizer
+            ~approval_provider:live.approval_provider
+            ~response_dir:live.response_dir
+            ~env:live.host.env
+            ~revision
+            ~sw
+        in
+        let%bind () = check_full () in
         let active = ref true in
         let prepared =
           { live
           ; root
           ; target
+          ; saved_ancestor
+          ; content_ports
           ; revision
           ; switch = sw
           ; active
@@ -1009,7 +1138,64 @@ let with_saved_child live ~root ~target ~startup ~compilation_limits ~programs ~
     Stdlib.Printexc.raise_with_backtrace exn backtrace
 ;;
 
-let bind_agent_sources t ~root ~models ~run_selected_target ~checkpoint =
+let with_saved_child live ~root ~target ~startup ~compilation_limits ~programs ~input ~f =
+  with_child
+    live
+    ~root
+    ~target:(Saved target)
+    ~saved_ancestor:target
+    ~daemon_sw:live.switch
+    ~startup
+    ~compilation_limits
+    ~programs
+    ~input
+    ~f
+;;
+
+let with_selected_content_child
+      ~parent
+      ~target
+      ~startup
+      ~compilation_limits
+      ~programs
+      ~input
+      ~f
+  =
+  let open Result.Let_syntax in
+  let expected_parent =
+    match parent.target with
+    | Saved target -> Content_target.Saved target
+    | Content target -> Content_target.Content target
+  in
+  let%bind () =
+    if Content_target.matches_parent target expected_parent
+    then Ok ()
+    else Error (invalid "nested Agent belongs to another immediate child")
+  in
+  let%bind admission = Child_prepared.refresh parent in
+  let%bind () = Child_prepared.Admission.check_now admission in
+  let%bind () = Content_target.check target in
+  with_child
+    parent.live
+    ~root:parent.root
+    ~target:(Content target)
+    ~saved_ancestor:parent.saved_ancestor
+    ~daemon_sw:parent.switch
+    ~startup
+    ~compilation_limits
+    ~programs
+    ~input
+    ~f
+;;
+
+let bind_agent_sources
+      t
+      ~root
+      ~models
+      ~run_selected_target
+      ~run_selected_content
+      ~checkpoint
+  =
   let open Result.Let_syntax in
   let%bind () = check_current t in
   match t.agent_source_runtime with
@@ -1020,13 +1206,16 @@ let bind_agent_sources t ~root ~models ~run_selected_target ~checkpoint =
      | _ :: _, None ->
        Error (invalid "developer Agent source requires an admitted model provider")
      | _, Some models ->
-       Developer_agent_source_runtime.bind
-         prepared
-         ~root
-         ~models
-         ~agent_runtime:t.runtime
-         ~run_selected_target:(Some run_selected_target)
-         ~checkpoint)
+       let%map () =
+         Developer_agent_source_runtime.bind
+           prepared
+           ~root
+           ~models
+           ~agent_runtime:t.runtime
+           ~run_selected_target:(Some run_selected_target)
+           ~checkpoint
+       in
+       t.selected_content_runner <- Some run_selected_content)
 ;;
 
 let close_and_wait t =
@@ -1034,6 +1223,7 @@ let close_and_wait t =
   then Ok ()
   else (
     t.closing <- true;
+    t.selected_content_runner <- None;
     Option.iter t.agent_source_runtime ~f:Developer_agent_source_runtime.revoke;
     let joined = Owner.join t.owner in
     let closed = Workspace.close_and_wait t.workspace_owner in

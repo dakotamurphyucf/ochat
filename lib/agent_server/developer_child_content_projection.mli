@@ -39,6 +39,19 @@ module Budget : sig
     -> declaration:Agent_session.Prompt_revision.t
     -> caller:Agent_session.Prompt_revision.t option
     -> (t, Agent_protocol.Error.t) result
+
+  (** Admit one further authenticated nested child's declaring and actual
+      caller revisions into this SAME budget before conversion. Debit each new
+      physical retained revision's captured accounting exactly once; a caller
+      already admitted by an ancestor is not charged again. This is resource
+      accounting, not source authority: the selected Target and source ports
+      are checked separately. The short budget gate covers membership/debit
+      only and is released before any nested Agent callback. *)
+  val admit_revisions
+    :  t
+    -> declaration:Agent_session.Prompt_revision.t
+    -> caller:Agent_session.Prompt_revision.t
+    -> (unit, Agent_protocol.Error.t) result
 end
 
 type source =
@@ -64,11 +77,15 @@ val create
     Captured and builtin documents were already materialized by the selected
     revision; only parser-owned dynamic/local/remote occurrences are read.
     Inline image string rendering retains its original spelling without a
-    read. Executable nested Agent content is denied until a genuine descendant
-    Target is supplied by the joined execution adapter. Failure and
+    read. [agent] executes only the exact parser-owned occurrence through the
+    selected child's declaring or caller port. The callback's descendant
+    Target and joined owner are established by the upper child runner, not by
+    Converter. The source Scope is closed before this callback, so synchronous
+    nested selection never enters a recursively held read gate. Failure and
     cancellation cannot reset the aggregate budget or retry a source read. *)
 val to_items
   :  t
   -> ctx:Eio_unix.Stdenv.base Chat_response.Ctx.t
+  -> agent:(Prompt.Chat_markdown.agent_content -> (string, Agent_protocol.Error.t) result)
   -> Prompt.Chat_markdown.top_level_elements list
   -> (Openai.Responses.Item.t list, Agent_protocol.Error.t) result

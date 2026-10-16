@@ -305,12 +305,21 @@ let create_live_services t ~root ~resources ~current_actor =
       ~authorize:t.authorize_native
       ~prepare_output:t.prepare_output
   in
+  let%bind run_selected_content =
+    Child_runner.create_content
+      ~live:resources
+      ~root
+      ~native
+      ~authorize:t.authorize_native
+      ~prepare_output:t.prepare_output
+  in
   let%map () =
     Live_resources.bind_agent_sources
       resources
       ~root
       ~models:model
       ~run_selected_target
+      ~run_selected_content
       ~checkpoint:t.checkpoint
   in
   { jobs; native; background; model }

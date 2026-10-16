@@ -237,6 +237,62 @@ module Claimed_developer : sig
     -> ('a, Agent_protocol.Error.t) result
 end
 
+module Selected_content_target : sig
+  (** One authored Agent content occurrence selected inside a physically entered
+      saved-Agent child. This is distinct from the saved Tool target: content
+      keeps its own defining parser/reference and cannot consume the enclosing
+      Tool's recorded artifact. The issuer is minted only from the actual
+      selected native borrow, the original invoke triple and the immediate
+      selected parent: either the saved Tool child or another authored Content
+      child. It also retains that ancestry's original saved Tool target. Every
+      level expires when its own callback or any ancestor child ends. *)
+  type t
+
+  (** Comparison coordinates for the immediate physical parent. Constructing a
+      variant is not a source grant; [matches_parent] checks the retained
+      issuer and [check] verifies the original saved ancestor and live chain. *)
+  type parent =
+    | Saved of Claimed_developer.Selected.Target.t
+    | Content of t
+
+  val revision : t -> Prompt_revision.t
+  val caller_revision : t -> Prompt_revision.t
+
+  (** Physical comparison only. The host must additionally check its live Root,
+      native child and current source before entering an effect. *)
+  val matches_parent : t -> parent -> bool
+
+  (** Yielding source/reference and selected-native recheck after restoration. *)
+  val check : t -> (unit, Agent_protocol.Error.t) result
+
+  (** Final nonyielding check of this callback and every logical parent. A
+      synchronous Content child may use the SAME selected native borrow as its
+      parent. Only an actually entered descendant native callback is checked
+      by [Native_tool_invocation.check_selected_ancestor]. *)
+  val check_now : t -> (unit, Agent_protocol.Error.t) result
+
+  (** Final nonyielding check when a genuine distinct native child invocation
+      shadows the borrow that selected this Content child. Logical Content
+      recursion alone does not create such a native invocation. *)
+  val check_descendant_now
+    :  t
+    -> child:Native_tool_invocation.selected_borrowed
+    -> (unit, Agent_protocol.Error.t) result
+end
+
+(** Trusted host callback for the one selected descendant content target. The
+    source runner mints the target; this function value does not itself grant
+    Root, parser, provider or source authority. *)
+type selected_content_runner =
+  target:Selected_content_target.t
+  -> startup:Chat_response.Startup_compilation.t
+  -> compilation_limits:Chatml_compilation.limits
+  -> programs:Chatml_prompt_programs.Restored.t option
+  -> ctx:Eio_unix.Stdenv.base Chat_response.Ctx.t
+  -> input:Prompt.Chat_markdown.content_item list
+  -> source:string
+  -> (string, Agent_protocol.Error.t) result
+
 module Source_binding : sig
   (** Immutable original-source template; borrows Store and source lease, without
       opening or claiming either. Bound ports belong to their actual resource
@@ -250,9 +306,10 @@ module Source_binding : sig
       | Declaring
       | Caller
 
-    (** Current saved Target and exact binding issuer, without opening a root
-        Scope. Captured/builtin/literal conversion remains valid if the
-        original lease is unavailable; this check is not a source grant. *)
+    (** Current selected Tool or descendant Content target and exact binding
+        issuer, without opening a root Scope. Captured/builtin/literal
+        conversion remains valid if the original lease is unavailable; this
+        check is not a source grant. *)
     val check : t -> (unit, Agent_protocol.Error.t) result
 
     (** Comparison only; a caller must still use this port's checked read. *)
@@ -287,6 +344,27 @@ module Source_binding : sig
       -> (Prompt_source_owner.Scope.Origin_read.t, Agent_protocol.Error.t) result
   end
 
+  module Content_ports : sig
+    (** Two physical parser-owned Agent ports from one selected child: its own
+        restored declaring parser and this invocation's actual caller.
+        Neither port is an independent original-source grant or an enduring
+        native callback; File selection still checks the actual live lease. *)
+    type t
+
+    (** Check the immediate selected parent and original saved ancestor, exact
+        source binding and side's parser membership before invoking the lower
+        content selector. Expected
+        selected-source denial remains typed; cancellation and unexpected
+        callback exceptions retain identity/backtrace. No ordinary source
+        fallback occurs after denial. *)
+    val run
+      :  t
+      -> side:Content_source.side
+      -> declaration:Prompt.Chat_markdown.agent_content
+      -> ctx:Eio_unix.Stdenv.base Chat_response.Ctx.t
+      -> (string, Agent_protocol.Error.t) result
+  end
+
   val create
     :  source:Source.t
     -> tool_contract:Chatml_compilation.Tool_contract.t
@@ -305,6 +383,16 @@ module Source_binding : sig
   val selected_content_source
     :  t
     -> target:Claimed_developer.Selected.Target.t
+    -> (Content_source.t, Agent_protocol.Error.t) result
+
+  (** The same short read port for a separately selected descendant Agent
+      content target. This cannot be minted by casting a saved Tool target or
+      comparing revision IDs; the exact binding issuer, saved ancestor and
+      current selected borrow must all match. Declaration/caller revisions are
+      taken from the content target's authentic invoke triple. *)
+  val selected_descendant_content_source
+    :  t
+    -> target:Selected_content_target.t
     -> (Content_source.t, Agent_protocol.Error.t) result
 
   (** Select installed child code through this genuine borrowed source template.
@@ -340,6 +428,29 @@ module Source_binding : sig
     -> revision:Prompt_revision.t
     -> sw:Eio.Switch.t
     -> (Chat_response.Tool.Agent_source_runner.t, Agent_protocol.Error.t) Result.t
+
+  (** Bind the selected child revision to its own parser-owned Agent port under
+      the immediate parent's joined switch. [parent] is the exact physically
+      selected saved Tool or Content child, and [revision] is this child's
+      restored target, never its ancestor's parser. The port checks the entire
+      original saved ancestry and this binding at each content invocation,
+      then mints a distinct [Selected_content_target] for the trusted callback.
+      The genuine caller port from this child's invoke triple remains separate.
+      Each nested level binds afresh through this same operation; no parent Port
+      is reused as the nested declaration Port. A failed callback never falls
+      through to ordinary Driver or Fetch. No source Scope is retained. *)
+  val bind_selected_child
+    :  t
+    -> parent:Selected_content_target.parent
+    -> run_selected_content:selected_content_runner
+    -> script_preparation:Runtime_script_preparation.t
+    -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+    -> approval_provider:Shell_runtime.Approval_broker.provider
+    -> response_dir:Eio.Fs.dir_ty Eio.Path.t
+    -> env:Eio_unix.Stdenv.base
+    -> revision:Prompt_revision.t
+    -> sw:Eio.Switch.t
+    -> (Content_ports.t, Agent_protocol.Error.t) result
 end
 
 module Deferred_developer : sig
@@ -358,9 +469,15 @@ module Deferred_developer : sig
       [run_selected_target], only literal authored message/config/reasoning
       content is admitted: callable Tool declarations, executable scripts,
       authored tool calls/responses, nested Agent content and document/image
-      fetch content reject. With the trusted callback, only an exact saved Tool
-      target in the current selected native scope is lent to that callback;
-      the callback must separately admit every child effect before execution.
+      fetch content reject. With the trusted Tool callback, only an exact saved
+      target in the current selected native scope is lent to it. Within that
+      physically entered child, the trusted host later binds a distinct
+      [Source_binding.Content_ports] with its selected Content callback. That
+      port may receive a distinct target for an actual parser-owned Agent
+      occurrence; a failed descendant check never falls through to literal
+      Driver execution. Outside an ambient
+      saved child, existing literal-only content behavior remains unchanged.
+      Each callback must separately admit every child effect.
       A callback error never falls back to Driver or the literal path. The
       selected Tool_contract is the explicit value already retained by
       [source]; a stored digest cannot choose another ABI.

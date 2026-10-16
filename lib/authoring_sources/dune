@@ -175,6 +175,10 @@
     lib/agent_server/managed_output_page.ml %{dep:../agent_server/managed_output_page.ml}
     lib/agent_server/session_factory.ml %{dep:../agent_server/session_factory.ml}
     lib/agent_server/developer_background_job_runner.ml %{dep:../agent_server/developer_background_job_runner.ml}
+    lib/agent_server/developer_child_agent_runner.ml %{dep:../agent_server/developer_child_agent_runner.ml}
+    lib/agent_server/developer_child_content_projection.ml %{dep:../agent_server/developer_child_content_projection.ml}
+    lib/agent_server/developer_child_selection.ml %{dep:../agent_server/developer_child_selection.ml}
+    lib/agent_server/developer_live_resources.ml %{dep:../agent_server/developer_live_resources.ml}
     lib/agent_server/developer_managed_tool_executor.ml %{dep:../agent_server/developer_managed_tool_executor.ml}
     lib/agent_server/developer_native_executor.ml %{dep:../agent_server/developer_native_executor.ml}
     lib/agent_server/developer_script_job_execution.ml %{dep:../agent_server/developer_script_job_execution.ml}

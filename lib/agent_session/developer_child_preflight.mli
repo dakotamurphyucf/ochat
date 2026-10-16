@@ -21,12 +21,15 @@ val admit_literal
     the converted moderator surface and rejects here.
     Actual child resources remain unavailable until the owning host proves
     and installs every selected implementation. Nested Agent, Persistent and
-    Inherited Tool declarations, authored call/response, image/document/Agent
-    Agent content, moderation and authoring effects reject before host
+    Inherited Tool declarations, authored call/response, moderator execution and
+    authoring effects reject before host
     activation. Image/document Basic items pass only a finite structural
     preflight; the selected source projector must subsequently authenticate
     each parser-owned occurrence and admit any read before Driver entry. This
-    preflight grants no local or remote source access. *)
+    preflight grants no local or remote source access. Authored Agent content
+    passes only its bounded structural scan; the selected source runner must
+    prove each parser occurrence and mint a distinct descendant Content target
+    before any nested child begins. *)
 val admit_selected
   :  revision:Prompt_revision.t
   -> parsed:Prompt.Chat_markdown.Parsed.t

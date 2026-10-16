@@ -60,7 +60,7 @@ let invalid message = Error (error Invalid_state message)
 module Budget = struct
   type t =
     { limits : Limits.t
-    ; contents : Agent_session.Prompt_revision.t list
+    ; mutable contents : Agent_session.Prompt_revision.t list
     ; mutable input_remaining : int
     ; mutable output_remaining : int
     ; mutable work_remaining : int
@@ -124,6 +124,53 @@ module Budget = struct
         then resource "child content budget has an unresolved read"
         else f ())
       ~finally:(fun () -> Eio.Cancel.protect (fun () -> Eio.Mutex.unlock t.gate))
+  ;;
+
+  let admit_revisions t ~declaration ~caller =
+    with_exclusive t ~f:(fun () ->
+      let revisions =
+        if phys_equal declaration caller then [ declaration ] else [ declaration; caller ]
+      in
+      let fresh =
+        List.filter revisions ~f:(fun revision ->
+          not (List.exists t.contents ~f:(phys_equal revision)))
+      in
+      let module A = Chatmd_prompt_content.Accounting in
+      let open Result.Let_syntax in
+      let%bind input, output, work, nodes =
+        List.fold_result
+          fresh
+          ~init:(0, 0, 0, 0)
+          ~f:(fun (input, output, work, nodes) revision ->
+            let captured =
+              Option.map
+                (Agent_session.Prompt_revision.content revision)
+                ~f:Chatmd_prompt_content.accounting
+            in
+            let next getter = Option.value_map captured ~default:0 ~f:getter in
+            let input_next = next A.input_bytes in
+            let output_next = next A.output_bytes in
+            let work_next = next A.work_steps + 1 in
+            let nodes_next = next A.nodes in
+            if
+              input_next > t.input_remaining - input
+              || output_next > t.output_remaining - output
+              || work_next > t.work_remaining - work
+              || nodes_next > t.nodes_remaining - nodes
+            then resource "nested child captured content exceeds aggregate budget"
+            else
+              Ok
+                ( input + input_next
+                , output + output_next
+                , work + work_next
+                , nodes + nodes_next ))
+      in
+      t.input_remaining <- t.input_remaining - input;
+      t.output_remaining <- t.output_remaining - output;
+      t.work_remaining <- t.work_remaining - work;
+      t.nodes_remaining <- t.nodes_remaining - nodes;
+      t.contents <- List.rev_append fresh t.contents;
+      Ok ())
   ;;
 end
 
@@ -365,7 +412,7 @@ let document t (item : CM.basic_content_item) =
     C.Output.contents converted)
 ;;
 
-let to_items t ~ctx elements =
+let to_items t ~ctx ~agent elements =
   let open Result.Let_syntax in
   if t.used
   then invalid "child content projection was already used"
@@ -373,10 +420,7 @@ let to_items t ~ctx elements =
     t.used <- true;
     let%bind () = check t in
     let source =
-      Chat_response.Converter_source.create
-        ~image:(image t)
-        ~document:(document t)
-        ~agent:(fun _ -> invalid "nested executable Agent content is not installed")
+      Chat_response.Converter_source.create ~image:(image t) ~document:(document t) ~agent
     in
     let%bind items =
       Chat_response.Converter.to_items_with_source
