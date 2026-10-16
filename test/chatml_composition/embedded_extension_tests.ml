@@ -100,23 +100,28 @@ let with_host
           ; event_capacity = 512
           }
         in
-        Fixtures.with_daemon_switch env ~clocks:daemon_clocks (fun sw daemon_env ->
-          let authoring_package_files =
-            List.map package_files ~f:(Filename.concat root)
-          in
-          let embedded =
-            Embedded.start
-              ~sw
-              ~env:daemon_env
-              ~daemon_options
-              ~authoring_package_files
-              ?authoring_budget
-              options
-            |> protocol_ok
-          in
-          Exn.protect
-            ~finally:(fun () -> Embedded.close embedded)
-            ~f:(fun () -> f env workspace embedded))))
+        Fixtures.with_daemon_switch
+          env
+          ~clocks:daemon_clocks
+          (fun sw daemon_env ~release_clocks ->
+             let authoring_package_files =
+               List.map package_files ~f:(Filename.concat root)
+             in
+             let embedded =
+               Embedded.start
+                 ~sw
+                 ~env:daemon_env
+                 ~daemon_options
+                 ~authoring_package_files
+                 ?authoring_budget
+                 options
+               |> protocol_ok
+             in
+             Exn.protect
+               ~finally:(fun () ->
+                 release_clocks ();
+                 Embedded.close embedded)
+               ~f:(fun () -> f env workspace embedded))))
 ;;
 
 let initial_outcome (snapshot : P.Public.Snapshot.Fields.t) call_id =
