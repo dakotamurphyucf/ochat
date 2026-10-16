@@ -109,6 +109,111 @@ let%expect_test "to_items converts user message with basic text" =
     |}]
 ;;
 
+let%expect_test "selected conversion admits exact escaped JSON boundary" =
+  Eio_main.run
+  @@ fun env ->
+  let dir = Eio.Stdenv.fs env in
+  let cache = Chat_response.Cache.create ~max_size:5 () in
+  let ctx = fixture_ctx ~env ~dir ~cache ~tool_dir:dir in
+  let msg : CM.msg =
+    { role = "user"
+    ; content = Some (Text "a\"\\\n")
+    ; name = None
+    ; id = None
+    ; status = None
+    ; phase = None
+    ; ochat_history_id = None
+    ; source_context = None
+    ; function_call = None
+    ; tool_call = None
+    ; tool_call_id = None
+    ; type_ = None
+    }
+  in
+  let elements = [ CM.Msg msg ] in
+  let expected = Converter.to_items ~ctx ~run_agent:stub_run_agent elements in
+  let exact =
+    2
+    + List.fold expected ~init:0 ~f:(fun total item ->
+      total + String.length (Openai.Responses.Item.jsonaf_of_t item |> Jsonaf.to_string))
+  in
+  let denied _ =
+    Error
+      (Agent_protocol.Error.create
+         Agent_protocol.Error.Invalid_state
+         ~message:"unexpected source callback"
+         ~retryable:false
+         ())
+  in
+  let source =
+    Chat_response.Converter_source.create ~image:denied ~document:denied ~agent:denied
+  in
+  let run max_output_bytes =
+    let charged = ref 0 in
+    let result =
+      Converter.to_items_with_source
+        ~source
+        ~ctx
+        ~max_output_bytes
+        ~max_source_bytes:4096
+        ~remaining_output_bytes:(fun () -> max_output_bytes)
+        ~charge_work:(fun count ->
+          charged := !charged + count;
+          Ok ())
+        ~charge_output:(fun _ -> Ok ())
+        ~checkpoint:(fun () -> ())
+        elements
+    in
+    Result.is_ok result, !charged > 0
+  in
+  print_s [%sexp (run exact : bool * bool), (run (exact - 1) : bool * bool)];
+  let rejected_before_projection elements =
+    let charged = ref 0 in
+    let outcome =
+      Converter.to_items_with_source
+        ~source
+        ~ctx
+        ~max_output_bytes:64
+        ~max_source_bytes:4096
+        ~remaining_output_bytes:(fun () -> 64)
+        ~charge_work:(fun count ->
+          charged := !charged + count;
+          Ok ())
+        ~charge_output:(fun _ -> Ok ())
+        ~checkpoint:(fun () -> ())
+        elements
+    in
+    Result.is_error outcome, !charged
+  in
+  let large_literal =
+    [ CM.Msg { msg with content = Some (Text (String.make 2048 'x')) } ]
+  in
+  let basic : CM.basic_content_item =
+    { type_ = "text"
+    ; text = Some "x"
+    ; image_url = None
+    ; document_url = None
+    ; is_local = false
+    ; cleanup_html = false
+    ; markdown = false
+    }
+  in
+  let wide =
+    [ CM.Msg
+        { msg with content = Some (Items (List.init 128 ~f:(fun _ -> CM.Basic basic))) }
+    ]
+  in
+  print_s
+    [%sexp
+      (rejected_before_projection large_literal : bool * int)
+    , (rejected_before_projection wide : bool * int)];
+  [%expect
+    {|
+    ((true true) (false true))
+    ((true 3) (true 3))
+    |}]
+;;
+
 let%expect_test "id-less assistant input survives JSON round trip" =
   Eio_main.run
   @@ fun env ->

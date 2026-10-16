@@ -120,6 +120,25 @@ module Prepared_inputs : sig
           -> string)
     -> unit
     -> Materialized.t
+
+  (** Trusted upper callers supply two already authenticated projectors. They
+      run in declaration-then-invocation order; an error prevents the second
+      projection and history allocation. This function grants no source or
+      execution authority and never selects the ambient Converter fallback. *)
+  val materialize_with_projectors
+    :  t
+    -> session_id:string
+    -> ?source:string
+    -> project_declaration:
+         (ctx:Eio_unix.Stdenv.base Ctx.t
+          -> Prompt.Chat_markdown.top_level_elements list
+          -> (Openai.Responses.Item.t list, Agent_protocol.Error.t) result)
+    -> project_invocation:
+         (ctx:Eio_unix.Stdenv.base Ctx.t
+          -> Prompt.Chat_markdown.top_level_elements list
+          -> (Openai.Responses.Item.t list, Agent_protocol.Error.t) result)
+    -> unit
+    -> (Materialized.t, Agent_protocol.Error.t) result
 end
 
 (** Generation options are explicit overrides; omitted model/settings inherit.

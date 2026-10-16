@@ -10,10 +10,11 @@ module C = Chat_response.Tool_capability
 module M = Chat_response.Managed_tool_registry
 module Driver = Chat_response.Driver
 module Prepared = Driver.Prepared_inputs
+module Content = Developer_child_content_projection
+module Content_source = Agent_session.Captured_agent_runner.Source_binding.Content_source
 module Output = Openai.Responses.Tool_output.Output
 
 exception Tool_denied of P.Error.t
-exception Content_denied
 
 let ( let* ) result f = Result.bind result ~f
 let invalid message = P.Error.invalid_request message
@@ -163,15 +164,64 @@ let run_selected
         let parent = H.context (Saved.invocation (Saved.Target.saved target)) in
         let config = Prepared.config prepared_inputs in
         let session_id = Option.value config.id ~default:"nested-agent" in
+        let* limits =
+          Content.Limits.for_host (Live.Child_prepared.content_limits prepared)
+          |> Result.map_error ~f:(fun _ ->
+            invalid "selected child content limits are invalid")
+        in
+        let* budget =
+          Content.Budget.create
+            ~limits
+            ~declaration:revision
+            ~caller:(Some (Saved.Target.caller_revision target))
+        in
+        let* source_mode =
+          if Live.Child_prepared.needs_dynamic_source prepared
+          then
+            let* () =
+              if Option.is_some (Live.Child_prepared.content_limits prepared)
+              then Ok ()
+              else Error (invalid "dynamic child content limits are not configured")
+            in
+            let* source = Live.Child_prepared.content_source prepared in
+            Ok (Content.Selected source)
+          else Ok Content.Captured_only
+        in
+        let check_current () =
+          let* current = Live.Child_prepared.refresh prepared in
+          Live.Child_prepared.Admission.check_now current
+        in
+        let checkpoint () = Chat_response.Startup_compilation.checkpoint startup in
+        let remote = Live.Child_prepared.remote_content prepared in
+        let* declaration =
+          Content.create
+            ~budget
+            ~revision
+            ~source:source_mode
+            ~side:Content_source.Declaring
+            ~remote
+            ~check_current
+            ~checkpoint
+        in
+        let* invocation =
+          Content.create
+            ~budget
+            ~revision:(Saved.Target.caller_revision target)
+            ~source:source_mode
+            ~side:Content_source.Caller
+            ~remote
+            ~check_current
+            ~checkpoint
+        in
         let result =
           try
-            let materialized =
-              Prepared.materialize
+            let* materialized =
+              Prepared.materialize_with_projectors
                 prepared_inputs
                 ~session_id
                 ~source
-                ~run_agent:(fun ?prompt_dir:_ ?session_id:_ ~ctx:_ _ _ ->
-                  raise Content_denied)
+                ~project_declaration:(Content.to_items declaration)
+                ~project_invocation:(Content.to_items invocation)
                 ()
             in
             let history = Prepared.Materialized.initial_history materialized in
@@ -190,8 +240,6 @@ let run_selected
             Ok (Prepared.Materialized.completion_text materialized all)
           with
           | Tool_denied error -> Error error
-          | Content_denied ->
-            Error (invalid "selected developer child contains unsupported content")
         in
         result))
 ;;

@@ -22,6 +22,10 @@ module Source : sig
     -> cleanup_html:bool
     -> markdown:bool
     -> t
+
+  val range : t -> Chatmd_parser_input.Range.t
+  val src : t -> string
+  val selection : t -> Selection.t
 end
 
 module Owner : sig

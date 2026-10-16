@@ -105,6 +105,7 @@ type t =
   ; max_native_bindings : int
   ; child_sources : Session_factory.Child_source_policy.t option
   ; content_limits : Chatmd_prompt_content.Limits.t option
+  ; remote_content : Developer_child_remote_content.t option
   ; artifact_store : Agent_store.Prompt_artifact_store.t
   ; agent_source_limits : Developer_agent_source_runtime.Limits.t
   ; gate : Eio.Mutex.t
@@ -166,9 +167,21 @@ let create
       ~max_native_bindings
       ~child_sources
       ~content_limits
+      ~remote_content
       ~artifact_store
       ~agent_source_limits
   =
+  let open Result.Let_syntax in
+  let%bind remote_content =
+    match remote_content with
+    | None -> Ok None
+    | Some policy ->
+      Developer_child_remote_content.create
+        ~policy
+        ~net:(Eio.Stdenv.net env)
+        ~clock:(Eio.Stdenv.mono_clock env)
+      |> Result.map ~f:Option.some
+  in
   if max_native_bindings <= 0
   then Error (invalid "developer native binding limit must be positive")
   else
@@ -188,6 +201,7 @@ let create
       ; max_native_bindings
       ; child_sources
       ; content_limits
+      ; remote_content
       ; artifact_store
       ; agent_source_limits
       ; gate = Eio.Mutex.create ()
@@ -707,6 +721,7 @@ type child_prepared =
   ; runtime : Runtime.t
   ; selected : Capabilities.t
   ; managed : Chat_response.Managed_tool_registry.t
+  ; needs_dynamic_source : bool
   }
 
 module Child_prepared = struct
@@ -729,6 +744,9 @@ module Child_prepared = struct
   let runtime t = t.runtime
   let selected_native t = t.selected
   let managed_definition t = t.managed
+  let needs_dynamic_source t = t.needs_dynamic_source
+  let remote_content t = t.live.host.remote_content
+  let content_limits t = t.live.host.content_limits
   let tool_contract t = Definition.tool_contract t.live.definition
   let response_dir t = t.live.response_dir
 
@@ -811,6 +829,24 @@ module Child_prepared = struct
 
     let check_now = check_admission_now
   end
+
+  let content_source t =
+    let open Result.Let_syntax in
+    let%bind source =
+      t.live.source_binding
+      |> Result.of_option ~error:(invalid "selected child has no original source binding")
+    in
+    let%bind admission = refresh t in
+    let%bind () = Admission.check_now admission in
+    let%bind port =
+      Agent_session.Captured_agent_runner.Source_binding.selected_content_source
+        source
+        ~target:t.target
+    in
+    let%bind current = refresh t in
+    let%map () = Admission.check_now current in
+    port
+  ;;
 end
 
 let with_saved_child live ~root ~target ~startup ~compilation_limits ~programs ~input ~f =
@@ -834,8 +870,8 @@ let with_saved_child live ~root ~target ~startup ~compilation_limits ~programs ~
         |> Result.of_option
              ~error:(invalid "selected child has no retained parser context")
       in
-      let%bind () =
-        Agent_session.Developer_child_preflight.admit_selected
+      let%bind needs_dynamic_source =
+        Agent_session.Developer_child_preflight.classify_selected
           ~revision
           ~parsed
           ~input
@@ -941,6 +977,7 @@ let with_saved_child live ~root ~target ~startup ~compilation_limits ~programs ~
           ; runtime = resources.native
           ; selected
           ; managed = resources.managed
+          ; needs_dynamic_source
           }
         in
         let run () =

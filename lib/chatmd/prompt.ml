@@ -222,6 +222,24 @@ module Chat_markdown = struct
   include Chat_content
   module Document_occurrence = Chatmd_document_occurrence
 
+  module Content_origin = struct
+    type kind =
+      | Image
+      | Document of Document_occurrence.Selection.t
+    [@@deriving equal, sexp_of]
+
+    type t =
+      { basic : basic_content_item
+      ; range : Chatmd_parser_input.Range.t
+      ; locator : string
+      ; kind : kind
+      }
+
+    let kind t = t.kind
+    let range t = t.range
+    let locator t = t.locator
+  end
+
   module Agent_reference = struct
     module Source_mode = struct
       type t =
@@ -270,6 +288,7 @@ module Chat_markdown = struct
     | Summary of reasoning_summary
     | Text of string
     | Image of string * bool
+    | Owned_image of string * bool * Chatmd_parser_input.Range.t
     | Document of string * bool * bool * bool * Document_occurrence.Source.t option
     | Agent of string (* url *) * bool (* is_local *) * chat_element list
     | Owned_agent_tool of
@@ -290,8 +309,19 @@ module Chat_markdown = struct
   let content_items_of_elements
         ?(on_document = fun _ ~items:_ -> ())
         ?(on_agent = ignore)
+        ?(on_basic_origin = ignore)
         elts
     =
+    let image_basic url local =
+      { type_ = "image_url"
+      ; text = None
+      ; image_url = Some { url }
+      ; document_url = None
+      ; is_local = local
+      ; cleanup_html = false
+      ; markdown = false
+      }
+    in
     let rec build ~path_rev ~index = function
       | [] -> []
       | Text text :: rest ->
@@ -306,20 +336,18 @@ module Chat_markdown = struct
           }
         :: build ~path_rev ~index:(index + 1) rest
       | Image (url, local) :: rest ->
-        Basic
-          { type_ = "image_url"
-          ; text = None
-          ; image_url = Some { url }
-          ; document_url = None
-          ; is_local = local
-          ; cleanup_html = false
-          ; markdown = false
-          }
-        :: build ~path_rev ~index:(index + 1) rest
+        Basic (image_basic url local) :: build ~path_rev ~index:(index + 1) rest
+      | Owned_image (url, local, range) :: rest ->
+        let basic = image_basic url local in
+        let origin : Content_origin.t =
+          { basic; range; locator = url; kind = Content_origin.Image }
+        in
+        on_basic_origin origin;
+        Basic basic :: build ~path_rev ~index:(index + 1) rest
       | Document (url, local, cleanup_html, markdown, source) :: rest ->
         Option.iter source ~f:(fun source ->
           on_document source ~items:(List.rev (index :: path_rev)));
-        Basic
+        let basic =
           { type_ = "text"
           ; text = None
           ; image_url = None
@@ -328,7 +356,17 @@ module Chat_markdown = struct
           ; cleanup_html
           ; markdown
           }
-        :: build ~path_rev ~index:(index + 1) rest
+        in
+        Option.iter source ~f:(fun source ->
+          let origin : Content_origin.t =
+            { basic
+            ; range = Document_occurrence.Source.range source
+            ; locator = Document_occurrence.Source.src source
+            ; kind = Content_origin.Document (Document_occurrence.Source.selection source)
+            }
+          in
+          on_basic_origin origin);
+        Basic basic :: build ~path_rev ~index:(index + 1) rest
       | Agent (url, is_local, children) :: rest ->
         let items = build ~path_rev:(index :: path_rev) ~index:0 children in
         Agent { url; is_local; items } :: build ~path_rev ~index:(index + 1) rest
@@ -367,10 +405,16 @@ module Chat_markdown = struct
   (* Actually parse the child elements to produce a (Text ...) or (Items ...). *)
   (* Converts a list of child chat_elements into either a single text or a list
      of content items, stored in chat_message_content. *)
-  let parse_msg_children ?on_document ?on_agent (children : chat_element list)
+  let parse_msg_children
+        ?on_document
+        ?on_agent
+        ?on_basic_origin
+        (children : chat_element list)
     : chat_message_content option
     =
-    let items = content_items_of_elements ?on_document ?on_agent children in
+    let items =
+      content_items_of_elements ?on_document ?on_agent ?on_basic_origin children
+    in
     match items with
     | [] -> None
     (* If there is exactly one Basic text item, store as Text. Otherwise use Items. *)
@@ -478,7 +522,7 @@ module Chat_markdown = struct
         is_local
         (String.concat ~sep:"" sub_items)
     | Text s -> s
-    | Image (url, is_local) ->
+    | Image (url, is_local) | Owned_image (url, is_local, _) ->
       if is_local
       then Printf.sprintf "<img src=\"%s\" local=\"true\" />" url
       else Printf.sprintf "<img src=\"%s\" />" url
@@ -778,6 +822,7 @@ module Chat_markdown = struct
         ?(owned_documents = false)
         ?(on_document = fun _ ~items:_ -> ())
         ?(on_agent = ignore)
+        ?(on_basic_origin = ignore)
         ?(checkpoint = ignore)
         ?extraction_budget
         ~dir
@@ -809,6 +854,7 @@ module Chat_markdown = struct
             parse_msg_children
               ?on_document:(if is_root then Some on_document else None)
               ?on_agent:(if is_root then Some on_agent else None)
+              ?on_basic_origin:(if is_root then Some on_basic_origin else None)
               children
           in
           let source_context = source_ref.Chatmd_shell_spec.Source_ref.file in
@@ -884,7 +930,9 @@ module Chat_markdown = struct
               List.iter attr ~f:(fun (nm, v) -> Hashtbl.set tbl ~key:nm ~data:v);
               let url = Option.value (Hashtbl.find tbl "src") ~default:"" in
               let is_local = Hashtbl.mem tbl "local" in
-              Image (url, is_local)
+              if owned_documents
+              then Owned_image (url, is_local, Option.value_exn range)
+              else Image (url, is_local)
             | Element (Doc, attrs, _) ->
               let attr =
                 List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"")
@@ -1735,6 +1783,7 @@ module Chat_markdown = struct
         | Summary _
         | Text _
         | Image _
+        | Owned_image _
         | Document _
         | Agent _
         | Owned_agent_tool _
@@ -1768,6 +1817,7 @@ module Chat_markdown = struct
       ; agents : Agent_reference.t list
       ; documents : Document_occurrence.t list
       ; document_owner : Document_occurrence.Owner.t
+      ; content_origins : Content_origin.t list
       }
 
     let elements t = t.elements
@@ -1838,6 +1888,53 @@ module Chat_markdown = struct
           ~error:(Error.of_string "content agent is absent from parser")
       with
       | Abort.Limit -> invalid "content agent lookup work limit")
+  ;;
+
+  let content_origin parsed ?projection ~max_work_steps ~checkpoint basic =
+    let module Abort = struct
+      exception Limit
+    end
+    in
+    let remaining = ref max_work_steps in
+    let poll () =
+      if !remaining <= 0 then raise Abort.Limit;
+      decr remaining;
+      checkpoint ()
+    in
+    let invalid message = Or_error.error_string message in
+    if max_work_steps <= 0
+    then invalid "content origin lookup requires positive work allowance"
+    else (
+      try
+        poll ();
+        let open Or_error.Let_syntax in
+        let%bind () =
+          match projection with
+          | None -> Ok ()
+          | Some projection ->
+            if phys_equal parsed (Document_projection.parsed projection)
+            then Ok ()
+            else invalid "content origin projection belongs to another parser"
+        in
+        let%bind origin =
+          List.find parsed.Parsed.content_origins ~f:(fun origin ->
+            poll ();
+            phys_equal basic origin.Content_origin.basic)
+          |> Result.of_option
+               ~error:(Error.of_string "content item is absent from parser")
+        in
+        let input = Chatmd_parser_input.Range.input (Content_origin.range origin) in
+        let%map () =
+          if
+            List.exists (Parsed.inputs parsed) ~f:(fun member ->
+              poll ();
+              phys_equal input member)
+          then Ok ()
+          else invalid "content origin input is absent from parser"
+        in
+        origin
+      with
+      | Abort.Limit -> invalid "content origin lookup work limit")
   ;;
 
   module Projection_work = struct
@@ -2144,6 +2241,7 @@ module Chat_markdown = struct
       agents := reference :: !agents
     in
     let documents = ref [] in
+    let content_origins = ref [] in
     let document_owner = Document_occurrence.Owner.create () in
     let ordinal = ref 0 in
     let converted =
@@ -2155,6 +2253,9 @@ module Chat_markdown = struct
             ~find_required
             ~owned_documents:true
             ~on_agent
+            ~on_basic_origin:(fun origin ->
+              checkpoint ();
+              content_origins := origin :: !content_origins)
             ~checkpoint
             ~extraction_budget:map_budget
             ~on_document:(fun source ~items ->
@@ -2185,6 +2286,7 @@ module Chat_markdown = struct
       ; agents = List.rev !agents
       ; documents = List.rev !documents
       ; document_owner
+      ; content_origins = List.rev !content_origins
       }
     in
     result

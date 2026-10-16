@@ -365,6 +365,27 @@ let%expect_test "saved child preflight uses the owned parser and denies unowned 
       , (outcome selected_text : string)
       , (outcome selected_document : string)
       , (outcome literal : string)];
+    let assistant, assistant_parsed =
+      build {|<assistant><img src="inline.png" local/></assistant>|}
+    in
+    let assistant_inline =
+      Preflight.classify_selected
+        ~revision:assistant
+        ~parsed:assistant_parsed
+        ~input:[]
+        ~checkpoint:ignore
+    in
+    let caller_document =
+      Preflight.classify_selected
+        ~revision:good
+        ~parsed:good_parsed
+        ~input:[ document_input ]
+        ~checkpoint:ignore
+    in
+    print_s
+      [%sexp
+        (assistant_inline : (bool, P.Error.t) result)
+      , (caller_document : (bool, P.Error.t) result)];
     let oversized_text =
       match text_input with
       | CM.Basic basic ->
@@ -440,7 +461,8 @@ let on_event ctx state event = Task.pure(state)</script>|}
     print_s [%sexp ("moderator" : string), (outcome moderator_result : string)]);
   [%expect
     {|
-    ("read_file / text input" admitted invalid_request invalid_state)
+    ("read_file / text input" admitted admitted invalid_state)
+    ((Ok false) (Ok true))
     ("bounds / checkpoint" resource_limit resource_limit true)
     ("fork / foreign parser" invalid_request invalid_state)
     (moderator invalid_request)

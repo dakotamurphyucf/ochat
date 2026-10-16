@@ -259,6 +259,7 @@ let with_fixture
       ?model_requests
       ?response_body
       ?(model_function_tools = false)
+      ?(model_image_input = false)
       ?(on_model_submit = ignore)
       ?(on_model_body = ignore)
       f
@@ -334,6 +335,12 @@ let with_fixture
                            ([ ( Openai.Responses_driver.Capability.Text_input
                               , Openai.Responses_driver.Capability.Supported )
                             ]
+                            @ (if model_image_input
+                               then
+                                 [ ( Openai.Responses_driver.Capability.Image_input
+                                   , Openai.Responses_driver.Capability.Supported )
+                                 ]
+                               else [])
                             @
                             if model_function_tools
                             then

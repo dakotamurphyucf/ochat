@@ -21,6 +21,19 @@ type startup_mode =
 module Developer_configuration : sig
   type t
 
+  module Remote_content : sig
+    type t
+
+    (** Optional daemon policy for exact remote content origins. Absence denies
+        child document/image network reads before I/O. Bounds are positive,
+        finite and validated at construction. *)
+    val create
+      :  allowed_origins:string list
+      -> max_response_bytes:int
+      -> max_wall_seconds:float
+      -> t Core.Or_error.t
+  end
+
   module Limits : sig
     type t
 
@@ -66,6 +79,10 @@ module Developer_configuration : sig
          (Openai.Responses.Tool_output.Output.t
           -> (Jsonaf.t, Agent_protocol.Error.t) result)
     -> (t, Agent_protocol.Error.t) result
+
+  (** Attach an explicitly admitted remote child-content policy before daemon
+      construction. Omission keeps remote reads disabled. *)
+  val with_remote_content : t -> Remote_content.t -> t
 end
 
 type options =
