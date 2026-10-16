@@ -561,6 +561,7 @@ let run ctx input = Task.bind(Tool.call("read_file", input), fun result ->
                            P.Authoring.Analysis.Target.selected_script "tool_child" |> ok
                        })
                   ~kind:Live_run
+                  ~target:Chatml.Chatml_compiler_contract.Target.One_off_v1
                   ~prompt:(Some (S.Catalog_identity.prompt_definition "restart.prompt"))
                   ~workspace:
                     (Some (S.Catalog_identity.workspace_definition "restart.workspace"))
