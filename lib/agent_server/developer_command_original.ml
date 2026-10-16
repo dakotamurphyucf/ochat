@@ -336,6 +336,7 @@ let create
 
 let kind t = t.kind
 let target t = t.target
+let route_to_json = route
 let route t = t.route
 let prompt t = t.prompt
 let workspace t = t.workspace
@@ -343,3 +344,16 @@ let requested_execution t = t.requested_execution
 let requested_max_output_bytes t = t.requested_max_output_bytes
 let fingerprint t = t.fingerprint
 let capture_request t = Ok t.request
+
+module Identity = struct
+  let valid_route = validate_route
+  let route_json = route_to_json
+  let execution_json = execution
+  let target_name = target_name
+
+  let digest_json json ~checkpoint =
+    canonical ~checkpoint json
+    |> canonical_string_with_checkpoint ~checkpoint
+    |> Chatml_source.Digest.of_contents ~checkpoint
+  ;;
+end

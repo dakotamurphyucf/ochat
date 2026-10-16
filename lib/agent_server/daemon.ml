@@ -1522,6 +1522,7 @@ let compose
         ~store_limits:limits.store
         ~limits:limits.host
         ~budget_configuration:limits.budgets
+        ~repl:configuration.repl
         ~now:(fun () -> timestamp env)
         ~checkpoint:Eio.Fiber.check
       |> Result.map ~f:Option.some
@@ -2156,4 +2157,49 @@ module Developer = struct
     with_host t (fun host ->
       Developer_host.Command.cancel_and_wait host ~actor ~run_id ~key)
   ;;
+
+  module Repl = struct
+    module Original = Developer_host.Repl.Original
+    module Instance = Developer_host.Repl.Instance
+    module Epoch = Developer_host.Repl.Epoch
+    module Revision = Developer_host.Repl.Revision
+    module View = Developer_host.Repl.View
+    module Submission = Developer_host.Repl.Submission
+
+    let create t ~actor ~run_id ~key ~original ~fresh_source =
+      with_host t (fun host ->
+        Developer_host.Repl.create host ~actor ~run_id ~key ~original ~fresh_source)
+    ;;
+
+    let submit t ~actor ~instance ~epoch ~expected_revision ~key ~source =
+      with_host t (fun host ->
+        Developer_host.Repl.submit
+          host
+          ~actor
+          ~instance
+          ~epoch
+          ~expected_revision
+          ~key
+          ~source)
+    ;;
+
+    let observe t ~actor ~instance ~key =
+      with_host t (fun host -> Developer_host.Repl.observe host ~actor ~instance ~key)
+    ;;
+
+    let cancel_and_wait t ~actor ~instance ~key =
+      with_host t (fun host ->
+        Developer_host.Repl.cancel_and_wait host ~actor ~instance ~key)
+    ;;
+
+    let reset_and_wait t ~actor ~instance ~expected_epoch ~key =
+      with_host t (fun host ->
+        Developer_host.Repl.reset_and_wait host ~actor ~instance ~expected_epoch ~key)
+    ;;
+
+    let close_and_wait t ~actor ~instance ~key =
+      with_host t (fun host ->
+        Developer_host.Repl.close_and_wait host ~actor ~instance ~key)
+    ;;
+  end
 end

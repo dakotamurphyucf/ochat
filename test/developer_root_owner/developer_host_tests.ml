@@ -213,7 +213,79 @@ let semantic_authoring_policy env =
   Policy.with_semantic base ~semantic |> ok
 ;;
 
-let with_daemon ?(tool_fixture = false) f =
+let repl_configuration () =
+  let parse =
+    Chatml.Chatml_parse.Submission.Limits.create
+      ~max_source_bytes:4096
+      ~max_tokens:4096
+      ~max_work_steps:100_000
+      ~sites:
+        (Chatml.Chatml_syntax_sites.Limits.create ~max_sites:4096 ~max_name_bytes:16384
+         |> Or_error.ok_exn)
+    |> Or_error.ok_exn
+  in
+  let display =
+    Chatml_typechecker.Type_snapshot.Limits.create
+      ~max_nodes:4096
+      ~max_edges:4096
+      ~max_label_bytes:16384
+    |> Or_error.ok_exn
+  in
+  let root_copy =
+    Chatml_typechecker.Repl_type_roots.Limits.create
+      ~max_bindings:128
+      ~max_type_roots:256
+      ~max_type_nodes:4096
+      ~max_variable_cells:1024
+      ~max_type_edges:4096
+      ~max_copy_work:100_000
+      ~max_copy_depth:128
+      ~max_name_work:100_000
+      ~max_name_bytes:16384
+    |> Or_error.ok_exn
+  in
+  let typing_limits =
+    Chatml_repl_typing.Limits.create
+      ~parse
+      ~display
+      ~max_display_name_bytes:4096
+      ~max_statements:16
+      ~root_copy
+    |> Or_error.ok_exn
+  in
+  S.Daemon.Developer_configuration.Repl.create
+    ~scope_limits:
+      (Chatml_configured_lookup.Repl_scope.Limits.create
+         ~max_snippets:16
+         ~max_identity_bytes:4096
+       |> Or_error.ok_exn)
+    ~root_limits:
+      (Chatml_dependency_session.Roots.Limits.create
+         ~max_checked_modules:16
+         ~max_edges:64
+         ~max_dependency_depth:16
+       |> Or_error.ok_exn)
+    ~typing_limits
+    ~evaluator_limits:
+      (Chatml_repl_execution.Limits.create
+         ~max_preview_bytes:4096
+         ~max_preview_nodes:1024
+         ~max_preview_depth:16
+         ~max_diagnostic_bytes:1024
+         ~max_retained_tasks:8
+       |> Or_error.ok_exn)
+    ~execution_policy:(Bounded Chatml_execution.default_limits)
+    ~max_instances:2
+    ~max_keys_per_instance:4
+    ~max_submissions_per_epoch:8
+    ~max_source_bytes:4096
+    ~max_receipt_bytes:8192
+    ~max_total_receipt_bytes:16384
+    ~max_task_origins:4
+  |> ok
+;;
+
+let with_daemon ?(tool_fixture = false) ?(repl = false) f =
   Eio_main.run (fun env ->
     let root =
       Filename.concat
@@ -252,10 +324,17 @@ let with_daemon ?(tool_fixture = false) f =
               }
             | _ -> failwith "unexpected configured catalog fixture"
           in
+          let developer = developer_configuration ~tool_fixture () in
+          let developer =
+            if repl
+            then
+              S.Daemon.Developer_configuration.with_repl developer (repl_configuration ())
+            else developer
+          in
           let options =
             { S.Daemon.default_options with
               authoring = Some (semantic_authoring_policy env)
-            ; developer = Some (developer_configuration ~tool_fixture ())
+            ; developer = Some developer
             }
           in
           let daemon =
@@ -548,4 +627,190 @@ let%expect_test "hosted Tool_v1 fixture binds selected ABI and durable row" =
       "tool_success=true same_row=true changed_target_conflicts=%b\n"
       changed_target_conflicts);
   [%expect {| tool_success=true same_row=true changed_target_conflicts=true |}]
+;;
+
+let%expect_test "hosted REPL retains partial work and closes at key saturation" =
+  with_daemon ~repl:true (fun daemon ->
+    let module Repl = S.Daemon.Developer.Repl in
+    let scopes = Set.add Agent_server_test_support.scopes Developer_repl in
+    let principal =
+      Agent_server_test_support.principal_with_scopes "pri_developer_repl" scopes
+    in
+    let actor = Operator_authorization.trusted_local principal in
+    let reconnected = Operator_authorization.trusted_local principal in
+    let foreign =
+      Operator_authorization.trusted_local
+        (Agent_server_test_support.principal_with_scopes "pri_foreign_repl" scopes)
+    in
+    let connection, _transport, expected = open_document daemon actor in
+    let selector = P.Authoring.Analysis.Target.selected_script "s" |> ok in
+    let route = S.Daemon.Developer.Request.Route.Document_script { expected; selector } in
+    let fresh_source =
+      Some (S.Daemon.Developer.Request.Fresh_source.Document_script { connection })
+    in
+    let original =
+      Repl.Original.create
+        ~route
+        ~target:Chatml.Chatml_compiler_contract.Target.One_off_v1
+        ~prompt:(S.Catalog_identity.prompt_definition "restart.prompt")
+        ~workspace:(S.Catalog_identity.workspace_definition "restart.workspace")
+        ~requested_execution:None
+        ~requested_max_output_bytes:None
+        ~checkpoint:ignore
+      |> ok
+    in
+    let run_id = P.Id.Developer_run.create () in
+    let key name = P.Idempotency_key.of_string name |> checked in
+    let view =
+      Repl.create daemon ~actor ~run_id ~key:(key "repl-create") ~original ~fresh_source
+      |> ok
+    in
+    let replay =
+      Repl.create
+        daemon
+        ~actor:reconnected
+        ~run_id
+        ~key:(key "repl-create")
+        ~original
+        ~fresh_source:None
+      |> ok
+    in
+    assert (Repl.Instance.equal (Repl.View.instance view) (Repl.View.instance replay));
+    let foreign_denied =
+      Result.is_error
+        (Repl.create
+           daemon
+           ~actor:foreign
+           ~run_id
+           ~key:(key "repl-create")
+           ~original
+           ~fresh_source:None)
+    in
+    let instance = Repl.View.instance view in
+    let epoch = Repl.View.epoch view in
+    let first =
+      Repl.submit
+        daemon
+        ~actor
+        ~instance
+        ~epoch
+        ~expected_revision:(Repl.View.revision view)
+        ~key:(key "repl-good")
+        ~source:"let good = 1"
+      |> ok
+    in
+    let first_finished =
+      match Repl.Submission.status first with
+      | Finished -> true
+      | Need_more _ | Rejected _ | Stopped _ -> false
+    in
+    let second =
+      Repl.submit
+        daemon
+        ~actor
+        ~instance
+        ~epoch
+        ~expected_revision:(Repl.Submission.revision first)
+        ~key:(key "repl-failed")
+        ~source:"let local = 1\nlet doomed = 1 / 0"
+      |> ok
+    in
+    let second_stopped =
+      match Repl.Submission.status second with
+      | Stopped _ -> true
+      | Need_more _ | Rejected _ | Finished -> false
+    in
+    let truthful_limited =
+      match Repl.Submission.details second, Repl.Submission.statements second with
+      | Output_limited, [] -> true
+      | Available, [ first; failed ] ->
+        (match
+           ( Chatml_repl_execution.Receipt.outcome first
+           , Chatml_repl_execution.Receipt.outcome failed )
+         with
+         | Succeeded, Failed Runtime -> true
+         | _ -> false)
+      | _ -> false
+    in
+    let retry =
+      Repl.submit
+        daemon
+        ~actor:reconnected
+        ~instance
+        ~epoch
+        ~expected_revision:(Repl.Submission.revision first)
+        ~key:(key "repl-failed")
+        ~source:"let local = 1\nlet doomed = 1 / 0"
+      |> ok
+    in
+    assert (
+      Repl.Revision.equal
+        (Repl.Submission.revision second)
+        (Repl.Submission.revision retry));
+    let known =
+      Repl.observe daemon ~actor:reconnected ~instance ~key:(key "repl-good") |> ok
+    in
+    let reset =
+      Repl.reset_and_wait
+        daemon
+        ~actor
+        ~instance
+        ~expected_epoch:epoch
+        ~key:(key "repl-reset")
+      |> ok
+    in
+    let old_key_replay =
+      Repl.submit
+        daemon
+        ~actor:reconnected
+        ~instance
+        ~epoch
+        ~expected_revision:(Repl.Submission.revision first)
+        ~key:(key "repl-failed")
+        ~source:"let local = 1\nlet doomed = 1 / 0"
+      |> ok
+    in
+    let changed_old_key_conflicts =
+      Result.is_error
+        (Repl.submit
+           daemon
+           ~actor:reconnected
+           ~instance
+           ~epoch
+           ~expected_revision:(Repl.Submission.revision first)
+           ~key:(key "repl-failed")
+           ~source:"let local = 2")
+    in
+    let reset_changed_epoch = not (Repl.Epoch.equal epoch (Repl.View.epoch reset)) in
+    let fresh_denied =
+      Result.is_error
+        (Repl.submit
+           daemon
+           ~actor
+           ~instance
+           ~epoch:(Repl.View.epoch reset)
+           ~expected_revision:(Repl.View.revision reset)
+           ~key:(key "repl-other")
+           ~source:"1")
+    in
+    let close = Repl.close_and_wait daemon ~actor ~instance ~key:(key "repl-close") in
+    printf
+      "same_instance=true foreign_denied=%b first_finished=%b second_stopped=%b \
+       truthful_limited=%b completed=%d first_observed=%b reset_changed_epoch=%b \
+       old_key_replay=%b changed_old_key_conflicts=%b fresh_denied=%b close_ok=%b\n"
+      foreign_denied
+      first_finished
+      second_stopped
+      truthful_limited
+      (Repl.Submission.completed_statements second)
+      (Option.is_some known)
+      reset_changed_epoch
+      (Repl.Revision.equal
+         (Repl.Submission.revision second)
+         (Repl.Submission.revision old_key_replay))
+      changed_old_key_conflicts
+      fresh_denied
+      (Result.is_ok close));
+  [%expect
+    {| same_instance=true foreign_denied=true first_finished=true second_stopped=true truthful_limited=true completed=1 first_observed=true reset_changed_epoch=true old_key_replay=true changed_old_key_conflicts=true fresh_denied=true close_ok=true |}]
 ;;

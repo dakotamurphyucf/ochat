@@ -6,6 +6,46 @@ module Remote_content = struct
   let create = Developer_child_remote_content.Policy.create
 end
 
+module Repl = struct
+  type t = Developer_repl_epoch.Configuration.t
+
+  let create
+        ~scope_limits
+        ~root_limits
+        ~typing_limits
+        ~evaluator_limits
+        ~execution_policy
+        ~max_instances
+        ~max_keys_per_instance
+        ~max_submissions_per_epoch
+        ~max_source_bytes
+        ~max_receipt_bytes
+        ~max_total_receipt_bytes
+        ~max_task_origins
+    =
+    let open Result.Let_syntax in
+    let%map limits =
+      Developer_repl_epoch.Limits.create
+        ~max_instances
+        ~max_keys_per_instance
+        ~max_submissions_per_epoch
+        ~max_source_bytes
+        ~max_receipt_bytes
+        ~max_total_receipt_bytes
+        ~max_task_origins
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request (Error.to_string_hum error))
+    in
+    Developer_repl_epoch.Configuration.create
+      ~scope_limits
+      ~root_limits
+      ~typing_limits
+      ~evaluator_limits
+      ~execution_policy
+      ~limits
+  ;;
+end
+
 module Limits = struct
   type t =
     { store : Agent_store.Developer_run_store.Limits.t
@@ -84,6 +124,7 @@ type t =
   ; publisher_storage : Agent_store.Developer_result_publisher.Storage.t
   ; model_target : Inference.Request.Target.t option
   ; remote_content : Remote_content.t option
+  ; repl : Repl.t option
   ; authorize_native :
       Agent_protocol.Host_invocation.t
       -> Chat_response.Tool_capability.binding
@@ -116,9 +157,11 @@ let create
     ; publisher_storage
     ; model_target
     ; remote_content = None
+    ; repl = None
     ; authorize_native
     ; prepare_output
     }
 ;;
 
 let with_remote_content t remote_content = { t with remote_content = Some remote_content }
+let with_repl t repl = { t with repl = Some repl }

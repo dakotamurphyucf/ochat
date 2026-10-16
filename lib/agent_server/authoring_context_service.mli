@@ -564,6 +564,50 @@ module Developer : sig
     val create : selector:P.Authoring.Analysis.Target.selector -> t
   end
 
+  module Source_selection : sig
+    (** Exact source/contract selection shared by command capture and one
+        process-local REPL epoch. Minted only from this installed Developer
+        service; it does not create a command or grant interpreter effects. *)
+    type t
+
+    type checked
+
+    val prepared : t -> Chatml_prepared_program.t
+    val entry_source : t -> Chatml_source.t
+    val selected_contract : t -> Selected_contract.t
+
+    val check_current
+      :  t
+      -> actor:Operator_authorization.t
+      -> checkpoint:(unit -> unit)
+      -> (checked, P.Error.t) result
+
+    val check_now
+      :  t
+      -> checked:checked
+      -> actor:Operator_authorization.t
+      -> (unit, P.Error.t) result
+
+    module Shared : sig
+      type checked
+
+      (** Concurrent authenticated reads do not invalidate a running REPL
+          statement's admission proof. This proof cannot enter a Candidate's
+          exclusive command admission. *)
+      val check_current
+        :  t
+        -> actor:Operator_authorization.t
+        -> checkpoint:(unit -> unit)
+        -> (checked, P.Error.t) result
+
+      val check_now
+        :  t
+        -> checked:checked
+        -> actor:Operator_authorization.t
+        -> (unit, P.Error.t) result
+    end
+  end
+
   module Candidate : sig
     type t
 
@@ -580,6 +624,46 @@ module Developer : sig
       -> checkpoint:(unit -> unit)
       -> (unit -> (unit, P.Error.t) result, P.Error.t) result
   end
+
+  val prepare_local_project_selection
+    :  t
+    -> original_actor:Operator_authorization.t
+    -> actor:Operator_authorization.t
+    -> local:Local_project.t
+    -> clock:Eio.Time.Mono.ty Eio.Time.Mono.t
+    -> checkpoint:(unit -> unit)
+    -> (Source_selection.t, P.Error.t) result
+
+  val prepare_local_source_selection
+    :  t
+    -> original_actor:Operator_authorization.t
+    -> actor:Operator_authorization.t
+    -> source:Local_source.t
+    -> checkpoint:(unit -> unit)
+    -> (Source_selection.t, P.Error.t) result
+
+  val prepare_authoring_project_selection
+    :  t
+    -> actor:Operator_authorization.t
+    -> connection:Connection_context.t
+    -> expected:P.Authoring.Context.Expected.t
+    -> checkpoint:(unit -> unit)
+    -> (Source_selection.t, P.Error.t) result
+
+  val prepare_document_script_selection
+    :  t
+    -> actor:Operator_authorization.t
+    -> connection:Connection_context.t
+    -> expected:P.Authoring.Context.Expected.t
+    -> script:Document_script.t
+    -> checkpoint:(unit -> unit)
+    -> (Source_selection.t, P.Error.t) result
+
+  val capture_selection
+    :  Source_selection.t
+    -> request:Request.t
+    -> checkpoint:(unit -> unit)
+    -> (Candidate.t, P.Error.t) result
 
   val create : owner:owner -> policy:Target_policy.t -> limits:Limits.t -> t
 

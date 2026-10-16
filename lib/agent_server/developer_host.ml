@@ -14,6 +14,7 @@ module Background = Developer_background_job_runner
 module Model = Developer_model_job_runner
 module Live_resources = Developer_live_resources
 module Child_runner = Developer_child_agent_runner
+module Repl_epoch = Developer_repl_epoch
 
 type live_services =
   { jobs : Jobs.t
@@ -188,6 +189,7 @@ type t =
   ; roots : Root.Registry.t
   ; lifecycle : Lifecycle.t
   ; capture : Capture.t
+  ; repl : Repl_epoch.t option
   ; live_resources : Developer_live_resources.t
   ; disclosure_policy : Command_view.Disclosure_policy.t
   ; control_policy : Command_view.Control_policy.t
@@ -414,6 +416,7 @@ let create
       ~store_limits
       ~(limits : Limits.t)
       ~budget_configuration
+      ~repl
       ~now
       ~checkpoint
   =
@@ -506,6 +509,16 @@ let create
         ~recovery
     in
     acquired_lifecycle := Some lifecycle;
+    let repl =
+      Option.map repl ~f:(fun configuration ->
+        Repl_epoch.install
+          ~sw
+          ~capture_host:capture
+          ~env
+          ~clock:(Eio.Stdenv.mono_clock env)
+          ~configuration
+          ~checkpoint)
+    in
     { env
     ; session_store
     ; blobs
@@ -514,6 +527,7 @@ let create
     ; roots
     ; lifecycle
     ; capture
+    ; repl
     ; live_resources
     ; disclosure_policy = command_disclosure
     ; control_policy = command_control
@@ -1371,6 +1385,11 @@ let close_and_wait t =
   t.closed <- true;
   Eio.Cancel.protect (fun () ->
     let open Result.Let_syntax in
+    let%bind () =
+      match t.repl with
+      | None -> Ok ()
+      | Some repl -> Repl_epoch.shutdown_and_wait repl
+    in
     let%bind () = Lifecycle.stop_and_join t.lifecycle in
     let live_runs =
       Hashtbl.data t.runs
@@ -1419,4 +1438,62 @@ module Command = struct
   let observe = observe_command
   let await_terminal = await_command
   let cancel_and_wait = cancel_command
+end
+
+module Repl = struct
+  module Original = Repl_epoch.Original
+  module Instance = Repl_epoch.Instance
+  module Epoch = Repl_epoch.Epoch
+  module Revision = Repl_epoch.Revision
+  module View = Repl_epoch.View
+  module Submission = Repl_epoch.Submission
+  module Task_origin = Repl_epoch.Task_origin
+
+  type borrowed = Repl_epoch.borrowed
+
+  let with_owner t ~f =
+    if t.closed
+    then Error (error P.Error.Invalid_state "developer host is closed" ~retryable:false)
+    else (
+      match t.repl with
+      | None ->
+        Error
+          (error P.Error.Invalid_state "developer REPL is not installed" ~retryable:false)
+      | Some repl -> f repl)
+  ;;
+
+  let create t ~actor ~run_id ~key ~original ~fresh_source =
+    with_owner t ~f:(fun repl ->
+      Repl_epoch.create repl ~actor ~run_id ~key ~original ~fresh_source)
+  ;;
+
+  let submit t ~actor ~instance ~epoch ~expected_revision ~key ~source =
+    with_owner t ~f:(fun repl ->
+      Repl_epoch.submit repl ~actor ~instance ~epoch ~expected_revision ~key ~source)
+  ;;
+
+  let observe t ~actor ~instance ~key =
+    with_owner t ~f:(fun repl -> Repl_epoch.observe repl ~actor ~instance ~key)
+  ;;
+
+  let cancel_and_wait t ~actor ~instance ~key =
+    with_owner t ~f:(fun repl -> Repl_epoch.cancel_and_wait repl ~actor ~instance ~key)
+  ;;
+
+  let reset_and_wait t ~actor ~instance ~expected_epoch ~key =
+    with_owner t ~f:(fun repl ->
+      Repl_epoch.reset_and_wait repl ~actor ~instance ~expected_epoch ~key)
+  ;;
+
+  let close_and_wait t ~actor ~instance ~key =
+    with_owner t ~f:(fun repl -> Repl_epoch.close_and_wait repl ~actor ~instance ~key)
+  ;;
+
+  let with_current t ~actor ~instance ~epoch ~f =
+    with_owner t ~f:(fun repl -> Repl_epoch.with_current repl ~actor ~instance ~epoch ~f)
+  ;;
+
+  let evaluator = Repl_epoch.evaluator
+  let check_now = Repl_epoch.check_now
+  let task_origin = Repl_epoch.task_origin
 end

@@ -24,6 +24,85 @@ module Limits : sig
     -> t Or_error.t
 end
 
+module Repl : sig
+  module Original = Developer_repl_epoch.Original
+  module Instance = Developer_repl_epoch.Instance
+  module Epoch = Developer_repl_epoch.Epoch
+  module Revision = Developer_repl_epoch.Revision
+  module View = Developer_repl_epoch.View
+  module Submission = Developer_repl_epoch.Submission
+  module Task_origin = Developer_repl_epoch.Task_origin
+
+  type borrowed = Developer_repl_epoch.borrowed
+
+  (** Every operation borrows the same process-local actor installed with this
+      host's exact Developer_capture_host. No command row, Store writer or
+      second scheduler is constructed for inert REPL statements. *)
+  val create
+    :  t
+    -> actor:Operator_authorization.t
+    -> run_id:P.Id.Developer_run.t
+    -> key:P.Idempotency_key.t
+    -> original:Original.t
+    -> fresh_source:Developer_command_original.Fresh_source.t option
+    -> (View.t, P.Error.t) result
+
+  val submit
+    :  t
+    -> actor:Operator_authorization.t
+    -> instance:Instance.t
+    -> epoch:Epoch.t
+    -> expected_revision:Revision.t
+    -> key:P.Idempotency_key.t
+    -> source:string
+    -> (Submission.t, P.Error.t) result
+
+  val observe
+    :  t
+    -> actor:Operator_authorization.t
+    -> instance:Instance.t
+    -> key:P.Idempotency_key.t
+    -> (Submission.t option, P.Error.t) result
+
+  val cancel_and_wait
+    :  t
+    -> actor:Operator_authorization.t
+    -> instance:Instance.t
+    -> key:P.Idempotency_key.t
+    -> (Submission.t, P.Error.t) result
+
+  val reset_and_wait
+    :  t
+    -> actor:Operator_authorization.t
+    -> instance:Instance.t
+    -> expected_epoch:Epoch.t
+    -> key:P.Idempotency_key.t
+    -> (View.t, P.Error.t) result
+
+  val close_and_wait
+    :  t
+    -> actor:Operator_authorization.t
+    -> instance:Instance.t
+    -> key:P.Idempotency_key.t
+    -> (unit, P.Error.t) result
+
+  val with_current
+    :  t
+    -> actor:Operator_authorization.t
+    -> instance:Instance.t
+    -> epoch:Epoch.t
+    -> f:(borrowed -> ('a, P.Error.t) result)
+    -> ('a, P.Error.t) result
+
+  val evaluator : borrowed -> Chatml_repl_execution.t
+  val check_now : borrowed -> (unit, P.Error.t) result
+
+  val task_origin
+    :  borrowed
+    -> Chatml_repl_execution.Task_handle.t
+    -> (Task_origin.t, P.Error.t) result
+end
+
 module Command : sig
   type view
 
@@ -241,6 +320,7 @@ val create
   -> store_limits:Store.Limits.t
   -> limits:Limits.t
   -> budget_configuration:Developer_command_budgets.Configuration.t
+  -> repl:Developer_repl_epoch.Configuration.t option
   -> now:(unit -> P.Timestamp.t)
   -> checkpoint:(unit -> unit)
   -> (t, P.Error.t) result
