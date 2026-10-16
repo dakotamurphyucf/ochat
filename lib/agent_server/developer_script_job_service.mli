@@ -162,29 +162,34 @@ module Native_selection : sig
   val physical : t -> Developer_root_owner.Native_terminal.Selection.t
 end
 
+module Capability_source : sig
+  type t =
+    | Root
+    | Worker of Chat_response.Tool_capability.t
+    | Admitted_child of Developer_child_selection.t
+
+  (** Current capabilities for this exact native scope. [Root] reads the
+      physical Root; [Worker] preserves the claimed Job's immutable narrowing;
+      [Admitted_child] resolves only the opaque saved child selection. A child
+      cannot be paired with another ceiling or comparison callback. This is
+      distinct from [Native_selection], the sealed outcome/job receipt. *)
+end
+
 (** Borrow a lexical Job scope from one actual registered Native_terminal.
-    This function checks physical terminal/root identity. A direct Child
-    context requires the exact live [selected_borrowed] from its parent
-    invocation; the parent's ID and narrowed capability ceiling are derived
-    from that expiring proof and compared with the terminal context and root
-    registry. Root and claimed-job children have no direct native borrow and
-    normally use the root's actual current selected registry. [ceiling], when
-    supplied for a claimed-job child, pins the admitted Tool request's exact
-    subset: every binding is re-resolved in the current root selection and the
-    terminal context must match its fingerprint. Job.start_tool/script cannot
-    regain other root-selected tools after a wait. A direct Child cannot
-    substitute [ceiling] for its expiring parent borrow. The existing selected
-    invocation kernel still re-resolves its binding and checks direct-parent
-    liveness at effect entry; this module repeats the borrowed ceiling after
-    yielding request preparation and before physical staging.
-    [selected_current] is an internal trusted comparison port used only by a
-    physically admitted child native executor. It cannot mint a capability:
-    this service still checks the exact Root, terminal, borrow and parent, and
-    each binding must resolve against the same caller selection after waits.
-    Its failure is final; no root-selection fallback is permitted. It may
-    yield, so the terminal is checked again after selection resolution and
-    immediately before the final parent check. Omission preserves the
-    original current Root registry path.
+    This function checks physical terminal/root identity. An ordinary direct
+    Child requires the exact live [borrowed] parent and intersects its narrowed
+    ceiling with current Root selection. [Worker] pins the admitted Tool
+    request's exact subset under its claimed Job ancestor; a direct Child
+    cannot substitute that ceiling for its expiring parent borrow. In the
+    [Admitted_child] branch the same exact saved-parent/descendant borrow is
+    checked, but the separately authenticated child registry supplies its
+    child-only bindings; the parent Root registry is not widened. The selected
+    invocation kernel still checks direct-parent liveness at effect entry.
+    [capabilities] is one coherent private current-selection source. The
+    admitted-child branch cannot be paired with an independent ceiling or
+    callback. Every selected binding is resolved after waits, and failure is
+    final without Root fallback. The child refresh may yield, so the terminal
+    is checked again before the final parent/effect gate.
     Developer_native_executor keeps its existing shared Function/Custom/
     managed policy, dispatch, permission, callback and completion pipeline.
     It calls [seal_native] from that pipeline's canonical outcome continuation
@@ -197,9 +202,7 @@ val with_native_scope
   :  t
   -> terminal:Developer_root_owner.Native_terminal.t
   -> borrowed:Agent_session.Native_tool_invocation.selected_borrowed option
-  -> ?ceiling:Chat_response.Tool_capability.t
-  -> ?selected_current:
-       (unit -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result)
+  -> capabilities:Capability_source.t
   -> check_parent_now:(unit -> (unit, Agent_protocol.Error.t) result)
   -> (scope:Scope.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result

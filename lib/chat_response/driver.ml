@@ -580,6 +580,115 @@ let assistant_text entries =
   |> String.concat ~sep:"\n"
 ;;
 
+module Prepared_inputs = struct
+  type t =
+    { ctx : Eio_unix.Stdenv.base Ctx.t
+    ; elements : CM.top_level_elements list
+    ; config : CM.config
+    ; input : CM.content_item list
+    }
+
+  module Materialized = struct
+    type t =
+      { allocator : History_entry.Allocator.t
+      ; initial_history : History_entry.t list
+      }
+
+    let allocator t = t.allocator
+    let initial_history t = t.initial_history
+
+    let completion_text t all_history =
+      extension_entries ~prefix:t.initial_history all_history |> assistant_text
+    ;;
+  end
+
+  let select_elements ~(ctx : Eio_unix.Stdenv.base Ctx.t) ~prompt_dir ~elements ~input =
+    let ctx =
+      Ctx.create
+        ~env:(Ctx.env ctx)
+        ~dir:prompt_dir
+        ~tool_dir:(Ctx.tool_dir ctx)
+        ~cache:(Ctx.cache ctx)
+        ~inference_context:ctx.inference_context
+        ~inference_identity:ctx.inference_identity
+        ~on_inference_attempt:ctx.on_inference_attempt
+        ~on_inference_completion:ctx.on_inference_completion
+        ~on_inference_observation:ctx.on_inference_observation
+        ~on_admitted_call:ctx.on_admitted_call
+        ~before_inference_dispatch:ctx.before_inference_dispatch
+        ?agent_prompt_v1_recipe:ctx.agent_prompt_v1_recipe
+        ~inference_relation:ctx.inference_relation
+        ()
+      |> fun child -> Ctx.with_submission_guard child ctx.submission_guard
+    in
+    let config = Config.of_elements elements in
+    { ctx = selected_context ctx config; elements; config; input }
+  ;;
+
+  let select_prepared ~ctx ~prompt_dir ~parsed ?document_projection ~input () =
+    let elements =
+      match document_projection with
+      | None -> CM.Parsed.elements parsed
+      | Some projection ->
+        if not (phys_equal parsed (CM.Document_projection.parsed projection))
+        then invalid_arg "prepared agent document projection belongs to another parser";
+        CM.Document_projection.elements projection
+    in
+    select_elements ~ctx ~prompt_dir ~elements ~input
+  ;;
+
+  let context t = t.ctx
+  let elements t = t.elements
+  let config t = t.config
+
+  let materialize
+        t
+        ~session_id
+        ?source
+        ?agent_source_runner
+        ?input_agent_source_runner
+        ~run_agent
+        ()
+    =
+    let convert ?agent_source_runner elements =
+      Converter.to_items ?agent_source_runner ~ctx:t.ctx ~run_agent elements
+    in
+    let user =
+      CM.User
+        { role = "user"
+        ; content = Some (Items t.input)
+        ; name = None
+        ; id = None
+        ; status = None
+        ; phase = None
+        ; ochat_history_id = None
+        ; source_context = None
+        ; function_call = None
+        ; tool_call = None
+        ; tool_call_id = None
+        ; type_ = None
+        }
+    in
+    (* Keep prompt conversion before caller-owned input conversion: both may
+       run captured content agents while preparing the initial history. *)
+    let prompt_items = convert ?agent_source_runner t.elements in
+    let invocation_items =
+      convert ?agent_source_runner:input_agent_source_runner [ user ]
+    in
+    let items = prompt_items @ invocation_items in
+    let namespace =
+      match source with
+      | Some source -> session_id ^ "/" ^ source
+      | None -> agent_allocator_namespace session_id
+    in
+    let created_allocator =
+      History_entry.Allocator.create ~namespace ~next_sequence:0 |> Result.ok_or_failwith
+    in
+    let history = create_history_entries ~allocator:created_allocator items in
+    Materialized.{ allocator = created_allocator; initial_history = history }
+  ;;
+end
+
 let run_entries
       ~ctx
       ~allocator
@@ -706,41 +815,6 @@ let rec run_agent_input
   (* 1.  Extract individual components from the shared context *)
   let dir = Option.value prompt_dir ~default:(Ctx.dir ctx) in
   let response_dir = Option.value response_dir ~default:(Ctx.dir ctx) in
-  let ctx =
-    Ctx.create
-      ~env:(Ctx.env ctx)
-      ~dir
-      ~tool_dir:(Ctx.tool_dir ctx)
-      ~cache:(Ctx.cache ctx)
-      ~inference_context:ctx.inference_context
-      ~inference_identity:ctx.inference_identity
-      ~on_inference_attempt:ctx.on_inference_attempt
-      ~on_inference_completion:ctx.on_inference_completion
-      ~on_inference_observation:ctx.on_inference_observation
-      ~on_admitted_call:ctx.on_admitted_call
-      ~before_inference_dispatch:ctx.before_inference_dispatch
-      ?agent_prompt_v1_recipe:ctx.agent_prompt_v1_recipe
-      ~inference_relation:ctx.inference_relation
-      ()
-    |> fun child -> Ctx.with_submission_guard child ctx.submission_guard
-  in
-  (* 1.  Build the full agent XML by adding any inline user items. *)
-  let msg =
-    CM.User
-      { role = "user"
-      ; content = Some (Items items)
-      ; name = None
-      ; id = None
-      ; status = None
-      ; phase = None
-      ; ochat_history_id = None
-      ; source_context = None
-      ; function_call = None
-      ; tool_call = None
-      ; tool_call_id = None
-      ; type_ = None
-      }
-  in
   let elements, programs =
     match input with
     | Authored prompt_xml ->
@@ -758,8 +832,11 @@ let rec run_agent_input
       elements, programs
   in
   (* 3.  Configuration (max_tokens, model, …) *)
-  let cfg = Config.of_elements elements in
-  let ctx = selected_context ctx cfg in
+  let prepared =
+    Prepared_inputs.select_elements ~ctx ~prompt_dir:dir ~elements ~input:items
+  in
+  let cfg = Prepared_inputs.config prepared in
+  let ctx = Prepared_inputs.context prepared in
   let id = cfg.id in
   let runtime_session_id =
     Option.first_some id session_id |> Option.value ~default:"nested-agent"
@@ -818,11 +895,13 @@ let rec run_agent_input
   let tools = agent_runtime.functions in
   let comp_tools, tool_tbl = Ochat_function.functions tools in
   let tools_req = Tool.convert_tools comp_tools in
-  (* 5.  Convert XML ‑> API items and enter the execute loop to handle function calls. *)
-  let convert ?agent_source_runner elements =
-    Converter.to_items
+  let materialized =
+    Prepared_inputs.materialize
+      prepared
+      ~session_id:runtime_session_id
+      ?source
       ?agent_source_runner
-      ~ctx
+      ?input_agent_source_runner
       ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
         run_agent
           ~history_compaction
@@ -834,13 +913,10 @@ let rec run_agent_input
           ~ctx
           prompt
           items)
-      elements
+      ()
   in
-  (* Prompt declarations belong to this child; invocation items may belong to
-     its caller. Dynamic items never inherit either declaration inventory. *)
-  let prompt_items = convert ?agent_source_runner elements in
-  let invocation_items = convert ?agent_source_runner:input_agent_source_runner [ msg ] in
-  let init_items = prompt_items @ invocation_items in
+  let allocator = Prepared_inputs.Materialized.allocator materialized in
+  let init_entries = Prepared_inputs.Materialized.initial_history materialized in
   let all_items =
     if has_script elements
     then (
@@ -870,16 +946,6 @@ let rec run_agent_input
       let capabilities =
         capabilities_with_model_recipe ~recipe Moderation.Capabilities.default
       in
-      let allocator =
-        let namespace =
-          match source with
-          | Some source -> session_id ^ "/" ^ source
-          | None -> agent_allocator_namespace session_id
-        in
-        History_entry.Allocator.create ~namespace ~next_sequence:0
-        |> Result.ok_or_failwith
-      in
-      let init_entries = create_history_entries ~allocator init_items in
       let moderator =
         let on_process_run = Agent_runtime.moderator_process_handler agent_runtime in
         create_moderator_entries
@@ -914,21 +980,8 @@ let rec run_agent_input
         ?source
         ?parent_call_id
         ()
-      |> extension_entries ~prefix:init_entries)
+      |> Prepared_inputs.Materialized.completion_text materialized)
     else (
-      let session_id =
-        Option.first_some id session_id |> Option.value ~default:"nested-agent"
-      in
-      let allocator =
-        let namespace =
-          match source with
-          | Some source -> session_id ^ "/" ^ source
-          | None -> agent_allocator_namespace session_id
-        in
-        History_entry.Allocator.create ~namespace ~next_sequence:0
-        |> Result.ok_or_failwith
-      in
-      let init_entries = create_history_entries ~allocator init_items in
       let all_entries =
         run_entries
           ~ctx
@@ -942,10 +995,9 @@ let rec run_agent_input
           ~tool_tbl
           init_entries
       in
-      extension_entries ~prefix:init_entries all_entries)
+      Prepared_inputs.Materialized.completion_text materialized all_entries)
   in
-  (* Child output is semantic text; retained opaque evidence is never lowered. *)
-  assistant_text all_items
+  all_items
 
 and run_agent
       ?history_compaction

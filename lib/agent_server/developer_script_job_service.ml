@@ -8,6 +8,7 @@ module Ops = Chat_response.Background_job_operations
 module C = Chat_response.Tool_capability
 module B = Chat_response.Background_request
 module N = Agent_session.Native_tool_invocation
+module Child = Developer_child_selection
 module M = Chat_response.Managed_tool_registry
 module H = P.Host_invocation
 module Runtime = Chatml_host_runtime
@@ -651,7 +652,27 @@ module Native_selection = struct
   let physical (t : t) = t.physical
 end
 
-let borrowed_selected service terminal borrowed ceiling ~selected_current =
+module Capability_source = struct
+  type t =
+    | Root
+    | Worker of C.t
+    | Admitted_child of Child.t
+end
+
+let current_capabilities service = function
+  | Capability_source.Root | Worker _ -> Ok (O.native_selected service.root)
+  | Admitted_child child ->
+    let* () =
+      if Child.issued_by_root child service.root
+      then Ok ()
+      else Error (invalid "admitted child belongs to another physical Root")
+    in
+    let* admission = Child.refresh child in
+    let* () = Child.Admission.check_now admission in
+    Ok (Child.Admission.capabilities admission)
+;;
+
+let borrowed_selected service terminal borrowed capabilities =
   let context = H.context (O.Native_terminal.invocation terminal) in
   let* () =
     if P.Execution_owner.equal context.owner (Developer (O.owner service.root))
@@ -659,22 +680,29 @@ let borrowed_selected service terminal borrowed ceiling ~selected_current =
     else Error (invalid "native job owner differs from its physical root")
   in
   let* selected =
-    match context.parent_invocation, borrowed, ceiling with
-    | None, None, None -> selected_current ()
-    | None, None, Some selected when Option.is_some context.parent_job -> Ok selected
-    | None, None, Some _ ->
+    match context.parent_invocation, borrowed, capabilities with
+    | None, None, Capability_source.Root -> current_capabilities service capabilities
+    | None, None, Worker selected when Option.is_some context.parent_job -> Ok selected
+    | None, None, Worker _ ->
       Error (invalid "root native scope cannot borrow a claimed job ceiling")
-    | Some expected, Some borrowed, None ->
+    | Some expected, Some borrowed, (Root | Admitted_child _) ->
       let parent = H.context (N.selected_borrowed_invocation borrowed) in
       if
         (not (P.Id.Invocation.equal expected parent.id))
         || not (P.Execution_owner.equal context.owner parent.owner)
       then Error (invalid "native job parent borrow is foreign")
-      else N.selected_borrowed_capabilities borrowed
-    | None, Some _, _ | Some _, None, _ | Some _, Some _, Some _ ->
+      else (
+        match capabilities with
+        | Root -> N.selected_borrowed_capabilities borrowed
+        | Admitted_child child -> current_capabilities service (Admitted_child child)
+        | Worker _ -> assert false)
+    | None, None, Admitted_child _
+    | None, Some _, _
+    | Some _, None, _
+    | Some _, Some _, Worker _ ->
       Error (invalid "native job parent borrow is missing or unexpected")
   in
-  let* current_capabilities = selected_current () in
+  let* current_capabilities = current_capabilities service capabilities in
   let* current =
     List.fold_result (C.references selected) ~init:[] ~f:(fun names reference ->
       let* _actual =
@@ -692,28 +720,57 @@ let borrowed_selected service terminal borrowed ceiling ~selected_current =
   else Error (invalid "native job borrow differs from admitted child selection")
 ;;
 
-let with_native_scope
-      service
-      ~terminal
-      ~borrowed
-      ?ceiling
-      ?(selected_current = fun () -> Ok (O.native_selected service.root))
-      ~check_parent_now
-      f
-  =
+let with_native_scope service ~terminal ~borrowed ~capabilities ~check_parent_now f =
   if not (O.Native_terminal.issued_by_root terminal ~root:service.root)
   then Error (invalid "native job terminal belongs to another physical root")
   else
-    let* selected =
-      borrowed_selected service terminal borrowed ceiling ~selected_current
+    let* selected = borrowed_selected service terminal borrowed capabilities in
+    let selected_now, current_capabilities_now =
+      match capabilities with
+      | Admitted_child child ->
+        let current_source () =
+          let* () =
+            if Child.issued_by_root child service.root
+            then Ok ()
+            else Error (invalid "admitted child belongs to another physical Root")
+          in
+          let* () =
+            match borrowed with
+            | Some borrowed ->
+              Result.map (N.selected_borrowed_capabilities borrowed) ~f:ignore
+            | None -> Error (invalid "admitted child has no borrowed parent")
+          in
+          Child.source_current child
+        in
+        let selected_now () =
+          let* source = current_source () in
+          let* names =
+            List.fold_result (C.references selected) ~init:[] ~f:(fun names reference ->
+              let* _ =
+                C.resolve source ~id:reference.id ~fingerprint:reference.fingerprint
+                |> Result.map_error ~f:(fun error -> invalid error.message)
+              in
+              Ok (reference.name :: names))
+          in
+          let* current =
+            C.select source ~names:(List.rev names)
+            |> Result.map_error ~f:(fun error -> invalid error.message)
+          in
+          if String.equal (C.fingerprint current) (C.fingerprint selected)
+          then Ok current
+          else Error (invalid "admitted child Job selection changed")
+        in
+        selected_now, current_source
+      | Root | Worker _ ->
+        ( (fun () -> borrowed_selected service terminal borrowed capabilities)
+        , fun () -> current_capabilities service capabilities )
     in
     with_kernel
       service
       ~physical:(Native terminal)
       ~selected
-      ~selected_now:(fun () ->
-        borrowed_selected service terminal borrowed ceiling ~selected_current)
-      ~current_capabilities:selected_current
+      ~selected_now
+      ~current_capabilities:current_capabilities_now
       ~check_parent_now
       (fun scope -> f ~scope)
 ;;
@@ -740,8 +797,9 @@ let seal_native (scope : scope) ~terminal ~outcome ~selected_jobs =
      | None ->
        let* () = completion_current scope terminal in
        let* () = kernel_result (K.check_open scope.kernel) in
-       let* physical = O.Native_terminal.seal terminal ~outcome ~selected:selected_jobs in
        let* acknowledge = kernel_result (K.mark_prepared scope.kernel) in
+       let* () = completion_current scope terminal in
+       let* physical = O.Native_terminal.seal terminal ~outcome ~selected:selected_jobs in
        let selection = { terminal; physical; acknowledge; acknowledged = false } in
        scope.frozen <- Some (outcome, selection);
        Ok selection)

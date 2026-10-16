@@ -8,12 +8,14 @@ module H = P.Host_invocation
 module Job_scope = Agent_session.Developer_job_scope
 module Jobs = Developer_script_job_service
 module Managed_tool = Developer_managed_tool_executor
+module Child_selection = Developer_child_selection
 
 type t =
   { root : O.t
   ; issuer : D.t
   ; jobs : Jobs.t option
   ; managed : Managed_tool.t option
+  ; managed_env : Eio_unix.Stdenv.base option
   }
 
 (* One private execution selection is carried through native dispatch, lexical
@@ -24,6 +26,7 @@ type execution =
   { base : t
   ; issuer : D.t
   ; managed : Managed_tool.t option
+  ; child : Child_selection.t option
   ; selected_current : unit -> (C.t, P.Error.t) result
   ; selected_for_witness : O.Current.t -> (C.t, P.Error.t) result
   }
@@ -51,7 +54,7 @@ let create ~root =
       ~current
       ~now:(fun () -> O.native_now root)
   in
-  Ok { root; issuer; jobs = None; managed = None }
+  Ok { root; issuer; jobs = None; managed = None; managed_env = None }
 ;;
 
 let with_job_service t jobs =
@@ -70,7 +73,7 @@ let with_managed_definition (t : t) ~definition ~env =
   | None, None -> invalid "managed developer executor requires its physical Job service"
   | None, Some jobs ->
     let* managed = Managed_tool.create ~root:t.root ~jobs ~definition ~env in
-    Ok { t with managed = Some managed }
+    Ok { t with managed = Some managed; managed_env = Some env }
 ;;
 
 let managed_definition (t : t) = Option.map t.managed ~f:Managed_tool.definition
@@ -79,6 +82,7 @@ let root_execution (t : t) =
   { base = t
   ; issuer = t.issuer
   ; managed = t.managed
+  ; child = None
   ; selected_current = (fun () -> Ok (O.native_selected t.root))
   ; selected_for_witness = (fun witness -> Ok (O.Current.selected witness))
   }
@@ -101,9 +105,12 @@ let reselect_current (t : t) ceiling =
 ;;
 
 let narrowed_registry execution parent =
-  let* ceiling = N.selected_borrowed_capabilities parent in
-  let* current = execution.selected_current () in
-  reselect current ceiling
+  match execution.child with
+  | Some _ -> execution.selected_current ()
+  | None ->
+    let* ceiling = N.selected_borrowed_capabilities parent in
+    let* current = execution.selected_current () in
+    reselect current ceiling
 ;;
 
 let finish_completion completion settlement = D.Completion.finish completion ~settlement
@@ -207,6 +214,7 @@ let recover_early scope =
 
 let rec run
           ?ceiling
+          ?native_invocation
           execution
           ~parent
           ~job_parent
@@ -218,6 +226,35 @@ let rec run
           ~prepare_output
   =
   let t = execution.base in
+  let* admitted_child =
+    match execution.child with
+    | None -> Ok None
+    | Some _ -> Result.map (registry ()) ~f:Option.some
+  in
+  let registry_now () =
+    match execution.child, admitted_child with
+    | None, None -> registry ()
+    | Some child, Some admitted ->
+      let* () =
+        match borrowed with
+        | None -> invalid "child native invocation has no borrowed parent"
+        | Some borrowed ->
+          Result.map (N.selected_borrowed_capabilities borrowed) ~f:ignore
+      in
+      let* source = Child_selection.source_current child in
+      let* current = reselect source admitted in
+      if String.equal (C.fingerprint current) (C.fingerprint admitted)
+      then Ok current
+      else invalid "child native admission changed after its parent borrow"
+    | None, Some _ | Some _, None -> invalid "child native admission is inconsistent"
+  in
+  let* capabilities =
+    match execution.child, ceiling with
+    | Some child, None -> Ok (Jobs.Capability_source.Admitted_child child)
+    | None, Some selected -> Ok (Worker selected)
+    | None, None -> Ok Root
+    | Some _, Some _ -> invalid "child native selection cannot borrow a worker ceiling"
+  in
   let* entered =
     O.with_native_registration t.root ?job_parent ~invocation (fun ~scope ->
       let execute job_scope =
@@ -230,7 +267,7 @@ let rec run
           let* witness = O.current t.root in
           let* selected = execution.selected_for_witness witness in
           let reference = C.reference binding in
-          let* narrowed = registry () in
+          let* narrowed = registry_now () in
           let* narrowed_binding =
             C.resolve narrowed ~id:reference.id ~fingerprint:reference.fingerprint
             |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
@@ -263,7 +300,7 @@ let rec run
           in
           (* The parent read above may yield. Resolve the SAME execution
              selection again before the final nonyielding Root/parent gate. *)
-          let* current_selected = execution.selected_current () in
+          let* current_selected = registry_now () in
           let* current_binding =
             C.resolve current_selected ~id:reference.id ~fingerprint:reference.fingerprint
             |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
@@ -375,9 +412,10 @@ let rec run
             ~enter_callback:(fun ~dispatched f ->
               O.with_native_callback scope ~dispatched (fun ~sw:_ -> f ()))
             ~managed
-            ~registry
+            ~registry:registry_now
             ~reference
             ~invocation
+            ~native_invocation
             ~authorize
             ~prepare_output
             ~effect_entry
@@ -416,8 +454,7 @@ let rec run
           jobs
           ~terminal:scope
           ~borrowed
-          ?ceiling
-          ~selected_current:execution.selected_current
+          ~capabilities
           ~check_parent_now:(fun () ->
             D.check_parent_now execution.issuer ~parent invocation)
           (fun ~scope:lexical -> execute (Some lexical)))
@@ -489,3 +526,65 @@ let run_job_child ?selected t ~active ~reference ~invocation ~authorize ~prepare
     ~authorize
     ~prepare_output
 ;;
+
+module Child = struct
+  type parent = t
+
+  type t =
+    { execution : execution
+    ; selection : Child_selection.t
+    }
+
+  let with_target ~parent ~target ~prepared f =
+    let* borrowed = N.borrow_selected () in
+    let* selection =
+      Child_selection.create ~root:parent.root ~target ~prepared ~parent:borrowed
+    in
+    let* managed =
+      match parent.jobs, parent.managed_env with
+      | None, None -> Ok None
+      | Some jobs, Some env ->
+        Managed_tool.create_child ~root:parent.root ~jobs ~selection ~env
+        |> Result.map ~f:Option.some
+      | None, Some _ | Some _, None ->
+        invalid "child managed execution has incomplete physical Job resources"
+    in
+    let selected_current () =
+      let* admission = Child_selection.refresh selection in
+      let* () = Child_selection.Admission.check_now admission in
+      Ok (Child_selection.Admission.capabilities admission)
+    in
+    let execution =
+      { base = parent
+      ; issuer = Child_selection.issuer selection
+      ; managed
+      ; child = Some selection
+      ; selected_current
+      ; selected_for_witness = (fun _ -> Child_selection.source_current selection)
+      }
+    in
+    f { execution; selection }
+  ;;
+
+  let current_capabilities t = t.execution.selected_current ()
+
+  let run t ~reference ~invocation ~native_invocation ~authorize ~prepare_output =
+    let* borrowed = Child_selection.first_borrowed t.selection in
+    let* job_parent =
+      D.inherited_job_parent
+        (N.selected_borrowed_issuer borrowed)
+        (N.selected_borrowed_parent borrowed)
+    in
+    run
+      ~native_invocation
+      t.execution
+      ~parent:(Child_selection.first_parent t.selection)
+      ~job_parent
+      ~borrowed:(Some borrowed)
+      ~registry:t.execution.selected_current
+      ~reference
+      ~invocation
+      ~authorize
+      ~prepare_output
+  ;;
+end

@@ -27,6 +27,7 @@ type 'a managed_target =
 let run_policy
       ~run_native
       ~on_progress
+      ~native_invocation
       ~managed_revision
       ~managed_admit
       ~execute
@@ -187,13 +188,31 @@ let run_policy
                    | None ->
                      let active = Atomic.make true in
                      let invocation =
-                       match on_progress with
-                       | None -> Ochat_function.Invocation.silent
-                       | Some emit ->
+                       match native_invocation, on_progress with
+                       | Some original, _ ->
+                         let scoped =
+                           if Ochat_function.Invocation.is_observed original
+                           then
+                             Ochat_function.Invocation.create_strict_with_trace
+                               ~progress:(fun update ->
+                                 if Atomic.get active
+                                 then Ochat_function.Invocation.emit original update)
+                               ~trace:(fun trace ->
+                                 if Atomic.get active
+                                 then Ochat_function.Invocation.emit_trace original trace)
+                           else Ochat_function.Invocation.silent
+                         in
+                         Option.value_map
+                           (Ochat_function.Invocation.inference_parent original)
+                           ~default:scoped
+                           ~f:(fun parent ->
+                             Ochat_function.Invocation.with_inference_parent
+                               scoped
+                               ~parent)
+                       | None, None -> Ochat_function.Invocation.silent
+                       | None, Some emit ->
                          Ochat_function.Invocation.create (fun update ->
-                           match Atomic.get active with
-                           | true -> emit dispatched update
-                           | false -> ())
+                           if Atomic.get active then emit dispatched update)
                      in
                      Exn.protect
                        ~finally:(fun () -> Atomic.set active false)

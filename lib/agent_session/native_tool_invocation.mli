@@ -286,11 +286,13 @@ type managed_script_install =
 (** A managed selected callback receives a stage operation for the current
     physical native terminal only. It returns IDs admitted through the shared
     capacity ledger, and both this operation and the selected borrow expire
-    with the callback. The result continuation names the exact subset that
-    survives alongside its canonical outcome. *)
+    with the callback. [current] is a typed fail-closed selected lookup: a
+    revoked child registry cannot fall back to Root or be treated as empty.
+    The result continuation names the exact subset that survives alongside
+    its canonical outcome. *)
 type selected_managed_dispatch =
   { definition : Chat_response.Managed_tool_registry.t
-  ; current : unit -> Chat_response.Tool_capability.t
+  ; current : unit -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
   ; run :
       'a.
       Chat_response.Managed_tool_registry.owned_execution
@@ -323,7 +325,10 @@ type selected_managed_dispatch =
     script runs. The trusted physical owner uses that receipt to admit declared
     lexical dependencies. An Error stops the callback before script effects.
     This hook grants no authority itself and does not replace native permission,
-    current-parent or effect-entry checks. *)
+    current-parent or effect-entry checks. [native_invocation], when present,
+    lends the actual Driver observer and inference parent to the native
+    implementation for this synchronous call only. It does not replace any
+    policy check or derive ancestry from the Host invocation DTO. *)
 val run_owned_selected
   :  admit_managed:
        (Chat_response.Managed_tool_registry.owned_execution
@@ -350,6 +355,7 @@ val run_owned_selected
   -> registry:(unit -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result)
   -> reference:Chat_response.Tool_capability.reference
   -> invocation:Agent_protocol.Host_invocation.t
+  -> native_invocation:Ochat_function.Invocation.t option
   -> authorize:
        (Agent_protocol.Host_invocation.t
         -> Chat_response.Tool_capability.binding
