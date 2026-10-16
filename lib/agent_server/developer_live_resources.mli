@@ -118,9 +118,9 @@ val model_sources : live -> Developer_model_job_runner.Sources.t
     its exact admitted Root, native runtime and selected Model package. The
     trusted host supplies one runner constructed from this same Live owner and
     the Root's actual Jobs/Native services after those services exist, before
-    any executor is exposed. The callback is a trusted Host composition
-    invariant; this module cannot infer its physical provenance from a
-    function value. SourceRuntime was prepared in Bound_runner mode, and a
+    any executor is exposed. Both callbacks are trusted Host composition
+    invariants; this module cannot infer their physical provenance from
+    function values. SourceRuntime was prepared in Bound_runner mode, and a
     selected Tool target never falls back to literal-only execution after a
     runner failure. Literal content children retain their existing strict
     path. A missing source policy is harmless only when there
@@ -132,10 +132,14 @@ val bind_agent_sources
   -> root:Developer_root_owner.run
   -> models:Developer_model_job_runner.t option
   -> run_selected_target:Developer_agent_source_runtime.Selected_target.runner
+  -> run_selected_content:Agent_session.Captured_agent_runner.selected_content_runner
   -> checkpoint:(unit -> unit)
   -> (unit, P.Error.t) result
 
 module Child_prepared : sig
+  (** One joined child preparation. Its private target is a closed [Saved] or
+      [Content] case; a Content case retains its immediate physical parent and
+      the original saved ancestor. No revision equality can change the case. *)
   type t
 
   module Admission : sig
@@ -153,11 +157,19 @@ module Child_prepared : sig
     val check_now : t -> (unit, P.Error.t) result
   end
 
-  (** Comparison only: this receipt belongs to the exact selected saved-Agent
-      target lent by [with_saved_child]. It grants no source or Root access. *)
+  (** Comparison only: this is the exact saved-Agent preparation lent by
+      [with_saved_child]. A nested Content preparation never matches. *)
   val matches_target
     :  t
     -> Agent_session.Captured_agent_runner.Claimed_developer.Selected.Target.t
+    -> bool
+
+  (** Comparison only: a descendant preparation retains the exact content
+      target, its immediate parent and the original saved ancestor. A saved
+      preparation never matches. *)
+  val matches_content_target
+    :  t
+    -> Agent_session.Captured_agent_runner.Selected_content_target.t
     -> bool
 
   val revision : t -> Agent_session.Prompt_revision.t
@@ -175,8 +187,10 @@ module Child_prepared : sig
 
   val content_limits : t -> Chatmd_prompt_content.Limits.t option
 
-  (** A selected callback-local source-read port, without a retained Scope.
-      Every dynamic operation opens and closes its own original-source Scope;
+  (** A selected callback-local source-read port for this preparation's exact
+      Saved or Content target, without a retained Scope. A Content preparation
+      never borrows through its saved ancestor's declaring parser. Every
+      dynamic operation opens and closes its own original-source Scope;
       captured/literal conversion needs no live source. The caller also passes
       [refresh]/[Admission.check_now] as the projector's Root/currentness check
       around each yielding conversion and remote transport. *)
@@ -186,6 +200,21 @@ module Child_prepared : sig
          , P.Error.t )
          result
 
+  (** Run one parser-owned Agent content occurrence through its exact declaring
+      or caller port. Every nested child binds its own declaring parser under
+      its joined switch; the caller port is that child's actual invoke triple,
+      never inferred from an ancestor parser. Each call verifies the current
+      Root, immediate target, saved ancestry and source; it returns typed
+      expected denial without an
+      ordinary Driver/Fetch fallback. The port and callback cannot outlive this
+      prepared owner. *)
+  val run_content_agent
+    :  t
+    -> side:Agent_session.Captured_agent_runner.Source_binding.Content_source.side
+    -> declaration:Prompt.Chat_markdown.agent_content
+    -> ctx:Eio_unix.Stdenv.base Chat_response.Ctx.t
+    -> (string, P.Error.t) result
+
   val tool_contract : t -> Chatml_compilation.Tool_contract.t
 
   (** The exact Live-owned response directory already supplied to the saved
@@ -194,14 +223,16 @@ module Child_prepared : sig
       child is active; it is not a source or execution admission. *)
   val response_dir : t -> Eio.Fs.dir_ty Eio.Path.t
 
-  (** Refresh a direct saved-parent effect after any yielding work. The full
-      source/Workspace/Root checks may yield; obtain a fresh Root witness and
-      repeat them before issuing an attempt-local [Admission.t]. *)
+  (** Refresh this exact Saved or Content preparation after yielding work. The
+      full immediate-parent, saved-ancestor, source/Workspace/Root checks may
+      yield; obtain a fresh Root witness and repeat them before issuing an
+      attempt-local [Admission.t]. *)
   val refresh : t -> (Admission.t, P.Error.t) result
 
-  (** Refresh inside an actual child selected borrow after any yielding work.
-      The lower target and Root checks prove the saved parent ancestry and
-      dispatched child terminal; no direct parent fiber binding is assumed. *)
+  (** Refresh inside an actual child selected borrow after yielding work. The
+      lower check dispatches on this preparation's Saved or Content target,
+      proving every physical ancestor and this dispatched child terminal; no
+      direct ancestor fiber binding is assumed. *)
   val refresh_descendant
     :  t
     -> child:Agent_session.Native_tool_invocation.selected_borrowed
@@ -230,6 +261,28 @@ val with_saved_child
   :  live
   -> root:Developer_root_owner.run
   -> target:Agent_session.Captured_agent_runner.Claimed_developer.Selected.Target.t
+  -> startup:Chat_response.Startup_compilation.t
+  -> compilation_limits:Chatml_compilation.limits
+  -> programs:Chatml_prompt_programs.Restored.t option
+  -> input:Prompt.Chat_markdown.content_item list
+  -> f:(Child_prepared.t -> (string, P.Error.t) result)
+  -> (string, P.Error.t) result
+
+(** Prepare an authored nested Agent selected from an already live Saved or
+    Content child. Require the exact immediate parent [Child_prepared], physical
+    Content target, original saved ancestry, Root/actor/provider and inherited
+    Claim/deadline before borrowing the same
+    Live resources. The nested owner has its own joined switch but no second
+    Root, Store writer, scheduler, provider tracker or synthetic Session. File
+    selection uses the original source lease; Captured selection uses immutable
+    retained custody. Recheck after every yielding selection/preparation and
+    before a child effect. An expired/foreign target cannot fall back to the
+    literal path. Recursive calls use this same entry and bind each child's
+    own parser/Port; there is no one-level limit beyond the inherited finite
+    depth/work budget. *)
+val with_selected_content_child
+  :  parent:Child_prepared.t
+  -> target:Agent_session.Captured_agent_runner.Selected_content_target.t
   -> startup:Chat_response.Startup_compilation.t
   -> compilation_limits:Chatml_compilation.limits
   -> programs:Chatml_prompt_programs.Restored.t option

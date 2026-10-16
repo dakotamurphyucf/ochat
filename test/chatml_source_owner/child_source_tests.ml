@@ -181,8 +181,16 @@ let%expect_test
         assert (Option.is_some programs);
         Ok ())
     |> ok;
-    ignore (capture_file env store parent lease ~work:!polls () |> ok : Child.t);
-    assert (Result.is_error (capture_file env store parent lease ~work:(!polls - 1) ()));
+    assert (!polls > 20);
+    let retained_polls = ref 0 in
+    ignore
+      (capture_file env store parent lease ~checkpoint:(fun () -> incr retained_polls) ()
+       |> ok
+       : Child.t);
+    assert (!retained_polls > 20);
+    ignore (capture_file env store parent lease ~work:!retained_polls () |> ok : Child.t);
+    assert (
+      Result.is_error (capture_file env store parent lease ~work:(!retained_polls - 1) ()));
     save root "guide.md" "guide C";
     save root "nested/graph.chatml" "let seed = 3";
     [%test_eq: string list]
@@ -226,30 +234,53 @@ let%expect_test
 let%test_unit
     "child callback and final-replay checkpoint exceptions preserve original identity"
   =
-  with_fixture (fun env _root _ store parent lease ->
+  with_fixture (fun env root _ store parent lease ->
     let sentinel = Failure "original selected child checkpoint" in
-    let observed = ref 0 in
+    let fresh_polls = ref 0 in
     ignore
-      (capture_file env store parent lease ~checkpoint:(fun () -> incr observed) () |> ok
+      (capture_file env store parent lease ~checkpoint:(fun () -> incr fresh_polls) ()
+       |> ok
        : Child.t);
-    assert (!observed > 20);
+    let retained_polls = ref 0 in
+    ignore
+      (capture_file env store parent lease ~checkpoint:(fun () -> incr retained_polls) ()
+       |> ok
+       : Child.t);
+    assert (!fresh_polls > 20 && !retained_polls > 20);
+    let assert_interrupted store interrupt =
+      let calls = ref 0 in
+      match
+        capture_file
+          env
+          store
+          parent
+          lease
+          ~checkpoint:(fun () ->
+            incr calls;
+            if !calls = interrupt then raise sentinel)
+          ()
+      with
+      | _ -> assert false
+      | exception exn -> assert (phys_equal sentinel exn)
+    in
+    (* Fresh publication and verified reuse have different checkpoint counts.
+       Give each publication attempt an empty physical artifact store so a
+       retained collision cannot silently take the shorter reuse branch. *)
     List.iter
-      [ 1; !observed - 2; !observed ]
+      [ 1; !fresh_polls - 2; !fresh_polls ]
       ~f:(fun interrupt ->
-        let calls = ref 0 in
-        match
-          capture_file
-            env
-            store
-            parent
-            lease
-            ~checkpoint:(fun () ->
-              incr calls;
-              if !calls = interrupt then raise sentinel)
-            ()
-        with
-        | _ -> assert false
-        | exception exn -> assert (phys_equal sentinel exn));
+        let directory = Filename.dirname (Eio.Path.native_exn root) in
+        let fresh_store =
+          Store.create
+            ~env
+            ~root:
+              (Filename.concat directory ("fresh-artifacts-" ^ Int.to_string interrupt))
+          |> ok
+        in
+        assert_interrupted fresh_store interrupt);
+    List.iter
+      [ 1; !retained_polls - 2; !retained_polls ]
+      ~f:(fun interrupt -> assert_interrupted store interrupt);
     ignore (capture_file env store parent lease () |> ok : Child.t))
 ;;
 

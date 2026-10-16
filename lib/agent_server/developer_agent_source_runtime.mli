@@ -74,7 +74,11 @@ val registrations : t -> Chat_response.Agent_runtime.native_registration list
     the actual [agent_runtime] to retain every registration's same function and
     Source(Some preparer), with matching revision/contract. No name, digest or
     saved artifact is sufficient. A second bind, foreign Root/runtime, or a
-    foreign runtime rejects. Saved artifact selection remains valid after the
+    foreign runtime rejects. [Literal_only] requires no selected Tool callback;
+    [Bound_runner] requires the trusted callback. The separate nested Content
+    callback is installed by the same trusted Live owner only after this bind,
+    when it can lend the exact selected child parser Port. Saved artifact selection
+    remains valid after the
     original source file changes; a new File selection rechecks its original
     source lease at the effect boundary. No provider request is sent here.
 

@@ -614,22 +614,31 @@ let preflight_selected_element ~max_source_bytes ~max_output_bytes ~checkpoint e
   let source_string s = add source max_source_bytes (String.length s) in
   let output_string s = add output max_output_bytes (String.length s) in
   let source_option = Option.iter ~f:source_string in
-  let content ~assistant = function
+  let rec content ~assistant ~depth ~output_enabled = function
     | CM.Basic basic ->
       add source max_source_bytes 16;
       source_string basic.type_;
       source_option basic.text;
       Option.iter basic.image_url ~f:(fun image -> source_string image.url);
       source_option basic.document_url;
-      add output max_output_bytes 1;
-      (match basic.image_url, basic.document_url with
-       | Some image, _ when assistant ->
-         (* The assistant's inline image is rendered as a literal tag. *)
-         output_string image.url;
-         add output max_output_bytes 16
-       | Some _, _ | _, Some _ -> ()
-       | None, None -> Option.iter basic.text ~f:output_string)
-    | CM.Agent _ -> limited ()
+      if output_enabled
+      then (
+        add output max_output_bytes 1;
+        match basic.image_url, basic.document_url with
+        | Some image, _ when assistant ->
+          (* The assistant's inline image is rendered as a literal tag. *)
+          output_string image.url;
+          add output max_output_bytes 16
+        | Some _, _ | _, Some _ -> ()
+        | None, None -> Option.iter basic.text ~f:output_string)
+    | CM.Agent agent ->
+      if depth >= 128 then limited ();
+      add source max_source_bytes 16;
+      source_string agent.url;
+      List.iter agent.items ~f:(fun item ->
+        content ~assistant:false ~depth:(depth + 1) ~output_enabled:false item);
+      (* The selected callback's actual output is checked after it returns. *)
+      if output_enabled then add output max_output_bytes 1
   in
   let message (m : CM.msg) =
     add source max_source_bytes 64;
@@ -644,7 +653,8 @@ let preflight_selected_element ~max_source_bytes ~max_output_bytes ~checkpoint e
     | Some (CM.Text text) ->
       source_string text;
       output_string text
-    | Some (CM.Items items) -> List.iter items ~f:(content ~assistant)
+    | Some (CM.Items items) ->
+      List.iter items ~f:(content ~assistant ~depth:0 ~output_enabled:true)
   in
   (match element with
    | CM.Msg m | Developer m | System m | User m | Assistant m -> message m

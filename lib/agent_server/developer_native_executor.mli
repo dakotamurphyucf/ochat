@@ -61,6 +61,24 @@ module Child : sig
     -> (t -> ('a, Agent_protocol.Error.t) result)
     -> ('a, Agent_protocol.Error.t) result
 
+  (** The same child-only native/managed/Job kernel, nested beneath the
+      immediately admitted Saved or Content child. The lower Content target
+      must match [parent]'s physical target and its original saved ancestry;
+      [prepared] must be issued by that same Live Root for this exact Content
+      target. Synchronous Content recursion need not enter a new native borrow:
+      capability selection narrows from the immediate logical Child selection,
+      while the source-child issuer derives from the ACTUAL entered native
+      borrow and active Claim. A later real tool dispatch checks native
+      ancestry against that physical borrow. No Root registry widening or new
+      native/Store execution owner is created. The child issuer joins before
+      its immediate parent retires. *)
+  val with_content_target
+    :  parent:t
+    -> target:Agent_session.Captured_agent_runner.Selected_content_target.t
+    -> prepared:Developer_live_resources.Child_prepared.t
+    -> (t -> ('a, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
+
   (** Checked current projection for constructing this child's exact provider
       descriptors and Host_invocation fingerprint. It refreshes the same
       source/Root/Live admission used by [run], including descendant narrowing;
