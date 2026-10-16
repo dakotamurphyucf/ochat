@@ -34,6 +34,10 @@ module Source = struct
   let create range ~src ~selection ~local ~cleanup_html ~markdown =
     { range; src; selection; local; cleanup_html; markdown }
   ;;
+
+  let range t = t.range
+  let src t = t.src
+  let selection t = t.selection
 end
 
 module Owner = struct

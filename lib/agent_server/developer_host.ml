@@ -399,6 +399,7 @@ let create
       ~max_native_bindings
       ~child_sources
       ~content_limits
+      ~remote_content
       ~agent_source_limits
       ~job_policy
       ~authorize_native
@@ -448,6 +449,7 @@ let create
       ~max_native_bindings
       ~child_sources
       ~content_limits
+      ~remote_content
       ~artifact_store
       ~agent_source_limits
   in

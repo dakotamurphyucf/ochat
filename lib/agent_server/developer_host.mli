@@ -222,6 +222,7 @@ val create
   -> max_native_bindings:int
   -> child_sources:Session_factory.Child_source_policy.t option
   -> content_limits:Chatmd_prompt_content.Limits.t option
+  -> remote_content:Developer_child_remote_content.Policy.t option
   -> agent_source_limits:Developer_agent_source_runtime.Limits.t
   -> job_policy:Chat_response.One_off_request.policy
   -> authorize_native:

@@ -10,7 +10,7 @@ let ok = function
   | Error error -> raise_s [%sexp (error : P.Error.t)]
 ;;
 
-let developer_configuration target =
+let developer_configuration ?remote_content target =
   let selected =
     S.Authoring_standard_contracts.create
       ~targets:[ Chatml.Chatml_compiler_contract.Target.One_off_v1 ]
@@ -111,38 +111,42 @@ let developer_configuration target =
       ~max_agent_cache_entries:8
     |> ok
   in
-  S.Daemon.Developer.Configuration.create
-    ~capture_policy
-    ~capture_limits
-    ~limits
-    ~result_disclosure:
-      (S.Developer_result_disclosure.Policy.create ~authorize:(fun _ _ -> true))
-    ~receipt_read:(fun _ _ -> true)
-    ~command_control:(fun _ _ -> true)
-    ~publisher_limits:
-      (Agent_store.Developer_result_publisher.Limits.create
-         ~inline_bytes:1024
-         ~max_result_bytes:65536
-         ~max_pending:2
-       |> ok)
-    ~publisher_storage:Agent_store.Developer_result_publisher.Storage.Automatic
-    ~model_target:(Some target)
-    ~authorize_native:(fun invocation binding ->
-      let name = (Chat_response.Tool_capability.reference binding).name in
-      if List.mem [ "read_file"; "summary"; "undeclared" ] name ~equal:String.equal
-      then (
-        assert (
-          P.Invocation.equal_origin
-            (P.Host_invocation.context invocation).origin
-            P.Invocation.Delegated_agent);
-        Ok ())
-      else if List.mem [ "child"; "child_tools" ] name ~equal:String.equal
-      then Ok ()
-      else Error (P.Error.invalid_request "unexpected native binding"))
-    ~prepare_output:(function
-      | Openai.Responses.Tool_output.Output.Text value -> Ok (`String value)
-      | _ -> Error (P.Error.invalid_request "unexpected native output"))
-  |> ok
+  let configuration =
+    S.Daemon.Developer.Configuration.create
+      ~capture_policy
+      ~capture_limits
+      ~limits
+      ~result_disclosure:
+        (S.Developer_result_disclosure.Policy.create ~authorize:(fun _ _ -> true))
+      ~receipt_read:(fun _ _ -> true)
+      ~command_control:(fun _ _ -> true)
+      ~publisher_limits:
+        (Agent_store.Developer_result_publisher.Limits.create
+           ~inline_bytes:1024
+           ~max_result_bytes:65536
+           ~max_pending:2
+         |> ok)
+      ~publisher_storage:Agent_store.Developer_result_publisher.Storage.Automatic
+      ~model_target:(Some target)
+      ~authorize_native:(fun invocation binding ->
+        let name = (Chat_response.Tool_capability.reference binding).name in
+        if List.mem [ "read_file"; "summary"; "undeclared" ] name ~equal:String.equal
+        then (
+          assert (
+            P.Invocation.equal_origin
+              (P.Host_invocation.context invocation).origin
+              P.Invocation.Delegated_agent);
+          Ok ())
+        else if List.mem [ "child"; "child_tools" ] name ~equal:String.equal
+        then Ok ()
+        else Error (P.Error.invalid_request "unexpected native binding"))
+      ~prepare_output:(function
+        | Openai.Responses.Tool_output.Output.Text value -> Ok (`String value)
+        | _ -> Error (P.Error.invalid_request "unexpected native output"))
+    |> ok
+  in
+  Option.value_map remote_content ~default:configuration ~f:(fun policy ->
+    S.Daemon.Developer.Configuration.with_remote_content configuration policy)
 ;;
 
 let open_document daemon actor =
@@ -263,6 +267,7 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
   RH.with_fixture
     ~model_requests:requests
     ~model_function_tools:true
+    ~model_image_input:true
     ~response_body:(fun number _body ->
       if Int.equal number 3 then Some (selected_tools_response ()) else None)
     ~on_model_body:(fun body -> model_bodies := body :: !model_bodies)
@@ -288,6 +293,53 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
               let target = RH.capture bootstrap in
               Provider_runtime.close bootstrap;
               let root = Eio.Path.native_exn anchor in
+              let remote_listener =
+                Eio.Net.listen
+                  ~sw
+                  ~reuse_addr:true
+                  ~backlog:4
+                  (Eio.Stdenv.net env)
+                  (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0))
+              in
+              let remote_port =
+                match Eio.Net.listening_addr remote_listener with
+                | `Tcp (_, port) -> port
+                | _ -> failwith "remote child fixture did not bind"
+              in
+              let remote_requests = ref 0 in
+              Eio.Fiber.fork_daemon ~sw (fun () ->
+                while true do
+                  let flow, _ = Eio.Net.accept ~sw remote_listener in
+                  Eio.Fiber.fork_daemon ~sw (fun () ->
+                    Exn.protect
+                      ~finally:(fun () -> Eio.Flow.close flow)
+                      ~f:(fun () ->
+                        let reader = Eio.Buf_read.of_flow flow ~max_size:1024 in
+                        ignore (Eio.Buf_read.line reader : string);
+                        let rec headers () =
+                          if String.is_empty (Eio.Buf_read.line reader)
+                          then ()
+                          else headers ()
+                        in
+                        headers ();
+                        incr remote_requests;
+                        Eio.Flow.copy_string
+                          "HTTP/1.1 200 OK\r\n\
+                           Content-Length: 27\r\n\
+                           Connection: close\r\n\
+                           \r\n\
+                           remote selected child bytes"
+                          flow;
+                        `Stop_daemon))
+                done);
+              let remote_origin = sprintf "http://127.0.0.1:%d" remote_port in
+              let remote_policy =
+                S.Daemon.Developer.Configuration.Remote_content.create
+                  ~allowed_origins:[ remote_origin ]
+                  ~max_response_bytes:1024
+                  ~max_wall_seconds:5.
+                |> Or_error.ok_exn
+              in
               let prompt_dir = Filename.concat root "prompts" in
               Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / prompt_dir);
               let prompt = Filename.concat prompt_dir "prompt.chatmd" in
@@ -295,6 +347,20 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
               let nested_dir = Filename.concat prompt_dir "agents" in
               Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / nested_dir);
               let tool_child = Filename.concat nested_dir "child.chatmd" in
+              let notes_dir = Filename.concat prompt_dir "notes" in
+              Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / notes_dir);
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / notes_dir / "d.txt")
+                "selected child original document bytes";
+              let image_bytes =
+                Base64.decode_exn
+                  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg=="
+              in
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / notes_dir / "p.png")
+                image_bytes;
               Eio.Path.save
                 ~create:(`Or_truncate 0o600)
                 Eio.Path.(Eio.Stdenv.fs env / prompt)
@@ -307,7 +373,12 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
               Eio.Path.save
                 ~create:(`Or_truncate 0o600)
                 Eio.Path.(Eio.Stdenv.fs env / tool_child)
-                {|<developer>Call read_file and summary.</developer>
+                (String.concat
+                   [ {|<developer>Call read_file and summary.</developer>
+<user><doc src="../notes/d.txt" local/><img src="../notes/p.png" local/></user>
+<user><doc src="|}
+                   ; remote_origin
+                   ; {|/asset"/></user>
 <tool name="read_file"/>
 <script id="owned" language="chatml" kind="tool">
 let run ctx input = Task.pure(`Complete(input))
@@ -319,7 +390,8 @@ let run ctx input = Task.bind(Tool.call("read_file", input), fun result ->
   | `Error(code) -> Task.pure(`Fail({code = code; message = "undeclared child call"; retryable = false; details = `Null})))
 </script>
 <tool name="summary" type="chatml" script="owned" entrypoint="run" input_schema="input.json" output_schema="output.json"/>
-<tool name="undeclared" type="chatml" script="unowned" entrypoint="run" input_schema="input.json" output_schema="output.json"/>|};
+<tool name="undeclared" type="chatml" script="unowned" entrypoint="run" input_schema="input.json" output_schema="output.json"/>|}
+                   ]);
               List.iter [ "input.json"; "output.json" ] ~f:(fun name ->
                 Eio.Path.save
                   ~create:(`Or_truncate 0o600)
@@ -355,7 +427,8 @@ let run ctx input = Task.bind(Tool.call("read_file", input), fun result ->
               let options =
                 { S.Daemon.default_options with
                   authoring = Some (DH.semantic_authoring_policy env)
-                ; developer = Some (developer_configuration target)
+                ; developer =
+                    Some (developer_configuration ~remote_content:remote_policy target)
                 ; provider_operator_factory = Some provider_factory
                 }
               in
@@ -652,6 +725,19 @@ let run ctx input = Task.bind(Tool.call("read_file", input), fun result ->
                    String.is_substring
                      tool_request
                      ~substring:"Call read_file and summary");
+                 assert (
+                   String.is_substring
+                     tool_request
+                     ~substring:"selected child original document bytes");
+                 assert (
+                   String.is_substring
+                     tool_request
+                     ~substring:"remote selected child bytes");
+                 assert (
+                   String.is_substring
+                     tool_request
+                     ~substring:("data:image/png;base64," ^ Base64.encode_exn image_bytes));
+                 assert (Int.equal !remote_requests 1);
                  let outputs =
                    field (Jsonaf.of_string tool_result) "input"
                    |> array

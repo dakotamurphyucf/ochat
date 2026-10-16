@@ -641,6 +641,37 @@ module Prepared_inputs = struct
   let elements t = t.elements
   let config t = t.config
 
+  let user t =
+    CM.User
+      { role = "user"
+      ; content = Some (Items t.input)
+      ; name = None
+      ; id = None
+      ; status = None
+      ; phase = None
+      ; ochat_history_id = None
+      ; source_context = None
+      ; function_call = None
+      ; tool_call = None
+      ; tool_call_id = None
+      ; type_ = None
+      }
+  ;;
+
+  let materialize_items ~session_id ?source ~prompt_items ~invocation_items () =
+    let items = prompt_items @ invocation_items in
+    let namespace =
+      match source with
+      | Some source -> session_id ^ "/" ^ source
+      | None -> agent_allocator_namespace session_id
+    in
+    let created_allocator =
+      History_entry.Allocator.create ~namespace ~next_sequence:0 |> Result.ok_or_failwith
+    in
+    let history = create_history_entries ~allocator:created_allocator items in
+    Materialized.{ allocator = created_allocator; initial_history = history }
+  ;;
+
   let materialize
         t
         ~session_id
@@ -653,39 +684,27 @@ module Prepared_inputs = struct
     let convert ?agent_source_runner elements =
       Converter.to_items ?agent_source_runner ~ctx:t.ctx ~run_agent elements
     in
-    let user =
-      CM.User
-        { role = "user"
-        ; content = Some (Items t.input)
-        ; name = None
-        ; id = None
-        ; status = None
-        ; phase = None
-        ; ochat_history_id = None
-        ; source_context = None
-        ; function_call = None
-        ; tool_call = None
-        ; tool_call_id = None
-        ; type_ = None
-        }
-    in
     (* Keep prompt conversion before caller-owned input conversion: both may
        run captured content agents while preparing the initial history. *)
     let prompt_items = convert ?agent_source_runner t.elements in
     let invocation_items =
-      convert ?agent_source_runner:input_agent_source_runner [ user ]
+      convert ?agent_source_runner:input_agent_source_runner [ user t ]
     in
-    let items = prompt_items @ invocation_items in
-    let namespace =
-      match source with
-      | Some source -> session_id ^ "/" ^ source
-      | None -> agent_allocator_namespace session_id
-    in
-    let created_allocator =
-      History_entry.Allocator.create ~namespace ~next_sequence:0 |> Result.ok_or_failwith
-    in
-    let history = create_history_entries ~allocator:created_allocator items in
-    Materialized.{ allocator = created_allocator; initial_history = history }
+    materialize_items ~session_id ?source ~prompt_items ~invocation_items ()
+  ;;
+
+  let materialize_with_projectors
+        t
+        ~session_id
+        ?source
+        ~project_declaration
+        ~project_invocation
+        ()
+    =
+    let open Result.Let_syntax in
+    let%bind prompt_items = project_declaration ~ctx:t.ctx t.elements in
+    let%map invocation_items = project_invocation ~ctx:t.ctx [ user t ] in
+    materialize_items ~session_id ?source ~prompt_items ~invocation_items ()
   ;;
 end
 

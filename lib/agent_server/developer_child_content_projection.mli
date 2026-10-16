@@ -1,0 +1,74 @@
+open! Core
+
+(** One selected child's document/image conversion. The trusted child
+    Target first authenticates the restored revision against its physical
+    Source_binding and Root; only then may it bind a
+    [Prompt_source_owner.Scope.Content_revision] and construct this projector.
+    A parser-owned Basic occurrence, not a model URL or Ctx directory, selects
+    its declaring source. Declaration and invocation projectors share one
+    physical Budget seeded with already captured content costs. *)
+type t
+
+module Limits : sig
+  type t
+
+  val create
+    :  max_input_bytes:int
+    -> max_output_bytes:int
+    -> max_work_steps:int
+    -> max_nodes:int
+    -> max_depth:int
+    -> t Or_error.t
+
+  (** The configured capture ceiling also bounds selected conversion. When
+      capture is disabled, literal selected content still receives a fixed
+      finite ceiling; no source read is enabled by that default. *)
+  val for_host : Chatmd_prompt_content.Limits.t option -> t Or_error.t
+end
+
+module Budget : sig
+  type t
+
+  (** Create once after authentic declaration/caller selection. These at most
+      two exact source-bound revisions share one budget; their captured/builtin
+      accounting is debited before dynamic reads. A physically identical
+      caller revision is charged once. A resource failure rejects before any
+      new source I/O. *)
+  val create
+    :  limits:Limits.t
+    -> declaration:Agent_session.Prompt_revision.t
+    -> caller:Agent_session.Prompt_revision.t option
+    -> (t, Agent_protocol.Error.t) result
+end
+
+type source =
+  | Captured_only
+  | Selected of Agent_session.Captured_agent_runner.Source_binding.Content_source.t
+
+(** [remote=None] denies remote image/document reads before network I/O. The
+    remote port is constructed only by explicit trusted daemon configuration.
+    [check_current] rechecks the exact selected Target, parent/Root and source
+    borrow after every yielding phase; it is not itself source authority. *)
+val create
+  :  budget:Budget.t
+  -> revision:Agent_session.Prompt_revision.t
+  -> source:source
+  -> side:Agent_session.Captured_agent_runner.Source_binding.Content_source.side
+  -> remote:Developer_child_remote_content.t option
+  -> check_current:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> checkpoint:(unit -> unit)
+  -> (t, Agent_protocol.Error.t) result
+
+(** Reuses the one Chat_response.Converter role/string traversal for the
+    selected message/reasoning subset. Tool-call history is not admitted here.
+    Captured and builtin documents were already materialized by the selected
+    revision; only parser-owned dynamic/local/remote occurrences are read.
+    Inline image string rendering retains its original spelling without a
+    read. Executable nested Agent content is denied until a genuine descendant
+    Target is supplied by the joined execution adapter. Failure and
+    cancellation cannot reset the aggregate budget or retry a source read. *)
+val to_items
+  :  t
+  -> ctx:Eio_unix.Stdenv.base Chat_response.Ctx.t
+  -> Prompt.Chat_markdown.top_level_elements list
+  -> (Openai.Responses.Item.t list, Agent_protocol.Error.t) result

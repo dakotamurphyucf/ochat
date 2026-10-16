@@ -1510,6 +1510,7 @@ let compose
         ~agent_source_limits:limits.agent_sources
         ~job_policy:Chat_response.One_off_request.default_policy
         ~authorize_native:configuration.authorize_native
+        ~remote_content:configuration.remote_content
         ~prepare_output:configuration.prepare_output
         ~capture_policy:configuration.capture_policy
         ~capture_limits:configuration.capture_limits

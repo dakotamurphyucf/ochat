@@ -49,6 +49,7 @@ let elements revision parsed =
 
 let admit_surface ~selected ~revision ~parsed ~input ~checkpoint =
   let open Result.Let_syntax in
+  let needs_dynamic_source = ref false in
   let remaining_nodes = ref max_nodes in
   let remaining_text_bytes = ref max_text_bytes in
   let poll () =
@@ -68,20 +69,29 @@ let admit_surface ~selected ~revision ~parsed ~input ~checkpoint =
       remaining_text_bytes := !remaining_text_bytes - length;
       Ok ())
   in
-  let admit_basic (basic : CM.basic_content_item) =
+  let admit_basic ~inline_image (basic : CM.basic_content_item) =
     let%bind () = poll () in
-    if
-      String.equal basic.type_ "text"
-      && Option.is_none basic.image_url
-      && Option.is_none basic.document_url
-      && (not basic.is_local)
-      && (not basic.cleanup_html)
-      && not basic.markdown
-    then Option.value_map basic.text ~default:(Ok ()) ~f:text
-    else denied ~selected ()
+    match basic.image_url, basic.document_url with
+    | None, None ->
+      if
+        String.equal basic.type_ "text"
+        && (not basic.is_local)
+        && (not basic.cleanup_html)
+        && not basic.markdown
+      then Option.value_map basic.text ~default:(Ok ()) ~f:text
+      else denied ~selected ()
+    | Some { url }, None when selected ->
+      if not inline_image then needs_dynamic_source := true;
+      let%bind () = text url in
+      Option.value_map basic.text ~default:(Ok ()) ~f:text
+    | None, Some url when selected ->
+      needs_dynamic_source := true;
+      let%bind () = text url in
+      Option.value_map basic.text ~default:(Ok ()) ~f:text
+    | Some _, Some _ | Some _, None | None, Some _ -> denied ~selected ()
   in
-  let content = function
-    | CM.Basic basic -> admit_basic basic
+  let content ~inline_image = function
+    | CM.Basic basic -> admit_basic ~inline_image basic
     | CM.Agent _ -> denied ~selected ()
   in
   let admit_message (message : CM.msg) =
@@ -102,7 +112,8 @@ let admit_surface ~selected ~revision ~parsed ~input ~checkpoint =
       | None -> Ok ()
       | Some (Text text_value) -> text text_value
       | Some (Items items) ->
-        List.fold_result items ~init:() ~f:(fun () item -> content item))
+        List.fold_result items ~init:() ~f:(fun () item ->
+          content ~inline_image:(String.equal message.role "assistant") item))
   in
   let tool (declaration : CM.tool) =
     match declaration with
@@ -152,13 +163,22 @@ let admit_surface ~selected ~revision ~parsed ~input ~checkpoint =
   let%bind () =
     List.fold_result actual_elements ~init:() ~f:(fun () item -> element item)
   in
-  List.fold_result input ~init:() ~f:(fun () item -> content item)
+  let%map () =
+    List.fold_result input ~init:() ~f:(fun () item -> content ~inline_image:false item)
+  in
+  !needs_dynamic_source
 ;;
 
 let admit_literal ~revision ~parsed ~checkpoint =
   admit_surface ~selected:false ~revision ~parsed ~input:[] ~checkpoint
+  |> Result.map ~f:ignore
 ;;
 
 let admit_selected ~revision ~parsed ~input ~checkpoint =
+  admit_surface ~selected:true ~revision ~parsed ~input ~checkpoint
+  |> Result.map ~f:ignore
+;;
+
+let classify_selected ~revision ~parsed ~input ~checkpoint =
   admit_surface ~selected:true ~revision ~parsed ~input ~checkpoint
 ;;

@@ -1,0 +1,9 @@
+; Test the private body reader without widening the production interface.
+(copy_files ../../lib/agent_server/developer_child_remote_content.ml)
+
+(library
+ (name developer_child_content_test)
+ (modules developer_child_remote_content remote_tests)
+ (libraries core eio eio.unix eio_main agent_protocol uri ca-certs tls-eio)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
