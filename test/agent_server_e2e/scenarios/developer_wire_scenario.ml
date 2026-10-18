@@ -200,6 +200,21 @@ let qualify_client client =
         | W.Response.Observe None -> fail "submitted Developer Check was not observable"
         | _ -> fail "Developer Observe returned another method"
       in
+      let retried =
+        match call_developer client ~limits (W.Request.Submit submit) with
+        | W.Response.Submit view -> view
+        | _ -> fail "same-key Developer retry returned another method"
+      in
+      require
+        (P.Developer_command_id.equal
+           (D.View.command_id retried)
+           (D.View.command_id observed))
+        "same-key retry created another command";
+      require
+        (Chatml_source.Digest.equal
+           (D.View.capture_fingerprint retried)
+           (D.View.capture_fingerprint observed))
+        "same-key retry changed the captured source";
       require
         (P.Developer_command_id.equal
            (D.View.command_id submitted)
@@ -287,6 +302,76 @@ let unix_client ~sw env fixture =
   }
 ;;
 
+let absolute env path =
+  if Filename.is_absolute path
+  then path
+  else Filename.concat (Eio.Path.native_exn (Eio.Stdenv.cwd env)) path
+;;
+
+let stdio_executable env =
+  let default =
+    Filename.concat
+      (Eio.Path.native_exn (Eio.Stdenv.cwd env))
+      "_build/default/bin/ochat_agent_stdio.exe"
+  in
+  let path = Sys.getenv "OCHAT_E2E_STDIO_EXE" |> Option.value ~default |> absolute env in
+  require
+    (Eio.Path.is_file Eio.Path.(Eio.Stdenv.fs env / path))
+    "stdio relay is unavailable";
+  path
+;;
+
+let rec read_stdio_response client remaining =
+  if remaining = 0 then fail "too many stdio notifications before response";
+  match Support.Stdio_client.next_envelope client ~timeout_seconds:5. |> ok with
+  | P.Envelope.Notification _ -> read_stdio_response client (remaining - 1)
+  | response -> response
+;;
+
+let stdio_client ~sw env fixture =
+  let environment =
+    Support.Temporary_environment.child_environment
+      (Support.Config_fixture.environment fixture)
+      ~base:(Core_unix.environment ())
+  in
+  let process =
+    Support.Stdio_process.spawn
+      ~sw
+      ~env
+      ~environment
+      ~max_output_bytes:(2 * 1024 * 1024)
+      [ stdio_executable env
+      ; "--connect"
+      ; "unix://" ^ Support.Config_fixture.unix_socket fixture
+      ]
+  in
+  let client = Support.Stdio_client.create ~process ~clock:(Eio.Stdenv.clock env) in
+  { next_id = 1
+  ; send =
+      (fun request ->
+        Support.Stdio_client.send_raw_line
+          client
+          (P.Envelope.to_json request |> Jsonaf.to_string)
+        |> ok;
+        read_stdio_response client 4)
+  ; close =
+      (fun () ->
+        Support.Stdio_process.close_stdin process;
+        match
+          Eio.Time.with_timeout (Eio.Stdenv.clock env) 3. (fun () ->
+            Ok (Support.Stdio_process.await process))
+        with
+        | Ok _ -> ()
+        | Error `Timeout ->
+          ignore
+            (Support.Stdio_process.terminate
+               process
+               ~clock:(Eio.Stdenv.clock env)
+               ~grace_seconds:1.
+             : Support.Process_manager.termination))
+  }
+;;
+
 let start_socket_listener ~sw env fixture daemon =
   let path = Support.Config_fixture.unix_socket fixture in
   Agent_transport_socket.Server.prepare_path ~env ~socket_path:path |> ok;
@@ -358,6 +443,7 @@ let run env ~case =
          Support.Daemon_host.with_ env fixture ~options (fun sw daemon ->
            start_socket_listener ~sw env fixture daemon;
            qualify_client (http_client ~sw env fixture);
-           qualify_client (unix_client ~sw env fixture))));
+           qualify_client (unix_client ~sw env fixture);
+           qualify_client (stdio_client ~sw env fixture))));
   Eio.Flow.copy_string "developer wire transports passed\n" (Eio.Stdenv.stdout env)
 ;;

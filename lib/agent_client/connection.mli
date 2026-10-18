@@ -22,6 +22,24 @@ val request_without_history
     connections expose None. Capability selection does not grant authority. *)
 val initialization : t -> Agent_protocol.Initialize.Response.t option
 
+(** Fixed-bound bootstrap for the actual installed Developer handler inventory.
+    A successful Initialize selecting developer.run is required; no peer-supplied
+    limits govern decoding of this first response. *)
+val developer_capabilities
+  :  t
+  -> (Agent_protocol.Developer_common.Capabilities.t, Agent_protocol.Error.t) result
+
+(** Same serialized request lane and physical initialization as [request].
+    [Capabilities] uses [developer_capabilities]; all other closed Developer
+    requests are redecoded and their method-affine responses validated against
+    the effective limits from that same connection. This call may block: a
+    same-connection Cancel cannot overtake Await_terminal. *)
+val request_developer
+  :  t
+  -> limits:Agent_protocol.Developer_common.Limits.t
+  -> Agent_protocol.Developer_wire.Request.t
+  -> (Agent_protocol.Developer_wire.Response.t, Agent_protocol.Error.t) result
+
 (** Exclusive asynchronous consumer, claimed before session admission. *)
 type notification_lease
 
