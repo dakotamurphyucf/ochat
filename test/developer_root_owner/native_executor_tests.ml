@@ -300,6 +300,7 @@ let with_job_executor
            ~disclosure
            ~env
            ~current_actor:(fun () -> current_actor root)
+           ~queued_issuer:None
            ~prepare_source
          |> Result.map_error ~f:(fun error -> error.P.Error.message)
          |> Result.ok_or_failwith

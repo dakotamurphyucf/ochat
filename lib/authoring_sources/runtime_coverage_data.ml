@@ -178,7 +178,8 @@ let shared_features =
   ; ( "jobs.saved_agent_inference"
     , "A physically selected saved-Agent callback and its parser-owned nested Content \
        children retain one Root, bounded source budget and developer inference tracking \
-       without granting other async jobs model authority"
+       without granting other async jobs model authority. Queued child starts retain \
+       separate issuer comparisons and remain unclaimed without an installed executor"
     , [ "lib/agent_protocol/developer_agent_artifact.ml"
       ; "lib/chat_response/background_request.ml"
       ; "lib/agent_session/captured_agent_runner.ml"
@@ -190,6 +191,7 @@ let shared_features =
       ; "lib/agent_server/developer_child_agent_runner.ml"
       ; "lib/agent_server/developer_child_content_projection.ml"
       ; "lib/agent_server/developer_child_selection.ml"
+      ; "lib/agent_server/developer_queued_issuer.ml"
       ; "lib/agent_server/developer_live_resources.ml"
       ; "lib/agent_server/developer_native_executor.ml"
       ; "lib/chat_response/converter.ml"
@@ -375,7 +377,7 @@ let implementation_sources =
   ; ( "lib/agent_protocol/delivery.ml"
     , "63ae0f4d478302e84a1e49c84f406abf090794db4c231aa76181ad02072581d9" )
   ; ( "lib/agent_protocol/developer_agent_artifact.ml"
-    , "ed55a33b64d35a1fdb3b0a1126b1093856cb55b4796bac46e8bf7671d07e9f6a" )
+    , "9fa006b7103cab22b7de2f290c808ed9deb3f9ed968cf7a036767444d7531de2" )
   ; ( "lib/agent_protocol/job.ml"
     , "9f7ce5c6116a85816df7e489d7a6ba0c54114e9248592b2e7b38f0b0097a01bb" )
   ; ( "lib/agent_protocol/stored_completion.ml"
@@ -385,33 +387,35 @@ let implementation_sources =
   ; ( "lib/agent_server/job_scheduler.ml"
     , "d95f0f85605ed4b21a1dcc1d77d5d16e8329a3be85e0e8ba8941ceb527effaa8" )
   ; ( "lib/agent_server/job_scheduler_developer.ml"
-    , "21b7d72830e8e5a90c046b334ec08410e3aedc531c621c415994365b81c8882a" )
+    , "18062ce3137c3b1782fb4015657ca304a591341a33e1d1da47d362b137b7fd19" )
   ; ( "lib/agent_server/developer_background_job_runner.ml"
-    , "6f5137851d5bdb58fc3e65a7a4824249d4e6d661ce261d2cab7de7040a7aa976" )
+    , "cecd93d15460ee60eda3cac8ba282894e228e94a29811e19c774bea78f49b62a" )
   ; ( "lib/agent_server/developer_child_agent_runner.ml"
     , "bcf38cbb06418513161cdca0694732a08101d80d83ffb260b11f5499acc95e5b" )
   ; ( "lib/agent_server/developer_child_content_projection.ml"
     , "17dbb6bc0891ad5bb5c3879a2b1e946c05a01d13db32a15d220faa531cb82ba8" )
   ; ( "lib/agent_server/developer_child_selection.ml"
-    , "50b852558533a84aaec686be95dd5a940e2dd1f9de28d0fed7ece909a7298631" )
+    , "1af9f51272a7b1cf672101f369284be0b305bef2fe45bb435f6e0412fcf61f2b" )
+  ; ( "lib/agent_server/developer_queued_issuer.ml"
+    , "37295975565e6ab8de87fff1806d4c2e53ca2f5e95819c29a4379fd530f5497f" )
   ; ( "lib/agent_server/developer_live_resources.ml"
-    , "fe6ae11116ebf1a4cc3f7937eed3e5588e1d5d16101db7fd58dc46978d1f0dc5" )
+    , "65e2410840eebf7eb231e68a223a76f48f9f0db6021f908db0e130587bc92f29" )
   ; ( "lib/agent_server/developer_managed_tool_executor.ml"
     , "6aa0d045c61e26b1f1d507d3ffba850e31684526534e824df7120bc6862696fb" )
   ; ( "lib/agent_server/developer_native_executor.ml"
     , "14a408d5fc47cde9f47fda5f0f27c234f3e9a8bfea56301e4b8e5db7b9cedcc7" )
   ; ( "lib/agent_server/developer_root_owner.ml"
-    , "ce499f65b4ab3ba4530e301ada2da80f81286caaa5eecb1352f805702c6f20ef" )
+    , "c83cbd8cc47ca8a890419ccd6283a8c95e36d7b93b7745bd87bec6ac931d826e" )
   ; ( "lib/agent_server/developer_script_job_execution.ml"
     , "4e30550f6585c6afa97ddd12a12042d0be26b84f18aad7f6f92b2f3a3bf4bb32" )
   ; ( "lib/agent_server/developer_script_job_service.ml"
-    , "0da3466b80128a0470a09f9c792814af449cb509112cbe1bf72724856e0de6bb" )
+    , "f1cdd9e72d6450460bca488188275a23e4b00c6e5004efabb23c206eb257eaca" )
   ; ( "lib/agent_server/schedule_scheduler.ml"
     , "37cf371632d8ad86693c162e0593d56866f76df577dceb06ddd2ac5fe5bfdae9" )
   ; ( "lib/agent_session/background_execution.ml"
     , "2149c979ce81c6c851c8d8cbe749c622334f3c43d05b72b17ae89873e5d563c3" )
   ; ( "lib/agent_session/captured_agent_runner.ml"
-    , "13240e231e6fca4e02474e43511bb77eab15c89c40286ede53c5042f70901201" )
+    , "7862a400b3cec8d3ae4df7170531657f1bb5bb834ef49c274e6b83d5febebdac" )
   ; ( "lib/agent_session/developer_child_preflight.ml"
     , "d0d24d3a0b95abe03712785d4bf828a976249cd2984c0990837bd63458f42a5e" )
   ; ( "lib/chat_response/converter.ml"
@@ -459,7 +463,7 @@ let implementation_sources =
   ; ( "lib/chat_response/background_job_operations.ml"
     , "86e16c6df7d1eafcb41cb8b558318f7f5b310f9b356afc2412f0e0a32055fcb5" )
   ; ( "lib/chat_response/background_request.ml"
-    , "8d4ef26379439f843bb4003591d7dd98fb472a2116cf49c708d42453abda53ed" )
+    , "4c1a46dd36de612779ed0328774d6888d47bbab58495a80da253ccac7bbb83c5" )
   ; ( "lib/chat_response/ingress_operations.ml"
     , "d8e2813f75f67ca4c4d3ee6fc264a9731889538987a53d1f80ff27c2c399c825" )
   ; ( "lib/chat_response/moderator_invocation.ml"

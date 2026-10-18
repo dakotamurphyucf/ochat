@@ -6,6 +6,14 @@ type child = t
 val revision : t -> Prompt_revision.t
 val reference : t -> Chat_response.Background_request.Agent_artifact.t
 
+(** Canonical immutable reference of a verified installed revision. This is
+    comparison data only: the caller must have authenticated the revision's
+    artifact and current selected owner. It performs no source acquisition. *)
+val reference_of_revision
+  :  Prompt_revision.t
+  -> checkpoint:(unit -> unit)
+  -> (Chat_response.Background_request.Agent_artifact.t, Agent_protocol.Error.t) result
+
 module Model_selection : sig
   (** A model member selected and replayed through the existing artifact
       publisher, with actual bounded ChatMD authored root/dependency bytes and

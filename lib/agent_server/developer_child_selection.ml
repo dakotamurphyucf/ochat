@@ -312,6 +312,44 @@ let refresh t =
   Admission.{ selection = t; borrowed; refreshed; descendant; capabilities = narrowed }
 ;;
 
+let capture_issuer_source t ~live ~checkpoint =
+  let open Result.Let_syntax in
+  let%bind () =
+    if Prepared.issued_by_live t.prepared live
+    then Ok ()
+    else Error (P.Error.invalid_request "selected child belongs to another Live owner")
+  in
+  let%bind admission = refresh t in
+  let%bind () = Admission.check_now admission in
+  let%bind issuer = Prepared.issuer_source t.prepared ~checkpoint in
+  let%bind after = refresh t in
+  let%map () = Admission.check_now after in
+  issuer
+;;
+
+let prepare_agent_source t ~live ~binding ~launch ~request ~max_registrations ~checkpoint =
+  let open Result.Let_syntax in
+  let%bind () =
+    if Prepared.issued_by_live t.prepared live
+    then Ok ()
+    else Error (P.Error.invalid_request "selected child belongs to another Live owner")
+  in
+  let%bind admission = refresh t in
+  let%bind () = Admission.check_now admission in
+  let%bind artifact =
+    Chat_response.Agent_runtime.prepare_agent_source
+      (Prepared.runtime t.prepared)
+      ~binding
+      ~launch
+      ~request
+      ~max_registrations
+      ~checkpoint
+  in
+  let%bind after = refresh t in
+  let%map () = Admission.check_now after in
+  artifact
+;;
+
 let source_current t =
   let open Result.Let_syntax in
   let%bind admission = refresh t in

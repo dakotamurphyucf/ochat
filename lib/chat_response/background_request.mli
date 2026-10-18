@@ -7,6 +7,38 @@ open Core
     generation, parent, deadline and attempt ownership belong to that job. *)
 type t
 
+module Issuer_source : sig
+  (** Immutable issuer comparison data for a queued selected child. The
+      installed artifact is the issuing child's own revision, not the optional
+      Tool target [agent_artifact]. Headless is the only admitted v3 role.
+      These values contain no live source lease, native issuer or Claim. *)
+  type t
+
+  val create
+    :  artifact:Agent_protocol.Developer_agent_artifact.t
+    -> prompt:Agent_protocol.Id.Prompt_definition.t
+    -> workspace:Agent_protocol.Id.Workspace_definition.t
+    -> tool_contract:Chatml_compilation.Tool_contract.t
+    -> source_policy:Chatml_source.Digest.t
+    -> runtime_policy:Chatml_source.Digest.t
+    -> t
+
+  val artifact : t -> Agent_protocol.Developer_agent_artifact.t
+  val prompt : t -> Agent_protocol.Id.Prompt_definition.t
+  val workspace : t -> Agent_protocol.Id.Workspace_definition.t
+  val tool_contract : t -> Chatml_compilation.Tool_contract.t
+  val source_policy : t -> Chatml_source.Digest.t
+  val runtime_policy : t -> Chatml_source.Digest.t
+end
+
+(** Pure attachment for trusted physical staging. A caller's possession of an
+    [Issuer_source.t] is never a grant. Reject replacement; a v3 request may
+    still carry an independent Tool [agent_artifact] target. Author-facing
+    Job.start parsers do not accept this field. *)
+val with_issuer_source : t -> Issuer_source.t -> (t, Agent_protocol.Error.t) result
+
+val issuer_source : t -> Issuer_source.t option
+
 module Agent_artifact : sig
   (** Immutable reference to selected child code, not a source grant, native
       resource, compiled state or reservation. Validated domain types bound the
@@ -66,8 +98,8 @@ val script
   -> policy:One_off_request.policy
   -> (t, Agent_protocol.Error.t) result
 
-(** A present code reference uses the strict v2 carrier and participates in the
-    fingerprint. Absence retains exact existing v1 encoding and fingerprint. *)
+(** An issuer uses strict v3. Without one, the existing v1/v2 encoding and
+    fingerprint remain byte-identical, including a v2 Tool target artifact. *)
 val to_json : t -> Jsonaf.t
 
 (** Effective stored budget, retained independently of later host defaults. *)

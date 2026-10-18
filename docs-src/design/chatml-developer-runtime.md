@@ -68,17 +68,32 @@ host configuration. Declaration and caller content retain distinct source
 origins and share one finite conversion budget. A selected source read checks
 the live owner before and after yielding acquisition; the existing Converter
 keeps its role and inline-image rendering. Immediate moderator/model
-orchestration still requires its own joined child execution scope.
+orchestration runs inside the selected child's joined execution scope.
 
 The [child preflight](../../lib/agent_session/developer_child_preflight.mli)
 reads the genuine parser projection and bounded caller input before the child
 prepares effects. Its literal mode retains the strict lower boundary. Its
-selected mode classifies document and image content without reading it, and
-rejects moderation, unowned nested Agents and the Driver's special `fork`
-route. The host must prove the saved target, physical Root and child policy
+selected mode classifies document and image content without reading it, admits
+the supported selected moderator script, and rejects unowned nested Agents and
+the Driver's special `fork` route. The host must prove the saved target,
+physical Root and child policy
 before installing any tool or acquiring dynamic content. The scan admits at
 most 16,384 nodes and 8 MiB of text and propagates the caller's cancellation
 checkpoint. Passing it is classification, not an execution grant.
+
+For a `Job.start` made inside an authenticated selected child, the private
+[queued issuer](../../lib/agent_server/developer_queued_issuer.mli) records the
+issuing child's installed revision, prompt/workspace definitions, tool
+contract, source policy and selected runtime policy as bounded comparison
+data. A Tool's optional Agent target artifact stays separate from that issuer;
+a Script has no Agent target. The physical native terminal stages both kinds
+only while the selected Child, registered invocation, original Root effect
+witness and current borrowed native scope still agree, including a source
+refresh after yielding job preparation. The immutable v3 payload does not
+carry a source lease or execution grant. Until a Claim-bound issuer installer
+is available, these rows remain `Queued` with no Worker attempt; ordinary
+root-issued v1/v2 work continues through its existing path. The future Worker
+must restore and compare the issuer inside its actual Claim before any effect.
 
 A physically claimed developer Worker borrows the same lexical kernel through a
 [Worker action](../../lib/agent_server/developer_root_owner.mli). It derives the

@@ -988,6 +988,11 @@ module Worker_action = struct
 
   let stage_background t ~request ~checkpoint =
     let issuer = t.issuer in
+    let* () =
+      if Option.is_some (Request.issuer_source request)
+      then invalid "worker action cannot stage a copied selected issuer"
+      else Ok ()
+    in
     let* () = check_now t in
     let* parent_id =
       let depth = Job_scope.Parent.nested_depth t.parent in
@@ -1729,7 +1734,15 @@ module Action = struct
     | Physically_owned
   [@@deriving sexp_of]
 
-  let stage_background_with_launch t ~launch ~request ~checkpoint ~check_parent_now =
+  let stage_background_with_launch
+        t
+        ~launch
+        ~selected
+        ~check_selection_now
+        ~request
+        ~checkpoint
+        ~check_parent_now
+    =
     let issuer = t.issuer in
     if (not (same_domain issuer.registry)) || (not (same_action_fiber t)) || not t.live
     then invalid "developer root action is not live in this scope"
@@ -1755,12 +1768,14 @@ module Action = struct
             then Ok ()
             else invalid "developer action selection changed"
           in
+          let* () = check_parent_now () in
+          let* () = check_selection_now () in
           let* prepared =
             Agent_session.Developer_root_job_admission.background
               ~owner:issuer.owner
               ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
               ~launch
-              ~selected:t.snapshot.selected
+              ~selected
               ~policy:issuer.job_policy
               ~request
               ~created_at:(issuer.registry.now ())
@@ -1768,6 +1783,8 @@ module Action = struct
           in
           let* () = check_effect_now issuer current_witness in
           let* () = check_parent_now () in
+          let* () = check_selection_now () in
+          let* () = check_effect_now issuer current_witness in
           if (not t.live) || Option.is_some t.sealed
           then invalid "developer root action changed during job preparation"
           else (
@@ -1777,6 +1794,11 @@ module Action = struct
   ;;
 
   let stage_background (t : t) ~request ~checkpoint =
+    let* () =
+      if Option.is_some (Request.issuer_source request)
+      then invalid "root action cannot stage a copied selected issuer"
+      else Ok ()
+    in
     let* launch =
       P.Developer_job.Launch.create
         ~parent:P.Developer_job.Launch.Run_root
@@ -1786,6 +1808,8 @@ module Action = struct
     stage_background_with_launch
       t
       ~launch
+      ~selected:t.snapshot.selected
+      ~check_selection_now:(fun () -> Ok ())
       ~request
       ~checkpoint
       ~check_parent_now:(fun () -> Ok ())
@@ -2269,6 +2293,8 @@ let with_root_action t ~phase f =
 module Native_terminal = struct
   type nonrec t = native_scope
 
+  module N = Agent_session.Native_tool_invocation
+
   let issued_by_root (t : t) ~root = phys_equal t.issuer root
   let invocation t = t.registration.invocation
 
@@ -2547,7 +2573,7 @@ module Native_terminal = struct
       | _ -> invalid "pre-entry native terminal is not a failure")
   ;;
 
-  let stage_background (t : t) ~request ~checkpoint ~check_parent_now =
+  let background_launch (t : t) =
     let context = H.context t.registration.invocation in
     let capture_fingerprint = Chatml_developer_capture.fingerprint t.issuer.capture in
     let* () =
@@ -2574,17 +2600,79 @@ module Native_terminal = struct
         ~parent_job
         ~nested_depth
     in
+    Ok (launch, capture_fingerprint)
+  ;;
+
+  let background_parent_now t ~capture_fingerprint ~check_parent_now () =
+    let* () = check_parent_now () in
+    match t.registration.job_parent with
+    | None -> Ok ()
+    | Some parent ->
+      Job_scope.Parent.check_now parent ~owner:t.issuer.owner ~capture_fingerprint
+  ;;
+
+  let stage_background (t : t) ~request ~checkpoint ~check_parent_now =
+    let* () =
+      if Option.is_some (Request.issuer_source request)
+      then invalid "native callback cannot stage a copied selected issuer"
+      else Ok ()
+    in
+    let* launch, capture_fingerprint = background_launch t in
     Action.stage_background_with_launch
       t.action
       ~launch
+      ~selected:t.action.snapshot.selected
+      ~check_selection_now:(fun () -> Ok ())
       ~request
       ~checkpoint
-      ~check_parent_now:(fun () ->
-        let* () = check_parent_now () in
-        match t.registration.job_parent with
-        | None -> Ok ()
-        | Some parent ->
-          Job_scope.Parent.check_now parent ~owner:t.issuer.owner ~capture_fingerprint)
+      ~check_parent_now:(background_parent_now t ~capture_fingerprint ~check_parent_now)
+  ;;
+
+  let stage_background_from_selected_borrow
+        (t : t)
+        ~borrowed
+        ~request
+        ~checkpoint
+        ~check_parent_now
+    =
+    let* () =
+      if Option.is_some (Request.issuer_source request)
+      then Ok ()
+      else invalid "selected child stage has no issuing source"
+    in
+    let check_borrow_now () =
+      let* current = N.borrow_selected () in
+      if not (phys_equal current borrowed)
+      then invalid "selected child native borrow changed"
+      else (
+        let invocation = N.selected_borrowed_invocation current in
+        let context = H.context t.registration.invocation in
+        let* () = check_completion_now t in
+        if
+          (not (H.equal_context context (H.context invocation)))
+          || not (Option.value_map t.dispatched ~default:false ~f:(phys_equal invocation))
+        then invalid "selected child borrow is not this registered terminal"
+        else Ok ())
+    in
+    let* () = check_borrow_now () in
+    let* selected = N.selected_borrowed_capabilities borrowed in
+    let selected_fingerprint = Capability.fingerprint selected in
+    let check_selection_now () =
+      let* () = check_borrow_now () in
+      let* current = N.selected_borrowed_capabilities borrowed in
+      if String.equal (Capability.fingerprint current) selected_fingerprint
+      then Ok ()
+      else invalid "selected child native ceiling changed during stage"
+    in
+    let* launch, capture_fingerprint = background_launch t in
+    Action.stage_background_with_launch
+      t.action
+      ~launch
+      ~selected
+      ~check_selection_now
+      ~request
+      ~checkpoint
+      ~check_parent_now:(background_parent_now t ~capture_fingerprint ~check_parent_now)
   ;;
 
   let admit_external_model (t : t) ~request ~checkpoint ~check_parent_now =

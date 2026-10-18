@@ -12,6 +12,7 @@ module Availability : sig
     | Runnable
     | Malformed_supported
     | Agent_artifact_installer_unavailable
+    | Issuer_source_installer_unavailable
     | Unsupported_kind
   [@@deriving equal, sexp_of]
 end
@@ -67,7 +68,10 @@ val issued_by_root : t -> Developer_root_owner.run -> bool
     bounded saved payload from the authentic candidate. Tool and Script are
     runnable, including Tools with saved v2 Agent.run references when the
     actual runtime is installed. Without that runtime, a valid saved artifact
-    remains [Agent_artifact_installer_unavailable] and unclaimed. Runnable
+    remains [Agent_artifact_installer_unavailable] and unclaimed. A v3 child
+    issuer remains [Issuer_source_installer_unavailable] and Queued until the
+    separate claimed-issuer executor is installed; neither this classification
+    nor a Root registry fallback may claim it. Runnable
     classification grants no source authority: the entered Worker re-decodes
     its Claim, and the actual selected native callback restores the exact pin.
     A malformed saved Async_tool payload is [Malformed_supported]: the same

@@ -29,6 +29,13 @@ module Source_parent : sig
       Native carries its actual Host invocation ID; Worker carries the entered
       Claim's job ID and attempt. It cannot replace [check]. *)
   val launch : t -> (Chat_response.Source_launch.t, Agent_protocol.Error.t) result
+
+  (** Comparison-only projection of the exact selected Child whose native
+      scope created this source parent. The caller must run [check] for its
+      binding, and Child's preparation action rechecks that child's owner and
+      source around I/O. Root and Worker parents have no selected Child here;
+      a failed selected preparation must never fall back to their runtime. *)
+  val selected_child : t -> Developer_child_selection.t option
 end
 
 module Scope : sig
@@ -56,7 +63,10 @@ module Scope : sig
 
   (** Physically stage one request returned by the existing selected native
       managed callback. Its effect-entry policy has already checked the exact
-      binding; this method records the returned ID in the same lexical Job
+      binding. An [Admitted_child] scope attaches that exact child's immutable
+      v3 issuer before the physical transaction, for Tool and Script alike;
+      Root/Worker scopes retain v1/v2. A preattached issuer is rejected, not
+      adopted. This method records the returned ID in the same lexical Job
       scope and rolls it back on any failed post-stage check. *)
   val stage_background
     :  t
@@ -116,7 +126,10 @@ end
     replaces the root's original authenticated principal. [prepare_source]
     must use the admitted capture and authentic native implementation to
     attach a Tool's code artifact; it cannot be caller source or a fabricated
-    conversation launch owner. The root's admitted resource policy is used,
+    conversation launch owner. [queued_issuer = Some] must be constructed by
+    the same Host from its exact Live/Root package; [None] preserves genuine
+    Root/Worker v1/v2 services and fails closed for Admitted_child v3 staging.
+    Only a physically admitted selected child can mint a v3 issuer. The root's admitted resource policy is used,
     never a script-selected wider fallback. *)
 val create
   :  root:Developer_root_owner.run
@@ -124,6 +137,7 @@ val create
   -> disclosure:Developer_result_disclosure.t
   -> env:Eio_unix.Stdenv.base
   -> current_actor:(unit -> Operator_authorization.t)
+  -> queued_issuer:Developer_queued_issuer.t option
   -> prepare_source:
        (parent:Source_parent.t
         -> binding:Chat_response.Tool_capability.binding

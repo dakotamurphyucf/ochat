@@ -16,6 +16,7 @@ module Value = Chatml.Chatml_value_codec
 
 type t =
   { root : O.run
+  ; queued_issuer : Developer_queued_issuer.t option
   ; disclosure : D.t
   ; env : Eio_unix.Stdenv.base
   ; current_actor : unit -> Operator_authorization.t
@@ -44,6 +45,7 @@ and native_selection =
 and scope =
   { service : t
   ; physical : physical
+  ; queued_child : Child.t option
   ; worker_parent : Agent_session.Developer_job_scope.Parent.t option
   ; mutable selected : C.t
   ; mutable selected_now : unit -> (C.t, P.Error.t) result
@@ -59,10 +61,19 @@ let ( let* ) result f = Result.bind result ~f
 let message result = Result.map_error result ~f:(fun error -> error.P.Error.message)
 let kernel_result result = Result.map_error result ~f:invalid
 
-let create ~root ~store ~disclosure ~env ~current_actor ~prepare_source =
+let create ~root ~store ~disclosure ~env ~current_actor ~queued_issuer ~prepare_source =
   if not (O.issued_by_store root store && D.issued_by_store disclosure store)
   then Error (invalid "developer job services do not share the physical Store")
-  else Ok { root; disclosure; env; current_actor; prepare_source }
+  else
+    let* () =
+      match queued_issuer with
+      | None -> Ok ()
+      | Some issuer ->
+        if Developer_queued_issuer.issued_by_root issuer root
+        then Ok ()
+        else Error (invalid "queued issuer belongs to another physical Root")
+    in
+    Ok { root; queued_issuer; disclosure; env; current_actor; prepare_source }
 ;;
 
 let issued_by_root t root = phys_equal t.root root
@@ -163,6 +174,8 @@ module Source_parent = struct
     in
     Chat_response.Source_launch.developer ~owner:(O.owner t.scope.service.root) ~parent
   ;;
+
+  let selected_child t = t.scope.queued_child
 end
 
 let stage_physical scope ~checkpoint request =
@@ -173,11 +186,26 @@ let stage_physical scope ~checkpoint request =
   match scope.physical with
   | Root action -> O.Action.stage_background action ~request ~checkpoint
   | Native terminal ->
-    O.Native_terminal.stage_background
-      terminal
-      ~request
-      ~checkpoint
-      ~check_parent_now:scope.check_parent_now
+    (match scope.queued_child with
+     | None ->
+       O.Native_terminal.stage_background
+         terminal
+         ~request
+         ~checkpoint
+         ~check_parent_now:scope.check_parent_now
+     | Some child ->
+       let* borrowed = N.borrow_selected () in
+       let check_selected_parent_now () =
+         let* () = scope.check_parent_now () in
+         let* admission = Child.refresh child in
+         Child.Admission.check_now admission
+       in
+       O.Native_terminal.stage_background_from_selected_borrow
+         terminal
+         ~borrowed
+         ~request
+         ~checkpoint
+         ~check_parent_now:check_selected_parent_now)
   | Worker action -> O.Worker_action.stage_background action ~request ~checkpoint
 ;;
 
@@ -196,6 +224,20 @@ let cleanup_physical physical id =
 ;;
 
 let stage scope ~checkpoint request =
+  let* () = check scope in
+  let* () =
+    if Option.is_some (B.issuer_source request)
+    then Error (invalid "caller-supplied queued issuer cannot be staged")
+    else Ok ()
+  in
+  let* request =
+    match scope.queued_child, scope.service.queued_issuer with
+    | None, _ -> Ok request
+    | Some child, Some issuer ->
+      let* source = Developer_queued_issuer.capture_child issuer ~child ~checkpoint in
+      B.with_issuer_source request source
+    | Some _, None -> Error (invalid "selected child queued issuer is unavailable")
+  in
   let* () = check scope in
   let* () = B.validate_capabilities request ~capabilities:scope.selected in
   Eio.Cancel.protect (fun () ->
@@ -493,6 +535,7 @@ end
 let with_kernel
       service
       ~physical
+      ~queued_child
       ~selected
       ~selected_now
       ~current_capabilities
@@ -513,6 +556,7 @@ let with_kernel
        f
          { service
          ; physical
+         ; queued_child
          ; worker_parent = None
          ; selected
          ; selected_now
@@ -547,6 +591,7 @@ let with_root_action service ~phase f =
            let scope =
              { service
              ; physical = Root issued
+             ; queued_child = None
              ; worker_parent = None
              ; selected
              ; selected_now = (fun () -> Ok (O.native_selected service.root))
@@ -611,6 +656,7 @@ let with_claimed_worker service ~candidate ?on_capacity_decision ?select f =
               let scope =
                 { service
                 ; physical = Worker issued
+                ; queued_child = None
                 ; worker_parent = Some parent
                 ; selected
                 ; selected_now
@@ -768,6 +814,10 @@ let with_native_scope service ~terminal ~borrowed ~capabilities ~check_parent_no
     with_kernel
       service
       ~physical:(Native terminal)
+      ~queued_child:
+        (match capabilities, borrowed with
+         | Admitted_child child, Some _ -> Some child
+         | Root, _ | Worker _, _ | Admitted_child _, None -> None)
       ~selected
       ~selected_now
       ~current_capabilities:current_capabilities_now

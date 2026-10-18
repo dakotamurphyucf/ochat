@@ -740,6 +740,33 @@ type child_prepared =
 module Child_prepared = struct
   type t = child_prepared
 
+  let issued_by_live t live = phys_equal t.live live
+
+  let issuer_source t ~checkpoint =
+    let open Result.Let_syntax in
+    let%bind binding =
+      t.live.source_binding
+      |> Result.of_option ~error:(invalid "selected child has no original source binding")
+    in
+    let%bind script_preparation =
+      t.live.host.script_preparation
+      |> Result.of_option
+           ~error:(invalid "selected child script preparation is unavailable")
+    in
+    let%bind artifact =
+      Agent_session.Prompt_child_source.reference_of_revision t.revision ~checkpoint
+    in
+    let policy = Source_binding.policy_identity binding ~script_preparation in
+    Ok
+      (Chat_response.Background_request.Issuer_source.create
+         ~artifact
+         ~prompt:t.live.definition.id
+         ~workspace:t.live.workspace_definition.id
+         ~tool_contract:(Definition.tool_contract t.live.definition)
+         ~source_policy:(Source_binding.Policy_identity.source policy)
+         ~runtime_policy:(Source_binding.Policy_identity.runtime policy))
+  ;;
+
   module Admission_data = struct
     type mode =
       | Direct

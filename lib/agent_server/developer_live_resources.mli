@@ -143,6 +143,22 @@ module Child_prepared : sig
       the case. *)
   type t
 
+  (** Comparison only: the preparation is retained by this exact physical
+      Live package, not another package with equal Prompt/Workspace IDs. *)
+  val issued_by_live : t -> live -> bool
+
+  (** Project the already verified selected revision and this Live package's
+      installed Prompt/Workspace, Tool contract and source/runtime policies,
+      using this Live package's exact retained script preparation for the
+      runtime policy digest.
+      It is immutable v3 comparison data, not a source or Job grant. The
+      enclosing Child_selection must refresh after this possibly yielding
+      projection and before the physical stage. *)
+  val issuer_source
+    :  t
+    -> checkpoint:(unit -> unit)
+    -> (Chat_response.Background_request.Issuer_source.t, P.Error.t) result
+
   module Admission : sig
     type t
 

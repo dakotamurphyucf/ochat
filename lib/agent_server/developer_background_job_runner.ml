@@ -28,6 +28,7 @@ module Availability = struct
     | Runnable
     | Malformed_supported
     | Agent_artifact_installer_unavailable
+    | Issuer_source_installer_unavailable
     | Unsupported_kind
   [@@deriving equal, sexp_of]
 end
@@ -77,13 +78,16 @@ let decode t job =
 ;;
 
 let classify t request =
-  match B.target_kind request, B.agent_artifact request with
-  | B.Target_kind.Tool, None -> Availability.Runnable
-  | Tool, Some _ ->
-    (match t.agent_runtime with
-     | None -> Agent_artifact_installer_unavailable
-     | Some _ -> Runnable)
-  | Script, _ -> Runnable
+  match B.issuer_source request with
+  | Some _ -> Availability.Issuer_source_installer_unavailable
+  | None ->
+    (match B.target_kind request, B.agent_artifact request with
+     | B.Target_kind.Tool, None -> Availability.Runnable
+     | Tool, Some _ ->
+       (match t.agent_runtime with
+        | None -> Agent_artifact_installer_unavailable
+        | Some _ -> Runnable)
+     | Script, _ -> Runnable)
 ;;
 
 let availability t candidate =
@@ -323,8 +327,10 @@ let execute_claimed t active =
   let* () =
     match classify t request with
     | Runnable -> Ok ()
-    | Malformed_supported | Agent_artifact_installer_unavailable | Unsupported_kind ->
-      invalid "developer background target has no installed executor"
+    | Malformed_supported
+    | Agent_artifact_installer_unavailable
+    | Issuer_source_installer_unavailable
+    | Unsupported_kind -> invalid "developer background target has no installed executor"
   in
   with_claim_budget
     t
@@ -432,7 +438,9 @@ let run_candidate t ?on_capacity_decision candidate =
     ~f:(fun () ->
       let* ready = availability t candidate in
       match ready with
-      | Agent_artifact_installer_unavailable | Unsupported_kind ->
+      | Agent_artifact_installer_unavailable
+      | Issuer_source_installer_unavailable
+      | Unsupported_kind ->
         invalid "developer background target has no installed executor"
       | Malformed_supported ->
         O.Job_candidate.with_claimed

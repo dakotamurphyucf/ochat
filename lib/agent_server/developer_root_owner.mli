@@ -492,6 +492,29 @@ module Native_terminal : sig
     -> check_parent_now:(unit -> (unit, Agent_protocol.Error.t) result)
     -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result
 
+  (** Selected-child v3 counterpart, reachable only inside this SAME terminal's
+      physically current native borrow. At entry and after yielding preparation,
+      [Native_tool_invocation.borrow_selected ()] must be physically [borrowed];
+      active/domain checks on [borrowed] alone do not prove fiber currentness.
+      Derive the stage ceiling from
+      [Native_tool_invocation.selected_borrowed_capabilities borrowed], never
+      from a caller-supplied registry or the Root snapshot. Require that the
+      borrowed Host invocation is physically the registered terminal's
+      dispatched invocation (the prepared registration has only equal context),
+      its selected issuer/currentness and physical parent are live, and the request carries
+      a v3 issuer. Recheck after yielding preparation and before reservation;
+      [check_parent_now] still checks the authenticated Child selection/source
+      at that final boundary. Ordinary [stage_background] retains v1/v2 Root
+      selection and cannot stage a copied v3 issuer. This only saves Queued
+      work; it does not install a claimed issuer executor. *)
+  val stage_background_from_selected_borrow
+    :  t
+    -> borrowed:Agent_session.Native_tool_invocation.selected_borrowed
+    -> request:Chat_response.Background_request.t
+    -> checkpoint:(unit -> unit)
+    -> check_parent_now:(unit -> (unit, Agent_protocol.Error.t) result)
+    -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result
+
   (** The native call-boundary counterpart of Action.admit_external_model.
       Its decoded request is re-admitted under the real whole-envelope and
       job/document bounds. This exact registered scope must own a durable Dispatching invocation.
