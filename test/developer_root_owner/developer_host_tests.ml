@@ -15,7 +15,14 @@ let checked = function
   | Error _ -> failwith "fixture admission failed"
 ;;
 
-let developer_configuration ?(tool_fixture = false) () =
+let developer_configuration
+      ?(tool_fixture = false)
+      ?(authorize_native =
+        fun _ _ -> Error (P.Error.invalid_request "no native tool selected"))
+      ?(prepare_output =
+        fun _ -> Error (P.Error.invalid_request "no native output selected"))
+      ()
+  =
   let target =
     if tool_fixture then Chatml.Chatml_compiler_contract.Target.Tool_v1 else One_off_v1
   in
@@ -142,9 +149,8 @@ let developer_configuration ?(tool_fixture = false) () =
        |> ok)
     ~publisher_storage:Agent_store.Developer_result_publisher.Storage.Automatic
     ~model_target:None
-    ~authorize_native:(fun _ _ ->
-      Error (P.Error.invalid_request "no native tool selected"))
-    ~prepare_output:(fun _ -> Error (P.Error.invalid_request "no native output selected"))
+    ~authorize_native
+    ~prepare_output
   |> ok
 ;;
 
@@ -285,7 +291,17 @@ let repl_configuration () =
   |> ok
 ;;
 
-let with_daemon ?(tool_fixture = false) ?(repl = false) f =
+let with_daemon
+      ?(tool_fixture = false)
+      ?(repl = false)
+      ?(prompt_source = "<developer>Developer host fixture.</developer>")
+      ?(native_sample = false)
+      ?authorize_native
+      ?prepare_output
+      ?timeout_seconds
+      ?after_shutdown
+      f
+  =
   Eio_main.run (fun env ->
     let root =
       Filename.concat
@@ -303,7 +319,13 @@ let with_daemon ?(tool_fixture = false) ?(repl = false) f =
           Eio.Path.save
             ~create:(`Exclusive 0o600)
             Eio.Path.(Eio.Stdenv.fs env / file)
-            "<developer>Developer host fixture.</developer>");
+            prompt_source);
+        if native_sample
+        then
+          Eio.Path.save
+            ~create:(`Exclusive 0o600)
+            Eio.Path.(Eio.Stdenv.fs env / root / "sample.txt")
+            "developer host native sample";
         Eio.Switch.run (fun sw ->
           let base = Agent_server_test_support.config root root prompt1 in
           let config =
@@ -324,7 +346,9 @@ let with_daemon ?(tool_fixture = false) ?(repl = false) f =
               }
             | _ -> failwith "unexpected configured catalog fixture"
           in
-          let developer = developer_configuration ~tool_fixture () in
+          let developer =
+            developer_configuration ~tool_fixture ?authorize_native ?prepare_output ()
+          in
           let developer =
             if repl
             then
@@ -337,7 +361,7 @@ let with_daemon ?(tool_fixture = false) ?(repl = false) f =
             ; developer = Some developer
             }
           in
-          let daemon =
+          let start () =
             S.Daemon.start
               ~sw
               ~env
@@ -349,9 +373,23 @@ let with_daemon ?(tool_fixture = false) ?(repl = false) f =
               ()
             |> ok
           in
-          Fun.protect
-            ~finally:(fun () -> S.Daemon.shutdown daemon |> ok)
-            (fun () -> f daemon))))
+          let run () =
+            let daemon = start () in
+            let result =
+              Fun.protect
+                ~finally:(fun () -> S.Daemon.shutdown daemon |> ok)
+                (fun () -> f daemon)
+            in
+            Option.iter after_shutdown ~f:(fun replay ->
+              let reopened = start () in
+              Fun.protect
+                ~finally:(fun () -> S.Daemon.shutdown reopened |> ok)
+                (fun () -> replay result reopened));
+            result
+          in
+          match timeout_seconds with
+          | None -> run ()
+          | Some seconds -> Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) seconds run)))
 ;;
 
 let open_document ?(source = "let main input = Task.pure(input)") daemon actor =
@@ -627,6 +665,359 @@ let%expect_test "hosted Tool_v1 fixture binds selected ABI and durable row" =
       "tool_success=true same_row=true changed_target_conflicts=%b\n"
       changed_target_conflicts);
   [%expect {| tool_success=true same_row=true changed_target_conflicts=true |}]
+;;
+
+let%expect_test "hosted command receipts distinguish compilation, limits, and revocation" =
+  with_daemon (fun daemon ->
+    let scopes = Set.add Agent_server_test_support.scopes Developer_live_run in
+    let scopes = Set.add scopes Developer_check in
+    let principal =
+      Agent_server_test_support.principal_with_scopes "pri_developer_receipts" scopes
+    in
+    let current = ref true in
+    let actor =
+      Operator_authorization.guarded ~principal ~is_current:(fun () -> !current)
+    in
+    let reconnected = Operator_authorization.trusted_local principal in
+    let key text = P.Idempotency_key.of_string text |> checked in
+    let bounds =
+      Chatml_developer_capture.Json_bounds.create
+        ~max_bytes:4096
+        ~max_depth:16
+        ~max_nodes:128
+      |> Or_error.ok_exn
+    in
+    let run ?(input = `Null) ~source ~kind ~name ~requested_max_output_bytes () =
+      let connection, _transport, expected = open_document ~source daemon actor in
+      let route =
+        S.Daemon.Developer.Request.Route.Document_script
+          { expected; selector = P.Authoring.Analysis.Target.selected_script "s" |> ok }
+      in
+      let request =
+        S.Daemon.Developer.Request.create
+          ~route
+          ~kind
+          ~target:Chatml.Chatml_compiler_contract.Target.One_off_v1
+          ~prompt:
+            (if R.Kind.equal kind Live_run
+             then Some (S.Catalog_identity.prompt_definition "restart.prompt")
+             else None)
+          ~workspace:
+            (if R.Kind.equal kind Live_run
+             then Some (S.Catalog_identity.workspace_definition "restart.workspace")
+             else None)
+          ~entrypoint:"main"
+          ~input
+          ~fixtures:None
+          ~requested_execution:None
+          ~requested_max_output_bytes
+          ~bounds
+          ~checkpoint:ignore
+        |> ok
+      in
+      let run_id = P.Id.Developer_run.create () in
+      let key = key name in
+      ignore
+        (S.Daemon.Developer.submit
+           daemon
+           ~actor
+           ~run_id
+           ~key
+           ~request
+           ~fresh_source:(Some (Document_script { connection }))
+         |> ok);
+      let terminal = S.Daemon.Developer.await_terminal daemon ~actor ~run_id ~key |> ok in
+      run_id, key, request, terminal
+    in
+    let bad_source = "let main input = Task.pure(no_such_developer_identifier)" in
+    let _check_run, _check_key, _check_request, check =
+      run
+        ~source:bad_source
+        ~kind:Check
+        ~name:"receipt-check-rejected"
+        ~requested_max_output_bytes:None
+        ()
+    in
+    (match Option.map (S.Daemon.Developer.View.receipt check) ~f:R.value with
+     | Some (Check (Rejected diagnostic)) ->
+       [%test_eq: string] diagnostic.code "chatml.invalid_handler"
+     | result ->
+       raise_s [%sexp "expected bounded Check diagnostic", (result : R.value option)]);
+    let long_value = String.make 1024 'x' in
+    let limited_source = "let main input = Task.pure(input)" in
+    let limited_run, limited_key, limited_request, limited =
+      run
+        ~input:(`String long_value)
+        ~source:limited_source
+        ~kind:Live_run
+        ~name:"receipt-live-limited"
+        ~requested_max_output_bytes:(Some 128)
+        ()
+    in
+    (match Option.map (S.Daemon.Developer.View.receipt limited) ~f:R.value with
+     | Some (Live (Limited error)) -> [%test_eq: P.Error.code] error.code Resource_limit
+     | result -> raise_s [%sexp "expected bounded Live limit", (result : R.value option)]);
+    (match S.Daemon.Developer.View.phase limited with
+     | Agent_store.Developer_command_row.Phase.Terminal { execution_started = true; _ } ->
+       ()
+     | _ -> failwith "bounded Live command did not enter execution");
+    let _failed_run, _failed_key, _failed_request, failed =
+      run
+        ~source:bad_source
+        ~kind:Live_run
+        ~name:"receipt-live-compile"
+        ~requested_max_output_bytes:None
+        ()
+    in
+    (match Option.map (S.Daemon.Developer.View.receipt failed) ~f:R.value with
+     | Some (Live (Failed error)) -> [%test_eq: P.Error.code] error.code Invalid_state
+     | result ->
+       raise_s
+         [%sexp "expected durable Live compilation failure", (result : R.value option)]);
+    (match S.Daemon.Developer.View.phase failed with
+     | Agent_store.Developer_command_row.Phase.Terminal { execution_started = true; _ } ->
+       ()
+     | _ -> failwith "captured Live failure was not durable after Start");
+    current := false;
+    (match
+       S.Daemon.Developer.observe daemon ~actor ~run_id:limited_run ~key:limited_key
+     with
+     | Error { P.Error.code = Permission_denied; _ } -> ()
+     | Error error ->
+       raise_s [%sexp "wrong revoked actor denial", (error.code : P.Error.code)]
+     | Ok _ -> failwith "revoked actor observed developer row");
+    let seen =
+      S.Daemon.Developer.observe
+        daemon
+        ~actor:reconnected
+        ~run_id:limited_run
+        ~key:limited_key
+      |> ok
+      |> Option.value_exn
+    in
+    assert (
+      R.Id.equal (S.Daemon.Developer.View.id limited) (S.Daemon.Developer.View.id seen));
+    let retry =
+      S.Daemon.Developer.submit
+        daemon
+        ~actor:reconnected
+        ~run_id:limited_run
+        ~key:limited_key
+        ~request:limited_request
+        ~fresh_source:None
+      |> ok
+    in
+    assert (
+      R.Id.equal (S.Daemon.Developer.View.id seen) (S.Daemon.Developer.View.id retry));
+    let without_live_scope =
+      Agent_server_test_support.principal_with_scopes
+        "pri_developer_receipts"
+        (Set.remove scopes Developer_live_run)
+      |> Operator_authorization.trusted_local
+    in
+    (match
+       S.Daemon.Developer.submit
+         daemon
+         ~actor:without_live_scope
+         ~run_id:limited_run
+         ~key:limited_key
+         ~request:limited_request
+         ~fresh_source:None
+     with
+     | Error { P.Error.code = Permission_denied; _ } -> ()
+     | Error error ->
+       raise_s [%sexp "wrong missing scope denial", (error.code : P.Error.code)]
+     | Ok _ -> failwith "unscoped actor submitted developer command");
+    print_endline
+      "Check diagnostic, Live failure and limit stayed durable; revoked reader denied");
+  [%expect
+    {| Check diagnostic, Live failure and limit stayed durable; revoked reader denied |}]
+;;
+
+let%expect_test "a disconnected Live waiter does not cancel its native effect" =
+  let entered, signal_entered = Eio.Promise.create () in
+  let release, signal_release = Eio.Promise.create () in
+  let released = ref false in
+  let authorization_attempts = ref 0 in
+  let authorize_native invocation binding =
+    let name = (Chat_response.Tool_capability.reference binding).name in
+    [%test_eq: string] name "read_file";
+    assert (
+      P.Invocation.equal_origin
+        (P.Host_invocation.context invocation).origin
+        P.Invocation.Script);
+    incr authorization_attempts;
+    Eio.Promise.resolve signal_entered ();
+    Eio.Promise.await release;
+    Ok ()
+  in
+  ignore
+    (Fun.protect
+       ~finally:(fun () -> if not !released then Eio.Promise.resolve signal_release ())
+       (fun () ->
+          with_daemon
+            ~prompt_source:
+              {|<developer>Developer native waiter fixture.</developer>
+<tool name="read_file"/>|}
+            ~native_sample:true
+            ~authorize_native
+            ~prepare_output:(function
+              | Openai.Responses.Tool_output.Output.Text value -> Ok (`String value)
+              | _ -> Error (P.Error.invalid_request "unexpected native output"))
+            ~timeout_seconds:15.
+            ~after_shutdown:(fun (run_id, key, request, receipt_id, output) reopened ->
+              let scopes = Set.add Agent_server_test_support.scopes Developer_live_run in
+              let principal =
+                Agent_server_test_support.principal_with_scopes
+                  "pri_developer_waiter"
+                  scopes
+              in
+              let reconnected = Operator_authorization.trusted_local principal in
+              let observed =
+                S.Daemon.Developer.observe reopened ~actor:reconnected ~run_id ~key
+                |> ok
+                |> Option.value_exn
+              in
+              assert (R.Id.equal receipt_id (S.Daemon.Developer.View.id observed));
+              (match Option.map (S.Daemon.Developer.View.receipt observed) ~f:R.value with
+               | Some (Live (Succeeded (`String reopened_output))) ->
+                 [%test_eq: string] reopened_output output
+               | result ->
+                 raise_s [%sexp "unexpected reopened receipt", (result : R.value option)]);
+              let retry =
+                S.Daemon.Developer.submit
+                  reopened
+                  ~actor:reconnected
+                  ~run_id
+                  ~key
+                  ~request
+                  ~fresh_source:None
+                |> ok
+              in
+              assert (R.Id.equal receipt_id (S.Daemon.Developer.View.id retry));
+              assert (Int.equal !authorization_attempts 1);
+              print_endline
+                "reopened daemon returned historical receipt without effect replay")
+            (fun daemon ->
+               Eio.Switch.run (fun sw ->
+                 let scopes =
+                   Set.add Agent_server_test_support.scopes Developer_live_run
+                 in
+                 let principal =
+                   Agent_server_test_support.principal_with_scopes
+                     "pri_developer_waiter"
+                     scopes
+                 in
+                 let actor = Operator_authorization.trusted_local principal in
+                 let source =
+                   {|let main input =
+  Task.bind(Tool.call("read_file", `Object([{key="file"; value=`String("sample.txt")}])), fun result ->
+    match result with
+    | `Ok(value) -> Task.pure(value)
+    | `Error(message) -> Task.fail(message))|}
+                 in
+                 let connection, _transport, expected =
+                   open_document ~source daemon actor
+                 in
+                 let selector = P.Authoring.Analysis.Target.selected_script "s" |> ok in
+                 let bounds =
+                   Chatml_developer_capture.Json_bounds.create
+                     ~max_bytes:4096
+                     ~max_depth:16
+                     ~max_nodes:128
+                   |> Or_error.ok_exn
+                 in
+                 let request =
+                   S.Daemon.Developer.Request.create
+                     ~route:(Document_script { expected; selector })
+                     ~kind:Live_run
+                     ~target:Chatml.Chatml_compiler_contract.Target.One_off_v1
+                     ~prompt:
+                       (Some (S.Catalog_identity.prompt_definition "restart.prompt"))
+                     ~workspace:
+                       (Some (S.Catalog_identity.workspace_definition "restart.workspace"))
+                     ~entrypoint:"main"
+                     ~input:(`String "waiter-result")
+                     ~fixtures:None
+                     ~requested_execution:None
+                     ~requested_max_output_bytes:None
+                     ~bounds
+                     ~checkpoint:ignore
+                   |> ok
+                 in
+                 let run_id = P.Id.Developer_run.create () in
+                 let key =
+                   P.Idempotency_key.of_string "native-disconnected-waiter" |> checked
+                 in
+                 let submitted =
+                   S.Daemon.Developer.submit
+                     daemon
+                     ~actor
+                     ~run_id
+                     ~key
+                     ~request
+                     ~fresh_source:(Some (Document_script { connection }))
+                   |> ok
+                 in
+                 Eio.Promise.await entered;
+                 let waiter_cancel, signal_waiter_cancel = Eio.Promise.create () in
+                 let waiter_done, signal_waiter_done = Eio.Promise.create () in
+                 Eio.Fiber.fork ~sw (fun () ->
+                   let result =
+                     match
+                       Eio.Cancel.sub (fun cancel ->
+                         (* Fork runs this fiber to its first suspension. Promise
+                            resolution does not yield, so cancellation reaches
+                            await_terminal's cooperative await path. *)
+                         Eio.Promise.resolve signal_waiter_cancel cancel;
+                         ignore
+                           (S.Daemon.Developer.await_terminal daemon ~actor ~run_id ~key
+                            |> ok))
+                     with
+                     | exception Eio.Cancel.Cancelled _ -> `Cancelled
+                     | () -> `Unexpected_success
+                   in
+                   Eio.Promise.resolve signal_waiter_done result);
+                 let cancel = Eio.Promise.await waiter_cancel in
+                 Eio.Cancel.cancel cancel Exit;
+                 (match Eio.Promise.await waiter_done with
+                  | `Cancelled -> ()
+                  | `Unexpected_success -> failwith "disconnected waiter returned");
+                 let pending =
+                   S.Daemon.Developer.observe daemon ~actor ~run_id ~key
+                   |> ok
+                   |> Option.value_exn
+                 in
+                 assert (Option.is_none (S.Daemon.Developer.View.receipt pending));
+                 released := true;
+                 Eio.Promise.resolve signal_release ();
+                 let terminal =
+                   S.Daemon.Developer.await_terminal daemon ~actor ~run_id ~key |> ok
+                 in
+                 let output =
+                   match
+                     Option.map (S.Daemon.Developer.View.receipt terminal) ~f:R.value
+                   with
+                   | Some (Live (Succeeded (`String output))) -> output
+                   | result ->
+                     raise_s
+                       [%sexp "unexpected disconnected result", (result : R.value option)]
+                 in
+                 assert (String.is_substring output ~substring:"sample.txt:1-1:");
+                 assert (
+                   String.is_substring output ~substring:"developer host native sample");
+                 assert (Int.equal !authorization_attempts 1);
+                 assert (
+                   R.Id.equal
+                     (S.Daemon.Developer.View.id submitted)
+                     (S.Daemon.Developer.View.id terminal));
+                 print_endline "waiter cancelled; native effect completed once";
+                 run_id, key, request, S.Daemon.Developer.View.id terminal, output))));
+  [%expect
+    {|
+    waiter cancelled; native effect completed once
+    reopened daemon returned historical receipt without effect replay
+    |}]
 ;;
 
 let%expect_test "hosted REPL retains partial work and closes at key saturation" =
