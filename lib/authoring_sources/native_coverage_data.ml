@@ -206,7 +206,7 @@ let implementation_sources =
   ; ( "lib/agent_server/session_helper_policy.ml"
     , "e88605f0d6f0fc512589ccd9546e5f8e741216dfa321ec66919b64c88d2958e1" )
   ; ( "lib/shell_access/shell_access_v2.ml"
-    , "81159199c2de8c80e35f192692ee28f3bdac4ca0929435835950bcaef83050d5" )
+    , "06f99e979fd39c4c72590ffe6faee9f0790a77b9ad141e4d05919b68771b51cc" )
   ; ( "lib/agent_server/delegated_runtime.ml"
     , "b2f4ae578f7dddd08bb5503f16af4a9c86c5b87c2c5250f318a425103297c374" )
   ; ( "lib/agent_server/delegation_lifecycle.ml"
