@@ -720,7 +720,7 @@ module Saved_inference_source = struct
     | Target.Saved saved -> Selected.Target.check saved
     | Content content -> Target.check content
     | Model model -> Model.check model
-    | Tool _ -> invalid "selected Tool source has no inference owner"
+    | Tool tool -> Tool.check tool
   ;;
 
   let check_now = function
@@ -732,7 +732,7 @@ module Saved_inference_source = struct
       else Selected.Target.check_descendant_now saved ~child:borrowed
     | Content content -> Target.check_current_or_descendant_now content
     | Model model -> Model.check_current_or_descendant_now model
-    | Tool _ -> invalid "selected Tool source has no inference owner"
+    | Tool tool -> Tool.check_current_or_descendant_now tool
   ;;
 
   let matches_parent child parent =
@@ -740,7 +740,7 @@ module Saved_inference_source = struct
     | Target.Saved _ -> false
     | Content content -> Target.matches_parent content parent
     | Model model -> Model.matches_parent model parent
-    | Tool _ -> false
+    | Tool tool -> Tool.matches_parent tool parent
   ;;
 
   let current_native_terminal_now issuer selected terminal =
@@ -3280,6 +3280,21 @@ module Model_inference = struct
       frame.inference_frame_context
   ;;
 
+  let current_selected_context issuer =
+    let open Result.Let_syntax in
+    let%bind scope =
+      match Eio.Fiber.get inference_scope_key with
+      | Some scope when phys_equal scope.inference_issuer issuer -> Ok scope
+      | None | Some _ -> invalid "selected Tool has no entered inference scope"
+    in
+    let%bind () = check_now scope in
+    match Eio.Fiber.get inference_child_frame_key with
+    | None -> invalid "selected Tool has no live child inference frame"
+    | Some frame ->
+      let%map () = check_inference_frame_now scope frame in
+      frame.inference_frame_context
+  ;;
+
   let with_selected_child_target
         issuer
         ~(target : Agent_session.Captured_agent_runner.Selected_content_target.parent)
@@ -3339,13 +3354,12 @@ module Model_inference = struct
     in
     let* context =
       (match target with
-       | Saved _ | Content _ ->
+       | Saved _ | Content _ | Tool _ ->
          Inference_runtime.Context.derive_in_session
            parent_context
            ~target:expected_target
        | Model _ ->
-         Inference_runtime.Context.derive parent_context ~target:expected_target
-       | Tool _ -> Error Inference_runtime.Preparation_error.Target_denied)
+         Inference_runtime.Context.derive parent_context ~target:expected_target)
       |> Result.map_error ~f:preparation_error
     in
     let* () =

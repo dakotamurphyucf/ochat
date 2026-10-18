@@ -35,6 +35,7 @@ val create
   -> remote_content:Developer_child_remote_content.Policy.t option
   -> artifact_store:Agent_store.Prompt_artifact_store.t
   -> agent_source_limits:Developer_agent_source_runtime.Limits.t
+  -> active_agent_calls:Agent_session.Selected_agent_depth.Limits.t
   -> (t, P.Error.t) result
 
 (** After a fresh source capture and durable epoch admission, resolve the
@@ -141,31 +142,47 @@ val with_claimed_issuer
   -> (Agent_session.Claimed_child_runtime.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
+module Selected_tool_callbacks : sig
+  type t
+
+  (** One inseparable trusted pre-target Context loan and post-target Tool
+      runner, constructed by ChildRunner from the same physical Live/Root/
+      Native package. The loan runs before the lower source selection mints a
+      Tool target. Both callbacks fail closed after the package is revoked;
+      they grant no authority from their function values alone. *)
+  val create
+    :  borrow_child_context:
+         (implementation:Ochat_function.t
+          -> invocation:Ochat_function.Invocation.t
+          -> (Eio_unix.Stdenv.base Chat_response.Ctx.t -> string)
+          -> (string, P.Error.t) result)
+    -> run_selected_tool:Agent_session.Captured_agent_runner.selected_tool_runner
+    -> t
+end
+
 (** Bind only the saved-Agent registrations prepared inside this Live owner to
     its exact admitted Root, native runtime and selected Model package. The
-    trusted host supplies one runner constructed from this same Live owner and
-    the Root's actual Jobs/Native services after those services exist, before
-    any executor is exposed. Both callbacks are trusted Host composition
-    invariants; this module cannot infer their physical provenance from
-    function values. SourceRuntime was prepared in Bound_runner mode, and a
-    selected Tool target never falls back to literal-only execution after a
-    runner failure. Literal content children retain their existing strict
-    path. A missing source policy is harmless only when there
-    are no Agent declarations; genuine Agent registrations never become
-    name-only grants. No separate source or provider context is supplied by
-    the caller. *)
+    trusted host supplies runners and the paired Tool callbacks constructed
+    from this same Live owner and Root's actual Jobs/Native services, before
+    any executor is exposed. These are trusted Host composition invariants;
+    function values alone do not prove physical provenance. SourceRuntime was
+    prepared in Bound_runner mode. No selected target falls back to literal
+    execution after a runner failure. A missing source policy is harmless only
+    when there are no Agent declarations. Closing revokes the whole pair before
+    joining children. *)
 val bind_agent_sources
   :  live
   -> root:Developer_root_owner.run
   -> models:Developer_model_job_runner.t option
   -> run_selected_target:Developer_agent_source_runtime.Selected_target.runner
   -> run_selected_content:Agent_session.Captured_agent_runner.selected_content_runner
+  -> selected_tool_callbacks:Selected_tool_callbacks.t
   -> checkpoint:(unit -> unit)
   -> (unit, P.Error.t) result
 
 module Child_prepared : sig
   (** One joined child preparation. Its private target is a closed [Saved],
-      [Content] or [Model] case; descendants retain their immediate physical
+      [Content], [Model] or [Tool] case; descendants retain their immediate physical
       parent and the original saved ancestor. No revision equality can change
       the case. *)
   type t
@@ -230,10 +247,24 @@ module Child_prepared : sig
     -> Agent_session.Captured_agent_runner.Selected_model_target.t
     -> bool
 
+  (** Comparison only; a registered ordinary Agent Tool target must be the
+      exact parser/native/source loan for this child preparation. *)
+  val matches_tool_target
+    :  t
+    -> Agent_session.Captured_agent_runner.Selected_tool_target.t
+    -> bool
+
   val revision : t -> Agent_session.Prompt_revision.t
   val runtime : t -> Chat_response.Agent_runtime.t
   val selected_native : t -> Chat_response.Tool_capability.t
   val managed_definition : t -> Chat_response.Managed_tool_registry.t
+
+  (** Pure comparison of this retained child's validated active Agent-call
+      depth against the next ordinary Tool child. The guarded pre-target
+      Context loan calls this before source selection or child compilation;
+      [with_selected_tool_child] still derives the actual next immutable depth
+      before opening resources. This returns no target or execution grant. *)
+  val check_tool_depth : t -> (unit, P.Error.t) result
 
   (** True only when the bounded parsed preflight found image/document source
       content. This structural choice is made before any attempted read. *)
@@ -246,8 +277,8 @@ module Child_prepared : sig
   val content_limits : t -> Chatmd_prompt_content.Limits.t option
 
   (** A selected callback-local source-read port for this preparation's exact
-      Saved, Content or Model target, without a retained Scope. A Content or
-      Model preparation never borrows through its saved ancestor's declaring parser. Every
+      Saved, Content, Model or Tool target, without a retained Scope. A
+      descendant preparation never borrows through its saved ancestor's declaring parser. Every
       dynamic operation opens and closes its own original-source Scope;
       captured/literal conversion needs no live source. The caller also passes
       [refresh]/[Admission.check_now] as the projector's Root/currentness check
@@ -303,20 +334,28 @@ module Child_prepared : sig
       child is active; it is not a source or execution admission. *)
   val response_dir : t -> Eio.Fs.dir_ty Eio.Path.t
 
-  (** Refresh this exact Saved, Content or Model preparation after yielding work. The
+  (** Refresh this exact Saved, Content, Model or Tool preparation after yielding work. The
       full immediate-parent, saved-ancestor, source/Workspace/Root checks may
       yield; obtain a fresh Root witness and repeat them before issuing an
       attempt-local [Admission.t]. *)
   val refresh : t -> (Admission.t, P.Error.t) result
 
   (** Refresh inside an actual child selected borrow after yielding work. The
-      lower check dispatches on this preparation's Saved, Content or Model target,
+      lower check dispatches on this preparation's Saved, Content, Model or Tool target,
       proving every physical ancestor and this dispatched child terminal; no
       direct ancestor fiber binding is assumed. *)
   val refresh_descendant
     :  t
     -> child:Agent_session.Native_tool_invocation.selected_borrowed
     -> (Admission.t, P.Error.t) result
+
+  (** Refresh the currently entered selected native borrow for an inherited
+      child inference guard. Preparation retains its exact entry borrow only
+      after target/source/Root validation. Physical equality selects the
+      existing direct refresh; a distinct borrow must pass the existing full
+      authenticated-descendant refresh. A denied direct proof never retries
+      as descendant. This does not create a new source or Root grant. *)
+  val refresh_current_borrow : t -> (Admission.t, P.Error.t) result
 end
 
 (** Lend resources for one exact restored saved-Agent target callback. Check
@@ -370,8 +409,25 @@ val with_selected_content_child
   -> f:(Child_prepared.t -> (string, P.Error.t) result)
   -> (string, P.Error.t) result
 
-(** Prepare a Model-selected member beneath the exact active Saved, Content or
-    Model child. The target was minted from a bounded selected source member,
+(** Prepare the exact ordinary Agent Tool selected under an active Saved,
+    Content, Model or Tool parent. The lower registration mints its opaque
+    target only after the pre-target guarded Context loan and original
+    Source_binding File/Captured selection. Require the same parent, actual
+    native borrowed implementation, Root/actor/source and active child
+    policy; charge one synchronous Agent-call depth before effects. No
+    claimed-Worker or literal fallback. The joined child expires on exit. *)
+val with_selected_tool_child
+  :  parent:Child_prepared.t
+  -> target:Agent_session.Captured_agent_runner.Selected_tool_target.t
+  -> startup:Chat_response.Startup_compilation.t
+  -> compilation_limits:Chatml_compilation.limits
+  -> programs:Chatml_prompt_programs.Restored.t option
+  -> input:Prompt.Chat_markdown.content_item list
+  -> f:(Child_prepared.t -> (string, P.Error.t) result)
+  -> (string, P.Error.t) result
+
+(** Prepare a Model-selected member beneath the exact active Saved, Content,
+    Model or Tool child. The target was minted from a bounded selected source member,
     installed/replayed child revision and actual parent Port. Restore that
     immutable revision under the SAME borrowed [startup], live script policy
     and tool contract; only that restoration lends the child's compilation

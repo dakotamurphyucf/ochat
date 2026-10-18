@@ -52,6 +52,7 @@ module Limits = struct
     ; host : Developer_host.Limits.t
     ; budgets : Developer_command_budgets.Configuration.t
     ; agent_sources : Developer_agent_source_runtime.Limits.t
+    ; active_agent_calls : Agent_session.Selected_agent_depth.Limits.t
     ; max_native_bindings : int
     ; workspace_cleanup : Agent_session.Workspace_cleanup.Limits.t
     ; max_agent_cache_entries : int
@@ -105,10 +106,18 @@ module Limits = struct
         ; host
         ; budgets
         ; agent_sources
+        ; active_agent_calls = Agent_session.Selected_agent_depth.Limits.default
         ; max_native_bindings
         ; workspace_cleanup
         ; max_agent_cache_entries
         }
+  ;;
+
+  let with_max_active_agent_calls t ~max_active_calls =
+    Agent_session.Selected_agent_depth.Limits.create ~max_active_calls
+    |> Result.map_error ~f:(fun error ->
+      Agent_protocol.Error.invalid_request (Error.to_string_hum error))
+    |> Result.map ~f:(fun active_agent_calls -> { t with active_agent_calls })
   ;;
 end
 

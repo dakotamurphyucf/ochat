@@ -90,6 +90,18 @@ module Child : sig
     -> (t -> ('a, Agent_protocol.Error.t) result)
     -> ('a, Agent_protocol.Error.t) result
 
+  (** Enter the same child-only physical native/managed/Job kernel for an
+      ordinary parser-owned Agent Tool selected from this exact parent's
+      registered implementation. The lower Tool target, prepared resources
+      and current Native borrow must match; no claimed Worker or parent Root
+      registry fallback is available. *)
+  val with_tool_target
+    :  parent:t
+    -> target:Agent_session.Captured_agent_runner.Selected_tool_target.t
+    -> prepared:Developer_live_resources.Child_prepared.t
+    -> (t -> ('a, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
+
   (** Checked current projection for constructing this child's exact provider
       descriptors and Host_invocation fingerprint. It refreshes the same
       source/Root/Live admission used by [run], including descendant narrowing;

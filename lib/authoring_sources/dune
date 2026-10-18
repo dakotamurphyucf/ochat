@@ -111,6 +111,7 @@
     lib/agent_session/claimed_child_runtime.ml %{dep:../agent_session/claimed_child_runtime.ml}
     lib/agent_session/developer_claimed_resource_owner.ml %{dep:../agent_session/developer_claimed_resource_owner.ml}
     lib/agent_session/developer_child_preflight.ml %{dep:../agent_session/developer_child_preflight.ml}
+    lib/agent_session/selected_agent_depth.ml %{dep:../agent_session/selected_agent_depth.ml}
     lib/agent_store/developer_run_document.ml %{dep:../agent_store/developer_run_document.ml}
     lib/agent_store/developer_run_store.ml %{dep:../agent_store/developer_run_store.ml}
     lib/agent_session/background_job_event.ml %{dep:../agent_session/background_job_event.ml}

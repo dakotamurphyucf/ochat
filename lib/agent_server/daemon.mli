@@ -78,6 +78,15 @@ module Developer_configuration : sig
       -> workspace_cleanup:Agent_session.Workspace_cleanup.Limits.t
       -> max_agent_cache_entries:int
       -> (t, Agent_protocol.Error.t) result
+
+    (** [create] uses eight active synchronous Agent calls by default. Change
+        only this developer selected policy through a validated receiver-first
+        copy before installing the daemon. The first Saved child counts as one;
+        accepted values are 1 through 64. *)
+    val with_max_active_agent_calls
+      :  t
+      -> max_active_calls:int
+      -> (t, Agent_protocol.Error.t) result
   end
 
   (** Trusted daemon policy. The daemon shares its existing child source

@@ -370,6 +370,7 @@ let%expect_test "saved child preflight uses the owned parser and denies unowned 
     in
     let assistant_inline =
       Preflight.classify_selected
+        ~ordinary_agent_tools:Denied
         ~revision:assistant
         ~parsed:assistant_parsed
         ~input:[]
@@ -377,6 +378,7 @@ let%expect_test "saved child preflight uses the owned parser and denies unowned 
     in
     let caller_document =
       Preflight.classify_selected
+        ~ordinary_agent_tools:Denied
         ~revision:good
         ~parsed:good_parsed
         ~input:[ document_input ]

@@ -107,6 +107,7 @@ module Child_source_policy : sig
   val bind
     :  t
     -> tool_contract:Chatml_compilation.Tool_contract.t
+    -> active_agent_calls:Agent_session.Selected_agent_depth.Limits.t
     -> content_limits:Chatmd_prompt_content.Limits.t option
     -> artifact_store:Agent_store.Prompt_artifact_store.t
     -> source_lease:Agent_session.Prompt_source_lease.t

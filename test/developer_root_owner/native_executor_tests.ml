@@ -592,6 +592,7 @@ let installed_agent_fixture_with_contents
         Runner.Source_binding.create
           ~source
           ~tool_contract:Chatml_compilation.Tool_contract.Standard
+          ~active_agent_calls:Agent_session.Selected_agent_depth.Limits.default
           ~runtime_policy_revision:
             (Chatml_source.Digest.of_contents
                "claimed-deferred-runtime.v1"
@@ -903,6 +904,7 @@ let%test_unit
            Agent_session.Captured_agent_runner.Source_binding.create
              ~source:fixture.source
              ~tool_contract:Chatml_compilation.Tool_contract.Standard
+             ~active_agent_calls:Agent_session.Selected_agent_depth.Limits.default
              ~runtime_policy_revision:
                (Chatml_source.Digest.of_contents
                   "claimed-deferred-source.v1"

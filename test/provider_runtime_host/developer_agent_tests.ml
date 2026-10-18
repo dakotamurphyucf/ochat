@@ -18,6 +18,8 @@ let developer_configuration
       ?(max_job_payload_bytes = 4096)
       ?(claimed_issuer = false)
       ?(on_native = fun () -> ())
+      ?max_active_agent_calls
+      ?observe_native_attempt
       target
   =
   let selected =
@@ -123,6 +125,15 @@ let developer_configuration
       ~max_agent_cache_entries:8
     |> ok
   in
+  let limits =
+    match max_active_agent_calls with
+    | None -> limits
+    | Some max_active_calls ->
+      S.Daemon.Developer.Configuration.Limits.with_max_active_agent_calls
+        limits
+        ~max_active_calls
+      |> ok
+  in
   let configuration =
     S.Daemon.Developer.Configuration.create
       ~capture_policy
@@ -143,6 +154,7 @@ let developer_configuration
       ~authorize_native:(fun invocation binding ->
         on_native ();
         let name = (Chat_response.Tool_capability.reference binding).name in
+        Option.iter observe_native_attempt ~f:(fun observe -> observe invocation binding);
         if List.mem [ "read_file"; "summary"; "undeclared" ] name ~equal:String.equal
         then (
           let expected_origin =
@@ -171,6 +183,7 @@ let developer_configuration
             ; "model_mixed"
             ; "model_spawn"
             ; "queued_producer"
+            ; "grand"
             ]
             name
             ~equal:String.equal
@@ -2688,4 +2701,672 @@ let on_event : context -> state -> event -> state task = fun _ st _ -> Task.pure
            7));
   print_endline "selected child policy and queued issuer remained source-owned";
   [%expect {| selected child policy and queued issuer remained source-owned |}]
+;;
+
+let%test_unit "selected ordinary Agent Tool runs through its registered child source" =
+  let requests = ref 0 in
+  let bodies = ref [] in
+  let sent_tool_call = ref false in
+  let stage_queued = ref false in
+  let before_tool_call = ref (fun () -> ()) in
+  let default_issuer_runtime = ref None in
+  let default_grand_revisions = ref [] in
+  let limited_grand_revisions = ref [] in
+  let record_grand_revision revisions invocation binding =
+    if String.equal (Chat_response.Tool_capability.reference binding).name "grand"
+    then
+      revisions
+      := (P.Host_invocation.context invocation).implementation_revision :: !revisions
+  in
+  let tool_call ~stage_queued =
+    let grand_call =
+      `Object
+        [ "type", `String "function_call"
+        ; "id", `String "ordinary-agent-item"
+        ; "call_id", `String "ordinary-agent-call"
+        ; "name", `String "grand"
+        ; "arguments", `String {|{"input":"go"}|}
+        ; "status", `String "completed"
+        ]
+    in
+    let queued_call =
+      `Object
+        [ "type", `String "function_call"
+        ; "id", `String "queued-agent-item"
+        ; "call_id", `String "queued-agent-call"
+        ; "name", `String "queued_producer"
+        ; "arguments", `String {|{"input":"go"}|}
+        ; "status", `String "completed"
+        ]
+    in
+    `Object
+      [ "type", `String "response.completed"
+      ; "sequence_number", `Number "1"
+      ; ( "response"
+        , `Object
+            [ "object", `String "response"
+            ; "id", `String "ordinary-agent-parent"
+            ; "status", `String "completed"
+            ; ( "output"
+              , `Array
+                  (if stage_queued then [ grand_call; queued_call ] else [ grand_call ]) )
+            ] )
+      ]
+    |> Jsonaf.to_string
+    |> fun json -> "data: " ^ json ^ "\n\n"
+  in
+  let queued_grand ~parent_job jobs =
+    let parent =
+      List.find_exn jobs ~f:(fun job ->
+        P.Id.Job.equal (P.Developer_job.id job) parent_job)
+    in
+    let parent_attempt = (P.Developer_job.state parent).attempt in
+    let queued =
+      List.filter jobs ~f:(fun job ->
+        not (P.Id.Job.equal (P.Developer_job.id job) parent_job))
+    in
+    let job = List.hd_exn queued in
+    [%test_eq: int] (List.length queued) 1;
+    let state = P.Developer_job.state job in
+    [%test_eq: int] state.attempt 0;
+    let launch = P.Developer_job.launch job in
+    (match P.Developer_job.Launch.parent launch with
+     | Invocation _ -> ()
+     | Run_root -> failwith "selected grandchild lacks its real invocation parent");
+    (match P.Developer_job.Launch.parent_job launch with
+     | Some (id, attempt) ->
+       assert (P.Id.Job.equal id parent_job);
+       [%test_eq: int] attempt parent_attempt
+     | None -> failwith "selected grandchild lacks its creating Job attempt");
+    (match state.status with
+     | Queued -> ()
+     | Running
+     | Waiting_permission _
+     | Waiting_completion _
+     | Succeeded
+     | Failed _
+     | Cancelled
+     | Interrupted _ -> failwith "selected grandchild was claimed before observation");
+    let request =
+      Chat_response.Background_request.of_json
+        ~policy:Chat_response.One_off_request.default_policy
+        (P.Developer_job.payload job)
+      |> ok
+    in
+    (match Chat_response.Background_request.target_kind request with
+     | Tool -> ()
+     | Script -> failwith "selected grandchild was not staged as Tool");
+    let issuer =
+      Chat_response.Background_request.issuer_source request |> Option.value_exn
+    in
+    let target =
+      Chat_response.Background_request.agent_artifact request |> Option.value_exn
+    in
+    [%test_eq: string]
+      (P.Developer_agent_artifact.root_relative_path
+         (Chat_response.Background_request.Issuer_source.artifact issuer)
+       |> Source.Portable_path.to_string)
+      "child.chatmd";
+    [%test_eq: string]
+      (P.Developer_agent_artifact.root_relative_path target
+       |> Source.Portable_path.to_string)
+      "grand.chatmd";
+    Chat_response.Background_request.Issuer_source.runtime_policy issuer
+  in
+  RH.with_fixture
+    ~model_requests:requests
+    ~model_function_tools:true
+    ~response_body:(fun _ body ->
+      if
+        (not !sent_tool_call)
+        && String.is_substring body ~substring:"OCH421 parent marker"
+      then (
+        sent_tool_call := true;
+        !before_tool_call ();
+        Some (tool_call ~stage_queued:!stage_queued))
+      else None)
+    ~on_model_body:(fun body -> bodies := body :: !bodies)
+    (fun env sw anchor create _ ->
+       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 45. (fun () ->
+         let bootstrap = create () in
+         ignore (RH.setup bootstrap : P.Method_result.t);
+         let reads = ref 0 in
+         ignore
+           (RH.enroll bootstrap ~sw "one" "ordinary-agent-bootstrap" reads
+            : P.Provider_operator.Configuration_result.t);
+         let target = RH.capture bootstrap in
+         Provider_runtime.close bootstrap;
+         let root = Eio.Path.(anchor / "ordinary-agent") |> Eio.Path.native_exn in
+         Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / root);
+         let prompt = Filename.concat root "prompt.chatmd" in
+         let child = Filename.concat root "child.chatmd" in
+         let grand = Filename.concat root "grand.chatmd" in
+         let grand_content = Filename.concat root "grand-content.chatmd" in
+         let queued_child =
+           {|<developer>OCH421 parent marker</developer>
+<tool name="grand" agent="grand.chatmd" local source_mode="captured"/>
+<script id="queue_grand" language="chatml" kind="tool">
+let run ctx input =
+  Task.bind(Job.start_tool("grand", input), fun _ -> Task.pure(`Complete(input)))
+</script>
+<tool name="queued_producer" type="chatml" script="queue_grand" entrypoint="run" input_schema="input.json" output_schema="output.json"><uses tool="grand"/></tool>|}
+         in
+         Eio.Path.save
+           ~create:(`Or_truncate 0o600)
+           Eio.Path.(Eio.Stdenv.fs env / prompt)
+           {|<tool name="child" agent="child.chatmd" local source_mode="file"/>|};
+         Eio.Path.save
+           ~create:(`Or_truncate 0o600)
+           Eio.Path.(Eio.Stdenv.fs env / child)
+           {|<developer>OCH421 parent marker</developer>
+<tool name="grand" agent="grand.chatmd" local source_mode="file"/>|};
+         Eio.Path.save
+           ~create:(`Or_truncate 0o600)
+           Eio.Path.(Eio.Stdenv.fs env / grand)
+           {|<developer>OCH421 grand marker</developer>
+<user><agent src="grand-content.chatmd" local source_mode="captured">Tool content caller</agent></user>|};
+         Eio.Path.save
+           ~create:(`Or_truncate 0o600)
+           Eio.Path.(Eio.Stdenv.fs env / grand_content)
+           "<developer>OCH421 Tool Content marker</developer>";
+         List.iter [ "input.json"; "output.json" ] ~f:(fun name ->
+           Eio.Path.save
+             ~create:(`Or_truncate 0o600)
+             Eio.Path.(Eio.Stdenv.fs env / root / name)
+             {|{"type":"object"}|});
+         let provider_anchor = Eio.Path.(anchor / "ordinary-agent-provider") in
+         Eio.Path.mkdir ~perm:0o700 provider_anchor;
+         let provider_factory ~sw:provider_sw ~server_id:provider_server_id =
+           let runtime =
+             create
+               ~runtime_sw:provider_sw
+               ~runtime_server_id:provider_server_id
+               ~runtime_anchor:provider_anchor
+               ()
+           in
+           ignore (RH.setup runtime : P.Method_result.t);
+           ignore
+             (RH.enroll runtime ~sw:provider_sw "one" "ordinary-agent-key" reads
+              : P.Provider_operator.Configuration_result.t);
+           assert (Inference.Request.Target.equal target (RH.capture runtime));
+           Ok (Provider_runtime.operator_port runtime)
+         in
+         let actor =
+           Set.add Agent_server_test_support.scopes Developer_live_run
+           |> Agent_server_test_support.principal_with_scopes "pri_operator"
+           |> Operator_authorization.trusted_local
+         in
+         let daemon_env clock =
+           object
+             method fs = env#fs
+             method cwd = env#cwd
+             method stdin = env#stdin
+             method stdout = env#stdout
+             method stderr = env#stderr
+             method net = env#net
+             method domain_mgr = env#domain_mgr
+             method process_mgr = env#process_mgr
+             method clock = clock
+             method mono_clock = env#mono_clock
+             method secure_random = env#secure_random
+             method debug = env#debug
+             method backend_id = env#backend_id
+           end
+         in
+         let pause_at_scheduler_wait daemon clock pause =
+           pause ();
+           let paused_now = Eio.Time.now clock in
+           Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+             let rec await () =
+               match S.Daemon.For_testing.job_scheduler_wait_deadline daemon with
+               | Some deadline when Float.(deadline > paused_now) -> ()
+               | None | Some _ ->
+                 Eio.Fiber.yield ();
+                 await ()
+             in
+             await ())
+         in
+         let clock, pause_clock, resume_clock, _ =
+           Agent_server_test_support.controlled_wall_clock
+             (Eio.Stdenv.clock env)
+             ~initial:(Eio.Time.now (Eio.Stdenv.clock env))
+         in
+         let options =
+           { S.Daemon.default_options with
+             authoring = Some (DH.semantic_authoring_policy env)
+           ; developer =
+               Some
+                 (developer_configuration
+                    ~observe_native_attempt:
+                      (record_grand_revision default_grand_revisions)
+                    target)
+           ; provider_operator_factory = Some provider_factory
+           }
+         in
+         let jobs daemon run_id =
+           let data_root =
+             S.Daemon.store daemon
+             |> Agent_store.Session_store.data_root
+             |> Agent_store.Data_root.path
+           in
+           let path =
+             Eio.Path.(
+               Eio.Stdenv.fs env
+               / data_root
+               / "developer-runs"
+               / ("run_" ^ P.Id.Developer_run.to_string run_id ^ ".json"))
+           in
+           let rows =
+             match Eio.Path.load path |> Jsonaf.parse |> Or_error.ok_exn with
+             | `Object envelope ->
+               (match List.Assoc.find_exn envelope ~equal:String.equal "payload" with
+                | `Object payload ->
+                  (match List.Assoc.find_exn payload ~equal:String.equal "jobs" with
+                   | `Array jobs -> jobs
+                   | _ -> failwith "invalid Agent Tool job array")
+                | _ -> failwith "invalid Agent Tool run payload")
+             | _ -> failwith "invalid Agent Tool run envelope"
+           in
+           List.map rows ~f:(fun row ->
+             P.Developer_job.of_json row
+             |> Result.map_error ~f:(fun error ->
+               Sexp.to_string_hum [%sexp (error : P.Protocol_error.t)])
+             |> Result.ok_or_failwith)
+         in
+         let daemon =
+           S.Daemon.start
+             ~sw
+             ~env:(daemon_env clock)
+             ~config:(Agent_server_test_support.config root root prompt)
+             ~tool_dir:root
+             ~home:root
+             ~process_start_identity:None
+             ~options
+             ()
+           |> ok
+         in
+         Fun.protect
+           ~finally:(fun () ->
+             resume_clock ();
+             S.Daemon.shutdown daemon |> ok)
+           (fun () ->
+              let connection, expected =
+                open_document
+                  ~contents:
+                    {|<script id="s" language="chatml" kind="tool">let main input = Task.bind(Job.start_tool("child", input), fun id -> Task.pure(`String(id)))</script>|}
+                  daemon
+                  actor
+              in
+              let request =
+                S.Daemon.Developer.Request.create
+                  ~route:
+                    (Document_script
+                       { expected
+                       ; selector = P.Authoring.Analysis.Target.selected_script "s" |> ok
+                       })
+                  ~kind:Live_run
+                  ~target:Chatml.Chatml_compiler_contract.Target.One_off_v1
+                  ~prompt:(Some (S.Catalog_identity.prompt_definition "restart.prompt"))
+                  ~workspace:
+                    (Some (S.Catalog_identity.workspace_definition "restart.workspace"))
+                  ~entrypoint:"main"
+                  ~input:(`Object [ "input", `String "go" ])
+                  ~fixtures:None
+                  ~requested_execution:None
+                  ~requested_max_output_bytes:None
+                  ~bounds:
+                    (Chatml_developer_capture.Json_bounds.create
+                       ~max_bytes:4096
+                       ~max_depth:16
+                       ~max_nodes:128
+                     |> Or_error.ok_exn)
+                  ~checkpoint:ignore
+                |> ok
+              in
+              let submit_job name =
+                let run_id = P.Id.Developer_run.create () in
+                let key = P.Idempotency_key.of_string name |> ok in
+                ignore
+                  (S.Daemon.Developer.submit
+                     daemon
+                     ~actor
+                     ~run_id
+                     ~key
+                     ~request
+                     ~fresh_source:(Some (Document_script { connection }))
+                   |> ok
+                   : S.Daemon.Developer.View.t);
+                let view =
+                  S.Daemon.Developer.await_terminal daemon ~actor ~run_id ~key |> ok
+                in
+                let job_id =
+                  match Option.map (S.Daemon.Developer.View.receipt view) ~f:R.value with
+                  | Some (Live (Succeeded (`String id))) -> P.Id.Job.of_string id |> ok
+                  | result ->
+                    raise_s
+                      [%sexp
+                        "expected selected Agent Tool Job", (result : R.value option)]
+                in
+                run_id, job_id
+              in
+              let job_state run_id job_id () =
+                let job =
+                  List.find_exn (jobs daemon run_id) ~f:(fun job ->
+                    P.Id.Job.equal (P.Developer_job.id job) job_id)
+                in
+                P.Developer_job.state job
+              in
+              let await_job run_id job_id =
+                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 25. (fun () ->
+                  let rec await () =
+                    match (job_state run_id job_id ()).status with
+                    | Succeeded -> ()
+                    | Failed _ -> failwith "selected ordinary Agent Tool Job failed"
+                    | Cancelled | Interrupted _ ->
+                      failwith "selected ordinary Agent Tool Job stopped"
+                    | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
+                      Eio.Fiber.yield ();
+                      await ()
+                  in
+                  await ())
+              in
+              let run_id, job_id = submit_job "ordinary-agent-tool" in
+              await_job run_id job_id;
+              assert !sent_tool_call;
+              let saw_grand =
+                List.exists !bodies ~f:(fun body ->
+                  String.is_substring body ~substring:"OCH421 grand marker")
+              in
+              let field value name =
+                match value with
+                | `Object fields -> List.Assoc.find_exn fields ~equal:String.equal name
+                | _ -> failwith "ordinary Agent Tool provider field is not an object"
+              in
+              let string = function
+                | `String value -> value
+                | _ -> failwith "ordinary Agent Tool provider field is not a string"
+              in
+              let tool_output bodies =
+                List.find_exn bodies ~f:(fun body ->
+                  String.is_substring body ~substring:"function_call_output")
+                |> Jsonaf.of_string
+                |> fun body ->
+                match field body "input" with
+                | `Array items ->
+                  List.find_exn items ~f:(fun item ->
+                    match field item "type" with
+                    | `String "function_call_output" -> true
+                    | `String _ -> false
+                    | _ -> failwith "invalid ordinary Agent Tool input type")
+                | _ -> failwith "ordinary Agent Tool provider input is not an array"
+              in
+              let output = tool_output !bodies in
+              [%test_eq: string] (field output "call_id" |> string) "ordinary-agent-call";
+              let outcome = field output "output" |> string |> Jsonaf.of_string in
+              let outcome_type = field outcome "type" |> string in
+              if (not saw_grand) || not (String.equal outcome_type "complete")
+              then
+                raise_s
+                  [%sexp
+                    "ordinary Agent Tool child did not complete"
+                  , (!requests : int)
+                  , (saw_grand : bool)
+                  , (outcome_type : string)
+                  , ((match outcome_type with
+                      | "fail" -> field outcome "code" |> string
+                      | _ -> "")
+                     : string)];
+              assert saw_grand;
+              assert (
+                List.exists !bodies ~f:(fun body ->
+                  String.is_substring body ~substring:"OCH421 Tool Content marker"));
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / child)
+                queued_child;
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / grand)
+                "<developer>OCH421 Captured original marker</developer>";
+              (before_tool_call
+               := fun () ->
+                    Eio.Path.save
+                      ~create:(`Or_truncate 0o600)
+                      Eio.Path.(Eio.Stdenv.fs env / grand)
+                      "<developer>OCH421 Captured edited marker</developer>";
+                    pause_at_scheduler_wait daemon clock pause_clock);
+              stage_queued := true;
+              sent_tool_call := false;
+              let previous_bodies = List.length !bodies in
+              let captured_run, captured_job =
+                submit_job "ordinary-agent-tool-captured"
+              in
+              await_job captured_run captured_job;
+              let captured_bodies =
+                List.take !bodies (List.length !bodies - previous_bodies)
+              in
+              assert (
+                List.exists captured_bodies ~f:(fun body ->
+                  String.is_substring body ~substring:"OCH421 Captured original marker"));
+              assert (
+                not
+                  (List.exists captured_bodies ~f:(fun body ->
+                     String.is_substring body ~substring:"OCH421 Captured edited marker")));
+              let captured_output = tool_output captured_bodies in
+              let captured_outcome =
+                field captured_output "output" |> string |> Jsonaf.of_string
+              in
+              [%test_eq: string] (field captured_outcome "type" |> string) "complete";
+              default_issuer_runtime
+              := Some (queued_grand ~parent_job:captured_job (jobs daemon captured_run)));
+         stage_queued := false;
+         [%test_eq: int] (List.length !default_grand_revisions) 2;
+         let file_grand_revision = List.last_exn !default_grand_revisions in
+         Eio.Path.save
+           ~create:(`Or_truncate 0o600)
+           Eio.Path.(Eio.Stdenv.fs env / child)
+           {|<developer>OCH421 parent marker</developer>
+<tool name="grand" agent="grand.chatmd" local source_mode="file"/>|};
+         Eio.Path.save
+           ~create:(`Or_truncate 0o600)
+           Eio.Path.(Eio.Stdenv.fs env / grand)
+           "<developer>OCH421 Captured original marker</developer>";
+         (before_tool_call
+          := fun () -> Eio.Path.unlink Eio.Path.(Eio.Stdenv.fs env / grand));
+         sent_tool_call := false;
+         let previous_bodies = List.length !bodies in
+         let limited_clock, pause_limited, resume_limited, _ =
+           Agent_server_test_support.controlled_wall_clock
+             (Eio.Stdenv.clock env)
+             ~initial:(Eio.Time.now (Eio.Stdenv.clock env))
+         in
+         let limited_options =
+           { options with
+             developer =
+               Some
+                 (developer_configuration
+                    ~max_active_agent_calls:1
+                    ~observe_native_attempt:
+                      (record_grand_revision limited_grand_revisions)
+                    target)
+           }
+         in
+         let limited_daemon =
+           S.Daemon.start
+             ~sw
+             ~env:(daemon_env limited_clock)
+             ~config:(Agent_server_test_support.config root root prompt)
+             ~tool_dir:root
+             ~home:root
+             ~process_start_identity:None
+             ~options:limited_options
+             ()
+           |> ok
+         in
+         Fun.protect
+           ~finally:(fun () ->
+             resume_limited ();
+             S.Daemon.shutdown limited_daemon |> ok)
+           (fun () ->
+              let connection, expected =
+                open_document
+                  ~contents:
+                    {|<script id="s" language="chatml" kind="tool">let main input = Task.bind(Job.start_tool("child", input), fun id -> Task.pure(`String(id)))</script>|}
+                  limited_daemon
+                  actor
+              in
+              let request =
+                S.Daemon.Developer.Request.create
+                  ~route:
+                    (Document_script
+                       { expected
+                       ; selector = P.Authoring.Analysis.Target.selected_script "s" |> ok
+                       })
+                  ~kind:Live_run
+                  ~target:Chatml.Chatml_compiler_contract.Target.One_off_v1
+                  ~prompt:(Some (S.Catalog_identity.prompt_definition "restart.prompt"))
+                  ~workspace:
+                    (Some (S.Catalog_identity.workspace_definition "restart.workspace"))
+                  ~entrypoint:"main"
+                  ~input:(`Object [ "input", `String "go" ])
+                  ~fixtures:None
+                  ~requested_execution:None
+                  ~requested_max_output_bytes:None
+                  ~bounds:
+                    (Chatml_developer_capture.Json_bounds.create
+                       ~max_bytes:4096
+                       ~max_depth:16
+                       ~max_nodes:128
+                     |> Or_error.ok_exn)
+                  ~checkpoint:ignore
+                |> ok
+              in
+              let submit_limited name =
+                let run_id = P.Id.Developer_run.create () in
+                let key = P.Idempotency_key.of_string name |> ok in
+                ignore
+                  (S.Daemon.Developer.submit
+                     limited_daemon
+                     ~actor
+                     ~run_id
+                     ~key
+                     ~request
+                     ~fresh_source:(Some (Document_script { connection }))
+                   |> ok
+                   : S.Daemon.Developer.View.t);
+                let view =
+                  S.Daemon.Developer.await_terminal limited_daemon ~actor ~run_id ~key
+                  |> ok
+                in
+                let job_id =
+                  match Option.map (S.Daemon.Developer.View.receipt view) ~f:R.value with
+                  | Some (Live (Succeeded (`String id))) -> P.Id.Job.of_string id |> ok
+                  | result ->
+                    raise_s
+                      [%sexp
+                        "expected depth-limited selected Job", (result : R.value option)]
+                in
+                run_id, job_id
+              in
+              let _depth_run, _depth_job = submit_limited "ordinary-agent-tool-depth" in
+              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 25. (fun () ->
+                let rec await_output () =
+                  if
+                    List.exists
+                      (List.take !bodies (List.length !bodies - previous_bodies))
+                      ~f:(fun body ->
+                        String.is_substring body ~substring:"function_call_output")
+                  then ()
+                  else (
+                    Eio.Fiber.yield ();
+                    await_output ())
+                in
+                await_output ());
+              let limited_bodies =
+                List.take !bodies (List.length !bodies - previous_bodies)
+              in
+              assert (
+                not
+                  (List.exists limited_bodies ~f:(fun body ->
+                     String.is_substring body ~substring:"OCH421 Captured edited marker")));
+              let field value name =
+                match value with
+                | `Object fields -> List.Assoc.find_exn fields ~equal:String.equal name
+                | _ -> failwith "limited Agent Tool provider field is not an object"
+              in
+              let string = function
+                | `String value -> value
+                | _ -> failwith "limited Agent Tool provider field is not a string"
+              in
+              let output =
+                List.find_exn limited_bodies ~f:(fun body ->
+                  String.is_substring body ~substring:"function_call_output")
+                |> Jsonaf.of_string
+                |> fun body ->
+                match field body "input" with
+                | `Array items ->
+                  List.find_exn items ~f:(fun item ->
+                    match field item "type" with
+                    | `String "function_call_output" -> true
+                    | `String _ -> false
+                    | _ -> failwith "invalid limited Agent Tool input type")
+                | _ -> failwith "limited Agent Tool input is not an array"
+              in
+              let outcome = field output "output" |> string |> Jsonaf.of_string in
+              [%test_eq: string] (field outcome "type" |> string) "fail";
+              [%test_eq: string]
+                (field outcome "code" |> string)
+                "invocation.handler_failed";
+              [%test_eq: int] (List.length !limited_grand_revisions) 1;
+              assert (
+                not
+                  (String.equal
+                     file_grand_revision
+                     (List.hd_exn !limited_grand_revisions)));
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / child)
+                queued_child;
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / grand)
+                "<developer>OCH421 Captured original marker</developer>";
+              (before_tool_call
+               := fun () ->
+                    pause_at_scheduler_wait limited_daemon limited_clock pause_limited);
+              stage_queued := true;
+              sent_tool_call := false;
+              let queued_run, queued_parent =
+                submit_limited "ordinary-agent-tool-queued-depth"
+              in
+              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 25. (fun () ->
+                let rec await () =
+                  let parent =
+                    List.find_exn (jobs limited_daemon queued_run) ~f:(fun job ->
+                      P.Id.Job.equal (P.Developer_job.id job) queued_parent)
+                  in
+                  match (P.Developer_job.state parent).status with
+                  | Succeeded -> ()
+                  | Failed _ -> failwith "depth-limited queued producer failed"
+                  | Cancelled | Interrupted _ ->
+                    failwith "depth-limited queued producer stopped"
+                  | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
+                    Eio.Fiber.yield ();
+                    await ()
+                in
+                await ());
+              let limited_issuer_runtime =
+                queued_grand ~parent_job:queued_parent (jobs limited_daemon queued_run)
+              in
+              assert (
+                not
+                  (Chatml_source.Digest.equal
+                     (Option.value_exn !default_issuer_runtime)
+                     limited_issuer_runtime));
+              [%test_eq: int] (List.length !limited_grand_revisions) 2;
+              assert (
+                not
+                  (String.equal
+                     (List.hd_exn !default_grand_revisions)
+                     (List.hd_exn !limited_grand_revisions))))))
 ;;

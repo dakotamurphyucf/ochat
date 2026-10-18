@@ -40,11 +40,21 @@ val admit_selected
   -> checkpoint:(unit -> unit)
   -> (unit, Agent_protocol.Error.t) result
 
+type ordinary_agent_tools =
+  | Denied
+  | Registered
+
 (** The same bounded selected preflight, returning whether any genuine parsed
     image/document Basic requires dynamic source admission. A false result is
-    structural captured/literal input, not a fallback after a failed read. *)
+    structural captured/literal input, not a fallback after a failed read.
+    [Registered] only changes the bounded structural classifier. It grants no
+    native implementation or source access. The host may select it only after
+    preparing exact parser-owned Agent registrations under its original bound
+    Source_binding and trusted Tool runner. Missing/failed registration uses
+    [Denied], never a literal or Fetch fallback. *)
 val classify_selected
-  :  revision:Prompt_revision.t
+  :  ordinary_agent_tools:ordinary_agent_tools
+  -> revision:Prompt_revision.t
   -> parsed:Prompt.Chat_markdown.Parsed.t
   -> input:Prompt.Chat_markdown.content_item list
   -> checkpoint:(unit -> unit)

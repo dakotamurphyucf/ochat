@@ -90,11 +90,19 @@ module Child_source_policy = struct
 
   let create ~source ~runtime_policy_revision = { source; runtime_policy_revision }
 
-  let bind t ~tool_contract ~content_limits ~artifact_store ~source_lease =
+  let bind
+        t
+        ~tool_contract
+        ~active_agent_calls
+        ~content_limits
+        ~artifact_store
+        ~source_lease
+    =
     Agent_session.Captured_agent_runner.Source_binding.create
       ~source:t.source
       ~tool_contract
       ~runtime_policy_revision:t.runtime_policy_revision
+      ~active_agent_calls
       ~content_limits
       ~artifact_store
       ~source_lease
@@ -2554,6 +2562,7 @@ let source_binding (t : t) ~source_lease =
       (Child_source_policy.bind
          policy
          ~tool_contract:Chatml_compilation.Tool_contract.Standard
+         ~active_agent_calls:Agent_session.Selected_agent_depth.Limits.default
          ~content_limits:t.content_limits
          ~artifact_store:artifacts
          ~source_lease)

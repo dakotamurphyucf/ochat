@@ -1046,7 +1046,7 @@ module Model_inference : sig
     -> ('a, Agent_protocol.Error.t) result
 
   (** Enter one authentic selected child beneath this Root's currently active
-      [with_claimed_agent] scope. [target] is the opaque Saved, Content or Model
+      [with_claimed_agent] scope. [target] is the opaque Saved, Content, Model or Tool
       source selection already entered by the trusted child runner. Root checks
       its exact saved ancestor and immediate logical parent against the active
       lexical frame, the current selected native borrow against its registered
@@ -1058,8 +1058,9 @@ module Model_inference : sig
       existing selected preparation; it is not a target grant. Root obtains
       the actual child revision through [target], applies that revision's one
       Config to the current parent Context and uses the original adapter's
-      binding to compute the expected complete Target. Saved and Content child
-      entries use [Context.derive_in_session], as the selected Driver does; a
+      binding to compute the expected complete Target. Saved, Content and
+      ordinary Tool entries use [Context.derive_in_session], as the selected
+      Driver does; a
       Model child uses [Context.derive], as the shared Model recipe does, so its
       new logical session does not inherit the parent's inference session. It
       requires [selected_context] to carry exactly that Target, then lends its
@@ -1090,6 +1091,16 @@ module Model_inference : sig
       shared Inference_client, not a renewed actor, credential or effect lease.
       Use the strict ports and composed submission guard for every dispatch. *)
   val context : t -> Inference_runtime.Context.t
+
+  (** Nonyielding comparison projection for a parser-owned ordinary Agent
+      Tool's pre-target Context loan. Require this run's currently entered
+      claimed inference scope and exact live selected-child frame, then return
+      the Root-created frame Context. Outside the frame, after expiry or under
+      another Root, deny rather than returning the baseline Context. This
+      grants no provider attempt or submission authority. *)
+  val current_selected_context
+    :  run
+    -> (Inference_runtime.Context.t, Agent_protocol.Error.t) result
 
   (** Strict source/host-service admission while this exact callback is live.
       Yielding refresh verifies the original actor, entered Worker parent,
