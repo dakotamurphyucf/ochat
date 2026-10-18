@@ -89,9 +89,26 @@ module Active : sig
         This neither writes nor consumes another durable Start. The returned
         Started remains one-use for the interpreter. *)
     val bind_root : t -> root:Developer_root_owner.run -> (Started.t, P.Error.t) result
+
+    (** Comparison only: [started] must be the unique result of binding this
+        Preparing token's same Active/callback generation, and both must
+        remain live. This does not consume a second Start or grant execution. *)
+    val issued_started : t -> Started.t -> bool
   end
 
   val view : t -> View.t
+
+  (** Nonyielding lexical Started check for this exact current Active and
+      physical Root. It accepts the Started token after its one interpreter
+      consumption, while this same callback is still live; it never revives
+      an expired callback or creates another Start. Caller also rechecks the
+      Root/Store/source after yielding approval work. *)
+  val check_started_now
+    :  t
+    -> started:Started.t
+    -> root:Developer_root_owner.run
+    -> actor:Operator_authorization.t
+    -> (unit, P.Error.t) result
 
   (** Commit and consume the unique fresh durable Start for this Active
       before any native/shell/MCP initialization or language effect. [actor]

@@ -46,6 +46,7 @@ type t =
   ; results : O.Job_result.t
   ; sources : Sources.t
   ; limits : Document_schema.Limits.t
+  ; approval_owner : Developer_approval_owner.t option
   }
 
 module Availability = struct
@@ -70,10 +71,20 @@ let create ~root ~results ~sources =
            ~default:(invalid "developer Model provider is unavailable")
            ~f:Provider_operator_port.Model_selection.context
     in
-    Ok { root; results; sources; limits }
+    Ok { root; results; sources; limits; approval_owner = None }
 ;;
 
 let issued_by_root t root = phys_equal t.root root
+
+let with_approval_owner t owner =
+  if not (Developer_approval_owner.issued_by_root owner t.root)
+  then invalid "developer Model approval owner belongs to another Root"
+  else (
+    match t.approval_owner with
+    | None -> Ok { t with approval_owner = Some owner }
+    | Some current when phys_equal current owner -> Ok t
+    | Some _ -> invalid "developer Model runner already has another approval owner")
+;;
 
 let decode t job =
   if not (P.Job.equal_kind (P.Developer_job.kind job) P.Job.Model_call)
@@ -134,18 +145,63 @@ let fetch_prompt scope ~ctx ~prompt ~is_local =
   Ok (xml, prompt_dir)
 ;;
 
-let run_agent t scope ?history_compaction ?prompt_dir ?session_id ~ctx prompt items =
+let run_agent
+      t
+      scope
+      ~source_prompt
+      ?history_compaction
+      ?prompt_dir
+      ?session_id
+      ~ctx
+      prompt
+      items
+  =
   O.Model_inference.check_current scope;
-  Chat_response.Driver.run_agent
-    ?history_compaction
-    ?prompt_dir
-    ?session_id
-    ~response_dir:t.sources.response_dir
-    ~shell_manifest_authorizer:t.sources.manifest_authorizer
-    ~shell_approval_provider:t.sources.approval_provider
-    ~ctx
-    prompt
-    items
+  match prompt_dir with
+  | None ->
+    Chat_response.Driver.run_agent
+      ?history_compaction
+      ?prompt_dir
+      ?session_id
+      ~response_dir:t.sources.response_dir
+      ~shell_manifest_authorizer:t.sources.manifest_authorizer
+      ~shell_approval_provider:t.sources.approval_provider
+      ~ctx
+      prompt
+      items
+  | Some prompt_dir ->
+    (* The retained manifest uses the owned parser's declaration ranges. Parse
+       this fresh File source once with the same authored grammar before the
+       prepared Driver; the legacy raw wrapper gives imports whole-file ranges. *)
+    let limits =
+      Prompt.Chat_markdown.Limits.create
+        ~max_input_bytes:(8 * 1024 * 1024)
+        ~max_parse_calls:1024
+        ~max_tokens:100000
+        ~max_depth:128
+      |> Or_error.ok_exn
+    in
+    let parsed =
+      Prompt.Chat_markdown.prepare_chat_inputs
+        ~source:(Filename.basename source_prompt)
+        ~source_loader:(Source_loader.filesystem ~root:prompt_dir)
+        ~dir:prompt_dir
+        ~preprocess:Meta_prompting.Preprocessor.preprocess
+        ~limits
+        ~checkpoint:Eio.Fiber.check
+        prompt
+    in
+    O.Model_inference.check_current scope;
+    Chat_response.Driver.run_prepared_agent
+      parsed
+      ?history_compaction
+      ~prompt_dir
+      ?session_id
+      ~response_dir:t.sources.response_dir
+      ~shell_manifest_authorizer:t.sources.manifest_authorizer
+      ~shell_approval_provider:t.sources.approval_provider
+      ~ctx
+      items
 ;;
 
 let context t scope recipe =
@@ -185,7 +241,10 @@ let strict_recipe t scope =
           let%bind request = Request.decode payload in
           let ctx = context t scope recipe in
           let exec_context : Executor.exec_context =
-            { ctx; fetch_prompt = fetch_prompt scope; run_agent = run_agent t scope }
+            { ctx
+            ; fetch_prompt = fetch_prompt scope
+            ; run_agent = run_agent t scope ~source_prompt:(Request.prompt request)
+            }
           in
           Executor.call_agent_prompt_v1_strict
             exec_context
@@ -242,21 +301,28 @@ let execute_claimed t active =
     selected
   in
   O.Model_inference.with_claimed t.root ~active ~f:(fun scope ~sw:_ ->
-    O.Model_inference.check_current scope;
-    let target = Runtime.Context.target (O.Model_inference.context scope) in
-    let completion =
-      if not (Inference.Request.Target.equal target (Model_call.target saved))
-      then P.Completion.Failed (tool_error "saved Model target changed")
-      else (
-        let request_json = Model_call.request saved in
-        let recipe = strict_recipe t scope in
-        match recipe.call ~payload:request_json with
-        | Ok (Capabilities.Model_ok value) -> P.Completion.Succeeded value
-        | Ok (Model_refused message | Model_error message) ->
-          P.Completion.Failed (tool_error message)
-        | Error message -> P.Completion.Failed (tool_error message))
+    let run () =
+      O.Model_inference.check_current scope;
+      let target = Runtime.Context.target (O.Model_inference.context scope) in
+      let completion =
+        if not (Inference.Request.Target.equal target (Model_call.target saved))
+        then P.Completion.Failed (tool_error "saved Model target changed")
+        else (
+          let request_json = Model_call.request saved in
+          let recipe = strict_recipe t scope in
+          match recipe.call ~payload:request_json with
+          | Ok (Capabilities.Model_ok value) -> P.Completion.Succeeded value
+          | Ok (Model_refused message | Model_error message) ->
+            P.Completion.Failed (tool_error message)
+          | Error message -> P.Completion.Failed (tool_error message))
+      in
+      Ok (completed_state t claim completion)
     in
-    completed_state t claim completion)
+    match t.approval_owner with
+    | None -> run ()
+    | Some owner ->
+      Developer_approval_owner.with_claimed_model_inference owner ~active ~scope run)
+  |> Result.join
 ;;
 
 let run_candidate t ?on_capacity_decision candidate =

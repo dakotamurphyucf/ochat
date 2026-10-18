@@ -12,10 +12,10 @@ type live
 (** Configuration only. [prompts] and [catalogs] are the daemon's actual
     publication owners; [workspace_leases] is its shared conversation/developer
     conflict-domain ledger. [script_preparation] supplies the same bounded
-    retained-program policy used by native preparation. [approval_broker]
-    must be an installed daemon broker or absent until an operator
-    response route exists; Assume_approved and Session grants are not developer
-    authority. No prompt, workspace or native resource is opened here. *)
+    retained-program policy used by native preparation. The actual per-run
+    approval owner is lent at [prepare] after durable Start, so configuration
+    cannot install a global or caller-chosen broker. No prompt, workspace or
+    native resource is opened here. *)
 val create
   :  sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
@@ -28,7 +28,6 @@ val create
   -> tool_dir:Eio.Fs.dir_ty Eio.Path.t
   -> home:Eio.Fs.dir_ty Eio.Path.t
   -> cache:Chat_response.Cache.t
-  -> approval_broker:Shell_runtime.Approval_broker.t option
   -> max_native_bindings:int
   -> child_sources:Session_factory.Child_source_policy.t option
   -> content_limits:Chatmd_prompt_content.Limits.t option
@@ -87,13 +86,20 @@ val create
     exception, preparation stops and joins that SAME switch before attempting
     retained Workspace cleanup. A missing or uncertain cleanup remains in [t]
     and refuses another preparation. Original exception/backtrace survives
-    switch-release failure. The caller has already consumed its one durable
+    switch-release failure. [approval_owner], if present, was created by
+    Host after this command's durable Start and is installed only in this
+    retained runtime. Preparation cannot borrow Root/native approval
+    authority while the registry activation gate is Pending. Host retains
+    the same owner with this Live package for later same-Root commands and
+    claimed Jobs; failed preparation closes it before provisional cleanup.
+    The caller has already consumed its one durable
     Execution_start before this effectful constructor; partial preparation
     exposes no Root or language callback and must finish that existing command
     as a truthful started failure without replay. *)
 val prepare
   :  t
   -> handle:Agent_store.Developer_run_store.handle
+  -> approval_owner:Developer_approval_owner.t option
   -> original_actor:Operator_authorization.t
   -> prompt:P.Id.Prompt_definition.t
   -> workspace:P.Id.Workspace_definition.t

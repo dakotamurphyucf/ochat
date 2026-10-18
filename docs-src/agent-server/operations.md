@@ -206,6 +206,15 @@ workspaces are never removed by that cleanup. Archived sessions/artifacts can st
 consume disk. Do not infer unlimited retention or a fixed memory ceiling from a
 short load test. See [test evidence](testing.md).
 
+Developer Shell approvals are disabled unless the library host supplies bounded
+`Developer_configuration.Shell_approvals` policies. The current pending list is
+process-local and redacted; read and response use distinct operator policies.
+Only a decision for the current command or claimed-job attempt can resume its
+waiting invocation, and that invocation checks its source and actor again before
+an effect. Cancellation, timeout, run retirement and daemon shutdown remove
+pending requests. After restart, inspect the command or job terminal state; do
+not treat a previous pending ID or approval as a reusable grant.
+
 Reset/rebuild/delete are authorized protocol mutations with revision checks.
 Review preservation flags and archive/remove choices in [the protocol](protocol.md).
 Never delete locks, broad directories or unknown processes as a generic fix for

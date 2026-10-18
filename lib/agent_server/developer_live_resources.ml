@@ -164,7 +164,6 @@ type t =
   ; tool_dir : Eio.Fs.dir_ty Eio.Path.t
   ; home : Eio.Fs.dir_ty Eio.Path.t
   ; cache : Chat_response.Cache.t
-  ; approval_broker : Shell_runtime.Approval_broker.t option
   ; max_native_bindings : int
   ; child_sources : Session_factory.Child_source_policy.t option
   ; content_limits : Chatmd_prompt_content.Limits.t option
@@ -228,7 +227,6 @@ let create
       ~tool_dir
       ~home
       ~cache
-      ~approval_broker
       ~max_native_bindings
       ~child_sources
       ~content_limits
@@ -263,7 +261,6 @@ let create
       ; tool_dir
       ; home
       ; cache
-      ; approval_broker
       ; max_native_bindings
       ; child_sources
       ; content_limits
@@ -395,7 +392,17 @@ let check_prepared
       ~current:original_actor
 ;;
 
-let prepare_on_switch t ~owner ~sw ~handle ~original_actor ~prompt ~workspace ~checkpoint =
+let prepare_on_switch
+      t
+      ~owner
+      ~sw
+      ~handle
+      ~approval_owner
+      ~original_actor
+      ~prompt
+      ~workspace
+      ~checkpoint
+  =
   let open Result.Let_syntax in
   if Option.is_some t.unresolved
   then Error (invalid "developer workspace cleanup is incomplete")
@@ -479,9 +486,9 @@ let prepare_on_switch t ~owner ~sw ~handle ~original_actor ~prompt ~workspace ~c
           |> Result.map_error ~f:diagnostic_error
         in
         let approval_provider =
-          match t.approval_broker with
+          match approval_owner with
           | None -> Shell_runtime.Approval_broker.None_available
-          | Some broker -> Shell_runtime.Approval_broker.Callback broker
+          | Some owner -> Developer_approval_owner.provider owner
         in
         let authorizer =
           manifest_authorizer
@@ -679,7 +686,16 @@ let preparation_cleanup_error original =
     ()
 ;;
 
-let prepare_locked t ~handle ~original_actor ~prompt ~workspace ~checkpoint ~retain =
+let prepare_locked
+      t
+      ~handle
+      ~approval_owner
+      ~original_actor
+      ~prompt
+      ~workspace
+      ~checkpoint
+      ~retain
+  =
   let owner = Owner.create () in
   let ready =
     Eio.Cancel.protect (fun () ->
@@ -689,6 +705,7 @@ let prepare_locked t ~handle ~original_actor ~prompt ~workspace ~checkpoint ~ret
           ~owner
           ~sw
           ~handle
+          ~approval_owner
           ~original_actor
           ~prompt
           ~workspace
@@ -730,9 +747,26 @@ let prepare_locked t ~handle ~original_actor ~prompt ~workspace ~checkpoint ~ret
   | exception exn -> rethrow_original exn (Stdlib.Printexc.get_raw_backtrace ())
 ;;
 
-let prepare t ~handle ~original_actor ~prompt ~workspace ~checkpoint ~retain =
+let prepare
+      t
+      ~handle
+      ~approval_owner
+      ~original_actor
+      ~prompt
+      ~workspace
+      ~checkpoint
+      ~retain
+  =
   Eio.Mutex.use_rw ~protect:false t.gate (fun () ->
-    prepare_locked t ~handle ~original_actor ~prompt ~workspace ~checkpoint ~retain)
+    prepare_locked
+      t
+      ~handle
+      ~approval_owner
+      ~original_actor
+      ~prompt
+      ~workspace
+      ~checkpoint
+      ~retain)
 ;;
 
 let workspace t = Workspace.instance t.workspace_owner

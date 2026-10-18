@@ -1492,6 +1492,22 @@ let compose
         Developer_host.Command.Control_policy.create
           ~authorize:configuration.command_control
       in
+      let approval =
+        Option.map configuration.shell_approvals ~f:(fun shell ->
+          let command_allowed policy actor row =
+            Result.is_ok
+              (Developer_method_authorization.authorize_principal
+                 (Agent_store.Developer_command_row.kind row)
+                 ~principal:(Operator_authorization.principal actor))
+            && policy actor row
+          in
+          Developer_approval_owner.Configuration.create
+            ~limits:shell.limits
+            ~command_read:(command_allowed configuration.receipt_read)
+            ~command_respond:(command_allowed configuration.command_control)
+            ~job_read:shell.job_read
+            ~job_respond:shell.job_respond)
+      in
       Developer_host.create
         ~sw
         ~env
@@ -1510,7 +1526,7 @@ let compose
         ~tool_dir:Eio.Path.(Eio.Stdenv.fs env / tool_dir)
         ~home:Eio.Path.(Eio.Stdenv.fs env / home)
         ~cache
-        ~approval_broker:None
+        ~approval
         ~max_native_bindings:limits.max_native_bindings
         ~child_sources
         ~content_limits:options.content_limits
@@ -2116,6 +2132,40 @@ let inspect_prompt_shell t ~definition_id ~selection ~checkpoint =
 
 module Developer = struct
   module Configuration = Developer_configuration
+
+  let with_host t f =
+    match t.developer with
+    | Some host -> f host
+    | None ->
+      Error
+        (Agent_protocol.Error.create
+           Invalid_state
+           ~message:"developer commands are not installed on this daemon"
+           ~retryable:false
+           ())
+  ;;
+
+  module Approval = struct
+    module Pending = Developer_host.Approval.Pending
+
+    type decision = Developer_host.Approval.decision =
+      | Approve_once
+      | Deny of string
+
+    let pending t ~actor ~run_id =
+      with_host t (fun host -> Developer_host.Approval.pending host ~actor ~run_id)
+    ;;
+
+    let respond t ~actor ~run_id ~id decision =
+      with_host t (fun host ->
+        Developer_host.Approval.respond host ~actor ~run_id ~id decision)
+    ;;
+
+    let cancel t ~actor ~run_id ~id =
+      with_host t (fun host -> Developer_host.Approval.cancel host ~actor ~run_id ~id)
+    ;;
+  end
+
   module Request = Developer_command_original
 
   module View = struct
@@ -2129,18 +2179,6 @@ module Developer = struct
     let capture_fingerprint = Developer_host.Command.capture_fingerprint
     let request_fingerprint = Developer_host.Command.request_fingerprint
   end
-
-  let with_host t f =
-    match t.developer with
-    | Some host -> f host
-    | None ->
-      Error
-        (Agent_protocol.Error.create
-           Invalid_state
-           ~message:"developer commands are not installed on this daemon"
-           ~retryable:false
-           ())
-  ;;
 
   let submit t ~actor ~run_id ~key ~request ~fresh_source =
     with_host t (fun host ->

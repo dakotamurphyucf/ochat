@@ -263,6 +263,40 @@ module Command : sig
     -> (view, P.Error.t) result
 end
 
+module Approval : sig
+  module Pending = Developer_approval_owner.Pending
+
+  type decision = Developer_approval_owner.decision =
+    | Approve_once
+    | Deny of string
+
+  (** Process-local projection of the exact installed run generation.
+      [run_id] is comparison data; actor, Root, command/Job row and the
+      distinct read policy are rechecked after any Store wait. *)
+  val pending
+    :  t
+    -> actor:Operator_authorization.t
+    -> run_id:P.Id.Developer_run.t
+    -> (Pending.t list, P.Error.t) result
+
+  (** Resolve one request once under separate response permission and exact
+      command/Claim/native ownership. ID or receipt read is not authority. *)
+  val respond
+    :  t
+    -> actor:Operator_authorization.t
+    -> run_id:P.Id.Developer_run.t
+    -> id:P.Id.Permission.t
+    -> decision
+    -> (unit, P.Error.t) result
+
+  val cancel
+    :  t
+    -> actor:Operator_authorization.t
+    -> run_id:P.Id.Developer_run.t
+    -> id:P.Id.Permission.t
+    -> (unit, P.Error.t) result
+end
+
 (** Open one Store beneath the daemon's Session_store, verify the actual Blob
     binding, borrow the existing Authoring installation and build one physical
     Root.Registry over the SAME Job_capacity. [prompts], [catalogs] and
@@ -271,9 +305,10 @@ end
     or conflict domain. [provider] is the genuine operator port, optionally
     absent; no ambient provider fallback exists. A configured [model_target]
     is selected for the original actor only on a fresh Live command, never on
-    a historical retry. [approval_broker=None] retains typed permission-required
-    shell behavior until a real operator response route is installed; no
-    Assume_approved or Session-scoped grant is substituted.
+    a historical retry. [approval=None] retains typed permission-required
+    shell behavior; an enabled owner belongs to one durably Started run
+    generation. No caller-supplied broker, Assume_approved provider or
+    Session-scoped grant is substituted.
     The live Developer facade borrows the exact Authoring_installation owner;
     it does not reconstruct a context/source owner. No command or
     Root effect occurs here. [runtime_policy] is the daemon's immutable initial
@@ -301,7 +336,7 @@ val create
   -> tool_dir:Eio.Fs.dir_ty Eio.Path.t
   -> home:Eio.Fs.dir_ty Eio.Path.t
   -> cache:Chat_response.Cache.t
-  -> approval_broker:Shell_runtime.Approval_broker.t option
+  -> approval:Developer_approval_owner.Configuration.t option
   -> max_native_bindings:int
   -> child_sources:Session_factory.Child_source_policy.t option
   -> content_limits:Chatmd_prompt_content.Limits.t option

@@ -16,6 +16,7 @@ module Model = Developer_model_job_runner
 module Live_resources = Developer_live_resources
 module Child_runner = Developer_child_agent_runner
 module Repl_epoch = Developer_repl_epoch
+module Approval_owner = Developer_approval_owner
 
 type live_services =
   { jobs : Jobs.t
@@ -94,17 +95,20 @@ type live_owner =
   | Prepared of
       { resources : Developer_live_resources.live
       ; origin_row : Row.t
+      ; approval_owner : Approval_owner.t option
       }
   | Root_owned of
       { root : Root.run
       ; resources : Developer_live_resources.live
       ; origin_row : Row.t
       ; services : live_services
+      ; approval_owner : Approval_owner.t option
       }
   | Root_provisional of
       { root : Root.run
       ; resources : Developer_live_resources.live
       ; origin_row : Row.t
+      ; approval_owner : Approval_owner.t option
       }
 
 let live_origin_row = function
@@ -122,6 +126,12 @@ let live_resources = function
 let live_root = function
   | Prepared _ -> None
   | Root_owned { root; _ } | Root_provisional { root; _ } -> Some root
+;;
+
+let live_approval_owner = function
+  | Prepared { approval_owner; _ }
+  | Root_owned { approval_owner; _ }
+  | Root_provisional { approval_owner; _ } -> approval_owner
 ;;
 
 type live_selection =
@@ -182,7 +192,8 @@ type admitted_run =
   | Appending of appending_epoch
 
 type t =
-  { env : Eio_unix.Stdenv.base
+  { sw : Eio.Switch.t
+  ; env : Eio_unix.Stdenv.base
   ; session_store : Agent_store.Session_store.t
   ; blobs : Agent_store.Blob_store.t
   ; capacity : Job_capacity.t
@@ -192,6 +203,7 @@ type t =
   ; capture : Capture.t
   ; repl : Repl_epoch.t option
   ; live_resources : Developer_live_resources.t
+  ; approval : Approval_owner.Configuration.t option
   ; disclosure_policy : Command_view.Disclosure_policy.t
   ; control_policy : Command_view.Control_policy.t
   ; provider : Provider_operator_port.t option
@@ -279,7 +291,7 @@ let prepare_agent_job_source ~root ~resources ~parent ~binding ~request ~checkpo
   artifact
 ;;
 
-let create_live_services t ~root ~resources ~current_actor =
+let create_live_services t ~root ~resources ~approval_owner ~current_actor =
   let open Result.Let_syntax in
   let%bind queued_issuer =
     Developer_queued_issuer.create ~live:resources ~root ~runtime_policy:t.runtime_policy
@@ -296,6 +308,11 @@ let create_live_services t ~root ~resources ~current_actor =
   in
   let%bind native = Native.create ~root in
   let%bind native = Native.with_job_service native jobs in
+  let%bind native =
+    match approval_owner with
+    | None -> Ok native
+    | Some owner -> Native.with_approval_owner native owner
+  in
   let%bind native =
     Native.with_managed_definition
       native
@@ -320,12 +337,24 @@ let create_live_services t ~root ~resources ~current_actor =
       ~authorize:t.authorize_native
       ~prepare_output:t.prepare_output
   in
+  let%bind background =
+    match approval_owner with
+    | None -> Ok background
+    | Some owner -> Background.with_approval_owner background owner
+  in
   let%bind model =
     match Root.selected_model root with
     | None -> Ok None
     | Some _ ->
-      Model.create ~root ~results ~sources:(Live_resources.model_sources resources)
-      |> Result.map ~f:Option.some
+      let%bind model =
+        Model.create ~root ~results ~sources:(Live_resources.model_sources resources)
+      in
+      let%map model =
+        match approval_owner with
+        | None -> Ok model
+        | Some owner -> Model.with_approval_owner model owner
+      in
+      Some model
   in
   let%bind run_selected_target =
     Child_runner.create
@@ -448,7 +477,7 @@ let create
       ~tool_dir
       ~home
       ~cache
-      ~approval_broker
+      ~approval
       ~max_native_bindings
       ~child_sources
       ~content_limits
@@ -501,7 +530,6 @@ let create
       ~tool_dir
       ~home
       ~cache
-      ~approval_broker
       ~max_native_bindings
       ~child_sources
       ~content_limits
@@ -573,7 +601,8 @@ let create
           ~configuration
           ~checkpoint)
     in
-    { env
+    { sw
+    ; env
     ; session_store
     ; blobs
     ; capacity
@@ -583,6 +612,7 @@ let create
     ; capture
     ; repl
     ; live_resources
+    ; approval
     ; disclosure_policy = command_disclosure
     ; control_policy = command_control
     ; provider
@@ -783,6 +813,8 @@ let rec retire_admitted t slot ~run_id ~actor ~authorize_now ~live_selection ret
   let open Result.Let_syntax in
   match retiring.step with
   | Join_callbacks ->
+    Option.iter retiring.old.live_owner ~f:(fun live ->
+      Option.iter (live_approval_owner live) ~f:Approval_owner.close);
     let%bind () = Lifecycle.retire_run t.lifecycle slot ~actor in
     retiring.step <- Detach_scheduler;
     retire_admitted t slot ~run_id ~actor ~authorize_now ~live_selection retiring
@@ -1216,11 +1248,12 @@ let run_live_locked
   in
   let%bind preparing = Lifecycle.Active.start_preparation active ~actor ~admit in
   let origin_row = Lifecycle.Active.view active |> Lifecycle.View.row in
-  let%bind root, resources, services =
+  let%bind root, resources, services, approval_owner, started =
     match admitted.live_owner with
-    | Some (Root_owned { root; resources; services; _ }) ->
-      let%map () = Live_resources.check_current resources in
-      root, resources, services
+    | Some (Root_owned { root; resources; services; approval_owner; _ }) ->
+      let%bind () = Live_resources.check_current resources in
+      let%map started = Lifecycle.Active.Preparing.bind_root preparing ~root in
+      root, resources, services, approval_owner, started
     | Some (Prepared _ | Root_provisional _) ->
       Error
         (error
@@ -1236,35 +1269,72 @@ let run_live_locked
             (P.Error.invalid_request
                "developer Live requires configured prompt and workspace")
       in
-      let%bind resources =
-        Live_resources.prepare
-          t.live_resources
-          ~handle:admitted.handle
-          ~original_actor:actor
-          ~prompt
-          ~workspace
-          ~checkpoint:t.checkpoint
-          ~retain:(fun resources ->
-            admitted.live_owner <- Some (Prepared { resources; origin_row }))
+      let%bind approval_owner =
+        match t.approval with
+        | None -> Ok None
+        | Some configuration ->
+          Approval_owner.create
+            ~sw:t.sw
+            ~env:t.env
+            ~store:t.store
+            ~preparing
+            ~configuration
+          |> Result.map ~f:Option.some
       in
-      let%bind root =
-        admit_live_root t ~actor ~capture ~candidate ~ready:admitted ~resources ~active
+      let build_initial () =
+        let%bind resources =
+          Live_resources.prepare
+            t.live_resources
+            ~handle:admitted.handle
+            ~approval_owner
+            ~original_actor:actor
+            ~prompt
+            ~workspace
+            ~checkpoint:t.checkpoint
+            ~retain:(fun resources ->
+              admitted.live_owner
+              <- Some (Prepared { resources; origin_row; approval_owner }))
+        in
+        let%bind root =
+          admit_live_root t ~actor ~capture ~candidate ~ready:admitted ~resources ~active
+        in
+        admitted.live_owner
+        <- Some (Root_provisional { root; resources; origin_row; approval_owner });
+        let%bind started = Lifecycle.Active.Preparing.bind_root preparing ~root in
+        let%bind () =
+          match approval_owner with
+          | None -> Ok ()
+          | Some owner -> Approval_owner.bind_root owner ~root ~started
+        in
+        let%bind services =
+          create_live_services
+            t
+            ~root
+            ~resources
+            ~approval_owner
+            ~current_actor:(fun () -> actor)
+        in
+        let%bind () =
+          Job_scheduler.attach_developer scheduler ~root ~runner:services.background
+        in
+        let%map () =
+          match services.model with
+          | None -> Ok ()
+          | Some model ->
+            Job_scheduler.attach_developer_model scheduler ~root ~runner:model
+        in
+        root, resources, services, approval_owner, started
       in
-      admitted.live_owner <- Some (Root_provisional { root; resources; origin_row });
-      let%bind services =
-        create_live_services t ~root ~resources ~current_actor:(fun () -> actor)
-      in
-      let%bind () =
-        Job_scheduler.attach_developer scheduler ~root ~runner:services.background
-      in
-      let%map () =
-        match services.model with
-        | None -> Ok ()
-        | Some model -> Job_scheduler.attach_developer_model scheduler ~root ~runner:model
-      in
-      root, resources, services
+      (match build_initial () with
+       | Ok value -> Ok value
+       | Error error ->
+         Option.iter approval_owner ~f:Approval_owner.close;
+         Error error
+       | exception exn ->
+         let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+         Option.iter approval_owner ~f:Approval_owner.close;
+         Exn.raise_with_original_backtrace exn backtrace)
   in
-  let%bind started = Lifecycle.Active.Preparing.bind_root preparing ~root in
   let%bind current = Root.current root in
   let%bind () = Root.check_effect_now root current in
   let execution_capture = Root.capture root in
@@ -1295,8 +1365,13 @@ let run_live_locked
       ~budgets
       ~env:t.env
   in
-  admitted.live_owner <- Some (Root_owned { root; resources; services; origin_row });
-  Developer_command_execution.Live.run execution ~started
+  admitted.live_owner
+  <- Some (Root_owned { root; resources; services; origin_row; approval_owner });
+  match approval_owner with
+  | None -> Developer_command_execution.Live.run execution ~started
+  | Some owner ->
+    Approval_owner.with_started_command owner ~active ~started ~actor (fun () ->
+      Developer_command_execution.Live.run execution ~started)
 ;;
 
 let run_live
@@ -1313,18 +1388,25 @@ let run_live
       ~admit
   =
   Eio.Mutex.use_rw ~protect:false admitted.live_gate (fun () ->
-    run_live_locked
-      t
-      ~original
-      ~actor
-      ~candidate
-      ~admitted
-      ~capture
-      ~budgets
-      ~id
-      ~active
-      ~sw
-      ~admit)
+    Exn.protect
+      ~finally:(fun () ->
+        match admitted.live_owner with
+        | Some (Prepared { approval_owner; _ } | Root_provisional { approval_owner; _ })
+          -> Option.iter approval_owner ~f:Approval_owner.close
+        | None | Some (Root_owned _) -> ())
+      ~f:(fun () ->
+        run_live_locked
+          t
+          ~original
+          ~actor
+          ~candidate
+          ~admitted
+          ~capture
+          ~budgets
+          ~id
+          ~active
+          ~sw
+          ~admit))
 ;;
 
 let submit_command t ~actor ~run_id ~key ~original ~fresh_source =
@@ -1436,10 +1518,56 @@ let cancel_command t ~actor ~run_id ~key =
        Command_view.of_lifecycle view)
 ;;
 
+module Approval = struct
+  module Pending = Approval_owner.Pending
+
+  type decision = Approval_owner.decision =
+    | Approve_once
+    | Deny of string
+
+  let current_owner t ~run_id =
+    if t.closed
+    then Error (P.Error.invalid_request "developer approval host is closed")
+    else (
+      match Hashtbl.find t.runs run_id with
+      | Some
+          (Ready { live_owner = Some (Root_owned { approval_owner = Some owner; _ }); _ })
+        -> Ok owner
+      | None | Some (Ready _ | Retiring _ | Appending _) ->
+        Error (P.Error.invalid_request "developer approval owner is unavailable"))
+  ;;
+
+  let pending t ~actor ~run_id =
+    let open Result.Let_syntax in
+    let%bind owner = current_owner t ~run_id in
+    Approval_owner.pending owner ~actor
+  ;;
+
+  let respond t ~actor ~run_id ~id decision =
+    let open Result.Let_syntax in
+    let%bind owner = current_owner t ~run_id in
+    Approval_owner.respond owner ~actor ~id decision
+  ;;
+
+  let cancel t ~actor ~run_id ~id =
+    let open Result.Let_syntax in
+    let%bind owner = current_owner t ~run_id in
+    Approval_owner.cancel owner ~actor ~id
+  ;;
+end
+
 let close_and_wait t =
   t.closed <- true;
   Eio.Cancel.protect (fun () ->
     let open Result.Let_syntax in
+    Hashtbl.iter t.runs ~f:(function
+      | Ready ready ->
+        Option.iter ready.live_owner ~f:(fun live ->
+          Option.iter (live_approval_owner live) ~f:Approval_owner.close)
+      | Retiring retiring ->
+        Option.iter retiring.old.live_owner ~f:(fun live ->
+          Option.iter (live_approval_owner live) ~f:Approval_owner.close)
+      | Appending _ -> ());
     let%bind () =
       match t.repl with
       | None -> Ok ()

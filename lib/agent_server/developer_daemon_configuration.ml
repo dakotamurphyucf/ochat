@@ -6,6 +6,18 @@ module Remote_content = struct
   let create = Developer_child_remote_content.Policy.create
 end
 
+module Shell_approvals = struct
+  module Limits = Developer_approval_owner.Limits
+
+  type t =
+    { limits : Limits.t
+    ; job_read : Operator_authorization.t -> Agent_protocol.Developer_job.t -> bool
+    ; job_respond : Operator_authorization.t -> Agent_protocol.Developer_job.t -> bool
+    }
+
+  let create ~limits ~job_read ~job_respond = { limits; job_read; job_respond }
+end
+
 module Repl = struct
   type t = Developer_repl_epoch.Configuration.t
 
@@ -134,6 +146,7 @@ type t =
   ; model_target : Inference.Request.Target.t option
   ; remote_content : Remote_content.t option
   ; repl : Repl.t option
+  ; shell_approvals : Shell_approvals.t option
   ; authorize_native :
       Agent_protocol.Host_invocation.t
       -> Chat_response.Tool_capability.binding
@@ -167,6 +180,7 @@ let create
     ; model_target
     ; remote_content = None
     ; repl = None
+    ; shell_approvals = None
     ; authorize_native
     ; prepare_output
     }
@@ -174,3 +188,7 @@ let create
 
 let with_remote_content t remote_content = { t with remote_content = Some remote_content }
 let with_repl t repl = { t with repl = Some repl }
+
+let with_shell_approvals t shell_approvals =
+  { t with shell_approvals = Some shell_approvals }
+;;
