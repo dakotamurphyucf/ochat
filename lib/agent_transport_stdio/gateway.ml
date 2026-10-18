@@ -43,13 +43,38 @@ let publish connection outgoing envelope =
 
 let response connection (request : Agent_protocol.Envelope.request) =
   let open Result.Let_syntax in
-  let%bind command =
-    Agent_protocol.Command.of_method_and_params
-      ~method_:request.Agent_protocol.Envelope.method_
-      ~params:request.params
-  in
-  let%map result = Agent_client.Connection.request connection command in
-  Agent_protocol.Public.Result.to_json result
+  if
+    List.mem
+      Agent_protocol.Developer_wire.Request.supported_methods
+      request.method_
+      ~equal:String.equal
+  then (
+    let%bind capabilities = Agent_client.Connection.developer_capabilities connection in
+    let limits = Agent_protocol.Developer_common.Capabilities.limits capabilities in
+    let%bind method_ = Agent_protocol.Developer_common.Method.of_string request.method_ in
+    let%bind () =
+      if Agent_protocol.Developer_common.Capabilities.supports capabilities method_
+      then Ok ()
+      else Error (invalid "Developer method is not advertised")
+    in
+    let%bind typed =
+      Agent_protocol.Developer_wire.Request.of_method_and_params
+        ~limits
+        ~method_:request.method_
+        ~params:request.params
+    in
+    let%bind result =
+      Agent_client.Connection.request_developer connection ~limits typed
+    in
+    Agent_protocol.Developer_wire.Response.to_json result ~limits)
+  else (
+    let%bind command =
+      Agent_protocol.Command.of_method_and_params
+        ~method_:request.method_
+        ~params:request.params
+    in
+    let%map result = Agent_client.Connection.request connection command in
+    Agent_protocol.Public.Result.to_json result)
 ;;
 
 let dispatch connection outgoing on_error = function

@@ -37,10 +37,24 @@ after registration and again after a hint or reconnect. Approval_list is a
 separate, authorized refresh. Unwatch and connection close cancel and join
 blocked publication, and Daemon shutdown joins the hub before closing shared
 Host and Authoring owners. The installed HTTP and directly authenticated Unix
-server paths share this Dispatcher; the stdio relay's portable client routing
-is a separate integration step.
+server paths share this Dispatcher. The portable Developer client routes the
+same closed methods through HTTP, Unix socket and the stdio relay. It obtains
+installed capabilities only after Initialize, decodes later responses under
+those effective bounds and checks the physical host/principal and exact
+command identity before presenting a View. A failed Submit after transport
+handoff retains the original bounded request for explicit same-key retry;
+Observe alone cannot prove a lost response did not execute. An HTTP Developer
+response body is streamed under the larger of the negotiated
+success-result bound and an independent 64 KiB error-JSON bound, each with
+the actual request-ID envelope framing. The decoded branch must then meet
+its own bound; socket framing also checks the error JSON independently of its
+physical line limit. A long Await_terminal occupies one physical request lane,
+so a responsive client
+uses Watch followed by Observe, or a separately initialized control
+connection for concurrent cancellation. A change hint invites reobservation
+of its key; it carries no durable cursor.
 
-Status: M5 design v1, 2026-10-15. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission, durable developer run checkpoint foundation, selected-document transactions, physical job-claim worker, compiler-side REPL typing transaction and incremental module registry described below are implemented. The developer root staging owner, bounded root/native terminal coordinator, selected native policy and claimed job-parent effect-entry proof are implemented. The owner-neutral lexical script-job kernel and its physical developer adapter are implemented. Actor-bound provider selection, the shared Model.spawn recipe decoder, durable intent, physical call-boundary admission, selected compiled-script adapter and claimed model-job runner are implemented. Hosted command, native, job and Model approval callbacks are implemented. The hosted library REPL Task service retains exact Task references, starts work durably on explicit request, and joins cancellation and reset. User-facing REPL Task transport remains pending. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
+Status: M5 design v1, 2026-10-15. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission, durable developer run checkpoint foundation, selected-document transactions, physical job-claim worker, compiler-side REPL typing transaction and incremental module registry described below are implemented. The developer root staging owner, bounded root/native terminal coordinator, selected native policy and claimed job-parent effect-entry proof are implemented. The owner-neutral lexical script-job kernel and its physical developer adapter are implemented. Actor-bound provider selection, the shared Model.spawn recipe decoder, durable intent, physical call-boundary admission, selected compiled-script adapter and claimed model-job runner are implemented. Hosted command, native, job and Model approval callbacks and the portable Developer transport client are implemented. The hosted library REPL Task service retains exact Task references, starts work durably on explicit request, and joins cancellation and reset. User-facing REPL Task transport remains pending. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
 
 The [authoring service design](chatml-authoring-services.md) owns source context,
 overlay and immutable upload contracts used here. Implementation and validation

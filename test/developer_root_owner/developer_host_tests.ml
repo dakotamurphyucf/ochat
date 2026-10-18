@@ -465,6 +465,7 @@ let open_document
       ?(source = "let main input = Task.pure(input)")
       ?(features = [ P.Authoring.Features.core; P.Authoring.Features.semantic ])
       ?(publish_notification = fun _ -> ())
+      ?(developer_reply = fun _ result -> result)
       daemon
       actor
   =
@@ -477,10 +478,20 @@ let open_document
       ~max_attachments:8
   in
   let transport =
-    Agent_client.In_memory.create
+    Agent_client.In_memory.create_with_developer
       ~notifications:(Eio.Stream.create 8)
       ~request:
         (S.Dispatcher.dispatch_command (S.Daemon.dispatcher daemon) ~context:connection)
+      ~request_developer:(fun ~bound:_ request ->
+        let result =
+          S.Dispatcher.dispatch_developer
+            (S.Daemon.dispatcher daemon)
+            ~context:connection
+            request
+          |> Result.bind ~f:(fun response ->
+            P.Developer_wire.Response.to_json response ~limits:(portable_wire_limits ()))
+        in
+        developer_reply request result)
       ~close:(fun () -> S.Daemon.close_connection daemon connection)
   in
   let implementation =
@@ -792,6 +803,7 @@ let%expect_test "installed Developer endpoint keeps command and approval methods
   let change_seen = ref false in
   let watching = ref false in
   let native_attempts = ref 0 in
+  let lost_submit_response = ref false in
   ignore
     (Fun.protect
        ~finally:(fun () -> if not !released then Eio.Promise.resolve signal_release ())
@@ -852,7 +864,7 @@ let%expect_test "installed Developer endpoint keeps command and approval methods
     | `Ok(value) -> Task.pure(value)
     | `Error(message) -> Task.fail(message))|}
                in
-               let connection, _transport, expected =
+               let connection, transport, expected =
                  open_document
                    ~source
                    ~features:
@@ -862,6 +874,17 @@ let%expect_test "installed Developer endpoint keeps command and approval methods
                      ; C.Features.events
                      ]
                    ~publish_notification:notification
+                   ~developer_reply:(fun request result ->
+                     match request, result with
+                     | W.Request.Submit _, Ok _ when not !lost_submit_response ->
+                       lost_submit_response := true;
+                       Error
+                         (P.Error.create
+                            Interrupted
+                            ~message:"the submitted response was lost"
+                            ~retryable:true
+                            ())
+                     | _ -> result)
                    daemon
                    actor
                in
@@ -898,9 +921,21 @@ let%expect_test "installed Developer endpoint keeps command and approval methods
                    request
                  |> ok
                in
-               (match dispatch (W.Request.Submit submit) with
-                | W.Response.Submit _ -> ()
-                | _ -> failwith "expected held Live submission");
+               let developer = Agent_client.Developer_connection.create transport |> ok in
+               (match
+                  Agent_client.Developer_connection.send
+                    developer
+                    (W.Request.Submit submit)
+                with
+                | Error { code = Interrupted; _ } -> ()
+                | Error error ->
+                  raise_s [%sexp "unexpected lost response error", (error : P.Error.t)]
+                | Ok _ -> failwith "the actual Submit response was not lost");
+               assert !lost_submit_response;
+               let pending =
+                 Agent_client.Developer_connection.pending_submits developer
+                 |> List.hd_exn
+               in
                Eio.Promise.await entered;
                let lookup = C.Lookup.create ~run_id ~key in
                (match dispatch (W.Request.Watch lookup) with
@@ -915,10 +950,43 @@ let%expect_test "installed Developer endpoint keeps command and approval methods
                   (match C.View.phase view with
                    | Terminal { receipt; _ } ->
                      (match P.Developer_receipt.value receipt with
-                      | Live (Succeeded (`String _)) -> ()
+                      | Live (Succeeded (`String output)) ->
+                        assert (
+                          String.is_substring
+                            output
+                            ~substring:"developer host native sample")
                       | _ -> failwith "watched Live did not succeed")
-                   | _ -> failwith "watched Live did not settle")
+                   | _ -> failwith "watched Live did not settle");
+                  let observed =
+                    Agent_client.Developer_connection.observe_pending developer pending
+                    |> ok
+                    |> Option.value_exn
+                  in
+                  assert (
+                    P.Developer_command_id.equal
+                      (C.View.command_id observed)
+                      (C.View.command_id view));
+                  assert (
+                    Int.equal
+                      (List.length
+                         (Agent_client.Developer_connection.pending_submits developer))
+                      1);
+                  let retried =
+                    Agent_client.Developer_connection.retry_pending developer pending
+                    |> ok
+                  in
+                  assert (
+                    P.Developer_command_id.equal
+                      (C.View.command_id retried)
+                      (C.View.command_id view));
+                  assert (
+                    Chatml_source.Digest.equal
+                      (C.View.capture_fingerprint retried)
+                      (C.View.capture_fingerprint view))
                 | _ -> failwith "expected watched Live terminal view");
+               assert (
+                 List.is_empty
+                   (Agent_client.Developer_connection.pending_submits developer));
                assert (Int.equal !native_attempts 1);
                match dispatch (W.Request.Unwatch lookup) with
                | W.Response.Unwatch -> ()

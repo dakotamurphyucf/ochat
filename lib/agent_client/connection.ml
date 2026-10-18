@@ -146,6 +146,8 @@ type t =
   ; notification_mutex : Eio.Mutex.t
   ; closed : bool Atomic.t
   ; mutable initialization : P.Initialize.Response.t option
+  ; mutable developer_capabilities :
+      (P.Initialize.Response.t * P.Developer_common.Capabilities.t) option
   ; mutable notification_owner : int option
   ; mutable next_notification_owner : int
   ; mutable pending : pending_command list
@@ -157,6 +159,7 @@ let create transport =
   ; notification_mutex = Eio.Mutex.create ()
   ; closed = Atomic.make false
   ; initialization = None
+  ; developer_capabilities = None
   ; notification_owner = None
   ; next_notification_owner = 0
   ; pending = []
@@ -368,6 +371,7 @@ let request t command =
                     ())
            in
            t.initialization <- Some response;
+           t.developer_capabilities <- None;
            result
          | _ -> result)
       | _, _ -> result))
@@ -379,6 +383,148 @@ let initialization t =
   else
     Eio.Mutex.use_ro t.mutex (fun () ->
       if Atomic.get t.closed then None else t.initialization)
+;;
+
+let developer_error message =
+  P.Error.create Incompatible_protocol ~message ~retryable:false ()
+;;
+
+let request_developer_transport t ~bound request =
+  match Transport.request_developer t.transport ~bound request with
+  | Error failure when not (Transport.Developer_response_bound.error_within_bound failure)
+    -> Error (developer_error "Developer error response exceeds its bound")
+  | result -> result
+;;
+
+let developer_initialization t =
+  match t.initialization with
+  | Some initialization when not (Atomic.get t.closed) -> Ok initialization
+  | Some _ | None -> Error (developer_error "Developer requires initialization")
+;;
+
+let require_developer_feature initialization feature =
+  if
+    List.mem
+      initialization.P.Initialize.Response.enabled_features
+      feature
+      ~equal:String.equal
+  then Ok ()
+  else Error (developer_error "Developer feature was not selected")
+;;
+
+let developer_capabilities t =
+  with_request_lock t (fun () ->
+    let open Result.Let_syntax in
+    let%bind initialization = developer_initialization t in
+    let%bind () =
+      require_developer_feature initialization P.Developer_common.Features.run
+    in
+    match t.developer_capabilities with
+    | Some (source, capabilities) when phys_equal source initialization -> Ok capabilities
+    | None | Some _ ->
+      let%bind json =
+        request_developer_transport
+          t
+          ~bound:Transport.Developer_response_bound.Bootstrap
+          P.Developer_wire.Request.Capabilities
+      in
+      let%bind capabilities = P.Developer_common.Capabilities.of_json json in
+      if
+        Atomic.get t.closed
+        || not
+             (Option.value_map
+                t.initialization
+                ~default:false
+                ~f:(phys_equal initialization))
+      then Error (developer_error "Developer initialization changed")
+      else (
+        t.developer_capabilities <- Some (initialization, capabilities);
+        Ok capabilities))
+;;
+
+let developer_feature = function
+  | P.Developer_wire.Request.Capabilities
+  | Submit _
+  | Observe _
+  | Await_terminal _
+  | Cancel_and_wait _ -> P.Developer_common.Features.run
+  | Approval_list _ | Approval_respond _ | Approval_cancel _ ->
+    P.Developer_common.Features.approvals
+  | Watch _ | Unwatch _ -> P.Developer_common.Features.events
+;;
+
+let developer_view_matches initialization request response =
+  let module D = P.Developer_wire in
+  let module C = P.Developer_common in
+  let same view ~run_id ~key =
+    let owner = C.View.owner view in
+    P.Id.Server.equal owner.host_id initialization.P.Initialize.Response.server_id
+    && P.Id.Principal.equal
+         owner.principal_id
+         initialization.P.Initialize.Response.principal.id
+    && P.Id.Developer_run.equal owner.run_id run_id
+    && P.Idempotency_key.equal (C.View.key view) key
+  in
+  match request, response with
+  | D.Request.Submit submit, D.Response.Submit view ->
+    same view ~run_id:(C.Submit.run_id submit) ~key:(C.Submit.key submit)
+    && P.Developer_receipt.Kind.equal (C.View.kind view) (C.Submit.kind submit)
+  | D.Request.Observe lookup, D.Response.Observe (Some view)
+  | D.Request.Await_terminal lookup, D.Response.Await_terminal view
+  | D.Request.Cancel_and_wait lookup, D.Response.Cancel_and_wait view ->
+    same view ~run_id:lookup.run_id ~key:lookup.key
+  | D.Request.Observe _, D.Response.Observe None -> true
+  | _ -> true
+;;
+
+let request_developer t ~limits request =
+  with_request_lock t (fun () ->
+    let module D = P.Developer_wire in
+    let open Result.Let_syntax in
+    let%bind initialization = developer_initialization t in
+    let%bind () = require_developer_feature initialization (developer_feature request) in
+    let%bind capabilities =
+      match t.developer_capabilities with
+      | Some (source, capabilities) when phys_equal source initialization ->
+        Ok capabilities
+      | None | Some _ -> Error (developer_error "Developer capabilities are absent")
+    in
+    if not (phys_equal limits (P.Developer_common.Capabilities.limits capabilities))
+    then Error (developer_error "Developer response limits changed")
+    else (
+      match request with
+      | D.Request.Capabilities -> Ok (D.Response.Capabilities capabilities)
+      | _ ->
+        let method_ = D.Request.method_name request in
+        let%bind selected_method = P.Developer_common.Method.of_string method_ in
+        let%bind () =
+          if P.Developer_common.Capabilities.supports capabilities selected_method
+          then Ok ()
+          else Error (developer_error "Developer method is not advertised")
+        in
+        let%bind request =
+          D.Request.of_method_and_params
+            ~limits
+            ~method_
+            ~params:(D.Request.params request)
+        in
+        let%bind json =
+          request_developer_transport
+            t
+            ~bound:(Transport.Developer_response_bound.Installed limits)
+            request
+        in
+        let%bind response = D.Response.of_method_and_json ~limits ~method_ json in
+        if
+          Atomic.get t.closed
+          || (not
+                (Option.value_map
+                   t.initialization
+                   ~default:false
+                   ~f:(phys_equal initialization)))
+          || not (developer_view_matches initialization request response)
+        then Error (developer_error "Developer response changed request identity")
+        else Ok response))
 ;;
 
 type notification_lease =
