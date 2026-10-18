@@ -410,15 +410,14 @@ let%test_unit "shared capacity alternates conversation and developer owner turns
             let original =
               DSelected.job
                 (DR.owner root)
-                (Chatml_developer_capture.fingerprint (DR.capture root))
+                (DR.Source.fingerprint (DR.source root))
                 ~id:developer_id
                 ~parent:Agent_protocol.Developer_job.Launch.Run_root
             in
             let queued =
               Agent_protocol.Developer_job.create
                 ~owner:(DR.owner root)
-                ~capture_fingerprint:
-                  (Chatml_developer_capture.fingerprint (DR.capture root))
+                ~capture_fingerprint:(DR.Source.fingerprint (DR.source root))
                 ~id:developer_id
                 ~launch:(Agent_protocol.Developer_job.launch original)
                 ~kind:Async_tool
@@ -608,14 +607,13 @@ let%test_unit "developer scan advances beyond an unsupported 64-job window" =
               let original =
                 DSelected.job
                   (DR.owner root)
-                  (Chatml_developer_capture.fingerprint (DR.capture root))
+                  (DR.Source.fingerprint (DR.source root))
                   ~id
                   ~parent:Agent_protocol.Developer_job.Launch.Run_root
               in
               Agent_protocol.Developer_job.create
                 ~owner:(DR.owner root)
-                ~capture_fingerprint:
-                  (Chatml_developer_capture.fingerprint (DR.capture root))
+                ~capture_fingerprint:(DR.Source.fingerprint (DR.source root))
                 ~id
                 ~launch:(Agent_protocol.Developer_job.launch original)
                 ~kind
@@ -731,7 +729,11 @@ let%test_unit "a saturated developer root leaves another physical root runnable"
            then Eio.Promise.resolve second_entered_u ())
          (fun ~sw ~root ~handle ~selected ~owners ~runner ~store ~blobs ~disclosure ->
             let other_owner = DT.owner "dvr_scheduler_other" 0 in
-            let capture = DR.capture root in
+            let capture =
+              match DR.command_capture root with
+              | Some capture -> capture
+              | None -> failwith "mixed scheduler fixture requires a command Root"
+            in
             let other_handle, _ =
               DS.admit_epoch
                 store
@@ -798,15 +800,14 @@ let%test_unit "a saturated developer root leaves another physical root runnable"
                   let original =
                     DSelected.job
                       (DR.owner run)
-                      (Chatml_developer_capture.fingerprint (DR.capture run))
+                      (DR.Source.fingerprint (DR.source run))
                       ~id
                       ~parent:Agent_protocol.Developer_job.Launch.Run_root
                   in
                   let queued =
                     Agent_protocol.Developer_job.create
                       ~owner:(DR.owner run)
-                      ~capture_fingerprint:
-                        (Chatml_developer_capture.fingerprint (DR.capture run))
+                      ~capture_fingerprint:(DR.Source.fingerprint (DR.source run))
                       ~id
                       ~launch:(Agent_protocol.Developer_job.launch original)
                       ~kind:Async_tool
