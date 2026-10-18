@@ -4,6 +4,10 @@ open Core
 
 type t
 
+(** The exact scopes installed for this fixture's all-scope token and local
+    same-user socket. This comparison set grants nothing by itself. *)
+val all_scopes : Agent_protocol.Scope.Set.t
+
 (** [create environment ~name ~http_port] creates one isolated configuration
     fixture with physical and temporary workspaces and two bearer credentials. *)
 val create : Temporary_environment.t -> name:string -> http_port:int -> t

@@ -18,7 +18,7 @@ let path t value = Temporary_environment.path t.environment value
 let atom value = Sexp.to_string_mach (Sexp.Atom value)
 let generate_token () = Mirage_crypto_rng.generate 32 |> Base64.encode_exn
 
-let all_scope_names =
+let all_scope_values =
   Agent_protocol.Scope.
     [ List_prompts
     ; List_workspaces
@@ -40,9 +40,15 @@ let all_scope_names =
     ; Provider_select
     ; View_organization
     ; Manage_organization
+    ; Developer_check
+    ; Developer_fixture_run
+    ; Developer_live_run
+    ; Developer_repl
     ]
-  |> List.map ~f:Agent_protocol.Scope.to_string
 ;;
+
+let all_scope_names = List.map all_scope_values ~f:Agent_protocol.Scope.to_string
+let all_scopes = Agent_protocol.Scope.Set.of_list all_scope_values
 
 let token_record token principal scopes =
   let digest = Digestif.SHA256.digest_string token |> Digestif.SHA256.to_hex in

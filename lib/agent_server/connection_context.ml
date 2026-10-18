@@ -33,6 +33,7 @@ type t =
   ; mutable protocol_version : Agent_protocol.Version.t option
   ; mutable authoring_negotiation : Authoring_negotiation.t option
   ; mutable authoring_closed : bool
+  ; mutable developer_event_failure : (exn * Stdlib.Printexc.raw_backtrace) option
   ; mutable reserved_attachments : int
   ; mutable attachments :
       (Agent_protocol.Id.Attachment.t, Agent_protocol.Session.Attachment.t) Map.Poly.t
@@ -59,6 +60,7 @@ let create_authenticated
   ; protocol_version = None
   ; authoring_negotiation = None
   ; authoring_closed = false
+  ; developer_event_failure = None
   ; reserved_attachments = 0
   ; attachments = Map.Poly.empty
   }
@@ -109,6 +111,23 @@ let close_authoring t =
       Atomic.set negotiation.Authoring_negotiation.revoked true);
     t.authoring_closed <- true;
     t.authoring_negotiation <- None)
+;;
+
+let record_developer_event_failure t exn backtrace =
+  Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+    if Option.is_none t.developer_event_failure
+    then t.developer_event_failure <- Some (exn, backtrace);
+    Option.iter t.authoring_negotiation ~f:(fun negotiation ->
+      Atomic.set negotiation.Authoring_negotiation.revoked true);
+    t.authoring_closed <- true;
+    t.authoring_negotiation <- None)
+;;
+
+let take_developer_event_failure t =
+  Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+    let failure = t.developer_event_failure in
+    t.developer_event_failure <- None;
+    failure)
 ;;
 
 let current_authoring_negotiation t negotiation =

@@ -21,6 +21,27 @@ type startup_mode =
 module Developer_configuration : sig
   type t
 
+  module Portable : sig
+    type t
+
+    (** Opt in the authenticated Developer wire service with explicit finite
+        request/result/event ceilings and bounded process-local watches. The
+        daemon checks this policy against the actual installed Host, approval
+        owner and Initialize bounds before advertising any Developer method.
+        Construction grants no source, method or approval permission. *)
+    val create
+      :  wire_limits:Agent_protocol.Developer_common.Limits.t
+      -> max_connections:int
+      -> max_watches_per_connection:int
+      -> max_pending_hints_per_connection:int
+      -> (t, Agent_protocol.Error.t) result
+  end
+
+  (** Without this copy, a Developer Host remains callable in-process but
+      has no portable command/approval/event handlers or feature advertisement.
+      This preserves existing Host-only installations. *)
+  val with_portable_wire : t -> Portable.t -> t
+
   module Shell_approvals : sig
     type t
 
@@ -169,8 +190,8 @@ type options =
         installed handler set, not this options record alone, is advertised. *)
   ; developer : Developer_configuration.t option
     (** Optional callable developer service. Some requires Authoring plus
-        Execute or On_demand; None is the default and advertises no developer
-        command transport. Wire methods belong to OCH267. *)
+        Execute or On_demand; None is the default. Portable handlers and
+        feature advertisement additionally require [with_portable_wire]. *)
   ; extension_host : Agent_protocol.Extension_capabilities.host
   ; protocol_limits : Agent_protocol.Initialize.Limits.t
   ; timing : Agent_protocol.Initialize.Timing.t

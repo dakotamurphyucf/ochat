@@ -481,6 +481,52 @@ let%test_unit "request methods and capabilities are closed and bounded" =
           assert (Result.is_ok (Dev.Limits.of_json (Dev.Limits.to_json admitted)))))
 ;;
 
+let%test_unit "key-scoped watch and change hints retain method and bounds" =
+  let limits = limits ~receipt_bytes:256 ~response_bytes:2048 in
+  let run_id = P.Id.Developer_run.create_with deterministic in
+  let key = must (P.Idempotency_key.of_string "watched") in
+  let lookup = Dev.Lookup.create ~run_id ~key in
+  List.iter
+    [ Dev.Wire.Request.Watch lookup; Dev.Wire.Request.Unwatch lookup ]
+    ~f:(fun request ->
+      let method_ = Dev.Wire.Request.method_name request in
+      let decoded =
+        must
+          (Dev.Wire.Request.of_method_and_params
+             ~limits
+             ~method_
+             ~params:(Dev.Wire.Request.params request))
+      in
+      assert (String.equal method_ (Dev.Wire.Request.method_name decoded));
+      assert (
+        Result.is_error
+          (Dev.Wire.Request.of_method_and_params
+             ~limits
+             ~method_
+             ~params:(`Object [ "run_id", P.Id.Developer_run.to_json run_id ]))));
+  List.iter
+    [ Dev.Wire.Change.Command_changed
+    ; Dev.Wire.Change.Approval_changed
+    ; Dev.Wire.Change.Resync_required
+    ]
+    ~f:(fun kind ->
+      let change = must (Dev.Wire.Change.create ~limits ~run_id ~key ~kind) in
+      let restored =
+        must (Dev.Wire.Change.of_json ~limits (Dev.Wire.Change.to_json change))
+      in
+      assert (P.Id.Developer_run.equal restored.run_id run_id);
+      assert (P.Idempotency_key.equal restored.key key);
+      assert (String.equal Dev.Wire.Change.method_name "developer.changed"));
+  assert (
+    Result.is_error
+      (Dev.Wire.Change.of_json
+         ~limits
+         (`Object
+             [ "run_id", P.Id.Developer_run.to_json run_id
+             ; "kind", `String "approval_changed"
+             ])))
+;;
+
 let%test_unit "routes and submissions roundtrip under the effective request policy" =
   let limits = limits ~receipt_bytes:256 ~response_bytes:2048 in
   let request_limit = Dev.Limits.request limits in

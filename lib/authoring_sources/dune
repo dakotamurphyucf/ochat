@@ -109,6 +109,14 @@
     lib/agent_protocol/developer_common.ml %{dep:../agent_protocol/developer_common.ml}
     lib/agent_protocol/developer_approval.ml %{dep:../agent_protocol/developer_approval.ml}
     lib/agent_protocol/developer_wire.ml %{dep:../agent_protocol/developer_wire.ml}
+    lib/agent_server/developer_endpoint.ml %{dep:../agent_server/developer_endpoint.ml}
+    lib/agent_server/developer_portable_admission.ml %{dep:../agent_server/developer_portable_admission.ml}
+    lib/agent_server/developer_change_hub.ml %{dep:../agent_server/developer_change_hub.ml}
+    lib/agent_server/dispatcher.ml %{dep:../agent_server/dispatcher.ml}
+    lib/agent_server/authoring_installation.ml %{dep:../agent_server/authoring_installation.ml}
+    lib/agent_server/connection_context.ml %{dep:../agent_server/connection_context.ml}
+    lib/agent_server/startup_cleanup.ml %{dep:../agent_server/startup_cleanup.ml}
+    bin/ochat_agent_server.ml %{dep:../../bin/ochat_agent_server.ml}
     lib/agent_store/developer_command_receipt.ml %{dep:../agent_store/developer_command_receipt.ml}
     lib/agent_store/developer_command_row.ml %{dep:../agent_store/developer_command_row.ml}
     lib/chatml_repl_execution/chatml_repl_execution.ml %{dep:../chatml_repl_execution/chatml_repl_execution.ml}

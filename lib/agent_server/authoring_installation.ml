@@ -396,6 +396,19 @@ let developer_capture (t : t) ~policy ~limits =
   else Ok (Service.Developer.create ~owner:t.service ~policy ~limits)
 ;;
 
+let developer_roots (t : t) ~actor ~checkpoint =
+  if t.closed
+  then Error (error Server_shutting_down "authoring is closed" ~retryable:true)
+  else (
+    match t.source with
+    | None -> Error (uninstalled ())
+    | Some source ->
+      Authoring_source_host.roots source ~actor ~checkpoint
+      |> Result.map_error ~f:(fun failure ->
+        Authoring_context_owner.source_host_error failure
+        |> Authoring_context_service_core.Error.to_protocol))
+;;
+
 let close_connection_and_wait (t : t) connection =
   Service.close_connection_and_wait t.service connection
   |> Result.map_error ~f:Service.Error.to_protocol

@@ -15,10 +15,30 @@ framing. Unknown or duplicate fields and explicit null for absent options are
 rejected. A response encoder checks the installed aggregate limit before
 returning JSON; approval snapshots reject overflow instead of truncating.
 These types carry selectors, owner coordinates and fingerprints as comparison
-data. No transport method, source resolver, approval responder or event
-publisher is installed merely by defining the DTOs. The eventual Host must
-advertise only its installed methods and reauthorize each decoded operation
-against its live physical owner and source after waits.
+data. Defining the DTOs installs no authority. An explicit portable policy now
+installs Developer methods only when the Daemon has a physically paired
+Developer Host and Authoring owner with compatible output, receipt, approval
+and transport bounds. The endpoint decodes envelope and typed local requests
+under those installed bounds, borrows the current Authoring source, and lets
+the Host resolve a historical key inside its serialized miss path before any
+fresh source selection. Repeating that key returns its original command;
+changing its request conflicts, and a new key requires current source
+authority. The connection lease governs admission until durable Reserve;
+admitted work then continues under its original actor and source even if the
+connection closes. Responses are rechecked before disclosure.
+
+A watch belongs to one disclosed run and command key. The Host enqueues
+bounded, process-local lifecycle and approval invalidations after authoritative
+changes, outside Store and approval locks; a connection-owned pump checks
+current disclosure before handing a key-bearing hint to the transport.
+Overflow yields a resync hint for each affected watched key. Watch
+acknowledgement has no replay cursor: clients Observe the key immediately
+after registration and again after a hint or reconnect. Approval_list is a
+separate, authorized refresh. Unwatch and connection close cancel and join
+blocked publication, and Daemon shutdown joins the hub before closing shared
+Host and Authoring owners. The installed HTTP and directly authenticated Unix
+server paths share this Dispatcher; the stdio relay's portable client routing
+is a separate integration step.
 
 Status: M5 design v1, 2026-10-15. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission, durable developer run checkpoint foundation, selected-document transactions, physical job-claim worker, compiler-side REPL typing transaction and incremental module registry described below are implemented. The developer root staging owner, bounded root/native terminal coordinator, selected native policy and claimed job-parent effect-entry proof are implemented. The owner-neutral lexical script-job kernel and its physical developer adapter are implemented. Actor-bound provider selection, the shared Model.spawn recipe decoder, durable intent, physical call-boundary admission, selected compiled-script adapter and claimed model-job runner are implemented. Hosted command, native, job and Model approval callbacks are implemented. The hosted library REPL Task service retains exact Task references, starts work durably on explicit request, and joins cancellation and reset. User-facing REPL Task transport remains pending. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
 

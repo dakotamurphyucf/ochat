@@ -178,6 +178,20 @@ val developer_capture
   -> limits:Service.Developer.Limits.t
   -> (Service.Developer.t, P.Error.t) result
 
+(** Select opaque current Roots only through this installed Source_host's
+    existing joined root enumeration and original/current actor read policy.
+    Wire root indices remain comparison data, not grants. The returned list
+    may omit denied configured roots; callers match each Root.index to the
+    requested configured index and never renumber or use List.nth. A missing
+    source owner, denied index or closed installation rejects; no root is
+    opened from a client path. Developer command callers invoke this only after Host's
+    authoritative historical-key miss. *)
+val developer_roots
+  :  t
+  -> actor:Operator_authorization.t
+  -> checkpoint:(unit -> unit)
+  -> (Authoring_source_host.Root.t list, P.Error.t) result
+
 (** The sole typed command route. Capabilities is admitted through the same
     joined Service request lifetime and lists only installed methods callable
     under this connection's current selected feature epoch. Bundle-only has
