@@ -340,6 +340,9 @@ module Recorder = struct
       then Or_error.error_string "invalid trace recorder limits"
       else Ok { max_events; max_normal_bytes; max_terminal_bytes }
     ;;
+
+    let max_normal_bytes t = t.max_normal_bytes
+    let max_terminal_bytes t = t.max_terminal_bytes
   end
 
   module Drop_count = struct
@@ -363,6 +366,7 @@ module Recorder = struct
       ; last_sequence : int64
       ; omitted_after_prefix : Drop_count.t option
       ; last_retained_site_context : Captured.Location.t option
+      ; omitted_site_count : int
       ; state : state
       }
 
@@ -371,7 +375,25 @@ module Recorder = struct
     let last_sequence t = t.last_sequence
     let omitted_after_prefix t = t.omitted_after_prefix
     let last_retained_site_context t = t.last_retained_site_context
+    let omitted_site_count t = t.omitted_site_count
     let state t = t.state
+
+    let with_authorized_sites t ~authorize =
+      let omitted = ref t.omitted_site_count in
+      let last = ref None in
+      let prefix =
+        List.map t.prefix ~f:(fun event ->
+          match event.Event.site with
+          | None -> event
+          | Some site when authorize site ->
+            last := Some site;
+            event
+          | Some _ ->
+            if !omitted < Int.max_value then incr omitted;
+            { event with site = None })
+      in
+      { t with prefix; last_retained_site_context = !last; omitted_site_count = !omitted }
+    ;;
   end
 
   type t =
@@ -507,6 +529,7 @@ module Recorder = struct
     ; last_sequence = Int64.of_int t.retained_count
     ; omitted_after_prefix
     ; last_retained_site_context = t.last_retained_site
+    ; omitted_site_count = 0
     ; state =
         (match t.terminal with
          | None -> Incomplete

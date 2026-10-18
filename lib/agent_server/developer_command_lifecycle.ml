@@ -82,6 +82,7 @@ type t =
   ; control : Control_policy.t
   ; recovery_adapter : Recovery_adapter.t
   ; on_committed : (Row.t -> unit) option
+  ; on_joined_terminal : (Row.t -> unit) option
   ; runs : (P.Id.Developer_run.t, run_entry) Hashtbl.t
   ; mutable occupied : int
   ; mutable closed : bool
@@ -144,6 +145,7 @@ and active =
   ; mutable terminal : (view, P.Error.t) result option
   ; mutable private_failure : (exn * Stdlib.Printexc.raw_backtrace) option
   ; mutable started : bool
+  ; mutable joined_notified : bool
   }
 
 and started =
@@ -227,6 +229,7 @@ let safe_view t run_id row =
 
 let create_with_hook
       ~on_committed
+      ~on_joined_terminal
       ~sw
       ~store:run_store
       ~max_active_commands
@@ -260,6 +263,7 @@ let create_with_hook
     ; control
     ; recovery_adapter = recovery
     ; on_committed
+    ; on_joined_terminal
     ; runs = Hashtbl.create (module P.Id.Developer_run)
     ; occupied = 0
     ; closed = false
@@ -269,6 +273,7 @@ let create_with_hook
 let create ~sw ~store ~max_active_commands ~disclosure ~control ~recovery =
   create_with_hook
     ~on_committed:None
+    ~on_joined_terminal:None
     ~sw
     ~store
     ~max_active_commands
@@ -1186,6 +1191,25 @@ let retire_active t (active : active) =
     t.occupied <- t.occupied - 1)
 ;;
 
+let notify_joined_terminal t (active : active) =
+  if (not active.live) && not active.joined_notified
+  then (
+    match active.terminal with
+    | Some (Ok view) ->
+      (match Row.phase view.row with
+       | Row.Phase.Terminal _ ->
+         active.joined_notified <- true;
+         (match t.on_joined_terminal with
+          | None -> ()
+          | Some notify ->
+            (* Trace publication is observation only. It cannot strand the
+               durable Active or mask its authoritative terminal result. *)
+            (try notify view.row with
+             | _ -> ()))
+       | Reserved | Waiting_permission | Execution_started -> ())
+    | None | Some (Error _) -> ())
+;;
+
 let launch t (slot : slot) ~handle ~reserved ~f =
   if
     (not (slot_current t slot))
@@ -1241,6 +1265,7 @@ let launch t (slot : slot) ~handle ~reserved ~f =
           ; terminal = None
           ; private_failure = None
           ; started = false
+          ; joined_notified = false
           }
         in
         slot.run.active <- active :: slot.run.active;
@@ -1254,6 +1279,7 @@ let launch t (slot : slot) ~handle ~reserved ~f =
               ~finally:(fun () ->
                 active.live <- false;
                 active.cancel <- None;
+                notify_joined_terminal t active;
                 (match active.terminal with
                  | Some (Ok _) -> retire_active t active
                  | None | Some (Error _) -> ());
@@ -1305,6 +1331,7 @@ let launch t (slot : slot) ~handle ~reserved ~f =
             | _ -> Error (unavailable ())
           in
           active.terminal <- Some terminal;
+          notify_joined_terminal t active;
           (match terminal with
            | Ok _ -> retire_active t active
            | Error _ -> ());
@@ -1413,6 +1440,7 @@ let retry_finished_active t (active : active) =
       (match finish_active t active receipt with
        | Ok view ->
          active.terminal <- Some (Ok view);
+         notify_joined_terminal t active;
          retire_active t active;
          Ok ()
        | Error error ->

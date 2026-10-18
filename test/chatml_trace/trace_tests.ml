@@ -441,6 +441,128 @@ let%expect_test "later execution observes an old closure at its defining source"
   [%expect {| |}]
 ;;
 
+let%expect_test
+    "historical site projection preserves trace facts and never restores a hidden site"
+  =
+  let current = capture ~name:"current.chatml" "abc" in
+  let earlier = capture ~name:"earlier.chatml" "def" in
+  let span source =
+    Source.locate source ~start_byte:0 ~end_byte:1 ~checkpoint:(fun () -> ())
+    |> Or_error.ok_exn
+    |> Source.Location.span
+  in
+  Eio_main.run (fun _ ->
+    let recorder = recorder current ~mode:Full ~max_events:4 ~max_normal_bytes:4096 in
+    let correlation =
+      Trace.Event.Correlation.of_host_token "parent-call" |> Or_error.ok_exn
+    in
+    Trace.Scope.within (Some recorder) (fun () ->
+      Trace.Scope.observe_span
+        ~kind:Statement_entered
+        ~source:(Some current)
+        ~span:(span current)
+        ~correlation:None;
+      Trace.Scope.observe_span
+        ~kind:Call_entered
+        ~source:(Some earlier)
+        ~span:(span earlier)
+        ~correlation:(Some correlation);
+      observe (Phase_started Evaluation);
+      Trace.Scope.observe_span
+        ~kind:Call_entered
+        ~source:(Some current)
+        ~span:(span current)
+        ~correlation:None;
+      observe Call_entered);
+    let terminal =
+      Trace.Terminal.create ~receipt_version:1 ~disposition:Succeeded |> Or_error.ok_exn
+    in
+    Trace.Recorder.finish recorder terminal |> Or_error.ok_exn;
+    let original = Trace.Recorder.snapshot recorder in
+    let facts snapshot =
+      Trace.Recorder.Snapshot.prefix snapshot
+      |> List.map ~f:(fun event ->
+        Trace.Event.sequence event, Trace.Event.kind event, Trace.Event.correlation event)
+    in
+    let equal_fact
+          (left_seq, left_kind, left_correlation)
+          (right_seq, right_kind, right_correlation)
+      =
+      Int64.equal left_seq right_seq
+      && Trace.Event.Kind.equal left_kind right_kind
+      && Option.equal Trace.Event.Correlation.equal left_correlation right_correlation
+    in
+    [%test_eq: int] (omitted_site_count original) 0;
+    [%test_eq: int]
+      (List.count (Trace.Recorder.Snapshot.prefix original) ~f:(fun event ->
+         Option.is_some (Trace.Event.site event)))
+      3;
+    let masks =
+      [ (fun _ -> true), 0, Some (Source.id current)
+      ; (fun _ -> false), 3, None
+      ; ( (fun site -> Source.Id.equal (Source.Location.source site) (Source.id current))
+        , 1
+        , Some (Source.id current) )
+      ; ( (fun site -> Source.Id.equal (Source.Location.source site) (Source.id earlier))
+        , 2
+        , Some (Source.id earlier) )
+      ]
+    in
+    List.iter masks ~f:(fun (authorize, expected_omitted, last_id) ->
+      let projected = with_authorized_sites original ~authorize in
+      let repeated = with_authorized_sites projected ~authorize in
+      assert (List.equal equal_fact (facts original) (facts projected));
+      assert (List.equal equal_fact (facts projected) (facts repeated));
+      [%test_eq: int] (omitted_site_count projected) expected_omitted;
+      [%test_eq: int] (omitted_site_count repeated) expected_omitted;
+      [%test_eq: int]
+        (List.count (Trace.Recorder.Snapshot.prefix projected) ~f:(fun event ->
+           Option.is_some (Trace.Event.site event)))
+        (3 - expected_omitted);
+      assert (
+        List.for_all (Trace.Recorder.Snapshot.prefix projected) ~f:(fun event ->
+          Option.value_map (Trace.Event.site event) ~default:true ~f:authorize));
+      assert (
+        phys_equal
+          (Trace.Recorder.Snapshot.header original)
+          (Trace.Recorder.Snapshot.header projected));
+      let drops snapshot =
+        Option.value_exn (omitted_after_prefix snapshot)
+        |> Trace.Recorder.Drop_count.at_least
+      in
+      [%test_eq: int64] (drops projected) (drops original);
+      [%test_eq: bool]
+        (Option.value_exn (omitted_after_prefix projected)
+         |> Trace.Recorder.Drop_count.overflowed)
+        (Option.value_exn (omitted_after_prefix original)
+         |> Trace.Recorder.Drop_count.overflowed);
+      assert (
+        Option.equal
+          Source.Id.equal
+          (Option.map (last_retained_site_context projected) ~f:Source.Location.source)
+          last_id);
+      match state projected, state original with
+      | Complete projected, Complete original ->
+        [%test_eq: int]
+          (Trace.Terminal.receipt_version projected)
+          (Trace.Terminal.receipt_version original);
+        assert (
+          Trace.Terminal.Disposition.equal
+            (Trace.Terminal.disposition projected)
+            (Trace.Terminal.disposition original))
+      | Incomplete, _ | _, Incomplete -> failwith "terminal changed by projection");
+    let none = with_authorized_sites original ~authorize:(fun _ -> false) in
+    let broadened = with_authorized_sites none ~authorize:(fun _ -> true) in
+    [%test_eq: int] (omitted_site_count broadened) 3;
+    assert (Option.is_none (last_retained_site_context broadened));
+    [%test_eq: int] (omitted_site_count original) 0;
+    [%test_eq: int]
+      (List.count (Trace.Recorder.Snapshot.prefix original) ~f:(fun event ->
+         Option.is_some (Trace.Event.site event)))
+      3);
+  [%expect {| |}]
+;;
+
 let%expect_test "tracing modes preserve task success and caught or uncaught failure" =
   Eio_main.run (fun env ->
     List.iter

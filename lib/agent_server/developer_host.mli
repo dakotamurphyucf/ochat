@@ -196,6 +196,40 @@ module Repl : sig
   end
 end
 
+module Trace : sig
+  type lookup =
+    | Command of
+        { run_id : P.Id.Developer_run.t
+        ; key : P.Idempotency_key.t
+        }
+    | Repl_statement of
+        { instance : Repl.Instance.t
+        ; epoch : Repl.Epoch.t
+        ; key : P.Idempotency_key.t
+        }
+    | Repl_task of
+        { run_id : P.Id.Developer_run.t
+        ; key : P.Idempotency_key.t
+        }
+
+  (** Private bounded host read for the later portable pager. First select the
+      exact persisted Command/Task row, or the physical historical REPL
+      instance/epoch/key, under current method and receipt policy. Then apply
+      the separately configured current historical source-read policy to the
+      immutable captured provenance, repeating actor/row/epoch checks after
+      yielding Store work and immediately before the snapshot copy. A normal
+      edit or closed old execution lease does not recapture/reinterpret a site.
+      Revoked principal/source read access fails Permission_denied, not
+      Unavailable. IDs, rows and trace cursors confer no authority. This
+      returns no source text or authored coordinate without an exact retained
+      map; a separate portable adapter owns encoded pages and transports. *)
+  val snapshot
+    :  t
+    -> actor:Operator_authorization.t
+    -> lookup:lookup
+    -> (Developer_trace_retention.Availability.t, P.Error.t) result
+end
+
 module Command : sig
   (** Existing command client/DTO boundary accepts only Check, Fixture_run
       and Live_run rows. A persisted Repl_task_run row is never projected or
@@ -474,6 +508,7 @@ val create
   -> limits:Limits.t
   -> budget_configuration:Developer_command_budgets.Configuration.t
   -> repl:Developer_repl_epoch.Configuration.t option
+  -> trace:Developer_trace_retention.Configuration.t option
   -> ?on_change:
        (run_id:P.Id.Developer_run.t
         -> key:P.Idempotency_key.t

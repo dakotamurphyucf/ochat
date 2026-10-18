@@ -49,6 +49,29 @@ let store_error = function
 
 let store result = Result.map_error result ~f:store_error
 
+let trace_disposition receipt =
+  let open Chatml_trace.Terminal.Disposition in
+  match Receipt.value receipt with
+  | Check Ready -> Succeeded
+  | Check (Rejected _) -> Failed Typecheck
+  | Check Interrupted -> Interrupted
+  | Check Cancelled -> Cancelled
+  | Fixture (Completed { outcome = Succeeded _; _ }) -> Succeeded
+  | Fixture (Completed { outcome = Tool_failed _ | Failed _; _ }) -> Failed Runtime
+  | Fixture Interrupted -> Interrupted
+  | Fixture Cancelled -> Cancelled
+  | Live (Succeeded _) -> Succeeded
+  | Live (Failed _) -> Failed Runtime
+  | Live (Limited _) -> Failed Resource_limit
+  | Live Interrupted -> Interrupted
+  | Live Cancelled -> Cancelled
+  | Task (Succeeded _) -> Succeeded
+  | Task (Failed _) -> Failed Runtime
+  | Task (Limited _) -> Failed Resource_limit
+  | Task Interrupted -> Interrupted
+  | Task Cancelled -> Cancelled
+;;
+
 module Limits = struct
   type t =
     { roots : Root.Limits.t
@@ -229,6 +252,7 @@ type t =
   ; capture : Capture.t
   ; authoring : Authoring_installation.t
   ; repl : Repl_epoch.t option
+  ; trace : Developer_trace_retention.t option
   ; live_resources : Developer_live_resources.t
   ; approval : Approval_owner.Configuration.t option
   ; on_change :
@@ -1098,7 +1122,42 @@ let submit_fresh
       in
       let id = Lifecycle.View.row reserved |> Row.id in
       Lifecycle.launch t.lifecycle slot ~handle ~reserved ~f:(fun active ~sw ->
-        run t ~actor ~candidate ~admitted ~capture ~budgets ~id ~active ~sw ~admit))
+        let trace_entry =
+          Option.bind t.trace ~f:(fun traces ->
+            let row = Lifecycle.Active.view active |> Lifecycle.View.row in
+            let prepared = Chatml_developer_capture.prepared capture in
+            let provenance =
+              Developer_trace_retention.Provenance.of_prepared
+                ~action:(Command kind)
+                ~original_actor:actor
+                ~route:(Original.route original)
+                ~capture_fingerprint:(Some capture_fingerprint)
+                ~selection_fingerprint:
+                  (Chatml_developer_capture.graph_fingerprint capture)
+                ~prepared
+                ~limits:(Developer_trace_retention.limits traces)
+            in
+            let association = Developer_trace_retention.Association.of_reserved_row row in
+            match provenance, association with
+            | Ok provenance, Ok association ->
+              let entry =
+                Developer_trace_retention.begin_prepared
+                  traces
+                  ~association
+                  ~provenance
+                  ~submission_fingerprint:(Original.fingerprint original)
+                  ~prepared
+                  ~checkpoint:Eio.Fiber.check
+              in
+              entry
+            | Error _, _ | _, Error _ -> None)
+        in
+        match t.trace with
+        | None ->
+          run t ~actor ~candidate ~admitted ~capture ~budgets ~id ~active ~sw ~admit
+        | Some traces ->
+          Developer_trace_retention.within traces trace_entry (fun () ->
+            run t ~actor ~candidate ~admitted ~capture ~budgets ~id ~active ~sw ~admit)))
 ;;
 
 let submit_pure t ~actor ~run_id ~key ~original ~resolve_fresh ~request_current ~kind =
@@ -1707,17 +1766,62 @@ let submit_repl_task t ~actor ~key ~original ~fresh_epoch =
                     ~actor
                     ~reference
                     ~f:(fun borrowed task_handle origin ->
-                      run_repl_task
-                        t
-                        ~actor
-                        ~budgets
-                        ~selection
-                        ~admitted
-                        ~active
-                        ~borrowed
-                        ~task_handle
-                        ~origin
-                        ~admit))))
+                      let trace_entry =
+                        Option.bind t.trace ~f:(fun traces ->
+                          match
+                            Repl_epoch.Task_origin.check_current
+                              origin
+                              ~actor
+                              ~checkpoint:Eio.Fiber.check
+                          with
+                          | Error _ -> None
+                          | Ok () ->
+                            let row =
+                              Lifecycle.Active.view active |> Lifecycle.View.row
+                            in
+                            (match Repl_epoch.Task_origin.trace_provenance origin with
+                             | None -> None
+                             | Some lineage ->
+                               let provenance =
+                                 Developer_trace_retention.Provenance.for_retained_task
+                                   lineage
+                                   ~capture_fingerprint:(Row.capture_fingerprint row)
+                                   ~limits:(Developer_trace_retention.limits traces)
+                               in
+                               let association =
+                                 Developer_trace_retention.Association.of_reserved_row row
+                               in
+                               (match provenance, association with
+                                | Some provenance, Ok association ->
+                                  let entry =
+                                    Developer_trace_retention.begin_submitted
+                                      traces
+                                      ~association
+                                      ~provenance
+                                      ~submission_fingerprint:request_fingerprint
+                                      ~source:(Repl_epoch.Task_origin.source origin)
+                                      ~checkpoint:Eio.Fiber.check
+                                  in
+                                  entry
+                                | None, _ | _, Error _ -> None)))
+                      in
+                      let run () =
+                        run_repl_task
+                          t
+                          ~actor
+                          ~budgets
+                          ~selection
+                          ~admitted
+                          ~active
+                          ~borrowed
+                          ~task_handle
+                          ~origin
+                          ~admit
+                      in
+                      match t.trace with
+                      | None -> run ()
+                      | Some traces ->
+                        Developer_trace_retention.within traces trace_entry run))))
         in
         let initial = attempt () in
         publish_initial initial;
@@ -2221,6 +2325,7 @@ let create
       ~(limits : Limits.t)
       ~budget_configuration
       ~repl
+      ~trace
       ?on_change
       ~now
       ~checkpoint
@@ -2269,6 +2374,7 @@ let create
   let acquired_roots = ref None in
   let acquired_lifecycle = ref None in
   let acquired_repl = ref None in
+  let acquired_trace = ref None in
   let build () =
     let%bind () =
       Agent_store.Blob_store.bind_developer_runs blobs ~session_store store_owner
@@ -2317,9 +2423,31 @@ let create
             ~kind:Change.Command_changed)
       | Repl_task_run -> ()
     in
+    let trace_owner =
+      Option.map trace ~f:(fun configuration ->
+        Developer_trace_retention.create
+          ~sw
+          ~clock:(Eio.Stdenv.mono_clock env)
+          ~configuration)
+    in
+    acquired_trace := trace_owner;
+    let trace_joined row =
+      Option.iter trace_owner ~f:(fun traces ->
+        match Developer_trace_retention.find_command_entry traces row, Row.phase row with
+        | Some entry, Row.Phase.Terminal { receipt; _ } ->
+          (match
+             Chatml_trace.Terminal.create
+               ~receipt_version:1
+               ~disposition:(trace_disposition receipt)
+           with
+           | Ok terminal -> Developer_trace_retention.finish traces entry terminal
+           | Error _ -> ())
+        | None, _ | Some _, (Reserved | Waiting_permission | Execution_started) -> ())
+    in
     let%bind lifecycle =
       Lifecycle.create_with_hook
         ~on_committed:(Some lifecycle_change)
+        ~on_joined_terminal:(Some trace_joined)
         ~sw
         ~store:store_owner
         ~max_active_commands:limits.max_active_commands
@@ -2333,6 +2461,7 @@ let create
         Repl_epoch.install
           ~sw
           ~capture_host:capture
+          ~traces:trace_owner
           ~env
           ~clock:(Eio.Stdenv.mono_clock env)
           ~configuration
@@ -2351,6 +2480,7 @@ let create
       ; capture
       ; authoring
       ; repl
+      ; trace = trace_owner
       ; live_resources
       ; approval
       ; on_change
@@ -2388,6 +2518,7 @@ let create
         | None -> Ok ()
         | Some repl -> Repl_epoch.shutdown_and_wait repl
       in
+      Option.iter !acquired_trace ~f:Developer_trace_retention.close;
       let%bind () =
         match !acquired_lifecycle with
         | None -> Ok ()
@@ -2459,6 +2590,7 @@ let close_and_wait t =
     let%bind () = Root.Registry.close_and_wait t.roots in
     let%bind () = Lifecycle.close_and_wait t.lifecycle in
     let%bind () = Developer_live_resources.drain_unresolved t.live_resources in
+    Option.iter t.trace ~f:Developer_trace_retention.close;
     store (Store.close_and_wait t.store))
 ;;
 
@@ -2656,4 +2788,71 @@ module Repl = struct
            of_lifecycle settled)
     ;;
   end
+end
+
+module Trace = struct
+  type lookup =
+    | Command of
+        { run_id : P.Id.Developer_run.t
+        ; key : P.Idempotency_key.t
+        }
+    | Repl_statement of
+        { instance : Repl.Instance.t
+        ; epoch : Repl.Epoch.t
+        ; key : P.Idempotency_key.t
+        }
+    | Repl_task of
+        { run_id : P.Id.Developer_run.t
+        ; key : P.Idempotency_key.t
+        }
+
+  let read_row t ~actor row =
+    match t.trace with
+    | None -> Ok Developer_trace_retention.Availability.Unavailable
+    | Some traces ->
+      (match Developer_trace_retention.find_command_entry traces row with
+       | None -> Ok Developer_trace_retention.Availability.Unavailable
+       | Some entry ->
+         let open Result.Let_syntax in
+         let%bind request = Developer_trace_retention.begin_read traces ~actor entry in
+         Developer_trace_retention.snapshot
+           traces
+           request
+           ~current_actor:actor
+           ~exact_membership:(fun association ->
+             Operator_authorization.is_current actor
+             && Developer_trace_retention.Association.matches_row association row))
+  ;;
+
+  let snapshot t ~actor ~lookup =
+    let open Result.Let_syntax in
+    match lookup with
+    | Command { run_id; key } ->
+      let%bind observed = Command.observe t ~actor ~run_id ~key in
+      (match observed with
+       | None -> Error (P.Error.invalid_request "developer command is absent")
+       | Some view -> read_row t ~actor (Command.row view))
+    | Repl_task { run_id; key } ->
+      let%bind observed = Repl.Task.observe t ~actor ~run_id ~key in
+      (match observed with
+       | None -> Error (P.Error.invalid_request "developer REPL Task is absent")
+       | Some view -> read_row t ~actor (Repl.Task.row view))
+    | Repl_statement { instance; epoch; key } ->
+      (match t.repl with
+       | None -> Error (P.Error.invalid_request "developer REPL is not installed")
+       | Some repl ->
+         let%bind entry = Repl_epoch.historical_trace repl ~actor ~instance ~epoch ~key in
+         (match t.trace, entry with
+          | None, _ | _, None -> Ok Developer_trace_retention.Availability.Unavailable
+          | Some traces, Some entry ->
+            let%bind request = Developer_trace_retention.begin_read traces ~actor entry in
+            Developer_trace_retention.snapshot
+              traces
+              request
+              ~current_actor:actor
+              ~exact_membership:(fun _ ->
+                match Repl_epoch.historical_trace repl ~actor ~instance ~epoch ~key with
+                | Ok (Some current) -> phys_equal current entry
+                | Ok None | Error _ -> false)))
+  ;;
 end

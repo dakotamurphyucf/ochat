@@ -28,6 +28,10 @@ module Original : sig
     -> (t, P.Error.t) result
 
   val fingerprint : t -> Chatml_source.Digest.t
+
+  (** Immutable requested lineage for historical trace-source policy. This
+      route is comparison data, not the current selected source or a grant. *)
+  val route : t -> Developer_command_original.Route.t
 end
 
 module Instance : sig
@@ -251,6 +255,14 @@ module Task_origin : sig
       a caller-provided Task value or a later latest-snippet lookup. *)
   val reference : t -> Task_reference.t
 
+  (** Current epoch's single bounded source lineage. The Host calls this only
+      after [check_current] inside the exact Task_action.with_current loan,
+      then admits the Entry without yielding. That active action excludes
+      reset/close until its callback joins; the accessor itself does not
+      renew or grant Task authority. No per-Task provenance copy is retained
+      in the origin ledger. *)
+  val trace_provenance : t -> Developer_trace_retention.Provenance.t option
+
   (** Recheck the exact original/current actor and selected base source and
       contract after waits. A newly captured equal-looking graph is not this
       epoch's authority. *)
@@ -260,6 +272,12 @@ module Task_origin : sig
     -> checkpoint:(unit -> unit)
     -> (unit, P.Error.t) result
 end
+
+(* A live instance retains at most one bounded current-epoch source lineage.
+   Across installed instances this uses at most [max_instances] times the
+   trace owner's per-trace provenance cap, independent of the owner's
+   recording/expired-tombstone aggregate. Reset rebuilds the lineage for the
+   new epoch; immutable older lineages live only in charged retained traces. *)
 
 (** Private host installation. Borrow the SAME capture host already installed
     by developer commands; no second source resolver or writer. [surface] is
@@ -272,6 +290,7 @@ end
 val install
   :  sw:Eio.Switch.t
   -> capture_host:Capture_host.t
+  -> traces:Developer_trace_retention.t option
   -> env:Eio_unix.Stdenv.base
   -> clock:Eio.Time.Mono.ty Eio.Time.Mono.t
   -> configuration:Configuration.t
@@ -335,6 +354,22 @@ val observe
   -> instance:Instance.t
   -> key:P.Idempotency_key.t
   -> (Submission.t option, P.Error.t) result
+
+(** Private Host trace selection after reset or explicit instance close. This
+    compares the same physical Instance, original epoch, key and authenticated
+    current actor against their retained historical identity; it does NOT
+    invoke Source_selection.check_current or demand that the old editor/file
+    generation remain executable. It grants no source-site disclosure: the
+    Host must additionally apply the trace owner's distinct historical read
+    policy before returning a snapshot. A missing/evicted trace is inert and
+    never reparses or reexecutes the key. *)
+val historical_trace
+  :  t
+  -> actor:Operator_authorization.t
+  -> instance:Instance.t
+  -> epoch:Epoch.t
+  -> key:P.Idempotency_key.t
+  -> (Developer_trace_retention.Entry.t option, P.Error.t) result
 
 (** Inspect one expression or indexed lexical binding from the exact retained
     zero-based [statement_index] receipt's immutable frozen snapshot. The

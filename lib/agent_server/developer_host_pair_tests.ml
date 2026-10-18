@@ -929,10 +929,39 @@ let%test_module "retained Developer Host policy" =
       |> Or_error.ok_exn
     ;;
 
+    let trace_configuration ~read_allowed =
+      let recorder =
+        Chatml_trace.Recorder.Limits.create
+          ~max_events:128
+          ~max_normal_bytes:(64 * 1024)
+          ~max_terminal_bytes:128
+        |> Or_error.ok_exn
+      in
+      let limits =
+        Developer_trace_retention.Limits.create
+          ~max_traces:3
+          ~max_retained_bytes:(512 * 1024)
+          ~max_source_refs_per_trace:32
+          ~max_provenance_bytes_per_trace:8192
+          ~max_expired_tombstones:4
+          ~max_age_seconds:3600.
+          ~max_header_bytes:8192
+          ~recorder
+        |> Or_error.ok_exn
+      in
+      Developer_trace_retention.Configuration.create
+        ~mode:Chatml_trace.Recorder.Mode.Full
+        ~limits
+        ~read_policy:
+          (Developer_trace_retention.Read_policy.create ~authorize:(fun actor _ ->
+             !read_allowed && Operator_authorization.is_current actor))
+    ;;
+
     let start_phase
           ?(repl = false)
           ?(selected_target = Chatml.Chatml_compiler_contract.Target.One_off_v1)
           ?approval
+          ?trace
           shared
           ~clock
           ~max_active_agent_calls
@@ -1045,6 +1074,7 @@ let%test_module "retained Developer Host policy" =
           ~limits
           ~budget_configuration
           ~repl:(if repl then Some (repl_configuration ()) else None)
+          ~trace
           ~now:(fun () -> timestamp shared.env)
           ~checkpoint:Eio.Fiber.check
           ()
@@ -1780,12 +1810,14 @@ let run ctx input =
                         ~job_read:(fun _ _ -> false)
                         ~job_respond:(fun _ _ -> false)
                     in
+                    let trace_read_allowed = ref true in
                     let phase =
                       start_phase
                         ~repl:true
                         ~selected_target:
                           Chatml.Chatml_compiler_contract.Target.Developer_tool_v1
                         ~approval
+                        ~trace:(trace_configuration ~read_allowed:trace_read_allowed)
                         shared
                         ~clock:wall_clock
                         ~max_active_agent_calls:2
@@ -1799,6 +1831,48 @@ let run ctx input =
                     in
                     Eio.Time.with_timeout_exn real_clock 5. wait_for_park;
                     let module Repl = Developer_host.Repl in
+                    let module Trace = Developer_host.Trace in
+                    let trace_snapshot lookup =
+                      Trace.snapshot phase.host ~actor:shared.actor ~lookup
+                      |> required "retained developer trace"
+                    in
+                    let retained_trace lookup =
+                      match trace_snapshot lookup with
+                      | Developer_trace_retention.Availability.Retained snapshot ->
+                        snapshot
+                      | Expired | Unavailable -> failwith "expected a retained trace"
+                    in
+                    let complete_trace lookup =
+                      let snapshot = retained_trace lookup in
+                      (match Chatml_trace.Recorder.Snapshot.state snapshot with
+                       | Complete terminal
+                         when Chatml_trace.Terminal.Disposition.equal
+                                (Chatml_trace.Terminal.disposition terminal)
+                                Chatml_trace.Terminal.Disposition.Succeeded -> ()
+                       | Complete _ | Incomplete ->
+                         failwith "joined trace terminal was not successful");
+                      snapshot
+                    in
+                    let has_prior_snippet_site ~statement task =
+                      let sources =
+                        Chatml_trace.Recorder.Snapshot.header statement
+                        |> Chatml_trace.Header.source_inventory
+                      in
+                      List.exists
+                        (Chatml_trace.Recorder.Snapshot.prefix task)
+                        ~f:(fun event ->
+                          Option.value_map
+                            (Chatml_trace.Event.site event)
+                            ~default:false
+                            ~f:(fun site ->
+                              List.exists sources ~f:(fun source ->
+                                Chatml_source.Id.equal
+                                  (Chatml_source.Location.source site)
+                                  (Chatml_trace.Header.Source_ref.id source)
+                                && Chatml_source.Digest.equal
+                                     (Chatml_source.Location.source_digest site)
+                                     (Chatml_trace.Header.Source_ref.digest source))))
+                    in
                     let run_id = P.Id.Developer_run.create () in
                     let key name =
                       P.Idempotency_key.of_string name |> required "Task key"
@@ -1890,6 +1964,18 @@ let run ctx input =
                      | Output_limited -> ()
                      | Available -> failwith "large frozen Task type was not bounded");
                     [%test_eq: int] (Repl.Submission.task_reference_count submission) 1;
+                    let statement_trace =
+                      retained_trace
+                        (Trace.Repl_statement
+                           { instance = Repl.View.instance view
+                           ; epoch = Repl.View.epoch view
+                           ; key = key "repl-expression"
+                           })
+                    in
+                    assert (
+                      not
+                        (List.is_empty
+                           (Chatml_trace.Recorder.Snapshot.prefix statement_trace)));
                     let reference =
                       match Repl.Submission.task_references submission with
                       | reference :: _ -> reference
@@ -2073,6 +2159,13 @@ let run ctx input =
                          [%sexp
                            "Task Job/Model receipt was not successful"
                          , (receipt : Store.Developer_command_receipt.value option)]);
+                    let task_trace =
+                      complete_trace (Trace.Repl_task { run_id; key = key "task-run" })
+                    in
+                    assert (has_prior_snippet_site ~statement:statement_trace task_trace);
+                    assert (
+                      not
+                        (List.is_empty (Chatml_trace.Recorder.Snapshot.prefix task_trace)));
                     let staged = persisted_jobs shared ~run_id in
                     [%test_eq: int] (List.length staged) 2;
                     List.iter staged ~f:(fun job ->
@@ -2161,6 +2254,20 @@ let run ctx input =
                     assert (
                       not
                         (Repl.Epoch.equal (Repl.View.epoch view) (Repl.View.epoch reset)));
+                    let statement_lookup =
+                      Trace.Repl_statement
+                        { instance = Repl.View.instance view
+                        ; epoch = Repl.View.epoch view
+                        ; key = key "repl-expression"
+                        }
+                    in
+                    let task_lookup = Trace.Repl_task { run_id; key = key "task-run" } in
+                    ignore
+                      (complete_trace statement_lookup : Chatml_trace.Recorder.Snapshot.t);
+                    assert (
+                      has_prior_snippet_site
+                        ~statement:statement_trace
+                        (complete_trace task_lookup));
                     let historical =
                       Repl.submit
                         phase.host
@@ -2193,6 +2300,45 @@ let run ctx input =
                      | Error { code = Lease_stale; _ } -> ()
                      | Ok _ | Error _ ->
                        failwith "reset did not expire the old reference page");
+                    let replacement =
+                      Repl.submit
+                        phase.host
+                        ~actor:shared.actor
+                        ~instance:(Repl.View.instance reset)
+                        ~epoch:(Repl.View.epoch reset)
+                        ~expected_revision:(Repl.View.revision reset)
+                        ~key:(key "trace-replacement")
+                        ~source:"Task.pure(9)"
+                      |> required "replacement trace submission"
+                    in
+                    (match Repl.Submission.status replacement with
+                     | Finished -> ()
+                     | Need_more _ | Rejected _ | Stopped _ ->
+                       failwith "replacement trace submission did not finish");
+                    (match trace_snapshot statement_lookup with
+                     | Developer_trace_retention.Availability.Unavailable -> ()
+                     | Expired | Retained _ ->
+                       failwith "oldest settled trace was not evicted");
+                    ignore (complete_trace task_lookup : Chatml_trace.Recorder.Snapshot.t);
+                    Eio.Path.save
+                      ~create:(`Or_truncate 0o600)
+                      Eio.Path.(Eio.Stdenv.fs env / root / "prompt.chatmd")
+                      "<developer>edited after execution</developer>";
+                    (match trace_snapshot statement_lookup with
+                     | Developer_trace_retention.Availability.Unavailable -> ()
+                     | Expired | Retained _ ->
+                       failwith "evicted trace was restored by source edit");
+                    assert (
+                      has_prior_snippet_site
+                        ~statement:statement_trace
+                        (complete_trace task_lookup));
+                    trace_read_allowed := false;
+                    (match
+                       Trace.snapshot phase.host ~actor:shared.actor ~lookup:task_lookup
+                     with
+                     | Error { code = Permission_denied; _ } -> ()
+                     | Ok _ | Error _ -> failwith "revoked trace read was admitted");
+                    trace_read_allowed := true;
                     close_phase_and_wait phase;
                     [%test_eq: int] (List.length (persisted_jobs shared ~run_id)) 2;
                     [%test_eq: int] !child_requests 1;
