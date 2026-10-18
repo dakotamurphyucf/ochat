@@ -2016,7 +2016,8 @@ let start
       ?home
       ~process_start_identity
       ?(options = default_options)
-      ?(before_activation = fun _ -> Ok ())
+      ?before_activation
+      ?local_setup
       ()
   =
   Mirage_crypto_rng_unix.use_default ();
@@ -2034,50 +2035,67 @@ let start
       }
   in
   let open Result.Let_syntax in
-  let%bind () =
-    match options.developer, config.server.developer, options.startup_mode with
-    | None, None, _ | _, _, (Execute | On_demand) -> Ok ()
-    | _, _, Operator_only ->
-      Error
-        (Agent_protocol.Error.invalid_request
-           "developer commands require an execution-enabled daemon")
+  let validate_startup_config (config : Config.t) =
+    let%bind () =
+      match options.developer, config.server.developer, options.startup_mode with
+      | None, None, _ | _, _, (Execute | On_demand) -> Ok ()
+      | _, _, Operator_only ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "developer commands require an execution-enabled daemon")
+    in
+    let%bind () =
+      match options.developer, config.server.developer with
+      | Some _, Some _ ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "configure Developer through either daemon options or server configuration")
+      | None, _ | _, None -> Ok ()
+    in
+    let%bind () =
+      match options.qualify_chatml_extensions with
+      | false -> Ok ()
+      | true ->
+        Agent_session.Automatic_turn_budget.create options.chatml_runtime_policy
+        |> Agent_session.Automatic_turn_budget.validate
+    in
+    let%bind () =
+      match config.server.authoring_project_access with
+      | None -> Ok ()
+      | Some access ->
+        (match config.server.project_sources with
+         | None ->
+           Error
+             (Agent_protocol.Error.invalid_request
+                "configured authoring read grants require project sources")
+         | Some project_sources ->
+           Authoring_project_access_configuration.validate access ~project_sources
+           |> Result.map_error ~f:(fun _ ->
+             Agent_protocol.Error.invalid_request
+               "invalid configured authoring read grants"))
+    in
+    let%bind () =
+      match config.server.authoring_upload_access with
+      | None -> Ok ()
+      | Some access ->
+        Authoring_upload_access_configuration.validate access
+        |> Result.map_error ~f:(fun _ ->
+          Agent_protocol.Error.invalid_request "invalid configured upload grants")
+    in
+    Ok ()
   in
   let%bind () =
-    match options.developer, config.server.developer with
+    match before_activation, local_setup with
     | Some _, Some _ ->
       Error
         (Agent_protocol.Error.invalid_request
-           "configure Developer through either daemon options or server configuration")
+           "before_activation and local_setup cannot both own local identity")
     | None, _ | _, None -> Ok ()
   in
   let%bind () =
-    match options.qualify_chatml_extensions with
-    | false -> Ok ()
-    | true ->
-      Agent_session.Automatic_turn_budget.create options.chatml_runtime_policy
-      |> Agent_session.Automatic_turn_budget.validate
-  in
-  let%bind () =
-    match config.server.authoring_project_access with
-    | None -> Ok ()
-    | Some access ->
-      (match config.server.project_sources with
-       | None ->
-         Error
-           (Agent_protocol.Error.invalid_request
-              "configured authoring read grants require project sources")
-       | Some project_sources ->
-         Authoring_project_access_configuration.validate access ~project_sources
-         |> Result.map_error ~f:(fun _ ->
-           Agent_protocol.Error.invalid_request "invalid configured authoring read grants"))
-  in
-  let%bind () =
-    match config.server.authoring_upload_access with
-    | None -> Ok ()
-    | Some access ->
-      Authoring_upload_access_configuration.validate access
-      |> Result.map_error ~f:(fun _ ->
-        Agent_protocol.Error.invalid_request "invalid configured upload grants")
+    match local_setup with
+    | Some _ -> Ok ()
+    | None -> validate_startup_config config
   in
   let%bind store, origin =
     open_store ~sw ~env config.server ~process_start_identity
@@ -2106,7 +2124,21 @@ let start
         |> Result.map_error ~f:protocol_of_store
         |> Result.map ~f:ignore
     in
-    let%bind () = before_activation store in
+    let%bind config =
+      match local_setup with
+      | Some setup ->
+        let%bind bound = setup store in
+        let%bind config = Config_validator.Embedded_local.apply bound ~config in
+        let%map () = validate_startup_config config in
+        config
+      | None ->
+        let%map () =
+          match before_activation with
+          | None -> Ok ()
+          | Some before_activation -> before_activation store
+        in
+        config
+    in
     let%bind provider_operator =
       match options.provider_operator_factory with
       | None -> Ok None

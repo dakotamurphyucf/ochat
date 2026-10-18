@@ -29,7 +29,7 @@ and [command reference](../bin/README.md) for accepted combinations.
 
 [Parser/normalizer](../../bin/ochat_agent_stdio.ml).
 
-`--authoring-package`, `--bearer-token-file`, `--connect`, `--data-root`, `--inference-transport`, `--local`, `--prompt`, `--transient`, `--workspace`
+`--authoring-package`, `--bearer-token-file`, `--connect`, `--data-root`, `--developer-policy`, `--inference-transport`, `--local`, `--prompt`, `--transient`, `--workspace`
 
 ## provider_commands.ml flag inventory
 

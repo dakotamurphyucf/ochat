@@ -79,7 +79,13 @@ REPL wire limits derived from the same owner and Initialize bounds. The
 ordinary compact statement receipt remains 4 KiB; on-demand type inspection
 has a separate 32 KiB output ceiling and frozen type details have an
 independent 1 MiB retention pool. HTTP and directly authenticated Unix use
-that installed service. Local `--local` operator-policy setup remains separate.
+that installed service.
+
+Local stdio can opt in through
+`--local --developer-policy FILE`: the bounded policy binds its closed
+`Embedded_operator` selector to the one Store-owned `embedded.local` identity,
+then reuses the same project, upload, Developer and manifest validators. An
+absent policy leaves the prior local scope and source setup unchanged.
 
 For example, this `server` record field admits the selected `s` script from
 an already authorized supplied ChatMD document for one configured bearer
@@ -122,7 +128,46 @@ uses its own installed upload and rebind policy. No Developer row substitutes
 for any of those source grants. Omit the `developer` field to leave the
 Developer service unavailable.
 
-Status: M5 design v1, 2026-10-15. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission, durable developer run checkpoint foundation, selected-document transactions, physical job-claim worker, compiler-side REPL typing transaction and incremental module registry described below are implemented. The developer root staging owner, bounded root/native terminal coordinator, selected native policy and claimed job-parent effect-entry proof are implemented. The owner-neutral lexical script-job kernel and its physical developer adapter are implemented. Actor-bound provider selection, the shared Model.spawn recipe decoder, durable intent, physical call-boundary admission, selected compiled-script adapter and claimed model-job runner are implemented. Hosted command, native, job and Model approval callbacks and the portable Developer transport client are implemented. The hosted library REPL Task service retains exact Task references, starts work durably on explicit request, and joins cancellation and reset. The portable server REPL endpoint is implemented; the first-party REPL client remains pending. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
+For local stdio, the policy file is a fragment rather than a replacement server
+configuration. For example, after creating `/absolute/project/check.chatml`
+with raw ChatML source `let main input = Task.pure(input)`, this file selects
+only Check for that exact project member and the local operator:
+
+```sexp
+(project_sources ((external_roots (/absolute/project))))
+(authoring_project_access
+ ((read_grants (((root /absolute/project)
+                 (principal_id Embedded_operator)
+                 (authentication_kind embedded.local))))
+  (selections (((root /absolute/project) (project check.chatml)
+                (request (entry ((name main)))) (target one_off_v1))))))
+(developer
+ ((selections
+   (((source (Local_source (root /absolute/project) (member check.chatml)))
+     (target One_off_v1)
+     (principals (((principal_id Embedded_operator)
+                   (authentication_kind embedded.local)))))))
+  (capacity
+   ((max_runs 128) (max_active_commands 4) (max_active_agent_calls 8)
+    (max_agent_sources 6) (max_native_bindings 32) (max_retained_tasks 8)
+    (max_watches_per_connection 4) (max_pending_approvals 4)
+    (max_repl_instances 8) (max_repl_keys_per_instance 128)
+    (max_repl_submissions_per_epoch 64) (max_repl_source_bytes 65536)))
+  (model Disabled) (approvals Disabled) (repl Disabled) (portable true)))
+(developer_scopes (developer.check))
+```
+
+Run `ochat_agent_stdio --local --prompt /absolute/agent.chatmd --workspace
+/absolute/workspace --data-root /absolute/store --developer-policy FILE`, or
+replace `--data-root` with `--transient`. The prompt and workspace are supplied
+by the local CLI; no path or method scope in this fragment creates a source
+grant. A manifest grant, if present, must list `Embedded_operator` explicitly
+and name the actual local `embedded.prompt` and `embedded.workspace`; an empty
+principal list is rejected. The policy accepts only the documented sections,
+bounded input and exact local authentication kind. It cannot silently override
+a separately configured project-source or Developer policy.
+
+Status: M5 design v1, 2026-10-15. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission, durable developer run checkpoint foundation, selected-document transactions, physical job-claim worker, compiler-side REPL typing transaction and incremental module registry described below are implemented. The developer root staging owner, bounded root/native terminal coordinator, selected native policy and claimed job-parent effect-entry proof are implemented. The owner-neutral lexical script-job kernel and its physical developer adapter are implemented. Actor-bound provider selection, the shared Model.spawn recipe decoder, durable intent, physical call-boundary admission, selected compiled-script adapter and claimed model-job runner are implemented. Hosted command, native, job and Model approval callbacks and the portable Developer transport client are implemented. The hosted library REPL Task service retains exact Task references, starts work durably on explicit request, and joins cancellation and reset. The portable server REPL endpoint is implemented; the lower typed REPL client transport is implemented, while upper mutation recovery remains pending. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
 
 The [authoring service design](chatml-authoring-services.md) owns source context,
 overlay and immutable upload contracts used here. Implementation and validation

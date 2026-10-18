@@ -197,11 +197,11 @@ let all_scopes =
     ]
 ;;
 
-let principal id =
+let principal ?(developer_scopes = Agent_protocol.Scope.Set.empty) id =
   Agent_protocol.Principal.create
     ~id
     ~authentication_kind:"embedded.local"
-    ~scopes:all_scopes
+    ~scopes:(Set.union all_scopes developer_scopes)
     ~attributes:[]
 ;;
 
@@ -349,6 +349,8 @@ let open_owned_host
       ~home
       ~event_capacity
       ~temporary_root
+      ?local_policy
+      ()
   =
   let open Result.Let_syntax in
   let%bind () =
@@ -356,6 +358,7 @@ let open_owned_host
     |> Result.map_error ~f:protocol_of_store
   in
   let operator_id = ref None in
+  let bound_local = ref None in
   let captured_store = ref None in
   let namespace_transferred = ref false in
   Eio.Switch.on_release sw (fun () ->
@@ -374,6 +377,27 @@ let open_owned_host
     in
     operator_id := Some id
   in
+  let local_setup policy store =
+    let%bind () = before_activation store in
+    let%bind id =
+      Result.of_option
+        !operator_id
+        ~error:(Agent_protocol.Error.invalid_request "local identity was not minted")
+    in
+    let%map bound =
+      Config_validator.Embedded_local.bind policy ~env ~operator_id:id
+      |> Result.map_error ~f:(fun diagnostics ->
+        Agent_protocol.Error.invalid_request
+          (Sexp.to_string_hum ([%sexp_of: Config.Diagnostic.t list] diagnostics)))
+    in
+    bound_local := Some bound;
+    bound
+  in
+  let before_activation, local_setup =
+    match local_policy with
+    | None -> Some before_activation, None
+    | Some policy -> None, Some (local_setup policy)
+  in
   let%bind daemon =
     Daemon.start
       ~sw
@@ -382,7 +406,8 @@ let open_owned_host
       ~config
       ~tool_dir
       ?home
-      ~before_activation
+      ?before_activation
+      ?local_setup
       ~process_start_identity:None
       ()
   in
@@ -396,7 +421,13 @@ let open_owned_host
           (Agent_protocol.Error.invalid_request
              "local operator identity was not admitted")
     in
-    let%bind principal = principal id in
+    let developer_scopes =
+      Option.value_map
+        !bound_local
+        ~default:Agent_protocol.Scope.Set.empty
+        ~f:Config_validator.Embedded_local.developer_scopes
+    in
+    let%bind principal = principal ~developer_scopes id in
     let max_attachments =
       daemon_options.Daemon.protocol_limits.max_attachments_per_connection
     in
@@ -443,6 +474,7 @@ let open_host
     ~home:(Some home)
     ~event_capacity
     ~temporary_root:None
+    ()
 ;;
 
 let close_host host = Embedded_host_cleanup.close host.cleanup
@@ -794,6 +826,7 @@ let open_local_host
       ?(daemon_options = Daemon.default_options)
       ?root_invocation
       ?project_sources
+      ?local_policy
       ?(authoring_package_files = [])
       ?authoring_budget
       options
@@ -803,6 +836,14 @@ let open_local_host
   let%bind authoring_packages =
     Chat_response.Authoring_package_file.load_many ~env ~paths:authoring_package_files
     |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+  in
+  let%bind () =
+    if Option.is_some local_policy && Option.is_some project_sources
+    then
+      Error
+        (Agent_protocol.Error.invalid_request
+           "local policy and separate project sources cannot both be configured")
+    else Ok ()
   in
   let%bind data_root, temporary_root = data_root env options in
   let config = config ~project_sources options data_root in
@@ -827,6 +868,8 @@ let open_local_host
     ~home:options.home
     ~event_capacity:options.event_capacity
     ~temporary_root
+    ?local_policy
+    ()
 ;;
 
 let with_local_host
@@ -835,6 +878,7 @@ let with_local_host
       ?daemon_options
       ?root_invocation
       ?project_sources
+      ?local_policy
       ?authoring_package_files
       ?authoring_budget
       options
@@ -848,6 +892,7 @@ let with_local_host
       ?daemon_options
       ?root_invocation
       ?project_sources
+      ?local_policy
       ?authoring_package_files
       ?authoring_budget
       options
@@ -863,6 +908,7 @@ let start
       ?daemon_options
       ?root_invocation
       ?project_sources
+      ?local_policy
       ?authoring_package_files
       ?authoring_budget
       options
@@ -877,6 +923,7 @@ let start
       ?project_sources
       ?authoring_package_files
       ?authoring_budget
+      ?local_policy
       options
   in
   Embedded_host_cleanup.protect host.cleanup (fun () ->

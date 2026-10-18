@@ -7,6 +7,7 @@
   developer_startup_tests
   config
   config_parser
+  embedded_local_template
   project_source_configuration
   authoring_project_access_configuration
   authoring_upload_access_configuration

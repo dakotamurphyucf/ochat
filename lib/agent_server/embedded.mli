@@ -41,8 +41,14 @@ val interactive_permission_profile
     Defaults match [Daemon.default_options]. The embedded host always derives
     extension host metadata from explicit [storage], keeps process-bound liveness and
     starts no network listener. A durable data root preserves data; it does not
-    keep jobs running after the embedding process exits. Startup initializes the
-    Unix cryptographic RNG before allocating IDs or a transient data root. *)
+    keep jobs running after the embedding process exits. [local_policy] is an
+    opt-in parsed local fragment: startup binds all its principal selectors to
+    the one Store-owned embedded operator before source/catalog work, and adds
+    only its requested Developer method scopes to that same actual principal.
+    It conflicts with a separate [project_sources] argument rather than
+    overriding it. Omission preserves the generated local Config and scopes.
+    Startup initializes the Unix cryptographic RNG before allocating IDs or a
+    transient data root. *)
 val start
   :  sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
@@ -50,6 +56,7 @@ val start
   -> ?root_invocation:
        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
   -> ?project_sources:Project_source_configuration.t
+  -> ?local_policy:Config_validator.Embedded_local.t
   -> ?authoring_package_files:string list
        (** Absolute paths captured through the shared bounded loader before store
          creation. Packages configure the same host as daemon configuration;
@@ -94,6 +101,7 @@ val open_local_host
   -> ?root_invocation:
        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
   -> ?project_sources:Project_source_configuration.t
+  -> ?local_policy:Config_validator.Embedded_local.t
   -> ?authoring_package_files:string list
   -> ?authoring_budget:Chat_response.Authoring_validation.context_budget
   -> options
@@ -121,6 +129,7 @@ val with_local_host
   -> ?root_invocation:
        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
   -> ?project_sources:Project_source_configuration.t
+  -> ?local_policy:Config_validator.Embedded_local.t
   -> ?authoring_package_files:string list
   -> ?authoring_budget:Chat_response.Authoring_validation.context_budget
   -> options

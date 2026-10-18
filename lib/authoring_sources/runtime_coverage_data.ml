@@ -179,6 +179,20 @@ let shared_features =
       ; "test/agent_server_e2e/scenarios/developer_wire_scenario.ml"
       ; "docs-src/design/chatml-developer-runtime.md"
       ] )
+  ; ( "execution.developer_embedded_local_policy"
+    , "Bounded local stdio policy binds exact Store-owned operator identity to existing \
+       source, Developer and manifest grants without changing absent-policy behavior"
+    , [ "lib/agent_server/embedded_local_template.ml"
+      ; "lib/agent_server/config_validator.ml"
+      ; "lib/agent_server/embedded.ml"
+      ; "lib/agent_server/daemon.ml"
+      ; "bin/ochat_agent_stdio.ml"
+      ]
+    , "runtime.execution"
+    , [ "test/local_storage/embedded_local_policy_tests.ml"
+      ; "test/agent_server_e2e/scenarios/stdio_scenario.ml"
+      ; "docs-src/design/chatml-developer-runtime.md"
+      ] )
   ; ( "execution.developer_repl_task"
     , "Retained REPL Task references and bounded frozen-type projection, explicit \
        durable Start and terminal receipt, current selected authority at new effects, \
@@ -496,7 +510,13 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_startup_policy.ml"
     , "9b344871a5abc8f9177b946b2f8fad9ff4a4507a90a472548c9d0c6fede68c29" )
   ; ( "lib/agent_server/config_validator.ml"
-    , "a14c0912f618a4eb522c719ed1b10791c7a9fc2508f35d68e0e9dbbd0a916707" )
+    , "7c0e553ab0d172a19cf38d7f7f30d1d42e43d06d794b11c621e4a0fd542c63d7" )
+  ; ( "lib/agent_server/embedded_local_template.ml"
+    , "93691f37b0b11d3b5ef3303d2d6f35d7bdffe2ea2eb360db9d007ab841210e3e" )
+  ; ( "lib/agent_server/embedded.ml"
+    , "acd3c5c59f9ad39f9edc52910f3756ac76f9b78ea286df74fc9ea85aa36af2ce" )
+  ; ( "bin/ochat_agent_stdio.ml"
+    , "07c51d608d6360d942ba00ec5301bffb0d432ebfaf6de4c97b52748874e028a6" )
   ; ( "lib/agent_server/session_factory.ml"
     , "6d91a79fe221939cafec72f63e21a5ab8a81476defb7a63999a4fc97012a90ac" )
   ; ( "bin/inference_composition.ml"
@@ -568,7 +588,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_model_job_runner.ml"
     , "7604ff6140540e3b53720515526242e7bc1014c97d6895aacadbfb2909bda718" )
   ; ( "lib/agent_server/daemon.ml"
-    , "774ca481ca8857134639da65369cb42853adcb56fe3ec470b29c4dac64f6961c" )
+    , "d12a1c68f19ade0a40d85771a2f238045390a338c89064d6917ae3827a19afdb" )
   ; ( "lib/agent_session/developer_claimed_resource_owner.ml"
     , "fb251c6e022f9880820b15807018adc5cf240500050a0424321d7507d3e2bc41" )
   ; ( "lib/agent_server/developer_claim_deadline.ml"

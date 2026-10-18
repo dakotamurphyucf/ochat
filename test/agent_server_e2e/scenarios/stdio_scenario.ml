@@ -640,6 +640,216 @@ let test_stdout_purity env environment =
     require (not (String.is_empty result.stderr.contents)) "CLI diagnostic omitted stderr")
 ;;
 
+let test_local_developer_check ?(transient = false) env environment =
+  let module P = Agent_protocol in
+  let module D = P.Developer_common in
+  let module W = P.Developer_wire in
+  let fixture =
+    fixture
+      env
+      environment
+      (if transient then "stdio-local-transient-developer" else "stdio-local-developer")
+  in
+  let root = Filename.dirname (Config_fixture.prompt_path fixture) in
+  let member = "check.chatml" in
+  Eio.Path.save
+    ~create:(`Exclusive 0o600)
+    Eio.Path.(Eio.Stdenv.fs env / Filename.concat root member)
+    "let main input = Task.pure(input)";
+  let root_atom = Sexp.to_string_mach (Sexp.Atom root) in
+  let capacity =
+    Agent_server.Developer_startup_configuration.Capacity.standard_v1
+    |> Agent_server.Developer_startup_configuration.Capacity.sexp_of_t
+    |> Sexp.to_string_mach
+  in
+  let policy =
+    sprintf
+      {|(project_sources ((external_roots (%s))))
+        (authoring_project_access
+         ((read_grants (((root %s) (principal_id Embedded_operator)
+                         (authentication_kind embedded.local))))
+          (selections (((root %s) (project %s)
+                        (request (entry ((name main)))) (target one_off_v1))))))
+        (developer
+         ((selections
+           (((source (Local_source (root %s) (member %s)))
+             (target One_off_v1)
+             (principals (((principal_id Embedded_operator)
+                           (authentication_kind embedded.local)))))))
+          (capacity %s) (model Disabled) (approvals Disabled)
+          (repl Disabled) (portable true)))
+        (developer_scopes (developer.check))|}
+      root_atom
+      root_atom
+      root_atom
+      member
+      root_atom
+      member
+      capacity
+  in
+  let policy_path =
+    Filename.concat
+      (Temporary_environment.roots environment).config
+      "developer-local.sexp"
+  in
+  Eio.Path.save
+    ~create:(`Exclusive 0o600)
+    Eio.Path.(Eio.Stdenv.fs env / policy_path)
+    policy;
+  let transient_roots () =
+    let temporary = (Temporary_environment.roots environment).temporary in
+    Eio.Path.read_dir Eio.Path.(Eio.Stdenv.fs env / temporary)
+    |> List.filter ~f:(String.is_prefix ~prefix:"ochat-embedded-")
+    |> List.sort ~compare:String.compare
+  in
+  let roots_before = if transient then transient_roots () else [] in
+  Eio.Switch.run (fun sw ->
+    let arguments =
+      if transient
+      then
+        [ "--local"
+        ; "--transient"
+        ; "--prompt"
+        ; Config_fixture.prompt_path fixture
+        ; "--workspace"
+        ; Config_fixture.physical_workspace fixture
+        ]
+      else local_arguments fixture
+    in
+    with_stdio
+      ~sw
+      env
+      fixture
+      (arguments @ [ "--developer-policy"; policy_path ])
+      (fun process ->
+         let client = Stdio_client.create ~process ~clock:(Eio.Stdenv.clock env) in
+         let next_id = ref 0 in
+         let rec response method_ expected_id remaining =
+           if remaining = 0 then fail "too many local Developer notifications";
+           match
+             Stdio_client.next_envelope client ~timeout_seconds:10. |> protocol_ok
+           with
+           | P.Envelope.Notification _ -> response method_ expected_id (remaining - 1)
+           | P.Envelope.Response { id; outcome } ->
+             require
+               (P.Envelope.Request_id.compare id expected_id = 0)
+               "local Developer response ID changed";
+             (match outcome with
+              | Ok value -> value
+              | Error error ->
+                raise_s
+                  [%sexp
+                    "local Developer method failed"
+                  , (method_ : string)
+                  , (error : P.Error.t)])
+           | P.Envelope.Request _ -> fail "local Developer returned a request"
+         in
+         let call method_ params =
+           Int.incr next_id;
+           let id =
+             P.Envelope.Request_id.of_json (`Number (Int.to_string !next_id))
+             |> protocol_ok
+           in
+           let request = P.Envelope.request ~id ~method_ ~params () in
+           Stdio_client.send_raw_line
+             client
+             (P.Envelope.to_json request |> Jsonaf.to_string)
+           |> protocol_ok;
+           response method_ id 16
+         in
+         let implementation =
+           P.Initialize.Implementation.create ~name:"local-developer-e2e" ~version:"1"
+           |> protocol_ok
+         in
+         let request =
+           P.Initialize.Request.create
+             ~implementation
+             ~protocol_min:P.Version.current
+             ~protocol_max:P.Version.current
+             ~features:[ D.Features.run ]
+             ~event_encodings:[ Json ]
+             ~max_inbound_event_bytes:(2 * 1024 * 1024)
+             ()
+           |> protocol_ok
+         in
+         let initialized =
+           call "protocol.initialize" (P.Initialize.Request.to_json request)
+           |> P.Initialize.Response.of_json
+           |> protocol_ok
+         in
+         require
+           (List.mem initialized.enabled_features D.Features.run ~equal:String.equal)
+           "local Developer run feature was not installed";
+         let capabilities =
+           call "developer.capabilities" (`Object [])
+           |> D.Capabilities.of_json
+           |> protocol_ok
+         in
+         require
+           (D.Capabilities.supports capabilities D.Method.Submit)
+           "local Developer submit was not installed";
+         let limits = D.Capabilities.limits capabilities in
+         let member = Source.Portable_path.create member |> Or_error.ok_exn in
+         let route =
+           D.Route.local_source ~limits:(D.Limits.request limits) ~root_index:0 ~member
+           |> protocol_ok
+         in
+         let run_id = P.Id.Developer_run.create () in
+         let key = P.Idempotency_key.of_string "local-check" |> protocol_ok in
+         let submit =
+           D.Submit.create
+             ~limits
+             ~run_id
+             ~key
+             ~kind:P.Developer_receipt.Kind.Check
+             ~route
+             ~target:D.Target.One_off_v1
+             ~prompt:None
+             ~workspace:None
+             ~entrypoint:"main"
+             ~input:(`Object [])
+             ~fixtures:None
+             ~requested_execution:None
+             ~requested_max_output_bytes:None
+           |> protocol_ok
+         in
+         let submitted = W.Request.Submit submit in
+         let view =
+           call (W.Request.method_name submitted) (W.Request.params submitted)
+           |> W.Response.of_method_and_json
+                ~limits
+                ~method_:(W.Request.method_name submitted)
+           |> protocol_ok
+         in
+         (match view with
+          | W.Response.Submit _ -> ()
+          | _ -> fail "local Developer submit returned another response");
+         let lookup = D.Lookup.create ~run_id ~key in
+         let await = W.Request.Await_terminal lookup in
+         let terminal =
+           call (W.Request.method_name await) (W.Request.params await)
+           |> W.Response.of_method_and_json ~limits ~method_:(W.Request.method_name await)
+           |> protocol_ok
+         in
+         (match terminal with
+          | W.Response.Await_terminal view ->
+            (match D.View.phase view with
+             | D.View.Terminal { receipt; execution_started = false } ->
+               (match P.Developer_receipt.value receipt with
+                | P.Developer_receipt.Check P.Developer_receipt.Check.Ready -> ()
+                | _ -> fail "local Check was not ready")
+             | _ -> fail "local Check was not a pre-execution terminal")
+          | _ -> fail "local Developer await returned another response");
+         let result = finish_process env process in
+         require_exit result (Exited 0) "local Developer stdio did not exit on EOF";
+         assert_stdout_pure result.stdout));
+  if transient
+  then
+    require
+      (List.equal String.equal roots_before (transient_roots ()))
+      "transient Developer stdio retained its private root"
+;;
+
 let cases =
   [ "stdio.local-initialize", test_local_initialize
   ; "stdio.local-transient-bootstrap", test_local_transient_bootstrap
@@ -651,6 +861,10 @@ let cases =
   ; "stdio.gateway-eof-detaches-only", test_gateway_eof_detaches_only
   ; "stdio.gateway-bad-bearer-file", test_gateway_bad_bearer_file
   ; "stdio.stdout-purity", test_stdout_purity
+  ; ( "stdio.local-developer-check"
+    , fun env environment -> test_local_developer_check env environment )
+  ; ( "stdio.local-transient-developer-check"
+    , fun env environment -> test_local_developer_check ~transient:true env environment )
   ]
 ;;
 

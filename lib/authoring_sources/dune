@@ -123,6 +123,9 @@
     lib/agent_server/developer_startup_limits.ml %{dep:../agent_server/developer_startup_limits.ml}
     lib/agent_server/developer_startup_policy.ml %{dep:../agent_server/developer_startup_policy.ml}
     lib/agent_server/config_validator.ml %{dep:../agent_server/config_validator.ml}
+    lib/agent_server/embedded_local_template.ml %{dep:../agent_server/embedded_local_template.ml}
+    lib/agent_server/embedded.ml %{dep:../agent_server/embedded.ml}
+    bin/ochat_agent_stdio.ml %{dep:../../bin/ochat_agent_stdio.ml}
     bin/inference_composition.ml %{dep:../../bin/inference_composition.ml}
     lib/agent_server/connection_context.ml %{dep:../agent_server/connection_context.ml}
     lib/agent_server/startup_cleanup.ml %{dep:../agent_server/startup_cleanup.ml}
