@@ -1210,7 +1210,7 @@ let%test_unit "claimed developer model runner publishes a real offline response"
                ~managed_definition:None
                ~agent_runtime:None
                ~jobs
-               ~authorize:(fun _ _ -> Ok ())
+               ~authorize_for_runtime:(fun _ -> fun _ _ -> Ok ())
                ~prepare_output:(function
                  | Openai.Responses.Tool_output.Output.Text value -> Ok (`String value)
                  | _ -> Error (P.Error.invalid_request "unexpected script output"))

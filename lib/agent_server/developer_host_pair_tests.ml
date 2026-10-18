@@ -1028,7 +1028,8 @@ let%test_module "retained Developer Host policy" =
           ~active_agent_calls
           ~job_policy:Chat_response.One_off_request.default_policy
           ~runtime_policy:Daemon.default_options.chatml_runtime_policy
-          ~authorize_native:shared.authorize_native
+          ~native_permission:
+            (Developer_native_permission.Mode.Explicit_callback shared.authorize_native)
           ~prepare_output:shared.prepare_output
           ~capture_policy
           ~capture_limits

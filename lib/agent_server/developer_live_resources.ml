@@ -171,12 +171,14 @@ type t =
   ; artifact_store : Agent_store.Prompt_artifact_store.t
   ; agent_source_limits : Developer_agent_source_runtime.Limits.t
   ; active_agent_calls : Agent_session.Selected_agent_depth.Limits.t
+  ; native_permission : Developer_native_permission.Mode.t
   ; gate : Eio.Mutex.t
   ; mutable unresolved : Workspace.t option
   }
 
 type live =
   { owner : Owner.t
+  ; run_owner : P.Execution_owner.developer
   ; switch : Eio.Switch.t
   ; host : t
   ; workspace_owner : Workspace.t
@@ -187,6 +189,8 @@ type live =
   ; definition : Definition.t
   ; workspace_definition : Agent_session.Workspace_definition.t
   ; original_actor : Operator_authorization.t
+  ; native_permission : Developer_native_permission.Mode.t
+  ; selected_profile : Developer_native_permission.t option
   ; runtime : Runtime.t
   ; selected : Capabilities.t
   ; managed : Chat_response.Managed_tool_registry.t
@@ -234,6 +238,7 @@ let create
       ~artifact_store
       ~agent_source_limits
       ~active_agent_calls
+      ~native_permission
   =
   let open Result.Let_syntax in
   let%bind remote_content =
@@ -268,6 +273,7 @@ let create
       ; artifact_store
       ; agent_source_limits
       ; active_agent_calls
+      ; native_permission
       ; gate = Eio.Mutex.create ()
       ; unresolved = None
       }
@@ -410,6 +416,15 @@ let prepare_on_switch
     Catalogs.with_admission t.catalogs ~f:(fun () ->
       let%bind definition, revision, workspace_definition =
         selected_pair t ~prompt ~workspace
+      in
+      let%bind selected_profile =
+        match t.native_permission with
+        | Developer_native_permission.Mode.Explicit_callback _ -> Ok None
+        | Selected_prompt_profile ->
+          Developer_native_permission.pin
+            ~catalogs:t.catalogs
+            ~profile_id:definition.permission_profile
+          |> Result.map ~f:Option.some
       in
       let%bind () =
         Developer_method_authorization.check_now
@@ -643,6 +658,7 @@ let prepare_on_switch
           in
           Ok
             { owner
+            ; run_owner = Store.owner handle
             ; switch = sw
             ; host = t
             ; workspace_owner
@@ -653,6 +669,8 @@ let prepare_on_switch
             ; definition
             ; workspace_definition
             ; original_actor
+            ; native_permission = t.native_permission
+            ; selected_profile
             ; runtime = resources.native
             ; selected
             ; managed = resources.managed
@@ -781,15 +799,69 @@ let check_current t =
   if t.closing || t.closed
   then Error (invalid "developer native resources are closed")
   else
-    check_prepared
-      t.host
-      ~prompt:t.definition.id
-      ~workspace:t.workspace_definition.id
-      ~definition:t.definition
-      ~revision:t.revision
-      ~workspace_definition:t.workspace_definition
-      ~original_actor:t.original_actor
-      t.workspace_owner
+    let open Result.Let_syntax in
+    let%bind () =
+      check_prepared
+        t.host
+        ~prompt:t.definition.id
+        ~workspace:t.workspace_definition.id
+        ~definition:t.definition
+        ~revision:t.revision
+        ~workspace_definition:t.workspace_definition
+        ~original_actor:t.original_actor
+        t.workspace_owner
+    in
+    match t.selected_profile with
+    | None -> Ok ()
+    | Some profile ->
+      Developer_native_permission.check_current profile ~catalogs:t.host.catalogs
+;;
+
+module Native_authorizer = struct
+  type t =
+    { live : live
+    ; root : Root.run
+    ; current_actor : unit -> Operator_authorization.t
+    }
+
+  let check t =
+    let open Result.Let_syntax in
+    let%bind () = check_current t.live in
+    let current_actor = t.current_actor () in
+    let original_principal = Operator_authorization.principal t.live.original_actor in
+    let current_principal = Operator_authorization.principal current_actor in
+    if
+      (not (phys_equal (Root.original_actor t.root) t.live.original_actor))
+      || (not (Operator_authorization.is_current current_actor))
+      || (not (P.Id.Principal.equal original_principal.id current_principal.id))
+      || (not
+            (String.equal
+               original_principal.authentication_kind
+               current_principal.authentication_kind))
+      || (not (P.Execution_owner.equal_developer (Root.owner t.root) t.live.run_owner))
+      || not (phys_equal (Root.native_ceiling t.root) t.live.selected)
+    then Error (invalid "developer native permission owner is foreign or expired")
+    else (
+      let%map _ = Root.claim_preflight t.root in
+      ())
+  ;;
+
+  let for_runtime t runtime =
+    match t.live.native_permission, t.live.selected_profile with
+    | Developer_native_permission.Mode.Explicit_callback authorize, None -> authorize
+    | Selected_prompt_profile, Some profile ->
+      Developer_native_permission.authorize profile ~runtime ~check_current:(fun () ->
+        check t)
+    | Explicit_callback _, Some _ | Selected_prompt_profile, None ->
+      fun _ _ -> Error (invalid "developer native permission profile is unavailable")
+  ;;
+end
+
+let native_authorizer live ~root ~current_actor =
+  let authorizer = Native_authorizer.{ live; root; current_actor } in
+  let open Result.Let_syntax in
+  let%map () = Native_authorizer.check authorizer in
+  authorizer
 ;;
 
 let check_pair_now t =

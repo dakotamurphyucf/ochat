@@ -41,8 +41,14 @@ end
     Developer_tool_v1 Model.spawn admission. It also retains that same service
     for the bare Script's claimed Worker lexical scope. It is not optional. The native
     kernel still re-resolves the exact binding,
-    permission, parent and original/current actor after waits. [authorize] and
-    [prepare_output] are trusted existing host services, never authority
+    permission, parent and original/current actor after waits.
+    [authorize_for_runtime] is the one Live-bound native policy factory: this
+    runner supplies the actual root or restored Claim runtime when installed.
+    [None] is the existing Script-only package; selected-profile mode denies
+    it, while an explicit trusted callback can preserve that historical route.
+    The factory verifies a Shell exemption against an exact installed runtime. A saved
+    request cannot select a runtime or profile by name. [prepare_output] is
+    a trusted existing host service, never authority
     inferred from a job ID. *)
 val create
   :  root:Developer_root_owner.run
@@ -51,10 +57,9 @@ val create
   -> managed_definition:Chat_response.Managed_tool_registry.t option
   -> agent_runtime:Chat_response.Agent_runtime.t option
   -> jobs:Developer_script_job_service.t
-  -> authorize:
-       (Agent_protocol.Host_invocation.t
-        -> Chat_response.Tool_capability.binding
-        -> (unit, Agent_protocol.Error.t) result)
+  -> authorize_for_runtime:
+       (Chat_response.Agent_runtime.t option
+        -> Developer_native_permission.Mode.authorizer)
   -> prepare_output:
        (Openai.Responses.Tool_output.Output.t
         -> (Jsonaf.t, Agent_protocol.Error.t) result)

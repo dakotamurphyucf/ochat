@@ -35,6 +35,7 @@ val create
   -> artifact_store:Agent_store.Prompt_artifact_store.t
   -> agent_source_limits:Developer_agent_source_runtime.Limits.t
   -> active_agent_calls:Agent_session.Selected_agent_depth.Limits.t
+  -> native_permission:Developer_native_permission.Mode.t
   -> (t, P.Error.t) result
 
 (** After a fresh source capture and durable epoch admission, resolve the
@@ -52,7 +53,10 @@ val create
     Model.spawn; Developer_model_spawn selects Developer_tool_v1 for that
     separately authorized feature. Prepare Agent_runtime's native/managed definitions once
     under the same joined switch and selected root contract, always through
-    its native-only preparation path. A selected provider is not an inference
+    its native-only preparation path. In selected native-permission mode the
+    same catalog admission pins this Prompt's compiled Permission_policy and
+    revision; missing profiles deny before activation. Trusted explicit
+    callback mode imposes no new profile prerequisite. A selected provider is not an inference
     Context: inference-dependent native declarations, including Model_reviewer,
     reject before activation. Later managed Model.spawn and Agent.run effects
     use the genuine physical Root/provider/source-parent services. Authorize shell
@@ -120,6 +124,35 @@ val native_registry : live -> Chat_response.Tool_capability.t
 val selected_native : live -> Chat_response.Tool_capability.t
 val managed_definition : live -> Chat_response.Managed_tool_registry.t
 val model_sources : live -> Developer_model_job_runner.Sources.t
+
+module Native_authorizer : sig
+  type t
+
+  (** Select Shell classification from the ACTUAL Root/child/Claim runtime at
+      this dispatch site. The callback checks a Shell binding's exact runtime
+      membership before bypassing only the generic non-Shell profile decision.
+      Selection of [runtime] alone grants nothing: the native kernel must still
+      admit the physical Root/child/Claim and selected implementation. In
+      trusted explicit-callback mode this returns the original callback. *)
+  val for_runtime
+    :  t
+    -> Chat_response.Agent_runtime.t
+    -> Developer_native_permission.Mode.authorizer
+end
+
+(** Assemble one expiring native permission factory for this Live and its
+    physically admitted Root. Compare the exact original actor, typed Store
+    owner and immutable native ceiling from the retained Live against [root];
+    equal caller coordinates alone are insufficient. Selected mode additionally
+    pins the profile from this same Live and checks its current revision and
+    actor/Root/Live after policy waits. The returned factory is shared by Root,
+    selected children, claimed Workers and retained REPL Task; each branch
+    supplies only its genuinely prepared runtime to [for_runtime]. *)
+val native_authorizer
+  :  live
+  -> root:Developer_root_owner.run
+  -> current_actor:(unit -> Operator_authorization.t)
+  -> (Native_authorizer.t, P.Error.t) result
 
 (** Restore a queued issuing child only while the exact physical Worker Claim
     is entered. Compare every serialized issuer coordinate with this Live

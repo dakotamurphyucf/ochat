@@ -167,7 +167,7 @@ let request ~expected ~input =
   |> ok
 ;;
 
-let with_shell_daemon f =
+let with_shell_daemon ?(selected_native_profile = false) f =
   Eio_main.run (fun env ->
     let root =
       Filename.concat
@@ -202,7 +202,7 @@ let with_shell_daemon f =
         let profile =
           S.Config.Permission_profile.
             { Agent_server_test_support.permission_profile with
-              tool_default = Ask
+              tool_default = (if selected_native_profile then Deny else Ask)
             ; manifest_authorization = Require_grant
             }
         in
@@ -242,6 +242,7 @@ let with_shell_daemon f =
         in
         let developer =
           Developer_host_tests.developer_configuration
+            ~selected_native_profile
             ~authorize_native
             ~prepare_output:(function
               | Openai.Responses.Tool_output.Output.Text text ->
@@ -600,4 +601,68 @@ let%expect_test "hosted Developer shell approval waits keep exact native custody
        [%test_eq: int] (List.length !native_invocations) 4;
        printf "approved=1 denied=1 cancelled=1 post-wait-revoked=1\n");
   [%expect {| approved=1 denied=1 cancelled=1 post-wait-revoked=1 |}]
+;;
+
+let%expect_test "selected generic Deny retains exact Shell grant and Once approval" =
+  with_shell_daemon
+    ~selected_native_profile:true
+    (fun
+        ~env
+         ~root
+         ~owner
+         ~reader:_
+         ~foreign:_
+         ~owner_current:_
+         ~manifest_sha256
+         ~wire_limits:_
+         ~authorization_attempts
+         ~run_phase
+       ->
+       let marker = Eio.Path.(Eio.Stdenv.fs env / root / "approval-marker") in
+       run_phase (fun daemon ->
+         let connection, _transport, expected =
+           Developer_host_tests.open_document ~source:script daemon owner
+         in
+         let run_id = P.Id.Developer_run.create () in
+         let key = P.Idempotency_key.of_string "selected-shell-once" |> checked in
+         let submitted =
+           D.Developer.submit
+             daemon
+             ~actor:owner
+             ~run_id
+             ~key
+             ~request:(request ~expected ~input:"shell")
+             ~fresh_source:(Some (Document_script { connection }))
+           |> ok
+         in
+         let pending =
+           wait_pending
+             env
+             daemon
+             ~actor:owner
+             ~run_id
+             ~key
+             ~marker
+             ~authorization_attempts
+         in
+         ignore (assert_native_pending ~manifest_sha256 ~submitted pending);
+         assert (not (Eio.Path.is_file marker));
+         D.Developer.Approval.respond
+           daemon
+           ~actor:owner
+           ~run_id
+           ~id:(Pending.id pending)
+           Approve_once
+         |> ok;
+         let terminal =
+           D.Developer.await_terminal daemon ~actor:owner ~run_id ~key |> ok
+         in
+         (match Option.map (D.Developer.View.receipt terminal) ~f:R.value with
+          | Some (Live (Succeeded _)) -> ()
+          | result ->
+            raise_s [%sexp "selected Shell did not finish", (result : R.value option)]);
+         assert (Eio.Path.is_file marker);
+         [%test_eq: int] !authorization_attempts 0));
+  print_endline "selected generic Deny still used exact Shell grant and Once approval";
+  [%expect {| selected generic Deny still used exact Shell grant and Once approval |}]
 ;;

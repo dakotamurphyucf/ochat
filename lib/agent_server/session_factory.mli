@@ -136,6 +136,11 @@ module Developer_catalog : sig
     -> Agent_protocol.Id.Workspace_definition.t
     -> Agent_session.Workspace_definition.t option
 
+  (** Read the current compiled profile during the caller's catalog admission.
+      The ID is only selection data; this projection grants no run, source or
+      native permission and cannot replace the publication owner. *)
+  val find_profile : t -> string -> Agent_session.Permission_policy.t option
+
   val manifest_grants : t -> Operator_manifest_grant.t list
   val with_admission : t -> f:(unit -> 'a) -> ('a, Admission.Error.t) result
 end

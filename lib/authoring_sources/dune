@@ -219,6 +219,7 @@
     lib/shell_runtime/call_context.ml %{dep:../shell_runtime/call_context.ml}
     lib/agent_server/developer_approval_owner.ml %{dep:../agent_server/developer_approval_owner.ml}
     lib/agent_server/developer_command_lifecycle.ml %{dep:../agent_server/developer_command_lifecycle.ml}
+    lib/agent_server/developer_native_permission.ml %{dep:../agent_server/developer_native_permission.ml}
     lib/agent_server/developer_background_job_runner.ml %{dep:../agent_server/developer_background_job_runner.ml}
     lib/agent_server/developer_child_agent_runner.ml %{dep:../agent_server/developer_child_agent_runner.ml}
     lib/agent_server/developer_child_content_projection.ml %{dep:../agent_server/developer_child_content_projection.ml}

@@ -194,6 +194,7 @@ module Developer_catalog = struct
 
   let workspace_definitions = Catalogs.workspace_definitions
   let find_workspace = Catalogs.find_workspace
+  let find_profile = Catalogs.find_profile
   let manifest_grants = Catalogs.manifest_grants
   let with_admission = Catalogs.with_admission
 end
