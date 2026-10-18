@@ -19,6 +19,19 @@ val with_services
   -> (unit -> 'a)
   -> 'a
 
+(** Narrow an already active caller solely for a nested selected moderator
+    [Process.run]. There is no unbound fallback: a real parent [with_services]
+    must be live. Each inherited execution check uses the parent's exact
+    services and executor adapter, then obtains a fresh child admission with
+    [refresh], repeats the parent check after that possibly yielding refresh,
+    and ends with the returned nonyielding child check. A cached child
+    admission or a copied parent approval provider does not grant authority.
+    Both bindings expire at their respective lexical returns. *)
+val with_narrowed_check
+  :  refresh:(unit -> (unit -> (unit, string) result, string) result)
+  -> (unit -> 'a)
+  -> ('a, string) result
+
 (** Revalidate the active caller and apply its trusted executor adapter after
     binding the caller's execution scope. Nested scopes never inherit an outer
     adapter implicitly. Expired bindings fail without restoring owner services. *)

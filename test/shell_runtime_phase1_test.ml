@@ -244,6 +244,211 @@ let%expect_test "approval broker presents requests FIFO and cancellation resolve
     |}]
 ;;
 
+let%expect_test
+    "bounded approval broker releases capacity on decision timeout and cancellation"
+  =
+  Eio_main.run
+  @@ fun _env ->
+  Eio.Switch.run
+  @@ fun sw ->
+  let limits =
+    B.Limits.create ~max_pending:1 ~wait_seconds:10. |> Result.ok_or_failwith
+  in
+  printf
+    "huge-wait-rejected=%b\n"
+    (Result.is_error (B.Limits.create ~max_pending:1 ~wait_seconds:1e100));
+  let clock = Eio_mock.Clock.Mono.make () in
+  let first_posted, signal_first_posted = Eio.Promise.create () in
+  let timeout_posted, signal_timeout_posted = Eio.Promise.create () in
+  let cancel_posted, signal_cancel_posted = Eio.Promise.create () in
+  let close_posted, signal_close_posted = Eio.Promise.create () in
+  let completed = ref 0 in
+  let broker =
+    B.create_bounded
+      ~clock
+      ~limits
+      ~admit:(fun request ->
+        if String.equal request.id "unadmitted" then Error "source changed" else Ok ())
+      ~on_pending:(fun request ->
+        match request.id with
+        | "first" -> Eio.Promise.resolve signal_first_posted ()
+        | "timeout" -> Eio.Promise.resolve signal_timeout_posted ()
+        | "cancel" -> Eio.Promise.resolve signal_cancel_posted ()
+        | "close" -> Eio.Promise.resolve signal_close_posted ()
+        | _ -> failwith "unexpected approval publication")
+      ~on_finished:(fun _ -> Int.incr completed)
+      ()
+  in
+  let make_request id =
+    B.
+      { id
+      ; request = approval_request ()
+      ; runtime_id = "readonly"
+      ; manifest_sha256 = "manifest-sha256"
+      ; scopes = [ Chatmd_shell_spec.Shell_spec.Once ]
+      }
+  in
+  let first_response, resolve_first = Eio.Promise.create () in
+  Eio.Fiber.fork ~sw (fun () ->
+    Eio.Promise.resolve resolve_first (B.request broker (make_request "first")));
+  Eio.Promise.await first_posted;
+  B.request broker (make_request "second") |> print_approval_response;
+  B.request broker (make_request "unadmitted") |> print_approval_response;
+  ignore (B.respond broker ~id:"first" Approve_exact_session : (unit, B.error) result);
+  Eio.Promise.await first_response |> print_approval_response;
+  let timeout_result, resolve_timeout = Eio.Promise.create () in
+  Eio.Fiber.fork ~sw (fun () ->
+    Eio.Promise.resolve resolve_timeout (B.request broker (make_request "timeout")));
+  Eio.Promise.await timeout_posted;
+  Eio.Fiber.yield ();
+  Eio_mock.Clock.Mono.set_time clock (Mtime.of_uint64_ns 11_000_000_000L);
+  Eio.Promise.await timeout_result |> print_approval_response;
+  let controls = Eio.Stream.create 1 in
+  let cancelled, resolve_cancelled = Eio.Promise.create () in
+  Eio.Fiber.fork ~sw (fun () ->
+    let outcome =
+      match
+        Eio.Cancel.sub (fun cancel ->
+          Eio.Stream.add controls cancel;
+          B.request broker (make_request "cancel") |> ignore)
+      with
+      | () -> false
+      | exception Eio.Cancel.Cancelled _ -> true
+    in
+    Eio.Promise.resolve resolve_cancelled outcome);
+  let cancel = Eio.Stream.take controls in
+  Eio.Promise.await cancel_posted;
+  Eio.Cancel.cancel cancel Exit;
+  printf "cancelled=%b\n" (Eio.Promise.await cancelled);
+  let close_result, resolve_close = Eio.Promise.create () in
+  Eio.Fiber.fork ~sw (fun () ->
+    Eio.Promise.resolve resolve_close (B.request broker (make_request "close")));
+  Eio.Promise.await close_posted;
+  B.close broker;
+  Eio.Promise.await close_result |> print_approval_response;
+  printf "pending=%d finished=%d\n" (B.pending_count broker) !completed;
+  [%expect
+    {|
+    +mock time is now 11
+    huge-wait-rejected=true
+    deny:approval pending capacity was reached
+    deny:source changed
+    deny:the requested approval scope is not enabled for this runtime
+    deny:approval request timed out
+    cancelled=true
+    deny:approval broker was closed
+    pending=0 finished=4
+    |}]
+;;
+
+let%expect_test "approval cleanup cannot remove a reused pending ID" =
+  Eio_main.run
+  @@ fun _env ->
+  Eio.Switch.run
+  @@ fun sw ->
+  let first_entered, signal_first_entered = Eio.Promise.create () in
+  let release_first, signal_release_first = Eio.Promise.create () in
+  let second_entered, signal_second_entered = Eio.Promise.create () in
+  let first = ref true in
+  let broker =
+    B.create
+      ~on_pending:(fun _ ->
+        if !first
+        then (
+          first := false;
+          Eio.Promise.resolve signal_first_entered ();
+          Eio.Promise.await release_first)
+        else Eio.Promise.resolve signal_second_entered ())
+      ()
+  in
+  let request =
+    B.
+      { id = "reused"
+      ; request = approval_request ()
+      ; runtime_id = "readonly"
+      ; manifest_sha256 = "manifest-sha256"
+      ; scopes = [ Chatmd_shell_spec.Shell_spec.Once ]
+      }
+  in
+  let first_result, resolve_first = Eio.Promise.create () in
+  Eio.Fiber.fork ~sw (fun () ->
+    Eio.Promise.resolve resolve_first (B.request broker request));
+  Eio.Promise.await first_entered;
+  ignore (B.respond broker ~id:"reused" Approve_once : (unit, B.error) result);
+  let second_result, resolve_second = Eio.Promise.create () in
+  Eio.Fiber.fork ~sw (fun () ->
+    Eio.Promise.resolve resolve_second (B.request broker request));
+  Eio.Promise.await second_entered;
+  Eio.Promise.resolve signal_release_first ();
+  Eio.Promise.await first_result |> print_approval_response;
+  printf "new-pending=%d\n" (B.pending_count broker);
+  ignore (B.respond broker ~id:"reused" (Deny "second") : (unit, B.error) result);
+  Eio.Promise.await second_result |> print_approval_response;
+  [%expect
+    {|
+    approve
+    new-pending=1
+    deny:second
+    |}]
+;;
+
+let%expect_test "nested shell approval check requires and expires with its real parent" =
+  Eio_main.run
+  @@ fun _env ->
+  let module Context = Shell_runtime.Call_context in
+  let label = ref "before-refresh" in
+  let rotate_services = ref false in
+  let revoked = ref false in
+  let refresh () =
+    Eio.Fiber.yield ();
+    if !rotate_services then label := "after-refresh";
+    Ok (fun () -> Ok ())
+  in
+  printf
+    "unbound=%b\n"
+    (Result.is_error (Context.with_narrowed_check ~refresh (fun () -> ())));
+  let retained = ref None in
+  Context.with_services
+    (fun () ->
+       Ok
+         Context.
+           { session_id = !label
+           ; approval_store = A.create_store ()
+           ; approval_provider = B.Auto_deny
+           ; check = (fun () -> if !revoked then Error "parent revoked" else Ok ())
+           })
+    (fun () ->
+       let entered =
+         Context.with_narrowed_check ~refresh (fun () ->
+           rotate_services := true;
+           let current = Context.current () |> Result.ok_or_failwith in
+           let current = Option.value_exn current in
+           retained := Some current;
+           printf "selected-parent=%s\n" current.session_id;
+           current.check ())
+       in
+       printf "entered=%b\n" (Result.is_ok entered);
+       printf "expired=%b\n" (Result.is_error ((Option.value_exn !retained).check ()));
+       let invoked = ref false in
+       let denied =
+         Context.with_narrowed_check
+           ~refresh:(fun () ->
+             Eio.Fiber.yield ();
+             revoked := true;
+             Ok (fun () -> Ok ()))
+           (fun () -> invoked := true)
+       in
+       printf "revoked-before-effect=%b\n" (Result.is_error denied && not !invoked));
+  [%expect
+    {|
+    unbound=true
+    selected-parent=after-refresh
+    entered=true
+    expired=true
+    revoked-before-effect=true
+    |}]
+;;
+
 let rec implementation_files path =
   Eio.Path.read_dir path
   |> List.concat_map ~f:(fun name ->
