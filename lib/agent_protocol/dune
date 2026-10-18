@@ -52,6 +52,10 @@
   developer_common
   developer_approval
   developer_wire
+  developer_repl_wire_common
+  developer_repl_wire_result
+  developer_repl_wire_task
+  developer_repl_wire
   developer
   host_job
   job_progress
@@ -145,6 +149,9 @@
   stream_error
   inference_query)
  (private_modules
+  developer_repl_wire_common
+  developer_repl_wire_result
+  developer_repl_wire_task
   protocol_error
   developer_codec
   developer_route

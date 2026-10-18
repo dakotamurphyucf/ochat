@@ -235,6 +235,15 @@ original immutable snapshot under a separate byte and work bound; an expired
 detail cannot be reconstructed by retyping or running the statement. Neither
 a summary nor a reference grants authority to drive a Task.
 
+An admitted REPL keeps its selected captured source and compiler contract after
+the editor context or transport connection closes. Reconnecting with a current
+authorized actor can inspect the same instance and drive an issued Task in its
+live epoch. Editor edits do not replace the captured program. Current actor,
+selected-source policy, physical root and uploaded-source retention are checked
+again before new effects. Reset keeps the same captured selection; close and
+shutdown release its source owner after joined work. A fresh Create still needs
+its own current source selection.
+
 The selected REPL source retains its actual Standard compiler contract: a
 `Developer_tool_v1` selection admits the matching Task surface, including
 `Model.spawn`, while `One_off_v1` and `Tool_v1` keep their narrower surfaces.

@@ -249,6 +249,40 @@ module Source_selection : sig
       -> actor:Operator_authorization.t
       -> (unit, P.Error.t) result
   end
+
+  type selection = t
+
+  module Retained : sig
+    type t
+
+    (** Called only by the serialized REPL Create owner after authentic route
+        selection and before Instance publication. It fully checks the
+        original physical Source_selection, transfers its Authoring pin into
+        an independent Retained_selection where needed, then repeats final
+        source/actor/selected-contract admission. The returned selection has
+        the SAME immutable Prepared inventory, captured origin, selected
+        Standard contract and REPL fingerprint, but a distinct physical owner
+        whose full/final checks never fall back to the old connection pin.
+        Local roots retain their existing policy checker; Uploaded retains
+        the genuine Store publication pin; supplied bytes retain document
+        policy. A retained selection cannot be transferred a second time.
+        The caller owns release on every error/exception after this
+        function returns, including failure to publish the Instance. *)
+    val acquire
+      :  selection
+      -> actor:Operator_authorization.t
+      -> checkpoint:(unit -> unit)
+      -> (t, P.Error.t) result
+
+    (** Comparison-only projection of the exact retained selection that must
+        be installed in Epoch and Root.Source.Repl. It is not a grant without
+        original/current actor and fresh full/final checks. *)
+    val selection : t -> selection
+
+    (** Idempotent joined release, after active interpreter/Task/Root work
+        joins. Same-capture reset retains this owner unchanged. *)
+    val close_and_wait : t -> unit
+  end
 end
 
 (** Shared route acquisition below command-specific [Request]/[Candidate].

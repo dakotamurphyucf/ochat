@@ -2,6 +2,7 @@ open! Core
 module P = Agent_protocol
 module D = Document_schema
 module L = P.Developer_common.Limits
+module R = P.Developer_repl_wire.Limits
 
 let invalid message = Error (P.Error.invalid_request message)
 
@@ -95,7 +96,114 @@ let check_capabilities limits =
   |> Result.map ~f:ignore
 ;;
 
-let check ~policy ~(initialize : P.Initialize.Limits.t) ~budgets ~approval =
+let check_repl ~wire ~configuration ~budgets ~(initialize : P.Initialize.Limits.t) =
+  let owner = Developer_repl_epoch.Configuration.limits configuration in
+  let request = R.request wire in
+  let result = R.result wire in
+  let page = R.page wire in
+  let response = R.response wire in
+  let task_receipt = Developer_command_budgets.Configuration.receipt budgets in
+  let open Result.Let_syntax in
+  let%bind required_entries =
+    Developer_repl_epoch.Limits.registry_required_entries owner
+  in
+  let%bind source_request_bytes =
+    checked_mul (R.max_source_bytes wire) 6
+    |> Option.bind ~f:(fun escaped -> checked_add escaped 1_024)
+    |> Result.of_option
+         ~error:(P.Error.invalid_request "REPL request source bound overflowed")
+  in
+  let%bind result_bytes =
+    checked_mul (Developer_repl_epoch.Limits.max_receipt_bytes owner) 6
+    |> Option.bind ~f:(fun escaped ->
+      checked_mul (R.max_page_items wire) (R.max_reference_bytes wire)
+      |> Option.bind ~f:(fun references -> checked_add escaped references))
+    |> Option.bind ~f:(fun encoded -> checked_add encoded 2_048)
+    |> Result.of_option
+         ~error:(P.Error.invalid_request "REPL result source bound overflowed")
+  in
+  let max_summaries = Developer_repl_epoch.Limits.max_receipt_bytes owner / 64 in
+  let%bind summary_nodes =
+    checked_mul max_summaries 32
+    |> Option.bind ~f:(fun nodes ->
+      checked_mul (R.max_page_items wire) 2
+      |> Option.bind ~f:(fun references -> checked_add nodes references))
+    |> Option.bind ~f:(fun nodes -> checked_add nodes 64)
+    |> Result.of_option
+         ~error:(P.Error.invalid_request "REPL summary node bound overflowed")
+  in
+  let%bind summary_fields =
+    checked_mul max_summaries 24
+    |> Option.bind ~f:(fun fields -> checked_add fields (R.max_page_items wire))
+    |> Option.bind ~f:(fun fields -> checked_add fields 64)
+    |> Result.of_option
+         ~error:(P.Error.invalid_request "REPL summary field bound overflowed")
+  in
+  let%bind page_items_with_cursor =
+    checked_add (R.max_page_items wire) 1
+    |> Result.of_option ~error:(P.Error.invalid_request "REPL page item bound overflowed")
+  in
+  let%bind page_nodes =
+    checked_add (R.max_page_items wire) 8
+    |> Result.of_option ~error:(P.Error.invalid_request "REPL page node bound overflowed")
+  in
+  let%bind reference_page_bytes =
+    checked_mul (R.max_reference_bytes wire) page_items_with_cursor
+    |> Option.bind ~f:(fun encoded -> checked_add encoded 512)
+    |> Result.of_option
+         ~error:(P.Error.invalid_request "REPL reference page bound overflowed")
+  in
+  if required_entries > R.max_registry_entries wire
+  then invalid "REPL registry cannot retain installed Host tokens"
+  else if
+    R.max_reference_bytes wire < Developer_repl_epoch.Task_reference.max_encoded_bytes
+  then invalid "REPL wire cannot represent an authentic Task reference"
+  else if R.max_source_bytes wire > Developer_repl_epoch.Limits.max_source_bytes owner
+  then invalid "REPL source exceeds the installed Host source limit"
+  else if R.max_page_items wire > Developer_repl_epoch.Limits.max_task_origins owner
+  then invalid "REPL page count exceeds installed Task origins"
+  else if D.Limits.max_bytes request > initialize.max_request_bytes
+  then invalid "REPL request exceeds Initialize capacity"
+  else if D.Limits.max_bytes request < source_request_bytes
+  then invalid "REPL request cannot represent its admitted source"
+  else if D.Limits.max_bytes result < result_bytes
+  then invalid "REPL result cannot represent installed compact receipt"
+  else if
+    D.Limits.max_nodes result < summary_nodes
+    || D.Limits.max_fields result < summary_fields
+    || D.Limits.max_depth result < 6
+  then invalid "REPL result cannot represent installed summary structure"
+  else if
+    not
+      (at_least_plus (D.Limits.max_bytes result) (D.Limits.max_bytes task_receipt) 2_048
+       && at_least_plus (D.Limits.max_nodes result) (D.Limits.max_nodes task_receipt) 32
+       && at_least_plus (D.Limits.max_fields result) (D.Limits.max_fields task_receipt) 32
+       && at_least_plus (D.Limits.max_depth result) (D.Limits.max_depth task_receipt) 3)
+  then invalid "REPL result cannot represent a durable Task receipt"
+  else if R.max_output_bytes wire < Developer_repl_epoch.Limits.max_receipt_bytes owner
+  then invalid "REPL wire output cannot represent installed compact receipt"
+  else if D.Limits.max_bytes page < reference_page_bytes
+  then invalid "REPL page cannot represent its admitted references and cursor"
+  else if
+    D.Limits.max_nodes page < page_nodes
+    || D.Limits.max_fields page < 8
+    || D.Limits.max_depth page < 3
+  then invalid "REPL page cannot represent its admitted reference structure"
+  else if
+    not
+      (at_least_plus (D.Limits.max_bytes response) (D.Limits.max_bytes result) 1_024
+       && at_least_plus (D.Limits.max_nodes response) (D.Limits.max_nodes result) 16
+       && at_least_plus (D.Limits.max_fields response) (D.Limits.max_fields result) 16
+       && at_least_plus (D.Limits.max_depth response) (D.Limits.max_depth result) 2
+       && at_least_plus (D.Limits.max_bytes response) (D.Limits.max_bytes page) 1_024
+       && at_least_plus (D.Limits.max_nodes response) (D.Limits.max_nodes page) 16
+       && at_least_plus (D.Limits.max_fields response) (D.Limits.max_fields page) 16
+       && at_least_plus (D.Limits.max_depth response) (D.Limits.max_depth page) 2)
+  then invalid "REPL response cannot represent installed result framing"
+  else Ok ()
+;;
+
+let check ~policy ~(initialize : P.Initialize.Limits.t) ~budgets ~approval ~repl =
   let limits = Developer_endpoint.Policy.wire_limits policy in
   let request = L.request limits in
   let receipt = L.receipt limits in
@@ -113,5 +221,12 @@ let check ~policy ~(initialize : P.Initialize.Limits.t) ~budgets ~approval =
   then invalid "Developer response lacks View or approval-page framing capacity"
   else if Option.exists approval ~f:(fun broker -> not (page_covers_broker limits broker))
   then invalid "Developer approval policy cannot represent the installed broker"
-  else check_capabilities limits
+  else
+    let open Result.Let_syntax in
+    let%bind () = check_capabilities limits in
+    match Developer_endpoint.Policy.repl_wire_limits policy, repl with
+    | None, _ -> Ok ()
+    | Some _, None -> invalid "REPL wire requires the installed REPL Host"
+    | Some wire, Some configuration ->
+      check_repl ~wire ~configuration ~budgets ~initialize
 ;;

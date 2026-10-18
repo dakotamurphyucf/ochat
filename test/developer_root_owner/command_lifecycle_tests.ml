@@ -1139,3 +1139,93 @@ let%test_unit "a started Live command transfers one claim while Check remains ac
     L.close_and_wait lifecycle |> ok;
     Agent_server.Developer_root_owner.Registry.close_and_wait registry |> ok)
 ;;
+
+let%test_unit "retirement joins a body-exited command during durable terminal settlement" =
+  let body_exited = ref false in
+  let pause_used = ref false in
+  let settling, signal_settling = Eio.Promise.create () in
+  let release, signal_release = Eio.Promise.create () in
+  let checkpoint () =
+    if !body_exited && not !pause_used
+    then (
+      pause_used := true;
+      Eio.Promise.resolve signal_settling ();
+      Eio.Promise.await release)
+  in
+  F.with_store ~checkpoint (fun env sw store ->
+    let owner = F.owner "dvr_body_exited_retirement" 0 in
+    let run_id = owner.run_id in
+    let captured = F.capture () in
+    let handle, _ =
+      R.admit_epoch
+        store
+        ~owner
+        ~capture_fingerprint:(Chatml_developer_capture.fingerprint captured)
+        ~previous:None
+      |> ok
+    in
+    let disclosure, control = policy () in
+    let lifecycle =
+      L.create
+        ~sw
+        ~store
+        ~max_active_commands:2
+        ~disclosure
+        ~control
+        ~recovery:(recovery ())
+      |> ok
+    in
+    let actor = Operator_authorization.trusted_local F.principal in
+    let key = P.Idempotency_key.of_string "body-exited-retirement" |> ok in
+    let request_fingerprint =
+      Chatml_source.Digest.of_contents "body-exited-retirement" ~checkpoint:ignore
+    in
+    L.with_slot lifecycle ~run_id ~f:(fun slot ->
+      let open Result.Let_syntax in
+      let%bind () = L.ensure_startup_recovered lifecycle slot in
+      let%bind reserved =
+        L.reserve
+          lifecycle
+          slot
+          ~handle
+          ~key
+          ~kind:R.Command.Receipt.Kind.Check
+          ~request_fingerprint
+          ~admit:(fun () -> true)
+      in
+      L.launch lifecycle slot ~handle ~reserved ~f:(fun _active ~sw:_ ->
+        let value = receipt handle (R.Command.Receipt.Check Ready) in
+        body_exited := true;
+        Ok value))
+    |> ok
+    |> ignore;
+    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+      Eio.Promise.await settling);
+    let retired, signal_retired = Eio.Promise.create () in
+    Eio.Fiber.fork ~sw (fun () ->
+      Eio.Promise.resolve
+        signal_retired
+        (Result.try_with (fun () ->
+           L.with_slot lifecycle ~run_id ~f:(fun slot ->
+             L.retire_run lifecycle slot ~actor))));
+    Exn.protect
+      ~finally:(fun () ->
+        if not (Eio.Promise.is_resolved release)
+        then Eio.Promise.resolve signal_release ())
+      ~f:(fun () ->
+        Eio.Fiber.yield ();
+        assert (not (Eio.Promise.is_resolved retired));
+        Eio.Promise.resolve signal_release ();
+        match
+          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+            Eio.Promise.await retired)
+        with
+        | Ok (Ok ()) -> ()
+        | Ok (Error _) | Error _ -> failwith "retirement did not join settlement");
+    let terminal = L.await_terminal lifecycle ~actor ~run_id ~key |> ok in
+    (match Option.map (L.View.receipt terminal) ~f:R.Command.Receipt.value with
+     | Some (Check Ready) -> ()
+     | None | Some (Check _ | Fixture _ | Live _ | Task _) ->
+       failwith "late retirement changed the settled Check result");
+    L.close_and_wait lifecycle |> ok)
+;;

@@ -54,6 +54,55 @@ module Candidate_pin : sig
   val check_now : t -> actor:Operator_authorization.t -> (unit, Error.t) result
 end
 
+module Retained_selection : sig
+  type t
+
+  (** Transfer exactly one authenticated Candidate_pin from its still-current
+      editor context into a run-owned selection. The caller has completed the
+      source/contract full check; this function repeats the physical pin,
+      original/current actor and context policy checks before transfer and
+      after any yielding upload verification. A Host project/document owner
+      reserves one Source_host context slot before yielding; an Uploaded
+      selection retains its actual Store-backed Context_capture; a supplied
+      document retains its original actor and policy. Only the selected
+      bounded immutable context view/identity is copied: no whole Core ledger,
+      unrelated cache head, Current token, editor connection or negotiation
+      survives as execution authority. Failure or cancellation releases any
+      newly reserved slot without changing the editor context. *)
+  val acquire
+    :  Candidate_pin.t
+    -> actor:Operator_authorization.t
+    -> checkpoint:(unit -> unit)
+    -> (t, Error.t) result
+
+  (** Full check of the retained ORIGINAL selected source and immutable
+      context-policy snapshot plus current actor. The snapshot is bounded by
+      the creating Authoring context's admitted source/view limits. Ordinary
+      editor edits/replacement/close do not reinterpret it. Genuine root,
+      supplied policy, upload Store pin/deadline and daemon lifetime remain
+      current requirements. May yield for the upload Store proof. *)
+  val check_current
+    :  t
+    -> actor:Operator_authorization.t
+    -> checkpoint:(unit -> unit)
+    -> (unit, Error.t) result
+
+  (** Immediate nonyielding exact physical-owner/actor suffix after the latest
+      full check. Any intervening yield requires a fresh full check unless
+      the caller's separate retained Store custody proves that yield cannot
+      change the pin. It repeats current policy and the upload pin/deadline
+      comparison; an old full check cannot authorize an effect after
+      revocation. The upper
+      Source_selection.Shared checked receipt binds each full check to the
+      same physical retained selection and actor, including concurrent reads. *)
+  val check_now : t -> actor:Operator_authorization.t -> (unit, Error.t) result
+
+  (** Idempotent joined release. Ordinary connection close never calls it;
+      the retained REPL instance releases after its callbacks and Root-owned
+      work join, or Create releases on every failed publication path. *)
+  val close_and_wait : t -> unit
+end
+
 (** [feature] chooses the negotiated sibling; absent means Core authoring.
     [final_check] adds a bounded nonyielding current host selection check
     immediately before the final gate, after the ordinary actor/source/context

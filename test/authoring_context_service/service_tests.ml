@@ -748,6 +748,53 @@ let%test_unit "host root read is fresh while project context remains captured" =
                   shared_selection
                   ~checked:shared_a
                   ~actor:foreign));
+           let open_extra_source () =
+             Agent_server.Authoring_source_host.Context.open_root
+               source_host
+               ~actor
+               ~root:static_root
+               ~dependency_roots:[]
+               ~project:(Source.Portable_path.create "chatml.project.json" |> ok)
+               ~selection:
+                 (Chatml_project.Selection.Entry { name = "main"; environment = None })
+               ~contract:
+                 (Chatml.Chatml_compiler_contract.for_target One_off_v1 ~checkpoint:Fn.id)
+           in
+           let occupied_at_checkpoint = ref false in
+           let cancelled = Failure "cancel retained source after slot acquisition" in
+           (match
+              Eio.Cancel.sub (fun cancel ->
+                let interrupt_after_retention () =
+                  match open_extra_source () with
+                  | Ok extra ->
+                    Agent_server.Authoring_source_host.Context.close_and_wait extra
+                  | Error Agent_server.Authoring_source_host.Error.Context_limit ->
+                    occupied_at_checkpoint := true;
+                    Eio.Cancel.cancel cancel cancelled;
+                    Eio.Fiber.check ()
+                  | Error _ -> failwith "source slot probe failed"
+                in
+                Selection.Retained.acquire
+                  shared_selection
+                  ~actor
+                  ~checkpoint:interrupt_after_retention)
+            with
+            | exception Eio.Cancel.Cancelled reason ->
+              assert (phys_equal reason cancelled)
+            | Ok _ | Error _ -> failwith "retention did not cancel at occupied slot");
+           assert !occupied_at_checkpoint;
+           let released_slot = open_extra_source () |> ok in
+           Agent_server.Authoring_source_host.Context.close_and_wait released_slot;
+           let retained =
+             Selection.Retained.acquire shared_selection ~actor ~checkpoint:ignore |> ok
+           in
+           assert (
+             Result.is_error
+               (Selection.Retained.acquire shared_selection ~actor ~checkpoint:ignore));
+           let retained_selection = Selection.Retained.selection retained in
+           let retained_fingerprint =
+             Selection.repl_root_fingerprint retained_selection
+           in
            let analyze =
              S.Semantic.create
                ~owner:service
@@ -1008,6 +1055,12 @@ let%test_unit "host root read is fresh while project context remains captured" =
            assert (
              Result.is_error
                (Selection.Shared.check_now shared_selection ~checked:shared_a ~actor));
+           assert (
+             Result.is_error
+               (Selection.Shared.check_current
+                  retained_selection
+                  ~actor
+                  ~checkpoint:ignore));
            (match project_assistance expected script_source with
             | Error S.Error.Selection_unavailable -> ()
             | Ok _ | Error _ ->
@@ -1111,6 +1164,23 @@ let%test_unit "host root read is fresh while project context remains captured" =
            assert (
              Result.is_error
                (Selection.Shared.check_now shared_selection ~checked:shared_a ~actor));
+           let retained_checked =
+             Selection.Shared.check_current retained_selection ~actor ~checkpoint:ignore
+             |> ok
+           in
+           Selection.Shared.check_now retained_selection ~checked:retained_checked ~actor
+           |> ok;
+           assert (
+             Chatml_source.Digest.equal
+               retained_fingerprint
+               (Selection.repl_root_fingerprint retained_selection));
+           Selection.Retained.close_and_wait retained;
+           assert (
+             Result.is_error
+               (Selection.Shared.check_current
+                  retained_selection
+                  ~actor
+                  ~checkpoint:ignore));
            [%test_eq: int]
              (S.For_testing.provisional_count
                 service

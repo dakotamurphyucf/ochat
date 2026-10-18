@@ -35,6 +35,15 @@ val dispatch_developer
   -> Agent_protocol.Developer_wire.Request.t
   -> (Agent_protocol.Developer_wire.Response.t, Agent_protocol.Error.t) result
 
+(** The closed REPL family routes through the same installed Developer
+    service, actor/connection and daemon admission as envelope dispatch. *)
+val dispatch_developer_repl
+  :  t
+  -> ?actor:Operator_authorization.t
+  -> context:Connection_context.t
+  -> Agent_protocol.Developer_repl_wire.Request.t
+  -> (Agent_protocol.Developer_repl_wire.Response.t, Agent_protocol.Error.t) result
+
 val dispatch_command
   :  t
   -> ?actor:Operator_authorization.t

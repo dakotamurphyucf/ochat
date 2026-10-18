@@ -74,7 +74,8 @@ let%test_module "Developer portable framing admission" =
            ~policy
            ~initialize:Daemon.default_options.protocol_limits
            ~budgets
-           ~approval:(Some broker));
+           ~approval:(Some broker)
+           ~repl:None);
       let larger_host_budget =
         must
           (Developer_command_budgets.Configuration.create
@@ -90,7 +91,8 @@ let%test_module "Developer portable framing admission" =
              ~policy
              ~initialize:Daemon.default_options.protocol_limits
              ~budgets:larger_host_budget
-             ~approval:(Some broker)));
+             ~approval:(Some broker)
+             ~repl:None));
       let command_id = must (P.Developer_command_id.of_string (String.make 256 '\001')) in
       let run_id = must (P.Id.Developer_run.of_string (id96 "dvr")) in
       let job_id = must (P.Id.Job.of_string (id96 "job")) in
@@ -195,6 +197,160 @@ let%test_module "Developer portable framing admission" =
       assert (response_nodes - page_nodes <= 8);
       assert (response_fields - page_fields <= 8);
       assert (response_depth - page_depth <= 2)
+    ;;
+
+    let repl_configuration () =
+      let sites =
+        Chatml.Chatml_syntax_sites.Limits.create ~max_sites:4096 ~max_name_bytes:16384
+        |> Or_error.ok_exn
+      in
+      let parse =
+        Chatml.Chatml_parse.Submission.Limits.create
+          ~max_source_bytes:4096
+          ~max_tokens:4096
+          ~max_work_steps:100_000
+          ~sites
+        |> Or_error.ok_exn
+      in
+      let display =
+        Chatml_typechecker.Type_snapshot.Limits.create
+          ~max_nodes:4096
+          ~max_edges:4096
+          ~max_label_bytes:16384
+        |> Or_error.ok_exn
+      in
+      let root_copy =
+        Chatml_typechecker.Repl_type_roots.Limits.create
+          ~max_bindings:128
+          ~max_type_roots:256
+          ~max_type_nodes:4096
+          ~max_variable_cells:1024
+          ~max_type_edges:4096
+          ~max_copy_work:100_000
+          ~max_copy_depth:128
+          ~max_name_work:100_000
+          ~max_name_bytes:16384
+        |> Or_error.ok_exn
+      in
+      let typing_limits =
+        Chatml_repl_typing.Limits.create
+          ~parse
+          ~display
+          ~max_display_name_bytes:4096
+          ~max_statements:16
+          ~root_copy
+        |> Or_error.ok_exn
+      in
+      let evaluator_limits =
+        Chatml_repl_execution.Limits.create
+          ~max_preview_bytes:4096
+          ~max_preview_nodes:1024
+          ~max_preview_depth:16
+          ~max_diagnostic_bytes:1024
+          ~max_retained_tasks:8
+        |> Or_error.ok_exn
+      in
+      let owner_limits =
+        Developer_repl_epoch.Limits.create
+          ~max_instances:2
+          ~max_keys_per_instance:4
+          ~max_submissions_per_epoch:8
+          ~max_source_bytes:4096
+          ~max_receipt_bytes:8192
+          ~max_total_receipt_bytes:16384
+          ~max_total_type_detail_bytes:(1024 * 1024)
+          ~max_task_origins:8
+          ~max_reference_page_bytes:4096
+        |> Or_error.ok_exn
+      in
+      Developer_repl_epoch.Configuration.create
+        ~scope_limits:
+          (Chatml_configured_lookup.Repl_scope.Limits.create
+             ~max_snippets:16
+             ~max_identity_bytes:4096
+           |> Or_error.ok_exn)
+        ~root_limits:
+          (Chatml_dependency_session.Roots.Limits.create
+             ~max_checked_modules:16
+             ~max_edges:64
+             ~max_dependency_depth:16
+           |> Or_error.ok_exn)
+        ~typing_limits
+        ~evaluator_limits
+        ~execution_policy:(Bounded Chatml_execution.default_limits)
+        ~type_display_limits:
+          (Chatml_type_display.Limits.create
+             ~max_nodes:4096
+             ~max_edges:8192
+             ~max_depth:32
+             ~max_work_steps:131072
+             ~max_text_bytes:4096
+             ~max_output_bytes:32768
+           |> Or_error.ok_exn)
+        ~limits:owner_limits
+      |> Or_error.ok_exn
+    ;;
+
+    let%test_unit "REPL installation rejects structurally unusable pages and results" =
+      let repl = repl_configuration () in
+      let budgets =
+        must
+          (Developer_command_budgets.Configuration.create
+             ~compilation:(Bounded Chatml_compilation.default_limits)
+             ~max_dependency_depth:32
+             ~execution:Chatml_execution.default_limits
+             ~max_output_bytes:1024
+             ~receipt:(L.receipt limits))
+      in
+      let wire
+            ?(page_items = 8)
+            ?(page_bytes = 16 * 1024)
+            ?(result_nodes = 8192)
+            ?(response_nodes = 8300)
+            ()
+        =
+        must
+          (P.Developer_repl_wire.Limits.create
+             ~request:(bound ~bytes:(128 * 1024) ~depth:24 ~fields:1024 ~nodes:2048)
+             ~result:
+               (bound ~bytes:(2 * 1024 * 1024) ~depth:20 ~fields:8192 ~nodes:result_nodes)
+             ~page:(bound ~bytes:page_bytes ~depth:8 ~fields:128 ~nodes:128)
+             ~response:
+               (bound
+                  ~bytes:(3 * 1024 * 1024)
+                  ~depth:24
+                  ~fields:8300
+                  ~nodes:response_nodes)
+             ~max_source_bytes:4096
+             ~max_reference_bytes:384
+             ~max_output_bytes:8192
+             ~max_page_items:page_items
+             ~max_event_bytes:4096
+             ~max_registry_entries:32)
+      in
+      let admitted wire =
+        let policy =
+          must
+            (Developer_endpoint.Policy.create
+               ~wire_limits:limits
+               ~max_connections:1
+               ~max_watches_per_connection:2
+               ~max_pending_hints_per_connection:2)
+          |> fun policy -> must (Developer_endpoint.Policy.with_repl_wire policy wire)
+        in
+        Developer_portable_admission.check
+          ~policy
+          ~initialize:Daemon.default_options.protocol_limits
+          ~budgets
+          ~approval:None
+          ~repl:(Some repl)
+        |> Result.is_ok
+      in
+      assert (admitted (wire ()));
+      assert (not (admitted (wire ~page_items:9 ())));
+      assert (not (admitted (wire ~page_bytes:1024 ())));
+      assert (not (admitted (wire ~result_nodes:4100 ())));
+      assert (not (admitted (wire ~response_nodes:8192 ())))
     ;;
   end)
 ;;

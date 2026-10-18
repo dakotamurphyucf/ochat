@@ -25,6 +25,15 @@ module Policy : sig
 
   val wire_limits : t -> P.Developer_common.Limits.t
   val change_limits : t -> Developer_change_hub.Limits.t
+
+  (** Opt in REPL methods on this SAME installed Developer Host/Authoring
+      pair and physical change hub. No second endpoint or connection pump is
+      installed. Daemon admission checks the REPL bounds against the actual
+      Host Epoch/evaluator, Initialize and response envelope before exposing
+      any method. *)
+  val with_repl_wire : t -> P.Developer_repl_wire.Limits.t -> (t, P.Error.t) result
+
+  val repl_wire_limits : t -> P.Developer_repl_wire.Limits.t option
 end
 
 (** [wire_limits] are the effective installed ceilings, admitted against the
@@ -40,6 +49,10 @@ val create
   -> (t, P.Error.t) result
 
 val limits : t -> P.Developer_common.Limits.t
+
+(** Installed REPL bounds for transport-neutral request decoding. Absent
+    REPL installation rejects before any source or Host operation. *)
+val repl_limits : t -> (P.Developer_repl_wire.Limits.t, P.Error.t) result
 
 (** Actual installed families, filtered again by the physical connection's
     current negotiated features. Codec-supported methods alone are never
@@ -87,6 +100,23 @@ val handle
     read versus response/control policy. A decoded ID or pending DTO never
     supplies authority. *)
 val encode_response : t -> P.Developer_wire.Response.t -> (Jsonaf.t, P.Error.t) result
+
+(** The separate closed REPL method family uses the same current actor,
+    Authoring negotiation and Host. The private registry maps comparison IDs
+    back to exact physical Instance/Epoch/Revision tokens. Create and Task
+    historical-key lookup precede fresh source/ID resolution; a decoded ID
+    alone never grants read, control or Task execution. *)
+val handle_repl
+  :  t
+  -> ?actor:Operator_authorization.t
+  -> connection:Connection_context.t
+  -> P.Developer_repl_wire.Request.t
+  -> (P.Developer_repl_wire.Response.t, P.Error.t) result
+
+val encode_repl_response
+  :  t
+  -> P.Developer_repl_wire.Response.t
+  -> (Jsonaf.t, P.Error.t) result
 
 val close_connection_and_wait : t -> Connection_context.t -> (unit, P.Error.t) result
 val close_and_wait : t -> (unit, P.Error.t) result

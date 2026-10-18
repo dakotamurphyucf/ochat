@@ -693,3 +693,206 @@ let%test_unit "routes and submissions roundtrip under the effective request poli
          ~requested_execution:None
          ~requested_max_output_bytes:None))
 ;;
+
+let%test_unit "REPL Task codec preserves all phases and current nested bounds" =
+  let module W = P.Developer_repl_wire in
+  let wire max_output_bytes =
+    must
+      (W.Limits.create
+         ~request:(bound 2048)
+         ~result:(bound 4096)
+         ~page:(bound 2048)
+         ~response:(bound 8192)
+         ~max_source_bytes:1024
+         ~max_reference_bytes:384
+         ~max_output_bytes
+         ~max_page_items:4
+         ~max_event_bytes:512
+         ~max_registry_entries:16)
+  in
+  let ample = wire 512 in
+  let tight = wire 256 in
+  let owner =
+    must
+      (Dev.Owner.create
+         ~host_id:(P.Id.Server.create_with deterministic)
+         ~run_id:(P.Id.Developer_run.create_with deterministic)
+         ~epoch:1
+         ~principal_id:(P.Id.Principal.create_with deterministic))
+  in
+  let digest = Chatml_source.Digest.of_contents "task" ~checkpoint:Fn.id in
+  let command_id = must (Dev.Command_id.of_string "task-command") in
+  let key = must (P.Idempotency_key.of_string "task-key") in
+  let create limits phase =
+    W.Task_view.create
+      ~limits
+      ~command_id
+      ~owner
+      ~key
+      ~phase
+      ~request_fingerprint:digest
+      ~capture_fingerprint:digest
+  in
+  let phases =
+    [ W.Task_view.Reserved
+    ; Waiting_permission
+    ; Execution_started
+    ; Terminal { execution_started = true; outcome = Succeeded (Some "done") }
+    ; Terminal { execution_started = false; outcome = Interrupted }
+    ; Terminal { execution_started = true; outcome = Cancelled }
+    ; Terminal
+        { execution_started = true
+        ; outcome = Failed { error = P.Error.invalid_request "failed"; diagnostic = None }
+        }
+    ; Terminal
+        { execution_started = true
+        ; outcome =
+            Limited { error = P.Error.invalid_request "limited"; diagnostic = None }
+        }
+    ]
+  in
+  List.iter phases ~f:(fun phase ->
+    let view = must (create ample phase) in
+    let decoded = must (W.Task_view.of_json ~limits:ample (W.Task_view.to_json view)) in
+    assert (
+      String.equal
+        (Jsonaf.to_string (W.Task_view.to_json view))
+        (Jsonaf.to_string (W.Task_view.to_json decoded))));
+  assert (
+    Result.is_error
+      (create ample (Terminal { execution_started = false; outcome = Succeeded None })));
+  let broad_diagnostic =
+    must
+      (W.Task_view.Diagnostic.create
+         ~limits:ample
+         ~code:"runtime"
+         ~message:(String.make 300 'x')
+         ~location:None)
+  in
+  assert (
+    Result.is_error
+      (create
+         tight
+         (Terminal
+            { execution_started = true
+            ; outcome =
+                Limited
+                  { error = P.Error.invalid_request "limited"
+                  ; diagnostic = Some broad_diagnostic
+                  }
+            })));
+  let broad_view =
+    must
+      (create
+         ample
+         (Terminal
+            { execution_started = true
+            ; outcome =
+                Limited
+                  { error = P.Error.invalid_request "limited"
+                  ; diagnostic = Some broad_diagnostic
+                  }
+            }))
+  in
+  assert (
+    Result.is_error (W.Task_view.of_json ~limits:tight (W.Task_view.to_json broad_view)));
+  let instance = must (W.Wire_id.Instance.of_string "ri_test") in
+  let epoch = must (W.Wire_id.Epoch.of_string "re_test") in
+  let revision = must (W.Wire_id.Revision.of_string "rv_test") in
+  let current = W.Current_epoch.create ~instance ~epoch ~key in
+  List.iter [ -1; Int.max_value ] ~f:(fun index ->
+    assert (
+      Result.is_error
+        (W.Inspect.create
+           ~limits:ample
+           ~current
+           ~statement_index:0
+           ~selector:(W.Type_selector.Binding_index index)
+           ~max_bytes:256)));
+  let source =
+    Chatml_source.Id.create
+      ~package_namespace:"repl-test"
+      ~relative_path:"imported.chatml"
+    |> Or_error.ok_exn
+  in
+  let location =
+    must
+      (W.Submission.Location.create
+         ~limits:ample
+         ~source
+         ~digest
+         ~start_byte:1400
+         ~end_byte:1500)
+  in
+  assert (Int.equal (W.Submission.Location.end_byte location) 1500);
+  let summary =
+    must
+      (W.Submission.Summary.create
+         ~limits:ample
+         ~outcome:Succeeded
+         ~value_preview:None
+         ~diagnostic:None
+         ~expression_type:None
+         ~binding_count:0
+         ~task_retention:Not_a_task
+         ~text_limited:false)
+  in
+  let summaries = List.init 5 ~f:(fun _ -> summary) in
+  let submission =
+    must
+      (W.Submission.create
+         ~limits:ample
+         ~status:Finished
+         ~details:Available
+         ~completed_statements:5
+         ~statement_count:5
+         ~epoch
+         ~revision
+         ~summaries
+         ~task_reference_count:0
+         ~task_references:[])
+  in
+  ignore (must (W.Submission.of_json ~limits:ample (W.Submission.to_json submission)));
+  let narrow_result =
+    must (D.Limits.create ~max_bytes:4096 ~max_depth:32 ~max_fields:256 ~max_nodes:32)
+  in
+  let narrow_summaries =
+    must
+      (W.Limits.create
+         ~request:(bound 2048)
+         ~result:narrow_result
+         ~page:(bound 2048)
+         ~response:(bound 8192)
+         ~max_source_bytes:1024
+         ~max_reference_bytes:384
+         ~max_output_bytes:512
+         ~max_page_items:4
+         ~max_event_bytes:512
+         ~max_registry_entries:16)
+  in
+  assert (
+    Result.is_error
+      (W.Submission.create
+         ~limits:narrow_summaries
+         ~status:Finished
+         ~details:Available
+         ~completed_statements:5
+         ~statement_count:5
+         ~epoch
+         ~revision
+         ~summaries
+         ~task_reference_count:0
+         ~task_references:[]));
+  assert (
+    Result.is_error
+      (W.Submission.of_json ~limits:narrow_summaries (W.Submission.to_json submission)));
+  assert (
+    Result.is_error
+      (W.Task_submit.create
+         ~limits:ample
+         ~key
+         ~reference:(String.make 385 'r')
+         ~requested_execution:None
+         ~requested_max_output_bytes:None
+         ~fresh_epoch:None))
+;;

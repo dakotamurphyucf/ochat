@@ -164,6 +164,23 @@ val check_root_current
   -> Root.t
   -> (unit, Error.t) Result.t
 
+module Retained_owner : sig
+  type t
+
+  (** A separate, counted Source_host context minted from an authenticated
+      project/document context. It retains the same physical root set or
+      supplied-document policy and original actor, but no source bytes, reader,
+      parser, editor connection or context-generation lease. Editor close does
+      not close it; Source_host shutdown does. Current original/request actor,
+      root and document policy are checked on every admission. *)
+  val check_current : t -> actor:Operator_authorization.t -> (unit, Error.t) Result.t
+
+  (** Idempotent joined release of this one retained context slot. Only the
+      owning REPL instance may close it, after its statement/Task callbacks
+      and rooted work have joined. *)
+  val close_and_wait : t -> unit
+end
+
 module Context : sig
   (** Connection-scoped source selection, not a runtime workspace or prepared
       editor overlay. Stores the original actor and selected root; no native FD
@@ -187,6 +204,16 @@ module Context : sig
       and after yielding work. An async handler separately bounds its request
       lifetime until that final check. *)
   val check_current : t -> actor:Operator_authorization.t -> (unit, Error.t) Result.t
+
+  (** Nonyielding, capacity-checked transfer of the authenticated root set to
+      a separately counted retained owner. The original editor Context stays
+      live and unchanged on success or failure. This does not recapture source
+      or produce a read capability. The caller must still prove its exact
+      selected graph/contract before publishing a REPL instance. *)
+  val retain_owner
+    :  t
+    -> actor:Operator_authorization.t
+    -> (Retained_owner.t, Error.t) Result.t
 
   (** Select only a member of the already granted root. [project] is a validated
       portable project declaration member, [selection] is the existing project
@@ -615,6 +642,16 @@ module Document_context : sig
       Concurrent pure reads need no activity gate; an async handler must retain
       its own bounded request lifetime until the final check. *)
   val check_current : t -> actor:Operator_authorization.t -> (unit, Error.t) Result.t
+
+  (** Retain the same physical root or supplied policy and original actor in
+      one separately charged Source_host slot. The captured source ID/bytes
+      remain in the caller's immutable Prepared inventory; no new source ID,
+      read or parse occurs here. Closing the editor context leaves this owner
+      live until explicit release or Source_host shutdown. *)
+  val retain_owner
+    :  t
+    -> actor:Operator_authorization.t
+    -> (Retained_owner.t, Error.t) Result.t
 
   (** Bind one exact portable member of an explicitly selected read root.
       Reuse the host's existing root policy, original actor and joined

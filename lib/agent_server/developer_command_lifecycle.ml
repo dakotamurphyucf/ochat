@@ -1287,11 +1287,15 @@ let launch t (slot : slot) ~handle ~reserved ~f =
               ~f:(fun () ->
                 let outcome =
                   try
-                    Eio.Cancel.sub (fun cancel ->
-                      active.cancel <- Some cancel;
-                      if active.cancel_requested then Eio.Cancel.cancel cancel Exit;
-                      Eio.Switch.run (fun sw ->
-                        Eio.Fiber.with_binding active_key active (fun () -> f active ~sw)))
+                    Exn.protect
+                      ~finally:(fun () -> active.cancel <- None)
+                      ~f:(fun () ->
+                        Eio.Cancel.sub (fun cancel ->
+                          active.cancel <- Some cancel;
+                          if active.cancel_requested then Eio.Cancel.cancel cancel Exit;
+                          Eio.Switch.run (fun sw ->
+                            Eio.Fiber.with_binding active_key active (fun () ->
+                              f active ~sw))))
                   with
                   | exn ->
                     active.private_failure

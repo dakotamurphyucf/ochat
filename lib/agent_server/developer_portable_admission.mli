@@ -9,4 +9,5 @@ val check
   -> initialize:Agent_protocol.Initialize.Limits.t
   -> budgets:Developer_command_budgets.Configuration.t
   -> approval:Developer_approval_owner.Limits.t option
+  -> repl:Developer_repl_epoch.Configuration.t option
   -> (unit, Agent_protocol.Error.t) result

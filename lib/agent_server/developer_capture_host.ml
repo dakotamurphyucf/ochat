@@ -10,6 +10,17 @@ module Captured = Chatml_source
 module Owner = Authoring_context_service_core
 module Scope = Authoring_context_owner
 
+exception Cleanup_invariant of exn * exn
+
+let reraise_after_cleanup original backtrace ~cleanup =
+  match cleanup () with
+  | () -> Stdlib.Printexc.raise_with_backtrace original backtrace
+  | exception cleanup_failure ->
+    Stdlib.Printexc.raise_with_backtrace
+      (Cleanup_invariant (original, cleanup_failure))
+      backtrace
+;;
+
 let error code message = P.Error.create code ~message ~retryable:false ()
 let unavailable () = error P.Error.Workspace_unavailable "developer source unavailable"
 let stale () = error P.Error.Conflict "developer capture changed"
@@ -336,6 +347,15 @@ let selected_for_pair ~original_actor ~actor ~selected select =
 ;;
 
 module Source_selection = struct
+  type retained_owner =
+    { full :
+        actor:Operator_authorization.t
+        -> checkpoint:(unit -> unit)
+        -> (unit, P.Error.t) result
+    ; now : actor:Operator_authorization.t -> (unit, P.Error.t) result
+    ; close_and_wait : unit -> unit
+    }
+
   type t =
     { prepared : Prepared.t
     ; origin : Capture.Origin.t
@@ -347,6 +367,10 @@ module Source_selection = struct
         -> checkpoint:(unit -> unit)
         -> (unit, P.Error.t) result
     ; owner_now : actor:Operator_authorization.t -> (unit, P.Error.t) result
+    ; retain :
+        actor:Operator_authorization.t
+        -> checkpoint:(unit -> unit)
+        -> (retained_owner, P.Error.t) result
     ; selection : Operator_authorization.t -> Selected_contract.t option
     ; repl_root_fingerprint : Captured.Digest.t
     ; domain : int
@@ -456,6 +480,69 @@ module Source_selection = struct
       else validate_now t ~actor
     ;;
   end
+
+  type selection = t
+
+  module Retained = struct
+    type t =
+      { selection : selection
+      ; close_owner : unit -> unit
+      ; closed : bool ref
+      ; mutable released : bool
+      }
+
+    let selection t = t.selection
+
+    let close_and_wait t =
+      t.closed := true;
+      if not t.released
+      then (
+        Eio.Cancel.protect t.close_owner;
+        t.released <- true)
+    ;;
+
+    let acquire source ~actor ~checkpoint =
+      let open Result.Let_syntax in
+      let%bind checked = Shared.check_current source ~actor ~checkpoint in
+      let%bind () = Shared.check_now source ~checked ~actor in
+      let%bind owner = source.retain ~actor ~checkpoint in
+      let closed = ref false in
+      let selection =
+        { source with
+          full_owner =
+            (fun ~actor ~checkpoint ->
+              if !closed
+              then Error (stale ())
+              else (
+                let%bind () = owner.full ~actor ~checkpoint in
+                if !closed then Error (stale ()) else Ok ()))
+        ; owner_now =
+            (fun ~actor -> if !closed then Error (stale ()) else owner.now ~actor)
+        ; retain = (fun ~actor:_ ~checkpoint:_ -> Error (stale ()))
+        ; busy = false
+        ; checked_nonce = None
+        }
+      in
+      let retained =
+        { selection; close_owner = owner.close_and_wait; closed; released = false }
+      in
+      let outcome =
+        try
+          let%bind checked = Shared.check_current selection ~actor ~checkpoint in
+          let%map () = Shared.check_now selection ~checked ~actor in
+          retained
+        with
+        | exn ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          reraise_after_cleanup exn backtrace ~cleanup:(fun () -> close_and_wait retained)
+      in
+      match outcome with
+      | Ok _ as success -> success
+      | Error _ as error ->
+        close_and_wait retained;
+        error
+    ;;
+  end
 end
 
 let make_source_selection
@@ -466,6 +553,7 @@ let make_source_selection
       ~selected
       ~full_owner
       ~owner_now
+      ~retain
       ~selection
   =
   let repl_root_identity =
@@ -483,6 +571,7 @@ let make_source_selection
    ; selected
    ; full_owner
    ; owner_now
+   ; retain
    ; selection
    ; repl_root_fingerprint =
        Captured.Digest.of_contents repl_root_identity ~checkpoint:(fun () -> ())
@@ -491,6 +580,26 @@ let make_source_selection
    ; checked_nonce = None
    }
    : Source_selection.t)
+;;
+
+let retain_local_owner ~full_owner ~owner_now ~actor:_ ~checkpoint:_ =
+  Ok { Source_selection.full = full_owner; now = owner_now; close_and_wait = Fn.id }
+;;
+
+let retain_authoring_owner pin ~actor ~checkpoint =
+  Scope.Retained_selection.acquire pin ~actor ~checkpoint
+  |> Result.map_error ~f:owner_error
+  |> Result.map ~f:(fun owner ->
+    { Source_selection.full =
+        (fun ~actor ~checkpoint ->
+          Scope.Retained_selection.check_current owner ~actor ~checkpoint
+          |> Result.map_error ~f:owner_error)
+    ; now =
+        (fun ~actor ->
+          Scope.Retained_selection.check_now owner ~actor
+          |> Result.map_error ~f:owner_error)
+    ; close_and_wait = (fun () -> Scope.Retained_selection.close_and_wait owner)
+    })
 ;;
 
 module Candidate = struct
@@ -641,6 +750,7 @@ let prepare_local_project_selection
        ~selected
        ~full_owner
        ~owner_now
+       ~retain:(retain_local_owner ~full_owner ~owner_now)
        ~selection:select)
 ;;
 
@@ -723,6 +833,7 @@ let prepare_local_source_selection
        ~selected
        ~full_owner
        ~owner_now
+       ~retain:(retain_local_owner ~full_owner ~owner_now)
        ~selection:select)
 ;;
 
@@ -908,6 +1019,7 @@ let prepare_authoring_project_selection t ~actor ~connection ~expected ~checkpoi
              ~selected
              ~full_owner
              ~owner_now
+             ~retain:(retain_authoring_owner pin)
              ~selection:select))
   in
   result
@@ -1199,6 +1311,7 @@ let prepare_document_script_selection
            ~selected
            ~full_owner
            ~owner_now
+           ~retain:(retain_authoring_owner pin)
            ~selection:select))
 ;;
 

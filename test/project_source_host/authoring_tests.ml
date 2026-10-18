@@ -1898,6 +1898,79 @@ let%test_unit "host switch release closes retained contexts" =
     | Ok _ -> failwith "switch-released context admitted read")
 ;;
 
+let%test_unit "retained source owner survives editor close but keeps its slot and grant" =
+  with_source_context (fun _ _ _ allowed denied sources _ _ _ ->
+    Eio.Switch.run (fun sw ->
+      let permitted = ref true in
+      let host =
+        Authoring.create
+          sources
+          ~sw
+          ~read_policy:
+            (Authoring.Read_policy.create ~authorize:(fun _ ~root_index ->
+               !permitted && Int.equal root_index 0))
+          ~document_policy:Authoring.Document_policy.deny_all
+          ~limits:
+            (Authoring.Limits.create
+               ~max_contexts:2
+               ~max_context_requests:2
+               ~max_manifest_entries:8
+               ~max_browse_entries:8
+               ~max_read_bytes:1024
+               ~max_context_read_bytes:1024
+             |> Or_error.ok_exn)
+      in
+      let root =
+        Authoring.roots host ~actor:allowed ~checkpoint:ignore
+        |> authoring_ok
+        |> List.hd_exn
+      in
+      let open_context () =
+        Authoring.Context.open_root
+          host
+          ~actor:allowed
+          ~root
+          ~dependency_roots:[]
+          ~project:(Path.create "chatml.project.json" |> Or_error.ok_exn)
+          ~selection:(Entry { name = "main"; environment = None })
+          ~contract:
+            (Chatml.Chatml_compiler_contract.for_target One_off_v1 ~checkpoint:ignore)
+      in
+      let editor = open_context () |> authoring_ok in
+      let retained =
+        Authoring.Context.retain_owner editor ~actor:allowed |> authoring_ok
+      in
+      (match open_context () with
+       | Error Authoring.Error.Context_limit -> ()
+       | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+       | Ok _ -> failwith "retained owner did not consume a source slot");
+      Authoring.Context.close_and_wait editor;
+      Authoring.Retained_owner.check_current retained ~actor:allowed |> authoring_ok;
+      (match Authoring.Retained_owner.check_current retained ~actor:denied with
+       | Error Authoring.Error.Unauthorized -> ()
+       | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+       | Ok () -> failwith "foreign actor used retained source");
+      permitted := false;
+      assert (
+        Result.is_error (Authoring.Retained_owner.check_current retained ~actor:allowed));
+      permitted := true;
+      Authoring.Retained_owner.check_current retained ~actor:allowed |> authoring_ok;
+      let other = open_context () |> authoring_ok in
+      (match open_context () with
+       | Error Authoring.Error.Context_limit -> ()
+       | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+       | Ok _ -> failwith "retained owner slot was released on editor close");
+      Authoring.Retained_owner.close_and_wait retained;
+      Authoring.Retained_owner.close_and_wait retained;
+      let replacement = open_context () |> authoring_ok in
+      Authoring.Context.close_and_wait replacement;
+      Authoring.Context.close_and_wait other;
+      match Authoring.Retained_owner.check_current retained ~actor:allowed with
+      | Error Authoring.Error.Closed -> ()
+      | Error error -> Error.raise_s (Authoring.Error.sexp_of_t error)
+      | Ok () -> failwith "released retained source remained current"))
+;;
+
 let%test_unit "root enumeration rechecks grant before publication" =
   with_source_context (fun _ _ _ allowed _ sources _ _ _ ->
     Eio.Switch.run (fun sw ->
@@ -2486,8 +2559,8 @@ let%test_unit "developer local project and standalone source retain captured byt
           let developer = Developer.create ~owner ~policy ~limits in
           let request =
             Developer.Request.create
-              ~entrypoint:"main"
               ~target:One_off_v1
+              ~entrypoint:"main"
               ~input:`Null
               ~fixtures:None
               ~json_bounds:
