@@ -18,50 +18,73 @@ let limits ?(grace = 0.05) ?(max_line_length = 65_536) ?(max_stderr_bytes = 128)
 
 let ping = P.Command.Protocol_ping { payload = None }
 
-let%expect_test "stdio child keeps stderr separate and correlates a typed response" =
+let%expect_test "stdio child isolates stderr and handles bounded protocol output" =
   Eio_main.run (fun env ->
     let id = P.Envelope.Request_id.of_json (`Number "1") |> ok in
     let request =
       P.Command.Protocol_ping { payload = Some (`String (String.make 256 'x')) }
     in
+    let encode = Fn.compose Jsonaf.to_string P.Envelope.to_json in
     let encoded_request_bytes =
       P.Envelope.request
         ~id
         ~method_:(P.Command.method_name request)
         ~params:(P.Command.params request)
         ()
-      |> P.Envelope.to_json
-      |> Jsonaf.to_string
+      |> encode
       |> String.length
     in
+    let notification = P.Envelope.notification ~method_:"fixture.changed" () |> encode in
     let response =
       P.Envelope.failure ~id (P.Error.invalid_request "controlled child failure")
-      |> P.Envelope.to_json
-      |> Jsonaf.to_string
+      |> encode
     in
     let script =
       {|IFS= read -r request
 i=0
-while [ "$i" -lt 512 ]; do
+while [ "$i" -lt "$3" ]; do
   printf 'abcdefghijklmnop' >&2
   i=$((i+1))
 done
-printf '%s\n' "$1"|}
+printf '%s\n' "$1"
+if [ -n "$2" ]; then
+  printf '%s\n' "$2"
+  IFS= read -r finish || :
+fi|}
     in
-    let outcome =
+    let run ~response ~stderr_blocks f =
       Child.with_spawned
         ~env
-        ~argv:[ "/bin/sh"; "-c"; script; "fixture"; response ]
+        ~argv:
+          [ "/bin/sh"
+          ; "-c"
+          ; script
+          ; "fixture"
+          ; notification
+          ; response
+          ; Int.to_string stderr_blocks
+          ]
         ~limits:
           (limits ~max_line_length:(encoded_request_bytes + 1) ~max_stderr_bytes:5_000 ())
-        ~f:(fun child ->
-          let response =
-            Agent_client.Connection.request (Child.connection child) request
-          in
+        ~f
+      |> ok
+    in
+    run ~response ~stderr_blocks:512 (fun child ->
+      let connection = Child.connection child in
+      let lease = Agent_client.Connection.claim_notifications connection |> ok in
+      Exn.protect
+        ~finally:(fun () -> Agent_client.Connection.release_notifications lease)
+        ~f:(fun () ->
           let code =
-            match response with
+            match Agent_client.Connection.request connection request with
             | Error error -> error.code
             | Ok _ -> failwith "unexpected successful response"
+          in
+          let interleaved_notification =
+            match Agent_client.Connection.next_owned_notification lease |> ok with
+            | Some (P.Envelope.Notification { method_; params = _ }) ->
+              String.equal method_ "fixture.changed"
+            | Some (Request _ | Response _) | None -> false
           in
           let status = Child.close_and_wait child |> ok in
           let stderr = Child.stderr_tail child in
@@ -71,6 +94,7 @@ printf '%s\n' "$1"|}
           print_s
             [%sexp
               { code : P.Error.code
+              ; interleaved_notification : bool
               ; exited_zero =
                   ((match status with
                     | `Exited 0 -> true
@@ -86,13 +110,37 @@ printf '%s\n' "$1"|}
                         ~len:5_000)
                    : bool)
               }];
-          Ok ())
+          Ok ()));
+    let oversized =
+      P.Envelope.failure
+        ~id
+        (P.Error.invalid_request (String.make (encoded_request_bytes + 32) 'x'))
+      |> encode
     in
-    ignore (ok outcome : unit));
+    List.iter
+      [ "malformed", "{"; "oversized", oversized; "eof", "" ]
+      ~f:(fun (name, response) ->
+        run ~response ~stderr_blocks:0 (fun child ->
+          let connection = Child.connection child in
+          let interrupted () =
+            match Agent_client.Connection.request connection request with
+            | Error error -> [%test_eq: P.Error.code] error.code Interrupted
+            | Ok _ -> failwith "invalid output was accepted"
+          in
+          interrupted ();
+          interrupted ();
+          (match Child.close_and_wait child |> ok with
+           | `Exited 0 -> ()
+           | `Exited _ | `Signaled _ -> failwith "controlled child was not cleanly reaped");
+          printf "%s retired; child reaped\n" name;
+          Ok ())));
   [%expect
     {|
-    ((code Invalid_request) (exited_zero true) (stderr_bytes 5000)
-     (stderr_tail_is_bounded true))
+    ((code Invalid_request) (interleaved_notification true) (exited_zero true)
+     (stderr_bytes 5000) (stderr_tail_is_bounded true))
+    malformed retired; child reaped
+    oversized retired; child reaped
+    eof retired; child reaped
     |}]
 ;;
 
