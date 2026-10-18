@@ -134,6 +134,46 @@ let create_moderator
     Ok (Some moderator)
 ;;
 
+let start_moderator_entries
+      ~env
+      ~session_id
+      ~(artifact : Moderator_manager.Registry.artifact)
+      ~allocator
+      ~history
+      ~available_tools
+      ~capabilities
+      ~runtime_policy
+      ?on_process_run
+      ()
+  =
+  let open Result.Let_syntax in
+  let%bind manager =
+    Moderator_manager.create_entries
+      ~env
+      ~artifact
+      ~capabilities
+      ~allocator
+      ?on_process_run
+      ()
+  in
+  let moderator =
+    Stream_moderator.
+      { manager; session_id; session_meta = `Null; runtime_policy; event_handlers = None }
+  in
+  let now_ms = now_ms env in
+  let%map outcome =
+    Moderator_manager.handle_event_entries
+      manager
+      ~session_id
+      ~now_ms
+      ~history
+      ~available_tools
+      ~session_meta:`Null
+      ~event:Moderation.Event.Session_start
+  in
+  moderator, outcome, now_ms
+;;
+
 let create_moderator_entries
       ~env
       ~session_id
@@ -150,41 +190,25 @@ let create_moderator_entries
   match artifact with
   | None -> Ok None
   | Some artifact ->
-    let%bind manager =
-      Moderator_manager.create_entries
+    let%bind moderator, outcome, now_ms =
+      start_moderator_entries
         ~env
-        ~artifact
-        ~capabilities
-        ~allocator
-        ?on_process_run
-        ()
-    in
-    let moderator =
-      Stream_moderator.
-        { manager
-        ; session_id
-        ; session_meta = `Null
-        ; runtime_policy
-        ; event_handlers = None
-        }
-    in
-    let now_ms = now_ms env in
-    let%bind outcome =
-      Moderator_manager.handle_event_entries
-        manager
         ~session_id
-        ~now_ms
+        ~artifact
+        ~allocator
         ~history
         ~available_tools
-        ~session_meta:`Null
-        ~event:Moderation.Event.Session_start
+        ~capabilities
+        ~runtime_policy
+        ?on_process_run
+        ()
     in
     let%bind drained =
       if has_end_session_request outcome.runtime_requests
       then Ok []
       else
         Moderator_manager.drain_internal_events_entries
-          manager
+          moderator.manager
           ~session_id
           ~now_ms
           ~history
@@ -201,6 +225,114 @@ let create_moderator_entries
            "Ignoring moderator runtime request in shared driver: %s"
            (Sexp.to_string_hum ([%sexp_of: Moderation.Runtime_request.t] request))));
     Ok (Some moderator)
+;;
+
+module Selected_moderator_start = struct
+  type t =
+    | No_moderator
+    | Ready of In_memory_stream.moderator
+    | Halted
+    | Paused
+    | End_session_requested of string
+end
+
+let selected_start_request outcome =
+  let requests = outcome.Moderation.Outcome.runtime_requests in
+  if
+    List.exists requests ~f:(function
+      | Moderation.Runtime_request.Request_turn | Request_compaction -> true
+      | End_session _ -> false)
+  then Error "selected moderator requested an unsupported mutable runtime action"
+  else Ok (Runtime_semantics.should_end_session requests)
+;;
+
+let create_selected_moderator_entries
+      ~env
+      ~session_id
+      ~artifact
+      ~allocator
+      ~history
+      ~available_tools
+      ~capabilities
+      ~runtime_policy
+      ?on_process_run
+      ()
+  =
+  let open Result.Let_syntax in
+  match artifact with
+  | None -> Ok Selected_moderator_start.No_moderator
+  | Some artifact ->
+    let limit = runtime_policy.Runtime_semantics.budget.max_internal_event_drain in
+    if limit < 0
+    then Error "selected moderator has a negative startup event limit"
+    else (
+      let%bind moderator, started, _ =
+        start_moderator_entries
+          ~env
+          ~session_id
+          ~artifact
+          ~allocator
+          ~history
+          ~available_tools
+          ~capabilities
+          ~runtime_policy
+          ?on_process_run
+          ()
+      in
+      let rec drain used =
+        let%bind bounded =
+          Moderator_manager.drain_internal_events_entries_bounded
+            ~max_events:(if used >= limit then 0 else 1)
+            moderator.manager
+            ~session_id
+            ~now_ms:(now_ms env)
+            ~history
+            ~available_tools
+            ~session_meta:`Null
+        in
+        let%bind ended =
+          List.fold_result bounded.outcomes ~init:None ~f:(fun previous outcome ->
+            let%map current = selected_start_request outcome in
+            Option.first_some previous current)
+        in
+        match ended with
+        | Some reason -> Ok (Selected_moderator_start.End_session_requested reason)
+        | None ->
+          (match bounded.stop with
+           | Moderator_manager.Bounded_drain.Empty ->
+             Ok (Selected_moderator_start.Ready moderator)
+           | Halted -> Ok Selected_moderator_start.Halted
+           | Waiting_for_ui _ -> Error "selected moderator is waiting for UI input"
+           | Limit_reached ->
+             if used >= limit
+             then Ok (Selected_moderator_start.Ready moderator)
+             else drain (used + List.length bounded.outcomes))
+      in
+      let%bind ended = selected_start_request started in
+      match ended with
+      | Some reason -> Ok (Selected_moderator_start.End_session_requested reason)
+      | None ->
+        if
+          List.mem
+            runtime_policy.budget.pause_conditions
+            Runtime_semantics.Pause_internal_event_drains
+            ~equal:Runtime_semantics.equal_pause_condition
+        then (
+          let%bind observed =
+            Moderator_manager.drain_internal_events_entries_bounded
+              ~max_events:0
+              moderator.manager
+              ~session_id
+              ~now_ms:(now_ms env)
+              ~history
+              ~available_tools
+              ~session_meta:`Null
+          in
+          match observed.stop with
+          | Moderator_manager.Bounded_drain.Halted -> Ok Selected_moderator_start.Halted
+          | Waiting_for_ui _ -> Error "selected moderator is waiting for UI input"
+          | Empty | Limit_reached -> Ok Selected_moderator_start.Paused)
+        else drain 0)
 ;;
 
 let render_tool_output_text (output : Res.Tool_output.Output.t) =
@@ -602,7 +734,7 @@ module Prepared_inputs = struct
     ;;
   end
 
-  let select_elements ~(ctx : Eio_unix.Stdenv.base Ctx.t) ~prompt_dir ~elements ~input =
+  let prepare_elements ~(ctx : Eio_unix.Stdenv.base Ctx.t) ~prompt_dir ~elements ~input =
     let ctx =
       Ctx.create
         ~env:(Ctx.env ctx)
@@ -622,10 +754,15 @@ module Prepared_inputs = struct
       |> fun child -> Ctx.with_submission_guard child ctx.submission_guard
     in
     let config = Config.of_elements elements in
-    { ctx = selected_context ctx config; elements; config; input }
+    { ctx; elements; config; input }
   ;;
 
-  let select_prepared ~ctx ~prompt_dir ~parsed ?document_projection ~input () =
+  let select_elements ~ctx ~prompt_dir ~elements ~input =
+    let prepared = prepare_elements ~ctx ~prompt_dir ~elements ~input in
+    { prepared with ctx = selected_context prepared.ctx prepared.config }
+  ;;
+
+  let prepared_elements ~parsed ?document_projection () =
     let elements =
       match document_projection with
       | None -> CM.Parsed.elements parsed
@@ -634,12 +771,30 @@ module Prepared_inputs = struct
         then invalid_arg "prepared agent document projection belongs to another parser";
         CM.Document_projection.elements projection
     in
+    elements
+  ;;
+
+  let select_prepared ~ctx ~prompt_dir ~parsed ?document_projection ~input () =
+    let elements = prepared_elements ~parsed ?document_projection () in
     select_elements ~ctx ~prompt_dir ~elements ~input
+  ;;
+
+  let select_prepared_model ~ctx ~prompt_dir ~parsed ?document_projection ~input () =
+    let elements = prepared_elements ~parsed ?document_projection () in
+    prepare_elements ~ctx ~prompt_dir ~elements ~input
   ;;
 
   let context t = t.ctx
   let elements t = t.elements
   let config t = t.config
+
+  let with_inference_context t ~inference_context =
+    { t with ctx = Ctx.with_inference t.ctx ~inference_context }
+  ;;
+
+  let with_model_recipe t recipe =
+    { t with ctx = Ctx.with_agent_prompt_v1_recipe t.ctx recipe }
+  ;;
 
   let user t =
     CM.User
@@ -769,6 +924,8 @@ let run_stream_entries
       ~moderator
       ~history_compaction
       ~response_dir
+      ?on_runtime_request
+      ?on_committed_entry
       ?observer
       ?source
       ?parent_call_id
@@ -796,6 +953,9 @@ let run_stream_entries
     ?parent_call_id
     ?on_tool_execution:
       (Option.map observer ~f:(fun observer -> observer.on_tool_execution))
+    ?on_runtime_request
+    ?on_history_item_appended:on_committed_entry
+    ?on_history_tool_out:on_committed_entry
     ~history_compaction
     ~parallel_tool_calls:true
     ()

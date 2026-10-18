@@ -230,6 +230,12 @@ module Current : sig
   (** The exact immutable selection this witness observed. A later narrowing
       invalidates the witness even if it happens to preserve a particular tool. *)
   val selected : t -> Chat_response.Tool_capability.t
+
+  (** Comparison data only: both witnesses came from the same physical Root,
+      selected object and selection revision. A narrowed empty registry may be
+      physically identical to its predecessor, so object identity alone does
+      not prove an unchanged selection. This grants no effect authority. *)
+  val same_selection : t -> t -> bool
 end
 
 module Claim_preflight : sig
@@ -807,6 +813,18 @@ end
     a witness. *)
 val current : t -> (Current.t, Agent_protocol.Error.t) result
 
+(** Acquire this Root's existing mutation gate, then read latest Active state
+    and issue a fresh [Current] while the gate is still held. For selected
+    source/native admission outside a Root mutation callback: a concurrent
+    Tracking prepare/commit settles before the read, whereas an uncertain
+    retained Pending remains a typed denial. This may yield and propagates
+    cancellation unchanged. It never reconciles another route, waits on an
+    uncertain Pending, runs source/provider callbacks under the gate, or
+    replaces [check_effect_now]'s final nonyielding proof. Calling it from an
+    existing mutation-gate callback is an invariant error. A foreign-domain
+    caller is rejected before touching the gate. *)
+val current_after_mutations : t -> (Current.t, Agent_protocol.Error.t) result
+
 (** Nonyielding local scheduling snapshot of the same physical owner, actor,
     selected object and revision. This is comparison data only: it does not
     establish latest-Active Store state, authorize an effect or issue a Claim.
@@ -979,10 +997,50 @@ module Model_inference : sig
     -> f:(t -> sw:Eio.Switch.t -> 'a)
     -> ('a, Agent_protocol.Error.t) result
 
-  (** The original bridge-issued selected Context borrowed for this lexical
-      scope. It is input data for the shared Inference_client, not a renewed
-      actor, credential or effect lease. Use the strict ports and composed
-      submission guard for every dispatch. *)
+  (** Enter one authentic selected child beneath this Root's currently active
+      [with_claimed_agent] scope. [target] is the opaque Saved, Content or Model
+      source selection already entered by the trusted child runner. Root checks
+      its exact saved ancestor and immediate logical parent against the active
+      lexical frame, the current selected native borrow against its registered
+      direct or descendant terminal, and the original Worker, actor, provider,
+      epoch and callback Switch. A failed direct check never becomes a
+      descendant admission. This cannot enter a [with_claimed] Model_call scope.
+
+      The caller's [selected_context] is configuration data produced by the
+      existing selected preparation; it is not a target grant. Root obtains
+      the actual child revision through [target], applies that revision's one
+      Config to the current parent Context and uses the original adapter's
+      binding to compute the expected complete Target. Saved and Content child
+      entries use [Context.derive_in_session], as the selected Driver does; a
+      Model child uses [Context.derive], as the shared Model recipe does, so its
+      new logical session does not inherit the parent's inference session. It
+      requires [selected_context] to carry exactly that Target, then lends its
+      OWN derived Context to [f]. No caller-supplied target, profile resolver,
+      credential, provider selection or Store writer is introduced. A nested
+      child derives from its current parent frame, not the original Root
+      baseline; a missing child Config leaves the parent Target unchanged.
+
+      The private frame is lexical and expires on every return or exception.
+      Its identity, target, source chain and physical native phase are checked
+      after yields and at Tracking admission, attempt Started, pre-dispatch and
+      application submission. [before_dispatch] retains exact original-target
+      equality outside this frame. A retained Context or frame cannot authorize
+      a sibling, foreign Root or later callback. Children spawned by [f] must
+      join under the existing claimed scope/child switches before it returns;
+      original cancellation and exception identity/backtrace are preserved. *)
+  val with_selected_child_target
+    :  run
+    -> target:Agent_session.Captured_agent_runner.Selected_content_target.parent
+    -> selected_context:Inference_runtime.Context.t
+    -> f:(Inference_runtime.Context.t -> ('a, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
+
+  (** The original bridge-issued Context outside a selected child frame, or
+      that exact frame's Root-derived Context while it is live and current.
+      An expired or foreign frame raises the same strict tracking failure; it
+      never falls back to the original target. This is input data for the
+      shared Inference_client, not a renewed actor, credential or effect lease.
+      Use the strict ports and composed submission guard for every dispatch. *)
   val context : t -> Inference_runtime.Context.t
 
   (** Strict source/host-service admission while this exact callback is live.
@@ -997,15 +1055,17 @@ module Model_inference : sig
       uses the composed [submission_guard]. *)
   val check_current : t -> unit
 
-  (** Admit an external Model_call child at this exact claimed Model_call's
-      application call boundary. The child is durably Queued under the current
-      parent job/attempt at the next nested depth. This reuses the one external
-      model transaction, mutation gate and shared capacity reservation; it
-      rechecks the entered Worker Claim, current selected Target/actor/provider,
-      callback Switch and parent after each yield and immediately before the
-      first rename attempt. A copied job, request or context cannot authorize
-      the child. Unknown persistence retains exact Prepared/Handoff and capacity
-      beyond lexical unwind for Root recovery; no callback or effect is replayed.
+  (** Admit an external Model_call child at the current application call
+      boundary. A claimed Model_call uses its exact parent job/attempt. A
+      claimed saved Agent uses the physically checked direct or descendant
+      native terminal's Dispatching invocation, then rechecks that SAME
+      terminal after yields. The existing selected provider target remains the
+      original Root target; a selected child Config cannot replace durable
+      Model_call target policy. This reuses the one external model transaction,
+      mutation gate and shared capacity reservation, checking Worker, actor,
+      provider, callback Switch and parent before the first rename attempt.
+      Unknown persistence retains exact Prepared/Handoff and capacity beyond
+      lexical unwind for Root recovery; no callback or effect is replayed.
       Bare One_off worker scopes do not gain this operation. *)
   val admit_external_model
     :  t
@@ -1025,10 +1085,12 @@ module Model_inference : sig
   val identity : t -> Inference_client.Identity.t
 
   (** Run after yielding request preparation. Check the Prepared target against
-      the original selected model and recheck Root/Worker currentness. The full
-      prepared configuration and accounting identity are checked at [on_attempt]
-      against the acknowledged registration. This is a host pre-dispatch check,
-      not a provider credential lease. *)
+      the original selected model, or against the exact currently entered
+      [with_selected_child_target] frame for a claimed saved-Agent child, then
+      recheck Root/Worker/selected-child currentness. The full prepared
+      configuration and accounting identity are checked at [on_attempt] against
+      the acknowledged registration. This is a host pre-dispatch check, not a
+      provider credential lease. *)
   val before_dispatch : t -> Inference_runtime.Prepared.t -> unit
 
   (** Strict producer callback from the real In_memory_stream call commit.

@@ -326,6 +326,7 @@ module Scope = struct
   module Content_revision = struct
     type t =
       { scope : scope
+      ; revision : Prompt_revision.t
       ; parsed : Prompt.Chat_markdown.Parsed.t
       ; projection : Prompt.Chat_markdown.Document_projection.t option
       ; captured_accounting : Chatmd_prompt_content.Accounting.t option
@@ -393,6 +394,7 @@ module Scope = struct
       Ok
         Content_revision.
           { scope = t
+          ; revision
           ; parsed
           ; projection
           ; captured_accounting =
@@ -628,6 +630,12 @@ module Scope = struct
   type capture_selection =
     | Original of Prompt_definition.t
     | Selected of Prompt_source_entry.t
+    | Selected_model of
+        { content : Content_revision.t
+        ; entry : Prompt_source_entry.t
+        ; max_input_bytes : int
+        ; on_acquire : unit -> unit
+        }
 
   let capture_selected t ~selection ~env ~preprocess ~limits ~checkpoint =
     run t (fun () ->
@@ -636,11 +644,17 @@ module Scope = struct
         match selection with
         | Original definition -> definition
         | Selected entry -> Prompt_source_entry.definition entry
+        | Selected_model { entry; _ } -> Prompt_source_entry.definition entry
       in
       let selection_matches =
         match selection with
         | Original _ -> true
         | Selected entry -> Receipt.equal receipt (Prompt_source_entry.receipt entry)
+        | Selected_model { content; entry; max_input_bytes; _ } ->
+          max_input_bytes > 0
+          && phys_equal content.scope t
+          && Prompt_source_entry.matches_selected_parent entry content.revision
+          && Receipt.equal receipt (Prompt_source_entry.receipt entry)
       in
       if
         (not selection_matches)
@@ -656,6 +670,7 @@ module Scope = struct
           | Original _ ->
             Source.Portable_path.create (Filename.basename definition.root_file)
           | Selected entry -> Ok (Prompt_source_entry.member entry)
+          | Selected_model { entry; _ } -> Ok (Prompt_source_entry.member entry)
         in
         match member with
         | Error _ -> Error (Error.create Invalid_binding)
@@ -680,6 +695,12 @@ module Scope = struct
               checked_poll t.owner user_checkpoint (fun error -> raise (Abort.Stop error))
           in
           (try
+             (match selection with
+              | Original _ | Selected _ -> ()
+              | Selected_model { on_acquire; _ } ->
+                poll ();
+                invoke on_acquire;
+                poll ());
              let loader =
                Source_loader.retained_filesystem
                  ~root:(t.owner.root :> Eio.Fs.dir_ty Eio.Path.t)
@@ -690,6 +711,10 @@ module Scope = struct
                Prompt_revision_builder.capture_with_loader
                  ~loader
                  ~entry
+                 ?max_total_source_bytes:
+                   (match selection with
+                    | Original _ | Selected _ -> None
+                    | Selected_model { max_input_bytes; _ } -> Some max_input_bytes)
                  ~env
                  ~preprocess
                  ~limits
@@ -741,6 +766,26 @@ module Scope = struct
 
   let capture_entry t ~entry ~env ~preprocess ~limits ~checkpoint =
     capture_selected t ~selection:(Selected entry) ~env ~preprocess ~limits ~checkpoint
+  ;;
+
+  let capture_selected_member
+        t
+        ~content
+        ~entry
+        ~env
+        ~preprocess
+        ~limits
+        ~max_input_bytes
+        ~checkpoint
+        ~on_acquire
+    =
+    capture_selected
+      t
+      ~selection:(Selected_model { content; entry; max_input_bytes; on_acquire })
+      ~env
+      ~preprocess
+      ~limits
+      ~checkpoint
   ;;
 
   let capture_documents t ~capture ~limits ~checkpoint =

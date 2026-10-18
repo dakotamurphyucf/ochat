@@ -49,6 +49,50 @@ let capture ?(checkpoint = ignore) env root preprocess =
   |> Result.ok_or_failwith
 ;;
 
+let%expect_test "selected capture narrows root and distinct dependency bytes" =
+  with_directory (fun env root ->
+    let entry = Source.Portable_path.create "root.chatmd" |> Or_error.ok_exn in
+    let capture ?max_total_source_bytes () =
+      B.capture_with_loader
+        ~loader:(Source_loader.filesystem ~root)
+        ~entry
+        ?max_total_source_bytes
+        ~env
+        ~preprocess:Fn.id
+        ~limits:(Input_tests.limits ~bytes:(16 * 1024 * 1024) ())
+        ~checkpoint:ignore
+        (definition root)
+    in
+    let rejects ?max_total_source_bytes () =
+      match capture ?max_total_source_bytes () with
+      | exception Failure _ -> true
+      | Error _ -> true
+      | Ok _ -> false
+    in
+    let captured ?max_total_source_bytes () =
+      capture ?max_total_source_bytes ()
+      |> Result.map_error ~f:(fun diagnostics ->
+        Sexp.to_string_hum ([%sexp_of: B.Diagnostic.t list] diagnostics))
+      |> Result.ok_or_failwith
+    in
+    let authored =
+      {|<tool name="first" agent="child.chatmd" local/><tool name="second" agent="child.chatmd" local/>|}
+    in
+    let child = "<user>retained dependency</user>" in
+    save root "root.chatmd" authored;
+    save root "child.chatmd" child;
+    let total = String.length authored + String.length child in
+    assert (rejects ~max_total_source_bytes:(total - 1) ());
+    let exact = captured ~max_total_source_bytes:total () in
+    [%test_eq: int] total (B.Capture.source_bytes exact);
+    let wider_request = captured ~max_total_source_bytes:(16 * 1024 * 1024) () in
+    [%test_eq: int] total (B.Capture.source_bytes wider_request);
+    save root "root.chatmd" ("<user>" ^ String.make (8 * 1024 * 1024) 'x' ^ "</user>");
+    assert (rejects ~max_total_source_bytes:(16 * 1024 * 1024) ());
+    print_endline "root and dependency caps held");
+  [%expect {| root and dependency caps held |}]
+;;
+
 let%test_unit "retained generated loader reuses first exact bytes and preflights files" =
   with_directory (fun _env dir ->
     Eio.Path.save ~create:(`Or_truncate 0o600) Eio.Path.(dir / "part.chatmd") "first";

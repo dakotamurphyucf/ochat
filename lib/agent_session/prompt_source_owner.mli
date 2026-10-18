@@ -250,6 +250,27 @@ module Scope : sig
     -> checkpoint:(unit -> unit)
     -> (Capture.t, Error.t) Result.t
 
+  (** Capture an admitted Model member through this original Scope. The
+      [content] view is bound to the exact selected parent revision by the
+      authenticated Source_binding port; [entry] must name the same revision's
+      original Definition/receipt and a positive portable member. Repeat that
+      comparison here before using the retained no-follow Local. [on_acquire]
+      fires exactly once after pure admission and before source I/O, so the
+      shared child budget can distinguish a denied selector from an uncertain
+      partial capture. Same Builder walker, limits and callback/backtrace rules
+      as [capture_entry]. A Scope method alone does not select a child Target. *)
+  val capture_selected_member
+    :  t
+    -> content:Content_revision.t
+    -> entry:Prompt_source_entry.t
+    -> env:Eio_unix.Stdenv.base
+    -> preprocess:(string -> string)
+    -> limits:Prompt.Chat_markdown.Limits.t
+    -> max_input_bytes:int
+    -> checkpoint:(unit -> unit)
+    -> on_acquire:(unit -> unit)
+    -> (Capture.t, Error.t) result
+
   (** Capture rendered documents through this SAME retained Local. Reject foreign
       capture admission/receipt before any read. Derive contexts from the actual
       immutable Builder capture; no root/Local getter or artifact-path reopen.

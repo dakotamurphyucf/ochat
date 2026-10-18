@@ -64,6 +64,7 @@ let developer_configuration ?remote_content target =
   in
   let store =
     Developer_root_owner_test_suite.Root_owner_tests.store_limits
+      ~max_runs:6
       ~max_job_payload_bytes:4096
       ~max_jobs_per_run:8
       ~max_inference_bytes_per_run:65536
@@ -73,7 +74,7 @@ let developer_configuration ?remote_content target =
   in
   let roots =
     S.Developer_root_owner.Limits.create
-      ~max_active_runs:3
+      ~max_active_runs:6
       ~max_staged_jobs:4
       ~max_native_occupancy:2
       ~max_active_workers:1
@@ -104,7 +105,7 @@ let developer_configuration ?remote_content target =
       ~execution:Chatml_execution.default_limits
       ~max_output_bytes:65536
       ~receipt:document
-      ~max_agent_sources:4
+      ~max_agent_sources:6
       ~max_agent_source_work_steps:100_000
       ~max_native_bindings:8
       ~workspace_cleanup
@@ -137,7 +138,17 @@ let developer_configuration ?remote_content target =
               (P.Host_invocation.context invocation).origin
               P.Invocation.Delegated_agent);
           Ok ())
-        else if List.mem [ "child"; "child_tools"; "deep" ] name ~equal:String.equal
+        else if
+          List.mem
+            [ "child"
+            ; "child_tools"
+            ; "deep"
+            ; "model_child"
+            ; "model_mixed"
+            ; "model_spawn"
+            ]
+            name
+            ~equal:String.equal
         then Ok ()
         else Error (P.Error.invalid_request "unexpected native binding"))
       ~prepare_output:(function
@@ -149,7 +160,13 @@ let developer_configuration ?remote_content target =
     S.Daemon.Developer.Configuration.with_remote_content configuration policy)
 ;;
 
-let open_document daemon actor =
+let open_document
+      ?(member = "draft.chatmd")
+      ?contents
+      ?(analysis_script = "s")
+      daemon
+      actor
+  =
   let connection =
     S.Connection_context.create_authenticated
       ~actor
@@ -189,12 +206,16 @@ let open_document daemon actor =
    | Error error -> raise_s [%sexp (error : P.Error.t)]);
   let request =
     P.Authoring.Context.Open_request.create_supplied_document
-      ~member:"draft.chatmd"
+      ~member
       ~default_environment:None
       ~contents:
-        {|<script id="s" language="chatml" kind="tool">let main input = Task.bind(Job.start_tool("child", input), fun first -> Task.bind(Job.start_tool("child", input), fun second -> Task.pure(`Object([{key="first"; value=`String(first)}, {key="second"; value=`String(second)}]))))</script>
+        (Option.value
+           contents
+           ~default:
+             {|<script id="s" language="chatml" kind="tool">let main input = Task.bind(Job.start_tool("child", input), fun first -> Task.bind(Job.start_tool("child", input), fun second -> Task.pure(`Object([{key="first"; value=`String(first)}, {key="second"; value=`String(second)}]))))</script>
 <script id="tool_child" language="chatml" kind="tool">let main input = Task.bind(Job.start_tool("child_tools", input), fun id -> Task.pure(`String(id)))</script>
-<script id="deep_child" language="chatml" kind="tool">let main input = Task.bind(Job.start_tool("deep", input), fun id -> Task.pure(`String(id)))</script>|}
+<script id="deep_child" language="chatml" kind="tool">let main input = Task.bind(Job.start_tool("deep", input), fun id -> Task.pure(`String(id)))</script>
+<script id="model_child" language="chatml" kind="tool">let main input = Task.bind(Job.start_tool("model_child", input), fun id -> Task.pure(`String(id)))</script>|})
     |> ok
   in
   let expected =
@@ -211,7 +232,7 @@ let open_document daemon actor =
   let analyze =
     P.Authoring.Analysis.Analyze.Request.create
       ~context:expected
-      ~target:(P.Authoring.Analysis.Target.selected_script "s" |> ok)
+      ~target:(P.Authoring.Analysis.Target.selected_script analysis_script |> ok)
     |> ok
   in
   (match
@@ -265,14 +286,24 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
   let requests = ref 0 in
   let model_bodies = ref [] in
   let deep_tools_sent = ref false in
+  let selected_parent_submitting = ref false in
+  let worker_two_submitting = ref false in
+  let control_submitting = ref false in
   let first_entered, first_entered_u = Eio.Promise.create () in
   let second_entered, second_entered_u = Eio.Promise.create () in
+  let selected_parent_entered, selected_parent_entered_u = Eio.Promise.create () in
   let release_first, release_first_u = Eio.Promise.create () in
+  let release_selected_parent, release_selected_parent_u = Eio.Promise.create () in
+  let worker_two_entered, worker_two_entered_u = Eio.Promise.create () in
+  let release_worker_two, release_worker_two_u = Eio.Promise.create () in
   let first_released = ref false in
+  let selected_parent_released = ref false in
+  let worker_two_released = ref false in
   RH.with_fixture
     ~model_requests:requests
     ~model_function_tools:true
     ~model_image_input:true
+    ~model_reasoning:true
     ~response_body:(fun number body ->
       if Int.equal number 3
       then Some (selected_tools_response ())
@@ -283,19 +314,43 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
         deep_tools_sent := true;
         Some (selected_tools_response ~include_undeclared:false ()))
       else None)
-    ~on_model_body:(fun body -> model_bodies := body :: !model_bodies)
+    ~on_model_body:(fun body ->
+      model_bodies := body :: !model_bodies;
+      if String.is_substring body ~substring:"Selected Model parent instructions"
+      then selected_parent_submitting := true;
+      if String.is_substring body ~substring:"Selected worker two instructions"
+      then worker_two_submitting := true;
+      if String.is_substring body ~substring:"Selected control instructions"
+      then control_submitting := true)
     ~on_model_submit:(fun () ->
       if Int.equal !requests 1
       then (
         Eio.Promise.resolve first_entered_u ();
         Eio.Promise.await release_first)
       else if Int.equal !requests 2
-      then Eio.Promise.resolve second_entered_u ())
+      then Eio.Promise.resolve second_entered_u ()
+      else if !selected_parent_submitting
+      then (
+        selected_parent_submitting := false;
+        Eio.Promise.resolve selected_parent_entered_u ();
+        Eio.Promise.await release_selected_parent)
+      else if !worker_two_submitting
+      then (
+        worker_two_submitting := false;
+        Eio.Promise.resolve worker_two_entered_u ();
+        Eio.Promise.await release_worker_two)
+      else if !control_submitting
+      then (
+        control_submitting := false;
+        Eio.Promise.await worker_two_entered))
     (fun env sw anchor create _ ->
        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 60. (fun () ->
          Fun.protect
            ~finally:(fun () ->
-             if not !first_released then Eio.Promise.resolve release_first_u ())
+             if not !first_released then Eio.Promise.resolve release_first_u ();
+             if not !selected_parent_released
+             then Eio.Promise.resolve release_selected_parent_u ();
+             if not !worker_two_released then Eio.Promise.resolve release_worker_two_u ())
            (fun () ->
               let bootstrap = create () in
               ignore (RH.setup bootstrap : P.Method_result.t);
@@ -363,6 +418,24 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
               let deep_one = Filename.concat nested_dir "deep-one.chatmd" in
               let deep_two = Filename.concat nested_dir "deep-two.chatmd" in
               let deep_three = Filename.concat nested_dir "deep-three.chatmd" in
+              let model_child = Filename.concat nested_dir "model-child.chatmd" in
+              let model_grand = Filename.concat nested_dir "model-grand.chatmd" in
+              let model_mixed_parent =
+                Filename.concat nested_dir "model-mixed-parent.chatmd"
+              in
+              let model_mixed = Filename.concat nested_dir "model-mixed.chatmd" in
+              let model_content = Filename.concat nested_dir "model-content.chatmd" in
+              let model_last = Filename.concat nested_dir "model-last.chatmd" in
+              let model_spawn_parent =
+                Filename.concat nested_dir "model-spawn-parent.chatmd"
+              in
+              let model_worker_one =
+                Filename.concat nested_dir "model-worker-one.chatmd"
+              in
+              let model_worker_two =
+                Filename.concat nested_dir "model-worker-two.chatmd"
+              in
+              let model_control = Filename.concat nested_dir "model-control.chatmd" in
               let notes_dir = Filename.concat prompt_dir "notes" in
               Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / notes_dir);
               Eio.Path.save
@@ -382,7 +455,10 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
                 Eio.Path.(Eio.Stdenv.fs env / prompt)
                 {|<tool name="child" agent="child.chatmd" local source_mode="file"/>
 <tool name="child_tools" agent="agents/child.chatmd" local source_mode="file"/>
-<tool name="deep" agent="agents/deep-one.chatmd" local source_mode="file"/>|};
+<tool name="deep" agent="agents/deep-one.chatmd" local source_mode="file"/>
+<tool name="model_child" agent="agents/model-child.chatmd" local source_mode="file"/>
+<tool name="model_mixed" agent="agents/model-mixed-parent.chatmd" local source_mode="file"/>
+<tool name="model_spawn" agent="agents/model-spawn-parent.chatmd" local source_mode="file"/>|};
               Eio.Path.save
                 ~create:(`Or_truncate 0o600)
                 Eio.Path.(Eio.Stdenv.fs env / child)
@@ -429,6 +505,270 @@ let run ctx input = Task.bind(Tool.call("read_file", input), fun result ->
 let run ctx input = Task.pure(`Complete(input))
 </script>
 <tool name="summary" type="chatml" script="owned" entrypoint="run" input_schema="input.json" output_schema="output.json"/>|};
+              let model_payload =
+                `Object
+                  [ "prompt", `String "model-grand.chatmd"
+                  ; "input", `String "from selected Model.call"
+                  ; "is_local", `True
+                  ; "source_mode", `String "file"
+                  ]
+                |> Jsonaf.to_string
+              in
+              let denied_model_payload =
+                `Object
+                  [ "prompt", `String "../../../escape.chatmd"
+                  ; "input", `String "pre-acquisition denial"
+                  ; "is_local", `True
+                  ; "source_mode", `String "file"
+                  ]
+                |> Jsonaf.to_string
+              in
+              let missing_model_payload =
+                `Object
+                  [ "prompt", `String "model-missing.chatmd"
+                  ; "input", `String "post-acquisition denial"
+                  ; "is_local", `True
+                  ; "source_mode", `String "file"
+                  ]
+                |> Jsonaf.to_string
+              in
+              let captured_model_payload =
+                `Object
+                  [ "prompt", `String "model-grand.chatmd"
+                  ; "input", `String "from retained selected Model.call"
+                  ; "is_local", `True
+                  ; "source_mode", `String "captured"
+                  ]
+                |> Jsonaf.to_string
+              in
+              let moderator_script =
+                sprintf
+                  {|
+  type state = int
+  type event = [ `Session_start | `Session_resume | `Turn_start | `Turn_end | `Item_appended(item) ]
+  let initial_state = 0
+  let on_event : context -> state -> event -> state task =
+    fun ctx st ev ->
+      match ev with
+      | `Session_start ->
+        Task.bind(Model.call("agent_prompt_v1", Json.parse(%S)), fun denied ->
+          match denied with
+          | `Error(_) ->
+            Task.bind(Model.call("agent_prompt_v1", Json.parse(%S)), fun valid ->
+              match valid with
+              | `Ok(_) -> Task.pure(st + 1)
+              | `Error(message) -> Task.fail(message)
+              | `Refused(message) -> Task.fail(message))
+          | `Ok(_) -> Task.fail("invalid selector was admitted")
+          | `Refused(_) -> Task.fail("invalid selector was refused"))
+      | `Item_appended(_) ->
+        if st == 1
+        then
+          Task.bind(Model.call("agent_prompt_v1", Json.parse(%S)), fun retained ->
+            match retained with
+            | `Ok(_) ->
+              Task.bind(Model.call("agent_prompt_v1", Json.parse(%S)), fun missing ->
+                match missing with
+                | `Error(_) ->
+                  Task.bind(Model.call("agent_prompt_v1", Json.parse(%S)), fun retry ->
+                    match retry with
+                    | `Error(_) ->
+                      Task.bind(Runtime.end_session("parent-complete"), fun ignored -> Task.pure(st))
+                    | `Ok(_) -> Task.fail("uncertain read allowed retry")
+                    | `Refused(_) -> Task.fail("uncertain read was refused"))
+                | `Ok(_) -> Task.fail("missing File source was admitted")
+                | `Refused(_) -> Task.fail("missing File source was refused"))
+            | `Error(message) -> Task.fail(message)
+            | `Refused(message) -> Task.fail(message))
+        else Task.pure(st)
+      | `Session_resume -> Task.pure(st)
+      | `Turn_start -> Task.pure(st)
+      | `Turn_end -> Task.pure(st)|}
+                  denied_model_payload
+                  model_payload
+                  captured_model_payload
+                  missing_model_payload
+                  captured_model_payload
+              in
+              let check_moderator id source =
+                let script : Prompt.Chat_markdown.script =
+                  { id
+                  ; language = "chatml"
+                  ; project_selection = None
+                  ; kind = "moderator"
+                  ; source_ref = None
+                  ; source = Inline source
+                  }
+                in
+                Chat_response.Moderator_manager.Registry.compile_script
+                  Chat_response.Moderator_manager.Registry.empty
+                  script
+                |> Result.ok_or_failwith
+                |> ignore
+              in
+              check_moderator "model-child-moderator" moderator_script;
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / model_child)
+                (sprintf
+                   {|<config model="synthetic" reasoning_effort="high"/>
+<developer>Selected Model parent instructions</developer>
+<user><agent src="model-grand.chatmd" local source_mode="captured">from selected Model content</agent></user>
+<script language="chatml" kind="moderator">%s</script>|}
+                   moderator_script);
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / model_grand)
+                "<developer>Selected Model grandchild instructions</developer>";
+              let mixed_payload =
+                `Object
+                  [ "prompt", `String "model-mixed.chatmd"
+                  ; "input", `String "enter mixed Model member"
+                  ; "is_local", `True
+                  ; "source_mode", `String "file"
+                  ]
+                |> Jsonaf.to_string
+              in
+              let mixed_parent_script =
+                sprintf
+                  {|type state = int
+type event = [ `Session_start ]
+let initial_state = 0
+let on_event : context -> state -> event -> state task =
+  fun ctx st ev ->
+    match ev with
+    | `Session_start ->
+      Task.bind(Model.call("agent_prompt_v1", Json.parse(%S)), fun result ->
+        match result with
+        | `Ok(_) -> Task.bind(Runtime.end_session("mixed-complete"), fun ignored -> Task.pure(st + 1))
+        | `Error(message) -> Task.fail(message)
+        | `Refused(message) -> Task.fail(message))|}
+                  mixed_payload
+              in
+              check_moderator "mixed-parent-moderator" mixed_parent_script;
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / model_mixed_parent)
+                (sprintf
+                   {|<config model="synthetic-mixed-parent" reasoning_effort="high"/>
+<developer>Mixed saved parent instructions</developer>
+<script language="chatml" kind="moderator">%s</script>|}
+                   mixed_parent_script);
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / model_mixed)
+                {|<config model="synthetic-mixed-outer" reasoning_effort="medium"/>
+<developer>Mixed Model member instructions</developer>
+<user><agent src="model-content.chatmd" local source_mode="file">mixed caller content</agent></user>|};
+              let last_payload =
+                `Object
+                  [ "prompt", `String "model-last.chatmd"
+                  ; "input", `String "from mixed Content Model.call"
+                  ; "is_local", `True
+                  ; "source_mode", `String "file"
+                  ]
+                |> Jsonaf.to_string
+              in
+              let content_script =
+                sprintf
+                  {|type state = int
+type event = [ `Session_start | `Session_resume | `Turn_start | `Item_appended(item) | `Turn_end ]
+let initial_state = 0
+let on_event : context -> state -> event -> state task =
+  fun ctx st ev ->
+    match ev with
+    | `Session_start ->
+      Task.bind(Model.call("agent_prompt_v1", Json.parse(%S)), fun result ->
+        match result with
+        | `Ok(_) -> Task.pure(st + 1)
+        | `Error(message) -> Task.fail(message)
+        | `Refused(message) -> Task.fail(message))
+    | `Session_resume -> Task.pure(st)
+    | `Turn_start -> Task.pure(st)
+    | `Item_appended(_) -> Task.pure(st)
+    | `Turn_end -> Task.pure(st)|}
+                  last_payload
+              in
+              check_moderator "mixed-content-moderator" content_script;
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / model_content)
+                (sprintf
+                   {|<config model="synthetic-mixed-content" reasoning_effort="medium"/>
+<developer>Mixed Content member instructions</developer>
+<script language="chatml" kind="moderator">%s</script>|}
+                   content_script);
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / model_last)
+                {|<config model="synthetic-mixed-leaf" reasoning_effort="low"/>
+<developer>Mixed last Model member instructions</developer>|};
+              let model_payload member input =
+                `Object
+                  [ "prompt", `String member
+                  ; "input", `String input
+                  ; "is_local", `True
+                  ; "source_mode", `String "file"
+                  ]
+                |> Jsonaf.to_string
+              in
+              let spawn_script =
+                sprintf
+                  {|type state = int
+type event = [ `Session_start | `Session_resume | `Turn_start | `Item_appended(item) | `Turn_end | `Model_job_succeeded(string, string, json) | `Model_job_failed(string, string, string) ]
+let initial_state = 0
+let on_event : context -> state -> event -> state task =
+  fun ctx st ev ->
+    match ev with
+    | `Session_start ->
+      Task.bind(Model.spawn("agent_prompt_v1", Json.parse(%S)), fun first_job -> Task.pure(1))
+    | `Model_job_succeeded(_, _, _) ->
+      if st == 1
+      then
+        Task.bind(Model.spawn("agent_prompt_v1", Json.parse(%S)), fun second_job ->
+          Task.bind(Model.call("agent_prompt_v1", Json.parse(%S)), fun control ->
+            match control with
+            | `Ok(_) -> Task.bind(Runtime.end_session("spawn-complete"), fun ignored -> Task.pure(2))
+            | `Error(message) -> Task.fail(message)
+            | `Refused(message) -> Task.fail(message)))
+      else Task.pure(st)
+    | `Model_job_failed(_, _, message) -> Task.fail(message)
+    | `Session_resume -> Task.pure(st)
+    | `Turn_start -> Task.pure(st)
+    | `Item_appended(_) -> Task.pure(st)
+    | `Turn_end -> Task.pure(st)|}
+                  (model_payload
+                     "model-worker-one.chatmd"
+                     "first selected spawned worker")
+                  (model_payload
+                     "model-worker-two.chatmd"
+                     "second selected spawned worker")
+                  (model_payload "model-control.chatmd" "control selected Model.call")
+              in
+              check_moderator "spawn-parent-moderator" spawn_script;
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / model_spawn_parent)
+                (sprintf
+                   {|<config model="synthetic-spawn-parent" reasoning_effort="high"/>
+<developer>Selected spawn parent instructions</developer>
+<script language="chatml" kind="moderator">%s</script>|}
+                   spawn_script);
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / model_worker_one)
+                {|<config model="synthetic-worker-one" reasoning_effort="low"/>
+<developer>Selected worker one instructions</developer>|};
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / model_worker_two)
+                {|<config model="synthetic-worker-two" reasoning_effort="high"/>
+<developer>Selected worker two instructions</developer>|};
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / model_control)
+                {|<config model="synthetic-control" reasoning_effort="medium"/>
+<developer>Selected control instructions</developer>|};
               List.iter [ "input.json"; "output.json" ] ~f:(fun name ->
                 Eio.Path.save
                   ~create:(`Or_truncate 0o600)
@@ -976,8 +1316,488 @@ let run ctx input = Task.pure(`Complete(input))
                    , (result : R.value option)]);
               [%test_eq: int] !requests model_requests_before_denial;
               [%test_eq: int] (List.length (jobs ~run:deep_run_id ())) jobs_before_denial;
+              let requests_before_model = !requests in
+              let model_request =
+                S.Daemon.Developer.Request.create
+                  ~route:
+                    (Document_script
+                       { expected
+                       ; selector =
+                           P.Authoring.Analysis.Target.selected_script "model_child" |> ok
+                       })
+                  ~kind:Live_run
+                  ~target:Chatml.Chatml_compiler_contract.Target.One_off_v1
+                  ~prompt:(Some (S.Catalog_identity.prompt_definition "restart.prompt"))
+                  ~workspace:
+                    (Some (S.Catalog_identity.workspace_definition "restart.workspace"))
+                  ~entrypoint:"main"
+                  ~input:(`Object [ "input", `String "model" ])
+                  ~fixtures:None
+                  ~requested_execution:None
+                  ~requested_max_output_bytes:None
+                  ~bounds
+                  ~checkpoint:ignore
+                |> ok
+              in
+              let model_run_id = P.Id.Developer_run.create () in
+              let model_key = P.Idempotency_key.of_string "hosted-selected-model" |> ok in
+              ignore
+                (S.Daemon.Developer.submit
+                   daemon
+                   ~actor
+                   ~run_id:model_run_id
+                   ~key:model_key
+                   ~request:model_request
+                   ~fresh_source:(Some (Document_script { connection = _connection }))
+                 |> ok
+                 : S.Daemon.Developer.View.t);
+              let model_view =
+                S.Daemon.Developer.await_terminal
+                  daemon
+                  ~actor
+                  ~run_id:model_run_id
+                  ~key:model_key
+                |> ok
+              in
+              let model_job =
+                match
+                  Option.map (S.Daemon.Developer.View.receipt model_view) ~f:R.value
+                with
+                | Some (Live (Succeeded (`String id))) -> P.Id.Job.of_string id |> ok
+                | result ->
+                  raise_s [%sexp "expected selected Model Job", (result : R.value option)]
+              in
+              (match
+                 Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+                   Eio.Promise.await selected_parent_entered)
+               with
+               | () -> ()
+               | exception Eio.Time.Timeout ->
+                 raise_s
+                   [%sexp
+                     "selected parent provider was not reached"
+                   , (P.Developer_job.state (job ~run:model_run_id model_job)
+                      : P.Developer_job.State.t)
+                   , (!requests - requests_before_model : int)]);
+              Eio.Path.unlink Eio.Path.(Eio.Stdenv.fs env / model_grand);
+              selected_parent_released := true;
+              Eio.Promise.resolve release_selected_parent_u ();
+              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. (fun () ->
+                let rec await_model () =
+                  match
+                    (P.Developer_job.state (job ~run:model_run_id model_job)).status
+                  with
+                  | Succeeded -> ()
+                  | Failed _ | Cancelled | Interrupted _ ->
+                    raise_s
+                      [%sexp
+                        "selected Model child did not complete"
+                      , (P.Developer_job.state (job ~run:model_run_id model_job)
+                         : P.Developer_job.State.t)
+                      , (!requests - requests_before_model : int)
+                      , (List.length (jobs ~run:model_run_id ()) : int)]
+                  | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
+                    Eio.Fiber.yield ();
+                    await_model ()
+                in
+                await_model ());
+              (match (P.Developer_job.state (job ~run:model_run_id model_job)).result with
+               | Some
+                   (P.Developer_job.Result_value.Inline
+                      (P.Completion.Succeeded (`String "model answer"))) -> ()
+               | result ->
+                 raise_s
+                   [%sexp
+                     "selected foreground End_session lost committed assistant text"
+                   , (result : P.Developer_job.Result_value.t option)]);
+              [%test_eq: int] !requests (requests_before_model + 4);
+              let model_requests = List.take !model_bodies 4 in
+              assert (Int.equal (List.length model_requests) 4);
+              List.iter model_requests ~f:(fun body ->
+                match Jsonaf.of_string body with
+                | `Object fields ->
+                  (match List.Assoc.find_exn fields ~equal:String.equal "model" with
+                   | `String "synthetic" -> ()
+                   | _ -> failwith "Model descendant lost selected child Config");
+                  (match List.Assoc.find_exn fields ~equal:String.equal "reasoning" with
+                   | `Object reasoning ->
+                     (match
+                        List.Assoc.find_exn reasoning ~equal:String.equal "effort"
+                      with
+                      | `String "high" -> ()
+                      | _ -> failwith "Model descendant lost selected reasoning")
+                   | _ -> failwith "selected reasoning was not a request object")
+                | _ -> failwith "expected selected provider request object");
+              (match List.rev model_requests with
+               | [ content; file; parent; captured ] ->
+                 assert (
+                   String.is_substring content ~substring:"from selected Model content");
+                 assert (String.is_substring file ~substring:"from selected Model.call");
+                 assert (
+                   String.is_substring
+                     parent
+                     ~substring:"Selected Model parent instructions");
+                 assert (
+                   String.is_substring
+                     captured
+                     ~substring:"from retained selected Model.call");
+                 List.iter [ content; file; captured ] ~f:(fun body ->
+                   assert (
+                     String.is_substring
+                       body
+                       ~substring:"Selected Model grandchild instructions"))
+               | _ -> failwith "selected Model provider sequence changed");
+              [%test_eq: int] (List.length (jobs ~run:model_run_id ())) 1;
+              let model_attempts = rows ~run:model_run_id "inference_attempts" in
+              [%test_eq: int] (List.length model_attempts) 4;
+              let completed_attempts = ref 0 in
+              let interrupted_attempts = ref 0 in
+              List.iter model_attempts ~f:(fun row ->
+                let fields =
+                  match row with
+                  | `Object fields -> fields
+                  | _ -> failwith "invalid selected inference row"
+                in
+                let field name = List.Assoc.find_exn fields ~equal:String.equal name in
+                let job_id = P.Id.Job.of_json (field "job_id") |> ok in
+                assert (P.Id.Job.equal job_id model_job);
+                let record =
+                  Inference.Observation.Attempt_record.of_json
+                    (field "record")
+                    ~limits:Inference.Observation.Admission.attempt
+                  |> Result.map_error ~f:(fun _ -> "invalid selected inference attempt")
+                  |> Result.ok_or_failwith
+                in
+                match Inference.Observation.Attempt_record.state record with
+                | Terminal terminal ->
+                  (match Inference.Event.Terminal.outcome terminal with
+                   | Completed -> incr completed_attempts
+                   | Refused | Incomplete _ | Failed _ ->
+                     failwith "selected inference did not complete")
+                | Interrupted { reason = Host_interrupted; delivery = Response_started }
+                  -> incr interrupted_attempts
+                | Prepared | Running | Interrupted _ ->
+                  failwith "selected inference attempt retained an unexpected phase");
+              [%test_eq: int] !completed_attempts 3;
+              [%test_eq: int] !interrupted_attempts 1;
+              let mixed_connection, mixed_expected =
+                open_document
+                  ~member:"selected-followup.chatmd"
+                  ~contents:
+                    {|<script id="model_mixed" language="chatml" kind="tool">let main input = Task.bind(Job.start_tool("model_mixed", input), fun id -> Task.pure(`String(id)))</script>
+<script id="model_spawn" language="chatml" kind="tool">let main input = Task.bind(Job.start_tool("model_spawn", input), fun id -> Task.pure(`String(id)))</script>|}
+                  ~analysis_script:"model_mixed"
+                  daemon
+                  actor
+              in
+              let submit_one selector_name input key_name =
+                let request =
+                  S.Daemon.Developer.Request.create
+                    ~route:
+                      (Document_script
+                         { expected = mixed_expected
+                         ; selector =
+                             P.Authoring.Analysis.Target.selected_script selector_name
+                             |> ok
+                         })
+                    ~kind:Live_run
+                    ~target:Chatml.Chatml_compiler_contract.Target.One_off_v1
+                    ~prompt:(Some (S.Catalog_identity.prompt_definition "restart.prompt"))
+                    ~workspace:
+                      (Some (S.Catalog_identity.workspace_definition "restart.workspace"))
+                    ~entrypoint:"main"
+                    ~input:(`Object [ "input", `String input ])
+                    ~fixtures:None
+                    ~requested_execution:None
+                    ~requested_max_output_bytes:None
+                    ~bounds
+                    ~checkpoint:ignore
+                  |> ok
+                in
+                let run_id = P.Id.Developer_run.create () in
+                let key = P.Idempotency_key.of_string key_name |> ok in
+                ignore
+                  (S.Daemon.Developer.submit
+                     daemon
+                     ~actor
+                     ~run_id
+                     ~key
+                     ~request
+                     ~fresh_source:
+                       (Some (Document_script { connection = mixed_connection }))
+                   |> ok
+                   : S.Daemon.Developer.View.t);
+                let view =
+                  S.Daemon.Developer.await_terminal daemon ~actor ~run_id ~key |> ok
+                in
+                let job_id =
+                  match Option.map (S.Daemon.Developer.View.receipt view) ~f:R.value with
+                  | Some (Live (Succeeded (`String id))) -> P.Id.Job.of_string id |> ok
+                  | result ->
+                    raise_s [%sexp "expected one selected Job", (result : R.value option)]
+                in
+                run_id, job_id
+              in
+              let await_succeeded ~run_id job_id =
+                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. (fun () ->
+                  let rec loop () =
+                    match (P.Developer_job.state (job ~run:run_id job_id)).status with
+                    | Succeeded -> ()
+                    | Failed _ | Cancelled | Interrupted _ ->
+                      raise_s
+                        [%sexp
+                          "selected child Job failed"
+                        , (P.Developer_job.state (job ~run:run_id job_id)
+                           : P.Developer_job.State.t)]
+                    | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
+                      Eio.Fiber.yield ();
+                      loop ()
+                  in
+                  loop ())
+              in
+              let model_and_effort body =
+                let fields =
+                  match Jsonaf.of_string body with
+                  | `Object fields -> fields
+                  | _ -> failwith "selected provider request is not an object"
+                in
+                let find fields key =
+                  List.Assoc.find_exn fields ~equal:String.equal key
+                in
+                let model =
+                  match find fields "model" with
+                  | `String value -> value
+                  | _ -> failwith "selected provider model is not a string"
+                in
+                let effort =
+                  match find fields "reasoning" with
+                  | `Object fields ->
+                    (match find fields "effort" with
+                     | `String value -> value
+                     | _ -> failwith "selected reasoning effort is not a string")
+                  | _ -> failwith "selected provider reasoning is not an object"
+                in
+                model, effort
+              in
+              let requests_before_mixed = !requests in
+              let mixed_run_id, mixed_job =
+                submit_one "model_mixed" "mixed" "hosted-selected-mixed"
+              in
+              await_succeeded ~run_id:mixed_run_id mixed_job;
+              [%test_eq: int] !requests (requests_before_mixed + 3);
+              (match List.take !model_bodies 3 |> List.rev with
+               | [ last; content; outer ] ->
+                 assert (
+                   String.is_substring
+                     last
+                     ~substring:"Mixed last Model member instructions");
+                 assert (
+                   String.is_substring
+                     content
+                     ~substring:"Mixed Content member instructions");
+                 assert (
+                   String.is_substring outer ~substring:"Mixed Model member instructions");
+                 assert (
+                   Tuple2.equal
+                     ~eq1:String.equal
+                     ~eq2:String.equal
+                     (model_and_effort last)
+                     ("synthetic-mixed-leaf", "low"));
+                 assert (
+                   Tuple2.equal
+                     ~eq1:String.equal
+                     ~eq2:String.equal
+                     (model_and_effort content)
+                     ("synthetic-mixed-content", "medium"));
+                 assert (
+                   Tuple2.equal
+                     ~eq1:String.equal
+                     ~eq2:String.equal
+                     (model_and_effort outer)
+                     ("synthetic-mixed-outer", "medium"))
+               | _ -> failwith "mixed selected provider sequence changed");
+              [%test_eq: int] (List.length (jobs ~run:mixed_run_id ())) 1;
+              let mixed_models =
+                List.map (rows ~run:mixed_run_id "inference_attempts") ~f:(fun row ->
+                  let fields =
+                    match row with
+                    | `Object fields -> fields
+                    | _ -> failwith "invalid mixed inference row"
+                  in
+                  let field name = List.Assoc.find_exn fields ~equal:String.equal name in
+                  assert (
+                    P.Id.Job.equal (P.Id.Job.of_json (field "job_id") |> ok) mixed_job);
+                  let record =
+                    Inference.Observation.Attempt_record.of_json
+                      (field "record")
+                      ~limits:Inference.Observation.Admission.attempt
+                    |> Result.map_error ~f:(fun _ -> "invalid mixed inference attempt")
+                    |> Result.ok_or_failwith
+                  in
+                  (match Inference.Observation.Attempt_record.state record with
+                   | Terminal terminal ->
+                     (match Inference.Event.Terminal.outcome terminal with
+                      | Completed -> ()
+                      | Refused | Incomplete _ | Failed _ ->
+                        failwith "mixed inference did not complete")
+                   | Prepared | Running | Interrupted _ ->
+                     failwith "mixed inference attempt did not terminalize");
+                  Inference.Observation.Configuration.model
+                    (Inference.Observation.Attempt_record.configuration record))
+                |> List.sort ~compare:String.compare
+              in
+              [%test_eq: string list]
+                mixed_models
+                [ "synthetic-mixed-content"
+                ; "synthetic-mixed-leaf"
+                ; "synthetic-mixed-outer"
+                ];
+              let requests_before_spawn = !requests in
+              let spawn_run_id, spawn_job =
+                submit_one "model_spawn" "spawn" "hosted-selected-spawn"
+              in
+              (match
+                 Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+                   Eio.Promise.await worker_two_entered)
+               with
+               | () -> ()
+               | exception Eio.Time.Timeout ->
+                 raise_s
+                   [%sexp
+                     "second selected spawn did not enter provider"
+                   , (P.Developer_job.state (job ~run:spawn_run_id spawn_job)
+                      : P.Developer_job.State.t)
+                   , (!requests - requests_before_spawn : int)
+                   , (List.map (List.take !model_bodies 2) ~f:(fun body ->
+                        List.find_map
+                          [ "Selected worker one instructions"
+                          ; "Selected spawn parent instructions"
+                          ; "Selected worker two instructions"
+                          ; "Selected control instructions"
+                          ]
+                          ~f:(fun marker ->
+                            if String.is_substring body ~substring:marker
+                            then Some marker
+                            else None))
+                      : string option list)]);
+              await_succeeded ~run_id:spawn_run_id spawn_job;
+              worker_two_released := true;
+              Eio.Promise.resolve release_worker_two_u ();
+              [%test_eq: int] !requests (requests_before_spawn + 4);
+              let spawn_bodies = List.take !model_bodies 4 in
+              List.iter
+                [ "Selected worker one instructions", ("synthetic-worker-one", "low")
+                ; "Selected spawn parent instructions", ("synthetic-spawn-parent", "high")
+                ; "Selected worker two instructions", ("synthetic-worker-two", "high")
+                ; "Selected control instructions", ("synthetic-control", "medium")
+                ]
+                ~f:(fun (marker, expected) ->
+                  match
+                    List.filter spawn_bodies ~f:(fun body ->
+                      String.is_substring body ~substring:marker)
+                  with
+                  | [ body ] ->
+                    assert (
+                      Tuple2.equal
+                        ~eq1:String.equal
+                        ~eq2:String.equal
+                        (model_and_effort body)
+                        expected)
+                  | _ -> failwith "selected spawn provider marker count changed");
+              [%test_eq: int] (List.length (jobs ~run:spawn_run_id ())) 1;
+              let spawn_attempts = rows ~run:spawn_run_id "inference_attempts" in
+              [%test_eq: int] (List.length spawn_attempts) 4;
+              let spawn_observations =
+                List.map spawn_attempts ~f:(fun row ->
+                  let fields =
+                    match row with
+                    | `Object fields -> fields
+                    | _ -> failwith "invalid spawned inference row"
+                  in
+                  let field name = List.Assoc.find_exn fields ~equal:String.equal name in
+                  assert (
+                    P.Id.Job.equal (P.Id.Job.of_json (field "job_id") |> ok) spawn_job);
+                  let record =
+                    Inference.Observation.Attempt_record.of_json
+                      (field "record")
+                      ~limits:Inference.Observation.Admission.attempt
+                    |> Result.map_error ~f:(fun _ -> "invalid spawned inference attempt")
+                    |> Result.ok_or_failwith
+                  in
+                  let phase =
+                    match Inference.Observation.Attempt_record.state record with
+                    | Terminal terminal ->
+                      (match Inference.Event.Terminal.outcome terminal with
+                       | Completed -> "completed"
+                       | Refused -> "refused"
+                       | Incomplete _ -> "incomplete"
+                       | Failed _ -> "failed")
+                    | Interrupted { reason; delivery } ->
+                      let reason =
+                        match reason with
+                        | Cancelled -> "cancelled"
+                        | Host_interrupted -> "host_interrupted"
+                      in
+                      let delivery =
+                        match delivery with
+                        | Definitely_not_submitted -> "not_submitted"
+                        | Possibly_submitted -> "possibly_submitted"
+                        | Response_started -> "response_started"
+                      in
+                      reason ^ "/" ^ delivery
+                    | Prepared | Running ->
+                      failwith "selected spawned attempt stayed live"
+                  in
+                  let configuration =
+                    Inference.Observation.Attempt_record.configuration record
+                  in
+                  let effort =
+                    let open Inference.Observation.Configuration in
+                    List.find (settings configuration) ~f:(fun setting ->
+                      Name.equal setting.name Name.Reasoning_effort)
+                    |> Option.value_exn
+                    |> fun setting ->
+                    match setting.selection with
+                    | Value (Reasoning_effort `Low) -> "low"
+                    | Value (Reasoning_effort `Medium) -> "medium"
+                    | Value (Reasoning_effort `High) -> "high"
+                    | Value (Reasoning_effort (`None | `Minimal | `Xhigh))
+                    | Value
+                        ( Tokens _
+                        | Boolean _
+                        | Temperature _
+                        | Probability _
+                        | Reasoning_summary _
+                        | Verbosity _
+                        | Text_format _
+                        | Tool_choice _
+                        | Cache_retention _ )
+                    | Omitted | Explicit_null | Withheld ->
+                      failwith "selected spawned reasoning effort changed"
+                  in
+                  (Inference.Observation.Configuration.model configuration, effort), phase)
+                |> List.sort ~compare:(fun ((a, _), _) ((b, _), _) -> String.compare a b)
+              in
+              let spawn_configurations = List.map spawn_observations ~f:fst in
+              [%test_eq: (string * string) list]
+                spawn_configurations
+                [ "synthetic-control", "medium"
+                ; "synthetic-spawn-parent", "high"
+                ; "synthetic-worker-one", "low"
+                ; "synthetic-worker-two", "high"
+                ];
+              let spawn_phases =
+                List.map spawn_observations ~f:(fun ((model, _), phase) -> model, phase)
+              in
+              [%test_eq: (string * string) list]
+                spawn_phases
+                [ "synthetic-control", "completed"
+                ; "synthetic-spawn-parent", "completed"
+                ; "synthetic-worker-one", "completed"
+                ; "synthetic-worker-two", "cancelled/possibly_submitted"
+                ];
               S.Daemon.shutdown daemon |> ok;
               print_endline
-                "hosted captured child and two content levels used selected tools")));
-  [%expect {| hosted captured child and two content levels used selected tools |}]
+                "hosted captured, content, and selected Model children used their sources")));
+  [%expect {| hosted captured, content, and selected Model children used their sources |}]
 ;;

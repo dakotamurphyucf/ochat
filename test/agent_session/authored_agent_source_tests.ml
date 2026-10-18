@@ -458,13 +458,23 @@ let on_event ctx state event = Task.pure(state)</script>|}
         ~input:[]
         ~checkpoint:ignore
     in
-    print_s [%sexp ("moderator" : string), (outcome moderator_result : string)]);
+    let literal_moderator =
+      Preflight.admit_literal
+        ~revision:moderator
+        ~parsed:moderator_parsed
+        ~checkpoint:ignore
+    in
+    print_s
+      [%sexp
+        ("moderator selected / literal" : string)
+      , (outcome moderator_result : string)
+      , (outcome literal_moderator : string)]);
   [%expect
     {|
     ("read_file / text input" admitted admitted invalid_state)
     ((Ok false) (Ok true))
     ("bounds / checkpoint" resource_limit resource_limit true)
     ("fork / foreign parser" invalid_request invalid_state)
-    (moderator invalid_request)
+    ("moderator selected / literal" admitted invalid_state)
     |}]
 ;;

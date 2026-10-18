@@ -191,6 +191,7 @@ and inference_call =
 
 and inference_route =
   { inference_scope : inference_scope
+  ; inference_child_frame : inference_child_frame option
   ; inference_claim : Store.Claim.t
   ; inference_configuration : Inference.Observation.Configuration.t
   ; mutable inference_registration : Store.Tracking.Registration.t option
@@ -201,6 +202,15 @@ and inference_route =
   ; mutable inference_observation : Inference.Observation.t option
   ; mutable inference_completion : Store.Tracking.change option
   ; mutable inference_terminal : bool
+  }
+
+and inference_child_frame =
+  { inference_frame_scope : inference_scope
+  ; inference_frame_source :
+      Agent_session.Captured_agent_runner.Selected_content_target.parent
+  ; inference_frame_parent : inference_child_frame option
+  ; inference_frame_context : Inference_runtime.Context.t
+  ; inference_frame_live : bool ref
   }
 
 and action =
@@ -334,6 +344,11 @@ let control_call_key : t Eio.Fiber.key = Eio.Fiber.create_key ()
 let admission_key : registry Eio.Fiber.key = Eio.Fiber.create_key ()
 let inference_route_key : inference_route Eio.Fiber.key = Eio.Fiber.create_key ()
 let inference_scope_key : inference_scope Eio.Fiber.key = Eio.Fiber.create_key ()
+
+let inference_child_frame_key : inference_child_frame Eio.Fiber.key =
+  Eio.Fiber.create_key ()
+;;
+
 let invalid message = Error (P.Error.invalid_request message)
 let ( let* ) result f = Result.bind result ~f
 
@@ -617,6 +632,189 @@ let current_with ?external_model t =
 
 let current t = current_with t
 
+let current_after_mutations t =
+  if not (same_domain t.registry)
+  then invalid "developer run owner belongs to another domain"
+  else Mutation_gate.with_owner t.mutation_gate ~f:(fun () -> current t)
+;;
+
+let same_action_fiber action =
+  Option.value_map (Eio.Fiber.get action_key) ~default:false ~f:(fun current ->
+    phys_equal current action)
+;;
+
+let native_effect_parent_live_now (scope : native_scope) =
+  same_domain scope.issuer.registry
+  && (not scope.bracket_exited)
+  && (not scope.callback_complete)
+  && scope.action.live
+  && Option.value_map scope.registration.call.cancel ~default:false ~f:(fun cancel ->
+    Option.is_none (Eio.Cancel.get_error cancel))
+  && Option.value_map scope.callback_switch ~default:false ~f:(fun sw ->
+    Option.is_none (Eio.Switch.get_error sw))
+;;
+
+let native_completion_state_now (scope : native_scope) ~require_action_fiber =
+  let issuer = scope.issuer in
+  let context = H.context scope.registration.invocation in
+  let dispatched =
+    match scope.dispatched, scope.dispatch_state with
+    | Some active, Dispatch_installed (installed, _)
+      when H.equal_context (H.context active) context
+           && H.equal_context (H.context installed) context
+           && P.Invocation.equal_status (H.status active) Dispatching -> true
+    | None, _ | Some _, (No_attempt | Dispatch_pending _ | Dispatch_installed _) -> false
+  in
+  if
+    (not (same_domain issuer.registry))
+    || issuer.registry.closed
+    || (match issuer.state with
+        | Live -> false
+        | Closing | Quarantined | Closed -> true)
+    || scope.bracket_exited
+    || scope.callback_complete
+    || scope.submitted
+    || Option.is_some scope.sealed
+    || (not dispatched)
+    || (not (native_effect_parent_live_now scope))
+    || (require_action_fiber && not (same_action_fiber scope.action))
+    || (not (phys_equal scope.action.snapshot.issuer issuer))
+    || (not (phys_equal scope.action.snapshot.selected issuer.selected))
+    || (not
+          (Int.equal scope.action.snapshot.selection_revision issuer.selection_revision))
+    || (not (Operator_authorization.is_current issuer.actor))
+    || (not
+          (Option.value_map
+             (Hashtbl.find issuer.native_calls context.id)
+             ~default:false
+             ~f:(phys_equal scope.registration)))
+    || not
+         (Option.value_map scope.registration.scope ~default:false ~f:(phys_equal scope))
+  then invalid "native callback completion is no longer current"
+  else Ok ()
+;;
+
+module Saved_inference_source = struct
+  module Selected = Agent_session.Captured_agent_runner.Claimed_developer.Selected
+  module Target = Agent_session.Captured_agent_runner.Selected_content_target
+  module Model = Agent_session.Captured_agent_runner.Selected_model_target
+  module Native = Agent_session.Native_tool_invocation
+  open Target
+
+  let saved_ancestor = function
+    | Target.Saved saved -> saved
+    | Content content -> Target.saved_ancestor content
+    | Model model -> Model.saved_ancestor model
+  ;;
+
+  let revision = function
+    | Target.Saved saved -> Selected.Target.revision saved
+    | Content content -> Target.revision content
+    | Model model -> Model.revision model
+  ;;
+
+  let check = function
+    | Target.Saved saved -> Selected.Target.check saved
+    | Content content -> Target.check content
+    | Model model -> Model.check model
+  ;;
+
+  let check_now = function
+    | Target.Saved saved ->
+      let* borrowed = Native.borrow_selected () in
+      let selected = Selected.Target.saved saved in
+      if Selected.matches_borrowed selected borrowed
+      then Selected.Target.check_now saved
+      else Selected.Target.check_descendant_now saved ~child:borrowed
+    | Content content -> Target.check_current_or_descendant_now content
+    | Model model -> Model.check_current_or_descendant_now model
+  ;;
+
+  let matches_parent child parent =
+    match child with
+    | Target.Saved _ -> false
+    | Content content -> Target.matches_parent content parent
+    | Model model -> Model.matches_parent model parent
+  ;;
+
+  let current_native_terminal_now issuer selected terminal =
+    let* borrowed = Native.borrow_selected () in
+    let direct = Selected.matches_borrowed selected borrowed in
+    let* () =
+      if direct
+      then Selected.check_now selected
+      else Selected.check_descendant_now selected ~child:borrowed
+    in
+    let* actual_terminal =
+      if direct
+      then
+        let* () = native_completion_state_now terminal ~require_action_fiber:true in
+        Ok terminal
+      else (
+        let invocation = Native.selected_borrowed_invocation borrowed in
+        let context = H.context invocation in
+        let* child =
+          match Hashtbl.find issuer.native_calls context.id with
+          | Some registration
+            when H.equal_context (H.context registration.invocation) context ->
+            (match registration.scope with
+             | Some child
+               when phys_equal child.issuer issuer
+                    && Option.value_map
+                         child.dispatched
+                         ~default:false
+                         ~f:(phys_equal invocation) -> Ok child
+             | Some _ | None -> invalid "saved Agent child native callback is not entered")
+          | Some _ | None ->
+            invalid "saved Agent child native invocation is not registered"
+        in
+        let* () = native_completion_state_now child ~require_action_fiber:true in
+        if phys_equal child terminal
+        then invalid "saved Agent callback did not enter a distinct native child"
+        else
+          let* () = native_completion_state_now terminal ~require_action_fiber:false in
+          Ok child)
+    in
+    let* () =
+      if direct
+      then Selected.check_now selected
+      else Selected.check_descendant_now selected ~child:borrowed
+    in
+    Ok actual_terminal
+  ;;
+
+  let current_native_now issuer selected terminal =
+    Result.map (current_native_terminal_now issuer selected terminal) ~f:ignore
+  ;;
+end
+
+let rec check_inference_frame_now scope frame =
+  if
+    (not (phys_equal frame.inference_frame_scope scope))
+    || not !(frame.inference_frame_live)
+  then invalid "selected inference child frame has expired"
+  else
+    let* () =
+      match frame.inference_frame_parent with
+      | None ->
+        (match scope.inference_origin, frame.inference_frame_source with
+         | Claimed_saved_agent { selected; _ }, Saved target
+           when phys_equal (Saved_inference_source.Selected.Target.saved target) selected
+           -> Ok ()
+         | Claimed_model_job, _ | Claimed_saved_agent _, _ ->
+           invalid "selected inference child has another saved parent")
+      | Some parent ->
+        let* () = check_inference_frame_now scope parent in
+        if
+          Saved_inference_source.matches_parent
+            frame.inference_frame_source
+            parent.inference_frame_source
+        then Ok ()
+        else invalid "selected inference child has another logical parent"
+    in
+    Saved_inference_source.check_now frame.inference_frame_source
+;;
+
 let check_inference_scope_local (scope : inference_scope) =
   let issuer = scope.inference_issuer in
   let callback_live =
@@ -646,11 +844,27 @@ let check_inference_scope_local (scope : inference_scope) =
         ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
     in
     let* () = Provider_operator_port.Model_selection.check_current selection in
+    let frame = Eio.Fiber.get inference_child_frame_key in
     match scope.inference_origin with
-    | Claimed_model_job -> Ok ()
+    | Claimed_model_job ->
+      (match frame with
+       | None -> Ok ()
+       | Some _ -> invalid "selected inference child has another Root origin")
     | Claimed_saved_agent { selected; terminal } ->
       let* () =
-        Agent_session.Captured_agent_runner.Claimed_developer.Selected.check_now selected
+        match frame with
+        | None ->
+          Agent_session.Captured_agent_runner.Claimed_developer.Selected.check_now
+            selected
+        | Some frame ->
+          let* () = check_inference_frame_now scope frame in
+          if
+            phys_equal
+              (Saved_inference_source.Selected.Target.saved
+                 (Saved_inference_source.saved_ancestor frame.inference_frame_source))
+              selected
+          then Ok ()
+          else invalid "selected inference child has another saved ancestor"
       in
       let context = H.context terminal.registration.invocation in
       if
@@ -667,7 +881,10 @@ let check_inference_scope_local (scope : inference_scope) =
              terminal.registration.scope
              ~default:false
              ~f:(phys_equal terminal)
-      then Ok ()
+      then (
+        match frame with
+        | None -> Ok ()
+        | Some _ -> Saved_inference_source.current_native_now issuer selected terminal)
       else invalid "saved Agent native callback is no longer owned"
 ;;
 
@@ -675,6 +892,12 @@ module Current = struct
   type nonrec t = current
 
   let selected (t : t) = t.selected
+
+  let same_selection (left : t) (right : t) =
+    phys_equal left.issuer right.issuer
+    && Int.equal left.selection_revision right.selection_revision
+    && phys_equal left.selected right.selected
+  ;;
 end
 
 module Claim_preflight = struct
@@ -1140,22 +1363,6 @@ let capacity_key t job =
     ~workspace_conflict_domain:t.workspace_conflict_domain
     ~kind:(P.Developer_job.kind job)
     ~nested_depth:(P.Developer_job.Launch.nested_depth (P.Developer_job.launch job))
-;;
-
-let same_action_fiber action =
-  Option.value_map (Eio.Fiber.get action_key) ~default:false ~f:(fun current ->
-    phys_equal current action)
-;;
-
-let native_effect_parent_live_now (scope : native_scope) =
-  same_domain scope.issuer.registry
-  && (not scope.bracket_exited)
-  && (not scope.callback_complete)
-  && scope.action.live
-  && Option.value_map scope.registration.call.cancel ~default:false ~f:(fun cancel ->
-    Option.is_none (Eio.Cancel.get_error cancel))
-  && Option.value_map scope.callback_switch ~default:false ~f:(fun sw ->
-    Option.is_none (Eio.Switch.get_error sw))
 ;;
 
 let model_source_issuer = function
@@ -2078,50 +2285,7 @@ module Native_terminal = struct
 
   let callback_complete (t : t) = t.callback_complete
   let effect_parent_live_now = native_effect_parent_live_now
-
-  let check_completion_state_now (scope : t) ~require_action_fiber =
-    let issuer = scope.issuer in
-    let context = H.context scope.registration.invocation in
-    let dispatched =
-      match scope.dispatched, scope.dispatch_state with
-      | Some active, Dispatch_installed (installed, _)
-        when H.equal_context (H.context active) context
-             && H.equal_context (H.context installed) context
-             && P.Invocation.equal_status (H.status active) Dispatching -> true
-      | None, _ | Some _, (No_attempt | Dispatch_pending _ | Dispatch_installed _) ->
-        false
-    in
-    if
-      (not (same_domain issuer.registry))
-      || issuer.registry.closed
-      || (match issuer.state with
-          | Live -> false
-          | Closing | Quarantined | Closed -> true)
-      || scope.bracket_exited
-      || scope.callback_complete
-      || scope.submitted
-      || Option.is_some scope.sealed
-      || (not dispatched)
-      || (not (native_effect_parent_live_now scope))
-      || (require_action_fiber && not (same_action_fiber scope.action))
-      || (not (phys_equal scope.action.snapshot.issuer issuer))
-      || (not (phys_equal scope.action.snapshot.selected issuer.selected))
-      || (not
-            (Int.equal scope.action.snapshot.selection_revision issuer.selection_revision))
-      || (not (Operator_authorization.is_current issuer.actor))
-      || (not
-            (Option.value_map
-               (Hashtbl.find issuer.native_calls context.id)
-               ~default:false
-               ~f:(phys_equal scope.registration)))
-      || not
-           (Option.value_map
-              scope.registration.scope
-              ~default:false
-              ~f:(phys_equal scope))
-    then invalid "native callback completion is no longer current"
-    else Ok ()
-  ;;
+  let check_completion_state_now = native_completion_state_now
 
   let check_completion_now scope =
     check_completion_state_now scope ~require_action_fiber:true
@@ -2719,12 +2883,15 @@ module Model_inference = struct
     let* () = check_inference_scope_local t in
     match t.inference_origin with
     | Claimed_model_job -> Ok ()
-    | Claimed_saved_agent { terminal; _ } -> Native_terminal.check_completion_now terminal
+    | Claimed_saved_agent { selected; terminal } ->
+      (match Eio.Fiber.get inference_child_frame_key with
+       | None -> Native_terminal.check_completion_now terminal
+       | Some _ -> Saved_inference_source.current_native_now issuer selected terminal)
   ;;
 
   let check t =
     let issuer = t.inference_issuer in
-    let* witness = current issuer in
+    let* before = current_after_mutations issuer in
     let* () =
       Job_scope.Parent.check
         t.inference_parent
@@ -2735,9 +2902,17 @@ module Model_inference = struct
       match t.inference_origin with
       | Claimed_model_job -> Ok ()
       | Claimed_saved_agent { selected; _ } ->
-        Agent_session.Captured_agent_runner.Claimed_developer.Selected.check selected
+        (match Eio.Fiber.get inference_child_frame_key with
+         | None -> Saved_selected.check selected
+         | Some frame -> check_inference_frame_now t frame)
     in
-    let* () = check_effect_now issuer witness in
+    let* after = current_after_mutations issuer in
+    let* () =
+      if Current.same_selection before after
+      then Ok ()
+      else invalid "developer inference selection changed during admission"
+    in
+    let* () = check_effect_now issuer after in
     check_now t
   ;;
 
@@ -2967,7 +3142,105 @@ module Model_inference = struct
     | Tracking_failure error -> Error error
   ;;
 
-  let context t = t.inference_context
+  let context t =
+    require (check_now t);
+    match Eio.Fiber.get inference_child_frame_key with
+    | None -> t.inference_context
+    | Some frame ->
+      require (check_inference_frame_now t frame);
+      frame.inference_frame_context
+  ;;
+
+  let with_selected_child_target
+        issuer
+        ~(target : Agent_session.Captured_agent_runner.Selected_content_target.parent)
+        ~selected_context
+        ~f
+    =
+    let* t =
+      match Eio.Fiber.get inference_scope_key with
+      | Some scope when phys_equal scope.inference_issuer issuer -> Ok scope
+      | None | Some _ -> invalid "selected child has no entered inference scope"
+    in
+    let* () = check t in
+    let* selected, terminal =
+      match t.inference_origin with
+      | Claimed_saved_agent { selected; terminal } -> Ok (selected, terminal)
+      | Claimed_model_job -> invalid "selected child requires a saved Agent scope"
+    in
+    let parent = Eio.Fiber.get inference_child_frame_key in
+    let* () =
+      match parent, target with
+      | None, Saved saved when phys_equal (Saved_selected.Target.saved saved) selected ->
+        Ok ()
+      | None, (Saved _ | Content _ | Model _) ->
+        invalid "selected child has another saved parent"
+      | Some parent, _ ->
+        let* () = check_inference_frame_now t parent in
+        if Saved_inference_source.matches_parent target parent.inference_frame_source
+        then Ok ()
+        else invalid "selected child has another immediate parent"
+    in
+    let* () = Saved_inference_source.check target in
+    let* () =
+      Saved_inference_source.current_native_now t.inference_issuer selected terminal
+    in
+    let* fresh = current_after_mutations t.inference_issuer in
+    let* () = check_effect_now t.inference_issuer fresh in
+    let* () = check_now t in
+    let parent_context =
+      match parent with
+      | None -> t.inference_context
+      | Some parent -> parent.inference_frame_context
+    in
+    let config =
+      Chat_response.Config.of_elements
+        (Agent_session.Prompt_revision.elements (Saved_inference_source.revision target))
+    in
+    let preparation_error error =
+      P.Error.invalid_request
+        (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+    in
+    let* expected_target =
+      Chat_response.Inference_config.apply_overrides
+        (Inference_runtime.Context.target parent_context)
+        config
+        ~limits:Transcript.Admission.default
+      |> Result.map_error ~f:preparation_error
+    in
+    let* context =
+      (match target with
+       | Saved _ | Content _ ->
+         Inference_runtime.Context.derive_in_session
+           parent_context
+           ~target:expected_target
+       | Model _ ->
+         Inference_runtime.Context.derive parent_context ~target:expected_target)
+      |> Result.map_error ~f:preparation_error
+    in
+    let* () =
+      if
+        Inference.Request.Target.equal
+          (Inference_runtime.Context.target selected_context)
+          expected_target
+      then Ok ()
+      else invalid "selected child inference target changed"
+    in
+    let* () = Saved_inference_source.check_now target in
+    let* () = check_now t in
+    let frame =
+      { inference_frame_scope = t
+      ; inference_frame_source = target
+      ; inference_frame_parent = parent
+      ; inference_frame_context = context
+      ; inference_frame_live = ref true
+      }
+    in
+    Exn.protect
+      ~f:(fun () ->
+        Eio.Fiber.with_binding inference_child_frame_key frame (fun () -> f context))
+      ~finally:(fun () -> frame.inference_frame_live := false)
+  ;;
 
   let admit_external_model t ~request ~checkpoint =
     match t.inference_origin with
@@ -2979,13 +3252,27 @@ module Model_inference = struct
         ~check_parent_now:(fun () -> Ok ())
     | Claimed_saved_agent { selected; terminal } ->
       let* () = check t in
+      let* actual_terminal =
+        Saved_inference_source.current_native_terminal_now
+          t.inference_issuer
+          selected
+          terminal
+      in
       admit_external_model_from_scope
-        (Native_model terminal)
+        (Native_model actual_terminal)
         ~request
         ~checkpoint
         ~check_parent_now:(fun () ->
-          Agent_session.Captured_agent_runner.Claimed_developer.Selected.check_now
-            selected)
+          let* () = check_inference_scope_local t in
+          let* current =
+            Saved_inference_source.current_native_terminal_now
+              t.inference_issuer
+              selected
+              terminal
+          in
+          if phys_equal current actual_terminal
+          then Ok ()
+          else invalid "developer Model native parent changed before admission")
   ;;
 
   let identity t : Inference_client.Identity.t =
@@ -3000,6 +3287,7 @@ module Model_inference = struct
         (fun prepared ~relation ~f ->
           let issuer = t.inference_issuer in
           require (check t);
+          let child_frame = Eio.Fiber.get inference_child_frame_key in
           let relation =
             match relation with
             | Transcript.Scope.Root -> Store.Tracking.Root
@@ -3031,6 +3319,7 @@ module Model_inference = struct
           issuer.inference_active <- issuer.inference_active + 1;
           let route =
             { inference_scope = t
+            ; inference_child_frame = child_frame
             ; inference_claim = Job_scope.claim t.inference_active_worker
             ; inference_configuration = Inference_runtime.Prepared.configuration prepared
             ; inference_registration = None
@@ -3057,26 +3346,42 @@ module Model_inference = struct
           in
           let outcome =
             try
-              let pending =
+              let registration =
                 Mutation_gate.with_owner issuer.mutation_gate ~f:(fun () ->
-                  require_store
-                    ((match t.inference_origin with
-                      | Claimed_model_job -> Store.Tracking.prepare_admit
-                      | Claimed_saved_agent _ -> Store.Tracking.prepare_admit_saved_agent)
-                       issuer.tracking
-                       ~claim:route.inference_claim
-                       ~relation
-                       ~configuration:(Inference_runtime.Prepared.configuration prepared)))
+                  require (check_now t);
+                  require
+                    (if
+                       Option.equal
+                         phys_equal
+                         child_frame
+                         (Eio.Fiber.get inference_child_frame_key)
+                     then Ok ()
+                     else invalid "selected inference child frame changed");
+                  let pending =
+                    require_store
+                      ((match t.inference_origin with
+                        | Claimed_model_job -> Store.Tracking.prepare_admit
+                        | Claimed_saved_agent _ ->
+                          Store.Tracking.prepare_admit_saved_agent)
+                         issuer.tracking
+                         ~claim:route.inference_claim
+                         ~relation
+                         ~configuration:
+                           (Inference_runtime.Prepared.configuration prepared))
+                  in
+                  route.inference_pending <- Some pending;
+                  let receipt =
+                    require_store
+                      (Store.Tracking.commit issuer.tracking pending ~admit:(fun () ->
+                         Result.is_ok (check_now ~allow_tracking:true t)
+                         && Option.equal
+                              phys_equal
+                              child_frame
+                              (Eio.Fiber.get inference_child_frame_key)))
+                  in
+                  acknowledge route receipt;
+                  registration route)
               in
-              route.inference_pending <- Some pending;
-              let receipt =
-                Mutation_gate.with_owner issuer.mutation_gate ~f:(fun () ->
-                  require_store
-                    (Store.Tracking.commit issuer.tracking pending ~admit:(fun () ->
-                       Result.is_ok (check_now ~allow_tracking:true t))))
-              in
-              acknowledge route receipt;
-              let registration = registration route in
               `Returned
                 (Eio.Fiber.with_binding inference_route_key route (fun () ->
                    f
@@ -3095,17 +3400,33 @@ module Model_inference = struct
 
   let before_dispatch t prepared =
     require (check t);
+    let expected =
+      match Eio.Fiber.get inference_child_frame_key with
+      | None -> t.inference_context
+      | Some frame ->
+        require (check_inference_frame_now t frame);
+        frame.inference_frame_context
+    in
     require
       (if
          Inference.Request.Target.equal
            (Inference_runtime.Prepared.target prepared)
-           (Inference_runtime.Context.target t.inference_context)
+           (Inference_runtime.Context.target expected)
        then Ok ()
        else invalid "prepared inference target changed")
   ;;
 
   let on_attempt t attempt =
     let route = current_route t in
+    require (check_now ~allow_tracking:true t);
+    require
+      (if
+         Option.equal
+           phys_equal
+           route.inference_child_frame
+           (Eio.Fiber.get inference_child_frame_key)
+       then Ok ()
+       else invalid "selected inference child frame changed before attempt");
     let registration = registration route in
     if Option.is_some route.inference_attempt
     then
@@ -3135,6 +3456,15 @@ module Model_inference = struct
               "inference attempt accounting or prepared configuration changed"));
     route.inference_attempt <- Some attempt;
     Mutation_gate.with_owner t.inference_issuer.mutation_gate ~f:(fun () ->
+      require (check_now ~allow_tracking:true t);
+      require
+        (if
+           Option.equal
+             phys_equal
+             route.inference_child_frame
+             (Eio.Fiber.get inference_child_frame_key)
+         then Ok ()
+         else invalid "selected inference child frame changed before attempt");
       change route Store.Tracking.Started);
     route.inference_started <- true
   ;;
@@ -3223,7 +3553,14 @@ module Model_inference = struct
   let submission_guard t =
     Inference_runtime.Submission_guard.create ~refresh:(fun () ->
       require (check t);
-      fun () -> require (check_now t))
+      let child_frame = Eio.Fiber.get inference_child_frame_key in
+      fun () ->
+        require (check_now t);
+        require
+          (if
+             Option.equal phys_equal child_frame (Eio.Fiber.get inference_child_frame_key)
+           then Ok ()
+           else invalid "selected inference child frame changed before submission"))
   ;;
 
   let interrupted_change route ~reason =
@@ -3394,7 +3731,8 @@ module Model_inference = struct
     let* () = Saved_selected.check selected in
     let* terminal = registered_saved_terminal issuer selected in
     let* () = Native_terminal.check_completion_now terminal in
-    let* _ = current_local issuer in
+    let* fresh = current_after_mutations issuer in
+    let* () = check_effect_now issuer fresh in
     let* () = Saved_selected.check_now selected in
     Ok ()
   ;;

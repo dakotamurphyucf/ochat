@@ -132,6 +132,15 @@ val with_inference : 'env t -> inference_context:Inference_runtime.Context.t -> 
     absent correlation must never be fabricated from a call alias. *)
 val with_inference_parent : 'env t -> parent:Transcript.Scope.parent -> 'env t
 
+(** Replace only the selected child's canonical Model recipe before
+    Driver.Prepared_inputs copies this immutable Context. The trusted host
+    binds it to an active child; the recipe value itself grants no source or
+    provider authority. Inherited attempt/submission guards, observations,
+    identity and inference parent are unchanged. An expired child rejects when
+    the recipe is later invoked. Ordinary contexts keep their constructor's
+    existing recipe behavior. *)
+val with_agent_prompt_v1_recipe : 'env t -> Moderation.Capabilities.model_recipe -> 'env t
+
 (** Selected inference ports for auxiliary requests owned by this invocation.
     Attempt admission remains the supplied host identity and acknowledgement;
     no actor lookup, ambient backend resolution or additional callback is installed. *)

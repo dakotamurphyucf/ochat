@@ -237,6 +237,15 @@ module Claimed_developer : sig
     -> ('a, Agent_protocol.Error.t) result
 end
 
+module Selected_child_target : sig
+  (** Private common ancestry node used by checked Content and Model targets.
+      Only the separately minted wrappers below expose typed receivers; no
+      caller can construct or serialize a node from coordinates. *)
+  module Model : sig
+    type t
+  end
+end
+
 module Selected_content_target : sig
   (** One authored Agent content occurrence selected inside a physically entered
       saved-Agent child. This is distinct from the saved Tool target: content
@@ -254,9 +263,16 @@ module Selected_content_target : sig
   type parent =
     | Saved of Claimed_developer.Selected.Target.t
     | Content of t
+    | Model of Selected_child_target.Model.t
 
   val revision : t -> Prompt_revision.t
   val caller_revision : t -> Prompt_revision.t
+
+  (** Comparison only: the exact saved Tool target retained by this Content
+      ancestry. Root must still check its registered native terminal, current
+      physical borrow and the live immediate parent; this projection grants no
+      source, model or provider effect. *)
+  val saved_ancestor : t -> Claimed_developer.Selected.Target.t
 
   (** Physical comparison only. The host must additionally check its live Root,
       native child and current source before entering an effect. *)
@@ -271,9 +287,48 @@ module Selected_content_target : sig
       by [Native_tool_invocation.check_selected_ancestor]. *)
   val check_now : t -> (unit, Agent_protocol.Error.t) result
 
+  (** Nonyielding physical check of the current borrow against this target's
+      own retained entering borrow. The direct/descendant branch is chosen by
+      identity BEFORE either check; a denied direct check never falls through
+      to descendant admission. Root separately proves its registered native
+      terminal and original saved ancestry. *)
+  val check_current_or_descendant_now : t -> (unit, Agent_protocol.Error.t) result
+
   (** Final nonyielding check when a genuine distinct native child invocation
       shadows the borrow that selected this Content child. Logical Content
       recursion alone does not create such a native invocation. *)
+  val check_descendant_now
+    :  t
+    -> child:Native_tool_invocation.selected_borrowed
+    -> (unit, Agent_protocol.Error.t) result
+end
+
+module Selected_model_target : sig
+  (** An immediate Model member selected under the same genuine saved-child
+      ancestry as Content, but never minted from a parser Agent occurrence.
+      Its distinct opaque constructor requires the active source binding,
+      selected parent, bounded member and an installed/replayed child revision.
+      Both Model and Content children may nest beneath it. A logical Model
+      selection does not manufacture a native invocation; [borrowed] is the
+      ACTUAL entered native scope at selection. The target and descendants
+      expire with the invoking child callback. *)
+  type t = Selected_child_target.Model.t
+
+  val revision : t -> Prompt_revision.t
+  val caller_revision : t -> Prompt_revision.t
+
+  (** Comparison only: the exact saved Tool target retained by this Model
+      ancestry. It is not a Root, native or inference admission proof. *)
+  val saved_ancestor : t -> Claimed_developer.Selected.Target.t
+
+  val matches_parent : t -> Selected_content_target.parent -> bool
+  val check : t -> (unit, Agent_protocol.Error.t) result
+  val check_now : t -> (unit, Agent_protocol.Error.t) result
+
+  (** Same direct-or-genuine-descendant choice as Content, relative to this
+      Model target's own entering borrow; no Root authority is granted. *)
+  val check_current_or_descendant_now : t -> (unit, Agent_protocol.Error.t) result
+
   val check_descendant_now
     :  t
     -> child:Native_tool_invocation.selected_borrowed
@@ -305,6 +360,39 @@ module Source_binding : sig
     type side =
       | Declaring
       | Caller
+
+    module Selected_member : sig
+      (** Bounded Model selector bound to THIS physical Saved, Content or Model
+          source port, its selected revision/side and original receipt. A path
+          spelling or equal revision cannot manufacture this value. The
+          immutable member is comparison data only: actual File/Captured
+          acquisition and child publication repeat target/lease checks. *)
+      type t
+
+      (** Exact admitted request choice, never inferred from inventory. *)
+      val mode : t -> Agent_protocol.Model_spawn_request.Source_mode.t
+    end
+
+    (** Select a local Model path relative to the exact selected revision's
+        portable root member. The request string is a selector, not a read
+        grant. This is pure bounded admission; it never opens a Scope. The
+        caller chooses Captured versus File from its explicit current source
+        policy BEFORE acquisition, never as fallback after either denies. *)
+    val select_local_member
+      :  t
+      -> side:side
+      -> reference:string
+      -> mode:Agent_protocol.Model_spawn_request.Source_mode.t
+      -> checkpoint:(unit -> unit)
+      -> (Selected_member.t, Agent_protocol.Error.t) result
+
+    (** Repeat the exact issuer, side, selected revision, original receipt,
+        immediate logical parent and actual native borrow checks. A selected
+        member is not a persistent grant and cannot outlive its callback. *)
+    val check_selected_member
+      :  t
+      -> Selected_member.t
+      -> (unit, Agent_protocol.Error.t) result
 
     (** Current selected Tool or descendant Content target and exact binding
         issuer, without opening a root Scope. Captured/builtin/literal
@@ -344,6 +432,17 @@ module Source_binding : sig
       -> (Prompt_source_owner.Scope.Origin_read.t, Agent_protocol.Error.t) result
   end
 
+  module Selected_model_source : sig
+    (** Physical source-selection result issued by THIS binding for one exact
+        selected member. It retains the verified installed/replayed revision
+        and observed bounded acquisition costs. Its representation cannot be
+        paired with a different Content_source, member or Content_ports. *)
+    type t
+
+    val input_bytes : t -> int
+    val work_steps : t -> int
+  end
+
   module Content_ports : sig
     (** Two physical parser-owned Agent ports from one selected child: its own
         restored declaring parser and this invocation's actual caller.
@@ -363,6 +462,22 @@ module Source_binding : sig
       -> declaration:Prompt.Chat_markdown.agent_content
       -> ctx:Eio_unix.Stdenv.base Chat_response.Ctx.t
       -> (string, Agent_protocol.Error.t) result
+
+    (** Lend one Model target under the actual selected declaring or caller
+        Port. [member] and [selected] must arise from this SAME binding, side,
+        physical parent and retained member; equal paths/artifact IDs alone
+        reject. The target expires when [f] returns, including exceptions and
+        cancellation. The later with_selected_model_child preparation binds
+        the selected revision's own parser Port for Model->Content and retains
+        the actual caller Port separately. No parser Agent occurrence or native
+        invocation is forged here. *)
+    val with_selected_model_target
+      :  t
+      -> source:Content_source.t
+      -> member:Content_source.Selected_member.t
+      -> selected:Selected_model_source.t
+      -> f:(Selected_model_target.t -> ('a, Agent_protocol.Error.t) result)
+      -> ('a, Agent_protocol.Error.t) result
   end
 
   val create
@@ -395,6 +510,14 @@ module Source_binding : sig
     -> target:Selected_content_target.t
     -> (Content_source.t, Agent_protocol.Error.t) result
 
+  (** Short read port for a checked Model member target. This target carries
+      its own selected revision and actual caller Port; no declaring/caller
+      side is inferred from a saved ancestor. *)
+  val selected_model_content_source
+    :  t
+    -> target:Selected_model_target.t
+    -> (Content_source.t, Agent_protocol.Error.t) result
+
   (** Select installed child code through this genuine borrowed source template.
       The caller authenticates its original wrapper/request and holds the native
       resource loan. Recorded selection always restores before source-mode
@@ -414,6 +537,27 @@ module Source_binding : sig
     -> checkpoint:(unit -> unit)
     -> (Prompt_child_source.t, Agent_protocol.Error.t) Result.t
 
+  (** Prepare one local Model member chosen by the exact live Content_source
+      port. The request's immutable [Captured|File] decision is made before any
+      source acquisition. Captured reuses verified immutable inventory; File
+      uses only the original retained source lease and existing bounded
+      Builder/install path. A denied/foreign/revoked selection never falls
+      through to the other mode. This operation does not mint a Content target
+      or new native scope; [Content_ports.with_selected_model_target] brackets
+      that separate selected-parent proof. [on_acquire] belongs to the ONE
+      shared upper budget and fires before possible File I/O. *)
+  val select_model_member
+    :  t
+    -> source:Content_source.t
+    -> member:Content_source.Selected_member.t
+    -> script_preparation:Runtime_script_preparation.t
+    -> env:Eio_unix.Stdenv.base
+    -> max_input_bytes:int
+    -> max_work_steps:int
+    -> checkpoint:(unit -> unit)
+    -> on_acquire:(unit -> unit)
+    -> (Selected_model_source.t, Agent_protocol.Error.t) result
+
   (** Bind the exact restored revision before native registration, using its
       constructor's actual shell/content policies and response directory. No
       source read or initializer. Missing/closed source loans still permit saved
@@ -431,7 +575,7 @@ module Source_binding : sig
 
   (** Bind the selected child revision to its own parser-owned Agent port under
       the immediate parent's joined switch. [parent] is the exact physically
-      selected saved Tool or Content child, and [revision] is this child's
+      selected saved Tool, Content or Model child, and [revision] is this child's
       restored target, never its ancestor's parser. The port checks the entire
       original saved ancestry and this binding at each content invocation,
       then mints a distinct [Selected_content_target] for the trusted callback.

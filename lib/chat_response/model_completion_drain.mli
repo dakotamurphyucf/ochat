@@ -50,10 +50,16 @@ type t =
     sampled after each asynchronous settlement, immediately before that round's
     manager drain.
 
-    Every surfaced runtime request is returned in order. [Request_turn] and
-    [Request_compaction] require the caller's existing policy/turn owner to
-    handle or explicitly reject them; [End_session] stops this drain with
-    [End_session_requested] even if the manager is not yet halted. Halt and
+    Every surfaced runtime request is returned in order. The optional
+    [on_runtime_request] observes each request from one committed handler
+    outcome immediately after that outcome, before another event handler or
+    any potentially blocking job wait. It is an existing host policy callback,
+    not a new turn owner: it may raise to reject an unsupported mutable request,
+    preserving the exception and backtrace. An absent callback preserves the
+    ordinary collection behavior. [Request_turn] and [Request_compaction]
+    require the caller's existing policy/turn owner to handle or explicitly
+    reject them; [End_session] stops this drain with [End_session_requested]
+    even if the manager is not yet halted. Halt and
     pending UI return typed stop states rather than
     spinning. Manager errors can follow committed outcomes; the caller must
     reconcile from the manager's authoritative state. Escaped worker exceptions
@@ -65,4 +71,6 @@ val run_entries
   -> now_ms:(unit -> int)
   -> history:History_entry.t list
   -> available_tools:Openai.Responses.Request.Tool.t list
+  -> ?on_runtime_request:(Moderation.Runtime_request.t -> unit)
+  -> unit
   -> (t, string) result

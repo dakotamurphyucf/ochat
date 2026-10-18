@@ -3,8 +3,9 @@
 These APIs construct tasks; use `let*` to interpret them in sequence. Runtime is
 available on ordinary and delegated extensibility-v1 moderators. Model and Process
 are available only on ordinary moderators. None of these three modules is installed
-on the one-off or standalone-tool surface. A declared compiler name does not itself
-install a host service, authorize a command or register a model recipe.
+on the one-off or standard standalone-tool surface. The separate developer tool
+contract adds only its admitted Model.spawn operations. A declared compiler name
+does not itself install a host service, authorize a command or register a model recipe.
 
 Use [selected tools](chatml-host-effects.md) and
 [owned jobs](chatml-authoring-background.md) for reusable work within delegated
@@ -31,7 +32,10 @@ operation can fail the task; catch those failures separately if recovery is usef
 The ordinary Ochat conversation host registers `agent_prompt_v1`. Its payload is
 an object with required string fields `prompt` and `input`, plus optional boolean
 `is_local` (default false), boolean `history_compaction` (default false), and string
-`session_id` (default the prompt name). Success contains `recipe`, `prompt`,
+`session_id` (default the prompt name). The optional string `source_mode` defaults
+to `"file"`; `"captured"` requires `is_local: true` and a host with selected
+captured-source custody. A host without that custody rejects the request before
+fetching. Explicit `null` is not an omitted field. Success contains `recipe`, `prompt`,
 `is_local`, `session_id`, `final_text` and `terminated_normally`. A JSON string
 alone does not satisfy this recipe: the text helpers are useful only for a
 registration whose input contract accepts a string.
@@ -53,6 +57,18 @@ string return type alone. Follow the installed host's
 [job contract](../agent-server/chatml-orchestration.md).
 A job ID acknowledges work; it is not the final answer or proof that a new
 model turn has been requested.
+
+Within a hosted developer child, local Model recipes select a member of that
+child's authenticated source. File mode reads through its original live source
+lease; captured mode uses its retained authored inventory. There is no mode
+fallback or remote executable fetch. Descendants share the child source budget,
+and each restores its own programs. Local spawned jobs stay inside the joined
+child scope; they are not durable scheduler jobs. The child moderator can stop
+early while retaining already accepted assistant text. Requests for another turn
+or mutable compaction are rejected immediately; paused or UI-dependent work is
+reported rather than treated as successful completion. See the
+[developer runtime design](../design/chatml-developer-runtime.md) for ownership
+and source-failure semantics.
 
 ## Shell-backed process execution
 

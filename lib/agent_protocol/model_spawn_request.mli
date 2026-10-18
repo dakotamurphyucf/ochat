@@ -21,5 +21,23 @@ val original : t -> Jsonaf.t
 val prompt : t -> string
 val input : t -> string
 val is_local : t -> bool
+
+module Source_mode : sig
+  type t =
+    | File
+    | Captured
+  [@@deriving equal, sexp_of]
+end
+
+(** Optional [source_mode] is part of the ONE shared grammar: ["file"] is the
+    default, ["captured"] must be explicit and requires [is_local=true]. An
+    unknown spelling/type rejects in [decode] before any source effect.
+    Existing payloads retain File behavior. A conversation executor without
+    captured selected-source custody explicitly refuses Captured rather than
+    ignoring it; the developer selected executor may use retained inventory.
+    File checks the current original lease even when captured bytes exist.
+    The value is a request, not source authority. *)
+val source_mode : t -> Source_mode.t
+
 val history_compaction : t -> bool option
 val nested_prompt_id : t -> string option

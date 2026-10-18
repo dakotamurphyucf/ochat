@@ -133,6 +133,16 @@ let admit_surface ~selected ~revision ~parsed ~input ~checkpoint =
     | Read_file _ | Custom _ | Shell _ | Mcp _ | Extension _ -> Ok ()
     | Agent _ | Persistent_agent _ | Inherited _ -> denied ~selected ()
   in
+  let moderator_script (script : CM.script) =
+    let%bind () = text script.id in
+    let%bind () = text script.language in
+    let%bind () = text script.kind in
+    match script.source with
+    | Inline source -> text source
+    | Src { path; source_text } ->
+      let%bind () = text path in
+      text source_text
+  in
   let element (element : CM.top_level_elements) =
     let%bind () = poll () in
     match element with
@@ -142,6 +152,7 @@ let admit_surface ~selected ~revision ~parsed ~input ~checkpoint =
     | User message
     | Assistant message -> admit_message message
     | Config _ | Reasoning _ -> Ok ()
+    | Script script when selected -> moderator_script script
     | Tool declaration when selected -> tool declaration
     | Shell_runtime _ when selected -> Ok ()
     | Shell_script script when selected ->

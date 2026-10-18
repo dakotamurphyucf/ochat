@@ -634,71 +634,173 @@ module Claimed_developer = struct
   ;;
 end
 
-module Selected_content_target = struct
+module Selected_child_target = struct
   module Saved_target = Claimed_developer.Selected.Target
   module N = Native_tool_invocation
 
+  module Node = struct
+    type t =
+      { saved : Saved_target.t
+      ; parent : t option
+      ; borrowed : N.selected_borrowed
+      ; live : bool Atomic.t
+      ; binding_issuer : Binding_issuer.t option
+      ; identity : unit ref
+      }
+
+    let create ~saved ~parent ~borrowed ~live ~binding_issuer =
+      { saved; parent; borrowed; live; binding_issuer; identity = ref () }
+    ;;
+
+    let invalid message = Error (Agent_protocol.Error.invalid_request message)
+
+    let check_saved_now t ~current =
+      if Claimed_developer.Selected.matches_borrowed (Saved_target.saved t.saved) current
+      then Saved_target.check_now t.saved
+      else Saved_target.check_descendant_now t.saved ~child:current
+    ;;
+
+    let rec check_descendant_now t ~child =
+      let open Result.Let_syntax in
+      if not (Atomic.get t.live)
+      then invalid "selected child target has expired"
+      else (
+        let%bind () = N.check_selected_ancestor ~ancestor:t.borrowed ~child in
+        match t.parent with
+        | None -> check_saved_now t ~current:child
+        | Some parent ->
+          if phys_equal parent.borrowed child
+          then check_now parent
+          else check_descendant_now parent ~child)
+
+    and check_now t =
+      let open Result.Let_syntax in
+      let%bind current = N.borrow_selected () in
+      if (not (Atomic.get t.live)) || not (phys_equal current t.borrowed)
+      then invalid "selected child target is not the current native callback"
+      else (
+        match t.parent with
+        | None -> check_saved_now t ~current
+        | Some parent ->
+          if phys_equal parent.borrowed current
+          then check_now parent
+          else check_descendant_now parent ~child:current)
+    ;;
+
+    let check_current_or_descendant_now t =
+      let open Result.Let_syntax in
+      let%bind current = N.borrow_selected () in
+      if phys_equal current t.borrowed
+      then check_now t
+      else check_descendant_now t ~child:current
+    ;;
+
+    let check t =
+      let open Result.Let_syntax in
+      let%bind () = check_now t in
+      let%bind () = N.check_selected_content_context t.borrowed in
+      check_now t
+    ;;
+  end
+
+  module Model = struct
+    type parent_identity =
+      | Saved_parent of Saved_target.t
+      | Child_parent of unit ref
+
+    type t =
+      { node : Node.t
+      ; parent_identity : parent_identity
+      ; source : Prompt_child_source.t
+      ; caller_revision : Prompt_revision.t
+      ; caller : Port.t
+      }
+  end
+end
+
+module Selected_content_target = struct
+  module Saved_target = Claimed_developer.Selected.Target
+  module Node = Selected_child_target.Node
+
   type t =
     { parent : parent
+    ; node : Node.t
     ; source : Prompt_child_source.t
     ; caller_revision : Prompt_revision.t
     ; caller : Port.t
-    ; borrowed : N.selected_borrowed
-    ; binding_issuer : Binding_issuer.t option
-    ; live : bool Atomic.t
     }
 
   and parent =
     | Saved of Saved_target.t
     | Content of t
+    | Model of Selected_child_target.Model.t
 
-  let revision t = Prompt_child_source.revision t.source
-  let caller_revision t = t.caller_revision
+  let revision (t : t) = Prompt_child_source.revision t.source
+  let caller_revision (t : t) = t.caller_revision
+  let saved_ancestor (t : t) = t.node.saved
 
   let matches_parent t parent =
     match t.parent, parent with
     | Saved actual, Saved expected -> phys_equal actual expected
     | Content actual, Content expected -> phys_equal actual expected
-    | Saved _, Content _ | Content _, Saved _ -> false
+    | Model actual, Model expected -> phys_equal actual expected
+    | Saved _, (Content _ | Model _)
+    | Content _, (Saved _ | Model _)
+    | Model _, (Saved _ | Content _) -> false
   ;;
 
-  let invalid message = Error (Agent_protocol.Error.invalid_request message)
-
-  let rec check_descendant_now t ~child =
-    let open Result.Let_syntax in
-    if not (Atomic.get t.live)
-    then invalid "selected content target has expired"
-    else (
-      let%bind () = N.check_selected_ancestor ~ancestor:t.borrowed ~child in
-      match t.parent with
-      | Saved parent -> Saved_target.check_descendant_now parent ~child
-      | Content parent -> check_descendant_now parent ~child)
-  ;;
-
-  let rec check_now t =
-    let open Result.Let_syntax in
-    let%bind current = N.borrow_selected () in
-    if (not (Atomic.get t.live)) || not (phys_equal current t.borrowed)
-    then invalid "selected content target is not the current native callback"
-    else (
-      match t.parent with
-      | Saved parent ->
-        if Claimed_developer.Selected.matches_borrowed (Saved_target.saved parent) current
-        then Saved_target.check_now parent
-        else Saved_target.check_descendant_now parent ~child:current
-      | Content parent ->
-        if phys_equal parent.borrowed current
-        then check_now parent
-        else check_descendant_now parent ~child:current)
-  ;;
-
-  let check t =
-    let open Result.Let_syntax in
-    let%bind () = check_now t in
-    let%bind () = N.check_selected_content_context t.borrowed in
-    check_now t
-  ;;
+  let check_descendant_now t ~child = Node.check_descendant_now t.node ~child
+  let check_now t = Node.check_now t.node
+  let check_current_or_descendant_now t = Node.check_current_or_descendant_now t.node
+  let check t = Node.check t.node
 end
+
+module Selected_model_target = struct
+  module Parent = Selected_child_target.Model
+  open Parent
+
+  type t = Selected_child_target.Model.t
+
+  let revision (t : t) = Prompt_child_source.revision t.source
+  let caller_revision (t : t) = t.caller_revision
+  let saved_ancestor (t : t) = t.node.saved
+
+  let matches_parent t parent =
+    match t.parent_identity, parent with
+    | Parent.Saved_parent actual, Selected_content_target.Saved expected ->
+      phys_equal actual expected
+    | Parent.Child_parent actual, Selected_content_target.Content expected ->
+      phys_equal actual expected.node.identity
+    | Parent.Child_parent actual, Selected_content_target.Model expected ->
+      phys_equal actual expected.node.identity
+    | ( Parent.Saved_parent _
+      , (Selected_content_target.Content _ | Selected_content_target.Model _) )
+    | Parent.Child_parent _, Selected_content_target.Saved _ -> false
+  ;;
+
+  let check_descendant_now t ~child =
+    Selected_child_target.Node.check_descendant_now t.node ~child
+  ;;
+
+  let check_now t = Selected_child_target.Node.check_now t.node
+
+  let check_current_or_descendant_now t =
+    Selected_child_target.Node.check_current_or_descendant_now t.node
+  ;;
+
+  let check t = Selected_child_target.Node.check t.node
+end
+
+let child_node_of_parent parent ~borrowed ~live ~binding_issuer =
+  let module Node = Selected_child_target.Node in
+  let saved, parent_node =
+    match parent with
+    | Selected_content_target.Saved target -> target, None
+    | Content target -> target.node.saved, Some target.node
+    | Model target -> target.node.saved, Some target.node
+  in
+  Node.create ~saved ~parent:parent_node ~borrowed ~live ~binding_issuer
+;;
 
 type selected_content_runner =
   target:Selected_content_target.t
@@ -715,6 +817,7 @@ exception Selected_content_denied of Agent_protocol.Error.t
 let check_selected_content_parent = function
   | Selected_content_target.Saved target -> Claimed_developer.Selected.Target.check target
   | Content target -> Selected_content_target.check target
+  | Model target -> Selected_model_target.check target
 ;;
 
 module Content_selection = struct
@@ -1032,15 +1135,19 @@ and invoke
             in
             let%bind () = check_selected_content_parent scope.parent in
             let%bind borrowed = Native_tool_invocation.borrow_selected () in
+            let live = Atomic.make true in
             let child =
               Selected_content_target.
                 { parent = scope.parent
+                ; node =
+                    child_node_of_parent
+                      scope.parent
+                      ~borrowed
+                      ~live
+                      ~binding_issuer:installed.binding_issuer
                 ; source = selected
                 ; caller_revision = parent
                 ; caller
-                ; borrowed
-                ; binding_issuer = installed.binding_issuer
-                ; live = Atomic.make true
                 }
             in
             let%map () = Selected_content_target.check child in
@@ -1056,7 +1163,7 @@ and invoke
         Exn.protect
           ~finally:(fun () ->
             Option.iter selected_content_handler ~f:(fun (_, target) ->
-              Atomic.set target.Selected_content_target.live false))
+              Atomic.set target.Selected_content_target.node.live false))
           ~f:(fun () ->
             Preparation.with_revision
               (Some t.script_preparation)
@@ -1214,6 +1321,7 @@ module Source_binding = struct
     type target =
       | Saved of Claimed_developer.Selected.Target.t
       | Content of Selected_content_target.t
+      | Model of Selected_model_target.t
 
     type t =
       { binding : binding
@@ -1223,6 +1331,18 @@ module Source_binding = struct
     type side =
       | Declaring
       | Caller
+
+    module Selected_member = struct
+      type t =
+        { source : binding * target
+        ; side : side
+        ; parent : Prompt_revision.t
+        ; member : Portable_path.t
+        ; mode : P.Model_spawn_request.Source_mode.t
+        }
+
+      let mode t = t.mode
+    end
 
     let check t =
       let open Result.Let_syntax in
@@ -1242,26 +1362,66 @@ module Source_binding = struct
         Claimed_developer.Selected.Target.check target
       | Content target ->
         let%bind () =
-          match target.Selected_content_target.binding_issuer with
+          match target.Selected_content_target.node.binding_issuer with
           | Some issuer when phys_equal issuer t.binding.issuer -> Ok ()
           | None | Some _ ->
             Error (failure "selected content belongs to another source binding")
         in
         Selected_content_target.check target
+      | Model target ->
+        let%bind () =
+          match target.Selected_child_target.Model.node.binding_issuer with
+          | Some issuer when phys_equal issuer t.binding.issuer -> Ok ()
+          | None | Some _ ->
+            Error (failure "selected Model belongs to another source binding")
+        in
+        Selected_model_target.check target
     ;;
 
     let revision t = function
       | Declaring ->
         (match t.target with
          | Saved target -> Claimed_developer.Selected.Target.revision target
-         | Content target -> Selected_content_target.revision target)
+         | Content target -> Selected_content_target.revision target
+         | Model target -> Selected_model_target.revision target)
       | Caller ->
         (match t.target with
          | Saved target -> Claimed_developer.Selected.Target.caller_revision target
-         | Content target -> Selected_content_target.caller_revision target)
+         | Content target -> Selected_content_target.caller_revision target
+         | Model target -> Selected_model_target.caller_revision target)
     ;;
 
     let matches_revision t ~side selected = phys_equal (revision t side) selected
+
+    let select_local_member t ~side ~reference ~mode:selected_mode ~checkpoint =
+      let open Result.Let_syntax in
+      let%bind () = check t in
+      let parent = revision t side in
+      let%bind root =
+        Portable_path.create (Prompt_revision.root_relative_path parent)
+        |> Result.map_error ~f:(fun _ ->
+          failure "selected Model parent root is not portable")
+      in
+      let%bind member =
+        Source_loader.resolve_member root ~reference ~max_reference_bytes:1024 ~checkpoint
+        |> Result.map_error ~f:(fun error -> failure (Error.to_string_hum error))
+      in
+      let%map () = check t in
+      Selected_member.
+        { source = t.binding, t.target; side; parent; member; mode = selected_mode }
+    ;;
+
+    let check_selected_member t member =
+      let open Result.Let_syntax in
+      let%bind () = check t in
+      let binding, target = member.Selected_member.source in
+      if
+        phys_equal binding t.binding
+        && phys_equal target t.target
+        && phys_equal member.parent (revision t member.side)
+      then check t
+      else Error (failure "selected Model member belongs to another source port")
+    ;;
 
     let with_read t ~side ~f =
       let module Owner = Prompt_source_owner in
@@ -1317,20 +1477,44 @@ module Source_binding = struct
     Result.map (Content_source.check port) ~f:(fun () -> port)
   ;;
 
+  let selected_model_content_source t ~target =
+    let port : Content_source.t = { binding = t; target = Model target } in
+    Result.map (Content_source.check port) ~f:(fun () -> port)
+  ;;
+
+  module Selected_model_source = struct
+    type binding = t
+
+    type t =
+      { binding : binding
+      ; port : Content_source.t
+      ; member : Content_source.Selected_member.t
+      ; selection : Prompt_child_source.Model_selection.t
+      ; input_bytes : int
+      ; work_steps : int
+      }
+
+    let input_bytes t = t.input_bytes
+    let work_steps t = t.work_steps
+  end
+
   let selected_parent_revision = function
     | Selected_content_target.Saved target ->
       Claimed_developer.Selected.Target.revision target
     | Content target -> Selected_content_target.revision target
+    | Model target -> Selected_model_target.revision target
   ;;
 
   let selected_parent_caller = function
     | Selected_content_target.Saved target -> target.caller
     | Content target -> target.caller
+    | Model target -> target.Selected_child_target.Model.caller
   ;;
 
   let selected_parent_issuer = function
     | Selected_content_target.Saved target -> target.binding_issuer
-    | Content target -> target.binding_issuer
+    | Content target -> target.node.binding_issuer
+    | Model target -> target.node.binding_issuer
   ;;
 
   module Content_ports = struct
@@ -1377,6 +1561,78 @@ module Source_binding = struct
         let%bind value = value in
         let%map () = check_selected_content_parent t.parent in
         value)
+    ;;
+
+    let with_selected_model_target t ~source ~member ~selected ~f =
+      let open Result.Let_syntax in
+      if not (Atomic.get t.live)
+      then Error (failure "selected child Agent ports have expired")
+      else (
+        let%bind () = check_selected_content_parent t.parent in
+        let%bind () = Content_source.check_selected_member source member in
+        let%bind () =
+          if
+            phys_equal source.binding t.binding
+            && phys_equal selected.Selected_model_source.binding t.binding
+            && phys_equal selected.port source
+            && phys_equal selected.member member
+          then Ok ()
+          else Error (failure "selected Model child belongs to another source port")
+        in
+        let expected_target =
+          match t.parent with
+          | Saved target ->
+            (match source.target with
+             | Saved actual -> phys_equal actual target
+             | Content _ | Model _ -> false)
+          | Content target ->
+            (match source.target with
+             | Content actual -> phys_equal actual target
+             | Saved _ | Model _ -> false)
+          | Model target ->
+            (match source.target with
+             | Model actual -> phys_equal actual target
+             | Saved _ | Content _ -> false)
+        in
+        let%bind () =
+          if expected_target
+          then Ok ()
+          else Error (failure "selected Model child has another logical parent")
+        in
+        let caller =
+          match member.Content_source.Selected_member.side with
+          | Declaring -> t.declaring
+          | Caller -> t.caller
+        in
+        let%bind borrowed = Native_tool_invocation.borrow_selected () in
+        let live = Atomic.make true in
+        let parent_identity =
+          match t.parent with
+          | Saved saved -> Selected_child_target.Model.Saved_parent saved
+          | Content target -> Child_parent target.node.identity
+          | Model target -> Child_parent target.node.identity
+        in
+        let target =
+          Selected_child_target.Model.
+            { node =
+                child_node_of_parent
+                  t.parent
+                  ~borrowed
+                  ~live
+                  ~binding_issuer:(Some t.binding.issuer)
+            ; parent_identity
+            ; source = Prompt_child_source.Model_selection.source selected.selection
+            ; caller_revision = member.parent
+            ; caller
+            }
+        in
+        Exn.protect
+          ~finally:(fun () -> Atomic.set live false)
+          ~f:(fun () ->
+            let%bind () = Selected_model_target.check target in
+            let%bind value = f target in
+            let%map () = Selected_model_target.check target in
+            value))
     ;;
   end
 
@@ -1561,6 +1817,111 @@ module Source_binding = struct
         ~invocation
         ~recorded
         ~checkpoint)
+  ;;
+
+  let select_model_member
+        t
+        ~source
+        ~member
+        ~script_preparation
+        ~env
+        ~max_input_bytes
+        ~max_work_steps
+        ~checkpoint
+        ~on_acquire
+    =
+    let module P = Agent_protocol in
+    let module Abort = struct
+      exception Work_limit
+    end
+    in
+    let resource message = P.Error.create Resource_limit ~message ~retryable:false () in
+    if max_input_bytes <= 0 || max_work_steps <= 0
+    then Error (resource "selected Model source allowance exhausted")
+    else (
+      let used = ref 0 in
+      let poll () =
+        if !used >= max_work_steps then raise Abort.Work_limit;
+        incr used;
+        checkpoint ()
+      in
+      try
+        let open Result.Let_syntax in
+        let%bind () = Content_source.check_selected_member source member in
+        let%bind () =
+          if phys_equal source.binding t
+          then Ok ()
+          else Error (failure "selected Model source belongs to another binding")
+        in
+        let parent = member.Content_source.Selected_member.parent in
+        let selected_member = member.member in
+        let%bind selection =
+          match Content_source.Selected_member.mode member with
+          | P.Model_spawn_request.Source_mode.File ->
+            let%bind entry =
+              Prompt_source_entry.of_selected_member
+                ~parent
+                ~member:selected_member
+                ~max_work_steps:(max_work_steps - !used)
+                ~checkpoint:poll
+              |> Result.map_error ~f:(fun error -> failure (Error.to_string_hum error))
+            in
+            let created_at =
+              Eio.Time.now (Eio.Stdenv.clock env)
+              |> Time_ns.Span.of_sec
+              |> Time_ns.of_span_since_epoch
+              |> P.Timestamp.of_time_ns
+            in
+            Prompt_child_source.file_selected_member
+              ~parent
+              ~entry
+              ~source_lease:t.source_lease
+              ~artifact_store:t.artifact_store
+              ~compilation:t.source.compilation
+              ~tool_contract:t.tool_contract
+              ~parser_limits:t.source.parser_limits
+              ~content_limits:t.content_limits
+              ~max_work_steps:(max_work_steps - !used)
+              ~max_input_bytes
+              ~preprocess:t.source.preprocess
+              ~prepare_programs:(fun startup ~tool_contract scope capture ->
+                t.source.prepare_programs
+                  startup
+                  ~tool_contract
+                  ~invocation:Headless
+                  scope
+                  capture)
+              ~env
+              ~created_at
+              ~checkpoint:poll
+              ~on_acquire
+          | Captured ->
+            Prompt_child_source.captured_selected_member
+              ~parent
+              ~member:selected_member
+              ~artifact_store:t.artifact_store
+              ~policy:script_preparation
+              ~tool_contract:t.tool_contract
+              ~invocation:Headless
+              ~content_limits:t.content_limits
+              ~max_input_bytes
+              ~max_work_steps:(max_work_steps - !used)
+              ~env
+              ~checkpoint:poll
+              ~on_acquire
+        in
+        let%map () = Content_source.check_selected_member source member in
+        Selected_model_source.
+          { binding = t
+          ; port = source
+          ; member
+          ; input_bytes = Prompt_child_source.Model_selection.input_bytes selection
+          ; work_steps = !used
+          ; selection
+          }
+      with
+      | Abort.Work_limit ->
+        Error (resource "selected Model source work allowance exhausted"))
   ;;
 end
 

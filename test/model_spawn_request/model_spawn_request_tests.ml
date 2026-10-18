@@ -40,6 +40,23 @@ let%expect_test "shared model recipe grammar and bounded developer admission" =
     |> ok
   in
   print_s [%sexp ((Request.prompt defaulted, Request.is_local defaulted) : string * bool)];
+  let source_payload ?(is_local = true) ?source_mode () =
+    `Object
+      ([ "prompt", `String "p"
+       ; "input", `String "x"
+       ; ("is_local", if is_local then `True else `False)
+       ]
+       @ Option.value_map source_mode ~default:[] ~f:(fun mode -> [ "source_mode", mode ])
+      )
+  in
+  List.iter
+    [ source_payload ()
+    ; source_payload ~source_mode:(`String "file") ()
+    ; source_payload ~source_mode:(`String "captured") ()
+    ]
+    ~f:(fun value ->
+      let request = Request.decode value |> ok in
+      print_s [%sexp (Request.source_mode request : Request.Source_mode.t)]);
   let fixtures =
     [ `Null
     ; `Object [ "input", `String "x" ]
@@ -47,6 +64,9 @@ let%expect_test "shared model recipe grammar and bounded developer admission" =
     ; `Object [ "prompt", `String "p"; "input", `String "x"; "is_local", `Null ]
     ; `Object [ "prompt", `String "p"; "input", `String "x"; "history_compaction", `Null ]
     ; `Object [ "prompt", `String "p"; "input", `String "x"; "session_id", `Null ]
+    ; source_payload ~source_mode:(`String "other") ()
+    ; source_payload ~source_mode:`Null ()
+    ; source_payload ~is_local:false ~source_mode:(`String "captured") ()
     ]
   in
   List.iter fixtures ~f:(fun value ->
@@ -64,11 +84,17 @@ let%expect_test "shared model recipe grammar and bounded developer admission" =
     (guide hello true)
     ((false) (nested))
     (first false)
+    File
+    File
+    Captured
     agent_prompt_v1: payload must be an object
     agent_prompt_v1: missing field "prompt"
     agent_prompt_v1: field "prompt" must be a string
     agent_prompt_v1: field "is_local" must be a bool
     field "history_compaction" must be a bool when present
     field "session_id" must be a string when present
+    agent_prompt_v1: unsupported source_mode
+    agent_prompt_v1: field "source_mode" must be a string
+    agent_prompt_v1: captured source requires is_local=true
     resource_limit |}]
 ;;

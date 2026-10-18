@@ -43,7 +43,7 @@ let create ~root =
       (not (P.Execution_owner.equal_developer owner claimed_owner))
       || not (Chatml_source.Digest.equal capture_fingerprint claimed_fingerprint)
     then invalid "selected native issuer is not the retained developer root"
-    else Result.map (O.current root) ~f:ignore
+    else Result.map (O.current_after_mutations root) ~f:ignore
   in
   let* issuer =
     D.create
@@ -264,7 +264,7 @@ let rec run
           }
         in
         let effect_entry binding =
-          let* witness = O.current t.root in
+          let* witness = O.current_after_mutations t.root in
           let* selected = execution.selected_for_witness witness in
           let reference = C.reference binding in
           let* narrowed = registry_now () in
@@ -315,7 +315,46 @@ let rec run
               invalid
                 "selected native implementation changed before final effect admission"
           in
-          let* () = O.check_effect_now t.root witness in
+          let* final_witness, final_selected =
+            match execution.child with
+            | None ->
+              let* fresh = O.current_after_mutations t.root in
+              let* () =
+                if O.Current.same_selection witness fresh
+                then Ok ()
+                else invalid "selected native Root selection changed before effect"
+              in
+              let* selected = execution.selected_for_witness fresh in
+              Ok (fresh, selected)
+            | Some child ->
+              let* admission = Child_selection.refresh child in
+              let* fresh = Child_selection.Admission.checked_root_now admission in
+              let* () =
+                if O.Current.same_selection witness fresh
+                then Ok ()
+                else invalid "selected native child Root selection changed before effect"
+              in
+              (* The invoked binding was checked against [registry_now]'s
+                 borrowed ceiling above. An entered managed program borrows its
+                 dependency ceiling, which excludes its own handler binding;
+                 use this SAME admission's source registry for the final
+                 handler comparison, not for selecting nested Tool.call. *)
+              Ok (fresh, Child_selection.Admission.source_capabilities admission)
+          in
+          let* final_binding =
+            C.resolve final_selected ~id:reference.id ~fingerprint:reference.fingerprint
+            |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
+          in
+          let* () =
+            match
+              C.native_implementation binding, C.native_implementation final_binding
+            with
+            | Some expected, Some final when phys_equal expected final -> Ok ()
+            | None, None -> Ok ()
+            | Some _, _ | None, Some _ ->
+              invalid "selected native implementation changed at final effect admission"
+          in
+          let* () = O.check_effect_now t.root final_witness in
           let* () =
             match job_parent with
             | None -> Ok ()
@@ -574,6 +613,19 @@ module Child = struct
     let* borrowed = N.borrow_selected () in
     let* selection =
       Child_selection.create_content
+        ~root:parent.execution.base.root
+        ~parent:parent.selection
+        ~target
+        ~prepared
+        ~borrowed
+    in
+    with_selection ~parent:parent.execution.base ~selection f
+  ;;
+
+  let with_model_target ~parent ~target ~prepared f =
+    let* borrowed = N.borrow_selected () in
+    let* selection =
+      Child_selection.create_model
         ~root:parent.execution.base.root
         ~parent:parent.selection
         ~target

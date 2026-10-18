@@ -35,7 +35,26 @@ val of_reference
   -> checkpoint:(unit -> unit)
   -> t Or_error.t
 
+(** Comparison metadata for a Model-selected member of [parent]'s original
+    root. [member] is already a bounded portable path resolved relative to the
+    selected revision; this operation checks the parent's owned Parsed, exact
+    Definition/source receipt and root identity, charging the caller's remaining
+    work allowance. Unlike [of_reference], no parser Agent occurrence is
+    asserted. The upper selected Content_source must authenticate the parent
+    and member before any Scope capture; this value alone grants no read. *)
+val of_selected_member
+  :  parent:Prompt_revision.t
+  -> member:Source.Portable_path.t
+  -> max_work_steps:int
+  -> checkpoint:(unit -> unit)
+  -> t Or_error.t
+
 val member : t -> Source.Portable_path.t
 val receipt : t -> Agent_store.Prompt_source_receipt.t
 val definition : t -> Prompt_definition.t
 val work_steps : t -> int
+
+(** Comparison-only original selected parent identity retained by
+    [of_selected_member]. An Agent-reference entry returns false. This grants no
+    source access; Scope also checks its physical Content_revision and receipt. *)
+val matches_selected_parent : t -> Prompt_revision.t -> bool

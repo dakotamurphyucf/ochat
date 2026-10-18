@@ -56,6 +56,7 @@ let capture () =
 ;;
 
 let store_limits
+      ?(max_runs = 3)
       ?(max_job_payload_bytes = 1024)
       ?(max_jobs_per_run = 4)
       ?(max_invocations_per_run = 5)
@@ -93,7 +94,7 @@ let store_limits
       |> or_error
   in
   R.Limits.create
-    ~max_runs:3
+    ~max_runs
     ~max_epochs_per_run:3
     ~max_jobs_per_run
     ~max_invocations_per_run
@@ -243,6 +244,10 @@ let%test_unit
       Result.is_error
         (Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () ->
            O.reconcile_pending run)));
+    assert (
+      Result.is_error
+        (Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () ->
+           O.current_after_mutations run)));
     let other_owner = owner "dvr_other_root_owner" 0 in
     let other_handle, _ =
       R.admit_epoch
@@ -297,6 +302,17 @@ let%test_unit
     let witness = O.current run |> ok in
     O.narrow_selection run ~names:[] |> ok;
     assert (Result.is_error (O.check_effect_now run witness));
+    let empty_before = O.current_after_mutations run |> ok in
+    let unchanged = O.current_after_mutations run |> ok in
+    assert (O.Current.same_selection empty_before unchanged);
+    O.narrow_selection run ~names:[] |> ok;
+    let empty_after = O.current_after_mutations run |> ok in
+    assert (phys_equal (O.Current.selected empty_before) (O.Current.selected empty_after));
+    assert (
+      String.equal
+        (Chat_response.Tool_capability.fingerprint (O.Current.selected empty_before))
+        (Chat_response.Tool_capability.fingerprint (O.Current.selected empty_after)));
+    assert (not (O.Current.same_selection empty_before empty_after));
     let prepared =
       Chat_response.One_off_script.prepare_in_domain
         ~env
@@ -1004,6 +1020,7 @@ let%test_unit "uncertain root handoff retains capacity through owner close" =
         | Ok () -> failwith "uncertain rename was acknowledged");
        assert (Int.equal !effects 1);
        assert (not !rename_armed);
+       assert (Result.is_error (O.current_after_mutations run));
        sync_blocked := false;
        let reached, reached_u = Eio.Promise.create () in
        let release, release_u = Eio.Promise.create () in
