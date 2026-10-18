@@ -129,6 +129,13 @@ let run_child env arguments =
     Crash_generated_creation.run_child env ~root ~boundary ~recover:true
   | [ "side-effect"; config_path; marker ] ->
     Crash_side_effect_host.run env ~config_path ~marker
+  | [ "developer-command"; config_path; marker; handoff; recover ] ->
+    Crash_developer_command.run_child
+      env
+      ~config_path
+      ~marker
+      ~handoff
+      ~recover:(Bool.of_string recover)
   | [ "notification"; config_path; boundary ] ->
     Crash_notification_host.run env ~config_path ~boundary
   | [ "queued-child"; config_path; boundary ] ->
@@ -340,6 +347,7 @@ let cases =
   ; "generated.owned-stop-recovery", Crash_owned_stop.test
   ; "pending.interrupted-root-recovery", Crash_pending_input.test
   ; "side-effect.unknown-no-replay", Crash_unknown_effect.test
+  ; "developer.started-native-no-replay", Crash_developer_command.test
   ; "invocation.admission-publication-no-replay", Crash_invocation_publication.test
   ; "job.committed-intent-launch-once", Crash_queued_launch.test
   ; "job.child-selected-source-recovery", Crash_queued_child.test
