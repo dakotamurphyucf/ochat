@@ -41,6 +41,10 @@ let all_scopes =
     ; Provider_view
     ; Provider_manage
     ; Provider_select
+    ; Developer_check
+    ; Developer_fixture_run
+    ; Developer_live_run
+    ; Developer_repl
     ]
 ;;
 

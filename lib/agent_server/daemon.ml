@@ -622,9 +622,33 @@ let extension_capabilities options config =
 ;;
 
 let enabled_features options capabilities requested =
-  List.filter options.features ~f:(fun feature ->
-    List.mem requested feature ~equal:String.equal)
-  |> Agent_protocol.Extension_capabilities.filter_available capabilities
+  let selected =
+    List.filter options.features ~f:(fun feature ->
+      List.mem requested feature ~equal:String.equal)
+    |> Agent_protocol.Extension_capabilities.filter_available capabilities
+  in
+  if List.mem selected Agent_protocol.Developer_common.Features.run ~equal:String.equal
+  then selected
+  else
+    List.filter selected ~f:(fun feature ->
+      not (String.equal feature Agent_protocol.Developer_common.Features.events))
+;;
+
+let with_installed_developer_features options endpoint =
+  let module Features = Agent_protocol.Developer_common.Features in
+  let configured =
+    List.filter options.features ~f:(fun feature ->
+      not
+        (List.mem
+           [ Features.run; Features.approvals; Features.events ]
+           feature
+           ~equal:String.equal))
+  in
+  { options with
+    features =
+      configured
+      @ Option.value_map endpoint ~default:[] ~f:Developer_endpoint.available_features
+  }
 ;;
 
 let initialize
@@ -1459,6 +1483,40 @@ let compose
       |> Result.map ~f:Option.some
   in
   Option.iter authoring ~f:(Startup_cleanup.adopt_authoring_exn startup_cleanup);
+  let%bind developer_changes =
+    match options.developer with
+    | None -> Ok None
+    | Some configuration ->
+      (match configuration.portable_wire with
+       | None -> Ok None
+       | Some policy ->
+         let%bind () =
+           Developer_portable_admission.check
+             ~policy
+             ~initialize:options.protocol_limits
+             ~budgets:configuration.limits.budgets
+             ~approval:
+               (Option.map configuration.shell_approvals ~f:(fun shell -> shell.limits))
+         in
+         Developer_change_hub.create
+           ~sw
+           ~limits:(Developer_endpoint.Policy.change_limits policy)
+           ~wire_limits:(Developer_endpoint.Policy.wire_limits policy)
+         |> Result.map ~f:Option.some)
+  in
+  Option.iter developer_changes ~f:(fun changes ->
+    Startup_cleanup.adopt_developer_events_exn startup_cleanup ~close_and_wait:(fun () ->
+      Developer_change_hub.close_and_wait changes));
+  let on_developer_change =
+    Option.map developer_changes ~f:(fun changes ~run_id ~key ~kind ->
+      let kind =
+        match kind with
+        | Developer_host.Change.Command_changed ->
+          Agent_protocol.Developer_wire.Change.Command_changed
+        | Approval_changed -> Agent_protocol.Developer_wire.Change.Approval_changed
+      in
+      Developer_change_hub.enqueue changes ~run_id ~key ~kind)
+  in
   let%bind developer =
     match options.developer, authoring, home with
     | None, _, _ -> Ok None
@@ -1548,6 +1606,7 @@ let compose
         ~limits:limits.host
         ~budget_configuration:limits.budgets
         ~repl:configuration.repl
+        ?on_change:on_developer_change
         ~now:(fun () -> timestamp env)
         ~checkpoint:Eio.Fiber.check
         ()
@@ -1556,6 +1615,25 @@ let compose
   Option.iter developer ~f:(fun developer ->
     Startup_cleanup.adopt_developer_exn startup_cleanup ~close_and_wait:(fun () ->
       Developer_host.close_and_wait developer));
+  let%bind developer_endpoint =
+    match developer_changes with
+    | None -> Ok None
+    | Some changes ->
+      (match developer, authoring, options.developer with
+       | Some host, Some authoring, Some configuration ->
+         (match configuration.portable_wire with
+          | Some policy ->
+            Developer_endpoint.create ~host ~authoring ~changes ~policy
+            |> Result.map ~f:Option.some
+          | None ->
+            Error
+              (Agent_protocol.Error.invalid_request
+                 "Developer endpoint has no installed portable policy"))
+       | _ ->
+         Error
+           (Agent_protocol.Error.invalid_request
+              "Developer endpoint has no paired Host and Authoring owner"))
+  in
   let start_scheduler =
     Start_scheduler.start_controlled
       ~enabled:execution_enabled
@@ -1666,6 +1744,7 @@ let compose
                  ~retryable:false
                  ())))
   in
+  let options = with_installed_developer_features options developer_endpoint in
   let handler =
     Command_handler.create
       ~sw
@@ -1805,7 +1884,29 @@ let compose
              ~retryable:false
              ()))
   in
-  let dispatcher = Dispatcher.create ~admit handler in
+  let developer_installation =
+    Option.map developer_endpoint ~f:(fun endpoint ->
+      Dispatcher.Developer_installation.create ~endpoint ~admit:(fun () ->
+        if execution_enabled
+        then (
+          match !status_ref with
+          | Ready -> Ok ()
+          | Starting | Draining | Stopped | Failed _ ->
+            Error
+              (Agent_protocol.Error.create
+                 Server_shutting_down
+                 ~message:"Developer service is not accepting requests"
+                 ~retryable:true
+                 ()))
+        else
+          Error
+            (Agent_protocol.Error.create
+               Invalid_state
+               ~message:"Developer execution is unavailable"
+               ~retryable:false
+               ())))
+  in
+  let dispatcher = Dispatcher.create ~admit ?developer:developer_installation handler in
   Ok
     { env
     ; store
@@ -1985,7 +2086,7 @@ let start
 ;;
 
 let close_connection t context =
-  match Command_handler.close_connection t.handler context with
+  match Dispatcher.close_connection_and_wait t.dispatcher context with
   | Ok () -> ()
   | Error failure -> t.status_ref := Failed failure
 ;;
@@ -2031,35 +2132,41 @@ let shutdown_sessions t =
     Session_registry.shutdown t.registry)
 ;;
 
+let shutdown_remaining t =
+  Start_scheduler.close t.start_scheduler;
+  Permission_scheduler.close t.permission_scheduler;
+  Schedule_scheduler.close t.schedule_scheduler;
+  Maintenance.close t.maintenance;
+  Config_watcher.close_and_wait t.config_watcher;
+  Start_scheduler.close_and_wait t.start_scheduler;
+  let open Result.Let_syntax in
+  let%bind () =
+    match t.developer with
+    | None -> Ok ()
+    | Some developer -> Developer_host.close_and_wait developer
+  in
+  let%bind () = Job_scheduler.close_and_wait t.job_scheduler in
+  shutdown_sessions t;
+  let%bind () =
+    match t.authoring with
+    | None -> Ok ()
+    | Some authoring -> Authoring_installation.close_and_wait authoring
+  in
+  Option.iter t.provider_operator ~f:Provider_operator_port.close;
+  Project_source_host.close_and_wait t.project_sources;
+  Agent_store.Session_store.close t.store |> Result.map_error ~f:protocol_of_store
+;;
+
 let shutdown t =
   match !(t.status_ref) with
   | Stopped -> Ok ()
   | Starting | Ready | Failed _ | Draining ->
-    t.status_ref := Draining;
-    Start_scheduler.close t.start_scheduler;
-    Permission_scheduler.close t.permission_scheduler;
-    Schedule_scheduler.close t.schedule_scheduler;
-    Maintenance.close t.maintenance;
-    Config_watcher.close_and_wait t.config_watcher;
-    Start_scheduler.close_and_wait t.start_scheduler;
-    let open Result.Let_syntax in
-    let%bind () =
-      match t.developer with
-      | None -> Ok ()
-      | Some developer -> Developer_host.close_and_wait developer
-    in
-    let%bind () = Job_scheduler.close_and_wait t.job_scheduler in
-    shutdown_sessions t;
-    let%bind () =
-      match t.authoring with
-      | None -> Ok ()
-      | Some authoring -> Authoring_installation.close_and_wait authoring
-    in
-    Option.iter t.provider_operator ~f:Provider_operator_port.close;
-    Project_source_host.close_and_wait t.project_sources;
-    Agent_store.Session_store.close t.store
-    |> Result.map_error ~f:protocol_of_store
-    |> Result.map ~f:(fun () -> t.status_ref := Stopped)
+    Eio.Cancel.protect (fun () ->
+      t.status_ref := Draining;
+      let open Result.Let_syntax in
+      let%bind () = Dispatcher.close_and_wait t.dispatcher in
+      let%map () = shutdown_remaining t in
+      t.status_ref := Stopped)
 ;;
 
 let select_session t ~principal ~expected =

@@ -15,6 +15,9 @@ type t = { settings : settings }
 module Configuration = struct
   type t = settings
 
+  let max_output_bytes t = t.max_output_bytes
+  let receipt t = t.receipt
+
   let create ~compilation ~max_dependency_depth ~execution ~max_output_bytes ~receipt =
     let compilation_valid =
       match compilation with

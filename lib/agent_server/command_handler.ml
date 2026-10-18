@@ -3882,18 +3882,40 @@ let handle t ?actor ~context ~inference_budget command =
 ;;
 
 let close_connection t context =
-  let open Result.Let_syntax in
-  let%bind () =
-    match t.authoring with
-    | None -> Ok ()
-    | Some authoring -> Authoring_installation.close_connection_and_wait authoring context
+  let authoring_outcome =
+    try
+      Ok
+        (match t.authoring with
+         | None -> Ok ()
+         | Some authoring ->
+           Authoring_installation.close_connection_and_wait authoring context)
+    with
+    | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
   in
-  Connection_context.attachments context
-  |> List.iter ~f:(fun attachment ->
-    Option.iter (Session_registry.find t.registry attachment.session_id) ~f:(fun entry ->
-      ignore
-        (Agent_session.Session_actor.detach entry.actor attachment.id
-         : (unit, Agent_protocol.Error.t) result));
-    Connection_context.remove_attachment context attachment.id);
-  Ok ()
+  let attachment_failure = ref None in
+  let attachments =
+    try Connection_context.attachments context with
+    | exn ->
+      attachment_failure := Some (exn, Stdlib.Printexc.get_raw_backtrace ());
+      []
+  in
+  List.iter attachments ~f:(fun attachment ->
+    try
+      Option.iter
+        (Session_registry.find t.registry attachment.session_id)
+        ~f:(fun entry ->
+          ignore
+            (Agent_session.Session_actor.detach entry.actor attachment.id
+             : (unit, Agent_protocol.Error.t) result));
+      Connection_context.remove_attachment context attachment.id
+    with
+    | exn ->
+      if Option.is_none !attachment_failure
+      then attachment_failure := Some (exn, Stdlib.Printexc.get_raw_backtrace ()));
+  match authoring_outcome, !attachment_failure with
+  | Error (exn, backtrace), _ -> Stdlib.Printexc.raise_with_backtrace exn backtrace
+  | Ok (Error error), _ -> Error error
+  | Ok (Ok ()), Some (exn, backtrace) ->
+    Stdlib.Printexc.raise_with_backtrace exn backtrace
+  | Ok (Ok ()), None -> Ok ()
 ;;

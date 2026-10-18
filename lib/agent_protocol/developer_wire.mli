@@ -14,8 +14,8 @@ module Request : sig
     | Approval_list of Id.Developer_run.t
     | Approval_respond of Developer_approval.Response.t
     | Approval_cancel of Id.Developer_run.t * Id.Permission.t
-    | Watch of Id.Developer_run.t
-    | Unwatch of Id.Developer_run.t
+    | Watch of Developer_common.Lookup.t
+    | Unwatch of Developer_common.Lookup.t
 
   val method_name : t -> string
   val params : t -> Jsonaf.t
@@ -62,20 +62,31 @@ end
 module Change : sig
   (** Pure bounded process-local invalidation notification. This codec
       installs no publisher, watch, durable cursor or live stdout/progress
-      stream. After a hint or a missed connection, Observe/Approval_list
-      remain authoritative. *)
+      stream. After a hint or a missed connection, Observe of the exact key
+      remains authoritative; Approval_list is a separate optional refresh
+      under its own negotiated feature and current read policy. *)
   type kind =
-    | Command_changed of Idempotency_key.t
+    | Command_changed
     | Approval_changed
+    | Resync_required
+    (** A bounded watcher overflow or lost generation. The client must
+        Observe its subscribed key; independently authorized clients may also
+        refresh Approval_list. This hint neither asserts an approval exists
+        nor requires approval scope to refresh a command view. It is not a
+        durable replay cursor or an event payload. *)
 
   type t = private
     { run_id : Id.Developer_run.t
+    ; key : Idempotency_key.t
     ; kind : kind
     }
+
+  val method_name : string
 
   val create
     :  limits:Developer_common.Limits.t
     -> run_id:Id.Developer_run.t
+    -> key:Idempotency_key.t
     -> kind:kind
     -> (t, Error.t) result
 

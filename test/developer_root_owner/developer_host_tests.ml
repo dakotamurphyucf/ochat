@@ -156,6 +156,31 @@ let developer_configuration
   |> ok
 ;;
 
+let portable_wire_limits () =
+  let bound ~bytes ~depth ~fields ~nodes =
+    Document_schema.Limits.create
+      ~max_bytes:bytes
+      ~max_depth:depth
+      ~max_fields:fields
+      ~max_nodes:nodes
+    |> checked
+  in
+  let receipt = bound ~bytes:(1024 * 1024) ~depth:16 ~fields:1024 ~nodes:2048 in
+  P.Developer_common.Limits.create
+    ~request:(bound ~bytes:4096 ~depth:16 ~fields:128 ~nodes:256)
+    ~receipt
+    ~response:(bound ~bytes:(2 * 1024 * 1024) ~depth:20 ~fields:1200 ~nodes:2400)
+    ~approval_page:(bound ~bytes:30_000 ~depth:8 ~fields:200 ~nodes:200)
+    ~max_output_bytes:65536
+    ~max_fixture_steps:4
+    ~max_fixture_bytes:4096
+    ~max_approval_display_bytes:256
+    ~max_approval_decision_reason_bytes:256
+    ~max_approval_page:2
+    ~max_event_bytes:2048
+  |> ok
+;;
+
 let semantic_authoring_policy env =
   let module Service = S.Authoring_context_service in
   let module Policy = S.Authoring_installation.Host_policy in
@@ -296,6 +321,8 @@ let repl_configuration ?(max_receipt_bytes = 8192) ?(max_keys_per_instance = 4) 
 let with_daemon
       ?(tool_fixture = false)
       ?(repl = false)
+      ?(portable = false)
+      ?(approvals = false)
       ?(repl_receipt_bytes = 8192)
       ?(repl_keys_per_instance = 4)
       ?(prompt_source = "<developer>Developer host fixture.</developer>")
@@ -364,6 +391,39 @@ let with_daemon
                    ())
             else developer
           in
+          let developer =
+            if approvals
+            then (
+              let limits =
+                S.Daemon.Developer_configuration.Shell_approvals.Limits.create
+                  ~max_pending:2
+                  ~max_request_bytes:2048
+                  ~max_display_bytes:256
+                  ~max_decision_reason_bytes:256
+                  ~wait_seconds:2.
+                |> ok
+              in
+              S.Daemon.Developer_configuration.with_shell_approvals
+                developer
+                (S.Daemon.Developer_configuration.Shell_approvals.create
+                   ~limits
+                   ~job_read:(fun _ _ -> true)
+                   ~job_respond:(fun _ _ -> true)))
+            else developer
+          in
+          let developer =
+            if portable
+            then
+              S.Daemon.Developer_configuration.with_portable_wire
+                developer
+                (S.Daemon.Developer_configuration.Portable.create
+                   ~wire_limits:(portable_wire_limits ())
+                   ~max_connections:4
+                   ~max_watches_per_connection:4
+                   ~max_pending_hints_per_connection:4
+                 |> ok)
+            else developer
+          in
           let options =
             { S.Daemon.default_options with
               authoring = Some (semantic_authoring_policy env)
@@ -401,13 +461,19 @@ let with_daemon
           | Some seconds -> Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) seconds run)))
 ;;
 
-let open_document ?(source = "let main input = Task.pure(input)") daemon actor =
+let open_document
+      ?(source = "let main input = Task.pure(input)")
+      ?(features = [ P.Authoring.Features.core; P.Authoring.Features.semantic ])
+      ?(publish_notification = fun _ -> ())
+      daemon
+      actor
+  =
   let connection =
     S.Connection_context.create_authenticated
       ~actor
       ~connection_id:P.Id.Transaction.(create () |> to_string)
       ~transport:In_memory
-      ~publish_notification:(fun _ -> ())
+      ~publish_notification
       ~max_attachments:8
   in
   let transport =
@@ -425,7 +491,7 @@ let open_document ?(source = "let main input = Task.pure(input)") daemon actor =
       ~implementation
       ~protocol_min:P.Version.current
       ~protocol_max:P.Version.current
-      ~features:[ P.Authoring.Features.core; P.Authoring.Features.semantic ]
+      ~features
       ~event_encodings:[ Json ]
       ~max_inbound_event_bytes:(1024 * 1024)
       ()
@@ -473,6 +539,495 @@ let open_document ?(source = "let main input = Task.pure(input)") daemon actor =
    | Ok _ -> failwith "unexpected analysis response"
    | Error error -> raise_s [%sexp (error : P.Error.t)]);
   connection, transport, expected
+;;
+
+let%expect_test "installed Developer endpoint keeps command and approval methods distinct"
+  =
+  with_daemon ~portable:true ~approvals:true (fun daemon ->
+    let module W = P.Developer_wire in
+    let module C = P.Developer_common in
+    let scopes =
+      Set.add
+        (Set.add Agent_server_test_support.scopes Developer_check)
+        Developer_live_run
+    in
+    let principal =
+      Agent_server_test_support.principal_with_scopes "pri_portable_developer" scopes
+    in
+    let actor = Operator_authorization.trusted_local principal in
+    let connection, transport, expected =
+      open_document
+        ~features:
+          [ P.Authoring.Features.core
+          ; P.Authoring.Features.semantic
+          ; C.Features.run
+          ; C.Features.approvals
+          ; C.Features.events
+          ]
+        daemon
+        actor
+    in
+    let dispatch request =
+      S.Dispatcher.dispatch_developer
+        (S.Daemon.dispatcher daemon)
+        ~context:connection
+        request
+      |> ok
+    in
+    let capabilities =
+      match dispatch W.Request.Capabilities with
+      | W.Response.Capabilities value -> value
+      | _ -> failwith "expected installed Developer capabilities"
+    in
+    List.iter
+      [ C.Method.Submit; Observe; Await_terminal; Approval_list; Watch; Unwatch ]
+      ~f:(fun method_ -> assert (C.Capabilities.supports capabilities method_));
+    let limits = C.Capabilities.limits capabilities in
+    let run_id = P.Id.Developer_run.create () in
+    let selector = P.Authoring.Analysis.Target.selected_script "s" |> ok in
+    let route =
+      C.Route.document_script ~limits:(C.Limits.request limits) ~expected ~selector |> ok
+    in
+    let key name = P.Idempotency_key.of_string name |> checked in
+    let check_key = key "portable-check" in
+    let live_key = key "portable-live" in
+    let submit ~key ~kind ~prompt ~workspace ~input =
+      C.Submit.create
+        ~limits
+        ~run_id
+        ~key
+        ~kind
+        ~route
+        ~target:One_off_v1
+        ~prompt
+        ~workspace
+        ~entrypoint:"main"
+        ~input
+        ~fixtures:None
+        ~requested_execution:None
+        ~requested_max_output_bytes:None
+      |> ok
+    in
+    let check =
+      submit ~key:check_key ~kind:Check ~prompt:None ~workspace:None ~input:`Null
+    in
+    let submitted =
+      match dispatch (W.Request.Submit check) with
+      | W.Response.Submit view -> view
+      | _ -> failwith "expected Check submission"
+    in
+    let lookup key = C.Lookup.create ~run_id ~key in
+    let terminal key =
+      match dispatch (W.Request.Await_terminal (lookup key)) with
+      | W.Response.Await_terminal view -> view
+      | _ -> failwith "expected terminal Developer view"
+    in
+    let checked_view = terminal check_key in
+    (match C.View.phase checked_view with
+     | Terminal { receipt; _ } ->
+       (match P.Developer_receipt.value receipt with
+        | Check Ready -> ()
+        | _ -> failwith "expected portable Check Ready")
+     | _ -> failwith "expected terminal portable Check");
+    (match dispatch (W.Request.Observe (lookup check_key)) with
+     | W.Response.Observe (Some _) -> ()
+     | _ -> failwith "expected disclosed Check observation");
+    let observation = W.Request.Observe (lookup check_key) in
+    let envelope_id = P.Envelope.Request_id.of_json (`Number "1") |> ok in
+    (match
+       S.Dispatcher.dispatch_envelope
+         (S.Daemon.dispatcher daemon)
+         ~context:connection
+         (P.Envelope.request
+            ~id:envelope_id
+            ~method_:(W.Request.method_name observation)
+            ~params:(W.Request.params observation)
+            ())
+     with
+     | Ok (Some (P.Envelope.Response { outcome = Ok json; _ })) ->
+       (match
+          W.Response.of_method_and_json
+            ~limits
+            ~method_:(W.Request.method_name observation)
+            json
+          |> ok
+        with
+        | Observe (Some view) ->
+          assert (
+            P.Developer_command_id.equal
+              (C.View.command_id view)
+              (C.View.command_id checked_view))
+        | _ -> failwith "envelope and local Observe differ")
+     | _ -> failwith "expected Developer envelope response");
+    (match dispatch (W.Request.Watch (lookup check_key)) with
+     | W.Response.Watch -> ()
+     | _ -> failwith "expected exact-key Watch acknowledgement");
+    (match dispatch (W.Request.Unwatch (lookup check_key)) with
+     | W.Response.Unwatch -> ()
+     | _ -> failwith "expected exact-key Unwatch acknowledgement");
+    let live =
+      submit
+        ~key:live_key
+        ~kind:Live_run
+        ~prompt:(Some (S.Catalog_identity.prompt_definition "restart.prompt"))
+        ~workspace:(Some (S.Catalog_identity.workspace_definition "restart.workspace"))
+        ~input:`Null
+    in
+    ignore (dispatch (W.Request.Submit live) : W.Response.t);
+    (match C.View.phase (terminal live_key) with
+     | Terminal { receipt; _ } ->
+       (match P.Developer_receipt.value receipt with
+        | Live (Succeeded `Null) -> ()
+        | _ -> failwith "expected portable Live success")
+     | _ -> failwith "expected terminal portable Live");
+    (match dispatch (W.Request.Approval_list run_id) with
+     | W.Response.Approval_list page ->
+       assert (List.is_empty (P.Developer_approval.Page.pending page))
+     | _ -> failwith "expected installed approval page");
+    (match
+       Agent_client.Connection.request_without_history
+         transport
+         (Authoring (Context_close (P.Authoring.Context.Close_request.create ~expected)))
+     with
+     | Ok (Authoring (Context_close _)) -> ()
+     | _ -> failwith "expected Authoring context closure");
+    let repeated =
+      match dispatch (W.Request.Submit check) with
+      | W.Response.Submit view -> view
+      | _ -> failwith "expected historical Check retry"
+    in
+    assert (
+      P.Developer_command_id.equal
+        (C.View.command_id submitted)
+        (C.View.command_id repeated));
+    let different_input =
+      submit
+        ~key:check_key
+        ~kind:Check
+        ~prompt:None
+        ~workspace:None
+        ~input:(`String "changed")
+    in
+    (match
+       S.Dispatcher.dispatch_developer
+         (S.Daemon.dispatcher daemon)
+         ~context:connection
+         (W.Request.Submit different_input)
+     with
+     | Error { code = Conflict; _ } -> ()
+     | Error { code; _ } ->
+       raise_s [%sexp "unexpected historical conflict code", (code : P.Error.code)]
+     | Ok _ -> failwith "changed payload reused historical key");
+    (match
+       S.Dispatcher.dispatch_developer
+         (S.Daemon.dispatcher daemon)
+         ~context:connection
+         (W.Request.Submit
+            (submit
+               ~key:(key "portable-new-key")
+               ~kind:Check
+               ~prompt:None
+               ~workspace:None
+               ~input:`Null))
+     with
+     | Error { code = Conflict; _ } -> ()
+     | Error { code; _ } ->
+       raise_s [%sexp "unexpected stale source denial", (code : P.Error.code)]
+     | Ok _ -> failwith "closed source recaptured under new key");
+    let wide_request =
+      Document_schema.Limits.create
+        ~max_bytes:8192
+        ~max_depth:16
+        ~max_fields:128
+        ~max_nodes:256
+      |> checked
+    in
+    let wider =
+      C.Limits.create
+        ~request:wide_request
+        ~receipt:(C.Limits.receipt limits)
+        ~response:(C.Limits.response limits)
+        ~approval_page:(C.Limits.approval_page limits)
+        ~max_output_bytes:(C.Limits.max_output_bytes limits)
+        ~max_fixture_steps:(C.Limits.max_fixture_steps limits)
+        ~max_fixture_bytes:(C.Limits.max_fixture_bytes limits)
+        ~max_approval_display_bytes:(C.Limits.max_approval_display_bytes limits)
+        ~max_approval_decision_reason_bytes:
+          (C.Limits.max_approval_decision_reason_bytes limits)
+        ~max_approval_page:(C.Limits.max_approval_page limits)
+        ~max_event_bytes:(C.Limits.max_event_bytes limits)
+      |> ok
+    in
+    let oversized =
+      C.Submit.create
+        ~limits:wider
+        ~run_id
+        ~key:(key "portable-oversized")
+        ~kind:Check
+        ~route
+        ~target:One_off_v1
+        ~prompt:None
+        ~workspace:None
+        ~entrypoint:"main"
+        ~input:(`String (String.make 5000 'x'))
+        ~fixtures:None
+        ~requested_execution:None
+        ~requested_max_output_bytes:None
+      |> ok
+    in
+    match
+      S.Dispatcher.dispatch_developer
+        (S.Daemon.dispatcher daemon)
+        ~context:connection
+        (W.Request.Submit oversized)
+    with
+    | Error { code = Resource_limit; _ } -> ()
+    | Error { code; _ } ->
+      raise_s [%sexp "unexpected typed request bound", (code : P.Error.code)]
+    | Ok _ -> failwith "broad typed DTO bypassed installed request limit");
+  let entered, signal_entered = Eio.Promise.create () in
+  let release, signal_release = Eio.Promise.create () in
+  let changed, signal_changed = Eio.Promise.create () in
+  let released = ref false in
+  let change_seen = ref false in
+  let watching = ref false in
+  let native_attempts = ref 0 in
+  ignore
+    (Fun.protect
+       ~finally:(fun () -> if not !released then Eio.Promise.resolve signal_release ())
+       (fun () ->
+          with_daemon
+            ~portable:true
+            ~native_sample:true
+            ~prompt_source:
+              {|<developer>Developer watch transition fixture.</developer>
+<tool name="read_file"/>|}
+            ~authorize_native:(fun _ binding ->
+              [%test_eq: string]
+                (Chat_response.Tool_capability.reference binding).name
+                "read_file";
+              incr native_attempts;
+              Eio.Promise.resolve signal_entered ();
+              Eio.Promise.await release;
+              Ok ())
+            ~prepare_output:(function
+              | Openai.Responses.Tool_output.Output.Text value -> Ok (`String value)
+              | _ -> Error (P.Error.invalid_request "unexpected native output"))
+            ~timeout_seconds:15.
+            (fun daemon ->
+               let module W = P.Developer_wire in
+               let module C = P.Developer_common in
+               let scopes = Set.add Agent_server_test_support.scopes Developer_live_run in
+               let actor =
+                 Agent_server_test_support.principal_with_scopes
+                   "pri_portable_watch"
+                   scopes
+                 |> Operator_authorization.trusted_local
+               in
+               let run_id = P.Id.Developer_run.create () in
+               let key = P.Idempotency_key.of_string "portable-watch-live" |> checked in
+               let notification = function
+                 | P.Envelope.Notification { method_; params }
+                   when String.equal method_ W.Change.method_name ->
+                   let change =
+                     W.Change.of_json ~limits:(portable_wire_limits ()) params |> ok
+                   in
+                   if
+                     !watching
+                     && P.Id.Developer_run.equal change.run_id run_id
+                     && P.Idempotency_key.equal change.key key
+                     && (match change.kind with
+                         | W.Change.Command_changed -> true
+                         | W.Change.Approval_changed | W.Change.Resync_required -> false)
+                     && not !change_seen
+                   then (
+                     change_seen := true;
+                     Eio.Promise.resolve signal_changed ())
+                 | P.Envelope.Notification _ | Request _ | Response _ -> ()
+               in
+               let source =
+                 {|let main input =
+  Task.bind(Tool.call("read_file", `Object([{key="file"; value=`String("sample.txt")}])), fun result ->
+    match result with
+    | `Ok(value) -> Task.pure(value)
+    | `Error(message) -> Task.fail(message))|}
+               in
+               let connection, _transport, expected =
+                 open_document
+                   ~source
+                   ~features:
+                     [ P.Authoring.Features.core
+                     ; P.Authoring.Features.semantic
+                     ; C.Features.run
+                     ; C.Features.events
+                     ]
+                   ~publish_notification:notification
+                   daemon
+                   actor
+               in
+               let limits = portable_wire_limits () in
+               let route =
+                 C.Route.document_script
+                   ~limits:(C.Limits.request limits)
+                   ~expected
+                   ~selector:(P.Authoring.Analysis.Target.selected_script "s" |> ok)
+                 |> ok
+               in
+               let submit =
+                 C.Submit.create
+                   ~limits
+                   ~run_id
+                   ~key
+                   ~kind:Live_run
+                   ~route
+                   ~target:One_off_v1
+                   ~prompt:(Some (S.Catalog_identity.prompt_definition "restart.prompt"))
+                   ~workspace:
+                     (Some (S.Catalog_identity.workspace_definition "restart.workspace"))
+                   ~entrypoint:"main"
+                   ~input:`Null
+                   ~fixtures:None
+                   ~requested_execution:None
+                   ~requested_max_output_bytes:None
+                 |> ok
+               in
+               let dispatch request =
+                 S.Dispatcher.dispatch_developer
+                   (S.Daemon.dispatcher daemon)
+                   ~context:connection
+                   request
+                 |> ok
+               in
+               (match dispatch (W.Request.Submit submit) with
+                | W.Response.Submit _ -> ()
+                | _ -> failwith "expected held Live submission");
+               Eio.Promise.await entered;
+               let lookup = C.Lookup.create ~run_id ~key in
+               (match dispatch (W.Request.Watch lookup) with
+                | W.Response.Watch -> ()
+                | _ -> failwith "expected held Live Watch acknowledgement");
+               watching := true;
+               released := true;
+               Eio.Promise.resolve signal_release ();
+               Eio.Promise.await changed;
+               (match dispatch (W.Request.Await_terminal lookup) with
+                | W.Response.Await_terminal view ->
+                  (match C.View.phase view with
+                   | Terminal { receipt; _ } ->
+                     (match P.Developer_receipt.value receipt with
+                      | Live (Succeeded (`String _)) -> ()
+                      | _ -> failwith "watched Live did not succeed")
+                   | _ -> failwith "watched Live did not settle")
+                | _ -> failwith "expected watched Live terminal view");
+               assert (Int.equal !native_attempts 1);
+               match dispatch (W.Request.Unwatch lookup) with
+               | W.Response.Unwatch -> ()
+               | _ -> failwith "expected held Live Unwatch acknowledgement")));
+  with_daemon ~portable:true ~tool_fixture:true (fun daemon ->
+    let module W = P.Developer_wire in
+    let module C = P.Developer_common in
+    let scopes = Set.add Agent_server_test_support.scopes Developer_fixture_run in
+    let principal =
+      Agent_server_test_support.principal_with_scopes "pri_portable_fixture" scopes
+    in
+    let actor = Operator_authorization.trusted_local principal in
+    let source =
+      {|let run ctx input =
+  let* result = Tool.call("fixture", input) in
+  match result with
+  | `Ok(value) -> Task.pure(`Complete(value))
+  | `Error(message) -> Task.fail(message)|}
+    in
+    let connection, _transport, expected =
+      open_document
+        ~source
+        ~features:
+          [ P.Authoring.Features.core
+          ; P.Authoring.Features.semantic
+          ; C.Features.run
+          ; C.Features.events
+          ]
+        daemon
+        actor
+    in
+    let limits = portable_wire_limits () in
+    let step =
+      C.Fixture.Step.create
+        ~limits:(C.Limits.request limits)
+        ~tool_name:"fixture"
+        ~input_schema:(`Object [])
+        ~output_schema:(`Object [])
+        ~expected_input:`Null
+        ~response:(Return (`String "world"))
+      |> ok
+    in
+    let fixtures =
+      C.Fixture.create
+        ~limits:(C.Limits.request limits)
+        ~max_steps:(C.Limits.max_fixture_steps limits)
+        ~max_bytes:(C.Limits.max_fixture_bytes limits)
+        ~steps:[ step ]
+      |> ok
+    in
+    let run_id = P.Id.Developer_run.create () in
+    let key = P.Idempotency_key.of_string "portable-fixture" |> checked in
+    let route =
+      C.Route.document_script
+        ~limits:(C.Limits.request limits)
+        ~expected
+        ~selector:(P.Authoring.Analysis.Target.selected_script "s" |> ok)
+      |> ok
+    in
+    let submitted =
+      C.Submit.create
+        ~limits
+        ~run_id
+        ~key
+        ~kind:Fixture_run
+        ~route
+        ~target:Tool_v1
+        ~prompt:None
+        ~workspace:None
+        ~entrypoint:"run"
+        ~input:`Null
+        ~fixtures:(Some fixtures)
+        ~requested_execution:None
+        ~requested_max_output_bytes:None
+      |> ok
+    in
+    (match
+       S.Dispatcher.dispatch_developer
+         (S.Daemon.dispatcher daemon)
+         ~context:connection
+         (W.Request.Submit submitted)
+     with
+     | Ok (W.Response.Submit _) -> ()
+     | _ -> failwith "expected portable Fixture submission");
+    match
+      S.Dispatcher.dispatch_developer
+        (S.Daemon.dispatcher daemon)
+        ~context:connection
+        (W.Request.Await_terminal (C.Lookup.create ~run_id ~key))
+    with
+    | Ok (W.Response.Await_terminal view) ->
+      (match C.View.phase view with
+       | Terminal { receipt; _ } ->
+         (match P.Developer_receipt.value receipt with
+          | Fixture
+              (Completed
+                 { outcome = Succeeded (`String "world")
+                 ; tool_selection_fingerprint = Some _
+                 ; matched_steps = 1
+                 ; _
+                 }) -> ()
+          | _ -> failwith "expected selected portable Fixture result")
+       | _ -> failwith "expected terminal portable Fixture")
+    | _ -> failwith "expected portable Fixture terminal");
+  print_endline
+    "portable Check, Fixture and Live; watched transition; approvals and envelope \
+     parity; historical retry without recapture";
+  [%expect
+    {| portable Check, Fixture and Live; watched transition; approvals and envelope parity; historical retry without recapture |}]
 ;;
 
 let%expect_test

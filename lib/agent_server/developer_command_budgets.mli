@@ -10,6 +10,13 @@ type t
 module Configuration : sig
   type t
 
+  (** Comparison-only configured upper bounds for portable endpoint
+      installation. [bind] may narrow the receipt byte ceiling against the
+      physical Store; these accessors never grant a larger execution budget. *)
+  val max_output_bytes : t -> int
+
+  val receipt : t -> Document_schema.Limits.t
+
   (** Validate explicit daemon-selected compilation/dependency policy,
       ChatML execution limits, aggregate output bytes and receipt JSON
       limits before the host opens its Store. This inert value is not bound to

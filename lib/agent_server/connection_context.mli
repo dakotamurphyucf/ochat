@@ -61,6 +61,20 @@ val authoring_closed : t -> bool
     joining transport close; unrelated connection attachment state is intact. *)
 val close_authoring : t -> unit
 
+(** Trusted connection-local custody for an unexpected Developer event pump
+    failure. Recording retains the first original exception/backtrace and
+    terminally revokes this physical connection's Authoring lease in one
+    existing-mutex transition; a different connection remains serviceable.
+    The pump has no durable retry or alternate publisher. Its owner first
+    resolves/joins the failed pump, then removes the dead Hub entry. Ordinary
+    Unwatch, joined Stop and caller cancellation do not record a failure. *)
+val record_developer_event_failure : t -> exn -> Stdlib.Printexc.raw_backtrace -> unit
+
+(** Consume the original connection-local failure at most once, only after
+    the pump's finished promise has been joined. The terminal connection
+    owner still joins Authoring/attachments even when this failure is raised. *)
+val take_developer_event_failure : t -> (exn * Stdlib.Printexc.raw_backtrace) option
+
 (** Mint a new authoring incarnation atomically with protocol-version and
     selected-feature replacement. The installed authoring handler must call
     this only through its joined reinitialization lifecycle transition. *)

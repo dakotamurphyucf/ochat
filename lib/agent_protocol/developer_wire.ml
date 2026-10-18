@@ -23,8 +23,8 @@ module Request = struct
     | Approval_list of Id.Developer_run.t
     | Approval_respond of A.Response.t
     | Approval_cancel of Id.Developer_run.t * Id.Permission.t
-    | Watch of Id.Developer_run.t
-    | Unwatch of Id.Developer_run.t
+    | Watch of Common.Lookup.t
+    | Unwatch of Common.Lookup.t
 
   let method_name = function
     | Capabilities -> "developer.capabilities"
@@ -43,7 +43,8 @@ module Request = struct
     | Capabilities -> `Object []
     | Submit x -> Common.Submit.to_json x
     | Observe x | Await_terminal x | Cancel_and_wait x -> Common.Lookup.to_json x
-    | Approval_list x | Watch x | Unwatch x -> run_id_params x
+    | Approval_list x -> run_id_params x
+    | Watch x | Unwatch x -> Common.Lookup.to_json x
     | Approval_respond x -> A.Response.to_json x
     | Approval_cancel (run_id, id) ->
       `Object
@@ -82,8 +83,14 @@ module Request = struct
       let* run_id = get fields "run_id" Id.Developer_run.of_json in
       let* id = get fields "id" Id.Permission.of_json in
       Ok (Approval_cancel (run_id, id))
-    | Watch -> Result.map (run_id_of_json params) ~f:(fun x -> Watch x)
-    | Unwatch -> Result.map (run_id_of_json params) ~f:(fun x -> Unwatch x)
+    | Watch ->
+      Result.map
+        (Common.Lookup.of_json ~limits:(Common.Limits.request limits) params)
+        ~f:(fun x -> Watch x)
+    | Unwatch ->
+      Result.map
+        (Common.Lookup.of_json ~limits:(Common.Limits.request limits) params)
+        ~f:(fun x -> Unwatch x)
   ;;
 
   let supported_methods =
@@ -202,27 +209,34 @@ module Response = struct
 end
 
 module Change = struct
+  let method_name = "developer.changed"
+
   type kind =
-    | Command_changed of Idempotency_key.t
+    | Command_changed
     | Approval_changed
+    | Resync_required
 
   type t =
     { run_id : Id.Developer_run.t
+    ; key : Idempotency_key.t
     ; kind : kind
     }
 
   let to_json t =
     `Object
-      ([ "run_id", Id.Developer_run.to_json t.run_id ]
-       @
-       match t.kind with
-       | Command_changed key ->
-         [ "kind", `String "command_changed"; "key", Idempotency_key.to_json key ]
-       | Approval_changed -> [ "kind", `String "approval_changed" ])
+      [ "run_id", Id.Developer_run.to_json t.run_id
+      ; "key", Idempotency_key.to_json t.key
+      ; ( "kind"
+        , `String
+            (match t.kind with
+             | Command_changed -> "command_changed"
+             | Approval_changed -> "approval_changed"
+             | Resync_required -> "resync_required") )
+      ]
   ;;
 
-  let create ~limits ~run_id ~kind =
-    let t = { run_id; kind } in
+  let create ~limits ~run_id ~key ~kind =
+    let t = { run_id; key; kind } in
     let json = to_json t in
     let* bytes = C.measure ~limits:(Common.Limits.response limits) json in
     if bytes > Common.Limits.max_event_bytes limits
@@ -234,17 +248,15 @@ module Change = struct
     let* () = C.validate ~limits:(Common.Limits.response limits) json in
     let* fields = C.fields ~allowed:[ "run_id"; "kind"; "key" ] json in
     let* run_id = get fields "run_id" Id.Developer_run.of_json in
+    let* key = get fields "key" Idempotency_key.of_json in
     let* kind = get fields "kind" (C.string ~max_bytes:32) in
     let* kind =
       match kind with
-      | "command_changed" ->
-        let* key = get fields "key" Idempotency_key.of_json in
-        Ok (Command_changed key)
-      | "approval_changed" ->
-        let* () = C.fields ~allowed:[ "run_id"; "kind" ] json |> Result.map ~f:ignore in
-        Ok Approval_changed
+      | "command_changed" -> Ok Command_changed
+      | "approval_changed" -> Ok Approval_changed
+      | "resync_required" -> Ok Resync_required
       | _ -> C.invalid "unknown developer change"
     in
-    create ~limits ~run_id ~kind
+    create ~limits ~run_id ~key ~kind
   ;;
 end

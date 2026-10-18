@@ -1,5 +1,11 @@
 open! Core
 
+module Portable = struct
+  type t = Developer_endpoint.Policy.t
+
+  let create = Developer_endpoint.Policy.create
+end
+
 module Remote_content = struct
   type t = Developer_child_remote_content.Policy.t
 
@@ -147,6 +153,7 @@ type t =
   ; remote_content : Remote_content.t option
   ; repl : Repl.t option
   ; shell_approvals : Shell_approvals.t option
+  ; portable_wire : Portable.t option
   ; authorize_native :
       Agent_protocol.Host_invocation.t
       -> Chat_response.Tool_capability.binding
@@ -181,6 +188,7 @@ let create
     ; remote_content = None
     ; repl = None
     ; shell_approvals = None
+    ; portable_wire = None
     ; authorize_native
     ; prepare_output
     }
@@ -192,3 +200,5 @@ let with_repl t repl = { t with repl = Some repl }
 let with_shell_approvals t shell_approvals =
   { t with shell_approvals = Some shell_approvals }
 ;;
+
+let with_portable_wire t portable_wire = { t with portable_wire = Some portable_wire }

@@ -26,6 +26,14 @@ val adopt_registry_exn : t -> Session_registry.t -> unit
 val adopt_operator_exn : t -> Provider_operator_port.t -> unit
 val adopt_authoring_exn : t -> Authoring_installation.t -> unit
 
+(** Adopt the bounded Developer event hub immediately after its construction,
+    before Host creation can yield or fail. Failed startup joins event pumps
+    before the existing Developer Host and scheduler owners. *)
+val adopt_developer_events_exn
+  :  t
+  -> close_and_wait:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> unit
+
 (** Retain this exact daemon-owned developer close operation before the
     scheduler starts. It joins command callbacks, Root workers and source
     owners while the scheduler remains serviceable. No caller receives an

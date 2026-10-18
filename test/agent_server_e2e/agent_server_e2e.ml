@@ -30,6 +30,7 @@ let run_scenario env ~case = function
   | "soak" -> Scenarios.Soak_scenario.run env ~case
   | "administration-idempotency" -> Admin_scenario.run env ~case
   | "cross-transport-conformance" -> Conformance_scenario.run env ~case
+  | "developer-wire-transport" -> Scenarios.Developer_wire_scenario.run env ~case
   | "workspace-cleanup" -> Cleanup_scenario.run env ~case
   | "crash-matrix" -> Crash_scenario.run env ~case
   | "harness-isolation" -> Harness_scenario.run env ~case

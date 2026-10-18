@@ -99,6 +99,27 @@ let shared_features =
     , [ "test/developer_protocol/developer_protocol_tests.ml"
       ; "docs-src/design/chatml-developer-runtime.md"
       ] )
+  ; ( "execution.developer_portable_endpoint"
+    , "Explicit Host-backed Developer methods, current Authoring source admission and \
+       exact-key historical retry; bounded joined lifecycle invalidations with \
+       authoritative reobservation"
+    , [ "lib/agent_protocol/developer_wire.ml"
+      ; "lib/agent_server/developer_endpoint.ml"
+      ; "lib/agent_server/developer_portable_admission.ml"
+      ; "lib/agent_server/developer_change_hub.ml"
+      ; "lib/agent_server/dispatcher.ml"
+      ; "lib/agent_server/daemon.ml"
+      ; "lib/agent_server/authoring_installation.ml"
+      ; "lib/agent_server/connection_context.ml"
+      ; "lib/agent_server/startup_cleanup.ml"
+      ; "bin/ochat_agent_server.ml"
+      ]
+    , "runtime.execution"
+    , [ "test/developer_root_owner/developer_host_tests.ml"
+      ; "lib/agent_server/developer_change_hub_tests.ml"
+      ; "test/agent_server_e2e/scenarios/developer_wire_scenario.ml"
+      ; "docs-src/design/chatml-developer-runtime.md"
+      ] )
   ; ( "execution.developer_shell_approval"
     , "Bounded once-only developer Shell review under real command, native and claimed \
        execution ownership; selected checks survive approval waits and cancellation"
@@ -417,7 +438,23 @@ let implementation_sources =
   ; ( "lib/agent_protocol/developer_approval.ml"
     , "53faaa0df245f4e1ca8194589e8abd190580ff81f433dcfc8fe1d039e94527a5" )
   ; ( "lib/agent_protocol/developer_wire.ml"
-    , "856335626038230343a0f9736f3b47638a650919e8932002c2066c73256636a6" )
+    , "7455a8a86e065aa4e6c4d04a8ee82eef9a0f0231eaae34576137effb2282a093" )
+  ; ( "lib/agent_server/developer_endpoint.ml"
+    , "f1e2449dbfb67958e768ff9d60acb139f042b741b4837819dbb693c56c082a96" )
+  ; ( "lib/agent_server/developer_portable_admission.ml"
+    , "95a41972b4d5039d9152ca3e743a190936311dbdb7ea2dfcdb8b863cc0184cf9" )
+  ; ( "lib/agent_server/developer_change_hub.ml"
+    , "ada93055dd90be99b736ec9632646c97c52ac56ce546263752cc2ba00a03689d" )
+  ; ( "lib/agent_server/dispatcher.ml"
+    , "eeca6bf0d65392edf75c236371a11e8bfa4eb7d8f4b7fbfed440ad8b58f01a6b" )
+  ; ( "lib/agent_server/authoring_installation.ml"
+    , "d052170d9b765b9df1f928805fcc2c28ff068982ace4728eba9e70313e96163b" )
+  ; ( "lib/agent_server/connection_context.ml"
+    , "6efbe0038e4d033c7fd06b441e88e0f37194f444a8a79cf54c8c78def67c1584" )
+  ; ( "lib/agent_server/startup_cleanup.ml"
+    , "bcbd487cccc3783d039e2a31af0e4c836813fa4a6ef417305e4adb58a3f250fc" )
+  ; ( "bin/ochat_agent_server.ml"
+    , "92de01b5a80a959e0ef77853af9113b8455afa7f7cde2beafb7ce4689da5b9fe" )
   ; ( "lib/agent_store/developer_command_receipt.ml"
     , "e5dc9cc0cdcd487287fc443b97ff996a7b1ea9319aa7c0c98c920ffcd4abe129" )
   ; ( "lib/shell_runtime/approval_broker.ml"
@@ -431,7 +468,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_model_job_runner.ml"
     , "7604ff6140540e3b53720515526242e7bc1014c97d6895aacadbfb2909bda718" )
   ; ( "lib/agent_server/daemon.ml"
-    , "66737c71f350f630a0c75663f79408430597dc3f3881c509464e39fe76ee9c2a" )
+    , "190352b948f40e897865d661130a9d619cc09b3109d89ceefe983264ee8e6d93" )
   ; ( "lib/agent_session/developer_claimed_resource_owner.ml"
     , "fb251c6e022f9880820b15807018adc5cf240500050a0424321d7507d3e2bc41" )
   ; ( "lib/agent_server/developer_claim_deadline.ml"
@@ -473,7 +510,7 @@ let implementation_sources =
   ; ( "lib/agent_session/administration.ml"
     , "00ae2dcdef80bd0552e6a7dded2e3872ed547b82b2ee85297ca5eb7d3ccd9f8a" )
   ; ( "lib/agent_server/command_handler.ml"
-    , "45c89b173ac6c33ab5036bee6c460a1118703abc207a4563bbb7d0ea6d10118e" )
+    , "895cc7c1e6cc706adc39f6b98c71e1c994aab20814cd86f642d244bb17a06a59" )
   ; ( "lib/agent_server/runtime_owner.ml"
     , "7431f8254c524a641f3ce86633cd812481b938ba3b6e35bf1e31d01059cd7d66" )
   ; ( "lib/agent_session/managed_submission_tracking.ml"
@@ -559,7 +596,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_repl_task_receipt.ml"
     , "209e79b8ba0f3ca9a10a8cdbc86186761aa45fb1f42a35ca1c5af47fde08b655" )
   ; ( "lib/agent_server/developer_command_budgets.ml"
-    , "a6ee375476b7c3b37d40131159356bcda552f6e7df730a71393abbb8b114ee12" )
+    , "870e5dde56c8a23d0da7ef2ec24d8f223efe7883f217d113b482a24b4e9cf6ab" )
   ; ( "lib/agent_store/developer_run_store.ml"
     , "2f9c2cfbb4ff17ae7ea0b38cf51014279738640ba86af788ae9752dab7940af0" )
   ; ( "lib/agent_session/background_job_event.ml"
