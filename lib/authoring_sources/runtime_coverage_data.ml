@@ -431,6 +431,8 @@ let implementation_sources =
     , "2149c979ce81c6c851c8d8cbe749c622334f3c43d05b72b17ae89873e5d563c3" )
   ; ( "lib/agent_session/captured_agent_runner.ml"
     , "5f25d5713a1e374ae3e30cc234e9b390336e39d693061b76b5a552873a9d490b" )
+  ; ( "lib/agent_session/selected_agent_depth.ml"
+    , "a5c52ff1391956f08af2cdb1651db530ab66abea394d7a7599885bcfc778c412" )
   ; ( "lib/agent_session/developer_child_preflight.ml"
     , "8d5a7a6d439cf1b547ace620ac72fc33a1e9010b9d844ff3a154ac094d72f75a" )
   ; ( "lib/chat_response/converter.ml"
