@@ -225,21 +225,18 @@ let%expect_test "Unix REPL lane bounds a raw result and keeps request correlatio
             ~finally:(fun () -> Agent_client.Connection.close connection)
             ~f:(fun () ->
               T.initialize ~repl:true connection initialized;
-              let capabilities =
-                Agent_client.Connection.repl_capabilities connection |> T.must
+              let client =
+                Agent_client.Developer_repl_connection.create connection |> T.must
               in
               let request () =
-                Agent_client.Connection.request_repl
-                  connection
-                  ~limits:(R.Capabilities.limits capabilities)
-                  (R.Request.Observe lookup)
+                Agent_client.Developer_repl_connection.observe client lookup
               in
               (match request () with
-               | Ok (R.Response.Observe None) -> ()
+               | Ok None -> ()
                | Ok _ | Error _ -> failwith "valid socket Observe was lost");
               assert (Result.is_error (request ()));
               (match request () with
-               | Ok (R.Response.Observe None) -> ()
+               | Ok None -> ()
                | Ok _ | Error _ -> failwith "socket correlation was not retained");
               assert (Int.equal !seen 5);
               print_endline

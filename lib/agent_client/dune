@@ -17,6 +17,7 @@
   authoring
   authoring_bundle
   developer_connection
+  developer_repl_connection
   activity_views
   run_views
   conversation_search

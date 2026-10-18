@@ -216,7 +216,11 @@ durable Task owner; its observe, await and cancel methods use the Task row's
 run/key and remain separate from Developer command receipts. REPL and Task
 watch/unwatch methods share the existing connection notification pump. A watch
 acknowledges future hints; observe the exact key for a baseline and after a
-resync hint. The first-party client for this family is separate work.
+resync hint. The typed [first-party client](../../lib/agent_client/developer_repl_connection.mli)
+retains exact Create, Submit, Task, Reset and Close requests before handoff.
+It adopts unresolved requests only across the same host, principal and
+authentication kind, and retries a lost reply only by explicit choice with
+the original key; a missing Observe result is never proof of nonexecution.
 
 ## Requests and results
 
