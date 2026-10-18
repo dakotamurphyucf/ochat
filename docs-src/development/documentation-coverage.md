@@ -349,10 +349,10 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_server/config.mli` | [contract](../../lib/agent_server/config.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/config_diff.mli` | [contract](../../lib/agent_server/config_diff.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/config_parser.mli` | [contract](../../lib/agent_server/config_parser.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
-| `lib/agent_server/config_validator.mli` | [contract](../../lib/agent_server/config_validator.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/agent_server/config_validator.mli` | [contract](../../lib/agent_server/config_validator.mli) | [integration](../design/chatml-developer-runtime.md) | Bounded local policy load and exact Store-owned operator selector binding reuse existing configuration validators. |
 | `lib/agent_server/config_watcher.mli` | [contract](../../lib/agent_server/config_watcher.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/connection_context.mli` | [contract](../../lib/agent_server/connection_context.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
-| `lib/agent_server/daemon.mli` | [contract](../../lib/agent_server/daemon.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/agent_server/daemon.mli` | [contract](../../lib/agent_server/daemon.mli) | [integration](../design/chatml-developer-runtime.md) | Local setup applies only a validated bound policy after Store ownership and before provider/catalog effects. |
 | `lib/agent_server/delegated_runtime.mli` | [contract](../../lib/agent_server/delegated_runtime.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_server/delegation_lifecycle.mli` | [contract](../../lib/agent_server/delegation_lifecycle.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_server/dependency_administration.mli` | [contract](../../lib/agent_server/dependency_administration.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
@@ -372,7 +372,8 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_server/developer_script_job_service.mli` | [contract](../../lib/agent_server/developer_script_job_service.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_server/developer_terminal_queue.mli` | [contract](../../lib/agent_server/developer_terminal_queue.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
 | `lib/agent_server/dispatcher.mli` | [contract](../../lib/agent_server/dispatcher.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
-| `lib/agent_server/embedded.mli` | [contract](../../lib/agent_server/embedded.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/agent_server/embedded.mli` | [contract](../../lib/agent_server/embedded.mli) | [integration](../design/chatml-developer-runtime.md) | Explicit local Developer policy shares one Store-owned embedded principal and adds only requested method scopes. |
+| `lib/agent_server/embedded_local_template.mli` | [contract](../../lib/agent_server/embedded_local_template.mli) | [integration](../design/chatml-developer-runtime.md) | Private finite syntax and closed principal-coordinate binder; no broad text replacement or grant. |
 | `lib/agent_server/embedded_host_cleanup.mli` | [contract](../../lib/agent_server/embedded_host_cleanup.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/graph_tracking.mli` | [contract](../../lib/agent_server/graph_tracking.mli) | [integration](../lib/inference-observations.md) | Public interface + current host guide. |
 | `lib/agent_server/independent_resources.mli` | [contract](../../lib/agent_server/independent_resources.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |

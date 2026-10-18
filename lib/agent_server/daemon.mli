@@ -720,6 +720,16 @@ val start
        (Agent_store.Session_store.t -> (unit, Agent_protocol.Error.t) result)
        (** Trusted composition hook after exclusive root ownership and before
            catalog/runtime construction. Failure closes the owned store. *)
+  -> ?local_setup:
+       (Agent_store.Session_store.t
+        -> (Config_validator.Embedded_local.bound, Agent_protocol.Error.t) result)
+       (** Trusted embedded-local handoff after the exclusive Store owner opens.
+           This callback can return only a validated, identity-bound local
+           section patch, not a replacement Config. Daemon applies that patch
+           to the generated embedded Config, repeats final configuration
+           admission, then starts provider/catalog/source work. Failure joins
+           the Store startup owner. Existing [before_activation] callers remain
+           source-compatible; Embedded uses one handoff for its minted ID. *)
   -> unit
   -> (t, Agent_protocol.Error.t) result
 

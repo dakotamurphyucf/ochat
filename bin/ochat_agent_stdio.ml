@@ -93,6 +93,7 @@ let run_local
       ~transient
       ~authoring_package_files
       ~authoring_budget
+      ~developer_policy
   =
   let open Or_error.Let_syntax in
   Eio.Switch.run (fun sw ->
@@ -102,6 +103,17 @@ let run_local
     in
     let authoring_package_files =
       List.map authoring_package_files ~f:(absolute (working_directory env))
+    in
+    let%bind local_policy =
+      match developer_policy with
+      | None -> Ok None
+      | Some path ->
+        Agent_server.Config_validator.Embedded_local.load
+          ~env
+          ~path:(absolute (working_directory env) path)
+        |> Result.map ~f:Option.some
+        |> Result.map_error ~f:(fun diagnostics ->
+          Error.create_s [%sexp (diagnostics : Agent_server.Config.Diagnostic.t list)])
     in
     let%bind embedded =
       Agent_server.Embedded.start
@@ -115,6 +127,7 @@ let run_local
         ~env
         ~authoring_package_files
         ?authoring_budget
+        ?local_policy
         options
       |> Result.map_error ~f:protocol_error
     in
@@ -148,6 +161,7 @@ let run
       ~transient
       ~authoring_package_files
       ~authoring_options
+      ~developer_policy
   =
   match local, connect with
   | true, None when Option.is_some bearer_token_file ->
@@ -173,7 +187,8 @@ let run
            ~data_root
            ~transient
            ~authoring_package_files
-           ~authoring_budget))
+           ~authoring_budget
+           ~developer_policy))
   | false, Some uri ->
     if
       Option.is_some inference_transport
@@ -183,10 +198,11 @@ let run
       || transient
       || (not (List.is_empty authoring_package_files))
       || Agent_server.Authoring_options.is_configured authoring_options
+      || Option.is_some developer_policy
     then
       Or_error.error_string
         "--inference-transport, --prompt, --workspace, --data-root, --transient, \
-         authoring package and budget flags are local-mode options"
+         authoring package, budget and developer policy flags are local-mode options"
     else Eio_main.run (fun env -> run_gateway env ~uri ~bearer_token_file)
   | true, Some _ -> Or_error.error_string "--local and --connect are mutually exclusive"
   | false, None when Option.is_some bearer_token_file ->
@@ -228,6 +244,11 @@ let command =
          "--authoring-package"
          (listed string)
          ~doc:"FILE Capture custom documentation for the local host (repeatable)."
+     and developer_policy =
+       flag
+         "--developer-policy"
+         (optional string)
+         ~doc:"FILE Local-only bounded Developer policy with Embedded_operator selectors."
      in
      fun () ->
        run
@@ -240,7 +261,8 @@ let command =
          ~data_root
          ~transient
          ~authoring_package_files
-         ~authoring_options)
+         ~authoring_options
+         ~developer_policy)
 ;;
 
 let () =

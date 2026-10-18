@@ -2209,3 +2209,262 @@ let validate ~env raw =
       ; manifest_grants
       })
 ;;
+
+module Embedded_local = struct
+  type t =
+    { context : context
+    ; sections : (string * Sexp.t) list
+    }
+
+  type bound =
+    { context : context
+    ; operator_id : Agent_protocol.Id.Principal.t
+    ; project_sources : Project_source_configuration.t option
+    ; authoring_project_access : Authoring_project_access_configuration.t option
+    ; authoring_upload_access : Authoring_upload_access_configuration.t option
+    ; developer : Developer_startup_configuration.t
+    ; permission_profile : Config.Permission_profile.t option
+    ; manifest_grants : Config.Manifest_grant.t list
+    ; developer_scopes : Agent_protocol.Scope.Set.t
+    }
+
+  let maximum_file_bytes = 9 * 1024 * 1024
+
+  let load ~env ~path =
+    let context = { env; source_file = path; source_directory = Filename.dirname path } in
+    let invalid message =
+      fail
+        context
+        ~code:"config.embedded_local"
+        ~path:"$"
+        ~message
+        ~remediation:"Use a finite local policy with only the documented sections."
+    in
+    if not (Filename.is_absolute path)
+    then invalid "local policy path must be absolute"
+    else
+      Eio.Switch.run (fun sw ->
+        let contents =
+          try
+            let flow = Eio.Path.open_in ~sw Eio.Path.(Eio.Stdenv.fs env / path) in
+            Ok (Eio.Buf_read.(parse_exn take_all) flow ~max_size:maximum_file_bytes)
+          with
+          | Eio.Cancel.Cancelled _ as cancelled -> raise cancelled
+          | exn -> Error (Exn.to_string exn)
+        in
+        let open Result.Let_syntax in
+        let%bind contents =
+          Result.map_error contents ~f:(fun message ->
+            [ diagnostic
+                context
+                ~code:"config.embedded_local"
+                ~path:"$"
+                ~message
+                ~remediation:"Use a readable local policy below 9 MiB."
+            ])
+        in
+        let%bind () =
+          if Embedded_local_template.finite_syntax contents
+          then Ok ()
+          else invalid "local policy exceeds its syntax depth or node budget"
+        in
+        let%bind raw = Config_parser.parse_string ~source_file:path contents in
+        let%bind sections = top_fields context raw.forms in
+        let%bind () =
+          ensure_allowed
+            context
+            "$"
+            sections
+            [ "project_sources"
+            ; "authoring_project_access"
+            ; "authoring_upload_access"
+            ; "permission_profiles"
+            ; "manifest_grants"
+            ; "developer"
+            ; "developer_scopes"
+            ]
+        in
+        let%bind _ = required context "$" sections "developer" in
+        let%map _ = required context "$" sections "developer_scopes" in
+        { context; sections })
+  ;;
+
+  let bind (t : t) ~env ~operator_id =
+    let open Result.Let_syntax in
+    let context = { t.context with env } in
+    let section name = field t.sections name in
+    let from_template result =
+      Result.map_error result ~f:(fun Embedded_local_template.{ path; message } ->
+        [ diagnostic
+            context
+            ~code:"config.embedded_local_selector"
+            ~path
+            ~message
+            ~remediation:
+              "Use exact Embedded_operator selectors and embedded.local authentication."
+        ])
+    in
+    let%bind project_sources =
+      match section "project_sources" with
+      | None -> Ok None
+      | Some value -> parse_project_sources context "project_sources" value
+    in
+    let%bind authoring_project_access =
+      match section "authoring_project_access" with
+      | None -> Ok None
+      | Some value ->
+        let%bind value =
+          Embedded_local_template.bind_project operator_id value |> from_template
+        in
+        parse_authoring_project_access
+          context
+          "authoring_project_access"
+          value
+          ~project_sources
+        |> Result.map ~f:Option.some
+    in
+    let%bind authoring_upload_access =
+      match section "authoring_upload_access" with
+      | None -> Ok None
+      | Some value ->
+        let%bind value =
+          Embedded_local_template.bind_upload operator_id value |> from_template
+        in
+        parse_authoring_upload_access context "authoring_upload_access" value
+        |> Result.map ~f:Option.some
+    in
+    let%bind developer =
+      let%bind value = required context "$" t.sections "developer" in
+      let%bind value =
+        Embedded_local_template.bind_developer operator_id value |> from_template
+      in
+      parse_developer context "developer" value
+    in
+    let%bind permission_profile =
+      match section "permission_profiles" with
+      | None -> Ok None
+      | Some value ->
+        let%bind rows = list context "permission_profiles" value in
+        (match rows with
+         | [] -> Ok None
+         | [ row ] -> parse_permission_profile context 0 row |> Result.map ~f:Option.some
+         | _ -> shape_error context "permission_profiles" "at most one profile")
+    in
+    let%bind manifest_grants =
+      match section "manifest_grants" with
+      | None -> Ok []
+      | Some value ->
+        let%bind value =
+          Embedded_local_template.bind_manifest operator_id value |> from_template
+        in
+        let%bind rows = list context "manifest_grants" value in
+        List.mapi rows ~f:(parse_manifest_grant context) |> Result.all
+    in
+    let%map developer_scopes =
+      let%bind value = required context "$" t.sections "developer_scopes" in
+      let%bind values = list context "developer_scopes" value in
+      let%bind scopes =
+        List.map values ~f:(fun value ->
+          let%bind name = atom context "developer_scopes[]" value in
+          match Agent_protocol.Scope.of_string name with
+          | Ok
+              (( Developer_check
+               | Developer_fixture_run
+               | Developer_live_run
+               | Developer_repl ) as scope) -> Ok scope
+          | Ok _ | Error _ ->
+            shape_error context "developer_scopes[]" "a Developer method scope")
+        |> Result.all
+      in
+      let set = Agent_protocol.Scope.Set.of_list scopes in
+      if Set.length set = List.length scopes
+      then Ok set
+      else
+        fail
+          context
+          ~code:"config.duplicate_scope"
+          ~path:"developer_scopes"
+          ~message:"duplicate Developer scope"
+          ~remediation:"List each scope once."
+    in
+    { context
+    ; operator_id
+    ; project_sources
+    ; authoring_project_access
+    ; authoring_upload_access
+    ; developer
+    ; permission_profile
+    ; manifest_grants
+    ; developer_scopes
+    }
+  ;;
+
+  let operator_id t = t.operator_id
+  let developer_scopes t = t.developer_scopes
+
+  let apply t ~(config : Config.t) =
+    let invalid message = Agent_protocol.Error.invalid_request message in
+    let open Result.Let_syntax in
+    let%bind () =
+      if
+        Option.is_some config.server.developer
+        || Option.is_some config.server.authoring_project_access
+        || Option.is_some config.server.authoring_upload_access
+        || (Option.is_some t.project_sources
+            && Option.is_some config.server.project_sources)
+      then Error (invalid "local policy conflicts with an existing configured section")
+      else Ok ()
+    in
+    let%bind prompt =
+      match config.prompts with
+      | [ prompt ] when String.equal prompt.id "embedded.prompt" -> Ok prompt
+      | _ -> Error (invalid "local policy requires the generated embedded prompt")
+    in
+    let%bind () =
+      match config.workspaces with
+      | [ workspace ] when String.equal workspace.id "embedded.workspace" -> Ok ()
+      | _ -> Error (invalid "local policy requires the generated embedded workspace")
+    in
+    let%bind permission_profiles, prompts =
+      match t.permission_profile with
+      | None -> Ok (config.permission_profiles, config.prompts)
+      | Some profile ->
+        (match config.permission_profiles with
+         | [ original ] when String.equal original.id prompt.permission_profile ->
+           Ok ([ profile ], [ { prompt with permission_profile = profile.id } ])
+         | _ -> Error (invalid "local policy conflicts with the embedded profile"))
+    in
+    let%bind () =
+      if List.is_empty config.manifest_grants
+      then Ok ()
+      else Error (invalid "local policy conflicts with existing manifest grants")
+    in
+    let result =
+      Config.
+        { config with
+          server =
+            { config.server with
+              project_sources =
+                Option.first_some t.project_sources config.server.project_sources
+            ; authoring_project_access = t.authoring_project_access
+            ; authoring_upload_access = t.authoring_upload_access
+            ; developer = Some t.developer
+            }
+        ; prompts
+        ; permission_profiles
+        ; manifest_grants = t.manifest_grants
+        }
+    in
+    let%map () =
+      validate_references
+        t.context
+        result.workspaces
+        result.prompts
+        result.permission_profiles
+        result.manifest_grants
+      |> Result.map_error ~f:(fun diagnostics ->
+        invalid (Sexp.to_string_hum ([%sexp_of: Config.Diagnostic.t list] diagnostics)))
+    in
+    result
+  ;;
+end
