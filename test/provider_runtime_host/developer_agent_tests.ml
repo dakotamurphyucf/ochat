@@ -2709,14 +2709,50 @@ let%test_unit "selected ordinary Agent Tool runs through its registered child so
   let sent_tool_call = ref false in
   let stage_queued = ref false in
   let before_tool_call = ref (fun () -> ()) in
+  let retained_grand = ref None in
+  let latest_grand = ref None in
+  let check_foreign_grand = ref false in
+  let foreign_grand_denial = ref None in
+  let retained_grand_denial implementation =
+    match
+      implementation.Ochat_function.run_with_progress
+        ~invocation:Ochat_function.Invocation.silent
+        {|{"input":"go"}|}
+    with
+    | exception Failure message -> Some message
+    | _ -> None
+  in
+  let denied_retained_grand implementation ~expected =
+    [%test_eq: string option] (retained_grand_denial implementation) (Some expected)
+  in
+  let hold_grand_response = ref false in
+  let awaiting_grand_submit = ref false in
+  let held_grand = ref None in
+  let grand_entered, grand_entered_u = Eio.Promise.create () in
+  let release_grand, release_grand_u = Eio.Promise.create () in
+  let release_requested = ref false in
+  let grand_released = ref false in
   let default_issuer_runtime = ref None in
   let default_grand_revisions = ref [] in
   let limited_grand_revisions = ref [] in
   let record_grand_revision revisions invocation binding =
     if String.equal (Chat_response.Tool_capability.reference binding).name "grand"
-    then
+    then (
+      let implementation =
+        Chat_response.Tool_capability.native_implementation binding |> Option.value_exn
+      in
+      latest_grand := Some implementation;
+      (match !retained_grand with
+       | None -> retained_grand := Some implementation
+       | Some original when !check_foreign_grand ->
+         assert (not (phys_equal original implementation));
+         let provider_calls = !requests in
+         foreign_grand_denial := retained_grand_denial original;
+         [%test_eq: int] !requests provider_calls;
+         check_foreign_grand := false
+       | Some _ -> ());
       revisions
-      := (P.Host_invocation.context invocation).implementation_revision :: !revisions
+      := (P.Host_invocation.context invocation).implementation_revision :: !revisions)
   in
   let tool_call ~stage_queued =
     let grand_call =
@@ -2825,7 +2861,19 @@ let%test_unit "selected ordinary Agent Tool runs through its registered child so
         !before_tool_call ();
         Some (tool_call ~stage_queued:!stage_queued))
       else None)
-    ~on_model_body:(fun body -> bodies := body :: !bodies)
+    ~on_model_body:(fun body ->
+      bodies := body :: !bodies;
+      if !hold_grand_response && String.is_substring body ~substring:"OCH421 grand marker"
+      then (
+        held_grand := !latest_grand;
+        awaiting_grand_submit := true))
+    ~on_model_submit:(fun () ->
+      if !awaiting_grand_submit
+      then (
+        awaiting_grand_submit := false;
+        Eio.Promise.resolve grand_entered_u ();
+        Eio.Promise.await release_grand;
+        grand_released := true))
     (fun env sw anchor create _ ->
        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 45. (fun () ->
          let bootstrap = create () in
@@ -2985,10 +3033,15 @@ let run ctx input =
              ()
            |> ok
          in
+         let daemon_closed = ref false in
          Fun.protect
            ~finally:(fun () ->
+             if not !release_requested
+             then (
+               release_requested := true;
+               Eio.Promise.resolve release_grand_u ());
              resume_clock ();
-             S.Daemon.shutdown daemon |> ok)
+             if not !daemon_closed then S.Daemon.shutdown daemon |> ok)
            (fun () ->
               let connection, expected =
                 open_document
@@ -3120,6 +3173,32 @@ let run ctx input =
               assert (
                 List.exists !bodies ~f:(fun body ->
                   String.is_substring body ~substring:"OCH421 Tool Content marker"));
+              let original_grand = Option.value_exn !retained_grand in
+              let provider_calls = !requests in
+              denied_retained_grand
+                original_grand
+                ~expected:"selected developer native invocation scope is not active";
+              [%test_eq: int] !requests provider_calls;
+              (before_tool_call
+               := fun () -> Eio.Path.unlink Eio.Path.(Eio.Stdenv.fs env / grand));
+              sent_tool_call := false;
+              let previous_bodies = List.length !bodies in
+              let file_missing_run, file_missing_job =
+                submit_job "ordinary-agent-tool-file-missing"
+              in
+              await_job file_missing_run file_missing_job;
+              let file_missing_bodies =
+                List.take !bodies (List.length !bodies - previous_bodies)
+              in
+              assert (
+                not
+                  (List.exists file_missing_bodies ~f:(fun body ->
+                     String.is_substring body ~substring:"OCH421 grand marker")));
+              let file_missing_output = tool_output file_missing_bodies in
+              let file_missing_outcome =
+                field file_missing_output "output" |> string |> Jsonaf.of_string
+              in
+              [%test_eq: string] (field file_missing_outcome "type" |> string) "fail";
               Eio.Path.save
                 ~create:(`Or_truncate 0o600)
                 Eio.Path.(Eio.Stdenv.fs env / child)
@@ -3135,6 +3214,7 @@ let run ctx input =
                       Eio.Path.(Eio.Stdenv.fs env / grand)
                       "<developer>OCH421 Captured edited marker</developer>";
                     pause_at_scheduler_wait daemon clock pause_clock);
+              check_foreign_grand := true;
               stage_queued := true;
               sent_tool_call := false;
               let previous_bodies = List.length !bodies in
@@ -3157,10 +3237,91 @@ let run ctx input =
                 field captured_output "output" |> string |> Jsonaf.of_string
               in
               [%test_eq: string] (field captured_outcome "type" |> string) "complete";
+              assert (not !check_foreign_grand);
+              [%test_eq: string option]
+                !foreign_grand_denial
+                (Some "saved Agent source callback is no longer selected");
               default_issuer_runtime
-              := Some (queued_grand ~parent_job:captured_job (jobs daemon captured_run)));
+              := Some (queued_grand ~parent_job:captured_job (jobs daemon captured_run));
+              resume_clock ();
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / child)
+                {|<developer>OCH421 parent marker</developer>
+<tool name="grand" agent="grand.chatmd" local source_mode="file"/>|};
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / grand)
+                "<developer>OCH421 grand marker</developer>";
+              before_tool_call := ignore;
+              stage_queued := false;
+              sent_tool_call := false;
+              hold_grand_response := true;
+              let cancelling_run, cancelling_job =
+                submit_job "ordinary-agent-tool-shutdown"
+              in
+              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+                Eio.Promise.await grand_entered);
+              let interrupted_grand = Option.value_exn !held_grand in
+              assert (not (phys_equal interrupted_grand original_grand));
+              let running = job_state cancelling_run cancelling_job () in
+              (match running.status with
+               | Running -> assert (running.attempt > 0)
+               | Queued
+               | Waiting_permission _
+               | Waiting_completion _
+               | Succeeded
+               | Failed _
+               | Cancelled
+               | Interrupted _ ->
+                 failwith "selected Agent Tool owner was not running at shutdown");
+              let shutdown_done, shutdown_done_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                S.Daemon.shutdown daemon |> ok;
+                daemon_closed := true;
+                Eio.Promise.resolve shutdown_done_u ());
+              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+                Eio.Promise.await shutdown_done);
+              assert (not !grand_released);
+              (match (job_state cancelling_run cancelling_job ()).status with
+               | Cancelled -> ()
+               | Queued
+               | Running
+               | Waiting_permission _
+               | Waiting_completion _
+               | Succeeded
+               | Failed _
+               | Interrupted _ ->
+                 failwith "selected Agent Tool Job was not cancelled by joined shutdown");
+              let provider_calls = !requests in
+              denied_retained_grand
+                interrupted_grand
+                ~expected:"selected developer native invocation scope is not active";
+              [%test_eq: int] !requests provider_calls;
+              hold_grand_response := false;
+              release_requested := true;
+              Eio.Promise.resolve release_grand_u ();
+              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                let rec await () =
+                  if not !grand_released
+                  then (
+                    Eio.Fiber.yield ();
+                    await ())
+                in
+                await ());
+              [%test_eq: int] !requests provider_calls;
+              match (job_state cancelling_run cancelling_job ()).status with
+              | Cancelled -> ()
+              | Queued
+              | Running
+              | Waiting_permission _
+              | Waiting_completion _
+              | Succeeded
+              | Failed _
+              | Interrupted _ ->
+                failwith "cancelled Agent Tool Job changed after server release");
          stage_queued := false;
-         [%test_eq: int] (List.length !default_grand_revisions) 2;
+         assert (List.length !default_grand_revisions >= 2);
          let file_grand_revision = List.last_exn !default_grand_revisions in
          Eio.Path.save
            ~create:(`Or_truncate 0o600)
