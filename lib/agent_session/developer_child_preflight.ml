@@ -168,6 +168,7 @@ let admit_surface ~selected ~ordinary_agent_tools ~revision ~parsed ~input ~chec
     | Script script when selected -> moderator_script script
     | Tool declaration when selected -> tool declaration
     | Shell_runtime _ when selected -> Ok ()
+    | Moderator_runtime _ when selected -> Ok ()
     | Shell_script script when selected ->
       (match script.kind with
        | Chatmd_shell_spec.Chatmd_script_spec.Moderator -> denied ~selected ()

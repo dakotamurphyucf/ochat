@@ -2006,6 +2006,27 @@ let run ctx input =
 type event = [ `Session_start | `Session_resume | `Turn_start | `Turn_end | `Item_appended(item) ]
 let initial_state = 0
 let on_event : context -> state -> event -> state task = fun _ st _ -> Task.pure(st)</script>|}
+              else if String.equal name "shell-no-approval"
+              then
+                {|<developer>OCH415 selected policy child marker</developer>
+<shell_access id="direct" cwd="${workspace}">
+  <capabilities sandbox="direct_unsafe" network="false"
+      child_processes="false" arbitrary_code="false" privilege_change="false">
+    <write path="${workspace}"/>
+  </capabilities>
+  <backends merge="replace"><direct when="macos"/><direct when="linux"/></backends>
+  <policy default="allow"/>
+  <approvals provider="none" unavailable="deny" scopes="once"/>
+  <audit format="none"/>
+</shell_access>
+<moderator_runtime shell_runtime="direct"/>
+<script language="chatml" kind="moderator">type state = int
+type event = [ `Session_start ]
+let initial_state = 0
+let on_event : context -> state -> event -> state task = fun _ st _ ->
+  Task.bind(Process.run("/usr/bin/touch", ["selected-process-marker"]), fun output ->
+    if output == "" then Task.pure(st)
+    else Task.fail("selected Process output changed"))</script>|}
               else
                 {|<developer>OCH415 selected policy child marker</developer>
 <script language="chatml" kind="moderator">type state = int
@@ -2069,6 +2090,64 @@ let on_event : context -> state -> event -> state task = fun _ st _ -> Task.pure
              }
            in
            let config = Agent_server_test_support.config root root prompt in
+           let config =
+             if String.equal name "shell-no-approval"
+             then (
+               let child_definition =
+                 { (List.hd_exn config.prompts) with
+                   id = "selected.child.grant"
+                 ; path = child
+                 }
+               in
+               let bootstrap_config =
+                 { config with prompts = config.prompts @ [ child_definition ] }
+               in
+               let source_sha256, manifest_sha256 =
+                 Eio.Switch.run (fun bootstrap_sw ->
+                   let bootstrap =
+                     S.Daemon.start
+                       ~sw:bootstrap_sw
+                       ~env:daemon_env
+                       ~config:bootstrap_config
+                       ~tool_dir:root
+                       ~home:root
+                       ~process_start_identity:None
+                       ~options:{ options with developer = None }
+                       ()
+                     |> ok
+                   in
+                   Fun.protect
+                     ~finally:(fun () -> S.Daemon.shutdown bootstrap |> ok)
+                     (fun () ->
+                        let entry =
+                          Agent_session.Prompt_catalog.find_by_name
+                            (S.Daemon.prompts bootstrap)
+                            "selected.child.grant"
+                          |> Option.value_exn
+                        in
+                        match entry.availability with
+                        | Ready revision ->
+                          let artifact =
+                            Agent_session.Prompt_revision.artifact revision
+                          in
+                          ( artifact.root_sha256
+                          , Option.value_exn artifact.shell_manifest_sha256 )
+                        | Disabled | Unavailable _ ->
+                          failwith "selected shell child did not compile"))
+               in
+               let grant =
+                 S.Config.Manifest_grant.
+                   { id = "selected-child-shell-grant"
+                   ; prompt = "restart.prompt"
+                   ; workspaces = [ "restart.workspace" ]
+                   ; manifest_sha256
+                   ; source_sha256
+                   ; principals = [ "pri_operator" ]
+                   }
+               in
+               { config with manifest_grants = [ grant ] })
+             else config
+           in
            let daemon =
              S.Daemon.start
                ~sw
@@ -2235,6 +2314,12 @@ let on_event : context -> state -> event -> state task = fun _ st _ -> Task.pure
                     in
                     [%test_eq: [ `Succeeded | `Failed ]] (loop ()) expected_status);
                   [%test_eq: int] !requests expected_requests;
+                  if String.equal name "shell-no-approval"
+                  then
+                    [%test_eq: string]
+                      (Eio.Path.load
+                         Eio.Path.(Eio.Stdenv.fs env / root / "selected-process-marker"))
+                      "";
                   if claimed_issuer
                   then (
                     let children =
@@ -2703,7 +2788,8 @@ let on_event : context -> state -> event -> state task = fun _ st _ -> Task.pure
            "queued-expired"
            default_policy
            `Succeeded
-           7));
+           7;
+         run_case "shell-no-approval" default_policy `Succeeded 8));
   print_endline "selected child policy and queued issuer remained source-owned";
   [%expect {| selected child policy and queued issuer remained source-owned |}]
 ;;
