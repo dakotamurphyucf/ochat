@@ -36,7 +36,7 @@ let required_limits ~stored =
 let validate_prepared prepared =
   Chatml_prepared_program.sources prepared
   |> List.fold_result ~init:() ~f:(fun () source ->
-    P.Authoring_codec.validate_source_id (Chatml_source.id source))
+    Wire.validate_source_id (Chatml_source.id source))
 ;;
 
 let diagnostic (value : Stored.Diagnostic.t) =

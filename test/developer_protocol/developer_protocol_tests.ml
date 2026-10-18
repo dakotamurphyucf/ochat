@@ -595,22 +595,32 @@ let%test_unit "routes and submissions roundtrip under the effective request poli
       ~relative_path:(String.make 1024 'm')
     |> Or_error.ok_exn
   in
-  must (P.Authoring_codec.validate_source_id maximal_source_id);
+  must (Dev.Receipt.validate_source_id maximal_source_id);
+  let maximal_source =
+    must
+      (P.Authoring.Source.create
+         ~id:maximal_source_id
+         ~digest:(Chatml_source.Digest.of_contents "" ~checkpoint:Fn.id)
+         ~byte_length:0
+         ~editor_revision:None)
+  in
   assert (
-    Chatml_source.Id.equal
-      maximal_source_id
-      (must
-         (P.Authoring_codec.source_id
-            (P.Authoring_codec.source_id_json maximal_source_id))));
+    P.Authoring.Source.equal
+      maximal_source
+      (must (P.Authoring.Source.of_json (P.Authoring.Source.to_json maximal_source))));
   let oversized_namespace =
     Chatml_source.Id.create
       ~package_namespace:(String.make 1025 'n')
       ~relative_path:"source.chatmd"
     |> Or_error.ok_exn
   in
-  assert (Result.is_error (P.Authoring_codec.validate_source_id oversized_namespace));
+  assert (Result.is_error (Dev.Receipt.validate_source_id oversized_namespace));
+  (* Source IDs already reject oversized members before wire admission. *)
   assert (
-    Result.is_error (P.Authoring_codec.portable_member_string (String.make 1025 'm')));
+    Result.is_error
+      (Chatml_source.Id.create
+         ~package_namespace:"developer-wire"
+         ~relative_path:(String.make 1025 'm')));
   let contents = "<developer>example</developer>" in
   let source =
     must
