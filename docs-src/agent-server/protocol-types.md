@@ -4658,6 +4658,12 @@ val of_json : Jsonaf.t -> limits:Document_schema.Limits.t -> (t, Protocol_error.
     retained. The server converts an already authorized Store receipt; a
     decoded value alone is never evidence of execution. *)
 
+(** Check that a captured executable source identifier can be represented by a
+    Developer diagnostic receipt. This validates protocol namespace/member
+    bounds only; it grants no source authority and does not construct a
+    diagnostic location. *)
+val validate_source_id : Chatml_source.Id.t -> (unit, Error.t) result
+
 module Kind : sig
   type t =
     | Check

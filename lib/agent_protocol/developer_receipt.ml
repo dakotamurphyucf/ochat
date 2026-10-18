@@ -8,6 +8,7 @@ let ( let* ) result f = Result.bind result ~f
 let get fields name decode = C.required fields name |> Result.bind ~f:decode
 let text = C.string ~max_bytes:16_384
 let decimal = C.integer_json
+let validate_source_id = Authoring_codec.validate_source_id
 
 module Kind = struct
   type t =
@@ -28,7 +29,7 @@ module Diagnostic = struct
       }
 
     let create ~source ~digest ~source_bytes ~start_byte ~end_byte =
-      let* () = Authoring_codec.validate_source_id source in
+      let* () = validate_source_id source in
       if
         source_bytes < 0
         || source_bytes > Authoring_codec.maximum_wire_integer

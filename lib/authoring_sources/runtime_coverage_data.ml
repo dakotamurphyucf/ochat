@@ -537,7 +537,7 @@ let implementation_sources =
   ; ( "lib/agent_protocol/developer_view.ml"
     , "b4ce96438f22d25730b016fdc940ae0c7e65ccc6166de834ceea7e4165490571" )
   ; ( "lib/agent_protocol/developer_receipt.ml"
-    , "a6a6fa52f7a1805f0d3c0833c5c6fea9868add02a3b69ce1981fe13c1c79c1a3" )
+    , "f8121cb5159f58b9dc06c5403ff80c67a32f6fff5037e0c60d36e1a3d03c844c" )
   ; ( "lib/agent_protocol/developer_common.ml"
     , "5c3846d01b34cf7c514e8f5f4eb491ba7bb9a7578e928549479cd63d58710bdf" )
   ; ( "lib/agent_protocol/developer_approval.ml"
@@ -553,7 +553,7 @@ let implementation_sources =
   ; ( "lib/agent_protocol/developer_repl_wire.ml"
     , "2926bde94430e0348d63ff0b11918080077163ea5646688f76bc8b81894d1f94" )
   ; ( "lib/agent_server/developer_command_wire_receipt.ml"
-    , "d4488c83e4dafaf47c7ecc296ffbc88b629b8175ed7158883db786b99091d320" )
+    , "5d30a8c37696290d8b1a1201855f763fdd39a7506a265232c11089179d625c1b" )
   ; ( "lib/agent_server/developer_endpoint.ml"
     , "2cce8ed23cd788997caae37d94eba3a34ad86615cdc76d9472afa46bf5f34161" )
   ; ( "lib/agent_server/developer_repl_registry.ml"
