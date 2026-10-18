@@ -156,7 +156,12 @@ let developer_configuration
   |> ok
 ;;
 
-let portable_wire_limits () =
+let portable_wire_limits
+      ?(max_approval_display_bytes = 256)
+      ?(max_approval_decision_reason_bytes = 256)
+      ?(approval_page_bytes = 30_000)
+      ()
+  =
   let bound ~bytes ~depth ~fields ~nodes =
     Document_schema.Limits.create
       ~max_bytes:bytes
@@ -170,15 +175,67 @@ let portable_wire_limits () =
     ~request:(bound ~bytes:4096 ~depth:16 ~fields:128 ~nodes:256)
     ~receipt
     ~response:(bound ~bytes:(2 * 1024 * 1024) ~depth:20 ~fields:1200 ~nodes:2400)
-    ~approval_page:(bound ~bytes:30_000 ~depth:8 ~fields:200 ~nodes:200)
+    ~approval_page:(bound ~bytes:approval_page_bytes ~depth:8 ~fields:200 ~nodes:200)
     ~max_output_bytes:65536
     ~max_fixture_steps:4
     ~max_fixture_bytes:4096
-    ~max_approval_display_bytes:256
-    ~max_approval_decision_reason_bytes:256
+    ~max_approval_display_bytes
+    ~max_approval_decision_reason_bytes
     ~max_approval_page:2
     ~max_event_bytes:2048
   |> ok
+;;
+
+let open_portable_client
+      ?(features =
+        [ P.Developer_common.Features.run; P.Developer_common.Features.approvals ])
+      ~limits
+      daemon
+      actor
+  =
+  let module C = P.Developer_common in
+  let context =
+    S.Connection_context.create_authenticated
+      ~actor
+      ~connection_id:P.Id.Transaction.(create () |> to_string)
+      ~transport:In_memory
+      ~publish_notification:(fun _ -> ())
+      ~max_attachments:8
+  in
+  let transport =
+    Agent_client.In_memory.create_with_developer
+      ~notifications:(Eio.Stream.create 8)
+      ~request:(S.Dispatcher.dispatch_command (S.Daemon.dispatcher daemon) ~context)
+      ~request_developer:(fun ~bound:_ request ->
+        S.Dispatcher.dispatch_developer (S.Daemon.dispatcher daemon) ~context request
+        |> Result.bind ~f:(fun response ->
+          P.Developer_wire.Response.to_json response ~limits))
+      ~close:(fun () -> S.Daemon.close_connection daemon context)
+  in
+  let implementation =
+    P.Initialize.Implementation.create ~name:"approval-client" ~version:"1" |> ok
+  in
+  let initialize =
+    P.Initialize.Request.create
+      ~implementation
+      ~protocol_min:P.Version.current
+      ~protocol_max:P.Version.current
+      ~features
+      ~event_encodings:[ Json ]
+      ~max_inbound_event_bytes:(1024 * 1024)
+      ()
+    |> ok
+  in
+  (match
+     Agent_client.Connection.request_without_history
+       transport
+       (Protocol_initialize initialize)
+   with
+   | Ok (Protocol_initialize _) -> ()
+   | Ok _ -> failwith "portable approval client initialization returned another method"
+   | Error error ->
+     raise_s [%sexp "portable approval client initialization failed", (error : P.Error.t)]);
+  Agent_client.Developer_connection.create transport |> ok, transport
 ;;
 
 let semantic_authoring_policy env =
@@ -801,6 +858,7 @@ let%expect_test "installed Developer endpoint keeps command and approval methods
   let changed, signal_changed = Eio.Promise.create () in
   let released = ref false in
   let change_seen = ref false in
+  let captured_change = ref None in
   let watching = ref false in
   let native_attempts = ref 0 in
   let lost_submit_response = ref false in
@@ -819,7 +877,7 @@ let%expect_test "installed Developer endpoint keeps command and approval methods
                 (Chat_response.Tool_capability.reference binding).name
                 "read_file";
               incr native_attempts;
-              Eio.Promise.resolve signal_entered ();
+              if Int.equal !native_attempts 1 then Eio.Promise.resolve signal_entered ();
               Eio.Promise.await release;
               Ok ())
             ~prepare_output:(function
@@ -854,6 +912,7 @@ let%expect_test "installed Developer endpoint keeps command and approval methods
                      && not !change_seen
                    then (
                      change_seen := true;
+                     captured_change := Some (P.Envelope.Notification { method_; params });
                      Eio.Promise.resolve signal_changed ())
                  | P.Envelope.Notification _ | Request _ | Response _ -> ()
                in
@@ -896,7 +955,7 @@ let%expect_test "installed Developer endpoint keeps command and approval methods
                    ~selector:(P.Authoring.Analysis.Target.selected_script "s" |> ok)
                  |> ok
                in
-               let submit =
+               let submit_for key =
                  C.Submit.create
                    ~limits
                    ~run_id
@@ -914,6 +973,7 @@ let%expect_test "installed Developer endpoint keeps command and approval methods
                    ~requested_max_output_bytes:None
                  |> ok
                in
+               let submit = submit_for key in
                let dispatch request =
                  S.Dispatcher.dispatch_developer
                    (S.Daemon.dispatcher daemon)
@@ -938,13 +998,31 @@ let%expect_test "installed Developer endpoint keeps command and approval methods
                in
                Eio.Promise.await entered;
                let lookup = C.Lookup.create ~run_id ~key in
-               (match dispatch (W.Request.Watch lookup) with
+               (match
+                  Agent_client.Developer_connection.send
+                    developer
+                    (W.Request.Watch lookup)
+                  |> ok
+                with
                 | W.Response.Watch -> ()
                 | _ -> failwith "expected held Live Watch acknowledgement");
                watching := true;
                released := true;
                Eio.Promise.resolve signal_release ();
                Eio.Promise.await changed;
+               (* The actual hint was handed to this transport callback, but not
+                  consumed as a client cursor. Reobserve the exact key after
+                  Watch to recover the authoritative state. *)
+               (match
+                  Agent_client.Developer_connection.change_of_notification
+                    developer
+                    (Option.value_exn !captured_change)
+                  |> ok
+                with
+                | Some change ->
+                  assert (P.Id.Developer_run.equal change.run_id run_id);
+                  assert (P.Idempotency_key.equal change.key key)
+                | None -> failwith "actual Developer hint was not decoded");
                (match dispatch (W.Request.Await_terminal lookup) with
                 | W.Response.Await_terminal view ->
                   (match C.View.phase view with
@@ -988,6 +1066,97 @@ let%expect_test "installed Developer endpoint keeps command and approval methods
                  List.is_empty
                    (Agent_client.Developer_connection.pending_submits developer));
                assert (Int.equal !native_attempts 1);
+               let reobserved =
+                 Agent_client.Developer_connection.watch_and_observe developer lookup
+                 |> ok
+                 |> Option.value_exn
+               in
+               (match C.View.phase reobserved with
+                | Terminal { receipt; _ } ->
+                  (match P.Developer_receipt.value receipt with
+                   | Live (Succeeded _) -> ()
+                   | _ -> failwith "lost hint recovery did not observe Live success")
+                | _ -> failwith "lost hint recovery did not reach terminal view");
+               let repeat_key =
+                 P.Idempotency_key.of_string "portable-watch-repeat" |> checked
+               in
+               let repeated = submit_for repeat_key in
+               let repeated_view =
+                 match
+                   Agent_client.Developer_connection.send
+                     developer
+                     (W.Request.Submit repeated)
+                   |> ok
+                 with
+                 | W.Response.Submit view -> view
+                 | _ -> failwith "different-key Repeat returned another method"
+               in
+               assert (
+                 not
+                   (P.Developer_command_id.equal
+                      (C.View.command_id repeated_view)
+                      (C.View.command_id reobserved)));
+               assert (
+                 Chatml_source.Digest.equal
+                   (C.View.capture_fingerprint repeated_view)
+                   (C.View.capture_fingerprint reobserved));
+               let repeated_terminal =
+                 match
+                   Agent_client.Developer_connection.send
+                     developer
+                     (W.Request.Await_terminal (C.Lookup.create ~run_id ~key:repeat_key))
+                   |> ok
+                 with
+                 | W.Response.Await_terminal view -> view
+                 | _ -> failwith "different-key Repeat did not settle"
+               in
+               (match C.View.phase repeated_terminal with
+                | Terminal { receipt; _ } ->
+                  (match P.Developer_receipt.value receipt with
+                   | Live (Succeeded _) -> ()
+                   | _ -> failwith "different-key Repeat failed")
+                | _ -> failwith "different-key Repeat did not reach terminal view");
+               assert (Int.equal !native_attempts 2);
+               (match
+                  Agent_client.Connection.request_without_history
+                    transport
+                    (Authoring
+                       (Context_close (P.Authoring.Context.Close_request.create ~expected)))
+                with
+                | Ok (Authoring (Context_close _)) -> ()
+                | _ -> failwith "current Authoring context did not close");
+               let stale =
+                 submit_for (P.Idempotency_key.of_string "portable-watch-stale" |> checked)
+               in
+               (match
+                  Agent_client.Developer_connection.send
+                    developer
+                    (W.Request.Submit stale)
+                with
+                | Error { code = Conflict; _ } -> ()
+                | Error error ->
+                  raise_s [%sexp "stale selector denial changed", (error : P.Error.t)]
+                | Ok _ -> failwith "stale selector admitted another effect");
+               let foreign =
+                 Agent_server_test_support.principal_with_scopes
+                   "pri_portable_watch_foreign"
+                   scopes
+                 |> Operator_authorization.trusted_local
+               in
+               let foreign_client, foreign_connection =
+                 open_portable_client ~features:[ C.Features.run ] ~limits daemon foreign
+               in
+               (match
+                  Agent_client.Developer_connection.send
+                    foreign_client
+                    (W.Request.Observe lookup)
+                with
+                | Error { code = Lease_stale; _ } -> ()
+                | Error error ->
+                  raise_s [%sexp "foreign principal denial changed", (error : P.Error.t)]
+                | Ok _ -> failwith "foreign principal observed Live result");
+               Agent_client.Connection.close foreign_connection;
+               assert (Int.equal !native_attempts 2);
                match dispatch (W.Request.Unwatch lookup) with
                | W.Response.Unwatch -> ()
                | _ -> failwith "expected held Live Unwatch acknowledgement")));
