@@ -698,6 +698,7 @@ module Saved_inference_source = struct
   module Selected = Agent_session.Captured_agent_runner.Claimed_developer.Selected
   module Target = Agent_session.Captured_agent_runner.Selected_content_target
   module Model = Agent_session.Captured_agent_runner.Selected_model_target
+  module Tool = Agent_session.Captured_agent_runner.Selected_tool_target
   module Native = Agent_session.Native_tool_invocation
   open Target
 
@@ -705,18 +706,21 @@ module Saved_inference_source = struct
     | Target.Saved saved -> saved
     | Content content -> Target.saved_ancestor content
     | Model model -> Model.saved_ancestor model
+    | Tool tool -> Tool.saved_ancestor tool
   ;;
 
   let revision = function
     | Target.Saved saved -> Selected.Target.revision saved
     | Content content -> Target.revision content
     | Model model -> Model.revision model
+    | Tool tool -> Tool.revision tool
   ;;
 
   let check = function
     | Target.Saved saved -> Selected.Target.check saved
     | Content content -> Target.check content
     | Model model -> Model.check model
+    | Tool _ -> invalid "selected Tool source has no inference owner"
   ;;
 
   let check_now = function
@@ -728,6 +732,7 @@ module Saved_inference_source = struct
       else Selected.Target.check_descendant_now saved ~child:borrowed
     | Content content -> Target.check_current_or_descendant_now content
     | Model model -> Model.check_current_or_descendant_now model
+    | Tool _ -> invalid "selected Tool source has no inference owner"
   ;;
 
   let matches_parent child parent =
@@ -735,6 +740,7 @@ module Saved_inference_source = struct
     | Target.Saved _ -> false
     | Content content -> Target.matches_parent content parent
     | Model model -> Model.matches_parent model parent
+    | Tool _ -> false
   ;;
 
   let current_native_terminal_now issuer selected terminal =
@@ -3296,7 +3302,7 @@ module Model_inference = struct
       match parent, target with
       | None, Saved saved when phys_equal (Saved_selected.Target.saved saved) selected ->
         Ok ()
-      | None, (Saved _ | Content _ | Model _) ->
+      | None, (Saved _ | Content _ | Model _ | Tool _) ->
         invalid "selected child has another saved parent"
       | Some parent, _ ->
         let* () = check_inference_frame_now t parent in
@@ -3338,7 +3344,8 @@ module Model_inference = struct
            parent_context
            ~target:expected_target
        | Model _ ->
-         Inference_runtime.Context.derive parent_context ~target:expected_target)
+         Inference_runtime.Context.derive parent_context ~target:expected_target
+       | Tool _ -> Error Inference_runtime.Preparation_error.Target_denied)
       |> Result.map_error ~f:preparation_error
     in
     let* () =

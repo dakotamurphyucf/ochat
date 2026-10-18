@@ -286,11 +286,6 @@ type invocation_target =
   | Tool_target of Ochat_function.t option
   | Content_target
 
-type selected_source =
-  | No_selected_source
-  | Selected_tool_source of Native_tool_invocation.selected_borrowed * Ochat_function.t
-  | Selected_content_context of Native_tool_invocation.selected_borrowed
-
 let select_installed_child
       installed
       ~script_preparation
@@ -729,6 +724,23 @@ module Selected_child_target = struct
       ; caller : Port.t
       }
   end
+
+  module Tool = struct
+    type parent_identity =
+      | Saved_parent of Saved_target.t
+      | Child_parent of unit ref
+
+    type t =
+      { node : Node.t
+      ; parent_identity : parent_identity
+      ; source : Prompt_child_source.t
+      ; caller_revision : Prompt_revision.t
+      ; caller : Port.t
+      ; implementation : Ochat_function.t
+      ; declaration : CM.agent_tool
+      ; reference : CM.Agent_reference.t
+      }
+  end
 end
 
 module Selected_content_target = struct
@@ -747,6 +759,7 @@ module Selected_content_target = struct
     | Saved of Saved_target.t
     | Content of t
     | Model of Selected_child_target.Model.t
+    | Tool of Selected_child_target.Tool.t
 
   let revision (t : t) = Prompt_child_source.revision t.source
   let caller_revision (t : t) = t.caller_revision
@@ -757,9 +770,11 @@ module Selected_content_target = struct
     | Saved actual, Saved expected -> phys_equal actual expected
     | Content actual, Content expected -> phys_equal actual expected
     | Model actual, Model expected -> phys_equal actual expected
-    | Saved _, (Content _ | Model _)
-    | Content _, (Saved _ | Model _)
-    | Model _, (Saved _ | Content _) -> false
+    | Tool actual, Tool expected -> phys_equal actual expected
+    | Saved _, (Content _ | Model _ | Tool _)
+    | Content _, (Saved _ | Model _ | Tool _)
+    | Model _, (Saved _ | Content _ | Tool _)
+    | Tool _, (Saved _ | Content _ | Model _) -> false
   ;;
 
   let check_descendant_now t ~child = Node.check_descendant_now t.node ~child
@@ -786,8 +801,12 @@ module Selected_model_target = struct
       phys_equal actual expected.node.identity
     | Parent.Child_parent actual, Selected_content_target.Model expected ->
       phys_equal actual expected.node.identity
+    | Parent.Child_parent actual, Selected_content_target.Tool expected ->
+      phys_equal actual expected.node.identity
     | ( Parent.Saved_parent _
-      , (Selected_content_target.Content _ | Selected_content_target.Model _) )
+      , ( Selected_content_target.Content _
+        | Selected_content_target.Model _
+        | Selected_content_target.Tool _ ) )
     | Parent.Child_parent _, Selected_content_target.Saved _ -> false
   ;;
 
@@ -804,6 +823,55 @@ module Selected_model_target = struct
   let check t = Selected_child_target.Node.check t.node
 end
 
+module Selected_tool_target = struct
+  module Parent = Selected_child_target.Tool
+  open Parent
+
+  type t = Parent.t
+
+  let revision (t : t) = Prompt_child_source.revision t.source
+  let caller_revision (t : t) = t.caller_revision
+  let saved_ancestor (t : t) = t.node.saved
+
+  let matches_parent t parent =
+    match t.parent_identity, parent with
+    | Parent.Saved_parent actual, Selected_content_target.Saved expected ->
+      phys_equal actual expected
+    | Parent.Child_parent actual, Selected_content_target.Content expected ->
+      phys_equal actual expected.node.identity
+    | Parent.Child_parent actual, Selected_content_target.Model expected ->
+      phys_equal actual expected.node.identity
+    | Parent.Child_parent actual, Selected_content_target.Tool expected ->
+      phys_equal actual expected.node.identity
+    | ( Parent.Saved_parent _
+      , ( Selected_content_target.Content _
+        | Selected_content_target.Model _
+        | Selected_content_target.Tool _ ) )
+    | Parent.Child_parent _, Selected_content_target.Saved _ -> false
+  ;;
+
+  let check_now t = Selected_child_target.Node.check_now t.node
+
+  let check_current_or_descendant_now t =
+    Selected_child_target.Node.check_current_or_descendant_now t.node
+  ;;
+
+  let check_descendant_now t ~child =
+    Selected_child_target.Node.check_descendant_now t.node ~child
+  ;;
+
+  let check t =
+    let open Result.Let_syntax in
+    let%bind () = check_now t in
+    let%bind () =
+      Native_tool_invocation.check_selected_source
+        t.node.borrowed
+        ~implementation:t.implementation
+    in
+    check_now t
+  ;;
+end
+
 let child_node_of_parent parent ~borrowed ~live ~binding_issuer =
   let module Node = Selected_child_target.Node in
   let saved, parent_node =
@@ -811,6 +879,7 @@ let child_node_of_parent parent ~borrowed ~live ~binding_issuer =
     | Selected_content_target.Saved target -> target, None
     | Content target -> target.node.saved, Some target.node
     | Model target -> target.node.saved, Some target.node
+    | Tool target -> target.node.saved, Some target.node
   in
   Node.create ~saved ~parent:parent_node ~borrowed ~live ~binding_issuer
 ;;
@@ -825,12 +894,55 @@ type selected_content_runner =
   -> source:string
   -> (string, Agent_protocol.Error.t) result
 
+type selected_tool_runner =
+  target:Selected_tool_target.t
+  -> startup:Chat_response.Startup_compilation.t
+  -> compilation_limits:Chatml_compilation.limits
+  -> programs:Chatml_prompt_programs.Restored.t option
+  -> ctx:Eio_unix.Stdenv.base Chat_response.Ctx.t
+  -> input:Prompt.Chat_markdown.content_item list
+  -> observer:Chat_response.Driver.agent_observer option
+  -> source:string
+  -> (string, Agent_protocol.Error.t) result
+
+type selected_saved_runner =
+  target:Claimed_developer.Selected.Target.t
+  -> startup:Chat_response.Startup_compilation.t
+  -> compilation_limits:Chatml_compilation.limits
+  -> programs:Chatml_prompt_programs.Restored.t option
+  -> ctx:Eio_unix.Stdenv.base Chat_response.Ctx.t
+  -> input:Prompt.Chat_markdown.content_item list
+  -> observer:Chat_response.Driver.agent_observer option
+  -> source:string
+  -> (string, Agent_protocol.Error.t) result
+
+type child_handler =
+  | Literal_child
+  | Saved_child of selected_saved_runner
+  | Tool_child of selected_tool_runner * Selected_tool_target.t
+  | Content_child of selected_content_runner * Selected_content_target.t
+
 exception Selected_content_denied of Agent_protocol.Error.t
 
 let check_selected_content_parent = function
   | Selected_content_target.Saved target -> Claimed_developer.Selected.Target.check target
   | Content target -> Selected_content_target.check target
   | Model target -> Selected_model_target.check target
+  | Tool target -> Selected_tool_target.check target
+;;
+
+let check_selected_parent_descendant_now parent ~child =
+  match parent with
+  | Selected_content_target.Saved target ->
+    if
+      Claimed_developer.Selected.matches_borrowed
+        (Claimed_developer.Selected.Target.saved target)
+        child
+    then Claimed_developer.Selected.Target.check_now target
+    else Claimed_developer.Selected.Target.check_descendant_now target ~child
+  | Content target -> Selected_content_target.check_descendant_now target ~child
+  | Model target -> Selected_model_target.check_descendant_now target ~child
+  | Tool target -> Selected_tool_target.check_descendant_now target ~child
 ;;
 
 module Content_selection = struct
@@ -843,6 +955,53 @@ module Content_selection = struct
 
   let key : t Eio.Fiber.key = Eio.Fiber.create_key ()
 end
+
+module Tool_selection = struct
+  type t =
+    { parent : Selected_content_target.parent
+    ; run : selected_tool_runner
+    ; binding_issuer : Binding_issuer.t
+    ; implementation : Ochat_function.t
+    ; declaration : CM.agent_tool
+    ; reference : CM.Agent_reference.t
+    ; port : Port.t
+    ; borrowed : Native_tool_invocation.selected_borrowed
+    ; live : bool Atomic.t
+    ; domain_id : int
+    }
+
+  let key : t Eio.Fiber.key = Eio.Fiber.create_key ()
+  let invalid message = Error (Agent_protocol.Error.invalid_request message)
+
+  let check_now t ~implementation ~port =
+    let open Result.Let_syntax in
+    let%bind current = Native_tool_invocation.borrow_selected () in
+    if
+      Atomic.get t.live
+      && Int.equal t.domain_id (Stdlib.Domain.self () :> int)
+      && Option.value_map (Eio.Fiber.get key) ~default:false ~f:(phys_equal t)
+      && phys_equal current t.borrowed
+      && phys_equal implementation t.implementation
+      && phys_equal port t.port
+    then check_selected_parent_descendant_now t.parent ~child:current
+    else invalid "selected child Tool source is foreign or expired"
+  ;;
+
+  let check t ~implementation ~port =
+    let open Result.Let_syntax in
+    let%bind () = check_now t ~implementation ~port in
+    let%bind () =
+      Native_tool_invocation.check_selected_source t.borrowed ~implementation
+    in
+    check_now t ~implementation ~port
+  ;;
+end
+
+type selected_source =
+  | No_selected_source
+  | Selected_tool_source of Native_tool_invocation.selected_borrowed * Ochat_function.t
+  | Selected_content_context of Native_tool_invocation.selected_borrowed
+  | Selected_child_tool_source of Tool_selection.t
 
 let rec bind_with_checkpoint ?installed ?run_selected_target t ~revision ~sw ~checkpoint =
   let open Result.Let_syntax in
@@ -1018,9 +1177,40 @@ and invoke
            Content occurrences keep their own defining revision and must never
            consume the enclosing queued target. Both paths reject expired/foreign
            services before source selection. *)
+        let%bind direct_tool_scope =
+          match Eio.Fiber.get Tool_selection.key with
+          | Some scope ->
+            (match Native_tool_invocation.borrow_selected () with
+             | Ok current when phys_equal current scope.borrowed ->
+               (match target with
+                | Tool_target (Some implementation)
+                  when phys_equal caller scope.port
+                       && phys_equal implementation scope.implementation ->
+                  Ok (Some scope)
+                | Tool_target _ ->
+                  Error (failure "selected Tool has a foreign port or implementation")
+                | Content_target -> Ok None)
+             | Ok _ | Error _ -> Ok None)
+          | None -> Ok None
+        in
         let%bind recorded, selected_source =
-          match Script_tool_calls.native_services_scope () with
-          | Active services ->
+          match direct_tool_scope, Script_tool_calls.native_services_scope () with
+          | Some scope, Unbound ->
+            (match target with
+             | Tool_target (Some implementation) ->
+               let%bind () =
+                 match installed.binding_issuer with
+                 | Some issuer when phys_equal issuer scope.binding_issuer -> Ok ()
+                 | None | Some _ ->
+                   Error (failure "selected Tool has a foreign source binding")
+               in
+               let%map () = Tool_selection.check scope ~implementation ~port:caller in
+               None, Selected_child_tool_source scope
+             | Content_target | Tool_target None ->
+               Error (failure "selected child Tool loan has another source callback"))
+          | Some _, (Active _ | Expired) ->
+            Error (failure "selected child Tool source overlaps another native owner")
+          | None, Active services ->
             (match target with
              | Tool_target implementation ->
                Script_tool_calls.agent_artifact_for_implementation
@@ -1030,8 +1220,8 @@ and invoke
              | Content_target ->
                Script_tool_calls.agent_artifact services
                |> Result.map ~f:(fun _ -> None, No_selected_source))
-          | Expired -> Error (failure "selected child native services have expired")
-          | Unbound ->
+          | None, Expired -> Error (failure "selected child native services have expired")
+          | None, Unbound ->
             (match Native_tool_invocation.borrow_selected () with
              | Ok borrowed ->
                (match target with
@@ -1079,6 +1269,16 @@ and invoke
             in
             parent, caller, Agent_source_code_view.Context.reference context
         in
+        let%bind () =
+          match selected_source with
+          | Selected_child_tool_source scope ->
+            if phys_equal reference scope.reference
+            then
+              Tool_selection.check scope ~implementation:scope.implementation ~port:caller
+            else Error (failure "selected Tool parser declaration changed")
+          | No_selected_source | Selected_tool_source _ | Selected_content_context _ ->
+            Ok ()
+        in
         let%bind selected =
           select_child
             t
@@ -1115,6 +1315,12 @@ and invoke
             if Option.equal same_reference recorded current
             then Ok ()
             else Error (failure "selected Agent source changed during restoration")
+          | Selected_child_tool_source scope ->
+            (match target with
+             | Tool_target (Some implementation) ->
+               Tool_selection.check scope ~implementation ~port:caller
+             | Content_target | Tool_target None ->
+               Error (failure "selected Tool source changed during restoration"))
         in
         let%bind () = check_selected () in
         let revision = Prompt_child_source.revision selected in
@@ -1123,18 +1329,45 @@ and invoke
           |> Result.of_option
                ~error:(failure "selected developer child has no owned parser")
         in
-        let selected_target_handler =
-          match run_selected_target, target, selected_source with
-          | Some run_selected_target, Tool_target (Some _), Selected_tool_source _ ->
-            Some run_selected_target
-          | Some _, (Content_target | Tool_target None), _
-          | Some _, Tool_target (Some _), (No_selected_source | Selected_content_context _)
-          | None, _, _ -> None
-        in
-        let%bind selected_content_handler =
-          match selected_content with
-          | None -> Ok None
-          | Some scope ->
+        let%bind handler =
+          match selected_source, selected_content, target, run_selected_target with
+          | Selected_child_tool_source scope, None, Tool_target (Some _), _ ->
+            let%bind () =
+              Tool_selection.check scope ~implementation:scope.implementation ~port:caller
+            in
+            let live = Atomic.make true in
+            let parent_identity =
+              match scope.parent with
+              | Saved saved -> Selected_child_target.Tool.Saved_parent saved
+              | Content target -> Child_parent target.node.identity
+              | Model target -> Child_parent target.node.identity
+              | Tool target -> Child_parent target.node.identity
+            in
+            let tool_target =
+              Selected_child_target.Tool.
+                { node =
+                    child_node_of_parent
+                      scope.parent
+                      ~borrowed:scope.borrowed
+                      ~live
+                      ~binding_issuer:(Some scope.binding_issuer)
+                ; parent_identity
+                ; source = selected
+                ; caller_revision = parent
+                ; caller
+                ; implementation = scope.implementation
+                ; declaration = scope.declaration
+                ; reference = scope.reference
+                }
+            in
+            let%map () = Selected_tool_target.check tool_target in
+            Tool_child (scope.run, tool_target)
+          | Selected_tool_source _, None, Tool_target (Some _), Some run ->
+            Ok (Saved_child run)
+          | ( (No_selected_source | Selected_content_context _)
+            , Some scope
+            , Content_target
+            , _ ) ->
             let%bind () =
               if Atomic.get scope.live
               then Ok ()
@@ -1164,19 +1397,23 @@ and invoke
                 }
             in
             let%map () = Selected_content_target.check child in
-            Some (scope.run, child)
-        in
-        let%bind () =
-          match selected_target_handler, selected_content_handler with
-          | Some _, None | None, Some _ -> Ok ()
-          | None, None -> admit_developer_literal_child t revision parsed ~checkpoint
-          | Some _, Some _ ->
-            Error (failure "selected Tool and Content handlers cannot overlap")
+            Content_child (scope.run, child)
+          | ( (No_selected_source | Selected_tool_source _ | Selected_content_context _)
+            , None
+            , _
+            , _ ) ->
+            let%map () = admit_developer_literal_child t revision parsed ~checkpoint in
+            Literal_child
+          | _ -> Error (failure "selected child handlers cannot overlap")
         in
         Exn.protect
           ~finally:(fun () ->
-            Option.iter selected_content_handler ~f:(fun (_, target) ->
-              Atomic.set target.Selected_content_target.node.live false))
+            match handler with
+            | Tool_child (_, target) ->
+              Atomic.set target.Selected_child_target.Tool.node.live false
+            | Content_child (_, target) ->
+              Atomic.set target.Selected_content_target.node.live false
+            | Literal_child | Saved_child _ -> ())
           ~f:(fun () ->
             Preparation.with_revision
               (Some t.script_preparation)
@@ -1186,8 +1423,8 @@ and invoke
               ~invocation:Headless
               ~checkpoint
               ~f:(fun startup ~compilation_limits ~programs ->
-                match selected_target_handler, selected_content_handler with
-                | None, None ->
+                match handler with
+                | Literal_child ->
                   run
                     ~check_selected
                     caller
@@ -1195,7 +1432,7 @@ and invoke
                     ~revision
                     ~compilation_limits
                     ~programs
-                | Some run_selected_target, None ->
+                | Saved_child run_selected_target ->
                   let%bind target =
                     Claimed_developer.Selected.target_for_current
                       selected
@@ -1213,7 +1450,19 @@ and invoke
                     ~input:items
                     ~observer
                     ~source
-                | None, Some (run_selected_content, target) ->
+                | Tool_child (run_selected_tool, target) ->
+                  let%bind () = check_selected () in
+                  let%bind () = Selected_tool_target.check target in
+                  run_selected_tool
+                    ~target
+                    ~startup
+                    ~compilation_limits
+                    ~programs
+                    ~ctx
+                    ~input:items
+                    ~observer
+                    ~source
+                | Content_child (run_selected_content, target) ->
                   let%bind () = check_selected () in
                   let%bind () = Selected_content_target.check target in
                   run_selected_content
@@ -1223,9 +1472,7 @@ and invoke
                     ~programs
                     ~ctx
                     ~input:items
-                    ~source
-                | Some _, Some _ ->
-                  Error (failure "selected Tool and Content handlers cannot overlap")))
+                    ~source))
     in
     match selected_content, result with
     | Some _, Error error -> raise (Selected_content_denied error)
@@ -1477,6 +1724,7 @@ module Source_binding = struct
       | Saved of Claimed_developer.Selected.Target.t
       | Content of Selected_content_target.t
       | Model of Selected_model_target.t
+      | Tool of Selected_tool_target.t
 
     type t =
       { binding : binding
@@ -1531,6 +1779,14 @@ module Source_binding = struct
             Error (failure "selected Model belongs to another source binding")
         in
         Selected_model_target.check target
+      | Tool target ->
+        let%bind () =
+          match target.Selected_child_target.Tool.node.binding_issuer with
+          | Some issuer when phys_equal issuer t.binding.issuer -> Ok ()
+          | None | Some _ ->
+            Error (failure "selected Tool belongs to another source binding")
+        in
+        Selected_tool_target.check target
     ;;
 
     let revision t = function
@@ -1538,12 +1794,14 @@ module Source_binding = struct
         (match t.target with
          | Saved target -> Claimed_developer.Selected.Target.revision target
          | Content target -> Selected_content_target.revision target
-         | Model target -> Selected_model_target.revision target)
+         | Model target -> Selected_model_target.revision target
+         | Tool target -> Selected_tool_target.revision target)
       | Caller ->
         (match t.target with
          | Saved target -> Claimed_developer.Selected.Target.caller_revision target
          | Content target -> Selected_content_target.caller_revision target
-         | Model target -> Selected_model_target.caller_revision target)
+         | Model target -> Selected_model_target.caller_revision target
+         | Tool target -> Selected_tool_target.caller_revision target)
     ;;
 
     let matches_revision t ~side selected = phys_equal (revision t side) selected
@@ -1637,6 +1895,11 @@ module Source_binding = struct
     Result.map (Content_source.check port) ~f:(fun () -> port)
   ;;
 
+  let selected_tool_content_source t ~target =
+    let port : Content_source.t = { binding = t; target = Tool target } in
+    Result.map (Content_source.check port) ~f:(fun () -> port)
+  ;;
+
   module Selected_model_source = struct
     type binding = t
 
@@ -1658,18 +1921,21 @@ module Source_binding = struct
       Claimed_developer.Selected.Target.revision target
     | Content target -> Selected_content_target.revision target
     | Model target -> Selected_model_target.revision target
+    | Tool target -> Selected_tool_target.revision target
   ;;
 
   let selected_parent_caller = function
     | Selected_content_target.Saved target -> target.caller
     | Content target -> target.caller
     | Model target -> target.Selected_child_target.Model.caller
+    | Tool target -> target.Selected_child_target.Tool.caller
   ;;
 
   let selected_parent_issuer = function
     | Selected_content_target.Saved target -> target.binding_issuer
     | Content target -> target.node.binding_issuer
     | Model target -> target.node.binding_issuer
+    | Tool target -> target.node.binding_issuer
   ;;
 
   module Content_ports = struct
@@ -1739,15 +2005,19 @@ module Source_binding = struct
           | Saved target ->
             (match source.target with
              | Saved actual -> phys_equal actual target
-             | Content _ | Model _ -> false)
+             | Content _ | Model _ | Tool _ -> false)
           | Content target ->
             (match source.target with
              | Content actual -> phys_equal actual target
-             | Saved _ | Model _ -> false)
+             | Saved _ | Model _ | Tool _ -> false)
           | Model target ->
             (match source.target with
              | Model actual -> phys_equal actual target
-             | Saved _ | Content _ -> false)
+             | Saved _ | Content _ | Tool _ -> false)
+          | Tool target ->
+            (match source.target with
+             | Tool actual -> phys_equal actual target
+             | Saved _ | Content _ | Model _ -> false)
         in
         let%bind () =
           if expected_target
@@ -1766,6 +2036,7 @@ module Source_binding = struct
           | Saved saved -> Selected_child_target.Model.Saved_parent saved
           | Content target -> Child_parent target.node.identity
           | Model target -> Child_parent target.node.identity
+          | Tool target -> Child_parent target.node.identity
         in
         let target =
           Selected_child_target.Model.
@@ -2088,6 +2359,149 @@ module Deferred_developer = struct
 
   let registrations t = t.registrations
 
+  let check_limits ~max_agents ~max_work_steps =
+    if max_agents <= 0 || max_agents > 1024 || max_work_steps <= 0
+    then Error (failure "deferred Agent registration limits are invalid")
+    else Ok ()
+  ;;
+
+  let prepare_registered
+        (source : Source_binding.t)
+        ~script_preparation
+        ~manifest_authorizer
+        ~approval_provider
+        ~response_dir
+        ~revision
+        ~port
+        ~max_agents
+        ~max_work_steps
+        ~checkpoint
+        ~strict_child_tools
+        ~context_for
+    =
+    let module Abort = struct
+      exception Work_limit
+    end
+    in
+    match check_limits ~max_agents ~max_work_steps with
+    | Error _ as error -> error
+    | Ok () ->
+      let remaining = ref max_work_steps in
+      let poll () =
+        if !remaining <= 0 then raise Abort.Work_limit;
+        decr remaining;
+        checkpoint ();
+        Eio.Fiber.check ()
+      in
+      (try
+         let open Result.Let_syntax in
+         let%bind parsed =
+           match Prompt_revision.parser_context revision with
+           | Some parsed -> Ok parsed
+           | None -> Error (failure "deferred Agent revision has no owned parser")
+         in
+         let%bind prepare =
+           match port.Port.prepare with
+           | Some prepare -> Ok prepare
+           | None -> Error (failure "deferred Agent source preparer is unavailable")
+         in
+         let membership_runner =
+           create_runner
+             ~script_preparation
+             ~tool_contract:source.tool_contract
+             ~content_limits:source.content_limits
+             ~policy_revision:source.runtime_policy_revision
+             ~manifest_authorizer
+             ~approval_provider
+             ~response_dir
+         in
+         let%map _, _, reversed =
+           List.fold_result
+             (CM.Parsed.elements parsed)
+             ~init:(0, String.Set.empty, [])
+             ~f:(fun (count, names, reversed) element ->
+               poll ();
+               match element with
+               | CM.Tool (Agent declaration) ->
+                 if count >= max_agents
+                 then Error (failure "deferred Agent registration count exhausted")
+                 else if Set.mem names declaration.name
+                 then Error (failure "deferred Agent name is duplicated")
+                 else (
+                   let%bind reference =
+                     tool_reference membership_runner parsed declaration ~checkpoint:poll
+                   in
+                   let expected_implementation = ref None in
+                   let with_context =
+                     context_for ~port ~declaration ~reference ~expected_implementation
+                   in
+                   let deferred =
+                     Chat_response.Tool.Deferred_agent.create
+                       ~declaration
+                       ~runner:port
+                       ~with_context
+                   in
+                   let implementation =
+                     Chat_response.Tool.Deferred_agent.implementation deferred
+                   in
+                   expected_implementation := Some implementation;
+                   let source_requirement =
+                     Chat_response.Native_tool_pool.Source_requirement.Source
+                       (Some
+                          (Chat_response.Native_source_registration.create
+                             ~implementation
+                             ~prepare:(fun ~launch ~request:_ ~checkpoint ->
+                               match
+                                 Chat_response.Source_launch.developer_owner launch
+                               with
+                               | None ->
+                                 Error
+                                   (Agent_protocol.Error.invalid_request
+                                      "deferred Agent requires a developer source parent")
+                               | Some _ ->
+                                 prepare ~declaration ~launch ~checkpoint
+                                 |> Result.map ~f:Option.some)))
+                   in
+                   let registration : Chat_response.Agent_runtime.native_registration =
+                     { implementation
+                     ; implementation_revision =
+                         [%sexp
+                           ("deferred-agent.v1" : string)
+                         , (Chatml_source.Digest.to_hex port.revision : string)
+                         , (declaration : CM.agent_tool)]
+                         |> Sexp.to_string_mach
+                         |> Chatmd_shell_spec.Source_ref.digest
+                     ; result_contract = Native_output
+                     ; authoring_metadata = None
+                     ; source_requirement
+                     }
+                   in
+                   Ok (count + 1, Set.add names declaration.name, registration :: reversed))
+               | CM.Tool (Persistent_agent _ | Inherited _) when strict_child_tools ->
+                 Error (failure "selected child has unsupported Agent Tool declaration")
+               | CM.Msg _
+               | Developer _
+               | System _
+               | User _
+               | Assistant _
+               | Tool_call _
+               | Tool_response _
+               | Config _
+               | Reasoning _
+               | Tool _
+               | Shell_runtime _
+               | Moderator_runtime _
+               | Script _
+               | Shell_script _
+               | Extension_script _
+               | Authoring_context _
+               | Authoring_help _ -> Ok (count, names, reversed))
+         in
+         { registrations = List.rev reversed; port }
+       with
+       | Abort.Work_limit -> Error (failure "deferred Agent work allowance exhausted"))
+  ;;
+
   let prepare
         ?run_selected_target
         source
@@ -2103,131 +2517,126 @@ module Deferred_developer = struct
         ~checkpoint
         ~with_context
     =
-    let module Abort = struct
-      exception Work_limit
-    end
+    let open Result.Let_syntax in
+    let%bind () = check_limits ~max_agents ~max_work_steps in
+    let%bind port =
+      Source_binding.bind_developer_literal
+        ?run_selected_target
+        source
+        ~script_preparation
+        ~manifest_authorizer
+        ~approval_provider
+        ~response_dir
+        ~env
+        ~revision
+        ~sw
     in
-    if max_agents <= 0 || max_agents > 1024 || max_work_steps <= 0
-    then Error (failure "deferred Agent registration limits are invalid")
-    else (
-      let remaining = ref max_work_steps in
-      let poll () =
-        if !remaining <= 0 then raise Abort.Work_limit;
-        decr remaining;
-        checkpoint ();
-        Eio.Fiber.check ()
-      in
-      try
-        let open Result.Let_syntax in
-        let%bind port =
-          Source_binding.bind_developer_literal
-            ?run_selected_target
-            source
-            ~script_preparation
-            ~manifest_authorizer
-            ~approval_provider
-            ~response_dir
-            ~env
-            ~revision
-            ~sw
-        in
-        let%bind parsed =
-          match Prompt_revision.parser_context revision with
-          | Some parsed -> Ok parsed
-          | None -> Error (failure "deferred Agent revision has no owned parser")
-        in
-        let%bind prepare =
-          match port.Port.prepare with
-          | Some prepare -> Ok prepare
-          | None -> Error (failure "deferred Agent source preparer is unavailable")
-        in
-        let membership_runner =
-          create_runner
-            ~script_preparation
-            ~tool_contract:source.tool_contract
-            ~content_limits:source.content_limits
-            ~policy_revision:source.runtime_policy_revision
-            ~manifest_authorizer
-            ~approval_provider
-            ~response_dir
-        in
-        let%map _, _, reversed =
-          List.fold_result
-            (CM.Parsed.elements parsed)
-            ~init:(0, String.Set.empty, [])
-            ~f:(fun (count, names, reversed) element ->
-              poll ();
-              match element with
-              | CM.Tool (Agent declaration) ->
-                if count >= max_agents
-                then Error (failure "deferred Agent registration count exhausted")
-                else if Set.mem names declaration.name
-                then Error (failure "deferred Agent name is duplicated")
-                else (
-                  let%bind (_ : CM.Agent_reference.t) =
-                    tool_reference membership_runner parsed declaration ~checkpoint:poll
-                  in
-                  let deferred =
-                    Chat_response.Tool.Deferred_agent.create
-                      ~declaration
-                      ~runner:port
-                      ~with_context
-                  in
-                  let implementation =
-                    Chat_response.Tool.Deferred_agent.implementation deferred
-                  in
-                  let source_requirement =
-                    Chat_response.Native_tool_pool.Source_requirement.Source
-                      (Some
-                         (Chat_response.Native_source_registration.create
-                            ~implementation
-                            ~prepare:(fun ~launch ~request:_ ~checkpoint ->
-                              match
-                                Chat_response.Source_launch.developer_owner launch
-                              with
-                              | None ->
-                                Error
-                                  (Agent_protocol.Error.invalid_request
-                                     "deferred Agent requires a developer source parent")
-                              | Some _ ->
-                                prepare ~declaration ~launch ~checkpoint
-                                |> Result.map ~f:Option.some)))
-                  in
-                  let registration : Chat_response.Agent_runtime.native_registration =
-                    { implementation
-                    ; implementation_revision =
-                        [%sexp
-                          ("deferred-agent.v1" : string)
-                        , (Chatml_source.Digest.to_hex port.revision : string)
-                        , (declaration : CM.agent_tool)]
-                        |> Sexp.to_string_mach
-                        |> Chatmd_shell_spec.Source_ref.digest
-                    ; result_contract = Native_output
-                    ; authoring_metadata = None
-                    ; source_requirement
-                    }
-                  in
-                  Ok (count + 1, Set.add names declaration.name, registration :: reversed))
-              | CM.Msg _
-              | Developer _
-              | System _
-              | User _
-              | Assistant _
-              | Tool_call _
-              | Tool_response _
-              | Config _
-              | Reasoning _
-              | Tool _
-              | Shell_runtime _
-              | Moderator_runtime _
-              | Script _
-              | Shell_script _
-              | Extension_script _
-              | Authoring_context _
-              | Authoring_help _ -> Ok (count, names, reversed))
-        in
-        { registrations = List.rev reversed; port }
-      with
-      | Abort.Work_limit -> Error (failure "deferred Agent work allowance exhausted"))
+    prepare_registered
+      source
+      ~script_preparation
+      ~manifest_authorizer
+      ~approval_provider
+      ~response_dir
+      ~revision
+      ~port
+      ~max_agents
+      ~max_work_steps
+      ~checkpoint
+      ~strict_child_tools:false
+      ~context_for:(fun ~port:_ ~declaration:_ ~reference:_ ~expected_implementation:_ ->
+        with_context)
+  ;;
+
+  let prepare_selected_child
+        (source : Source_binding.t)
+        ~parent
+        ~script_preparation
+        ~manifest_authorizer
+        ~approval_provider
+        ~response_dir
+        ~env
+        ~revision
+        ~sw
+        ~max_agents
+        ~max_work_steps
+        ~checkpoint
+        ~borrow_child_context
+        ~run_selected_tool
+    =
+    let open Result.Let_syntax in
+    let%bind () = check_limits ~max_agents ~max_work_steps in
+    let%bind () =
+      if phys_equal revision (Source_binding.selected_parent_revision parent)
+      then Ok ()
+      else Error (failure "selected Tool parser differs from its actual parent")
+    in
+    let%bind () =
+      match Source_binding.selected_parent_issuer parent with
+      | Some issuer when phys_equal issuer source.issuer -> Ok ()
+      | None | Some _ -> Error (failure "selected Tool belongs to another source binding")
+    in
+    let%bind () = check_selected_content_parent parent in
+    let%bind port =
+      Source_binding.bind_developer_literal
+        source
+        ~script_preparation
+        ~manifest_authorizer
+        ~approval_provider
+        ~response_dir
+        ~env
+        ~revision
+        ~sw
+    in
+    let%bind () = check_selected_content_parent parent in
+    let%bind prepared =
+      prepare_registered
+        source
+        ~script_preparation
+        ~manifest_authorizer
+        ~approval_provider
+        ~response_dir
+        ~revision
+        ~port
+        ~max_agents
+        ~max_work_steps
+        ~checkpoint
+        ~strict_child_tools:true
+        ~context_for:(fun ~port ~declaration ~reference ~expected_implementation ->
+          fun ~implementation ~invocation f ->
+          let open Result.Let_syntax in
+          let borrowed = Native_tool_invocation.borrow_selected () |> runner_result in
+          let live = Atomic.make true in
+          let scope =
+            Tool_selection.
+              { parent
+              ; run = run_selected_tool
+              ; binding_issuer = source.issuer
+              ; implementation
+              ; declaration
+              ; reference
+              ; port
+              ; borrowed
+              ; live
+              ; domain_id = (Stdlib.Domain.self () :> int)
+              }
+          in
+          Exn.protect
+            ~finally:(fun () -> Atomic.set live false)
+            ~f:(fun () ->
+              Eio.Fiber.with_binding Tool_selection.key scope (fun () ->
+                let%bind () =
+                  match !expected_implementation with
+                  | Some expected when phys_equal expected implementation -> Ok ()
+                  | None | Some _ ->
+                    Error (failure "selected Tool implementation changed")
+                in
+                let%bind () = Tool_selection.check scope ~implementation ~port in
+                let value = borrow_child_context ~implementation ~invocation f in
+                let%map () = Tool_selection.check scope ~implementation ~port in
+                value)
+              |> runner_result))
+    in
+    let%map () = check_selected_content_parent parent in
+    prepared
   ;;
 end
