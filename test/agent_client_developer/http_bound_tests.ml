@@ -265,20 +265,17 @@ let%expect_test
           |> T.must
         in
         let observe connection =
-          let capabilities =
-            Agent_client.Connection.repl_capabilities connection |> T.must
-          in
-          Agent_client.Connection.request_repl
-            connection
-            ~limits:(R.Capabilities.limits capabilities)
-            (R.Request.Observe RT.lookup)
+          Result.bind
+            (Agent_client.Developer_repl_connection.create connection)
+            ~f:(fun client ->
+              Agent_client.Developer_repl_connection.observe client RT.lookup)
         in
         let first = connect () in
         Exn.protect
           ~f:(fun () ->
             T.initialize ~repl:true first !initialized;
             (match observe first with
-             | Ok (R.Response.Observe None) -> ()
+             | Ok None -> ()
              | Ok _ | Error _ -> failwith "valid REPL HTTP response failed");
             response_mode := `Oversized_success;
             assert (Result.is_error (observe first));
@@ -320,7 +317,7 @@ let%expect_test
           ~f:(fun () ->
             T.initialize ~repl:true exact !initialized;
             (match observe exact with
-             | Ok (R.Response.Observe None) -> ()
+             | Ok None -> ()
              | Ok _ -> failwith "exact REPL HTTP frame budget returned wrong result"
              | Error failure ->
                failwith ("exact REPL HTTP frame budget: " ^ failure.message));

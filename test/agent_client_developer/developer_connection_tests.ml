@@ -57,6 +57,7 @@ let initialization
       ?(events = false)
       ?(repl = false)
       ?(max_request_bytes = 16 * 1024 * 1024)
+      ?(authentication_kind = "embedded")
       ()
   =
   let implementation =
@@ -65,7 +66,7 @@ let initialization
   let principal =
     P.Principal.create
       ~id:(P.Id.Principal.create_with generator)
-      ~authentication_kind:"embedded"
+      ~authentication_kind
       ~scopes:P.Scope.Set.empty
       ~attributes:[]
     |> must

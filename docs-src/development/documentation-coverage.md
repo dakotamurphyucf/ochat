@@ -145,6 +145,8 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_client/completion_view.mli` | [contract](../../lib/agent_client/completion_view.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/connection.mli` | [contract](../../lib/agent_client/connection.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/conversation_search.mli` | [contract](../../lib/agent_client/conversation_search.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_client/developer_connection.mli` | [contract](../../lib/agent_client/developer_connection.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_client/developer_repl_connection.mli` | [contract](../../lib/agent_client/developer_repl_connection.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/in_memory.mli` | [contract](../../lib/agent_client/in_memory.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/inference_views.mli` | [contract](../../lib/agent_client/inference_views.mli) | [integration](../lib/inference-observations.md) | Public interface + current host guide. |
 | `lib/agent_client/ingress.mli` | [contract](../../lib/agent_client/ingress.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |

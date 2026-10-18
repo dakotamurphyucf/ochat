@@ -199,7 +199,9 @@ let portable_wire_limits
       ~max_nodes:nodes
     |> checked
   in
-  let receipt = bound ~bytes:(1024 * 1024) ~depth:16 ~fields:1024 ~nodes:2048 in
+  (* The portable diagnostic nests and base64-encodes its source ID. Reserve
+     the documented projection headroom over the stored receipt budget. *)
+  let receipt = bound ~bytes:((1024 * 1024) + 362) ~depth:17 ~fields:1025 ~nodes:2049 in
   P.Developer_common.Limits.create
     ~request:(bound ~bytes:4096 ~depth:16 ~fields:128 ~nodes:256)
     ~receipt
@@ -634,6 +636,8 @@ let open_document
       ?(features = [ P.Authoring.Features.core; P.Authoring.Features.semantic ])
       ?(publish_notification = fun _ -> ())
       ?(developer_reply = fun _ result -> result)
+      ?(repl_limits = portable_repl_limits ())
+      ?(repl_reply = fun _ result -> result)
       daemon
       actor
   =
@@ -646,7 +650,7 @@ let open_document
       ~max_attachments:8
   in
   let transport =
-    Agent_client.In_memory.create_with_developer
+    Agent_client.In_memory.create_with_developer_repl
       ~notifications:(Eio.Stream.create 8)
       ~request:
         (S.Dispatcher.dispatch_command (S.Daemon.dispatcher daemon) ~context:connection)
@@ -660,6 +664,16 @@ let open_document
             P.Developer_wire.Response.to_json response ~limits:(portable_wire_limits ()))
         in
         developer_reply request result)
+      ~request_repl:(fun ~max_request_bytes:_ ~bound:_ request ->
+        let result =
+          S.Dispatcher.dispatch_developer_repl
+            (S.Daemon.dispatcher daemon)
+            ~context:connection
+            request
+          |> Result.bind ~f:(fun response ->
+            P.Developer_repl_wire.Response.to_json response ~limits:repl_limits)
+        in
+        repl_reply request result)
       ~close:(fun () -> S.Daemon.close_connection daemon connection)
   in
   let implementation =
@@ -2159,6 +2173,7 @@ let%expect_test "portable REPL uses the installed Host and retained comparison I
   let native_release, signal_native_release = Eio.Promise.create () in
   let native_calls = ref 0 in
   let native_outputs = ref 0 in
+  let drop_native_reply = ref false in
   with_daemon
     ~repl:true
     ~portable_repl:true
@@ -2193,8 +2208,16 @@ let%expect_test "portable REPL uses the installed Host and retained comparison I
          Agent_server_test_support.principal_with_scopes "pri_portable_repl" scopes
          |> Operator_authorization.trusted_local
        in
-       let connection, _transport, expected =
+       let connection, client_transport, expected =
          open_document
+           ~repl_limits:(portable_repl_limits ~max_receipt_bytes:(512 * 1024) ())
+           ~repl_reply:(fun request result ->
+             match request with
+             | W.Request.Task_submit _ when !drop_native_reply ->
+               drop_native_reply := false;
+               assert (Result.is_ok result);
+               Error (P.Error.invalid_request "native Task reply deliberately lost")
+             | _ -> result)
            ~features:
              [ P.Authoring.Features.core
              ; P.Authoring.Features.semantic
@@ -2428,37 +2451,40 @@ let%expect_test "portable REPL uses the installed Host and retained comparison I
          | _ -> failwith "expected native REPL submission"
        in
        let native_key = key "portable-repl-native-task" in
-       let accepted =
-         let request =
-           W.Task_submit.create
-             ~limits
-             ~key:native_key
-             ~reference:(W.Submission.task_references native_submission |> List.hd_exn)
-             ~requested_execution:None
-             ~requested_max_output_bytes:None
-             ~fresh_epoch:(Some (W.View.instance after_reset, W.View.epoch after_reset))
-           |> ok
-         in
-         match dispatch (W.Request.Task_submit request) with
-         | W.Response.Task_submit view -> view
-         | _ -> failwith "expected accepted native Task"
-       in
-       Eio.Promise.await native_entered;
-       let dispatch_on context request =
-         S.Dispatcher.dispatch_developer_repl
-           (S.Daemon.dispatcher daemon)
-           ~context
-           request
+       let native_request =
+         W.Task_submit.create
+           ~limits
+           ~key:native_key
+           ~reference:(W.Submission.task_references native_submission |> List.hd_exn)
+           ~requested_execution:None
+           ~requested_max_output_bytes:None
+           ~fresh_epoch:(Some (W.View.instance after_reset, W.View.epoch after_reset))
          |> ok
        in
-       let stale_code, observer, task_lookup =
+       let native_client =
+         Agent_client.Developer_repl_connection.create client_transport |> ok
+       in
+       drop_native_reply := true;
+       assert (
+         Result.is_error
+           (Agent_client.Developer_repl_connection.task_submit
+              native_client
+              ~view:after_reset
+              native_request));
+       let pending_task =
+         (Agent_client.Developer_repl_connection.pending native_client).tasks
+         |> List.hd_exn
+       in
+       Eio.Promise.await native_entered;
+       let stale_code, observer_client, task_lookup, accepted =
          Exn.protect
            ~finally:(fun () ->
              if not (Eio.Promise.is_resolved native_release)
              then Eio.Promise.resolve signal_native_release ())
            ~f:(fun () ->
-             let observer, _transport, _expected =
+             let _observer, observer_transport, _expected =
                open_document
+                 ~repl_limits:(portable_repl_limits ~max_receipt_bytes:(512 * 1024) ())
                  ~features:
                    [ P.Authoring.Features.core
                    ; P.Authoring.Features.semantic
@@ -2472,19 +2498,32 @@ let%expect_test "portable REPL uses the installed Host and retained comparison I
              let task_lookup =
                C.Lookup.create ~run_id:(W.View.run_id view) ~key:native_key
              in
-             (match
-                dispatch_on observer (W.Request.Watch (W.Watch_key.Task task_lookup))
-              with
-              | W.Response.Watch -> watched_task := Some task_lookup
-              | _ -> failwith "expected native Task watch acknowledgement");
-             (match dispatch_on observer (W.Request.Task_observe task_lookup) with
-              | W.Response.Task_observe (Some current) ->
+             let observer_client =
+               Agent_client.Developer_repl_connection.create observer_transport |> ok
+             in
+             Agent_client.Developer_repl_connection.adopt_pending
+               observer_client
+               (Agent_client.Developer_repl_connection.pending native_client)
+             |> ok;
+             let accepted =
+               Agent_client.Developer_repl_connection.watch_and_observe_task
+                 observer_client
+                 task_lookup
+               |> ok
+             in
+             watched_task := Some task_lookup;
+             (match accepted with
+              | Some current ->
                 (match W.Task_view.phase current with
                  | Terminal _ -> failwith "native Task completed before release"
                  | Reserved | Waiting_permission | Execution_started -> ())
-              | _ -> failwith "expected held native Task observation");
+              | None -> failwith "expected held native Task observation");
+             assert (
+               List.length
+                 (Agent_client.Developer_repl_connection.pending observer_client).tasks
+               = 1);
              assert (not (Eio.Promise.is_resolved task_changed));
-             S.Daemon.close_connection daemon connection;
+             Agent_client.Connection.close client_transport;
              let stale =
                W.Submit.create
                  ~limits
@@ -2505,14 +2544,28 @@ let%expect_test "portable REPL uses the installed Host and retained comparison I
                | Error error -> P.Error.code_to_string error.code
                | Ok _ -> "ok"
              in
-             stale_code, observer, task_lookup)
+             stale_code, observer_client, task_lookup, Option.value_exn accepted)
        in
        Eio.Promise.await task_changed;
        let reconnected_terminal =
-         match dispatch_on observer (W.Request.Task_observe task_lookup) with
-         | W.Response.Task_observe (Some view) -> view
-         | _ -> failwith "expected native Task observation after reconnect"
+         match
+           Agent_client.Developer_repl_connection.task_observe observer_client task_lookup
+           |> ok
+         with
+         | Some view -> view
+         | None -> failwith "expected native Task observation after reconnect"
        in
+       let historical =
+         Agent_client.Developer_repl_connection.retry_task observer_client pending_task
+         |> ok
+       in
+       assert (
+         P.Developer_command_id.equal
+           (W.Task_view.command_id historical)
+           (W.Task_view.command_id reconnected_terminal));
+       assert (
+         List.is_empty
+           (Agent_client.Developer_repl_connection.pending observer_client).tasks);
        let accepted_finished =
          P.Developer_command_id.equal
            (W.Task_view.command_id accepted)
