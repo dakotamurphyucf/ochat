@@ -196,6 +196,7 @@ type t =
   ; provider : Provider_operator_port.t option
   ; model_target : Inference.Request.Target.t option
   ; job_policy : Chat_response.One_off_request.policy
+  ; runtime_policy : Chat_response.Runtime_semantics.policy
   ; authorize_native :
       P.Host_invocation.t
       -> Chat_response.Tool_capability.binding
@@ -302,6 +303,7 @@ let create_live_services t ~root ~resources ~current_actor =
       ~live:resources
       ~root
       ~native
+      ~runtime_policy:t.runtime_policy
       ~authorize:t.authorize_native
       ~prepare_output:t.prepare_output
   in
@@ -310,6 +312,7 @@ let create_live_services t ~root ~resources ~current_actor =
       ~live:resources
       ~root
       ~native
+      ~runtime_policy:t.runtime_policy
       ~authorize:t.authorize_native
       ~prepare_output:t.prepare_output
   in
@@ -413,6 +416,7 @@ let create
       ~remote_content
       ~agent_source_limits
       ~job_policy
+      ~runtime_policy
       ~authorize_native
       ~prepare_output
       ~capture_policy
@@ -543,6 +547,7 @@ let create
     ; provider
     ; model_target
     ; job_policy
+    ; runtime_policy
     ; authorize_native
     ; prepare_output
     ; result_disclosure

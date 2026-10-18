@@ -1801,3 +1801,205 @@ let on_event : context -> state -> event -> state task =
                 "hosted captured, content, and selected Model children used their sources")));
   [%expect {| hosted captured, content, and selected Model children used their sources |}]
 ;;
+
+let%expect_test "developer child moderator uses the daemon's configured runtime policy" =
+  let requests = ref 0 in
+  let bodies = ref [] in
+  RH.with_fixture
+    ~model_requests:requests
+    ~on_model_body:(fun body -> bodies := body :: !bodies)
+    (fun env sw anchor create _ ->
+       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 60. (fun () ->
+         let bootstrap = create () in
+         ignore (RH.setup bootstrap : P.Method_result.t);
+         let reads = ref 0 in
+         ignore
+           (RH.enroll bootstrap ~sw "one" "policy-bootstrap-key" reads
+            : P.Provider_operator.Configuration_result.t);
+         let target = RH.capture bootstrap in
+         Provider_runtime.close bootstrap;
+         let scopes = Set.add Agent_server_test_support.scopes Developer_live_run in
+         let actor =
+           Agent_server_test_support.principal_with_scopes "pri_operator" scopes
+           |> Operator_authorization.trusted_local
+         in
+         let bounds =
+           Chatml_developer_capture.Json_bounds.create
+             ~max_bytes:4096
+             ~max_depth:16
+             ~max_nodes:128
+           |> Or_error.ok_exn
+         in
+         let run_case name runtime_policy expected_status expected_requests =
+           let root = Eio.Path.(anchor / name) |> Eio.Path.native_exn in
+           Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / root);
+           let prompt = Filename.concat root "prompt.chatmd" in
+           let child = Filename.concat root "child.chatmd" in
+           Eio.Path.save
+             ~create:(`Or_truncate 0o600)
+             Eio.Path.(Eio.Stdenv.fs env / prompt)
+             {|<tool name="child" agent="child.chatmd" local source_mode="file"/>|};
+           Eio.Path.save
+             ~create:(`Or_truncate 0o600)
+             Eio.Path.(Eio.Stdenv.fs env / child)
+             {|<developer>OCH415 selected policy child marker</developer>
+<script language="chatml" kind="moderator">type state = int
+type event = [ `Session_start ]
+let initial_state = 0
+let on_event : context -> state -> event -> state task = fun _ st _ -> Task.pure(st)</script>|};
+           let provider_anchor = Eio.Path.(anchor / (name ^ "-provider")) in
+           Eio.Path.mkdir ~perm:0o700 provider_anchor;
+           let provider_factory ~sw:provider_sw ~server_id:provider_server_id =
+             let runtime =
+               create
+                 ~runtime_sw:provider_sw
+                 ~runtime_server_id:provider_server_id
+                 ~runtime_anchor:provider_anchor
+                 ()
+             in
+             ignore (RH.setup runtime : P.Method_result.t);
+             ignore
+               (RH.enroll runtime ~sw:provider_sw "one" "policy-daemon-key" reads
+                : P.Provider_operator.Configuration_result.t);
+             assert (Inference.Request.Target.equal target (RH.capture runtime));
+             Ok (Provider_runtime.operator_port runtime)
+           in
+           let options =
+             { S.Daemon.default_options with
+               authoring = Some (DH.semantic_authoring_policy env)
+             ; developer = Some (developer_configuration target)
+             ; provider_operator_factory = Some provider_factory
+             ; chatml_runtime_policy = runtime_policy
+             }
+           in
+           let config = Agent_server_test_support.config root root prompt in
+           let daemon =
+             S.Daemon.start
+               ~sw
+               ~env
+               ~config
+               ~tool_dir:root
+               ~home:root
+               ~process_start_identity:None
+               ~options
+               ()
+             |> ok
+           in
+           Fun.protect
+             ~finally:(fun () -> S.Daemon.shutdown daemon |> ok)
+             (fun () ->
+                let connection, expected =
+                  open_document
+                    ~contents:
+                      {|<script id="s" language="chatml" kind="tool">let main input = Task.bind(Job.start_tool("child", input), fun id -> Task.pure(`String(id)))</script>|}
+                    daemon
+                    actor
+                in
+                let selector = P.Authoring.Analysis.Target.selected_script "s" |> ok in
+                let request =
+                  S.Daemon.Developer.Request.create
+                    ~route:(Document_script { expected; selector })
+                    ~kind:Live_run
+                    ~target:Chatml.Chatml_compiler_contract.Target.One_off_v1
+                    ~prompt:(Some (S.Catalog_identity.prompt_definition "restart.prompt"))
+                    ~workspace:
+                      (Some (S.Catalog_identity.workspace_definition "restart.workspace"))
+                    ~entrypoint:"main"
+                    ~input:(`Object [ "input", `String "go" ])
+                    ~fixtures:None
+                    ~requested_execution:None
+                    ~requested_max_output_bytes:None
+                    ~bounds
+                    ~checkpoint:ignore
+                  |> ok
+                in
+                let run_id = P.Id.Developer_run.create () in
+                let key = P.Idempotency_key.of_string ("policy-" ^ name) |> ok in
+                ignore
+                  (S.Daemon.Developer.submit
+                     daemon
+                     ~actor
+                     ~run_id
+                     ~key
+                     ~request
+                     ~fresh_source:(Some (Document_script { connection }))
+                   |> ok
+                   : S.Daemon.Developer.View.t);
+                let view =
+                  S.Daemon.Developer.await_terminal daemon ~actor ~run_id ~key |> ok
+                in
+                let job_id =
+                  match Option.map (S.Daemon.Developer.View.receipt view) ~f:R.value with
+                  | Some (Live (Succeeded (`String id))) -> P.Id.Job.of_string id |> ok
+                  | result ->
+                    raise_s
+                      [%sexp "expected selected child Job", (result : R.value option)]
+                in
+                let data_root =
+                  S.Daemon.store daemon
+                  |> Agent_store.Session_store.data_root
+                  |> Agent_store.Data_root.path
+                in
+                let job_status () =
+                  let path =
+                    Eio.Path.(
+                      Eio.Stdenv.fs env
+                      / data_root
+                      / "developer-runs"
+                      / ("run_" ^ P.Id.Developer_run.to_string run_id ^ ".json"))
+                  in
+                  let payload =
+                    match Eio.Path.load path |> Jsonaf.parse |> Or_error.ok_exn with
+                    | `Object fields ->
+                      (match List.Assoc.find_exn fields ~equal:String.equal "payload" with
+                       | `Object fields -> fields
+                       | _ -> failwith "invalid run payload")
+                    | _ -> failwith "invalid run envelope"
+                  in
+                  let jobs =
+                    match List.Assoc.find_exn payload ~equal:String.equal "jobs" with
+                    | `Array rows -> rows
+                    | _ -> failwith "invalid run jobs"
+                  in
+                  let job =
+                    List.map jobs ~f:(fun json ->
+                      P.Developer_job.of_json json
+                      |> Result.map_error ~f:(fun error ->
+                        Sexp.to_string_hum [%sexp (error : P.Protocol_error.t)])
+                      |> Result.ok_or_failwith)
+                    |> List.find_exn ~f:(fun job ->
+                      P.Id.Job.equal (P.Developer_job.id job) job_id)
+                  in
+                  (P.Developer_job.state job).status
+                in
+                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. (fun () ->
+                  let rec loop () =
+                    match job_status () with
+                    | Succeeded -> `Succeeded
+                    | Failed _ -> `Failed
+                    | Cancelled | Interrupted _ ->
+                      failwith "selected policy child was interrupted"
+                    | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
+                      Eio.Fiber.yield ();
+                      loop ()
+                  in
+                  [%test_eq: [ `Succeeded | `Failed ]] (loop ()) expected_status);
+                [%test_eq: int] !requests expected_requests)
+         in
+         let default_policy = Chat_response.Runtime_semantics.default_policy in
+         run_case "default" default_policy `Succeeded 1;
+         assert (
+           List.exists !bodies ~f:(fun body ->
+             String.is_substring body ~substring:"OCH415 selected policy child marker"));
+         let paused_policy =
+           { default_policy with
+             budget =
+               { default_policy.budget with
+                 pause_conditions = [ Pause_internal_event_drains ]
+               }
+           }
+         in
+         run_case "paused" paused_policy `Failed 1));
+  print_endline "selected child observed configured moderator pause";
+  [%expect {| selected child observed configured moderator pause |}]
+;;

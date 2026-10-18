@@ -389,7 +389,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_background_job_runner.ml"
     , "6f5137851d5bdb58fc3e65a7a4824249d4e6d661ce261d2cab7de7040a7aa976" )
   ; ( "lib/agent_server/developer_child_agent_runner.ml"
-    , "1ceff13dc9a5f6c17d2493506436844e847bb39f1f2aff5506f9838f47128546" )
+    , "bcf38cbb06418513161cdca0694732a08101d80d83ffb260b11f5499acc95e5b" )
   ; ( "lib/agent_server/developer_child_content_projection.ml"
     , "17dbb6bc0891ad5bb5c3879a2b1e946c05a01d13db32a15d220faa531cb82ba8" )
   ; ( "lib/agent_server/developer_child_selection.ml"
