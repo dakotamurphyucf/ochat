@@ -343,6 +343,8 @@ let daemon_options host =
   let inference_policy : Agent_server.Session_factory.inference_policy =
     { capture_inference_target =
         (fun ~prompt_revision_id:_ ~config -> Inference_host.capture_config host config)
+    ; capture_developer_default_target =
+        (fun () -> Inference_host.capture_config host Chat_response.Config.default)
     ; select_inference_profile = Inference_host.capture_profile host
     ; recapture_inference_target =
         (fun ~current ~prompt_revision_id:_ ~config ->

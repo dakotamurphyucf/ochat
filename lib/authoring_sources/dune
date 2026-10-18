@@ -114,6 +114,11 @@
     lib/agent_server/developer_change_hub.ml %{dep:../agent_server/developer_change_hub.ml}
     lib/agent_server/dispatcher.ml %{dep:../agent_server/dispatcher.ml}
     lib/agent_server/authoring_installation.ml %{dep:../agent_server/authoring_installation.ml}
+    lib/agent_server/developer_startup_configuration.ml %{dep:../agent_server/developer_startup_configuration.ml}
+    lib/agent_server/developer_startup_limits.ml %{dep:../agent_server/developer_startup_limits.ml}
+    lib/agent_server/developer_startup_policy.ml %{dep:../agent_server/developer_startup_policy.ml}
+    lib/agent_server/config_validator.ml %{dep:../agent_server/config_validator.ml}
+    bin/inference_composition.ml %{dep:../../bin/inference_composition.ml}
     lib/agent_server/connection_context.ml %{dep:../agent_server/connection_context.ml}
     lib/agent_server/startup_cleanup.ml %{dep:../agent_server/startup_cleanup.ml}
     bin/ochat_agent_server.ml %{dep:../../bin/ochat_agent_server.ml}

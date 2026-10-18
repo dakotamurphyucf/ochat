@@ -67,6 +67,16 @@ module Developer_configuration : sig
       -> job_read:(Operator_authorization.t -> Agent_protocol.Developer_job.t -> bool)
       -> job_respond:(Operator_authorization.t -> Agent_protocol.Developer_job.t -> bool)
       -> t
+
+    (** Override command approval responses independently of command cancellation.
+        Without an override, embedding configurations retain the command_control
+        policy for both operations. The approval owner also checks the command
+        kind and original owner before accepting a response. *)
+    val with_command_respond
+      :  t
+      -> authorize:
+           (Operator_authorization.t -> Agent_store.Developer_command_row.t -> bool)
+      -> t
   end
 
   (** Disabled by default. This configures an owner, not a supplied broker,

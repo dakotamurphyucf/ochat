@@ -668,11 +668,12 @@ let%test_unit "host root read is fresh while project context remains captured" =
                  (S.Developer.Target_policy.create
                     ~local_project:(fun _ ~root:_ ~project:_ ~selection:_ -> None)
                     ~local_source:(fun _ ~root:_ ~member:_ -> None)
-                    ~authoring_project:(fun _ ~context:_ ~current:_ ->
+                    ~authoring_project:(fun _ ~origin:_ ~context:_ ~current:_ ->
                       if !project_allowed then Some selected else None)
                     ~document_project:
                       (fun
                         _
+                        ~origin:_
                         ~context:_
                         ~current:_
                         ~parsed:_
@@ -681,8 +682,13 @@ let%test_unit "host root read is fresh while project context remains captured" =
                         ~metadata:_ -> None)
                     ~document_source:
                       (fun
-                        _ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~script:_ ->
-                      None))
+                        _
+                        ~origin:_
+                        ~context:_
+                        ~current:_
+                        ~parsed:_
+                        ~declaration:_
+                        ~script:_ -> None))
                ~limits:
                  (S.Developer.Limits.create
                     ~max_prepared_input_bytes:4096

@@ -12,6 +12,7 @@ type t =
   ; token_path : string
   ; prompt_path : string
   ; physical_workspace : string
+  ; mutable public_principal : Agent_protocol.Id.Principal.t option
   }
 
 let path t value = Temporary_environment.path t.environment value
@@ -63,6 +64,7 @@ let token_record token principal scopes =
 let write_tokens_with_public_scopes t public_scopes =
   let admin = Agent_protocol.Id.Principal.create () in
   let public = Agent_protocol.Id.Principal.create () in
+  t.public_principal <- Some public;
   let contents =
     sprintf
       "(%s %s)"
@@ -168,6 +170,7 @@ let create environment ~name ~http_port =
     ; token_path = make "tokens.sexp"
     ; prompt_path = make "smoke.chatmd"
     ; physical_workspace
+    ; public_principal = None
     }
   in
   Temporary_environment.register_secret environment t.admin_token;
@@ -187,6 +190,7 @@ let unix_socket t = t.unix_socket
 let http_port t = t.http_port
 let admin_token t = t.admin_token
 let public_token t = t.public_token
+let public_principal t = Option.value_exn t.public_principal
 let prompt_path t = t.prompt_path
 let physical_workspace t = t.physical_workspace
 let environment t = t.environment

@@ -109,6 +109,8 @@ let inference_policy env =
   Agent_server.Session_factory.
     { capture_inference_target =
         (fun ~prompt_revision_id:_ ~config -> Inference_host.capture_config host config)
+    ; capture_developer_default_target =
+        (fun () -> Inference_host.capture_config host Chat_response.Config.default)
     ; select_inference_profile =
         (fun ~current:_ ~profile:_ ->
           Error Inference_runtime.Preparation_error.Target_unavailable)

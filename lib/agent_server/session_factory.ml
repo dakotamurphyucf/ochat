@@ -48,6 +48,8 @@ type inference_policy =
       prompt_revision_id:Agent_protocol.Id.Prompt_revision.t
       -> config:Chat_response.Config.t
       -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t
+  ; capture_developer_default_target :
+      unit -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t
   ; select_inference_profile :
       current:Inference.Request.Target.t
       -> profile:string

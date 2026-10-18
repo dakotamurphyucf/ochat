@@ -120,7 +120,11 @@ val bounded_execution
     targetless data has no implicit migration policy. These provisional runtime
     ports allocate fresh actual identities but intentionally do not claim a
     durable inference ledger; the ledger integration replaces their observers.
-    Other daemon authority, quotas and transport limits retain their defaults. *)
+    The policy's Developer-default capture closes over this SAME host as its
+    Prompt capture/profile/resolve and the provider operator factory. It is
+    invoked only by an opted-in declarative Developer startup, with the host's
+    explicit default model and no invented Prompt revision. Other daemon
+    authority, quotas and transport limits retain their defaults. *)
 val daemon_options : Inference_host.t -> Agent_server.Daemon.options
 
 (** Installed provider operator remains reachable before explicit host setup.

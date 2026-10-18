@@ -509,6 +509,9 @@ module Developer : sig
   module Target_policy : sig
     type t
 
+    module Project_origin = Developer_capture_host.Target_policy.Project_origin
+    module Document_origin = Developer_capture_host.Target_policy.Document_origin
+
     (** Trusted bounded NONYIELDING selectors from already admitted host
         policy. Their arguments are comparison data, not source grants. The
         candidate reselects both original and current actors after waits and
@@ -527,11 +530,13 @@ module Developer : sig
             -> Selected_contract.t option)
       -> authoring_project:
            (Operator_authorization.t
+            -> origin:Project_origin.t
             -> context:P.Authoring.Context.t
             -> current:Ledger.Inputs.t
             -> Selected_contract.t option)
       -> document_project:
            (Operator_authorization.t
+            -> origin:Document_origin.t
             -> context:P.Authoring.Context.t
             -> current:Ledger.Document.Inputs.t
             -> parsed:Prompt.Chat_markdown.Parsed.t
@@ -541,6 +546,7 @@ module Developer : sig
             -> Selected_contract.t option)
       -> document_source:
            (Operator_authorization.t
+            -> origin:Document_origin.t
             -> context:P.Authoring.Context.t
             -> current:Ledger.Document.Inputs.t
             -> parsed:Prompt.Chat_markdown.Parsed.t

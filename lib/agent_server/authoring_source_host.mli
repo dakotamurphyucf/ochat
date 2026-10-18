@@ -533,6 +533,13 @@ module Document_context : sig
   end
 
   val origin : t -> Origin.t
+
+  (** Comparison-only actual selected host Root for Host_member, and None
+      exactly for Supplied. The enclosing Context owner still checks both
+      actors, the current Root grant and source generation; this getter opens
+      no source and does not make an index or path a grant. *)
+  val root : t -> Root.t option
+
   val source_id : t -> Chatml_source.Id.t
 
   (** Explicitly rebuild an authorized imported closure for [source]'s exact

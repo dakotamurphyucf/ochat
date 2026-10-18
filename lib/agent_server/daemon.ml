@@ -203,6 +203,8 @@ let default_options =
       { capture_inference_target =
           (fun ~prompt_revision_id:_ ~config:_ ->
             Error Inference_runtime.Preparation_error.Target_unavailable)
+      ; capture_developer_default_target =
+          (fun () -> Error Inference_runtime.Preparation_error.Target_unavailable)
       ; select_inference_profile =
           (fun ~current:_ ~profile:_ ->
             Error Inference_runtime.Preparation_error.Target_unavailable)
@@ -1402,10 +1404,12 @@ let compose
   in
   let%bind configured_contracts =
     match
-      config.server.authoring_project_access, config.server.authoring_upload_access
+      ( config.server.authoring_project_access
+      , config.server.authoring_upload_access
+      , config.server.developer )
     with
-    | None, None -> Ok None
-    | native, upload ->
+    | None, None, None -> Ok None
+    | native, upload, developer ->
       let%bind native_limits = Authoring_native_policy.Limits.standard in
       let native_targets =
         Option.value_map native ~default:[] ~f:(fun access ->
@@ -1417,8 +1421,14 @@ let compose
           ~default:[]
           ~f:Authoring_upload_access_configuration.targets
       in
+      let%bind developer_targets =
+        Option.value_map
+          developer
+          ~default:(Ok [])
+          ~f:Developer_startup_configuration.standard_targets
+      in
       Authoring_standard_contracts.create
-        ~targets:(native_targets @ upload_targets)
+        ~targets:(native_targets @ upload_targets @ developer_targets)
         ~max_identity_bytes:
           (Authoring_native_policy.Limits.max_contract_identity_bytes native_limits)
         ~max_work_steps:
@@ -1431,9 +1441,9 @@ let compose
           Agent_protocol.Error.invalid_request "Standard authoring target limit")
       |> Result.map ~f:(fun contracts -> Some (native_limits, contracts))
   in
-  let%bind native_authoring_policy =
+  let%bind native_authoring_policy, configured_project =
     match config.server.authoring_project_access with
-    | None -> Ok options.authoring
+    | None -> Ok (options.authoring, None)
     | Some configured ->
       let native_limits, shared_contracts = Option.value_exn configured_contracts in
       Authoring_native_policy.create
@@ -1449,7 +1459,9 @@ let compose
         ~document_dir:(Eio.Stdenv.cwd env)
         ~limits:native_limits
         ~checkpoint:Eio.Fiber.check
-      |> Result.map ~f:Authoring_native_policy.host_policy
+      |> Result.map ~f:(fun bound ->
+        ( Authoring_native_policy.host_policy bound
+        , Authoring_native_policy.configured_project bound ))
   in
   let%bind authoring_policy =
     match config.server.authoring_upload_access with
@@ -1483,6 +1495,38 @@ let compose
       |> Result.map ~f:Option.some
   in
   Option.iter authoring ~f:(Startup_cleanup.adopt_authoring_exn startup_cleanup);
+  let%bind options =
+    match config.server.developer with
+    | None -> Ok options
+    | Some developer ->
+      let%bind authoring =
+        Option.value_map
+          authoring
+          ~default:
+            (Error
+               (Agent_protocol.Error.invalid_request
+                  "configured Developer requires an installed Authoring owner"))
+          ~f:Result.return
+      in
+      let _, contracts = Option.value_exn configured_contracts in
+      let%map configuration =
+        Developer_startup_policy.bind
+          developer
+          ~source_host:project_sources
+          ~authoring
+          ~source_configuration:
+            (Option.value
+               config.server.project_sources
+               ~default:Project_source_configuration.local_only)
+          ~read_access:config.server.authoring_project_access
+          ~upload_access:config.server.authoring_upload_access
+          ~configured_project
+          ~contracts
+          ~inference_policy:options.inference_policy
+          ~initialize_limits:options.protocol_limits
+      in
+      { options with developer = Some configuration }
+  in
   let%bind developer_changes =
     match options.developer with
     | None -> Ok None
@@ -1562,7 +1606,11 @@ let compose
           Developer_approval_owner.Configuration.create
             ~limits:shell.limits
             ~command_read:(command_allowed configuration.receipt_read)
-            ~command_respond:(command_allowed configuration.command_control)
+            ~command_respond:
+              (command_allowed
+                 (Option.value
+                    shell.command_respond
+                    ~default:configuration.command_control))
             ~job_read:shell.job_read
             ~job_respond:shell.job_respond)
       in
@@ -1971,12 +2019,20 @@ let start
   in
   let open Result.Let_syntax in
   let%bind () =
-    match options.developer, options.startup_mode with
-    | None, _ | Some _, (Execute | On_demand) -> Ok ()
-    | Some _, Operator_only ->
+    match options.developer, config.server.developer, options.startup_mode with
+    | None, None, _ | _, _, (Execute | On_demand) -> Ok ()
+    | _, _, Operator_only ->
       Error
         (Agent_protocol.Error.invalid_request
            "developer commands require an execution-enabled daemon")
+  in
+  let%bind () =
+    match options.developer, config.server.developer with
+    | Some _, Some _ ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "configure Developer through either daemon options or server configuration")
+    | None, _ | _, None -> Ok ()
   in
   let%bind () =
     match options.qualify_chatml_extensions with

@@ -93,6 +93,7 @@ let server_config ~project_sources data_root =
     ; session_helpers = []
     ; authoring_packages = []
     ; authoring_budget = None
+    ; developer = None
     ; project_sources
     ; authoring_project_access = None
     ; authoring_upload_access = None

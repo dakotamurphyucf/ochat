@@ -71,6 +71,7 @@ module Server = struct
           [@sexp.option]
     ; authoring_upload_access : Authoring_upload_access_configuration.t option
           [@sexp.option]
+    ; developer : Developer_startup_configuration.t option [@sexp.option]
     ; session_helpers : Session_helper_policy.t list [@sexp.list]
     ; authoring_packages : Chat_response.Authoring_package_file.t list [@sexp.list]
     ; authoring_budget : Chat_response.Authoring_validation.context_budget option

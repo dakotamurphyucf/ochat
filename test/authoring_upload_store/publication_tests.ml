@@ -1048,15 +1048,22 @@ let%test_unit
         Context_service.Developer.Target_policy.create
           ~local_project:(fun _ ~root:_ ~project:_ ~selection:_ -> None)
           ~local_source:(fun _ ~root:_ ~member:_ -> None)
-          ~authoring_project:(fun _ ~context:_ ~current:_ ->
+          ~authoring_project:(fun _ ~origin:_ ~context:_ ~current:_ ->
             if !developer_allowed then Some developer_selected else None)
           ~document_project:
             (fun
-              _ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~build:_ ~metadata:_ ->
-            None)
+              _
+              ~origin:_
+              ~context:_
+              ~current:_
+              ~parsed:_
+              ~declaration:_
+              ~build:_
+              ~metadata:_ -> None)
           ~document_source:
             (fun
-              _ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~script:_ -> None)
+              _ ~origin:_ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~script:_ ->
+            None)
       in
       let developer_limits =
         Context_service.Developer.Limits.create
@@ -1080,6 +1087,7 @@ let%test_unit
       let developer_request =
         Context_service.Developer.Request.create
           ~entrypoint:"main"
+          ~target:One_off_v1
           ~input:`Null
           ~fixtures:None
           ~json_bounds:

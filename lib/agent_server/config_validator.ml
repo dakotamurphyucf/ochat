@@ -1236,6 +1236,55 @@ let parse_authoring_upload_access context path sexp =
   result
 ;;
 
+let parse_developer context path sexp =
+  let open Result.Let_syntax in
+  (* The outer config parser has already constructed an S-expression. Bound
+     traversal before the derived typed conversion, then apply the precise
+     row/selector/schema limits of the pure configuration constructor. *)
+  let rec check_shape ~depth ~nodes ~bytes = function
+    | _ when depth > 32 || nodes <= 0 -> Error ()
+    | Sexp.Atom text ->
+      let length = String.length text in
+      if length > bytes then Error () else Ok (nodes - 1, bytes - length)
+    | Sexp.List values ->
+      List.fold_result
+        values
+        ~init:(nodes - 1, bytes)
+        ~f:(fun (nodes, bytes) value ->
+          check_shape ~depth:(depth + 1) ~nodes ~bytes value)
+  in
+  let%bind () =
+    check_shape ~depth:0 ~nodes:16_384 ~bytes:(9 * 1024 * 1024) sexp
+    |> Result.map ~f:(fun _ -> ())
+    |> Result.map_error ~f:(fun () ->
+      [ diagnostic
+          context
+          ~code:"config.developer"
+          ~path
+          ~message:"Developer configuration exceeds its syntax budget"
+          ~remediation:"Reduce the bounded selection, schema, or nesting size."
+      ])
+  in
+  let%bind selected =
+    match Developer_startup_configuration.t_of_sexp sexp with
+    | selected -> Ok selected
+    | exception Sexplib.Conv.Of_sexp_error _ ->
+      shape_error context path "a Developer selection/capacity record"
+  in
+  Developer_startup_configuration.validate selected
+  |> Result.map ~f:(fun () -> selected)
+  |> Result.map_error ~f:(fun _ ->
+    [ diagnostic
+        context
+        ~code:"config.developer"
+        ~path
+        ~message:"invalid Developer selection or capacity"
+        ~remediation:
+          "Use finite distinct source/principal choices, valid Standard targets and \
+           bounded capacity."
+    ])
+;;
+
 let parse_server context sexp =
   let path = "server" in
   let open Result.Let_syntax in
@@ -1245,6 +1294,7 @@ let parse_server context sexp =
     ; "project_sources"
     ; "authoring_project_access"
     ; "authoring_upload_access"
+    ; "developer"
     ; "session_helpers"
     ; "authoring_packages"
     ; "authoring_budget"
@@ -1289,6 +1339,12 @@ let parse_server context sexp =
     | Some value ->
       parse_authoring_upload_access context "server.authoring_upload_access" value
       |> Result.map ~f:Option.some
+  in
+  let%bind developer =
+    match field fields "developer" with
+    | None -> Ok None
+    | Some value ->
+      parse_developer context "server.developer" value |> Result.map ~f:Option.some
   in
   let%bind session_helpers =
     optional_value
@@ -1439,6 +1495,7 @@ let parse_server context sexp =
     ; project_sources
     ; authoring_project_access
     ; authoring_upload_access
+    ; developer
     ; session_helpers
     ; authoring_packages
     ; authoring_budget

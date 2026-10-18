@@ -162,6 +162,8 @@ let inference_policy ~default_model ~post_stream =
     { capture_inference_target =
         (fun ~prompt_revision_id:_ ~config ->
           Inference_fixture.capture_config fixture config)
+    ; capture_developer_default_target =
+        (fun () -> Inference_fixture.capture_config fixture Chat_response.Config.default)
     ; select_inference_profile =
         (fun ~current:_ ~profile:_ ->
           Error Inference_runtime.Preparation_error.Target_unavailable)
@@ -412,6 +414,7 @@ let config
         ; session_helpers = []
         ; authoring_packages = []
         ; authoring_budget = None
+        ; developer = None
         ; project_sources = None
         ; authoring_project_access = None
         ; authoring_upload_access = None

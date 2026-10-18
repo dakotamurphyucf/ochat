@@ -44,6 +44,10 @@ val admin_token : t -> string
 (** [public_token t] authenticates without the diagnostics scope. *)
 val public_token : t -> string
 
+(** Principal actually written for the current public token before daemon
+    startup. Rewriting its scopes also refreshes this comparison identity. *)
+val public_principal : t -> Agent_protocol.Id.Principal.t
+
 (** Replace the public credential grants before daemon startup. This rewrites
     fixture principal identities; it is not a live scope-change operation. *)
 val grant_public_scopes : t -> Agent_protocol.Scope.t list -> unit

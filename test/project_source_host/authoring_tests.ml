@@ -2410,14 +2410,21 @@ let%test_unit "developer local project and standalone source retain captured byt
         Developer.Target_policy.create
           ~local_project:(fun actor ~root:_ ~project:_ ~selection:_ -> pick actor)
           ~local_source:(fun actor ~root:_ ~member:_ -> pick actor)
-          ~authoring_project:(fun _ ~context:_ ~current:_ -> None)
+          ~authoring_project:(fun _ ~origin:_ ~context:_ ~current:_ -> None)
           ~document_project:
             (fun
-              _ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~build:_ ~metadata:_ ->
-            None)
+              _
+              ~origin:_
+              ~context:_
+              ~current:_
+              ~parsed:_
+              ~declaration:_
+              ~build:_
+              ~metadata:_ -> None)
           ~document_source:
             (fun
-              _ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~script:_ -> None)
+              _ ~origin:_ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~script:_ ->
+            None)
       in
       let limits =
         Developer.Limits.create
@@ -2480,6 +2487,7 @@ let%test_unit "developer local project and standalone source retain captured byt
           let request =
             Developer.Request.create
               ~entrypoint:"main"
+              ~target:One_off_v1
               ~input:`Null
               ~fixtures:None
               ~json_bounds:
