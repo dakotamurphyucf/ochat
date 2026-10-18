@@ -370,6 +370,48 @@ module Source_binding : sig
     -> script_preparation:Runtime_script_preparation.t
     -> Policy_identity.t
 
+  module Claimed_source : sig
+    (** A restored issuing revision from this exact retained binding and its
+        artifact store, held only inside the physically entered Worker Claim.
+        The serialized issuer is comparison data; this receipt remains tied to
+        the binding issuer, captured bytes, entered Parent and callback. It
+        neither selects native capabilities nor grants a Root effect. *)
+    type t
+
+    val revision : t -> Prompt_revision.t
+    val tool_contract : t -> Chatml_compilation.Tool_contract.t
+    val request : t -> Chat_response.Background_request.t
+    val issuer_source : t -> Chat_response.Background_request.Issuer_source.t
+    val same_parent : t -> Developer_job_scope.Parent.t -> bool
+
+    (** Nonyielding local Claim/binding-lifetime check. The caller separately
+        checks actual Root, actor and selected Prompt/Workspace after yields. *)
+    val check_now : t -> (unit, Agent_protocol.Error.t) result
+  end
+
+  (** Re-decode the actual Claim.job payload under the current admitted policy
+      and require canonical equality with [request] before extracting its v3
+      issuer. Require its source-policy digest and tool contract to equal this
+      binding's actual installed values, and its Prompt ID to equal the
+      authenticated definition. This prevents a copied artifact or request
+      from being paired with a different physical Claim or source policy.
+      Restore only that issuer artifact through
+      this binding's own artifact store, configured definition and captured
+      content policy. Require the exact active Parent before and after replay.
+      No File recapture or optional Tool target restoration occurs here. The
+      callback and all derived runtime resources join before this bracket
+      exits. *)
+  val with_claimed_source
+    :  t
+    -> active:Developer_job_scope.active
+    -> parent:Developer_job_scope.Parent.t
+    -> definition:Prompt_definition.t
+    -> policy:Chat_response.One_off_request.policy
+    -> request:Chat_response.Background_request.t
+    -> checkpoint:(unit -> unit)
+    -> (Claimed_source.t -> ('a, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
+
   module Content_source : sig
     type t
 

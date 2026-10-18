@@ -9,6 +9,7 @@ module Budgets = Developer_command_budgets
 module Capture = Authoring_context_service.Developer
 module Root = Developer_root_owner
 module Jobs = Developer_script_job_service
+module Claimed = Agent_session.Claimed_child_runtime
 module Native = Developer_native_executor
 module Background = Developer_background_job_runner
 module Model = Developer_model_job_runner
@@ -241,8 +242,8 @@ let prepare_agent_job_source ~root ~resources ~parent ~binding ~request ~checkpo
   let%bind () = Live_resources.check_current resources in
   let%bind launch = Jobs.Source_parent.launch parent in
   let%bind artifact =
-    match Jobs.Source_parent.selected_child parent with
-    | Some child ->
+    match Jobs.Source_parent.runtime_source parent with
+    | Selected_child_runtime child ->
       Developer_child_selection.prepare_agent_source
         child
         ~live:resources
@@ -251,7 +252,20 @@ let prepare_agent_job_source ~root ~resources ~parent ~binding ~request ~checkpo
         ~request
         ~max_registrations:(Root.job_policy root).execution.max_array_items
         ~checkpoint
-    | None ->
+    | Claimed_runtime issuer ->
+      let%bind () = Claimed.check issuer in
+      let%bind artifact =
+        Chat_response.Agent_runtime.prepare_agent_source
+          (Claimed.native_runtime issuer)
+          ~binding
+          ~launch
+          ~request
+          ~max_registrations:(Root.job_policy root).execution.max_array_items
+          ~checkpoint
+      in
+      let%map () = Claimed.check issuer in
+      artifact
+    | Root_runtime ->
       Chat_response.Agent_runtime.prepare_agent_source
         (Live_resources.native_runtime resources)
         ~binding

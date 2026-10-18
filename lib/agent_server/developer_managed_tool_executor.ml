@@ -8,6 +8,7 @@ module N = Agent_session.Native_tool_invocation
 module C = Chat_response.Tool_capability
 module M = Chat_response.Managed_tool_registry
 module Child = Developer_child_selection
+module Claimed = Agent_session.Claimed_child_runtime
 module EC = Chat_response.Extension_compiler
 module ABI = Chat_response.Moderator_invocation.Owned
 module X = Chatml_execution
@@ -20,8 +21,13 @@ type t =
   { root : O.run
   ; definition : M.t
   ; env : Eio_unix.Stdenv.base
-  ; child : Child.t option
+  ; source : source
   }
+
+and source =
+  | Root
+  | Child of Child.t
+  | Claimed of Claimed.t
 
 exception Fatal_effect of P.Error.t
 
@@ -64,7 +70,7 @@ let create ~root ~jobs ~definition ~env =
           |> Result.map ~f:ignore
           |> Result.map_error ~f:(fun error -> invalid error.message))
     in
-    Ok { root; definition; env; child = None })
+    Ok { root; definition; env; source = Root })
 ;;
 
 let create_child ~root ~jobs ~selection ~env =
@@ -91,7 +97,40 @@ let create_child ~root ~jobs ~selection ~env =
         |> Result.map ~f:ignore
         |> Result.map_error ~f:(fun error -> invalid error.message))
   in
-  Ok { root; definition; env; child = Some selection }
+  Ok { root; definition; env; source = Child selection }
+;;
+
+let create_claimed ~root ~jobs ~active ~issuer ~env =
+  let* parent = O.job_parent root active in
+  let* () =
+    if Claimed.same_parent issuer parent
+    then Ok ()
+    else Error (invalid "claimed managed issuer belongs to another Worker Claim")
+  in
+  let* () = Claimed.check issuer in
+  let definition = Claimed.managed_definition issuer in
+  let available = M.capabilities definition in
+  let selected = Claimed.selected issuer in
+  let* () =
+    if Jobs.issued_by_root jobs root
+    then Ok ()
+    else Error (invalid "claimed managed Job service belongs to another Root")
+  in
+  let* () =
+    List.fold_result (C.references selected) ~init:() ~f:(fun () reference ->
+      let* binding =
+        C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
+        |> Result.map_error ~f:(fun error -> invalid error.message)
+      in
+      match C.implementation binding with
+      | Native _ -> Ok ()
+      | Managed _ ->
+        C.resolve available ~id:reference.id ~fingerprint:reference.fingerprint
+        |> Result.map ~f:ignore
+        |> Result.map_error ~f:(fun error -> invalid error.message))
+  in
+  let* () = Claimed.check_now issuer in
+  Ok { root; definition; env; source = Claimed issuer }
 ;;
 
 let issued_by_root t root = phys_equal t.root root
@@ -153,18 +192,29 @@ let effective_abi_limits t prepared (limits : X.limits) =
       }
 ;;
 
-let refresh_child t =
-  match t.child with
-  | None -> Ok None
-  | Some child -> Result.map (Child.refresh child) ~f:Option.some
+type admission =
+  | Root_admission
+  | Child_admission of Child.Admission.t
+  | Claimed_admission of Claimed.t
+
+let refresh_source t =
+  match t.source with
+  | Root -> Ok Root_admission
+  | Child child ->
+    Result.map (Child.refresh child) ~f:(fun admission -> Child_admission admission)
+  | Claimed issuer ->
+    Result.map (Claimed.check issuer) ~f:(fun () -> Claimed_admission issuer)
 ;;
 
 let selected_now t admission =
   match admission with
-  | None -> Ok (O.native_selected t.root)
-  | Some admission ->
+  | Root_admission -> Ok (O.native_selected t.root)
+  | Child_admission admission ->
     let* () = Child.Admission.check_now admission in
     Ok (Child.Admission.source_capabilities admission)
+  | Claimed_admission issuer ->
+    let* () = Claimed.check_now issuer in
+    Ok (Claimed.selected issuer)
 ;;
 
 let check_run_now t ~terminal ~scope ~execution ~borrowed ~admission =
@@ -267,7 +317,7 @@ let run_handler
   =
   let prepared = M.owned_prepared execution in
   let parent = M.owned_invocation execution in
-  let* admission = refresh_child t |> Result.map_error ~f:error_outcome in
+  let* admission = refresh_source t |> Result.map_error ~f:error_outcome in
   let* () =
     check_run_now t ~terminal ~scope ~execution ~borrowed ~admission
     |> Result.map_error ~f:error_outcome
@@ -284,7 +334,7 @@ let run_handler
     in
     let evaluate control =
       let* () = effect_entry () |> Result.map_error ~f:error_outcome in
-      let* admission = refresh_child t |> Result.map_error ~f:error_outcome in
+      let* admission = refresh_source t |> Result.map_error ~f:error_outcome in
       let* () =
         check_run_now t ~terminal ~scope ~execution ~borrowed ~admission
         |> Result.map_error ~f:error_outcome
@@ -347,7 +397,7 @@ let run_handler
           fail error.Chatml_execution.code error.message)
       in
       let* () = effect_entry () |> Result.map_error ~f:error_outcome in
-      let* admission = refresh_child t |> Result.map_error ~f:error_outcome in
+      let* admission = refresh_source t |> Result.map_error ~f:error_outcome in
       let* () =
         check_run_now t ~terminal ~scope ~execution ~borrowed ~admission
         |> Result.map_error ~f:error_outcome
@@ -385,7 +435,7 @@ let bind t ~terminal ~scope ~call_child =
         { definition = t.definition
         ; current =
             (fun () ->
-              let* admission = refresh_child t in
+              let* admission = refresh_source t in
               selected_now t admission)
         ; run =
             (fun execution

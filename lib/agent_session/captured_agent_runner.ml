@@ -1331,6 +1331,126 @@ module Source_binding = struct
     Policy_identity.{ source = Source.policy_identity t.source; runtime = runtime_digest }
   ;;
 
+  module Claimed_source = struct
+    type binding = t
+
+    type t =
+      { binding : binding
+      ; active : Developer_job_scope.active
+      ; parent : Developer_job_scope.Parent.t
+      ; request : Chat_response.Background_request.t
+      ; issuer_source : Chat_response.Background_request.Issuer_source.t
+      ; revision : Prompt_revision.t
+      ; owner : P.Execution_owner.developer
+      ; capture_fingerprint : Chatml_source.Digest.t
+      ; domain_id : int
+      ; live : bool Atomic.t
+      }
+
+    let key : t Eio.Fiber.key = Eio.Fiber.create_key ()
+    let revision t = t.revision
+    let tool_contract t = t.binding.tool_contract
+    let request t = t.request
+    let issuer_source t = t.issuer_source
+    let same_parent t parent = Developer_job_scope.Parent.same_claim t.parent parent
+
+    let check_now t =
+      if
+        Atomic.get t.live
+        && Int.equal t.domain_id (Stdlib.Domain.self () :> int)
+        && Option.value_map (Eio.Fiber.get key) ~default:false ~f:(phys_equal t)
+        && Developer_job_scope.Parent.same_active t.parent t.active
+      then
+        Developer_job_scope.Parent.check_now
+          t.parent
+          ~owner:t.owner
+          ~capture_fingerprint:t.capture_fingerprint
+      else Error (P.Error.invalid_request "claimed issuing source has expired")
+    ;;
+  end
+
+  let with_claimed_source
+        t
+        ~active
+        ~parent
+        ~(definition : Prompt_definition.t)
+        ~policy
+        ~request
+        ~checkpoint
+        f
+    =
+    let module B = Chat_response.Background_request in
+    let module J = Developer_job_scope in
+    let open Result.Let_syntax in
+    let invalid message = Error (P.Error.invalid_request message) in
+    let claim = J.claim active in
+    let job = Agent_store.Developer_run_store.Claim.job claim in
+    let owner = Agent_store.Developer_run_store.Claim.owner claim in
+    let capture_fingerprint = P.Developer_job.capture_fingerprint job in
+    let%bind () =
+      if
+        Int.equal t.domain_id (Stdlib.Domain.self () :> int)
+        && J.Parent.same_active parent active
+      then J.Parent.check parent ~owner ~capture_fingerprint
+      else invalid "claimed issuing source has a foreign Worker parent"
+    in
+    let%bind stored = B.of_json ~policy (P.Developer_job.payload job) in
+    let%bind issuer =
+      B.issuer_source stored
+      |> Result.of_option
+           ~error:(P.Error.invalid_request "claimed job has no saved issuing source")
+    in
+    let%bind () =
+      if String.equal (B.fingerprint stored) (B.fingerprint request)
+      then Ok ()
+      else invalid "saved issuing source is foreign to the entered Worker Claim"
+    in
+    let%bind () =
+      if
+        P.Id.Prompt_definition.equal (B.Issuer_source.prompt issuer) definition.id
+        && Chatml_compilation.Tool_contract.equal
+             (B.Issuer_source.tool_contract issuer)
+             t.tool_contract
+        && Chatml_source.Digest.equal
+             (B.Issuer_source.source_policy issuer)
+             (Source.policy_identity t.source)
+      then Ok ()
+      else invalid "saved issuing source differs from its installed source policy"
+    in
+    let%bind () = J.Parent.check parent ~owner ~capture_fingerprint in
+    let%bind restored =
+      Prompt_child_source.restore
+        ~artifact_store:t.artifact_store
+        ~definition
+        ~content_limits:t.content_limits
+        (B.Issuer_source.artifact issuer)
+        ~checkpoint
+    in
+    let%bind () = J.Parent.check parent ~owner ~capture_fingerprint in
+    let scoped =
+      Claimed_source.
+        { binding = t
+        ; active
+        ; parent
+        ; request = stored
+        ; issuer_source = issuer
+        ; revision = Prompt_child_source.revision restored
+        ; owner
+        ; capture_fingerprint
+        ; domain_id = (Stdlib.Domain.self () :> int)
+        ; live = Atomic.make true
+        }
+    in
+    Exn.protect
+      ~finally:(fun () -> Atomic.set scoped.live false)
+      ~f:(fun () ->
+        Eio.Fiber.with_binding Claimed_source.key scoped (fun () ->
+          let%bind () = Claimed_source.check_now scoped in
+          let%bind result = f scoped in
+          let%map () = Claimed_source.check_now scoped in
+          result))
+  ;;
+
   let content_source_error failure =
     let module E = Prompt_source_owner.Error in
     let open P.Error in

@@ -197,6 +197,13 @@ type options =
 
 type t
 
+module For_testing : sig
+  (** Read-only projection of this daemon's actual JobScheduler wait deadline,
+      in seconds on the daemon's injected wall clock. The observation grants
+      no polling, candidate or claim control. *)
+  val job_scheduler_wait_deadline : t -> float option
+end
+
 module Developer : sig
   module Configuration = Developer_configuration
 

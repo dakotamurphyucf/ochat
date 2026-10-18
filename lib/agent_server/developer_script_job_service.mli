@@ -9,12 +9,22 @@ type t
 (** Physical composition check for the selected native executor. *)
 val issued_by_root : t -> Developer_root_owner.run -> bool
 
+(** Comparison-only installed Host package for scheduling v3 candidates.
+    [None] keeps v3 unclaimable; [Some] does not restore an issuer or grant a
+    Claim. The Runner uses this same service for Tool and Script. *)
+val queued_issuer : t -> Developer_queued_issuer.t option
+
 module Source_parent : sig
   (** Borrowed proof belonging to one live Root action, Native terminal or
       claimed Worker scope. The service creates it from its existing physical
       scope; source callbacks cannot construct it from a job ID or request.
       It expires with the enclosing scope and never escapes into a saved job. *)
   type t
+
+  type runtime_source =
+    | Root_runtime
+    | Selected_child_runtime of Developer_child_selection.t
+    | Claimed_runtime of Agent_session.Claimed_child_runtime.t
 
   (** Bounded current actor/selection and exact physical parent check. This
       may yield for current Store/host evidence. The caller repeats it after
@@ -30,12 +40,12 @@ module Source_parent : sig
       Claim's job ID and attempt. It cannot replace [check]. *)
   val launch : t -> (Chat_response.Source_launch.t, Agent_protocol.Error.t) result
 
-  (** Comparison-only projection of the exact selected Child whose native
-      scope created this source parent. The caller must run [check] for its
-      binding, and Child's preparation action rechecks that child's owner and
-      source around I/O. Root and Worker parents have no selected Child here;
-      a failed selected preparation must never fall back to their runtime. *)
-  val selected_child : t -> Developer_child_selection.t option
+  (** Comparison-only origin of this exact lexical source parent. The Host
+      calls [check] before and after preparation, and dispatches only to the
+      runtime paired with this origin: Root, checked foreground Child, or
+      restored Claim issuer. A failed Child or Claim preparation never falls
+      back to the Root runtime. This projection grants no source read. *)
+  val runtime_source : t -> runtime_source
 end
 
 module Scope : sig
@@ -181,6 +191,7 @@ module Capability_source : sig
     | Root
     | Worker of Chat_response.Tool_capability.t
     | Admitted_child of Developer_child_selection.t
+    | Claimed_child of Agent_session.Claimed_child_runtime.t
 
   (** Current capabilities for this exact native scope. [Root] reads the
       physical Root; [Worker] preserves the claimed Job's immutable narrowing;
@@ -250,6 +261,13 @@ val acknowledge_native
   -> Native_selection.t
   -> (unit, Agent_protocol.Error.t) result
 
+module Claim_budget : sig
+  type t
+
+  val deadline : t -> Agent_protocol.Timestamp.t
+  val control : t -> Chatml.Chatml_lang.execution_control
+end
+
 (** Borrow the one lexical Job kernel around an entire physically claimed
     Worker Script-root operation, including its final Store transaction.
     [candidate] must come from this service's exact Root. The callback uses
@@ -261,6 +279,20 @@ val acknowledge_native
     result [select] once and atomically installs parent state plus selected
     children through its existing claimed Prepared/recovery path.
 
+    For v3, the outer kernel opens with an empty nonauthorizing comparison
+    selection. It exposes no Scope or effect before the physical Claim is
+    entered, the exact saved issuer is restored through the configured Host
+    service, and the request's pins are rebound once against that issuer's
+    checked selected registry. This is the kernel's only rebind. Its Scope,
+    including native/managed nested effects and Worker_action staging, uses
+    that same expiring runtime receipt; it cannot substitute Root selection
+    after a denied restore. The issuer bracket encloses callback execution,
+    split_starts, Worker_action.seal and K.mark_prepared, whose check_open
+    still needs the live receipt. It may close after leaving the physical
+    Claim; only the later proven Selected_installed acknowledgement runs
+    outside Claim while the outer kernel remains live. Ordinary v1/v2 keep
+    their existing pre-Claim Root selection and result path.
+
     The lexical scope remains live until that Worker returns. A proven
     Selected_installed disposition alone invokes its one-shot acknowledgement;
     an old-epoch omission of nonempty selected children returns a typed stale
@@ -271,23 +303,45 @@ val acknowledge_native
     the lexical Scope cannot manufacture or retain it. Callback exceptions
     and Eio cancellation preserve their original identity.
     Before entering the lexical scope, the saved payload of this exact
-    Store-issued candidate is decoded under the root's admitted policy and its
-    capability pins rebound to an exact subset of the current root registry.
-    The scope and each later effect recheck that subset; extra root tools never
-    become visible to this job. This is pure admission, not script compilation
-    before the physical Claim. Bare Worker Script roots use One_off_v1 and do
+    Store-issued candidate is decoded under the root's admitted policy. For
+    v1/v2 its capability pins are rebound to an exact subset of the current
+    Root registry; for v3 binding is deferred until restored issuer admission
+    inside the Claim. The scope and each later effect recheck the chosen
+    subset; extra Root tools never become visible to a v3 job. This is pure
+    admission, not script compilation before the physical Claim. Bare Worker
+    Script roots use One_off_v1 and do
     not install Model.spawn;
-    the existing Root/Native Developer_tool_v1 path remains unchanged. *)
+    the existing Root/Native Developer_tool_v1 path remains unchanged.
+
+    A v3 Script whose saved absolute deadline has passed enters the genuine
+    Claim but calls [expired_state] without restoring source or lending a
+    Scope; its empty selection is still sealed and prepared by the same
+    kernel. A live v3 Script uses one bounded host execution scope around
+    restoration, one-time rebind, callback, split, seal and preparation,
+    entirely inside the physical Claim. Its callback receives the matching
+    deadline and execution control together in [budget] and must use those
+    for Script.run, not open another budget. Capacity waiting precedes this
+    scope; durable settlement and acknowledgement follow it. Ordinary v1/v2
+    callbacks receive [budget=None] and retain their existing budget path.
+    Source restoration polls this same scope's deadline and cancellation
+    without charging interpreter fuel; its compilation and custody retain
+    their separate bounded work ledgers. Script execution still charges fuel.
+    [expired_state] has no stage/runtime capability. *)
 val with_claimed_worker
   :  t
   -> candidate:Developer_root_owner.Job_candidate.t
   -> ?on_capacity_decision:(Developer_job_worker.Capacity_decision.t -> unit)
+  -> expired_state:
+       (active:Agent_session.Developer_job_scope.active
+        -> (Agent_protocol.Developer_job.State.t, Agent_protocol.Error.t) result)
   -> ?select:
        (claim:Agent_store.Developer_run_store.Claim.t
         -> proposed:Agent_protocol.Developer_job.State.t
         -> (Developer_job_worker.Selected.t option, Agent_protocol.Error.t) result)
   -> (active:Agent_session.Developer_job_scope.active
       -> scope:Scope.t
+      -> issuer:Agent_session.Claimed_child_runtime.t option
+      -> budget:Claim_budget.t option
       -> sw:Eio.Switch.t
       -> ( Agent_protocol.Developer_job.State.t * Chatml.Chatml_lang.eff list
            , Agent_protocol.Error.t )

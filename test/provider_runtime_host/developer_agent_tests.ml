@@ -10,7 +10,16 @@ let ok = function
   | Error error -> raise_s [%sexp (error : P.Error.t)]
 ;;
 
-let developer_configuration ?remote_content target =
+let developer_configuration
+      ?remote_content
+      ?(execution = Chatml_execution.default_limits)
+      ?(max_invocations_per_run = 5)
+      ?(max_selected_per_commit = 2)
+      ?(max_job_payload_bytes = 4096)
+      ?(claimed_issuer = false)
+      ?(on_native = fun () -> ())
+      target
+  =
   let selected =
     S.Authoring_standard_contracts.create
       ~targets:[ Chatml.Chatml_compiler_contract.Target.One_off_v1 ]
@@ -65,8 +74,10 @@ let developer_configuration ?remote_content target =
   let store =
     Developer_root_owner_test_suite.Root_owner_tests.store_limits
       ~max_runs:6
-      ~max_job_payload_bytes:4096
+      ~max_job_payload_bytes
       ~max_jobs_per_run:8
+      ~max_invocations_per_run
+      ~max_selected_per_commit
       ~max_inference_bytes_per_run:65536
       ~max_document_bytes:(1024 * 1024)
       ~max_work_steps:100_000
@@ -102,7 +113,7 @@ let developer_configuration ?remote_content target =
       ~disclosure
       ~compilation:(Bounded Chatml_compilation.default_limits)
       ~max_dependency_depth:32
-      ~execution:Chatml_execution.default_limits
+      ~execution
       ~max_output_bytes:65536
       ~receipt:document
       ~max_agent_sources:6
@@ -130,13 +141,26 @@ let developer_configuration ?remote_content target =
       ~publisher_storage:Agent_store.Developer_result_publisher.Storage.Automatic
       ~model_target:(Some target)
       ~authorize_native:(fun invocation binding ->
+        on_native ();
         let name = (Chat_response.Tool_capability.reference binding).name in
         if List.mem [ "read_file"; "summary"; "undeclared" ] name ~equal:String.equal
+        then (
+          let expected_origin =
+            if claimed_issuer && String.equal name "read_file"
+            then P.Invocation.Script
+            else P.Invocation.Delegated_agent
+          in
+          assert (
+            P.Invocation.equal_origin
+              (P.Host_invocation.context invocation).origin
+              expected_origin);
+          Ok ())
+        else if claimed_issuer && String.equal name "queued_worker"
         then (
           assert (
             P.Invocation.equal_origin
               (P.Host_invocation.context invocation).origin
-              P.Invocation.Delegated_agent);
+              P.Invocation.Script);
           Ok ())
         else if
           List.mem
@@ -1807,6 +1831,7 @@ let%expect_test "developer child moderator uses the daemon's configured runtime 
   let requests = ref 0 in
   let bodies = ref [] in
   let queued_response_sent = ref false in
+  let queued_response_hook = ref (fun () -> ()) in
   let queued_response =
     `Object
       [ "type", `String "response.completed"
@@ -1841,6 +1866,7 @@ let%expect_test "developer child moderator uses the daemon's configured runtime 
         && String.is_substring body ~substring:"OCH417 selected issuing child marker"
       then (
         queued_response_sent := true;
+        !queued_response_hook ();
         Some queued_response)
       else None)
     ~on_model_body:(fun body -> bodies := body :: !bodies)
@@ -1866,13 +1892,67 @@ let%expect_test "developer child moderator uses the daemon's configured runtime 
              ~max_nodes:128
            |> Or_error.ok_exn
          in
+         let module Queued_case = struct
+           type t =
+             | Ordinary
+             | Claimed
+             | Corrupt
+             | Expired_corrupt
+           [@@deriving equal]
+         end
+         in
          let run_case
-               ?(queued_issuer = false)
+               ?(queued_case = Queued_case.Ordinary)
                name
                runtime_policy
                expected_status
                expected_requests
            =
+           let claimed_issuer =
+             match queued_case with
+             | Queued_case.Ordinary -> false
+             | Queued_case.Claimed | Queued_case.Corrupt | Queued_case.Expired_corrupt ->
+               true
+           in
+           let expire_claims =
+             Queued_case.equal queued_case Queued_case.Expired_corrupt
+           in
+           let corrupt_artifact =
+             match queued_case with
+             | Queued_case.Corrupt | Queued_case.Expired_corrupt -> true
+             | Queued_case.Ordinary | Queued_case.Claimed -> false
+           in
+           if claimed_issuer then queued_response_sent := false;
+           (queued_response_hook := fun () -> ());
+           let park_entered = ref false in
+           let park_observed = ref false in
+           let park_last_deadline = ref None in
+           let wall_clock, pause_wall, resume_wall, advance_wall_to =
+             Agent_server_test_support.controlled_wall_clock
+               (Eio.Stdenv.clock env)
+               ~initial:(Eio.Time.now (Eio.Stdenv.clock env))
+           in
+           let daemon_env =
+             if claimed_issuer
+             then
+               (object
+                  method fs = env#fs
+                  method cwd = env#cwd
+                  method stdin = env#stdin
+                  method stdout = env#stdout
+                  method stderr = env#stderr
+                  method net = env#net
+                  method domain_mgr = env#domain_mgr
+                  method process_mgr = env#process_mgr
+                  method clock = wall_clock
+                  method mono_clock = env#mono_clock
+                  method secure_random = env#secure_random
+                  method debug = env#debug
+                  method backend_id = env#backend_id
+                end
+                 :> Eio_unix.Stdenv.base)
+             else env
+           in
            let root = Eio.Path.(anchor / name) |> Eio.Path.native_exn in
            Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / root);
            let prompt = Filename.concat root "prompt.chatmd" in
@@ -1884,20 +1964,26 @@ let%expect_test "developer child moderator uses the daemon's configured runtime 
            Eio.Path.save
              ~create:(`Or_truncate 0o600)
              Eio.Path.(Eio.Stdenv.fs env / child)
-             (if queued_issuer
+             (if claimed_issuer
               then
                 {|<developer>OCH417 selected issuing child marker</developer>
 <tool name="read_file"/>
+<script id="worker" language="chatml" kind="tool">
+let run ctx input =
+  Task.bind(Tool.call("read_file", `Object([{key="file"; value=`String("sample.txt")}])), fun _ -> Task.pure(`Complete(input)))
+</script>
+<tool name="queued_worker" type="chatml" script="worker" entrypoint="run" input_schema="input.json" output_schema="output.json"><uses tool="read_file"/></tool>
 <script id="producer" language="chatml" kind="tool">
 let run ctx input =
   Task.bind(Job.start_tool("read_file", `Object([{key="file"; value=`String("sample.txt")}])), fun first ->
+    Task.bind(Job.start_tool("queued_worker", input), fun second ->
     Task.bind(Job.start_script(`Object([
-      {key="source"; value=`String("let main input = Task.pure(input)")},
-      {key="tools"; value=`Array([])},
-      {key="input"; value=`Null}
-    ])), fun second -> Task.pure(`Complete(input))))
+      {key="source"; value=`String("let main input = Task.bind(Tool.call(\"read_file\", `Object([{key=\"file\"; value=`String(\"sample.txt\")}])), fun _ -> Task.bind(Job.start_tool(\"read_file\", `Object([{key=\"file\"; value=`String(\"sample.txt\")}])), fun _ -> Task.pure(input)))")},
+      {key="tools"; value=`Array([`String("read_file")])},
+      {key="input"; value=`String("script-claim")}
+    ])), fun third -> Task.pure(`Complete(input)))))
 </script>
-<tool name="queued_producer" type="chatml" script="producer" entrypoint="run" input_schema="input.json" output_schema="output.json"><uses tool="read_file"/></tool>
+<tool name="queued_producer" type="chatml" script="producer" entrypoint="run" input_schema="input.json" output_schema="output.json"><uses tool="read_file"/><uses tool="queued_worker"/></tool>
 <script language="chatml" kind="moderator">type state = int
 type event = [ `Session_start | `Session_resume | `Turn_start | `Turn_end | `Item_appended(item) ]
 let initial_state = 0
@@ -1908,7 +1994,7 @@ let on_event : context -> state -> event -> state task = fun _ st _ -> Task.pure
 type event = [ `Session_start ]
 let initial_state = 0
 let on_event : context -> state -> event -> state task = fun _ st _ -> Task.pure(st)</script>|});
-           if queued_issuer
+           if claimed_issuer
            then (
              Eio.Path.save
                ~create:(`Or_truncate 0o600)
@@ -1936,10 +2022,30 @@ let on_event : context -> state -> event -> state task = fun _ st _ -> Task.pure
              assert (Inference.Request.Target.equal target (RH.capture runtime));
              Ok (Provider_runtime.operator_port runtime)
            in
+           let native_admissions = ref 0 in
            let options =
+             let execution =
+               if claimed_issuer
+               then { Chatml_execution.default_limits with fuel = 200_000 }
+               else Chatml_execution.default_limits
+             in
+             let max_invocations_per_run = if claimed_issuer then 8 else 5 in
+             let max_selected_per_commit = if claimed_issuer then 3 else 2 in
+             (* Four issuer-bearing jobs use 3,686 payload bytes; the nested
+                child adds 917. Keep the ordinary cases at their 4,096 cap. *)
+             let max_job_payload_bytes = if claimed_issuer then 8192 else 4096 in
              { S.Daemon.default_options with
                authoring = Some (DH.semantic_authoring_policy env)
-             ; developer = Some (developer_configuration target)
+             ; developer =
+                 Some
+                   (developer_configuration
+                      ~execution
+                      ~max_invocations_per_run
+                      ~max_selected_per_commit
+                      ~max_job_payload_bytes
+                      ~claimed_issuer
+                      ~on_native:(fun () -> Int.incr native_admissions)
+                      target)
              ; provider_operator_factory = Some provider_factory
              ; chatml_runtime_policy = runtime_policy
              }
@@ -1948,7 +2054,7 @@ let on_event : context -> state -> event -> state task = fun _ st _ -> Task.pure
            let daemon =
              S.Daemon.start
                ~sw
-               ~env
+               ~env:daemon_env
                ~config
                ~tool_dir:root
                ~home:root
@@ -1958,219 +2064,595 @@ let on_event : context -> state -> event -> state task = fun _ st _ -> Task.pure
              |> ok
            in
            let daemon_closed = ref false in
+           let body_failed = ref false in
            Fun.protect
              ~finally:(fun () ->
-               if not !daemon_closed then S.Daemon.shutdown daemon |> ok)
+               resume_wall ();
+               if not !daemon_closed
+               then (
+                 match S.Daemon.shutdown daemon with
+                 | Ok () -> ()
+                 | Error error ->
+                   if not !body_failed then ignore (ok (Error error) : unit)))
              (fun () ->
-                let connection, expected =
-                  open_document
-                    ~contents:
-                      {|<script id="s" language="chatml" kind="tool">let main input = Task.bind(Job.start_tool("child", input), fun id -> Task.pure(`String(id)))</script>|}
-                    daemon
-                    actor
-                in
-                let selector = P.Authoring.Analysis.Target.selected_script "s" |> ok in
-                let request =
-                  S.Daemon.Developer.Request.create
-                    ~route:(Document_script { expected; selector })
-                    ~kind:Live_run
-                    ~target:Chatml.Chatml_compiler_contract.Target.One_off_v1
-                    ~prompt:(Some (S.Catalog_identity.prompt_definition "restart.prompt"))
-                    ~workspace:
-                      (Some (S.Catalog_identity.workspace_definition "restart.workspace"))
-                    ~entrypoint:"main"
-                    ~input:(`Object [ "input", `String "go" ])
-                    ~fixtures:None
-                    ~requested_execution:None
-                    ~requested_max_output_bytes:None
-                    ~bounds
-                    ~checkpoint:ignore
-                  |> ok
-                in
-                let run_id = P.Id.Developer_run.create () in
-                let key = P.Idempotency_key.of_string ("policy-" ^ name) |> ok in
-                ignore
-                  (S.Daemon.Developer.submit
-                     daemon
-                     ~actor
-                     ~run_id
-                     ~key
-                     ~request
-                     ~fresh_source:(Some (Document_script { connection }))
-                   |> ok
-                   : S.Daemon.Developer.View.t);
-                let view =
-                  S.Daemon.Developer.await_terminal daemon ~actor ~run_id ~key |> ok
-                in
-                let job_id =
-                  match Option.map (S.Daemon.Developer.View.receipt view) ~f:R.value with
-                  | Some (Live (Succeeded (`String id))) -> P.Id.Job.of_string id |> ok
-                  | result ->
-                    raise_s
-                      [%sexp "expected selected child Job", (result : R.value option)]
-                in
-                let data_root =
-                  S.Daemon.store daemon
-                  |> Agent_store.Session_store.data_root
-                  |> Agent_store.Data_root.path
-                in
-                let payload () =
-                  let path =
-                    Eio.Path.(
-                      Eio.Stdenv.fs env
-                      / data_root
-                      / "developer-runs"
-                      / ("run_" ^ P.Id.Developer_run.to_string run_id ^ ".json"))
+                try
+                  (if claimed_issuer
+                   then (
+                     queued_response_hook
+                     := fun () ->
+                          park_entered := true;
+                          pause_wall ();
+                          let paused_now = Eio.Time.now wall_clock in
+                          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+                            let rec await_parked () =
+                              park_last_deadline
+                              := S.Daemon.For_testing.job_scheduler_wait_deadline daemon;
+                              match !park_last_deadline with
+                              | Some deadline when Float.(deadline > paused_now) ->
+                                park_observed := true
+                              | None | Some _ ->
+                                Eio.Fiber.yield ();
+                                await_parked ()
+                            in
+                            await_parked ()))
+                   else queued_response_hook := fun () -> ());
+                  let connection, expected =
+                    open_document
+                      ~contents:
+                        {|<script id="s" language="chatml" kind="tool">let main input = Task.bind(Job.start_tool("child", input), fun id -> Task.pure(`String(id)))</script>|}
+                      daemon
+                      actor
                   in
-                  match Eio.Path.load path |> Jsonaf.parse |> Or_error.ok_exn with
-                  | `Object fields ->
-                    (match List.Assoc.find_exn fields ~equal:String.equal "payload" with
-                     | `Object fields -> fields
-                     | _ -> failwith "invalid run payload")
-                  | _ -> failwith "invalid run envelope"
-                in
-                let jobs () =
-                  let jobs =
-                    match List.Assoc.find_exn (payload ()) ~equal:String.equal "jobs" with
-                    | `Array rows -> rows
-                    | _ -> failwith "invalid run jobs"
+                  let selector = P.Authoring.Analysis.Target.selected_script "s" |> ok in
+                  let request =
+                    S.Daemon.Developer.Request.create
+                      ~route:(Document_script { expected; selector })
+                      ~kind:Live_run
+                      ~target:Chatml.Chatml_compiler_contract.Target.One_off_v1
+                      ~prompt:
+                        (Some (S.Catalog_identity.prompt_definition "restart.prompt"))
+                      ~workspace:
+                        (Some
+                           (S.Catalog_identity.workspace_definition "restart.workspace"))
+                      ~entrypoint:"main"
+                      ~input:(`Object [ "input", `String "go" ])
+                      ~fixtures:None
+                      ~requested_execution:None
+                      ~requested_max_output_bytes:None
+                      ~bounds
+                      ~checkpoint:ignore
+                    |> ok
                   in
-                  List.map jobs ~f:(fun json ->
-                    P.Developer_job.of_json json
-                    |> Result.map_error ~f:(fun error ->
-                      Sexp.to_string_hum [%sexp (error : P.Protocol_error.t)])
-                    |> Result.ok_or_failwith)
-                in
-                let job_status () =
-                  let job =
-                    List.find_exn (jobs ()) ~f:(fun job ->
-                      P.Id.Job.equal (P.Developer_job.id job) job_id)
+                  let run_id = P.Id.Developer_run.create () in
+                  let key = P.Idempotency_key.of_string ("policy-" ^ name) |> ok in
+                  ignore
+                    (S.Daemon.Developer.submit
+                       daemon
+                       ~actor
+                       ~run_id
+                       ~key
+                       ~request
+                       ~fresh_source:(Some (Document_script { connection }))
+                     |> ok
+                     : S.Daemon.Developer.View.t);
+                  let view =
+                    S.Daemon.Developer.await_terminal daemon ~actor ~run_id ~key |> ok
                   in
-                  (P.Developer_job.state job).status
-                in
-                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. (fun () ->
-                  let rec loop () =
-                    match job_status () with
-                    | Succeeded -> `Succeeded
-                    | Failed _ when queued_issuer ->
+                  let job_id =
+                    match
+                      Option.map (S.Daemon.Developer.View.receipt view) ~f:R.value
+                    with
+                    | Some (Live (Succeeded (`String id))) -> P.Id.Job.of_string id |> ok
+                    | result ->
                       raise_s
                         [%sexp
-                          "selected queued producer failed"
-                        , (List.map (jobs ()) ~f:(fun job ->
-                             P.Developer_job.id job, P.Developer_job.state job)
-                           : (P.Id.Job.t * P.Developer_job.State.t) list)
-                        , (!requests : int)
-                        , (!queued_response_sent : bool)]
-                    | Failed _ -> `Failed
-                    | Waiting_completion _ when queued_issuer -> `Waiting_completion
-                    | Cancelled | Interrupted _ ->
-                      failwith "selected policy child was interrupted"
-                    | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
-                      Eio.Fiber.yield ();
-                      loop ()
+                          "expected selected child Job"
+                        , (result : R.value option)
+                        , (!queued_response_sent : bool)
+                        , (!park_entered : bool)
+                        , (!park_observed : bool)
+                        , (!park_last_deadline : float option)
+                        , (!requests : int)]
                   in
-                  [%test_eq: [ `Succeeded | `Failed | `Waiting_completion ]]
-                    (loop ())
-                    expected_status);
-                [%test_eq: int] !requests expected_requests;
-                if queued_issuer
-                then (
-                  let children =
-                    List.filter (jobs ()) ~f:(fun job ->
-                      not (P.Id.Job.equal (P.Developer_job.id job) job_id))
+                  let data_root =
+                    S.Daemon.store daemon
+                    |> Agent_store.Session_store.data_root
+                    |> Agent_store.Data_root.path
                   in
-                  [%test_eq: int] (List.length children) 2;
-                  let queued_requests =
-                    List.map children ~f:(fun job ->
-                      let state = P.Developer_job.state job in
-                      [%test_eq: int] state.attempt 0;
-                      (match state.status with
-                       | Queued -> ()
-                       | Running
-                       | Waiting_permission _
-                       | Waiting_completion _
-                       | Succeeded
-                       | Failed _
-                       | Cancelled
-                       | Interrupted _ ->
-                         failwith "v3 issuer child was claimed before installation");
-                      Chat_response.Background_request.of_json
-                        ~policy:Chat_response.One_off_request.default_policy
-                        (P.Developer_job.payload job)
-                      |> ok)
+                  let payload () =
+                    let path =
+                      Eio.Path.(
+                        Eio.Stdenv.fs env
+                        / data_root
+                        / "developer-runs"
+                        / ("run_" ^ P.Id.Developer_run.to_string run_id ^ ".json"))
+                    in
+                    match Eio.Path.load path |> Jsonaf.parse |> Or_error.ok_exn with
+                    | `Object fields ->
+                      (match List.Assoc.find_exn fields ~equal:String.equal "payload" with
+                       | `Object fields -> fields
+                       | _ -> failwith "invalid run payload")
+                    | _ -> failwith "invalid run envelope"
                   in
-                  let tool, script =
-                    match
+                  let jobs () =
+                    let jobs =
+                      match
+                        List.Assoc.find_exn (payload ()) ~equal:String.equal "jobs"
+                      with
+                      | `Array rows -> rows
+                      | _ -> failwith "invalid run jobs"
+                    in
+                    List.map jobs ~f:(fun json ->
+                      P.Developer_job.of_json json
+                      |> Result.map_error ~f:(fun error ->
+                        Sexp.to_string_hum [%sexp (error : P.Protocol_error.t)])
+                      |> Result.ok_or_failwith)
+                  in
+                  let job_status () =
+                    let job =
+                      List.find_exn (jobs ()) ~f:(fun job ->
+                        P.Id.Job.equal (P.Developer_job.id job) job_id)
+                    in
+                    (P.Developer_job.state job).status
+                  in
+                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. (fun () ->
+                    let rec loop () =
+                      match job_status () with
+                      | Succeeded -> `Succeeded
+                      | Failed _ when claimed_issuer ->
+                        raise_s
+                          [%sexp
+                            "selected queued producer failed"
+                          , (List.map (jobs ()) ~f:(fun job ->
+                               P.Developer_job.id job, P.Developer_job.state job)
+                             : (P.Id.Job.t * P.Developer_job.State.t) list)
+                          , (!requests : int)
+                          , (!queued_response_sent : bool)]
+                      | Failed _ -> `Failed
+                      | Cancelled | Interrupted _ ->
+                        failwith "selected policy child was interrupted"
+                      | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
+                        Eio.Fiber.yield ();
+                        loop ()
+                    in
+                    [%test_eq: [ `Succeeded | `Failed ]] (loop ()) expected_status);
+                  [%test_eq: int] !requests expected_requests;
+                  if claimed_issuer
+                  then (
+                    let children =
+                      List.filter (jobs ()) ~f:(fun job ->
+                        not (P.Id.Job.equal (P.Developer_job.id job) job_id))
+                    in
+                    [%test_eq: int] (List.length children) 3;
+                    let queued_requests =
+                      List.map children ~f:(fun job ->
+                        let state = P.Developer_job.state job in
+                        [%test_eq: int] state.attempt 0;
+                        (match state.status with
+                         | Queued -> ()
+                         | Running
+                         | Waiting_permission _
+                         | Waiting_completion _
+                         | Succeeded
+                         | Failed _
+                         | Cancelled
+                         | Interrupted _ ->
+                           failwith "v3 issuer child was claimed before installation");
+                        Chat_response.Background_request.of_json
+                          ~policy:Chat_response.One_off_request.default_policy
+                          (P.Developer_job.payload job)
+                        |> ok)
+                    in
+                    let tools, scripts =
                       List.partition_tf queued_requests ~f:(fun request ->
                         match Chat_response.Background_request.target_kind request with
                         | Tool -> true
                         | Script -> false)
-                    with
-                    | [ tool ], [ script ] -> tool, script
-                    | _ -> failwith "selected issuer did not stage Tool and Script"
-                  in
-                  let issuer request =
-                    Chat_response.Background_request.issuer_source request
-                    |> Option.value_exn
-                  in
-                  let issuing = issuer tool in
-                  let issuer_field request =
-                    match Chat_response.Background_request.to_json request with
-                    | `Object fields ->
-                      List.Assoc.find_exn fields ~equal:String.equal "issuer_source"
-                    | _ -> failwith "invalid queued request envelope"
-                  in
-                  [%test_eq: string]
-                    (Jsonaf.to_string (issuer_field tool))
-                    (Jsonaf.to_string (issuer_field script));
-                  [%test_eq: string]
-                    (P.Developer_agent_artifact.root_relative_path
-                       (Chat_response.Background_request.Issuer_source.artifact issuing)
-                     |> Source.Portable_path.to_string)
-                    "child.chatmd";
-                  assert (
-                    Option.is_none (Chat_response.Background_request.agent_artifact tool));
-                  assert (
-                    Option.is_none
-                      (Chat_response.Background_request.agent_artifact script));
-                  let retained =
-                    List.map2_exn children queued_requests ~f:(fun job request ->
-                      ( P.Developer_job.id job
-                      , Chat_response.Background_request.fingerprint request ))
-                  in
-                  Eio.Path.save
-                    ~create:(`Or_truncate 0o600)
-                    Eio.Path.(Eio.Stdenv.fs env / child)
-                    "<developer>Edited selected issuing child</developer>";
-                  S.Daemon.shutdown daemon |> ok;
-                  daemon_closed := true;
-                  let after = jobs () in
-                  List.iter retained ~f:(fun (id, original) ->
-                    let job =
-                      List.find_exn after ~f:(fun job ->
-                        P.Id.Job.equal (P.Developer_job.id job) id)
                     in
-                    let state = P.Developer_job.state job in
-                    [%test_eq: int] state.attempt 0;
-                    (match state.status with
-                     | Queued -> ()
-                     | Running
-                     | Waiting_permission _
-                     | Waiting_completion _
-                     | Succeeded
-                     | Failed _
-                     | Cancelled
-                     | Interrupted _ ->
-                       failwith "v3 issuer child changed after joined shutdown");
-                    let current =
-                      Chat_response.Background_request.of_json
-                        ~policy:Chat_response.One_off_request.default_policy
-                        (P.Developer_job.payload job)
-                      |> ok
-                      |> Chat_response.Background_request.fingerprint
+                    [%test_eq: int] (List.length tools) 2;
+                    [%test_eq: int] (List.length scripts) 1;
+                    let tool = List.hd_exn tools in
+                    let script_id =
+                      List.find_map
+                        (List.zip_exn children queued_requests)
+                        ~f:(fun (job, request) ->
+                          match Chat_response.Background_request.target_kind request with
+                          | Tool -> None
+                          | Script -> Some (P.Developer_job.id job))
+                      |> Option.value_exn
                     in
-                    assert (String.equal original current));
-                  [%test_eq: int] !requests expected_requests))
+                    let issuer request =
+                      Chat_response.Background_request.issuer_source request
+                      |> Option.value_exn
+                    in
+                    let issuing = issuer tool in
+                    let issuer_field request =
+                      match Chat_response.Background_request.to_json request with
+                      | `Object fields ->
+                        List.Assoc.find_exn fields ~equal:String.equal "issuer_source"
+                      | _ -> failwith "invalid queued request envelope"
+                    in
+                    let tool_name request =
+                      match Chat_response.Background_request.to_json request with
+                      | `Object fields ->
+                        (match
+                           List.Assoc.find_exn fields ~equal:String.equal "target"
+                         with
+                         | `Object target ->
+                           (match
+                              List.Assoc.find_exn target ~equal:String.equal "name"
+                            with
+                            | `String name -> name
+                            | _ -> failwith "invalid claimed Tool name")
+                         | _ -> failwith "invalid claimed Tool target")
+                      | _ -> failwith "invalid claimed request"
+                    in
+                    List.iter queued_requests ~f:(fun request ->
+                      [%test_eq: string]
+                        (Jsonaf.to_string (issuer_field tool))
+                        (Jsonaf.to_string (issuer_field request)));
+                    [%test_eq: string]
+                      (P.Developer_agent_artifact.root_relative_path
+                         (Chat_response.Background_request.Issuer_source.artifact issuing)
+                       |> Source.Portable_path.to_string)
+                      "child.chatmd";
+                    List.iter queued_requests ~f:(fun request ->
+                      assert (
+                        Option.is_none
+                          (Chat_response.Background_request.agent_artifact request)));
+                    let managed =
+                      List.find_exn tools ~f:(fun request ->
+                        String.equal (tool_name request) "queued_worker")
+                    in
+                    let pins =
+                      match Chat_response.Background_request.to_json managed with
+                      | `Object fields ->
+                        (match List.Assoc.find_exn fields ~equal:String.equal "pins" with
+                         | `Object pins -> pins
+                         | _ -> failwith "invalid managed request pins")
+                      | _ -> failwith "invalid managed request"
+                    in
+                    assert (
+                      Option.is_some
+                        (List.Assoc.find pins ~equal:String.equal "queued_worker"));
+                    assert (
+                      Option.is_none
+                        (List.Assoc.find pins ~equal:String.equal "read_file"));
+                    let retained =
+                      List.map2_exn children queued_requests ~f:(fun job request ->
+                        ( P.Developer_job.id job
+                        , Chat_response.Background_request.fingerprint request ))
+                    in
+                    if corrupt_artifact
+                    then (
+                      let module Artifacts = Agent_store.Prompt_artifact_store in
+                      let artifact_ok = function
+                        | Ok value -> value
+                        | Error error ->
+                          raise_s [%sexp (error : Agent_store.Store_error.t)]
+                      in
+                      let artifacts =
+                        Artifacts.open_existing
+                          ~env:daemon_env
+                          ~root:
+                            (Agent_store.Data_root.prompt_artifacts_path
+                               (S.Daemon.store daemon
+                                |> Agent_store.Session_store.data_root))
+                        |> artifact_ok
+                      in
+                      let revision_id =
+                        P.Developer_agent_artifact.revision_id
+                          (Chat_response.Background_request.Issuer_source.artifact
+                             issuing)
+                      in
+                      let installed =
+                        Artifacts.load artifacts revision_id |> artifact_ok
+                      in
+                      [%test_eq: string] installed.root_relative_path "child.chatmd";
+                      let captured_root =
+                        Eio.Path.(
+                          Artifacts.materialized_tree artifacts revision_id
+                          / installed.root_relative_path)
+                      in
+                      Eio.Path.unlink captured_root;
+                      Eio.Path.save
+                        ~create:(`Exclusive 0o600)
+                        captured_root
+                        "<developer>Corrupted retained issuing child</developer>";
+                      assert (Result.is_error (Artifacts.load artifacts revision_id)));
+                    Eio.Path.save
+                      ~create:(`Or_truncate 0o600)
+                      Eio.Path.(Eio.Stdenv.fs env / child)
+                      "<developer>Edited selected issuing child</developer>";
+                    let native_before_claim = !native_admissions in
+                    let provider_before_claim = !requests in
+                    if expire_claims
+                    then (
+                      let latest_deadline =
+                        List.map2_exn children queued_requests ~f:(fun job request ->
+                          let created =
+                            P.Developer_job.created_at job
+                            |> P.Timestamp.to_time_ns
+                            |> Time_ns.to_span_since_epoch
+                            |> Time_ns.Span.to_sec
+                          in
+                          created
+                          +. (Chat_response.Background_request.policy request).execution
+                               .wall_seconds)
+                        |> List.reduce_exn ~f:Float.max
+                      in
+                      advance_wall_to (latest_deadline +. 1.));
+                    resume_wall ();
+                    if expire_claims
+                    then
+                      Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. (fun () ->
+                        let rec await_expired () =
+                          let current = jobs () in
+                          [%test_eq: int] (List.length current) 4;
+                          let children =
+                            List.map retained ~f:(fun (id, original) ->
+                              let job =
+                                List.find_exn current ~f:(fun job ->
+                                  P.Id.Job.equal (P.Developer_job.id job) id)
+                              in
+                              let request =
+                                Chat_response.Background_request.of_json
+                                  ~policy:Chat_response.One_off_request.default_policy
+                                  (P.Developer_job.payload job)
+                                |> ok
+                              in
+                              [%test_eq: string]
+                                (Chat_response.Background_request.fingerprint request)
+                                original;
+                              job)
+                          in
+                          let all_expired =
+                            List.for_all children ~f:(fun job ->
+                              let state = P.Developer_job.state job in
+                              match state.status, state.result with
+                              | ( Failed _
+                                , Some
+                                    (P.Developer_job.Result_value.Inline
+                                       P.Completion.Expired) ) ->
+                                assert (state.attempt > 0);
+                                true
+                              | Queued, None | Running, None -> false
+                              | _ ->
+                                raise_s
+                                  [%sexp
+                                    "expired claimed child had an unexpected outcome"
+                                  , (state : P.Developer_job.State.t)])
+                          in
+                          if not all_expired
+                          then (
+                            Eio.Fiber.yield ();
+                            await_expired ())
+                        in
+                        await_expired ());
+                    if Queued_case.equal queued_case Queued_case.Corrupt
+                    then
+                      Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. (fun () ->
+                        let rec await_rejected () =
+                          let current = jobs () in
+                          [%test_eq: int] (List.length current) 4;
+                          let all_rejected =
+                            List.for_all retained ~f:(fun (id, original) ->
+                              let job =
+                                List.find_exn current ~f:(fun job ->
+                                  P.Id.Job.equal (P.Developer_job.id job) id)
+                              in
+                              let request =
+                                Chat_response.Background_request.of_json
+                                  ~policy:Chat_response.One_off_request.default_policy
+                                  (P.Developer_job.payload job)
+                                |> ok
+                              in
+                              [%test_eq: string]
+                                (Chat_response.Background_request.fingerprint request)
+                                original;
+                              let state = P.Developer_job.state job in
+                              match state.status with
+                              | Failed error ->
+                                assert (
+                                  P.Error.equal_code error.code P.Error.Journal_corrupt);
+                                assert (state.attempt > 0);
+                                true
+                              | Queued | Running -> false
+                              | Waiting_permission _
+                              | Waiting_completion _
+                              | Succeeded
+                              | Cancelled
+                              | Interrupted _ ->
+                                raise_s
+                                  [%sexp
+                                    "corrupt claimed child had an unexpected outcome"
+                                  , (state : P.Developer_job.State.t)])
+                          in
+                          if not all_rejected
+                          then (
+                            Eio.Fiber.yield ();
+                            await_rejected ())
+                        in
+                        await_rejected ());
+                    if Queued_case.equal queued_case Queued_case.Claimed
+                    then
+                      Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. (fun () ->
+                        let rec await_claimed () =
+                          let current = jobs () in
+                          let children =
+                            List.map retained ~f:(fun (id, original) ->
+                              let job =
+                                List.find_exn current ~f:(fun job ->
+                                  P.Id.Job.equal (P.Developer_job.id job) id)
+                              in
+                              let request =
+                                Chat_response.Background_request.of_json
+                                  ~policy:Chat_response.One_off_request.default_policy
+                                  (P.Developer_job.payload job)
+                                |> ok
+                              in
+                              assert (
+                                String.equal
+                                  original
+                                  (Chat_response.Background_request.fingerprint request));
+                              job)
+                          in
+                          let failed =
+                            List.filter children ~f:(fun job ->
+                              match (P.Developer_job.state job).status with
+                              | Failed _ | Cancelled | Interrupted _ -> true
+                              | Queued
+                              | Running
+                              | Waiting_permission _
+                              | Waiting_completion _
+                              | Succeeded -> false)
+                          in
+                          if not (List.is_empty failed)
+                          then
+                            raise_s
+                              [%sexp
+                                "claimed selected child failed"
+                              , (List.map failed ~f:(fun job ->
+                                   let request =
+                                     Chat_response.Background_request.of_json
+                                       ~policy:
+                                         Chat_response.One_off_request.default_policy
+                                       (P.Developer_job.payload job)
+                                     |> ok
+                                   in
+                                   ( P.Developer_job.id job
+                                   , (match
+                                        Chat_response.Background_request.target_kind
+                                          request
+                                      with
+                                      | Tool -> tool_name request
+                                      | Script -> "Script")
+                                   , P.Developer_job.state job ))
+                                 : (P.Id.Job.t * string * P.Developer_job.State.t) list)];
+                          let all_succeeded =
+                            List.for_all children ~f:(fun job ->
+                              match (P.Developer_job.state job).status with
+                              | Succeeded -> true
+                              | Queued
+                              | Running
+                              | Waiting_permission _
+                              | Waiting_completion _
+                              | Failed _
+                              | Cancelled
+                              | Interrupted _ -> false)
+                          in
+                          let nested =
+                            List.filter current ~f:(fun job ->
+                              match
+                                P.Developer_job.Launch.parent_job
+                                  (P.Developer_job.launch job)
+                              with
+                              | Some (parent, _) -> P.Id.Job.equal parent script_id
+                              | None -> false)
+                          in
+                          if List.length nested > 1
+                          then failwith "claimed Script staged multiple nested Jobs";
+                          let nested_failed =
+                            List.filter nested ~f:(fun job ->
+                              match (P.Developer_job.state job).status with
+                              | Failed _ | Cancelled | Interrupted _ -> true
+                              | Queued
+                              | Running
+                              | Waiting_permission _
+                              | Waiting_completion _
+                              | Succeeded -> false)
+                          in
+                          if not (List.is_empty nested_failed)
+                          then
+                            raise_s
+                              [%sexp
+                                "nested selected job failed"
+                              , (List.map nested_failed ~f:P.Developer_job.state
+                                 : P.Developer_job.State.t list)];
+                          let nested_succeeded =
+                            match nested with
+                            | [ job ] ->
+                              (match (P.Developer_job.state job).status with
+                               | Succeeded -> true
+                               | Queued
+                               | Running
+                               | Waiting_permission _
+                               | Waiting_completion _
+                               | Failed _
+                               | Cancelled
+                               | Interrupted _ -> false)
+                            | [] -> false
+                            | _ -> failwith "multiple nested selected Jobs"
+                          in
+                          if all_succeeded && nested_succeeded
+                          then (
+                            List.iter children ~f:(fun job ->
+                              let state = P.Developer_job.state job in
+                              assert (state.attempt > 0);
+                              let result =
+                                match state.result with
+                                | Some
+                                    (P.Developer_job.Result_value.Inline
+                                       (P.Completion.Succeeded value)) -> value
+                                | None | Some _ ->
+                                  failwith "claimed child lost successful output"
+                              in
+                              let request =
+                                Chat_response.Background_request.of_json
+                                  ~policy:Chat_response.One_off_request.default_policy
+                                  (P.Developer_job.payload job)
+                                |> ok
+                              in
+                              match
+                                Chat_response.Background_request.target_kind request
+                              with
+                              | Tool ->
+                                (match tool_name request with
+                                 | "read_file" ->
+                                   assert (
+                                     String.is_substring
+                                       (Jsonaf.to_string result)
+                                       ~substring:"OCH417 selected child file")
+                                 | "queued_worker" ->
+                                   (match result with
+                                    | `Object [ ("input", `String "go") ] -> ()
+                                    | _ -> failwith "claimed managed input changed")
+                                 | _ -> failwith "unexpected claimed Tool target")
+                              | Script ->
+                                (match result with
+                                 | `String "script-claim" -> ()
+                                 | _ -> failwith "claimed Script input changed"));
+                            List.iter nested ~f:(fun job ->
+                              let state = P.Developer_job.state job in
+                              match state.status, state.result with
+                              | ( Succeeded
+                                , Some
+                                    (P.Developer_job.Result_value.Inline
+                                       (P.Completion.Succeeded value)) ) ->
+                                assert (state.attempt > 0);
+                                assert (
+                                  String.is_substring
+                                    (Jsonaf.to_string value)
+                                    ~substring:"OCH417 selected child file")
+                              | _ ->
+                                raise_s
+                                  [%sexp
+                                    "nested selected job did not finish"
+                                  , (state : P.Developer_job.State.t)]))
+                          else (
+                            Eio.Fiber.yield ();
+                            await_claimed ())
+                        in
+                        await_claimed ());
+                    if corrupt_artifact
+                    then (
+                      [%test_eq: int] !native_admissions native_before_claim;
+                      [%test_eq: int] !requests provider_before_claim);
+                    [%test_eq: int] !requests expected_requests)
+                with
+                | exn ->
+                  body_failed := true;
+                  raise exn)
          in
          let default_policy = Chat_response.Runtime_semantics.default_policy in
          run_case "default" default_policy `Succeeded 1;
@@ -2186,7 +2668,24 @@ let on_event : context -> state -> event -> state task = fun _ st _ -> Task.pure
            }
          in
          run_case "paused" paused_policy `Failed 1;
-         run_case ~queued_issuer:true "queued" default_policy `Succeeded 3));
+         run_case
+           ~queued_case:Queued_case.Claimed
+           "queued-claimed"
+           default_policy
+           `Succeeded
+           3;
+         run_case
+           ~queued_case:Queued_case.Corrupt
+           "queued-corrupt"
+           default_policy
+           `Succeeded
+           5;
+         run_case
+           ~queued_case:Queued_case.Expired_corrupt
+           "queued-expired"
+           default_policy
+           `Succeeded
+           7));
   print_endline "selected child policy and queued issuer remained source-owned";
   [%expect {| selected child policy and queued issuer remained source-owned |}]
 ;;

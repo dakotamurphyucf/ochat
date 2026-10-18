@@ -60,6 +60,7 @@ let store_limits
       ?(max_job_payload_bytes = 1024)
       ?(max_jobs_per_run = 4)
       ?(max_invocations_per_run = 5)
+      ?(max_selected_per_commit = 2)
       ?(max_document_bytes = 8192)
       ?(max_inference_bytes_per_run = 8192)
       ?(max_work_steps = 200)
@@ -101,7 +102,7 @@ let store_limits
     ~max_inference_attempts_per_run:256
     ~commands
     ~max_inference_bytes_per_run
-    ~max_selected_per_commit:2
+    ~max_selected_per_commit
     ~max_job_payload_bytes
     ~max_document_bytes
     ~max_recovery_entries:16

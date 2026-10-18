@@ -17,6 +17,7 @@ let features =
       ; "lib/agent_session/native_tool_policy.ml"
       ; "lib/agent_session/script_tool_calls.ml"
       ; "lib/agent_server/developer_background_job_runner.ml"
+      ; "lib/agent_server/developer_claim_deadline.ml"
       ; "lib/agent_server/developer_managed_tool_executor.ml"
       ; "lib/agent_server/developer_script_job_execution.ml"
       ]
@@ -190,12 +191,14 @@ let features =
 ;;
 
 let implementation_sources =
-  [ ( "lib/agent_protocol/invocation.ml"
+  [ ( "lib/agent_server/developer_claim_deadline.ml"
+    , "04bb3b5eae209fbc7af9b938e65d9896f9838421dbc48ea823ac802fd0803f63" )
+  ; ( "lib/agent_protocol/invocation.ml"
     , "4d5abb95474bcdef6c360b666a3b57d2203a7b378193df5c49266897acac4981" )
   ; ( "lib/agent_server/developer_background_job_runner.ml"
-    , "cecd93d15460ee60eda3cac8ba282894e228e94a29811e19c774bea78f49b62a" )
+    , "bee393bda7895aeef41c69acab2b672d7c5e338a306cd01a179a5facdad7a8a3" )
   ; ( "lib/agent_server/developer_managed_tool_executor.ml"
-    , "6aa0d045c61e26b1f1d507d3ffba850e31684526534e824df7120bc6862696fb" )
+    , "e7931b4f548e321069c442029d71c6cca47db54af468d7d30957ae6cdbd4a909" )
   ; ( "lib/agent_server/developer_script_job_execution.ml"
     , "4e30550f6585c6afa97ddd12a12042d0be26b84f18aad7f6f92b2f3a3bf4bb32" )
   ; ( "lib/agent_session/session_management_channel.ml"

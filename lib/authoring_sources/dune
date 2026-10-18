@@ -107,6 +107,9 @@
     lib/agent_server/schedule_scheduler.ml %{dep:../agent_server/schedule_scheduler.ml}
     lib/agent_session/background_execution.ml %{dep:../agent_session/background_execution.ml}
     lib/agent_session/captured_agent_runner.ml %{dep:../agent_session/captured_agent_runner.ml}
+    lib/agent_server/developer_claim_deadline.ml %{dep:../agent_server/developer_claim_deadline.ml}
+    lib/agent_session/claimed_child_runtime.ml %{dep:../agent_session/claimed_child_runtime.ml}
+    lib/agent_session/developer_claimed_resource_owner.ml %{dep:../agent_session/developer_claimed_resource_owner.ml}
     lib/agent_session/developer_child_preflight.ml %{dep:../agent_session/developer_child_preflight.ml}
     lib/agent_store/developer_run_document.ml %{dep:../agent_store/developer_run_document.ml}
     lib/agent_store/developer_run_store.ml %{dep:../agent_store/developer_run_store.ml}
@@ -189,6 +192,7 @@
     lib/agent_server/developer_native_executor.ml %{dep:../agent_server/developer_native_executor.ml}
     lib/agent_server/developer_script_job_execution.ml %{dep:../agent_server/developer_script_job_execution.ml}
     lib/agent_server/developer_script_job_service.ml %{dep:../agent_server/developer_script_job_service.ml}
+    lib/agent_server/developer_host.ml %{dep:../agent_server/developer_host.ml}
     lib/agent_session/authoring_context_tool.ml %{dep:../agent_session/authoring_context_tool.ml}
     lib/agent_session/authoring_reference_scope.ml %{dep:../agent_session/authoring_reference_scope.ml}
     lib/agent_session/authoring_services.ml %{dep:../agent_session/authoring_services.ml}

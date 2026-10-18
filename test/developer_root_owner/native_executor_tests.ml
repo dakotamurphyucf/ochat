@@ -10,6 +10,7 @@ module C = Chat_response.Tool_capability
 module T = Root_owner_tests
 module Scope = Agent_session.Developer_job_scope
 module Jobs = Agent_server.Developer_script_job_service
+module Deadline = Agent_server.Developer_claim_deadline
 module Disclosure = Agent_server.Developer_result_disclosure
 module Blobs = Agent_store.Blob_store
 module F = Developer_run_store_test_suite.Developer_run_store_tests
@@ -3521,22 +3522,82 @@ let%test_unit "claimed worker lexical jobs retain the saved tool ceiling" =
          |> List.find_exn ~f:(fun candidate ->
            P.Id.Job.equal (P.Developer_job.id (O.Job_candidate.job candidate)) parent_id)
        in
+       let job = O.Job_candidate.job candidate in
+       let timing =
+         Deadline.create
+           ~now:(P.Developer_job.created_at job)
+           ~job
+           ~request:pinned_request
+         |> ok
+       in
+       (match Deadline.disposition timing with
+        | Active limits ->
+          assert (
+            Float.equal
+              limits.wall_seconds
+              (Chat_response.Background_request.policy pinned_request).execution
+                .wall_seconds)
+        | Expired -> failwith "new claimed job has no execution time");
+       let at_deadline =
+         Deadline.create ~now:(Deadline.deadline timing) ~job ~request:pinned_request
+         |> ok
+       in
+       (match Deadline.disposition at_deadline with
+        | Expired -> ()
+        | Active _ -> failwith "elapsed claimed job admitted execution");
+       let earliest =
+         Time_ns.of_int63_ns_since_epoch Int63.min_value |> P.Timestamp.of_time_ns
+       in
+       let with_old_clock =
+         Deadline.create ~now:earliest ~job ~request:pinned_request |> ok
+       in
+       (match Deadline.disposition with_old_clock with
+        | Active limits ->
+          assert (
+            Float.equal
+              limits.wall_seconds
+              (Chat_response.Background_request.policy pinned_request).execution
+                .wall_seconds)
+        | Expired -> failwith "old clock expired a new claimed job");
+       let latest =
+         Time_ns.of_int63_ns_since_epoch Int63.max_value |> P.Timestamp.of_time_ns
+       in
+       let latest_job =
+         P.Developer_job.create
+           ~owner:(P.Developer_job.owner job)
+           ~capture_fingerprint:(P.Developer_job.capture_fingerprint job)
+           ~id:(P.Developer_job.id job)
+           ~launch:(P.Developer_job.launch job)
+           ~kind:(P.Developer_job.kind job)
+           ~payload:(P.Developer_job.payload job)
+           ~retry_policy:(P.Developer_job.retry_policy job)
+           ~created_at:latest
+           ~state:(P.Developer_job.state job)
+         |> ok
+       in
+       assert (
+         Result.is_error
+           (Deadline.create ~now:latest ~job:latest_job ~request:pinned_request));
        let completed =
-         Jobs.with_claimed_worker jobs ~candidate (fun ~active ~scope ~sw:_ ->
-           assert (
-             Result.is_error
-               (Jobs.Scope.stage_background
-                  scope
-                  ~request:wider_request
-                  ~checkpoint:ignore));
-           unselected_child
-           := Some
-                (Jobs.Scope.stage_background
-                   scope
-                   ~request:pinned_request
-                   ~checkpoint:ignore
-                 |> ok);
-           Ok (succeeded_claim (Scope.claim active), []))
+         Jobs.with_claimed_worker
+           jobs
+           ~candidate
+           ~expired_state:(fun ~active:_ -> failwith "unexpired fixture")
+           (fun ~active ~scope ~issuer:_ ~budget:_ ~sw:_ ->
+              assert (
+                Result.is_error
+                  (Jobs.Scope.stage_background
+                     scope
+                     ~request:wider_request
+                     ~checkpoint:ignore));
+              unselected_child
+              := Some
+                   (Jobs.Scope.stage_background
+                      scope
+                      ~request:pinned_request
+                      ~checkpoint:ignore
+                    |> ok);
+              Ok (succeeded_claim (Scope.claim active), []))
          |> ok
          |> Option.value_exn
        in

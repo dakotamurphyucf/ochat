@@ -140,7 +140,9 @@ let shared_features =
       ; "lib/agent_session/script_job_service.ml"
       ; "lib/agent_session/staged_jobs.ml"
       ; "lib/agent_server/developer_script_job_service.ml"
+      ; "lib/agent_server/developer_host.ml"
       ; "lib/agent_server/developer_background_job_runner.ml"
+      ; "lib/agent_server/developer_claim_deadline.ml"
       ; "lib/agent_server/developer_managed_tool_executor.ml"
       ; "lib/agent_server/developer_native_executor.ml"
       ; "lib/agent_server/developer_script_job_execution.ml"
@@ -179,10 +181,14 @@ let shared_features =
     , "A physically selected saved-Agent callback and its parser-owned nested Content \
        children retain one Root, bounded source budget and developer inference tracking \
        without granting other async jobs model authority. Queued child starts retain \
-       separate issuer comparisons and remain unclaimed without an installed executor"
+       separate issuer captures; installed Tool and Script workers restore them inside \
+       the physical Claim with saved pins, source-owned managed dependencies and joined \
+       resource lifetimes"
     , [ "lib/agent_protocol/developer_agent_artifact.ml"
       ; "lib/chat_response/background_request.ml"
       ; "lib/agent_session/captured_agent_runner.ml"
+      ; "lib/agent_session/claimed_child_runtime.ml"
+      ; "lib/agent_session/developer_claimed_resource_owner.ml"
       ; "lib/agent_session/developer_child_preflight.ml"
       ; "lib/agent_store/developer_run_document.ml"
       ; "lib/agent_store/developer_run_store.ml"
@@ -324,7 +330,13 @@ let moderator_features =
 ;;
 
 let implementation_sources =
-  [ ( "lib/agent_protocol/model_spawn_request.ml"
+  [ ( "lib/agent_session/developer_claimed_resource_owner.ml"
+    , "fb251c6e022f9880820b15807018adc5cf240500050a0424321d7507d3e2bc41" )
+  ; ( "lib/agent_server/developer_claim_deadline.ml"
+    , "04bb3b5eae209fbc7af9b938e65d9896f9838421dbc48ea823ac802fd0803f63" )
+  ; ( "lib/agent_session/claimed_child_runtime.ml"
+    , "6a954b078e7df14eec28ccae1153bc7c9afb9577d6a383f3128701a26847dbbc" )
+  ; ( "lib/agent_protocol/model_spawn_request.ml"
     , "258c00854df5cd7a65eb28d8fccc4ab1e1d1880ccbbc15999306fd448322d160" )
   ; ( "lib/chat_response/ctx.ml"
     , "7cc0abfa6a5091d99c4d6877d6495ceb6c516c2950902c0ca6d0cd9c5844f99e" )
@@ -385,11 +397,11 @@ let implementation_sources =
   ; ( "lib/agent_protocol/subscription.ml"
     , "a5447544cbe1cd55302cd70a3c50bf7f6b0ec07ad3af8ce1f70b7b90dfbd07bc" )
   ; ( "lib/agent_server/job_scheduler.ml"
-    , "d95f0f85605ed4b21a1dcc1d77d5d16e8329a3be85e0e8ba8941ceb527effaa8" )
+    , "879dba4811cd93c1d65da4267ac80e701dfc236a81c14c62c8e794866407d32e" )
   ; ( "lib/agent_server/job_scheduler_developer.ml"
     , "18062ce3137c3b1782fb4015657ca304a591341a33e1d1da47d362b137b7fd19" )
   ; ( "lib/agent_server/developer_background_job_runner.ml"
-    , "cecd93d15460ee60eda3cac8ba282894e228e94a29811e19c774bea78f49b62a" )
+    , "bee393bda7895aeef41c69acab2b672d7c5e338a306cd01a179a5facdad7a8a3" )
   ; ( "lib/agent_server/developer_child_agent_runner.ml"
     , "bcf38cbb06418513161cdca0694732a08101d80d83ffb260b11f5499acc95e5b" )
   ; ( "lib/agent_server/developer_child_content_projection.ml"
@@ -397,25 +409,27 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_child_selection.ml"
     , "1af9f51272a7b1cf672101f369284be0b305bef2fe45bb435f6e0412fcf61f2b" )
   ; ( "lib/agent_server/developer_queued_issuer.ml"
-    , "37295975565e6ab8de87fff1806d4c2e53ca2f5e95819c29a4379fd530f5497f" )
+    , "d7a52e5cd46ff8da9f8c7143b9cd0609a97ed199671756d5a8b4c4014e06bce8" )
   ; ( "lib/agent_server/developer_live_resources.ml"
-    , "65e2410840eebf7eb231e68a223a76f48f9f0db6021f908db0e130587bc92f29" )
+    , "53f76fb6f3bcc3ca1fb80663f0210b8fb98ef7a161a6023db18cd9852a6ffa86" )
   ; ( "lib/agent_server/developer_managed_tool_executor.ml"
-    , "6aa0d045c61e26b1f1d507d3ffba850e31684526534e824df7120bc6862696fb" )
+    , "e7931b4f548e321069c442029d71c6cca47db54af468d7d30957ae6cdbd4a909" )
   ; ( "lib/agent_server/developer_native_executor.ml"
-    , "14a408d5fc47cde9f47fda5f0f27c234f3e9a8bfea56301e4b8e5db7b9cedcc7" )
+    , "41ab8cbc2f76b2bb76d358e2da9acd849ebdc4e67719e1ab81a0225503ccf31c" )
   ; ( "lib/agent_server/developer_root_owner.ml"
-    , "c83cbd8cc47ca8a890419ccd6283a8c95e36d7b93b7745bd87bec6ac931d826e" )
+    , "f9ab42d67081f0a6c2009bdac25afed4125c688c88478e351e31b18f28e09cd5" )
   ; ( "lib/agent_server/developer_script_job_execution.ml"
     , "4e30550f6585c6afa97ddd12a12042d0be26b84f18aad7f6f92b2f3a3bf4bb32" )
   ; ( "lib/agent_server/developer_script_job_service.ml"
-    , "f1cdd9e72d6450460bca488188275a23e4b00c6e5004efabb23c206eb257eaca" )
+    , "084f8f130b40d5cc1613b984de8f64468cb680bc39cac98995c1724a41add662" )
+  ; ( "lib/agent_server/developer_host.ml"
+    , "371e6124c24aeebc296dc0c6ce7e6a27628c1f63018198d5482b563f4caffb22" )
   ; ( "lib/agent_server/schedule_scheduler.ml"
     , "37cf371632d8ad86693c162e0593d56866f76df577dceb06ddd2ac5fe5bfdae9" )
   ; ( "lib/agent_session/background_execution.ml"
     , "2149c979ce81c6c851c8d8cbe749c622334f3c43d05b72b17ae89873e5d563c3" )
   ; ( "lib/agent_session/captured_agent_runner.ml"
-    , "7862a400b3cec8d3ae4df7170531657f1bb5bb834ef49c274e6b83d5febebdac" )
+    , "0c2b9feb1296d6ef2e10de7baa6851c88ec87bd3380c1bc85cd9fabc4bdc1f1a" )
   ; ( "lib/agent_session/developer_child_preflight.ml"
     , "d0d24d3a0b95abe03712785d4bf828a976249cd2984c0990837bd63458f42a5e" )
   ; ( "lib/chat_response/converter.ml"

@@ -986,14 +986,9 @@ module Worker_action = struct
         ~capture_fingerprint:(Chatml_developer_capture.fingerprint t.issuer.capture)
   ;;
 
-  let stage_background t ~request ~checkpoint =
+  let stage_background_with t ~selected ~request ~checkpoint ~check_selected =
     let issuer = t.issuer in
-    let* () =
-      if Option.is_some (Request.issuer_source request)
-      then invalid "worker action cannot stage a copied selected issuer"
-      else Ok ()
-    in
-    let* () = check_now t in
+    let* () = check_selected () in
     let* parent_id =
       let depth = Job_scope.Parent.nested_depth t.parent in
       if depth >= Int.max_value
@@ -1015,16 +1010,16 @@ module Worker_action = struct
             ~owner:issuer.owner
             ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
             ~launch
-            ~selected:t.snapshot.selected
+            ~selected
             ~policy:issuer.job_policy
             ~request
             ~created_at:(issuer.registry.now ())
             ~checkpoint
         in
-        let* () = check_now t in
+        let* () = check_selected () in
         Ok prepared)
     in
-    match check_now t with
+    match check_selected () with
     | Ok () -> Ok staged
     | Error error ->
       ignore
@@ -1037,6 +1032,46 @@ module Worker_action = struct
         (Developer_job_worker.Children.rollback_staged t.children staged
          : (unit, P.Error.t) result);
       Stdlib.Printexc.raise_with_backtrace exn backtrace
+  ;;
+
+  let stage_background t ~request ~checkpoint =
+    let* () =
+      if Option.is_some (Request.issuer_source request)
+      then invalid "worker action cannot stage a copied selected issuer"
+      else Ok ()
+    in
+    stage_background_with
+      t
+      ~selected:t.snapshot.selected
+      ~request
+      ~checkpoint
+      ~check_selected:(fun () -> check_now t)
+  ;;
+
+  let stage_background_from_claimed_issuer t ~issuer ~request ~checkpoint =
+    let module Claimed = Agent_session.Claimed_child_runtime in
+    let* () =
+      if Claimed.same_parent issuer t.parent
+      then Ok ()
+      else invalid "claimed issuing source belongs to another Worker action"
+    in
+    let* () =
+      if Option.is_some (Request.issuer_source request)
+      then invalid "worker action cannot stage a copied selected issuer"
+      else Ok ()
+    in
+    let* request = Request.with_issuer_source request (Claimed.issuer_source issuer) in
+    let check_selected () =
+      let* () = Claimed.check issuer in
+      let* () = check_now t in
+      Claimed.check_now issuer
+    in
+    stage_background_with
+      t
+      ~selected:(Claimed.pinned_capabilities issuer)
+      ~request
+      ~checkpoint
+      ~check_selected
   ;;
 
   let rollback_staged t id =
