@@ -1,6 +1,6 @@
 (library
  (name agent_client_developer_tests)
- (modules developer_connection_tests http_bound_tests)
- (libraries core eio_main ochat.agent_client ochat.agent_protocol ochat.agent_transport_http ochat.document_schema ochat.chatml_source)
+ (modules developer_connection_tests http_bound_tests repl_transport_tests)
+ (libraries core eio_main eio.unix mirage-crypto-rng.unix ochat.agent_client ochat.agent_protocol ochat.agent_transport_http ochat.agent_transport_socket ochat.agent_transport_stdio ochat.document_schema ochat.chatml_source)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))

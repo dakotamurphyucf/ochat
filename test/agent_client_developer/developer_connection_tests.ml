@@ -1,6 +1,7 @@
 open! Core
 module P = Agent_protocol
 module C = P.Developer_common
+module R = P.Developer_repl_wire
 
 let must = function
   | Ok value -> value
@@ -45,7 +46,19 @@ let capabilities =
   |> must
 ;;
 
-let initialization ?(events = false) () =
+let selected_features ~events ~repl =
+  [ C.Features.run ]
+  @ (if events then [ C.Features.events ] else [])
+  @ (if repl then [ R.Features.repl ] else [])
+  @ if events && repl then [ R.Features.events ] else []
+;;
+
+let initialization
+      ?(events = false)
+      ?(repl = false)
+      ?(max_request_bytes = 16 * 1024 * 1024)
+      ()
+  =
   let implementation =
     P.Initialize.Implementation.create ~name:"developer-test" ~version:"1" |> must
   in
@@ -62,12 +75,11 @@ let initialization ?(events = false) () =
     ~selected_version:P.Version.current
     ~implementation
     ~server_id:(P.Id.Server.create_with generator)
-    ~enabled_features:
-      (if events then [ C.Features.run; C.Features.events ] else [ C.Features.run ])
+    ~enabled_features:(selected_features ~events ~repl)
     ~extensions:None
     ~principal
     ~limits:
-      { max_request_bytes = 16 * 1024 * 1024
+      { max_request_bytes
       ; max_event_bytes = 16 * 1024 * 1024
       ; max_page_size = 1000
       ; max_attachments_per_connection = 8
@@ -84,15 +96,19 @@ let initialization ?(events = false) () =
   |> must
 ;;
 
-let initialize ?(events = false) connection (response : P.Initialize.Response.t) =
+let initialize
+      ?(events = false)
+      ?(repl = false)
+      connection
+      (response : P.Initialize.Response.t)
+  =
   let request =
     P.Initialize.Request.create
       ~implementation:
         (P.Initialize.Implementation.create ~name:"developer-test" ~version:"1" |> must)
       ~protocol_min:P.Version.current
       ~protocol_max:P.Version.current
-      ~features:
-        (if events then [ C.Features.run; C.Features.events ] else [ C.Features.run ])
+      ~features:(selected_features ~events ~repl)
       ~event_encodings:[ Json ]
       ~max_inbound_event_bytes:(16 * 1024 * 1024)
       ()

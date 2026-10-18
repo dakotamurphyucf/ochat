@@ -148,6 +148,8 @@ type t =
   ; mutable initialization : P.Initialize.Response.t option
   ; mutable developer_capabilities :
       (P.Initialize.Response.t * P.Developer_common.Capabilities.t) option
+  ; mutable repl_capabilities :
+      (P.Initialize.Response.t * P.Developer_repl_wire.Capabilities.t) option
   ; mutable notification_owner : int option
   ; mutable next_notification_owner : int
   ; mutable pending : pending_command list
@@ -160,6 +162,7 @@ let create transport =
   ; closed = Atomic.make false
   ; initialization = None
   ; developer_capabilities = None
+  ; repl_capabilities = None
   ; notification_owner = None
   ; next_notification_owner = 0
   ; pending = []
@@ -372,6 +375,7 @@ let request t command =
            in
            t.initialization <- Some response;
            t.developer_capabilities <- None;
+           t.repl_capabilities <- None;
            result
          | _ -> result)
       | _, _ -> result))
@@ -524,6 +528,179 @@ let request_developer t ~limits request =
                    ~f:(phys_equal initialization)))
           || not (developer_view_matches initialization request response)
         then Error (developer_error "Developer response changed request identity")
+        else Ok response))
+;;
+
+let request_repl_transport t ~initialization ~bound request =
+  match
+    Transport.request_repl
+      t.transport
+      ~max_request_bytes:initialization.P.Initialize.Response.limits.max_request_bytes
+      ~bound
+      request
+  with
+  | Ok json
+    when String.length (Jsonaf.to_string json)
+         > Transport.Repl_response_bound.max_result_bytes bound ->
+    Error (developer_error "REPL success response exceeds its bound")
+  | Error failure when not (Transport.Repl_response_bound.error_within_bound failure) ->
+    Error (developer_error "REPL error response exceeds its bound")
+  | result -> result
+;;
+
+let repl_capabilities t =
+  with_request_lock t (fun () ->
+    let module R = P.Developer_repl_wire in
+    let open Result.Let_syntax in
+    let%bind initialization = developer_initialization t in
+    let%bind () = require_developer_feature initialization R.Features.repl in
+    match t.repl_capabilities with
+    | Some (source, capabilities) when phys_equal source initialization -> Ok capabilities
+    | None | Some _ ->
+      let%bind json =
+        request_repl_transport
+          t
+          ~initialization
+          ~bound:Transport.Repl_response_bound.Bootstrap
+          R.Request.Capabilities
+      in
+      let%bind capabilities = R.Capabilities.of_json json in
+      if
+        Atomic.get t.closed
+        || not
+             (Option.value_map
+                t.initialization
+                ~default:false
+                ~f:(phys_equal initialization))
+      then Error (developer_error "REPL initialization changed")
+      else if not (R.Capabilities.supports capabilities "developer.repl.capabilities")
+      then Error (developer_error "REPL Capabilities method is not advertised")
+      else (
+        t.repl_capabilities <- Some (initialization, capabilities);
+        Ok capabilities))
+;;
+
+let repl_feature = function
+  | P.Developer_repl_wire.Request.Watch _ | Unwatch _ ->
+    P.Developer_repl_wire.Features.events
+  | Capabilities
+  | Create _
+  | Submit _
+  | Observe _
+  | Cancel_submission _
+  | Inspect_type _
+  | Task_references_page _
+  | Task_submit _
+  | Task_observe _
+  | Task_await_terminal _
+  | Task_cancel_and_wait _
+  | Reset_and_wait _
+  | Close_and_wait _ -> P.Developer_repl_wire.Features.repl
+;;
+
+let repl_response_matches initialization request response =
+  let module R = P.Developer_repl_wire in
+  let owner_matches view ~key ~run_id =
+    let owner = R.Task_view.owner view in
+    P.Id.Server.equal owner.host_id initialization.P.Initialize.Response.server_id
+    && P.Id.Principal.equal
+         owner.principal_id
+         initialization.P.Initialize.Response.principal.id
+    && P.Id.Developer_run.equal owner.run_id run_id
+    && P.Idempotency_key.equal (R.Task_view.key view) key
+  in
+  let task_key_matches view ~key =
+    let owner = R.Task_view.owner view in
+    P.Id.Server.equal owner.host_id initialization.P.Initialize.Response.server_id
+    && P.Id.Principal.equal
+         owner.principal_id
+         initialization.P.Initialize.Response.principal.id
+    && P.Idempotency_key.equal (R.Task_view.key view) key
+  in
+  match request, response with
+  | R.Request.Capabilities, R.Response.Capabilities _ -> true
+  | Create create, Create view ->
+    P.Id.Developer_run.equal (R.Create.run_id create) (R.View.run_id view)
+  | Submit submit, Submit submission ->
+    R.Wire_id.Epoch.equal (R.Submit.epoch submit) (R.Submission.epoch submission)
+  | Observe _, Observe _
+  | Cancel_submission _, Cancel_submission _
+  | Inspect_type _, Inspect_type _
+  | Task_references_page _, Task_references_page _ -> true
+  | Task_submit submit, Task_submit view ->
+    task_key_matches view ~key:(R.Task_submit.key submit)
+  | Task_observe lookup, Task_observe (Some view)
+  | Task_await_terminal lookup, Task_await_terminal view
+  | Task_cancel_and_wait lookup, Task_cancel_and_wait view ->
+    owner_matches view ~key:lookup.key ~run_id:lookup.run_id
+  | Task_observe _, Task_observe None -> true
+  | Reset_and_wait current, Reset_and_wait view ->
+    R.Wire_id.Instance.equal (R.Current_epoch.instance current) (R.View.instance view)
+  | Close_and_wait _, Close_and_wait | Watch _, Watch | Unwatch _, Unwatch -> true
+  | Capabilities, _
+  | Create _, _
+  | Submit _, _
+  | Observe _, _
+  | Cancel_submission _, _
+  | Inspect_type _, _
+  | Task_references_page _, _
+  | Task_submit _, _
+  | Task_observe _, _
+  | Task_await_terminal _, _
+  | Task_cancel_and_wait _, _
+  | Reset_and_wait _, _
+  | Close_and_wait _, _
+  | Watch _, _
+  | Unwatch _, _ -> false
+;;
+
+let request_repl t ~limits request =
+  with_request_lock t (fun () ->
+    let module R = P.Developer_repl_wire in
+    let open Result.Let_syntax in
+    let%bind initialization = developer_initialization t in
+    let%bind () = require_developer_feature initialization (repl_feature request) in
+    let%bind capabilities =
+      match t.repl_capabilities with
+      | Some (source, capabilities) when phys_equal source initialization ->
+        Ok capabilities
+      | None | Some _ -> Error (developer_error "REPL capabilities are absent")
+    in
+    if not (phys_equal limits (R.Capabilities.limits capabilities))
+    then Error (developer_error "REPL response limits changed")
+    else (
+      let method_ = R.Request.method_name request in
+      let%bind () =
+        if R.Capabilities.supports capabilities method_
+        then Ok ()
+        else Error (developer_error "REPL method is not advertised")
+      in
+      match request with
+      | R.Request.Capabilities -> Ok (R.Response.Capabilities capabilities)
+      | _ ->
+        let%bind request =
+          R.Request.of_method_and_params
+            ~limits
+            ~method_
+            ~params:(R.Request.params request)
+        in
+        let%bind json =
+          request_repl_transport
+            t
+            ~initialization
+            ~bound:(Transport.Repl_response_bound.Installed limits)
+            request
+        in
+        let%bind response = R.Response.of_method_and_json ~limits ~method_ json in
+        if
+          Atomic.get t.closed
+          || (not
+                (Option.value_map
+                   t.initialization
+                   ~default:false
+                   ~f:(phys_equal initialization)))
+          || not (repl_response_matches initialization request response)
+        then Error (developer_error "REPL response changed request identity")
         else Ok response))
 ;;
 
