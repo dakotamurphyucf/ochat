@@ -33,16 +33,19 @@ module Repl = struct
         ~typing_limits
         ~evaluator_limits
         ~execution_policy
+        ~type_display_limits
         ~max_instances
         ~max_keys_per_instance
         ~max_submissions_per_epoch
         ~max_source_bytes
         ~max_receipt_bytes
         ~max_total_receipt_bytes
+        ~max_total_type_detail_bytes
         ~max_task_origins
+        ~max_reference_page_bytes
     =
     let open Result.Let_syntax in
-    let%map limits =
+    let%bind limits =
       Developer_repl_epoch.Limits.create
         ~max_instances
         ~max_keys_per_instance
@@ -50,7 +53,9 @@ module Repl = struct
         ~max_source_bytes
         ~max_receipt_bytes
         ~max_total_receipt_bytes
+        ~max_total_type_detail_bytes
         ~max_task_origins
+        ~max_reference_page_bytes
       |> Result.map_error ~f:(fun error ->
         Agent_protocol.Error.invalid_request (Error.to_string_hum error))
     in
@@ -60,7 +65,10 @@ module Repl = struct
       ~typing_limits
       ~evaluator_limits
       ~execution_policy
+      ~type_display_limits
       ~limits
+    |> Result.map_error ~f:(fun error ->
+      Agent_protocol.Error.invalid_request (Error.to_string_hum error))
   ;;
 end
 

@@ -365,13 +365,24 @@ let repl_configuration ?(max_receipt_bytes = 8192) ?(max_keys_per_instance = 4) 
          ~max_retained_tasks:8
        |> Or_error.ok_exn)
     ~execution_policy:(Bounded Chatml_execution.default_limits)
+    ~type_display_limits:
+      (Chatml_type_display.Limits.create
+         ~max_nodes:4096
+         ~max_edges:8192
+         ~max_depth:32
+         ~max_work_steps:131072
+         ~max_text_bytes:4096
+         ~max_output_bytes:32768
+       |> Or_error.ok_exn)
     ~max_instances:2
     ~max_keys_per_instance
     ~max_submissions_per_epoch:8
     ~max_source_bytes:4096
     ~max_receipt_bytes
     ~max_total_receipt_bytes:(Int.max 16384 (max_receipt_bytes * 2))
-    ~max_task_origins:4
+    ~max_total_type_detail_bytes:(1024 * 1024)
+    ~max_task_origins:8
+    ~max_reference_page_bytes:4096
   |> ok
 ;;
 

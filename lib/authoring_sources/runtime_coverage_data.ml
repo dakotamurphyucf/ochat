@@ -140,8 +140,9 @@ let shared_features =
       ; "test/provider_runtime_host/developer_model_approval_tests.ml"
       ] )
   ; ( "execution.developer_repl_task"
-    , "Retained REPL Task references, explicit durable Start and terminal receipt, \
-       current selected authority at new effects, and joined cancellation/reset"
+    , "Retained REPL Task references and bounded frozen-type projection, explicit \
+       durable Start and terminal receipt, current selected authority at new effects, \
+       and joined cancellation/reset"
     , [ "lib/chatml_repl_execution/chatml_repl_execution.ml"
       ; "lib/agent_store/developer_command_receipt.ml"
       ; "lib/agent_store/developer_command_row.ml"
@@ -149,6 +150,8 @@ let shared_features =
       ; "lib/agent_server/developer_capture_host.ml"
       ; "lib/agent_server/developer_root_source.ml"
       ; "lib/agent_server/developer_repl_epoch.ml"
+      ; "lib/agent_server/developer_repl_projection.ml"
+      ; "lib/agent_server/developer_daemon_configuration.ml"
       ; "lib/agent_server/developer_repl_task_original.ml"
       ; "lib/agent_server/developer_repl_task_execution.ml"
       ; "lib/agent_server/developer_repl_task_receipt.ml"
@@ -156,6 +159,7 @@ let shared_features =
       ; "lib/agent_server/developer_command_lifecycle.ml"
       ; "lib/agent_server/developer_root_owner.ml"
       ; "lib/agent_server/developer_host.ml"
+      ; "lib/agent_server/daemon.ml"
       ]
     , "runtime.execution"
     , [ "test/developer_root_owner/developer_host_tests.ml"
@@ -468,7 +472,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_model_job_runner.ml"
     , "7604ff6140540e3b53720515526242e7bc1014c97d6895aacadbfb2909bda718" )
   ; ( "lib/agent_server/daemon.ml"
-    , "190352b948f40e897865d661130a9d619cc09b3109d89ceefe983264ee8e6d93" )
+    , "10b9cab3d0ba19d273a85a47e27b9b09e0902a3e59f25deac26651e84cb08bc7" )
   ; ( "lib/agent_session/developer_claimed_resource_owner.ml"
     , "fb251c6e022f9880820b15807018adc5cf240500050a0424321d7507d3e2bc41" )
   ; ( "lib/agent_server/developer_claim_deadline.ml"
@@ -564,7 +568,9 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_script_job_service.ml"
     , "79ab45f6fd273e4f55060607c7635b52e19e724b8ff0bf0356d4c328024db6d6" )
   ; ( "lib/agent_server/developer_host.ml"
-    , "6331b6cc650c05ef79a16c11e80a831ba62d1e9d291951e1b37f87289978d8b0" )
+    , "f1a79a6c36625d67e8aafa55ef2605485e9cf75d83b11fcf526929c0e3ec0cee" )
+  ; ( "lib/agent_server/developer_daemon_configuration.ml"
+    , "f4662dd7d90be9428279299454ae477c9084e1ef2dd0da25a64f2059480b1114" )
   ; ( "lib/agent_server/schedule_scheduler.ml"
     , "37cf371632d8ad86693c162e0593d56866f76df577dceb06ddd2ac5fe5bfdae9" )
   ; ( "lib/agent_session/background_execution.ml"
@@ -580,7 +586,7 @@ let implementation_sources =
   ; ( "lib/agent_store/developer_run_document.ml"
     , "7274f5aa4214a9fe6fd16614e6f9163d2aeb36b72e12160adb4389f45566fcf7" )
   ; ( "lib/chatml_repl_execution/chatml_repl_execution.ml"
-    , "bcc574ef327cc1632f4cf53263a79beca95ac657ec3a3b2229dbf48274338dac" )
+    , "f37aaf35200ba627a2f23867059723555afec06f11e632bf101ffd913cc497da" )
   ; ( "lib/agent_store/developer_command_row.ml"
     , "c7fe85fb222c80450fdc512732c9ad9fc2fd8ab8e12e65eeb64302e4904a5809" )
   ; ( "lib/agent_server/developer_capture_host.ml"
@@ -588,7 +594,9 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_root_source.ml"
     , "052785a90fef793261bdcdabcf5f5067269ae321d65e1fb5169952d4974fd16a" )
   ; ( "lib/agent_server/developer_repl_epoch.ml"
-    , "d77c37b2ce6171aaaef4342768164232f266bc7175042808e45f01105de95aa4" )
+    , "15bdc53210567b2b1a20889575c758c9050e48873ef27eef3dfe8fb883f47803" )
+  ; ( "lib/agent_server/developer_repl_projection.ml"
+    , "d8240d92b432b2d40c4401e08c53b1c16c3445cbadd0f005a1cf59ae2da2657b" )
   ; ( "lib/agent_server/developer_repl_task_original.ml"
     , "97033f759efa9952eaea486c795d7e2092a985818c424cebe36a03d219ac9089" )
   ; ( "lib/agent_server/developer_repl_task_execution.ml"

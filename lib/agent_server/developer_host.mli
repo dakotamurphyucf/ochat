@@ -39,6 +39,9 @@ module Repl : sig
   module Submission = Developer_repl_epoch.Submission
   module Task_origin = Developer_repl_epoch.Task_origin
   module Task_reference = Developer_repl_epoch.Task_reference
+  module Type_selector = Developer_repl_epoch.Type_selector
+  module Type_inspection = Developer_repl_epoch.Type_inspection
+  module Task_reference_page = Developer_repl_epoch.Task_reference_page
 
   type borrowed = Developer_repl_epoch.borrowed
 
@@ -70,6 +73,27 @@ module Repl : sig
     -> instance:Instance.t
     -> key:P.Idempotency_key.t
     -> (Submission.t option, P.Error.t) result
+
+  val inspect_type
+    :  t
+    -> actor:Operator_authorization.t
+    -> instance:Instance.t
+    -> epoch:Epoch.t
+    -> key:P.Idempotency_key.t
+    -> statement_index:int
+    -> selector:Type_selector.t
+    -> max_bytes:int
+    -> (Type_inspection.t, P.Error.t) result
+
+  val task_references_page
+    :  t
+    -> actor:Operator_authorization.t
+    -> instance:Instance.t
+    -> epoch:Epoch.t
+    -> key:P.Idempotency_key.t
+    -> after:Task_reference.t option
+    -> limit:int
+    -> (Task_reference_page.t, P.Error.t) result
 
   val cancel_and_wait
     :  t

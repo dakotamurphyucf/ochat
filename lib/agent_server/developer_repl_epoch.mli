@@ -51,12 +51,30 @@ end
 module Limits : sig
   type t
 
-  (** All counts/bytes are positive and bounded by the installed source,
-      typing and evaluator policies. Retained receipts and exact Task origins
-      have independent caps. A bounded key ledger retains either the original
-      result or a tombstone after detail eviction; known keys never execute
-      again. At least two keys are required: one slot is reserved for an
-      authenticated close even after submit/reset admission is exhausted.
+  (** Every scalar cap is validated as positive and at most 1 MiB; receipt
+      bytes must admit 256, and the origin count must not exceed the submission
+      count. [Configuration.create] separately requires the origin cap to cover
+      the evaluator's retained-Task capacity. Source, typing and execution
+      policies impose their own independent limits. [max_receipt_bytes] caps the compact
+      statement presentation; [max_total_receipt_bytes] bounds retained compact
+      outcomes and exact reference metadata across one instance. A distinct
+      [max_total_type_detail_bytes] bounds private immutable frozen graphs;
+      evicting those graphs never removes completed Task origins or their
+      references. Retained metadata uses conservative bounded charges;
+      the aggregate receipt budget must reserve enough for the configured
+      maximum number of bounded Task references before any evaluator effect.
+      [max_reference_page_bytes] bounds conservative in-process reference and
+      page-framing charges, including the first page returned by Submit. It is
+      not an encoded transport envelope bound; the later portable DTO layer
+      applies its own wire limit. Validation guarantees room for at least one
+      maximum-size reference plus framing, so a page with remaining references
+      contains a new item and its [after] cursor advances on the next read.
+      The bounded key ledger retains a compact historical outcome or tombstone
+      after detail eviction or reset; reset drops frozen graphs, physical Task
+      handles and reference pages, while an exact old-key retry remains inert.
+      Known keys never execute again. At
+      least two keys are required: one slot is reserved for an authenticated
+      close even after submit/reset admission is exhausted.
       Exhaustion rejects fresh work keys before any effect. *)
   val create
     :  max_instances:int
@@ -65,7 +83,9 @@ module Limits : sig
     -> max_source_bytes:int
     -> max_receipt_bytes:int
     -> max_total_receipt_bytes:int
+    -> max_total_type_detail_bytes:int
     -> max_task_origins:int
+    -> max_reference_page_bytes:int
     -> t Or_error.t
 end
 
@@ -73,15 +93,19 @@ module Configuration : sig
   type t
 
   (** Immutable REPL-only policy. This does not mint source, method or Task
-      authority. The host binds it to its existing capture owner at install. *)
+      authority. The host binds it to its existing capture owner at install.
+      The Epoch origin cap must cover the evaluator's installed retained-Task
+      capacity, so every successfully retained handle has a reference; a
+      mismatch is rejected before creating an instance or running effects. *)
   val create
     :  scope_limits:Chatml_configured_lookup.Repl_scope.Limits.t
     -> root_limits:Chatml_dependency_session.Roots.Limits.t
     -> typing_limits:Chatml_repl_typing.Limits.t
     -> evaluator_limits:Evaluator.Limits.t
     -> execution_policy:Chatml_execution.policy
+    -> type_display_limits:Chatml_type_display.Limits.t
     -> limits:Limits.t
-    -> t
+    -> t Or_error.t
 end
 
 module View : sig
@@ -123,28 +147,96 @@ module Submission : sig
 
   type status =
     | Need_more of
-        Chatml.Chatml_parse.Submission.Need_more.reason * Chatml_source.Location.t
+        Chatml.Chatml_parse.Submission.Need_more.reason * Chatml_source.Location.t option
     | Rejected of Diagnostic.t
     | Finished
     | Stopped of Diagnostic.t option
+
+  (** An omitted [Need_more] location means only the source coordinate exceeded
+      the requested presentation ceiling; [details] is [Output_limited]. The
+      parse outcome itself is unchanged. *)
 
   type details =
     | Available
     | Output_limited
 
+  module Statement_summary : sig
+    type t
+
+    type task_retention =
+      | Not_a_task
+      | Retained
+      | Limit_reached
+    [@@deriving equal, sexp_of]
+
+    (** Original evaluator outcome and bounded scalar projections from this
+        exact receipt. The type is rendered from its immutable frozen snapshot;
+        [Chatml_type_display.completeness] distinguishes truncation from a
+        complete type. No language value, raw graph or Task handle escapes. *)
+    val outcome : t -> Evaluator.Receipt.outcome
+
+    val value_preview : t -> string option
+    val diagnostic : t -> Evaluator.Diagnostic.t option
+    val expression_type : t -> Chatml_type_display.t option
+    val binding_count : t -> int
+    val task_retention : t -> task_retention
+    val text_limited : t -> bool
+  end
+
   val status : t -> status
   val details : t -> details
   val completed_statements : t -> int
+  val statement_count : t -> int
   val revision : t -> Revision.t
+
+  (** Byte-bounded execution-order prefix of compact receipts. A display
+      ceiling can truncate a field or shorten the prefix without changing the
+      actual [statement_count], outcomes already shown or Task reference
+      count. The full frozen graph stays private and is inspected separately
+      while its exact-key detail is retained. *)
+  val summaries : t -> Statement_summary.t list
+
+  (** Existing in-process detail projection, present only while the explicit
+      private frozen-detail budget retains these receipts. Portable clients
+      use [summaries] and [inspect_type], never this graph-bearing accessor. *)
   val statements : t -> Evaluator.Receipt.t list
+
   val task_handles : t -> Evaluator.Task_handle.t list
 
-  (** Bounded comparison references issued alongside successful retained
-      handles, in the same order. These can be projected to a later REPL client
-      without exposing a Lang.Task or physical handle. Output_limited hides
-      detail but does not turn a retained reference into execution authority;
-      a later action must still resolve it against this live epoch. *)
+  (** This count survives frozen-detail eviction and presentation truncation.
+      The list is the first byte-bounded page while the issuing epoch is live;
+      use [task_references_page] for the rest or after an uncertain/lost Submit
+      response. Reset preserves the historical count but clears this page.
+      Each reference is inert until a fresh Task action resolves its exact
+      physical origin. *)
+  val task_reference_count : t -> int
+
   val task_references : t -> Task_reference.t list
+end
+
+module Type_selector : sig
+  (** [Binding_index] is zero-based in the original receipt's ordered frozen
+      binding list; shadowed names remain distinct. *)
+  type t =
+    | Expression
+    | Binding_index of int
+  [@@deriving equal, sexp_of]
+end
+
+module Type_inspection : sig
+  type t
+
+  val revision : t -> Revision.t
+  val binding_name : t -> string option
+  val rendered : t -> Chatml_type_display.t
+end
+
+module Task_reference_page : sig
+  type t
+
+  val items : t -> Task_reference.t list
+  val next : t -> Task_reference.t option
+  val total : t -> int
 end
 
 module Task_origin : sig
@@ -243,6 +335,40 @@ val observe
   -> instance:Instance.t
   -> key:P.Idempotency_key.t
   -> (Submission.t option, P.Error.t) result
+
+(** Inspect one expression or indexed lexical binding from the exact retained
+    zero-based [statement_index] receipt's immutable frozen snapshot. The
+    binding index disambiguates shadowing;
+    a foreign/expired epoch, key or graph detail fails closed. Actor, method
+    and selected source are rechecked after any yield. The installed display
+    limits and [max_bytes] bound work and output; truncation is explicit in
+    [Type_inspection.rendered]. No latest-snippet reconstruction occurs. *)
+val inspect_type
+  :  t
+  -> actor:Operator_authorization.t
+  -> instance:Instance.t
+  -> epoch:Epoch.t
+  -> key:P.Idempotency_key.t
+  -> statement_index:int
+  -> selector:Type_selector.t
+  -> max_bytes:int
+  -> (Type_inspection.t, P.Error.t) result
+
+(** Read an exact issuing submission's retained Task origins, even if its
+    rich result detail was evicted or the Submit response was lost. [after]
+    must be an issued reference of this same physical instance/epoch/key;
+    it is a cursor, never authority. Items and framing are bounded by the
+    installed page-byte cap and [limit]. Expired reset/close/restart state
+    cannot be revived by a decoded reference. *)
+val task_references_page
+  :  t
+  -> actor:Operator_authorization.t
+  -> instance:Instance.t
+  -> epoch:Epoch.t
+  -> key:P.Idempotency_key.t
+  -> after:Task_reference.t option
+  -> limit:int
+  -> (Task_reference_page.t, P.Error.t) result
 
 (** Explicit current-actor control of the exact in-flight submission. This
     signal path does not wait for the serialized statement lock: it marks and
@@ -491,8 +617,10 @@ end
 (** Reset/close signal the actor's current statement through the independent
     control path, then join it before revoking
     scope/evaluator/handles. OCH-402 registers any background Task action with
-    the same owner and joins it before these operations return. Same-key retry
-    observes the original result; no restart recovery or replay exists. *)
+    the same owner and joins it before these operations return. Reset retains
+    charged compact historical outcomes for exact-key retry, but drops private
+    frozen graphs, physical handles and first-page references. Already-evicted
+    key tombstones remain expired. No restart recovery or effect replay exists. *)
 val reset_and_wait
   :  t
   -> actor:Operator_authorization.t

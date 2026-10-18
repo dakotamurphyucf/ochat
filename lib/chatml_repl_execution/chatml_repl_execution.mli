@@ -28,6 +28,11 @@ module Limits : sig
     -> max_diagnostic_bytes:int
     -> max_retained_tasks:int
     -> t Or_error.t
+
+  (** Comparison-only installed evaluator capacity. A host retaining a
+      separate exact Task-origin table must admit every handle this owner can
+      retain; this value does not grant execution or expose a handle. *)
+  val max_retained_tasks : t -> int
 end
 
 module Error : sig

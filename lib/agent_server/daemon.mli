@@ -97,13 +97,16 @@ module Developer_configuration : sig
       -> typing_limits:Chatml_repl_typing.Limits.t
       -> evaluator_limits:Chatml_repl_execution.Limits.t
       -> execution_policy:Chatml_execution.policy
+      -> type_display_limits:Chatml_type_display.Limits.t
       -> max_instances:int
       -> max_keys_per_instance:int
       -> max_submissions_per_epoch:int
       -> max_source_bytes:int
       -> max_receipt_bytes:int
       -> max_total_receipt_bytes:int
+      -> max_total_type_detail_bytes:int
       -> max_task_origins:int
+      -> max_reference_page_bytes:int
       -> (t, Agent_protocol.Error.t) result
   end
 
@@ -439,6 +442,29 @@ module Developer : sig
       val equal : t -> t -> bool
     end
 
+    module Type_selector : sig
+      type t =
+        | Expression
+        | Binding_index of int
+      [@@deriving equal, sexp_of]
+    end
+
+    module Type_inspection : sig
+      type t
+
+      val revision : t -> Revision.t
+      val binding_name : t -> string option
+      val rendered : t -> Chatml_type_display.t
+    end
+
+    module Task_reference_page : sig
+      type t
+
+      val items : t -> Task_reference.t list
+      val next : t -> Task_reference.t option
+      val total : t -> int
+    end
+
     module View : sig
       type t
 
@@ -452,6 +478,24 @@ module Developer : sig
     module Submission : sig
       type t
 
+      module Statement_summary : sig
+        type t
+
+        type task_retention =
+          | Not_a_task
+          | Retained
+          | Limit_reached
+        [@@deriving equal, sexp_of]
+
+        val outcome : t -> Chatml_repl_execution.Receipt.outcome
+        val value_preview : t -> string option
+        val diagnostic : t -> Chatml_repl_execution.Diagnostic.t option
+        val expression_type : t -> Chatml_type_display.t option
+        val binding_count : t -> int
+        val task_retention : t -> task_retention
+        val text_limited : t -> bool
+      end
+
       module Diagnostic : sig
         type t
 
@@ -461,7 +505,8 @@ module Developer : sig
 
       type status =
         | Need_more of
-            Chatml.Chatml_parse.Submission.Need_more.reason * Chatml_source.Location.t
+            Chatml.Chatml_parse.Submission.Need_more.reason
+            * Chatml_source.Location.t option
         | Rejected of Diagnostic.t
         | Finished
         | Stopped of Diagnostic.t option
@@ -477,9 +522,12 @@ module Developer : sig
 
       val details : t -> details
       val completed_statements : t -> int
+      val statement_count : t -> int
       val revision : t -> Revision.t
+      val summaries : t -> Statement_summary.t list
       val statements : t -> Chatml_repl_execution.Receipt.t list
       val task_handles : t -> Chatml_repl_execution.Task_handle.t list
+      val task_reference_count : t -> int
       val task_references : t -> Task_reference.t list
     end
 
@@ -563,6 +611,27 @@ module Developer : sig
       -> instance:Instance.t
       -> key:Agent_protocol.Idempotency_key.t
       -> (Submission.t option, Agent_protocol.Error.t) result
+
+    val inspect_type
+      :  t
+      -> actor:Operator_authorization.t
+      -> instance:Instance.t
+      -> epoch:Epoch.t
+      -> key:Agent_protocol.Idempotency_key.t
+      -> statement_index:int
+      -> selector:Type_selector.t
+      -> max_bytes:int
+      -> (Type_inspection.t, Agent_protocol.Error.t) result
+
+    val task_references_page
+      :  t
+      -> actor:Operator_authorization.t
+      -> instance:Instance.t
+      -> epoch:Epoch.t
+      -> key:Agent_protocol.Idempotency_key.t
+      -> after:Task_reference.t option
+      -> limit:int
+      -> (Task_reference_page.t, Agent_protocol.Error.t) result
 
     val cancel_and_wait
       :  t

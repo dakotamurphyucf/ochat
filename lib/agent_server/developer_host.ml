@@ -2468,6 +2468,9 @@ module Repl = struct
   module Submission = Repl_epoch.Submission
   module Task_origin = Repl_epoch.Task_origin
   module Task_reference = Repl_epoch.Task_reference
+  module Type_selector = Repl_epoch.Type_selector
+  module Type_inspection = Repl_epoch.Type_inspection
+  module Task_reference_page = Repl_epoch.Task_reference_page
 
   type borrowed = Repl_epoch.borrowed
 
@@ -2494,6 +2497,24 @@ module Repl = struct
 
   let observe t ~actor ~instance ~key =
     with_owner t ~f:(fun repl -> Repl_epoch.observe repl ~actor ~instance ~key)
+  ;;
+
+  let inspect_type t ~actor ~instance ~epoch ~key ~statement_index ~selector ~max_bytes =
+    with_owner t ~f:(fun repl ->
+      Repl_epoch.inspect_type
+        repl
+        ~actor
+        ~instance
+        ~epoch
+        ~key
+        ~statement_index
+        ~selector
+        ~max_bytes)
+  ;;
+
+  let task_references_page t ~actor ~instance ~epoch ~key ~after ~limit =
+    with_owner t ~f:(fun repl ->
+      Repl_epoch.task_references_page repl ~actor ~instance ~epoch ~key ~after ~limit)
   ;;
 
   let cancel_and_wait t ~actor ~instance ~key =

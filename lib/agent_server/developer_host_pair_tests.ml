@@ -896,7 +896,9 @@ let%test_module "retained Developer Host policy" =
           ~max_source_bytes:4096
           ~max_receipt_bytes:(512 * 1024)
           ~max_total_receipt_bytes:(1024 * 1024)
-          ~max_task_origins:4
+          ~max_total_type_detail_bytes:(512 * 1024)
+          ~max_task_origins:8
+          ~max_reference_page_bytes:4096
         |> Or_error.ok_exn
       in
       Developer_repl_epoch.Configuration.create
@@ -914,7 +916,17 @@ let%test_module "retained Developer Host policy" =
         ~typing_limits
         ~evaluator_limits
         ~execution_policy:(Bounded Chatml_execution.default_limits)
+        ~type_display_limits:
+          (Chatml_type_display.Limits.create
+             ~max_nodes:4096
+             ~max_edges:8192
+             ~max_depth:32
+             ~max_work_steps:131072
+             ~max_text_bytes:4096
+             ~max_output_bytes:32768
+           |> Or_error.ok_exn)
         ~limits
+      |> Or_error.ok_exn
     ;;
 
     let start_phase
@@ -1833,7 +1845,7 @@ let run ctx input =
                         ~workspace:
                           (Catalog_identity.workspace_definition "restart.workspace")
                         ~requested_execution:None
-                        ~requested_max_output_bytes:None
+                        ~requested_max_output_bytes:(Some 256)
                         ~checkpoint:Eio.Fiber.check
                       |> required "REPL original"
                     in
@@ -1872,6 +1884,11 @@ let run ctx input =
                         ~source
                       |> required "REPL Task expression"
                     in
+                    [%test_eq: int] (Repl.Submission.statement_count submission) 1;
+                    (match Repl.Submission.details submission with
+                     | Output_limited -> ()
+                     | Available -> failwith "large frozen Task type was not bounded");
+                    [%test_eq: int] (Repl.Submission.task_reference_count submission) 1;
                     let reference =
                       match Repl.Submission.task_references submission with
                       | reference :: _ -> reference
@@ -1894,6 +1911,58 @@ let run ctx input =
                         in
                         failwith ("REPL Task reference absent: " ^ status ^ "/" ^ details)
                     in
+                    let replayed_submission =
+                      Repl.submit
+                        phase.host
+                        ~actor:shared.actor
+                        ~instance:(Repl.View.instance view)
+                        ~epoch:(Repl.View.epoch view)
+                        ~expected_revision:(Repl.View.revision view)
+                        ~key:(key "repl-expression")
+                        ~source
+                      |> required "bounded REPL submission replay"
+                    in
+                    [%test_eq: int]
+                      (Repl.Submission.task_reference_count replayed_submission)
+                      1;
+                    assert (
+                      List.exists
+                        (Repl.Submission.task_references replayed_submission)
+                        ~f:(Repl.Task_reference.equal reference));
+                    let page =
+                      Repl.task_references_page
+                        phase.host
+                        ~actor:shared.actor
+                        ~instance:(Repl.View.instance view)
+                        ~epoch:(Repl.View.epoch view)
+                        ~key:(key "repl-expression")
+                        ~after:None
+                        ~limit:1
+                      |> required "REPL reference page"
+                    in
+                    [%test_eq: int] (Repl.Task_reference_page.total page) 1;
+                    (match Repl.Task_reference_page.items page with
+                     | [ only ] -> assert (Repl.Task_reference.equal only reference)
+                     | _ -> failwith "REPL reference page changed origin count");
+                    assert (Option.is_none (Repl.Task_reference_page.next page));
+                    let inspected =
+                      Repl.inspect_type
+                        phase.host
+                        ~actor:shared.actor
+                        ~instance:(Repl.View.instance view)
+                        ~epoch:(Repl.View.epoch view)
+                        ~key:(key "repl-expression")
+                        ~statement_index:0
+                        ~selector:Repl.Type_selector.Expression
+                        ~max_bytes:512
+                      |> required "frozen REPL type inspection"
+                    in
+                    assert (Option.is_none (Repl.Type_inspection.binding_name inspected));
+                    assert (
+                      not
+                        (String.is_empty
+                           (Chatml_type_display.text
+                              (Repl.Type_inspection.rendered inspected))));
                     let task_original =
                       Repl.Task.Original.create
                         ~reference
@@ -2039,6 +2108,46 @@ let run ctx input =
                       Store.Developer_command_row.same_identity
                         (Repl.Task.row initial)
                         (Repl.Task.row replay));
+                    let second =
+                      Repl.submit
+                        phase.host
+                        ~actor:shared.actor
+                        ~instance:(Repl.View.instance view)
+                        ~epoch:(Repl.View.epoch view)
+                        ~expected_revision:(Repl.Submission.revision submission)
+                        ~key:(key "repl-second-expression")
+                        ~source:"Task.pure(8)"
+                      |> required "second retained Task"
+                    in
+                    [%test_eq: int] (Repl.Submission.task_reference_count second) 1;
+                    (match
+                       Repl.inspect_type
+                         phase.host
+                         ~actor:shared.actor
+                         ~instance:(Repl.View.instance view)
+                         ~epoch:(Repl.View.epoch view)
+                         ~key:(key "repl-expression")
+                         ~statement_index:0
+                         ~selector:Repl.Type_selector.Expression
+                         ~max_bytes:512
+                     with
+                     | Error { code = Lease_stale; _ } -> ()
+                     | Ok _ | Error _ ->
+                       failwith "older frozen type detail did not expire at its cap");
+                    let retained_page =
+                      Repl.task_references_page
+                        phase.host
+                        ~actor:shared.actor
+                        ~instance:(Repl.View.instance view)
+                        ~epoch:(Repl.View.epoch view)
+                        ~key:(key "repl-expression")
+                        ~after:None
+                        ~limit:1
+                      |> required "old Task reference after type-detail eviction"
+                    in
+                    (match Repl.Task_reference_page.items retained_page with
+                     | [ old ] -> assert (Repl.Task_reference.equal old reference)
+                     | _ -> failwith "type-detail eviction lost a Task origin");
                     let reset =
                       Repl.reset_and_wait
                         phase.host
@@ -2051,6 +2160,38 @@ let run ctx input =
                     assert (
                       not
                         (Repl.Epoch.equal (Repl.View.epoch view) (Repl.View.epoch reset)));
+                    let historical =
+                      Repl.submit
+                        phase.host
+                        ~actor:shared.actor
+                        ~instance:(Repl.View.instance view)
+                        ~epoch:(Repl.View.epoch view)
+                        ~expected_revision:(Repl.View.revision view)
+                        ~key:(key "repl-expression")
+                        ~source
+                      |> required "historical compact REPL replay"
+                    in
+                    assert (
+                      Repl.Revision.equal
+                        (Repl.Submission.revision submission)
+                        (Repl.Submission.revision historical));
+                    [%test_eq: int] (Repl.Submission.task_reference_count historical) 1;
+                    assert (List.is_empty (Repl.Submission.task_references historical));
+                    assert (List.is_empty (Repl.Submission.task_handles historical));
+                    assert (List.is_empty (Repl.Submission.statements historical));
+                    (match
+                       Repl.task_references_page
+                         phase.host
+                         ~actor:shared.actor
+                         ~instance:(Repl.View.instance view)
+                         ~epoch:(Repl.View.epoch view)
+                         ~key:(key "repl-expression")
+                         ~after:None
+                         ~limit:1
+                     with
+                     | Error { code = Lease_stale; _ } -> ()
+                     | Ok _ | Error _ ->
+                       failwith "reset did not expire the old reference page");
                     close_phase_and_wait phase;
                     [%test_eq: int] (List.length (persisted_jobs shared ~run_id)) 2;
                     [%test_eq: int] !child_requests 1;

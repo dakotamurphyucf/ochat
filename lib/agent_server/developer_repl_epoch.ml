@@ -7,6 +7,7 @@ module Prepared = Chatml_prepared_program
 module Contract = Chatml.Chatml_compiler_contract
 module Typing = Chatml_repl_typing
 module Evaluator = Chatml_repl_execution
+module Projection = Developer_repl_projection
 module Scope = Chatml_configured_lookup.Repl_scope
 module Parse = Chatml.Chatml_parse
 module Captured = Chatml_source
@@ -201,7 +202,9 @@ module Limits = struct
     ; max_source_bytes : int
     ; max_receipt_bytes : int
     ; max_total_receipt_bytes : int
+    ; max_total_type_detail_bytes : int
     ; max_task_origins : int
+    ; max_reference_page_bytes : int
     }
 
   let create
@@ -211,7 +214,9 @@ module Limits = struct
         ~max_source_bytes
         ~max_receipt_bytes
         ~max_total_receipt_bytes
+        ~max_total_type_detail_bytes
         ~max_task_origins
+        ~max_reference_page_bytes
     =
     let values =
       [ max_instances
@@ -220,7 +225,9 @@ module Limits = struct
       ; max_source_bytes
       ; max_receipt_bytes
       ; max_total_receipt_bytes
+      ; max_total_type_detail_bytes
       ; max_task_origins
+      ; max_reference_page_bytes
       ]
     in
     if
@@ -229,6 +236,9 @@ module Limits = struct
       && max_receipt_bytes >= 256
       && max_receipt_bytes <= max_total_receipt_bytes
       && max_task_origins <= max_submissions_per_epoch
+      && max_reference_page_bytes >= Task_reference.max_bytes + 128
+      && max_total_receipt_bytes
+         >= (max_task_origins * (Task_reference.max_bytes + 64)) + max_receipt_bytes
     then
       Ok
         { max_instances
@@ -237,7 +247,9 @@ module Limits = struct
         ; max_source_bytes
         ; max_receipt_bytes
         ; max_total_receipt_bytes
+        ; max_total_type_detail_bytes
         ; max_task_origins
+        ; max_reference_page_bytes
         }
     else Or_error.error_string "invalid developer REPL limits"
   ;;
@@ -250,6 +262,7 @@ module Configuration = struct
     ; typing_limits : Typing.Limits.t
     ; evaluator_limits : Evaluator.Limits.t
     ; execution_policy : Chatml_execution.policy
+    ; type_display_limits : Chatml_type_display.Limits.t
     ; limits : Limits.t
     }
 
@@ -259,15 +272,21 @@ module Configuration = struct
         ~typing_limits
         ~evaluator_limits
         ~execution_policy
-        ~limits
+        ~type_display_limits
+        ~(limits : Limits.t)
     =
-    { scope_limits
-    ; root_limits
-    ; typing_limits
-    ; evaluator_limits
-    ; execution_policy
-    ; limits
-    }
+    if limits.max_task_origins < Evaluator.Limits.max_retained_tasks evaluator_limits
+    then Or_error.error_string "REPL Task-origin cap is below evaluator retention cap"
+    else
+      Ok
+        { scope_limits
+        ; root_limits
+        ; typing_limits
+        ; evaluator_limits
+        ; execution_policy
+        ; type_display_limits
+        ; limits
+        }
   ;;
 end
 
@@ -288,6 +307,8 @@ module View = struct
 end
 
 module Submission = struct
+  module Statement_summary = Projection.Statement
+
   module Diagnostic = struct
     type t =
       { message : string
@@ -299,7 +320,7 @@ module Submission = struct
   end
 
   type status =
-    | Need_more of Parse.Submission.Need_more.reason * Captured.Location.t
+    | Need_more of Parse.Submission.Need_more.reason * Captured.Location.t option
     | Rejected of Diagnostic.t
     | Finished
     | Stopped of Diagnostic.t option
@@ -312,19 +333,52 @@ module Submission = struct
     { status : status
     ; details : details
     ; completed_statements : int
+    ; statement_count : int
     ; revision : Revision.t
+    ; summaries : Statement_summary.t list
+    ; presentation_bytes : int
     ; statements : Evaluator.Receipt.t list
     ; task_handles : Evaluator.Task_handle.t list
+    ; task_reference_count : int
     ; task_references : Task_reference.t list
     }
 
   let status t = t.status
   let details t = t.details
   let completed_statements t = t.completed_statements
+  let statement_count t = t.statement_count
   let revision t = t.revision
+  let summaries t = t.summaries
   let statements t = t.statements
   let task_handles t = t.task_handles
+  let task_reference_count t = t.task_reference_count
   let task_references t = t.task_references
+end
+
+module Type_selector = Projection.Selector
+
+module Type_inspection = struct
+  type t =
+    { revision : Revision.t
+    ; binding_name : string option
+    ; rendered : Chatml_type_display.t
+    }
+
+  let revision t = t.revision
+  let binding_name t = t.binding_name
+  let rendered t = t.rendered
+end
+
+module Task_reference_page = struct
+  type t =
+    { items : Task_reference.t list
+    ; next : Task_reference.t option
+    ; total : int
+    }
+
+  let items t = t.items
+  let next t = t.next
+  let total t = t.total
 end
 
 open Submission
@@ -347,6 +401,7 @@ type task_origin =
   ; owner : instance_state
   ; handle : Evaluator.Task_handle.t
   ; reference : Task_reference.t
+  ; issuing_key : P.Idempotency_key.t
   }
 
 and key_entry =
@@ -357,6 +412,9 @@ and key_entry =
   ; mutable outcome : (Submission.t, P.Error.t) result option
   ; mutable expired : bool
   ; mutable charged_bytes : int
+  ; mutable reference_bytes : int
+  ; mutable type_details : Evaluator.Receipt.t list option
+  ; mutable type_detail_bytes : int
   }
 
 and active =
@@ -405,6 +463,7 @@ and instance_state =
   ; mutable task_origins : task_origin list
   ; mutable task_ordinal : int
   ; mutable retained_bytes : int
+  ; mutable retained_type_detail_bytes : int
   ; mutable active : active option
   ; mutable closed : bool
   ; mutable borrowed : int
@@ -735,6 +794,7 @@ let create_state t ~run_id ~original ~fresh_source ~actor =
     ; task_origins = []
     ; task_ordinal = 0
     ; retained_bytes = 0
+    ; retained_type_detail_bytes = 0
     ; active = None
     ; closed = false
     ; borrowed = 0
@@ -867,6 +927,7 @@ let make_source (state : instance_state) text ~checkpoint =
 
 exception Admission_revoked of P.Error.t
 exception Cancelled_statement
+exception Reference_limit
 
 let raise_if_error = function
   | Ok () -> ()
@@ -881,78 +942,186 @@ let guarded_checkpoint t state ~actor ~checked () =
     (Capture_host.Source_selection.Shared.check_now state.selection ~checked ~actor)
 ;;
 
-let submission_details_bytes submission =
-  let status_bytes =
-    match submission.Submission.status with
-    | Need_more _ | Finished -> 64
-    | Rejected diagnostic | Stopped (Some diagnostic) ->
-      64 + String.length (Submission.Diagnostic.message diagnostic)
-    | Stopped None -> 64
-  in
-  status_bytes
-  + List.sum
-      (module Int)
-      submission.statements
-      ~f:(fun receipt ->
-        let frozen = Evaluator.Receipt.frozen_types receipt in
-        let snapshot = Typing.Frozen_types.snapshot frozen in
-        let snapshot_bound =
-          (Chatml_typechecker.Type_snapshot.node_count snapshot * 256)
-          + (Chatml_typechecker.Type_snapshot.edge_count snapshot * 48)
-          + (Chatml_typechecker.Type_snapshot.label_bytes snapshot * 2)
-          + List.sum
-              (module Int)
-              (Typing.Frozen_types.bindings frozen)
-              ~f:(fun (name, _) -> 64 + String.length name)
-        in
-        192
-        + snapshot_bound
-        + Option.value_map
-            (Evaluator.Receipt.value_preview receipt)
-            ~default:0
-            ~f:String.length
-        + Option.value_map
-            (Evaluator.Receipt.diagnostic receipt)
-            ~default:0
-            ~f:(fun diagnostic -> String.length (Evaluator.Diagnostic.message diagnostic)))
-  + List.sum
-      (module Int)
-      submission.task_references
-      ~f:(fun reference -> 16 + String.length (Task_reference.to_string reference))
+let status_bytes = function
+  | Need_more (_, location) ->
+    64 + Option.value_map location ~default:0 ~f:Projection.location_charge
+  | Finished | Stopped None -> 64
+  | Rejected diagnostic | Stopped (Some diagnostic) ->
+    64
+    + String.length (Submission.Diagnostic.message diagnostic)
+    + Option.value_map
+        (Submission.Diagnostic.location diagnostic)
+        ~default:0
+        ~f:Projection.location_charge
 ;;
 
-let limit_details state submission =
-  let ceiling =
-    Option.value_map
-      state.original.Original.requested_max_output_bytes
-      ~default:state.limits.max_receipt_bytes
-      ~f:(Int.min state.limits.max_receipt_bytes)
-  in
-  if submission_details_bytes submission <= ceiling
-  then submission
-  else
-    { submission with
-      details = Output_limited
-    ; statements = []
-    ; task_handles = []
-    ; task_references = []
-    ; status =
-        (match submission.status with
-         | Rejected _ ->
-           Rejected (diagnostic "REPL result detail exceeded output limit" None)
-         | Stopped _ -> Stopped None
-         | Need_more _ | Finished -> submission.status)
-    }
+let compact_bytes submission =
+  status_bytes submission.Submission.status + submission.presentation_bytes
 ;;
 
-let evict_old_details state =
+let type_detail_bytes receipts =
+  List.sum
+    (module Int)
+    receipts
+    ~f:(fun receipt ->
+      let frozen = Evaluator.Receipt.frozen_types receipt in
+      let snapshot = Typing.Frozen_types.snapshot frozen in
+      192
+      + (Chatml_typechecker.Type_snapshot.node_count snapshot * 256)
+      + (Chatml_typechecker.Type_snapshot.edge_count snapshot * 48)
+      + (Chatml_typechecker.Type_snapshot.label_bytes snapshot * 2)
+      + List.sum
+          (module Int)
+          (Typing.Frozen_types.bindings frozen)
+          ~f:(fun (name, _) -> 64 + String.length name)
+      + Option.value_map
+          (Evaluator.Receipt.value_preview receipt)
+          ~default:0
+          ~f:String.length
+      + Option.value_map
+          (Evaluator.Receipt.diagnostic receipt)
+          ~default:0
+          ~f:(fun diagnostic ->
+            String.length (Evaluator.Diagnostic.message diagnostic)
+            + Option.value_map
+                (Evaluator.Diagnostic.location diagnostic)
+                ~default:0
+                ~f:Projection.location_charge))
+;;
+
+let reference_charge reference = 64 + String.length (Task_reference.to_string reference)
+
+let presentation_ceiling state =
+  Option.value_map
+    state.original.Original.requested_max_output_bytes
+    ~default:state.limits.max_receipt_bytes
+    ~f:(Int.min state.limits.max_receipt_bytes)
+;;
+
+let first_reference_page state references =
+  let rec loop remaining acc = function
+    | [] -> List.rev acc
+    | reference :: rest ->
+      let charged = reference_charge reference in
+      if charged > remaining
+      then List.rev acc
+      else loop (remaining - charged) (reference :: acc) rest
+  in
+  loop (state.limits.max_reference_page_bytes - 64) [] references
+;;
+
+let bound_status ~ceiling status =
+  if status_bytes status <= ceiling
+  then status, false
+  else (
+    match status with
+    | Rejected _ ->
+      Rejected (diagnostic "REPL result diagnostic exceeded output limit" None), true
+    | Stopped _ -> Stopped None, true
+    | Need_more (reason, Some _) -> Need_more (reason, None), true
+    | Need_more (_, None) | Finished -> status, true)
+;;
+
+let%test_unit "minimal receipt preserves incomplete input with a bounded location" =
+  let long_run =
+    match P.Id.Developer_run.of_string ("dvr_" ^ String.make 92 'a') with
+    | Ok id -> id
+    | Error _ -> failwith "maximum-length developer run ID was rejected"
+  in
+  let source_id =
+    Captured.Id.create
+      ~package_namespace:("developer-repl-" ^ P.Id.Developer_run.to_string long_run)
+      ~relative_path:"snippet-1.chatml"
+    |> Or_error.ok_exn
+  in
+  let source =
+    Captured.create
+      source_id
+      ~contents:"let x ="
+      ~expected_digest:None
+      ~max_bytes:None
+      ~checkpoint:(fun () -> ())
+    |> Or_error.ok_exn
+  in
+  let location =
+    Captured.locate source ~start_byte:7 ~end_byte:7 ~checkpoint:(fun () -> ())
+    |> Or_error.ok_exn
+  in
+  let original = Submission.Need_more (Parser_eof, Some location) in
+  assert (status_bytes original > 256);
+  (match bound_status ~ceiling:256 original with
+   | Need_more (Parser_eof, None), true -> ()
+   | _ -> failwith "bounded incomplete input lost its truthful limited status");
+  assert (status_bytes (fst (bound_status ~ceiling:256 original)) <= 256);
+  match bound_status ~ceiling:512 original with
+  | Need_more (Parser_eof, Some retained), false ->
+    assert (Captured.Id.equal (Captured.Location.source retained) source_id)
+  | _ -> failwith "location was removed despite fitting the receipt"
+;;
+
+let compact_submission
+      t
+      state
+      ~status
+      ~revision
+      ~completed_statements
+      ~statements
+      ~handles
+      ~references
+  =
+  let ceiling = presentation_ceiling state in
+  let status, status_limited = bound_status ~ceiling status in
+  let presentation =
+    try
+      Projection.present
+        ~display_limits:t.configuration.type_display_limits
+        ~max_bytes:(Int.max 0 (ceiling - status_bytes status))
+        statements
+        ~checkpoint:t.checkpoint
+    with
+    | exn ->
+      (match exn with
+       | Cancelled_statement | Eio.Cancel.Cancelled Cancelled_statement -> ()
+       | _ ->
+         Option.iter state.active ~f:(fun active ->
+           active.private_failure <- Some (exn, Stdlib.Printexc.get_raw_backtrace ())));
+      Error Projection.Error.Invalid_selection
+  in
+  let summaries, presentation_limited, presentation_bytes =
+    match presentation with
+    | Ok presentation ->
+      ( Projection.Presentation.statements presentation
+      , not (Projection.Presentation.complete presentation)
+      , Projection.Presentation.charged_bytes presentation )
+    | Error _ -> [], true, 0
+  in
+  { Submission.status
+  ; details =
+      (if status_limited || presentation_limited then Output_limited else Available)
+  ; completed_statements
+  ; statement_count = List.length statements
+  ; revision
+  ; summaries
+  ; presentation_bytes
+  ; statements
+  ; task_handles = handles
+  ; task_reference_count = List.length references
+  ; task_references = first_reference_page state references
+  }
+;;
+
+let evict_old_compact state =
   let rec evict = function
     | [] -> ()
     | entry :: rest when state.retained_bytes > state.limits.max_total_receipt_bytes ->
       if entry.charged_bytes > 0
       then (
         state.retained_bytes <- state.retained_bytes - entry.charged_bytes;
+        state.retained_type_detail_bytes
+        <- state.retained_type_detail_bytes - entry.type_detail_bytes;
         entry.charged_bytes <- 0;
+        entry.type_detail_bytes <- 0;
+        entry.type_details <- None;
         entry.expired <- true;
         entry.outcome <- None);
       evict rest
@@ -961,15 +1130,37 @@ let evict_old_details state =
   evict (List.rev state.keys)
 ;;
 
+let evict_old_type_details state =
+  let rec evict = function
+    | [] -> ()
+    | entry :: rest
+      when state.retained_type_detail_bytes > state.limits.max_total_type_detail_bytes ->
+      state.retained_type_detail_bytes
+      <- state.retained_type_detail_bytes - entry.type_detail_bytes;
+      entry.type_detail_bytes <- 0;
+      entry.type_details <- None;
+      evict rest
+    | _ -> ()
+  in
+  evict (List.rev state.keys)
+;;
+
 let remember_outcome state entry outcome =
-  entry.outcome <- Some outcome;
   match outcome with
-  | Error _ -> ()
+  | Error _ ->
+    entry.outcome <- Some outcome;
+    evict_old_compact state
   | Ok submission ->
-    let bytes = submission_details_bytes submission in
-    entry.charged_bytes <- bytes;
-    state.retained_bytes <- state.retained_bytes + bytes;
-    evict_old_details state
+    let receipts = submission.statements in
+    let detail_bytes = type_detail_bytes receipts in
+    entry.type_details <- Some receipts;
+    entry.type_detail_bytes <- detail_bytes;
+    state.retained_type_detail_bytes <- state.retained_type_detail_bytes + detail_bytes;
+    entry.outcome <- Some (Ok { submission with statements = [] });
+    entry.charged_bytes <- compact_bytes submission;
+    state.retained_bytes <- state.retained_bytes + entry.charged_bytes;
+    evict_old_type_details state;
+    evict_old_compact state
 ;;
 
 let discard_if_current state candidate =
@@ -993,7 +1184,7 @@ let task_source_digest source ~checkpoint =
   |> Captured.Digest.of_contents ~checkpoint
 ;;
 
-let execute_ready t state ~actor ready ~checked =
+let execute_ready t state ~actor ~key ready ~checked =
   let guard = guarded_checkpoint t state ~actor ~checked in
   let rec loop remaining receipts origins =
     if remaining = 0
@@ -1005,11 +1196,29 @@ let execute_ready t state ~actor ready ~checked =
         | Error error ->
           Stopped (Some (typing_diagnostic error)), List.rev receipts, List.rev origins
         | Ok candidate ->
-          (try guard () with
-           | exn ->
-             let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-             reraise_after_cleanup exn backtrace ~cleanup:(fun () ->
-               discard_if_current state candidate));
+          let candidate_reference =
+            try
+              guard ();
+              let source = Typing.Candidate.source candidate in
+              let reference =
+                Task_reference.issue
+                  ~run_id:state.run_id
+                  ~instance_nonce:state.instance_nonce
+                  ~epoch:state.epoch.Epoch.serial
+                  ~ordinal:(state.task_ordinal + 1)
+                  ~source:(task_source_digest source ~checkpoint:guard)
+              in
+              if
+                String.length (Task_reference.to_string reference)
+                > Task_reference.max_bytes
+              then raise Reference_limit;
+              reference
+            with
+            | exn ->
+              let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+              reraise_after_cleanup exn backtrace ~cleanup:(fun () ->
+                discard_if_current state candidate)
+          in
           (match Evaluator.execute_next state.evaluator candidate ~checkpoint:guard with
            | Error error ->
              discard_if_current state candidate;
@@ -1032,15 +1241,13 @@ let execute_ready t state ~actor ready ~checked =
                   | Evaluator.Receipt.Retained handle ->
                     let source = Typing.Candidate.source candidate in
                     state.task_ordinal <- state.task_ordinal + 1;
-                    let reference =
-                      Task_reference.issue
-                        ~run_id:state.run_id
-                        ~instance_nonce:state.instance_nonce
-                        ~epoch:state.epoch.Epoch.serial
-                        ~ordinal:state.task_ordinal
-                        ~source:(task_source_digest source ~checkpoint:guard)
-                    in
-                    { source; owner = state; handle; reference } :: origins
+                    { source
+                    ; owner = state
+                    ; handle
+                    ; reference = candidate_reference
+                    ; issuing_key = key
+                    }
+                    :: origins
                   | Not_a_task | Limit_reached -> origins
                 in
                 loop (remaining - 1) (receipt :: receipts) origins))
@@ -1051,6 +1258,7 @@ let execute_ready t state ~actor ready ~checked =
           | Cancelled_statement | Eio.Cancel.Cancelled Cancelled_statement ->
             "REPL statement cancelled", false
           | Admission_revoked _ -> "REPL source or actor admission expired", false
+          | Reference_limit -> "REPL Task reference limit reached", false
           | _ -> "REPL statement interrupted", true
         in
         if unexpected
@@ -1062,7 +1270,7 @@ let execute_ready t state ~actor ready ~checked =
   loop (Typing.Submission.statement_count ready) [] []
 ;;
 
-let process_submission t state ~actor source =
+let process_submission t state ~actor ~entry source =
   let open Result.Let_syntax in
   let previous_bytes = String.length state.pending_source in
   if String.length source > state.limits.max_source_bytes - previous_bytes
@@ -1088,33 +1296,35 @@ let process_submission t state ~actor source =
     | Typing.Submission.Need_more need_more ->
       state.pending_source <- text;
       Ok
-        { Submission.status =
-            Need_more
-              ( Parse.Submission.Need_more.reason need_more
-              , Parse.Submission.Need_more.at need_more )
-        ; details = Available
-        ; completed_statements = 0
-        ; revision
-        ; statements = []
-        ; task_handles = []
-        ; task_references = []
-        }
-      |> Result.map ~f:(limit_details state)
+        (compact_submission
+           t
+           state
+           ~status:
+             (Need_more
+                ( Parse.Submission.Need_more.reason need_more
+                , Some (Parse.Submission.Need_more.at need_more) ))
+           ~revision
+           ~completed_statements:0
+           ~statements:[]
+           ~handles:[]
+           ~references:[])
     | Typing.Submission.Rejected rejection ->
       state.pending_source <- "";
       Ok
-        { Submission.status = Rejected (rejected_diagnostic rejection)
-        ; details = Available
-        ; completed_statements = 0
-        ; revision
-        ; statements = []
-        ; task_handles = []
-        ; task_references = []
-        }
-      |> Result.map ~f:(limit_details state)
+        (compact_submission
+           t
+           state
+           ~status:(Rejected (rejected_diagnostic rejection))
+           ~revision
+           ~completed_statements:0
+           ~statements:[]
+           ~handles:[]
+           ~references:[])
     | Typing.Submission.Ready ready ->
       state.pending_source <- "";
-      let status, statements, origins = execute_ready t state ~actor ready ~checked in
+      let status, statements, origins =
+        execute_ready t state ~actor ~key:entry.key ready ~checked
+      in
       let completed_statements =
         List.count statements ~f:(fun receipt ->
           match Evaluator.Receipt.outcome receipt with
@@ -1123,33 +1333,21 @@ let process_submission t state ~actor source =
       in
       let handles = List.map origins ~f:(fun origin -> origin.handle) in
       let references = List.map origins ~f:(fun origin -> origin.reference) in
-      let submission =
-        { Submission.status
-        ; details = Available
-        ; completed_statements
-        ; revision
-        ; statements
-        ; task_handles = handles
-        ; task_references = references
-        }
-        |> limit_details state
-      in
-      if
-        List.length state.task_origins + List.length submission.task_handles
-        > state.limits.max_task_origins
-      then
-        Ok
-          { submission with
-            details = Output_limited
-          ; statements = []
-          ; task_handles = []
-          ; task_references = []
-          }
-      else (
-        if List.is_empty submission.task_handles
-        then ()
-        else state.task_origins <- origins @ state.task_origins;
-        Ok submission))
+      (* Configuration admits every handle the evaluator can retain. This
+         nonyielding publication precedes optional presentation work. *)
+      state.task_origins <- origins @ state.task_origins;
+      entry.reference_bytes <- List.sum (module Int) references ~f:reference_charge;
+      state.retained_bytes <- state.retained_bytes + entry.reference_bytes;
+      Ok
+        (compact_submission
+           t
+           state
+           ~status
+           ~revision
+           ~completed_statements
+           ~statements
+           ~handles
+           ~references))
 ;;
 
 let key_result entry =
@@ -1157,7 +1355,12 @@ let key_result entry =
   then Error (stale "developer REPL result detail expired")
   else (
     match entry.outcome with
-    | Some result -> result
+    | Some (Ok submission) ->
+      Ok
+        (match entry.type_details with
+         | Some statements -> { submission with statements }
+         | None -> { submission with details = Output_limited })
+    | Some (Error error) -> Error error
     | None -> Error (busy "developer REPL submission is still active"))
 ;;
 
@@ -1190,7 +1393,7 @@ let launch_submission t state entry ~actor ~source =
         Eio.Cancel.sub (fun cancel ->
           active.cancel <- Some cancel;
           if active.cancel_requested then Eio.Cancel.cancel cancel Cancelled_statement;
-          with_gate state.gate (fun () -> process_submission t state ~actor source))
+          with_gate state.gate (fun () -> process_submission t state ~actor ~entry source))
       with
       | exn ->
         (match exn with
@@ -1200,9 +1403,13 @@ let launch_submission t state entry ~actor ~source =
                  Stopped (Some (diagnostic "REPL statement cancelled" None))
              ; details = Available
              ; completed_statements = 0
+             ; statement_count = 0
              ; revision = state.revision
+             ; summaries = []
+             ; presentation_bytes = 0
              ; statements = []
              ; task_handles = []
+             ; task_reference_count = 0
              ; task_references = []
              }
          | Admission_revoked error -> Error error
@@ -1341,6 +1548,9 @@ let submit t ~actor ~instance ~epoch ~expected_revision ~key ~source =
             ; outcome = None
             ; expired = false
             ; charged_bytes = 0
+            ; reference_bytes = 0
+            ; type_details = None
+            ; type_detail_bytes = 0
             }
           in
           state.keys <- entry :: state.keys;
@@ -1369,6 +1579,139 @@ let observe t ~actor ~instance ~key =
      | Some active when P.Idempotency_key.equal active.key key ->
        Error (busy "developer REPL submission is still active")
      | Some _ | None -> Result.map (key_result entry) ~f:Option.some)
+;;
+
+let inspect_type t ~actor ~instance ~epoch ~key ~statement_index ~selector ~max_bytes =
+  let open Result.Let_syntax in
+  let%bind () = check_host t in
+  let%bind state =
+    find_instance t instance
+    |> Result.of_option ~error:(stale "developer REPL instance not found")
+  in
+  let%bind () = check_instance t state ~actor in
+  let%bind () = check_selection state ~actor ~checkpoint:t.checkpoint in
+  with_gate state.gate (fun () ->
+    if (not (Epoch.equal state.epoch epoch)) || Option.is_some state.control
+    then Error (stale "developer REPL epoch is not current")
+    else (
+      let%bind entry =
+        List.find state.keys ~f:(fun entry ->
+          Epoch.equal entry.epoch epoch && P.Idempotency_key.equal entry.key key)
+        |> Result.of_option ~error:(stale "developer REPL submission key not found")
+      in
+      let%bind submission, receipts =
+        match entry.outcome, entry.type_details with
+        | Some (Ok submission), Some receipts when not entry.expired ->
+          Ok (submission, receipts)
+        | Some (Error _), _ | Some (Ok _), None | None, _ | Some (Ok _), Some _ ->
+          Error (stale "developer REPL frozen type detail expired")
+      in
+      let%bind receipt =
+        List.nth receipts statement_index
+        |> Result.of_option ~error:(invalid "invalid REPL statement index")
+      in
+      let%bind inspected =
+        Projection.inspect
+          ~display_limits:t.configuration.type_display_limits
+          ~max_bytes
+          receipt
+          ~selector
+          ~checkpoint:t.checkpoint
+        |> Result.map_error ~f:(function
+          | Projection.Error.Invalid_max_bytes | Invalid_selection ->
+            invalid "invalid REPL type selection or byte limit"
+          | Output_limit -> limit "REPL type inspection output limit reached"
+          | Foreign_snapshot ->
+            P.Error.create
+              P.Error.Invalid_state
+              ~message:"developer REPL frozen type owner changed"
+              ~retryable:false
+              ())
+      in
+      let%bind () = check_instance t state ~actor in
+      let%bind () = check_selection state ~actor ~checkpoint:t.checkpoint in
+      if
+        (not (Epoch.equal state.epoch epoch))
+        || Option.is_some state.control
+        || entry.expired
+        || Option.is_none entry.type_details
+      then Error (stale "developer REPL frozen type detail expired")
+      else
+        Ok
+          { Type_inspection.revision = submission.revision
+          ; binding_name = Projection.Inspected.binding_name inspected
+          ; rendered = Projection.Inspected.rendered inspected
+          }))
+;;
+
+let task_references_page t ~actor ~instance ~epoch ~key ~after ~limit:requested_limit =
+  let open Result.Let_syntax in
+  let%bind () = check_host t in
+  let%bind state =
+    find_instance t instance
+    |> Result.of_option ~error:(stale "developer REPL instance not found")
+  in
+  let%bind () = check_instance t state ~actor in
+  let%bind () = check_selection state ~actor ~checkpoint:t.checkpoint in
+  with_gate state.gate (fun () ->
+    if (not (Epoch.equal state.epoch epoch)) || Option.is_some state.control
+    then Error (stale "developer REPL epoch is not current")
+    else if requested_limit <= 0 || requested_limit > state.limits.max_task_origins
+    then Error (invalid "invalid REPL Task reference page size")
+    else (
+      let%bind _entry =
+        List.find state.keys ~f:(fun entry ->
+          Epoch.equal entry.epoch epoch && P.Idempotency_key.equal entry.key key)
+        |> Result.of_option ~error:(stale "developer REPL submission key not found")
+      in
+      match state.active with
+      | Some active when P.Idempotency_key.equal active.key key ->
+        Error (busy "developer REPL submission is still active")
+      | Some _ | None ->
+        let references =
+          List.filter_map (List.rev state.task_origins) ~f:(fun origin ->
+            if P.Idempotency_key.equal origin.issuing_key key
+            then Some origin.reference
+            else None)
+        in
+        let%bind remaining =
+          match after with
+          | None -> Ok references
+          | Some cursor ->
+            (match
+               List.findi references ~f:(fun _ reference ->
+                 Task_reference.equal reference cursor)
+             with
+             | None -> Error (invalid "foreign REPL Task reference cursor")
+             | Some (index, _) -> Ok (List.drop references (index + 1)))
+        in
+        let rec page remaining_bytes remaining_items acc = function
+          | [] -> List.rev acc, false
+          | _ when remaining_items = 0 -> List.rev acc, true
+          | reference :: rest ->
+            let charge = reference_charge reference in
+            if charge > remaining_bytes
+            then List.rev acc, true
+            else
+              page
+                (remaining_bytes - charge)
+                (remaining_items - 1)
+                (reference :: acc)
+                rest
+        in
+        let items, more =
+          page (state.limits.max_reference_page_bytes - 64) requested_limit [] remaining
+        in
+        let%bind () = check_instance t state ~actor in
+        let%bind () = check_selection state ~actor ~checkpoint:t.checkpoint in
+        if (not (Epoch.equal state.epoch epoch)) || Option.is_some state.control
+        then Error (stale "developer REPL epoch is not current")
+        else
+          Ok
+            { Task_reference_page.items
+            ; next = (if more then List.last items else None)
+            ; total = List.length references
+            }))
 ;;
 
 let cancel_and_wait t ~actor ~instance ~key =
@@ -2090,6 +2433,26 @@ let reset_and_wait t ~actor ~instance ~expected_epoch ~key =
                        state.revision <- { Revision.token = ref (); serial = 0 };
                        state.submission_count <- 0;
                        state.pending_source <- "";
+                       List.iter state.keys ~f:(fun entry ->
+                         state.retained_bytes
+                         <- state.retained_bytes - entry.reference_bytes;
+                         state.retained_type_detail_bytes
+                         <- state.retained_type_detail_bytes - entry.type_detail_bytes;
+                         entry.reference_bytes <- 0;
+                         entry.type_detail_bytes <- 0;
+                         entry.type_details <- None;
+                         entry.outcome
+                         <- (match entry.outcome with
+                             | Some (Ok submission) when not entry.expired ->
+                               Some
+                                 (Ok
+                                    { submission with
+                                      details = Output_limited
+                                    ; statements = []
+                                    ; task_handles = []
+                                    ; task_references = []
+                                    })
+                             | outcome -> outcome));
                        state.task_origins <- [];
                        state.task_ordinal <- 0;
                        let result = view state in
