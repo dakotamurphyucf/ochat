@@ -1515,6 +1515,7 @@ let compose
         ~child_sources
         ~content_limits:options.content_limits
         ~agent_source_limits:limits.agent_sources
+        ~active_agent_calls:limits.active_agent_calls
         ~job_policy:Chat_response.One_off_request.default_policy
         ~runtime_policy:options.chatml_runtime_policy
         ~authorize_native:configuration.authorize_native

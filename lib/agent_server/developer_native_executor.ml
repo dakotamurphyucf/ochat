@@ -769,6 +769,19 @@ module Child = struct
     with_selection ~parent:parent.execution.base ~selection f
   ;;
 
+  let with_tool_target ~parent ~target ~prepared f =
+    let* borrowed = N.borrow_selected () in
+    let* selection =
+      Child_selection.create_tool
+        ~root:parent.execution.base.root
+        ~parent:parent.selection
+        ~target
+        ~prepared
+        ~borrowed
+    in
+    with_selection ~parent:parent.execution.base ~selection f
+  ;;
+
   let current_capabilities t = t.execution.selected_current ()
 
   let run t ~reference ~invocation ~native_invocation ~authorize ~prepare_output =

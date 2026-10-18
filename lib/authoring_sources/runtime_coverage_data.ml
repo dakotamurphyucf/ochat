@@ -190,6 +190,7 @@ let shared_features =
       ; "lib/agent_session/claimed_child_runtime.ml"
       ; "lib/agent_session/developer_claimed_resource_owner.ml"
       ; "lib/agent_session/developer_child_preflight.ml"
+      ; "lib/agent_session/selected_agent_depth.ml"
       ; "lib/agent_store/developer_run_document.ml"
       ; "lib/agent_store/developer_run_store.ml"
       ; "lib/agent_server/developer_root_owner.ml"
@@ -403,35 +404,35 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_background_job_runner.ml"
     , "bee393bda7895aeef41c69acab2b672d7c5e338a306cd01a179a5facdad7a8a3" )
   ; ( "lib/agent_server/developer_child_agent_runner.ml"
-    , "0fd93829790dbb703514b0444183e754894d4d970693612afef470746ffb4411" )
+    , "76943ca7ea6d366a43c0950bade622c58c2e881baf87a46f4c945e5104a2c032" )
   ; ( "lib/agent_server/developer_child_content_projection.ml"
     , "17dbb6bc0891ad5bb5c3879a2b1e946c05a01d13db32a15d220faa531cb82ba8" )
   ; ( "lib/agent_server/developer_child_selection.ml"
-    , "1af9f51272a7b1cf672101f369284be0b305bef2fe45bb435f6e0412fcf61f2b" )
+    , "615ce2d2ece542ac27f37f994fa6b727c7010ea467819bcf7e652d31b1e360d1" )
   ; ( "lib/agent_server/developer_queued_issuer.ml"
     , "d7a52e5cd46ff8da9f8c7143b9cd0609a97ed199671756d5a8b4c4014e06bce8" )
   ; ( "lib/agent_server/developer_live_resources.ml"
-    , "53f76fb6f3bcc3ca1fb80663f0210b8fb98ef7a161a6023db18cd9852a6ffa86" )
+    , "87c3a4c04848d58be23093bb04e409659a09401d4f23f3ba51ebf97672e809b6" )
   ; ( "lib/agent_server/developer_managed_tool_executor.ml"
     , "e7931b4f548e321069c442029d71c6cca47db54af468d7d30957ae6cdbd4a909" )
   ; ( "lib/agent_server/developer_native_executor.ml"
-    , "41ab8cbc2f76b2bb76d358e2da9acd849ebdc4e67719e1ab81a0225503ccf31c" )
+    , "0656f5d7beb46ead9e9f92b168f2a649f56ee2c760dcba355c77fac3dc739519" )
   ; ( "lib/agent_server/developer_root_owner.ml"
-    , "6de69c4bb8f0183b913d1249477605edec398f87bdf2cff0037f058b78313c98" )
+    , "3245327232f69eee160ec0629111110344cf3ccfa8c34dbade23e7774b164214" )
   ; ( "lib/agent_server/developer_script_job_execution.ml"
     , "4e30550f6585c6afa97ddd12a12042d0be26b84f18aad7f6f92b2f3a3bf4bb32" )
   ; ( "lib/agent_server/developer_script_job_service.ml"
     , "084f8f130b40d5cc1613b984de8f64468cb680bc39cac98995c1724a41add662" )
   ; ( "lib/agent_server/developer_host.ml"
-    , "371e6124c24aeebc296dc0c6ce7e6a27628c1f63018198d5482b563f4caffb22" )
+    , "4a5f9eb4c137b92843582eb97b50a56b5edf9c6e70d3a0706a49886a0b8b5c59" )
   ; ( "lib/agent_server/schedule_scheduler.ml"
     , "37cf371632d8ad86693c162e0593d56866f76df577dceb06ddd2ac5fe5bfdae9" )
   ; ( "lib/agent_session/background_execution.ml"
     , "2149c979ce81c6c851c8d8cbe749c622334f3c43d05b72b17ae89873e5d563c3" )
   ; ( "lib/agent_session/captured_agent_runner.ml"
-    , "e1a6b5a52e32b8129a1aa0552772e1d60374ab970390dd697c2c18fdb019c2a7" )
+    , "5f25d5713a1e374ae3e30cc234e9b390336e39d693061b76b5a552873a9d490b" )
   ; ( "lib/agent_session/developer_child_preflight.ml"
-    , "d0d24d3a0b95abe03712785d4bf828a976249cd2984c0990837bd63458f42a5e" )
+    , "8d5a7a6d439cf1b547ace620ac72fc33a1e9010b9d844ff3a154ac094d72f75a" )
   ; ( "lib/chat_response/converter.ml"
     , "c6cdff248b4433655daa72064ce42e90d9522a7e2a632b78f555f86961bc0b0e" )
   ; ( "lib/agent_store/developer_run_document.ml"

@@ -50,3 +50,26 @@ val create_content
   -> ( Agent_session.Captured_agent_runner.selected_content_runner
        , Agent_protocol.Error.t )
        result
+
+(** Build the inseparable pre-target Context loan and post-target Tool runner
+    from this exact Live/Root/Native package. The first callback requires the
+    current execute-scoped child Context under Root's authentic selected
+    inference frame, compares it with the retained [child_key] and physically
+    selected Native implementation, and lends only that guarded Context to
+    the lower parser callback. The second enters the resulting opaque Tool
+    target through the same Child_prepared/native/Job kernel. Both deny after
+    revocation; neither function is independently a source or provider grant.
+    Content/Model descendants retain the parent's active Agent-call depth. *)
+val create_tool
+  :  live:Developer_live_resources.live
+  -> root:Developer_root_owner.run
+  -> native:Developer_native_executor.t
+  -> runtime_policy:Chat_response.Runtime_semantics.policy
+  -> authorize:
+       (Agent_protocol.Host_invocation.t
+        -> Chat_response.Tool_capability.binding
+        -> (unit, Agent_protocol.Error.t) result)
+  -> prepare_output:
+       (Openai.Responses.Tool_output.Output.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> (Developer_live_resources.Selected_tool_callbacks.t, Agent_protocol.Error.t) result

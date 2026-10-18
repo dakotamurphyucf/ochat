@@ -345,6 +345,15 @@ let create_live_services t ~root ~resources ~current_actor =
       ~authorize:t.authorize_native
       ~prepare_output:t.prepare_output
   in
+  let%bind selected_tool_callbacks =
+    Child_runner.create_tool
+      ~live:resources
+      ~root
+      ~native
+      ~runtime_policy:t.runtime_policy
+      ~authorize:t.authorize_native
+      ~prepare_output:t.prepare_output
+  in
   let%map () =
     Live_resources.bind_agent_sources
       resources
@@ -352,6 +361,7 @@ let create_live_services t ~root ~resources ~current_actor =
       ~models:model
       ~run_selected_target
       ~run_selected_content
+      ~selected_tool_callbacks
       ~checkpoint:t.checkpoint
   in
   { jobs; native; background; model }
@@ -444,6 +454,7 @@ let create
       ~content_limits
       ~remote_content
       ~agent_source_limits
+      ~active_agent_calls
       ~job_policy
       ~runtime_policy
       ~authorize_native
@@ -497,6 +508,7 @@ let create
       ~remote_content
       ~artifact_store
       ~agent_source_limits
+      ~active_agent_calls
   in
   let%bind store_owner =
     Store.open_or_create session_store ~sw ~limits:store_limits ~checkpoint |> store

@@ -6,6 +6,7 @@ module D = Agent_session.Developer_invocation_owner.Selected
 module Saved = Agent_session.Captured_agent_runner.Claimed_developer.Selected
 module Content = Agent_session.Captured_agent_runner.Selected_content_target
 module Model = Agent_session.Captured_agent_runner.Selected_model_target
+module Tool = Agent_session.Captured_agent_runner.Selected_tool_target
 module Prepared = Developer_live_resources.Child_prepared
 module C = Chat_response.Tool_capability
 
@@ -23,6 +24,7 @@ and target =
   | Saved of Saved.Target.t
   | Content of Content.t
   | Model of Model.t
+  | Tool of Tool.t
 
 type selection = t
 
@@ -52,12 +54,14 @@ module Admission = struct
         match t.selection.target with
         | Saved target -> Saved.Target.check_descendant_now target ~child:current
         | Content target -> Content.check_descendant_now target ~child:current
-        | Model target -> Model.check_descendant_now target ~child:current)
+        | Model target -> Model.check_descendant_now target ~child:current
+        | Tool target -> Tool.check_descendant_now target ~child:current)
       else (
         match t.selection.target with
         | Saved target -> Saved.Target.check_now target
         | Content target -> Content.check_now target
-        | Model target -> Model.check_now target)
+        | Model target -> Model.check_now target
+        | Tool target -> Tool.check_now target)
     in
     Prepared.Admission.check_now t.refreshed
   ;;
@@ -78,18 +82,21 @@ let refresh_proof ~root ~target ~saved_ancestor ~prepared ~parent =
     | Saved target -> Saved.Target.check target
     | Content target -> Content.check target
     | Model target -> Model.check target
+    | Tool target -> Tool.check target
   in
   let check_target_now () =
     match target with
     | Saved target -> Saved.Target.check_now target
     | Content target -> Content.check_now target
     | Model target -> Model.check_now target
+    | Tool target -> Tool.check_now target
   in
   let check_descendant_now () =
     match target with
     | Saved target -> Saved.Target.check_descendant_now target ~child:borrowed
     | Content target -> Content.check_descendant_now target ~child:borrowed
     | Model target -> Model.check_descendant_now target ~child:borrowed
+    | Tool target -> Tool.check_descendant_now target ~child:borrowed
   in
   let check_saved_root () =
     if Saved.matches_borrowed saved borrowed
@@ -169,6 +176,7 @@ let create_descendant ~root ~parent ~target ~prepared ~borrowed =
       match target with
       | Content target -> Prepared.matches_content_target prepared target
       | Model target -> Prepared.matches_model_target prepared target
+      | Tool target -> Prepared.matches_tool_target prepared target
       | Saved _ -> false
     then Ok ()
     else
@@ -179,12 +187,14 @@ let create_descendant ~root ~parent ~target ~prepared ~borrowed =
     | Saved target -> Content.Saved target
     | Content target -> Content.Content target
     | Model target -> Content.Model target
+    | Tool target -> Content.Tool target
   in
   let%bind () =
     if
       match target with
       | Content target -> Content.matches_parent target expected_parent
       | Model target -> Model.matches_parent target expected_parent
+      | Tool target -> Tool.matches_parent target expected_parent
       | Saved _ -> false
     then Ok ()
     else Error (P.Error.invalid_request "selected child has a foreign immediate parent")
@@ -266,6 +276,10 @@ let create_content ~root ~parent ~target ~prepared ~borrowed =
 
 let create_model ~root ~parent ~target ~prepared ~borrowed =
   create_descendant ~root ~parent ~target:(Model target) ~prepared ~borrowed
+;;
+
+let create_tool ~root ~parent ~target ~prepared ~borrowed =
+  create_descendant ~root ~parent ~target:(Tool target) ~prepared ~borrowed
 ;;
 
 let issuer t = t.issuer

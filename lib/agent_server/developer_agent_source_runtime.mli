@@ -32,6 +32,9 @@ module Limits : sig
       and physical comparison work. Lower parser/source and Root limits remain
       independently active; this policy cannot widen them. *)
   val create : max_agents:int -> max_work_steps:int -> t Or_error.t
+
+  val max_agents : t -> int
+  val max_work_steps : t -> int
 end
 
 (** Prepare the genuine retained revision and captured-source port using the

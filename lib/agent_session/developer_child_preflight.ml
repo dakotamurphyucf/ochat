@@ -4,6 +4,10 @@ module CM = Prompt.Chat_markdown
 let max_nodes = 16_384
 let max_text_bytes = 8 * 1024 * 1024
 
+type ordinary_agent_tools =
+  | Denied
+  | Registered
+
 let denied ~selected () =
   let message = "developer child effect needs a selected child owner" in
   if selected
@@ -47,7 +51,7 @@ let elements revision parsed =
        else invalid ())
 ;;
 
-let admit_surface ~selected ~revision ~parsed ~input ~checkpoint =
+let admit_surface ~selected ~ordinary_agent_tools ~revision ~parsed ~input ~checkpoint =
   let open Result.Let_syntax in
   let needs_dynamic_source = ref false in
   let remaining_nodes = ref max_nodes in
@@ -131,7 +135,16 @@ let admit_surface ~selected ~revision ~parsed ~input ~checkpoint =
     | CM.Builtin "fork" -> denied ~selected ()
     | CM.Builtin _ -> Ok ()
     | Read_file _ | Custom _ | Shell _ | Mcp _ | Extension _ -> Ok ()
-    | Agent _ | Persistent_agent _ | Inherited _ -> denied ~selected ()
+    | Agent declaration ->
+      (match ordinary_agent_tools with
+       | Registered when selected ->
+         let%bind () = text declaration.name in
+         let%bind () =
+           Option.value_map declaration.description ~default:(Ok ()) ~f:text
+         in
+         text declaration.agent
+       | Registered | Denied -> denied ~selected ())
+    | Persistent_agent _ | Inherited _ -> denied ~selected ()
   in
   let moderator_script (script : CM.script) =
     let%bind () = text script.id in
@@ -191,15 +204,27 @@ let admit_surface ~selected ~revision ~parsed ~input ~checkpoint =
 ;;
 
 let admit_literal ~revision ~parsed ~checkpoint =
-  admit_surface ~selected:false ~revision ~parsed ~input:[] ~checkpoint
+  admit_surface
+    ~selected:false
+    ~ordinary_agent_tools:Denied
+    ~revision
+    ~parsed
+    ~input:[]
+    ~checkpoint
   |> Result.map ~f:ignore
 ;;
 
 let admit_selected ~revision ~parsed ~input ~checkpoint =
-  admit_surface ~selected:true ~revision ~parsed ~input ~checkpoint
+  admit_surface
+    ~selected:true
+    ~ordinary_agent_tools:Denied
+    ~revision
+    ~parsed
+    ~input
+    ~checkpoint
   |> Result.map ~f:ignore
 ;;
 
-let classify_selected ~revision ~parsed ~input ~checkpoint =
-  admit_surface ~selected:true ~revision ~parsed ~input ~checkpoint
+let classify_selected ~ordinary_agent_tools ~revision ~parsed ~input ~checkpoint =
+  admit_surface ~selected:true ~ordinary_agent_tools ~revision ~parsed ~input ~checkpoint
 ;;

@@ -7,6 +7,7 @@ module Live = Developer_live_resources
 module Saved = Agent_session.Captured_agent_runner.Claimed_developer.Selected
 module Content_target = Agent_session.Captured_agent_runner.Selected_content_target
 module Model_target = Agent_session.Captured_agent_runner.Selected_model_target
+module Tool_target = Agent_session.Captured_agent_runner.Selected_tool_target
 module Native_borrow = Agent_session.Native_tool_invocation
 module Revision = Agent_session.Prompt_revision
 module C = Chat_response.Tool_capability
@@ -129,6 +130,13 @@ type child_context =
   }
 
 let child_key : child_context Eio.Fiber.key = Eio.Fiber.create_key ()
+
+type execute_context =
+  { child : child_context
+  ; ctx : Eio_unix.Stdenv.base Chat_response.Ctx.t
+  }
+
+let execute_context_key : execute_context Eio.Fiber.key = Eio.Fiber.create_key ()
 
 type selected_moderator_run =
   { prepared : Live.Child_prepared.t
@@ -292,8 +300,12 @@ let rec run_child
       let* current = Live.Child_prepared.refresh prepared in
       Live.Child_prepared.Admission.check_now current
     in
+    let check_inference_current () =
+      let* current = Live.Child_prepared.refresh_current_borrow prepared in
+      Live.Child_prepared.Admission.check_now current
+    in
     let require_current () =
-      match check_current () with
+      match check_inference_current () with
       | Ok () -> ()
       | Error _ -> raise Chat_response.Ctx.Inference_admission_rejected
     in
@@ -301,7 +313,7 @@ let rec run_child
       let submission =
         Inference_runtime.Submission_guard.create ~refresh:(fun () ->
           let current =
-            match Live.Child_prepared.refresh prepared with
+            match Live.Child_prepared.refresh_current_borrow prepared with
             | Ok current -> current
             | Error _ -> raise Chat_response.Ctx.Inference_admission_rejected
           in
@@ -358,8 +370,7 @@ let rec run_child
     in
     let* select =
       match target with
-      | Content_target.Tool _ ->
-        Error (invalid "selected Tool source has no child runtime")
+      | Content_target.Tool _ -> Ok Prepared.select_prepared
       | Content_target.Model _ -> Ok Prepared.select_prepared_model
       | Content_target.Saved _ | Content_target.Content _ -> Ok Prepared.select_prepared
     in
@@ -499,7 +510,12 @@ let rec run_child
       ~target
       ~selected_context:(Prepared.context selected_inputs).inference_context
       ~f:(fun inference_context ->
-        run_selected (Prepared.with_inference_context selected_inputs ~inference_context)))
+        let selected_inputs =
+          Prepared.with_inference_context selected_inputs ~inference_context
+        in
+        let execution = { child = context; ctx = Prepared.context selected_inputs } in
+        Eio.Fiber.with_binding execute_context_key execution (fun () ->
+          run_selected selected_inputs)))
 
 and selected_model_source
       ~root
@@ -695,4 +711,121 @@ let create_content ~live ~root ~native ~runtime_policy ~authorize ~prepare_outpu
                    ~source
                    ~history_compaction:false
                    ~selected_session_id:None)))
+;;
+
+let create_tool ~live ~root ~native ~runtime_policy ~authorize ~prepare_output =
+  if not (N.issued_by_root native root)
+  then Error (invalid "ordinary Agent Tool runner belongs to another physical Root")
+  else (
+    let borrow_child_context ~implementation ~invocation:_ f =
+      let* parent =
+        Eio.Fiber.get child_key
+        |> Result.of_option
+             ~error:(invalid "ordinary Agent Tool has no selected child parent")
+      in
+      let* execution =
+        Eio.Fiber.get execute_context_key
+        |> Result.of_option
+             ~error:(invalid "ordinary Agent Tool has no active child execution")
+      in
+      let* () =
+        if
+          phys_equal execution.child parent
+          && Live.Child_prepared.issued_by_live parent.prepared live
+        then Ok ()
+        else Error (invalid "ordinary Agent Tool has a foreign child execution")
+      in
+      let check_current () =
+        let* borrowed = Native_borrow.borrow_selected () in
+        let* () = Native_borrow.check_selected_source borrowed ~implementation in
+        let* admission =
+          Live.Child_prepared.refresh_descendant parent.prepared ~child:borrowed
+        in
+        let* () = Live.Child_prepared.Admission.check_now admission in
+        let* inference = O.Model_inference.current_selected_context root in
+        let* () =
+          if phys_equal inference execution.ctx.inference_context
+          then Ok ()
+          else Error (invalid "ordinary Agent Tool has a foreign inference context")
+        in
+        Live.Child_prepared.check_tool_depth parent.prepared
+      in
+      let* () = check_current () in
+      let value = f execution.ctx in
+      let* () = check_current () in
+      Ok value
+    in
+    let run_selected_tool
+          ~target
+          ~startup
+          ~compilation_limits
+          ~programs
+          ~ctx
+          ~input
+          ~observer
+          ~source
+      =
+      let* parent =
+        Eio.Fiber.get child_key
+        |> Result.of_option
+             ~error:(invalid "ordinary Agent Tool has no selected child parent")
+      in
+      let* () =
+        if Live.Child_prepared.issued_by_live parent.prepared live
+        then Ok ()
+        else Error (invalid "ordinary Agent Tool has a foreign Live package")
+      in
+      let* _ = N.Child.current_capabilities parent.child in
+      let expected_parent =
+        match parent.target with
+        | Saved target -> Content_target.Saved target
+        | Content target -> Content_target.Content target
+        | Model target -> Content_target.Model target
+        | Tool target -> Content_target.Tool target
+      in
+      let* () =
+        if Tool_target.matches_parent target expected_parent
+        then Ok ()
+        else Error (invalid "ordinary Agent Tool has a foreign immediate parent")
+      in
+      let* () = Tool_target.check target in
+      let* borrowed = Native_borrow.borrow_selected () in
+      let* admission =
+        Live.Child_prepared.refresh_descendant parent.prepared ~child:borrowed
+      in
+      let* () = Live.Child_prepared.Admission.check_now admission in
+      Live.with_selected_tool_child
+        ~parent:parent.prepared
+        ~target
+        ~startup
+        ~compilation_limits
+        ~programs
+        ~input
+        ~f:(fun prepared ->
+          N.Child.with_tool_target ~parent:parent.child ~target ~prepared (fun child ->
+            let* () =
+              Content.Budget.admit_revisions
+                parent.budget
+                ~declaration:(Tool_target.revision target)
+                ~caller:(Tool_target.caller_revision target)
+            in
+            run_child
+              ~root
+              ~runtime_policy
+              ~authorize
+              ~prepare_output
+              ~prepared
+              ~child
+              ~budget:parent.budget
+              ~target:(Content_target.Tool target)
+              ~caller_revision:(Tool_target.caller_revision target)
+              ~startup
+              ~ctx
+              ~input
+              ~observer
+              ~source
+              ~history_compaction:false
+              ~selected_session_id:None))
+    in
+    Ok (Live.Selected_tool_callbacks.create ~borrow_child_context ~run_selected_tool))
 ;;

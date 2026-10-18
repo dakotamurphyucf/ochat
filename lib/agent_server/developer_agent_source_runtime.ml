@@ -34,6 +34,9 @@ module Limits = struct
     then Or_error.error_string "deferred Agent limits must be positive and bounded"
     else Ok { max_agents; max_work_steps }
   ;;
+
+  let max_agents t = t.max_agents
+  let max_work_steps t = t.max_work_steps
 end
 
 type bound =

@@ -607,10 +607,17 @@ module Source_binding : sig
       -> ('a, Agent_protocol.Error.t) result
   end
 
+  (** Bind the original source policy, compiler contract and validated active
+      Agent-call limit once. The selected runner revision includes this limit;
+      the queued issuer comparison digest covers both effective developer
+      literal and selected runner revisions. These values have distinct roles
+      and need not equal each other. An older issuer digest cannot silently
+      reinterpret the active depth. This creates no child grant. *)
   val create
     :  source:Source.t
     -> tool_contract:Chatml_compilation.Tool_contract.t
     -> runtime_policy_revision:Chatml_source.Digest.t
+    -> active_agent_calls:Selected_agent_depth.Limits.t
     -> content_limits:Chatmd_prompt_content.Limits.t option
     -> artifact_store:Agent_store.Prompt_artifact_store.t
     -> source_lease:Prompt_source_lease.t
@@ -845,7 +852,7 @@ module Deferred_developer : sig
          (implementation:Ochat_function.t
           -> invocation:Ochat_function.Invocation.t
           -> (Eio_unix.Stdenv.base Chat_response.Ctx.t -> string)
-          -> string)
+          -> (string, Agent_protocol.Error.t) result)
     -> run_selected_tool:selected_tool_runner
     -> (t, Agent_protocol.Error.t) result
 

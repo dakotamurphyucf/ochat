@@ -15,6 +15,66 @@ module Target = Saved.Target
 module Content_target = Agent_session.Captured_agent_runner.Selected_content_target
 module Model_target = Agent_session.Captured_agent_runner.Selected_model_target
 module Source_binding = Agent_session.Captured_agent_runner.Source_binding
+module Tool_target = Agent_session.Captured_agent_runner.Selected_tool_target
+
+module Selected_tool_callbacks = struct
+  type t =
+    { borrow_child_context :
+        implementation:Ochat_function.t
+        -> invocation:Ochat_function.Invocation.t
+        -> (Eio_unix.Stdenv.base Chat_response.Ctx.t -> string)
+        -> (string, P.Error.t) result
+    ; run_selected_tool : Agent_session.Captured_agent_runner.selected_tool_runner
+    ; mutable revoked : bool
+    }
+
+  let create ~borrow_child_context ~run_selected_tool =
+    { borrow_child_context; run_selected_tool; revoked = false }
+  ;;
+
+  let revoke t = t.revoked <- true
+
+  let borrow_child_context t ~implementation ~invocation f =
+    if t.revoked
+    then Error (P.Error.invalid_request "selected Tool owner has expired")
+    else t.borrow_child_context ~implementation ~invocation f
+  ;;
+
+  let run_selected_tool
+        t
+        ~target
+        ~startup
+        ~compilation_limits
+        ~programs
+        ~ctx
+        ~input
+        ~observer
+        ~source
+    =
+    if t.revoked
+    then Error (P.Error.invalid_request "selected Tool owner has expired")
+    else
+      t.run_selected_tool
+        ~target
+        ~startup
+        ~compilation_limits
+        ~programs
+        ~ctx
+        ~input
+        ~observer
+        ~source
+  ;;
+end
+
+type selected_callbacks =
+  { content : Agent_session.Captured_agent_runner.selected_content_runner
+  ; tool : Selected_tool_callbacks.t
+  }
+
+type selected_sources =
+  | Unbound
+  | Bound of selected_callbacks
+  | Revoked
 
 module Owner = struct
   exception Stop
@@ -111,6 +171,7 @@ type t =
   ; remote_content : Developer_child_remote_content.t option
   ; artifact_store : Agent_store.Prompt_artifact_store.t
   ; agent_source_limits : Developer_agent_source_runtime.Limits.t
+  ; active_agent_calls : Agent_session.Selected_agent_depth.Limits.t
   ; gate : Eio.Mutex.t
   ; mutable unresolved : Workspace.t option
   }
@@ -136,8 +197,7 @@ type live =
   ; approval_provider : Shell_runtime.Approval_broker.provider
   ; source_binding : Agent_session.Captured_agent_runner.Source_binding.t option
   ; agent_source_runtime : Developer_agent_source_runtime.t option
-  ; mutable selected_content_runner :
-      Agent_session.Captured_agent_runner.selected_content_runner option
+  ; mutable selected_sources : selected_sources
   ; mutable closing : bool
   ; mutable closed : bool
   }
@@ -175,6 +235,7 @@ let create
       ~remote_content
       ~artifact_store
       ~agent_source_limits
+      ~active_agent_calls
   =
   let open Result.Let_syntax in
   let%bind remote_content =
@@ -209,6 +270,7 @@ let create
       ; remote_content
       ; artifact_store
       ; agent_source_limits
+      ; active_agent_calls
       ; gate = Eio.Mutex.create ()
       ; unresolved = None
       }
@@ -452,6 +514,7 @@ let prepare_on_switch t ~owner ~sw ~handle ~original_actor ~prompt ~workspace ~c
               Session_factory.Child_source_policy.bind
                 child_sources
                 ~tool_contract:(Definition.tool_contract definition)
+                ~active_agent_calls:t.active_agent_calls
                 ~content_limits:t.content_limits
                 ~artifact_store:t.artifact_store
                 ~source_lease
@@ -592,7 +655,7 @@ let prepare_on_switch t ~owner ~sw ~handle ~original_actor ~prompt ~workspace ~c
             ; approval_provider
             ; source_binding
             ; agent_source_runtime
-            ; selected_content_runner = None
+            ; selected_sources = Unbound
             ; closing = false
             ; closed = false
             })
@@ -798,6 +861,7 @@ let with_claimed_issuer live ~root ~active ~parent ~request ~runtime_policy ~che
        in
        let%bind _needs_dynamic_source =
          Agent_session.Developer_child_preflight.classify_selected
+           ~ordinary_agent_tools:Denied
            ~revision
            ~parsed
            ~input:[]
@@ -868,12 +932,15 @@ type child_target =
   | Saved of Target.t
   | Content of Content_target.t
   | Model of Model_target.t
+  | Tool of Tool_target.t
 
 type child_prepared =
   { live : live
   ; root : Root.run
   ; target : child_target
   ; saved_ancestor : Target.t
+  ; entry_borrowed : Agent_session.Native_tool_invocation.selected_borrowed
+  ; agent_depth : Agent_session.Selected_agent_depth.Active.t
   ; content_ports : Source_binding.Content_ports.t
   ; revision : Revision.t
   ; switch : Eio.Switch.t
@@ -929,19 +996,25 @@ module Child_prepared = struct
   let matches_target t target =
     match t.target with
     | Saved actual -> phys_equal actual target
-    | Content _ | Model _ -> false
+    | Content _ | Model _ | Tool _ -> false
   ;;
 
   let matches_content_target t target =
     match t.target with
     | Content actual -> phys_equal actual target
-    | Saved _ | Model _ -> false
+    | Saved _ | Model _ | Tool _ -> false
   ;;
 
   let matches_model_target t target =
     match t.target with
     | Model actual -> phys_equal actual target
-    | Saved _ | Content _ -> false
+    | Saved _ | Content _ | Tool _ -> false
+  ;;
+
+  let matches_tool_target t target =
+    match t.target with
+    | Tool actual -> phys_equal actual target
+    | Saved _ | Content _ | Model _ -> false
   ;;
 
   let check_target t =
@@ -949,6 +1022,7 @@ module Child_prepared = struct
     | Saved target -> Target.check target
     | Content target -> Content_target.check target
     | Model target -> Model_target.check target
+    | Tool target -> Tool_target.check target
   ;;
 
   let check_target_now t =
@@ -956,6 +1030,7 @@ module Child_prepared = struct
     | Saved target -> Target.check_now target
     | Content target -> Content_target.check_now target
     | Model target -> Model_target.check_now target
+    | Tool target -> Tool_target.check_now target
   ;;
 
   let check_target_descendant_now t ~child =
@@ -963,12 +1038,19 @@ module Child_prepared = struct
     | Saved target -> Target.check_descendant_now target ~child
     | Content target -> Content_target.check_descendant_now target ~child
     | Model target -> Model_target.check_descendant_now target ~child
+    | Tool target -> Tool_target.check_descendant_now target ~child
   ;;
 
   let revision t = t.revision
   let runtime t = t.runtime
   let selected_native t = t.selected
   let managed_definition t = t.managed
+
+  let check_tool_depth t =
+    Agent_session.Selected_agent_depth.Active.descend t.agent_depth
+    |> Result.map ~f:ignore
+  ;;
+
   let needs_dynamic_source t = t.needs_dynamic_source
   let remote_content t = t.live.host.remote_content
   let content_limits t = t.live.host.content_limits
@@ -1060,6 +1142,14 @@ module Child_prepared = struct
       check_descendant_full t ~child)
   ;;
 
+  let refresh_current_borrow t =
+    let open Result.Let_syntax in
+    let%bind borrowed = Agent_session.Native_tool_invocation.borrow_selected () in
+    if phys_equal borrowed t.entry_borrowed
+    then refresh t
+    else refresh_descendant t ~child:borrowed
+  ;;
+
   module Admission = struct
     type t = Admission_data.t
 
@@ -1085,6 +1175,7 @@ module Child_prepared = struct
       | Saved target -> Source_binding.selected_content_source source ~target
       | Content target -> Source_binding.selected_descendant_content_source source ~target
       | Model target -> Source_binding.selected_model_content_source source ~target
+      | Tool target -> Source_binding.selected_tool_content_source source ~target
     in
     let%bind current = refresh t in
     let%map () = Admission.check_now current in
@@ -1167,6 +1258,7 @@ let with_child
       ~root
       ~target
       ~saved_ancestor
+      ~agent_depth
       ~daemon_sw
       ~startup
       ~compilation_limits
@@ -1181,18 +1273,21 @@ let with_child
     | Saved target -> Target.check target
     | Content target -> Content_target.check target
     | Model target -> Model_target.check target
+    | Tool target -> Tool_target.check target
   in
   let check_target_now () =
     match target with
     | Saved target -> Target.check_now target
     | Content target -> Content_target.check_now target
     | Model target -> Model_target.check_now target
+    | Tool target -> Tool_target.check_now target
   in
   let revision =
     match target with
     | Saved target -> Target.revision target
     | Content target -> Content_target.revision target
     | Model target -> Model_target.revision target
+    | Tool target -> Tool_target.revision target
   in
   let check_full () =
     let%bind () = check_source_bound_now live ~root in
@@ -1220,20 +1315,83 @@ let with_child
         |> Result.of_option
              ~error:(invalid "selected child has no retained parser context")
       in
-      let%bind needs_dynamic_source =
-        Agent_session.Developer_child_preflight.classify_selected
-          ~revision
-          ~parsed
-          ~input
-          ~checkpoint
-      in
-      let%bind () = check_full () in
       let%bind () =
         Agent_store.Prompt_artifact_store.verify_tree_with_checkpoint
           ~root:(Revision.materialized_tree revision)
           (Revision.artifact revision)
           ~checkpoint
         |> Result.map_error ~f:(fun _ -> invalid "developer child artifact changed")
+      in
+      let%bind () = check_full () in
+      let authorizer =
+        manifest_authorizer
+          live.host
+          ~definition:live.definition
+          ~workspace_definition:live.workspace_definition
+          ~revision
+          ~original_actor:live.original_actor
+      in
+      let%bind binding =
+        live.source_binding
+        |> Result.of_option
+             ~error:(invalid "selected child has no original source binding")
+      in
+      let%bind script_preparation =
+        live.host.script_preparation
+        |> Result.of_option
+             ~error:(invalid "selected child script preparation is unavailable")
+      in
+      let%bind callbacks =
+        match live.selected_sources with
+        | Bound callbacks -> Ok callbacks
+        | Unbound | Revoked -> Error (invalid "selected child runners are unavailable")
+      in
+      let parent =
+        match target with
+        | Saved target -> Content_target.Saved target
+        | Content target -> Content_target.Content target
+        | Model target -> Content_target.Model target
+        | Tool target -> Content_target.Tool target
+      in
+      let%bind tool_registration =
+        Agent_session.Captured_agent_runner.Deferred_developer.prepare_selected_child
+          binding
+          ~parent
+          ~script_preparation
+          ~manifest_authorizer:authorizer
+          ~approval_provider:live.approval_provider
+          ~response_dir:live.response_dir
+          ~env:live.host.env
+          ~revision
+          ~sw
+          ~max_agents:
+            (Developer_agent_source_runtime.Limits.max_agents
+               live.host.agent_source_limits)
+          ~max_work_steps:
+            (Developer_agent_source_runtime.Limits.max_work_steps
+               live.host.agent_source_limits)
+          ~checkpoint
+          ~borrow_child_context:
+            (Selected_tool_callbacks.borrow_child_context callbacks.tool)
+          ~run_selected_tool:(Selected_tool_callbacks.run_selected_tool callbacks.tool)
+      in
+      let native_registrations =
+        Agent_session.Captured_agent_runner.Deferred_developer.registrations
+          tool_registration
+      in
+      let%bind () = check_full () in
+      let ordinary_agent_tools =
+        if List.is_empty native_registrations
+        then Agent_session.Developer_child_preflight.Denied
+        else Agent_session.Developer_child_preflight.Registered
+      in
+      let%bind needs_dynamic_source =
+        Agent_session.Developer_child_preflight.classify_selected
+          ~ordinary_agent_tools
+          ~revision
+          ~parsed
+          ~input
+          ~checkpoint
       in
       let%bind () = check_full () in
       let prompt_dir =
@@ -1254,14 +1412,6 @@ let with_child
           ~session_id:live.shell_owner_id
           ~prompt_elements:elements
         |> Result.map_error ~f:diagnostic_error
-      in
-      let authorizer =
-        manifest_authorizer
-          live.host
-          ~definition:live.definition
-          ~workspace_definition:live.workspace_definition
-          ~revision
-          ~original_actor:live.original_actor
       in
       let preparation_denial = ref None in
       let check_preparation_now () =
@@ -1297,7 +1447,7 @@ let with_child
           ?programs
           ~checkpoint
           ~check_preparation_now
-          ~native_registrations:[]
+          ~native_registrations
           ~sw
           ~host
           ~platform:(Runtime.platform ())
@@ -1316,32 +1466,11 @@ let with_child
       then Error (invalid "developer child native binding limit exceeded")
       else (
         let%bind () = check_full () in
-        let%bind binding =
-          live.source_binding
-          |> Result.of_option
-               ~error:(invalid "selected child has no original source binding")
-        in
-        let%bind run_selected_content =
-          live.selected_content_runner
-          |> Result.of_option
-               ~error:(invalid "selected child content runner is unavailable")
-        in
-        let%bind script_preparation =
-          live.host.script_preparation
-          |> Result.of_option
-               ~error:(invalid "selected child script preparation is unavailable")
-        in
-        let parent =
-          match target with
-          | Saved target -> Content_target.Saved target
-          | Content target -> Content_target.Content target
-          | Model target -> Content_target.Model target
-        in
         let%bind content_ports =
           Source_binding.bind_selected_child
             binding
             ~parent
-            ~run_selected_content
+            ~run_selected_content:callbacks.content
             ~script_preparation
             ~manifest_authorizer:authorizer
             ~approval_provider:live.approval_provider
@@ -1351,12 +1480,17 @@ let with_child
             ~sw
         in
         let%bind () = check_full () in
+        let%bind entry_borrowed =
+          Agent_session.Native_tool_invocation.borrow_selected ()
+        in
         let active = ref true in
         let prepared =
           { live
           ; root
           ; target
           ; saved_ancestor
+          ; entry_borrowed
+          ; agent_depth
           ; content_ports
           ; revision
           ; switch = sw
@@ -1402,6 +1536,8 @@ let with_saved_child live ~root ~target ~startup ~compilation_limits ~programs ~
     ~root
     ~target:(Saved target)
     ~saved_ancestor:target
+    ~agent_depth:
+      (Agent_session.Selected_agent_depth.Active.start live.host.active_agent_calls)
     ~daemon_sw:live.switch
     ~startup
     ~compilation_limits
@@ -1425,6 +1561,7 @@ let with_selected_content_child
     | Saved target -> Content_target.Saved target
     | Content target -> Content_target.Content target
     | Model target -> Content_target.Model target
+    | Tool target -> Content_target.Tool target
   in
   let%bind () =
     if Content_target.matches_parent target expected_parent
@@ -1439,6 +1576,50 @@ let with_selected_content_child
     ~root:parent.root
     ~target:(Content target)
     ~saved_ancestor:parent.saved_ancestor
+    ~agent_depth:parent.agent_depth
+    ~daemon_sw:parent.switch
+    ~startup
+    ~compilation_limits
+    ~programs
+    ~input
+    ~f
+;;
+
+let with_selected_tool_child
+      ~parent
+      ~target
+      ~startup
+      ~compilation_limits
+      ~programs
+      ~input
+      ~f
+  =
+  let open Result.Let_syntax in
+  let expected_parent =
+    match parent.target with
+    | Saved target -> Content_target.Saved target
+    | Content target -> Content_target.Content target
+    | Model target -> Content_target.Model target
+    | Tool target -> Content_target.Tool target
+  in
+  let%bind () =
+    if Tool_target.matches_parent target expected_parent
+    then Ok ()
+    else Error (invalid "ordinary Agent Tool belongs to another immediate child")
+  in
+  let%bind agent_depth =
+    Agent_session.Selected_agent_depth.Active.descend parent.agent_depth
+  in
+  let%bind borrowed = Agent_session.Native_tool_invocation.borrow_selected () in
+  let%bind admission = Child_prepared.refresh_descendant parent ~child:borrowed in
+  let%bind () = Child_prepared.Admission.check_now admission in
+  let%bind () = Tool_target.check target in
+  with_child
+    parent.live
+    ~root:parent.root
+    ~target:(Tool target)
+    ~saved_ancestor:parent.saved_ancestor
+    ~agent_depth
     ~daemon_sw:parent.switch
     ~startup
     ~compilation_limits
@@ -1454,6 +1635,7 @@ let with_selected_model_child ~parent ~target ~startup ~input ~f =
     | Saved target -> Content_target.Saved target
     | Content target -> Content_target.Content target
     | Model target -> Content_target.Model target
+    | Tool target -> Content_target.Tool target
   in
   let%bind () =
     if Model_target.matches_parent target expected_parent
@@ -1484,6 +1666,7 @@ let with_selected_model_child ~parent ~target ~startup ~input ~f =
         ~root:parent.root
         ~target:(Model target)
         ~saved_ancestor:parent.saved_ancestor
+        ~agent_depth:parent.agent_depth
         ~daemon_sw:parent.switch
         ~startup
         ~compilation_limits
@@ -1498,6 +1681,7 @@ let bind_agent_sources
       ~models
       ~run_selected_target
       ~run_selected_content
+      ~selected_tool_callbacks
       ~checkpoint
   =
   let open Result.Let_syntax in
@@ -1519,7 +1703,8 @@ let bind_agent_sources
            ~run_selected_target:(Some run_selected_target)
            ~checkpoint
        in
-       t.selected_content_runner <- Some run_selected_content)
+       t.selected_sources
+       <- Bound { content = run_selected_content; tool = selected_tool_callbacks })
 ;;
 
 let close_and_wait t =
@@ -1527,7 +1712,10 @@ let close_and_wait t =
   then Ok ()
   else (
     t.closing <- true;
-    t.selected_content_runner <- None;
+    (match t.selected_sources with
+     | Bound callbacks -> Selected_tool_callbacks.revoke callbacks.tool
+     | Unbound | Revoked -> ());
+    t.selected_sources <- Revoked;
     Option.iter t.agent_source_runtime ~f:Developer_agent_source_runtime.revoke;
     let joined = Owner.join t.owner in
     let closed = Workspace.close_and_wait t.workspace_owner in

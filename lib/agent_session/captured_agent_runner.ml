@@ -1526,12 +1526,19 @@ let create_runner = create
 module Source_binding = struct
   module P = Agent_protocol
 
+  type developer_execution_mode =
+    | Generic
+    | Literal
+    | Selected_saved of selected_saved_runner
+    | Selected_tool
+
   type t =
     { domain_id : int
     ; issuer : Binding_issuer.t
     ; source : Source.t
     ; tool_contract : Chatml_compilation.Tool_contract.t
     ; runtime_policy_revision : Chatml_source.Digest.t
+    ; active_agent_calls : Selected_agent_depth.Limits.t
     ; content_limits : Chatmd_prompt_content.Limits.t option
     ; artifact_store : Agent_store.Prompt_artifact_store.t
     ; source_lease : Prompt_source_lease.t
@@ -1541,6 +1548,7 @@ module Source_binding = struct
         ~source
         ~tool_contract
         ~runtime_policy_revision
+        ~active_agent_calls
         ~content_limits
         ~artifact_store
         ~source_lease
@@ -1550,6 +1558,7 @@ module Source_binding = struct
     ; source
     ; tool_contract
     ; runtime_policy_revision
+    ; active_agent_calls
     ; content_limits
     ; artifact_store
     ; source_lease = Prompt_source_lease.borrow source_lease
@@ -1566,14 +1575,34 @@ module Source_binding = struct
     let runtime t = t.runtime
   end
 
+  let developer_child_policy_identity t ~base ~selected_target =
+    if selected_target
+    then
+      numeric_identity
+        base
+        [%sexp
+          ("developer-selected-child.v2" : string)
+        , (Selected_agent_depth.Limits.max_active_calls t.active_agent_calls : int)]
+    else numeric_identity base [%sexp ("developer-literal-child.v1" : string)]
+  ;;
+
   let policy_identity t ~script_preparation =
     let runtime_digest =
-      runtime_policy_identity
-        ~script_preparation
-        ~tool_contract:t.tool_contract
-        ~content_limits:t.content_limits
-        ~policy_revision:t.runtime_policy_revision
-      |> fun base -> numeric_identity base [%sexp ("developer-literal-child.v1" : string)]
+      let base =
+        runtime_policy_identity
+          ~script_preparation
+          ~tool_contract:t.tool_contract
+          ~content_limits:t.content_limits
+          ~policy_revision:t.runtime_policy_revision
+      in
+      let literal = developer_child_policy_identity t ~base ~selected_target:false in
+      let selected = developer_child_policy_identity t ~base ~selected_target:true in
+      numeric_identity
+        base
+        [%sexp
+          ("developer-source-policy.v2" : string)
+        , (Chatml_source.Digest.to_hex literal : string)
+        , (Chatml_source.Digest.to_hex selected : string)]
     in
     Policy_identity.{ source = Source.policy_identity t.source; runtime = runtime_digest }
   ;;
@@ -2063,9 +2092,8 @@ module Source_binding = struct
   end
 
   let bind_with_literal_policy
-        ?run_selected_target
         t
-        ~developer_literal_child
+        ~developer_execution_mode
         ~script_preparation
         ~manifest_authorizer
         ~approval_provider
@@ -2087,21 +2115,39 @@ module Source_binding = struct
           ~approval_provider
           ~response_dir
       in
-      let runner =
-        if developer_literal_child
-        then
-          { runner with
-            developer_literal_child = true
-          ; policy_revision =
-              numeric_identity
-                runner.policy_revision
-                [%sexp
-                  (if Option.is_some run_selected_target
-                   then "developer-selected-child.v1"
-                   else "developer-literal-child.v1"
-                   : string)]
-          }
-        else runner
+      let runner, run_selected_target =
+        match developer_execution_mode with
+        | Generic -> runner, None
+        | Literal ->
+          ( { runner with
+              developer_literal_child = true
+            ; policy_revision =
+                developer_child_policy_identity
+                  t
+                  ~base:runner.policy_revision
+                  ~selected_target:false
+            }
+          , None )
+        | Selected_saved run_selected_target ->
+          ( { runner with
+              developer_literal_child = true
+            ; policy_revision =
+                developer_child_policy_identity
+                  t
+                  ~base:runner.policy_revision
+                  ~selected_target:true
+            }
+          , Some run_selected_target )
+        | Selected_tool ->
+          ( { runner with
+              developer_literal_child = true
+            ; policy_revision =
+                developer_child_policy_identity
+                  t
+                  ~base:runner.policy_revision
+                  ~selected_target:true
+            }
+          , None )
       in
       bind_installed_with_selected
         ?run_selected_target
@@ -2127,7 +2173,7 @@ module Source_binding = struct
     =
     bind_with_literal_policy
       t
-      ~developer_literal_child:false
+      ~developer_execution_mode:Generic
       ~script_preparation
       ~manifest_authorizer
       ~approval_provider
@@ -2148,10 +2194,36 @@ module Source_binding = struct
         ~revision
         ~sw
     =
+    let developer_execution_mode =
+      match run_selected_target with
+      | None -> Literal
+      | Some runner -> Selected_saved runner
+    in
     bind_with_literal_policy
-      ?run_selected_target
       t
-      ~developer_literal_child:true
+      ~developer_execution_mode
+      ~script_preparation
+      ~manifest_authorizer
+      ~approval_provider
+      ~response_dir
+      ~env
+      ~revision
+      ~sw
+  ;;
+
+  let bind_developer_selected_tool
+        t
+        ~script_preparation
+        ~manifest_authorizer
+        ~approval_provider
+        ~response_dir
+        ~env
+        ~revision
+        ~sw
+    =
+    bind_with_literal_policy
+      t
+      ~developer_execution_mode:Selected_tool
       ~script_preparation
       ~manifest_authorizer
       ~approval_provider
@@ -2577,7 +2649,7 @@ module Deferred_developer = struct
     in
     let%bind () = check_selected_content_parent parent in
     let%bind port =
-      Source_binding.bind_developer_literal
+      Source_binding.bind_developer_selected_tool
         source
         ~script_preparation
         ~manifest_authorizer
@@ -2631,7 +2703,7 @@ module Deferred_developer = struct
                     Error (failure "selected Tool implementation changed")
                 in
                 let%bind () = Tool_selection.check scope ~implementation ~port in
-                let value = borrow_child_context ~implementation ~invocation f in
+                let%bind value = borrow_child_context ~implementation ~invocation f in
                 let%map () = Tool_selection.check scope ~implementation ~port in
                 value)
               |> runner_result))
