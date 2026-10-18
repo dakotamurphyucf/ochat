@@ -147,17 +147,22 @@ let optional_field name value encode =
   | Some value -> [ name, encode value ]
 ;;
 
+let maximum_source_id_component_bytes = 1024
+
 let portable_member_string value =
-  match
-    Chatml_source.Id.create ~package_namespace:"authoring-wire" ~relative_path:value
-  with
-  | Ok _ -> Ok value
-  | Error _ -> invalid "invalid portable authoring member"
+  if String.length value > maximum_source_id_component_bytes
+  then invalid "portable authoring member exceeds wire limit"
+  else (
+    match
+      Chatml_source.Id.create ~package_namespace:"authoring-wire" ~relative_path:value
+    with
+    | Ok _ -> Ok value
+    | Error _ -> invalid "invalid portable authoring member")
 ;;
 
 let portable_member json =
   let open Result.Let_syntax in
-  let%bind value = string ~max_bytes:1024 json in
+  let%bind value = string ~max_bytes:maximum_source_id_component_bytes json in
   portable_member_string value
 ;;
 
@@ -183,16 +188,21 @@ let source_id_json id =
 ;;
 
 let validate_source_id id =
-  if String.length (Chatml_source.Id.package_namespace id) > 1024
+  if
+    String.length (Chatml_source.Id.package_namespace id)
+    > maximum_source_id_component_bytes
   then invalid "authoring source namespace exceeds wire limit"
-  else Ok ()
+  else portable_member_string (Chatml_source.Id.relative_path id) |> Result.map ~f:ignore
 ;;
 
 let source_id json =
   let open Result.Let_syntax in
   let%bind fields = fields ~allowed:[ "namespace_base64"; "member" ] json in
   let%bind package_namespace =
-    required_as fields "namespace_base64" (bytes_base64 ~max_bytes:1024)
+    required_as
+      fields
+      "namespace_base64"
+      (bytes_base64 ~max_bytes:maximum_source_id_component_bytes)
   in
   let%bind relative_path = required_as fields "member" portable_member in
   match Chatml_source.Id.create ~package_namespace ~relative_path with

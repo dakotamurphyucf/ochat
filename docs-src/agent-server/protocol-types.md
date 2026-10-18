@@ -2294,7 +2294,9 @@ val array : ('a -> Jsonaf.t) -> 'a list -> Jsonaf.t
 val optional_field : string -> 'a option -> ('a -> Jsonaf.t) -> (string * Jsonaf.t) list
 
 (** Source IDs encode the arbitrary-byte package namespace as bounded base64;
-    the portable relative member remains a UTF-8 JSON string. *)
+    the portable relative member remains a UTF-8 JSON string. Constructor and
+    decoder validation both require each source-ID component to fit 1,024
+    bytes, so an admitted ID can round-trip through this wire codec. *)
 val source_id : Jsonaf.t -> (Chatml_source.Id.t, Error.t) result
 
 val validate_source_id : Chatml_source.Id.t -> (unit, Error.t) result
@@ -4343,8 +4345,11 @@ module Capabilities : sig
       installed Host handlers for this authenticated connection, never the
       codec inventory. The server must additionally enforce selected Features.
       Construction is pure comparison data and does not install a handler.
-      [of_json] uses a fixed finite bootstrap Document_schema bound before
-      reading advertised limits; a peer cannot choose its own decode budget. *)
+      [create] and [of_json] share a fixed 64 KiB bootstrap Document_schema
+      bound before reading advertised limits; a peer cannot choose its own
+      decode budget. *)
+  val max_json_bytes : int
+
   val create
     :  format_version:int
     -> methods:string list

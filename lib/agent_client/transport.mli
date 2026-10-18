@@ -10,7 +10,7 @@ module Developer_response_bound : sig
   (** Upper bound on success result JSON only. Errors use an independent finite
       JSON bound. Socket/HTTP add the exact generated Envelope Request_id/framing
       length and enforce their physical line/body limits before parsing.
-      Bootstrap uses the protocol's fixed Capabilities decoder bound; Installed
+      Bootstrap uses the protocol's fixed 64 KiB Capabilities decoder bound; Installed
       is supplied only after Connection has checked the same physical
       negotiated Capabilities. *)
   val max_result_bytes : t -> int

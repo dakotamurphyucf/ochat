@@ -41,7 +41,7 @@ let wire_limits () =
   in
   D.Limits.create
     ~request:(document ~bytes:(1024 * 1024) ~depth:16 ~fields:1024 ~nodes:2048)
-    ~receipt:(document ~bytes:(1024 * 1024) ~depth:16 ~fields:1024 ~nodes:2048)
+    ~receipt:(document ~bytes:((1024 * 1024) + 362) ~depth:17 ~fields:1025 ~nodes:2049)
     ~response:(document ~bytes:(2 * 1024 * 1024) ~depth:24 ~fields:2048 ~nodes:4096)
     ~approval_page:(document ~bytes:(1024 * 1024) ~depth:16 ~fields:1024 ~nodes:2048)
     ~max_output_bytes:65536
@@ -68,8 +68,8 @@ let configured_wire_limits () =
   in
   D.Limits.create
     ~request:(document ~bytes:(1024 * 1024) ~depth:24 ~fields:2048 ~nodes:4096)
-    ~receipt:(document ~bytes:65536 ~depth:16 ~fields:1024 ~nodes:2048)
-    ~response:(document ~bytes:69632 ~depth:24 ~fields:1056 ~nodes:2080)
+    ~receipt:(document ~bytes:65898 ~depth:17 ~fields:1025 ~nodes:2049)
+    ~response:(document ~bytes:69994 ~depth:24 ~fields:1057 ~nodes:2081)
     ~approval_page:(document ~bytes:14080 ~depth:8 ~fields:32 ~nodes:48)
     ~max_output_bytes:65536
     ~max_fixture_steps:64
@@ -222,6 +222,117 @@ let open_and_analyze client =
   expected, selector
 ;;
 
+let qualify_rejected_check client ~limits ~run_id =
+  let source = "let main input = Task.pure(no_such_developer_identifier)" in
+  let document =
+    "<script id=\"s\" language=\"chatml\" kind=\"tool\">" ^ source ^ "</script>"
+  in
+  let opened =
+    P.Authoring.Context.Open_request.create_supplied_document
+      ~member:"draft.chatmd"
+      ~default_environment:None
+      ~contents:document
+    |> ok
+  in
+  let expected =
+    match call_authoring client (P.Authoring_wire.Request.Context_open opened) with
+    | P.Authoring_wire.Response.Context_open context ->
+      P.Authoring.Context.Expected.of_view context
+    | _ -> fail "rejected Check Context_open returned another method"
+  in
+  let selector = P.Authoring.Analysis.Target.selected_script "s" |> ok in
+  let analyze =
+    P.Authoring.Analysis.Analyze.Request.create ~context:expected ~target:selector |> ok
+  in
+  (match call_authoring client (P.Authoring_wire.Request.Analyze analyze) with
+   | P.Authoring_wire.Response.Analyze _ -> ()
+   | _ -> fail "rejected Check Analyze returned another method");
+  let route =
+    D.Route.document_script ~limits:(D.Limits.request limits) ~expected ~selector |> ok
+  in
+  let key = P.Idempotency_key.of_string "developer-wire-rejected-check" |> ok in
+  let submit =
+    D.Submit.create
+      ~limits
+      ~run_id
+      ~key
+      ~kind:P.Developer_receipt.Kind.Check
+      ~route
+      ~target:D.Target.One_off_v1
+      ~prompt:None
+      ~workspace:None
+      ~entrypoint:"main"
+      ~input:`Null
+      ~fixtures:None
+      ~requested_execution:None
+      ~requested_max_output_bytes:None
+    |> ok
+  in
+  let submitted =
+    match call_developer client ~limits (W.Request.Submit submit) with
+    | W.Response.Submit value -> value
+    | _ -> fail "rejected Check Submit returned another method"
+  in
+  let lookup = D.Lookup.create ~run_id ~key in
+  let terminal =
+    match call_developer client ~limits (W.Request.Await_terminal lookup) with
+    | W.Response.Await_terminal value -> value
+    | _ -> fail "rejected Check Await_terminal returned another method"
+  in
+  let observed =
+    match call_developer client ~limits (W.Request.Observe lookup) with
+    | W.Response.Observe (Some value) -> value
+    | _ -> fail "rejected Check Observe did not return its receipt"
+  in
+  require
+    (P.Developer_command_id.equal
+       (D.View.command_id submitted)
+       (D.View.command_id terminal)
+     && P.Developer_command_id.equal
+          (D.View.command_id terminal)
+          (D.View.command_id observed))
+    "rejected Check changed command identity";
+  let rejected view =
+    match D.View.phase view with
+    | D.View.Terminal { execution_started = false; receipt } ->
+      (match P.Developer_receipt.value receipt with
+       | P.Developer_receipt.Check (P.Developer_receipt.Check.Rejected value) -> value
+       | _ -> fail "rejected Check returned another receipt")
+    | _ -> fail "rejected Check did not settle before execution"
+  in
+  let terminal_diagnostic = rejected terminal in
+  let observed_diagnostic = rejected observed in
+  require
+    (String.equal terminal_diagnostic.code "chatml.invalid_handler")
+    "rejected Check diagnostic code changed";
+  let location = Option.value_exn terminal_diagnostic.location in
+  require
+    (Option.equal
+       (fun (left : P.Developer_receipt.Diagnostic.Location.t)
+         (right : P.Developer_receipt.Diagnostic.Location.t) ->
+          Chatml_source.Id.equal left.source right.source
+          && Chatml_source.Digest.equal left.digest right.digest
+          && Int.equal left.source_bytes right.source_bytes
+          && Int.equal left.start_byte right.start_byte
+          && Int.equal left.end_byte right.end_byte)
+       terminal_diagnostic.location
+       observed_diagnostic.location)
+    "rejected Check Await and Observe changed source attribution";
+  require
+    (let relative_path = Chatml_source.Id.relative_path location.source in
+     String.is_prefix relative_path ~prefix:"fragments/"
+     && String.is_suffix
+          relative_path
+          ~suffix:(Printf.sprintf "/0-%d.chatml" (String.length document))
+     && Chatml_source.Digest.equal
+          location.digest
+          (Chatml_source.Digest.of_contents source ~checkpoint:ignore)
+     && Int.equal location.source_bytes (String.length source)
+     && Int.equal location.start_byte 27
+     && Int.equal location.end_byte 55)
+    "rejected Check diagnostic lost its captured fragment, digest or byte range"
+;;
+
 let qualify_client ?expected_wire_limits ?(after_check = fun _ _ -> ()) client =
   Exn.protect
     ~f:(fun () ->
@@ -334,6 +445,7 @@ let qualify_client ?expected_wire_limits ?(after_check = fun _ _ -> ()) client =
           | P.Developer_receipt.Check P.Developer_receipt.Check.Ready -> ()
           | _ -> fail "Developer Check did not produce Ready")
        | _ -> fail "Developer Check was not terminal");
+      qualify_rejected_check client ~limits ~run_id;
       after_check run_id key)
     ~finally:client.close
 ;;

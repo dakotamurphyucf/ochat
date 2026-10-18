@@ -19,9 +19,13 @@ let%test_module "Developer portable framing admission" =
            ~max_depth:depth)
     ;;
 
+    let stored_receipt_limit = bound ~bytes:4096 ~fields:128 ~nodes:256 ~depth:8
+
     let limits =
       let request = bound ~bytes:4096 ~fields:128 ~nodes:256 ~depth:8 in
-      let receipt = bound ~bytes:4096 ~fields:128 ~nodes:256 ~depth:8 in
+      let receipt =
+        must (Developer_command_wire_receipt.required_limits ~stored:stored_receipt_limit)
+      in
       let approval_page = bound ~bytes:30_000 ~fields:200 ~nodes:200 ~depth:8 in
       let response = bound ~bytes:40_000 ~fields:400 ~nodes:400 ~depth:12 in
       must
@@ -67,7 +71,7 @@ let%test_module "Developer portable framing admission" =
              ~max_dependency_depth:32
              ~execution:Chatml_execution.default_limits
              ~max_output_bytes:1024
-             ~receipt:(L.receipt limits))
+             ~receipt:stored_receipt_limit)
       in
       must
         (Developer_portable_admission.check
@@ -76,6 +80,38 @@ let%test_module "Developer portable framing admission" =
            ~budgets
            ~approval:(Some broker)
            ~repl:None);
+      let equal_receipt_limits =
+        must
+          (L.create
+             ~request:(L.request limits)
+             ~receipt:stored_receipt_limit
+             ~response:(L.response limits)
+             ~approval_page:(L.approval_page limits)
+             ~max_output_bytes:(L.max_output_bytes limits)
+             ~max_fixture_steps:(L.max_fixture_steps limits)
+             ~max_fixture_bytes:(L.max_fixture_bytes limits)
+             ~max_approval_display_bytes:(L.max_approval_display_bytes limits)
+             ~max_approval_decision_reason_bytes:
+               (L.max_approval_decision_reason_bytes limits)
+             ~max_approval_page:(L.max_approval_page limits)
+             ~max_event_bytes:(L.max_event_bytes limits))
+      in
+      let equal_receipt_policy =
+        must
+          (Developer_endpoint.Policy.create
+             ~wire_limits:equal_receipt_limits
+             ~max_connections:1
+             ~max_watches_per_connection:2
+             ~max_pending_hints_per_connection:2)
+      in
+      assert (
+        Result.is_error
+          (Developer_portable_admission.check
+             ~policy:equal_receipt_policy
+             ~initialize:Daemon.default_options.protocol_limits
+             ~budgets
+             ~approval:(Some broker)
+             ~repl:None));
       let larger_host_budget =
         must
           (Developer_command_budgets.Configuration.create
@@ -83,7 +119,7 @@ let%test_module "Developer portable framing admission" =
              ~max_dependency_depth:32
              ~execution:Chatml_execution.default_limits
              ~max_output_bytes:2048
-             ~receipt:(L.receipt limits))
+             ~receipt:stored_receipt_limit)
       in
       assert (
         Result.is_error
@@ -300,7 +336,7 @@ let%test_module "Developer portable framing admission" =
              ~max_dependency_depth:32
              ~execution:Chatml_execution.default_limits
              ~max_output_bytes:1024
-             ~receipt:(L.receipt limits))
+             ~receipt:stored_receipt_limit)
       in
       let wire
             ?(page_items = 8)
@@ -351,6 +387,170 @@ let%test_module "Developer portable framing admission" =
       assert (not (admitted (wire ~page_bytes:1024 ())));
       assert (not (admitted (wire ~result_nodes:4100 ())));
       assert (not (admitted (wire ~response_nodes:8192 ())))
+    ;;
+
+    let%test_unit "stored command variants project through bounded typed wire receipts" =
+      let module Stored = Agent_store.Developer_command_receipt in
+      let module Wire = P.Developer_receipt in
+      let receipt_limit = bound ~bytes:4096 ~depth:16 ~fields:128 ~nodes:256 in
+      let stored value = must (Stored.create value ~limits:receipt_limit ~poll:ignore) in
+      let project value =
+        stored value
+        |> fun receipt ->
+        must (Developer_command_wire_receipt.project receipt ~limits:receipt_limit)
+        |> Wire.value
+      in
+      let source =
+        Chatml_source.Id.create
+          ~package_namespace:"developer-wire"
+          ~relative_path:"entry.chatml"
+        |> Or_error.ok_exn
+      in
+      let code = "let main input = missing" in
+      let location =
+        { Stored.Diagnostic.Location.source
+        ; digest = Chatml_source.Digest.of_contents code ~checkpoint:ignore
+        ; source_bytes = String.length code
+        ; start_byte = 17
+        ; end_byte = String.length code
+        }
+      in
+      let diagnostic =
+        { Stored.Diagnostic.code = "chatml.invalid_handler"
+        ; message = "unknown name"
+        ; location = Some location
+        }
+      in
+      let check_location (value : Wire.Diagnostic.t) =
+        match value.location with
+        | None -> failwith "typed wire projection lost source attribution"
+        | Some actual ->
+          assert (Chatml_source.Id.equal actual.source source);
+          assert (Chatml_source.Digest.equal actual.digest location.digest);
+          assert (Int.equal actual.source_bytes location.source_bytes);
+          assert (Int.equal actual.start_byte location.start_byte);
+          assert (Int.equal actual.end_byte location.end_byte)
+      in
+      List.iter
+        [ Stored.Fixture.Failure.Compile diagnostic
+        ; Runtime diagnostic
+        ; Invalid_result diagnostic
+        ]
+        ~f:(fun failure ->
+          let completed =
+            { Stored.Fixture.graph_fingerprint = digest
+            ; fixture_digest = digest
+            ; tool_selection_fingerprint = None
+            ; matched_steps = 0
+            ; logs = [ { Stored.Fixture.Log.level = Warn; message = "fixture warning" } ]
+            ; outcome = Failed failure
+            }
+          in
+          match project (Stored.Fixture (Completed completed)) with
+          | Wire.Fixture (Completed value) ->
+            assert (Int.equal (List.length value.logs) 1);
+            assert (String.equal (List.hd_exn value.logs).message "fixture warning");
+            (match value.outcome with
+             | Failed (Compile value | Runtime value | Invalid_result value) ->
+               check_location value
+             | _ -> failwith "fixture diagnostic outcome changed")
+          | _ -> failwith "fixture receipt changed family");
+      let error = P.Error.invalid_request "live failure" in
+      (match project (Stored.Live (Failed error)) with
+       | Wire.Live (Failed actual) ->
+         assert (P.Error.equal_code actual.code error.code);
+         assert (String.equal actual.message error.message)
+       | _ -> failwith "Live failure changed family");
+      let tiny = bound ~bytes:32 ~depth:16 ~fields:128 ~nodes:256 in
+      assert (
+        Result.is_error
+          (Developer_command_wire_receipt.project
+             (stored (Stored.Check (Rejected diagnostic)))
+             ~limits:tiny));
+      (match
+         Developer_command_wire_receipt.project
+           (stored (Stored.Task Interrupted))
+           ~limits:receipt_limit
+       with
+       | Error { code = Permission_denied; _ } -> ()
+       | _ -> failwith "Task receipt entered Command wire family");
+      let max_source =
+        Chatml_source.Id.create
+          ~package_namespace:(String.make 1024 'n')
+          ~relative_path:"entry.chatml"
+        |> Or_error.ok_exn
+      in
+      let maximal_location = { location with source = max_source } in
+      let maximal_diagnostic = { diagnostic with location = Some maximal_location } in
+      let maximal_value = Stored.Check (Rejected maximal_diagnostic) in
+      let maximal_stored = stored maximal_value in
+      let stored_bytes =
+        must
+          (D.Json.validate_and_measure
+             ~limits:receipt_limit
+             (Stored.to_json maximal_stored))
+      in
+      let wire_limit =
+        must (Developer_command_wire_receipt.required_limits ~stored:receipt_limit)
+      in
+      let maximal_wire =
+        must (Developer_command_wire_receipt.project maximal_stored ~limits:wire_limit)
+      in
+      let wire_bytes =
+        must (D.Json.validate_and_measure ~limits:wire_limit (Wire.to_json maximal_wire))
+      in
+      assert (Int.equal (wire_bytes - stored_bytes) 362);
+      let exact_stored_limit =
+        bound ~bytes:stored_bytes ~depth:16 ~fields:128 ~nodes:256
+      in
+      ignore
+        (must (Stored.create maximal_value ~limits:exact_stored_limit ~poll:ignore)
+         : Stored.t);
+      assert (
+        Result.is_error
+          (Developer_command_wire_receipt.project
+             maximal_stored
+             ~limits:exact_stored_limit));
+      let required =
+        must (Developer_command_wire_receipt.required_limits ~stored:exact_stored_limit)
+      in
+      assert (Int.equal (D.Limits.max_bytes required) wire_bytes);
+      assert (Int.equal (D.Limits.max_depth required) 17);
+      assert (Int.equal (D.Limits.max_fields required) 129);
+      assert (Int.equal (D.Limits.max_nodes required) 257);
+      ignore
+        (must (Developer_command_wire_receipt.project maximal_stored ~limits:required)
+         : Wire.t);
+      let overflow = bound ~bytes:Int.max_value ~depth:16 ~fields:128 ~nodes:256 in
+      assert (
+        Result.is_error (Developer_command_wire_receipt.required_limits ~stored:overflow));
+      let overlong_id =
+        Chatml_source.Id.create
+          ~package_namespace:(String.make 1025 'n')
+          ~relative_path:"entry.chatml"
+        |> Or_error.ok_exn
+      in
+      let overlong_source =
+        Chatml_source.create
+          overlong_id
+          ~contents:code
+          ~expected_digest:None
+          ~max_bytes:(Some 4096)
+          ~checkpoint:ignore
+        |> Or_error.ok_exn
+      in
+      let overlong_prepared =
+        Chatml_prepared_program.single_captured
+          ~compiler_contract:digest
+          ~source:overlong_source
+          ~max_input_bytes:4096
+          ~checkpoint:ignore
+          ()
+        |> must
+      in
+      assert (
+        Result.is_error
+          (Developer_command_wire_receipt.validate_prepared overlong_prepared))
     ;;
   end)
 ;;

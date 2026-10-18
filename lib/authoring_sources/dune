@@ -113,6 +113,7 @@
     lib/agent_protocol/developer_repl_wire_result.ml %{dep:../agent_protocol/developer_repl_wire_result.ml}
     lib/agent_protocol/developer_repl_wire_task.ml %{dep:../agent_protocol/developer_repl_wire_task.ml}
     lib/agent_protocol/developer_repl_wire.ml %{dep:../agent_protocol/developer_repl_wire.ml}
+    lib/agent_server/developer_command_wire_receipt.ml %{dep:../agent_server/developer_command_wire_receipt.ml}
     lib/agent_server/developer_endpoint.ml %{dep:../agent_server/developer_endpoint.ml}
     lib/agent_server/developer_repl_registry.ml %{dep:../agent_server/developer_repl_registry.ml}
     lib/agent_server/developer_portable_admission.ml %{dep:../agent_server/developer_portable_admission.ml}

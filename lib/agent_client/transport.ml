@@ -4,7 +4,7 @@ module Developer_response_bound = struct
     | Installed of Agent_protocol.Developer_common.Limits.t
 
   let max_result_bytes = function
-    | Bootstrap -> Document_schema.Limits.max_bytes Document_schema.Limits.default
+    | Bootstrap -> Agent_protocol.Developer_common.Capabilities.max_json_bytes
     | Installed limits ->
       Document_schema.Limits.max_bytes
         (Agent_protocol.Developer_common.Limits.response limits)

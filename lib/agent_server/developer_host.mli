@@ -435,7 +435,11 @@ module Command : sig
       [request_current] is a trusted nonyielding, nonraising lease predicate.
       It is checked through the pre-Reserve admission boundary but not retained
       by the installed callback, so disconnect cannot cancel accepted work.
-      The returned source remains subject to ordinary Candidate admission. *)
+      The returned source remains subject to ordinary Candidate admission.
+      [validate_capture] is trusted, pure, nonyielding compatibility validation
+      of the newly captured Prepared source IDs. It runs only after a historical
+      miss and before Reserve/effects; it grants no source or execution
+      authority. Direct nonportable callers pass an identity validator. *)
   val submit_resolving
     :  t
     -> actor:Operator_authorization.t
@@ -444,6 +448,7 @@ module Command : sig
     -> original:Original.t
     -> resolve_fresh:(unit -> (Original.Fresh_source.t, P.Error.t) result)
     -> request_current:(unit -> bool)
+    -> validate_capture:(Chatml_developer_capture.t -> (unit, P.Error.t) result)
     -> (view, P.Error.t) result
 
   (** Historical disclosure without same-request comparison. It never

@@ -26,6 +26,21 @@ changing its request conflicts, and a new key requires current source
 authority. The connection lease governs admission until durable Reserve;
 admitted work then continues under its original actor and source even if the
 connection closes. Responses are rechecked before disclosure.
+Terminal Check, Fixture and Live receipts are converted from their persisted
+values through typed protocol constructors after that disclosure check. A
+diagnostic keeps its exact captured source ID, digest and half-open byte range;
+the complete wire receipt is then validated under the installed byte and
+structure bound. Portable installation requires checked headroom over the
+Host's stored receipt ceiling for the diagnostic source ID's base64 encoding
+and one nested object. The configured startup preset derives that wire ceiling
+from the Host ceiling; a manually configured policy with insufficient headroom
+rejects before it can disclose a terminal row. On a fresh portable command,
+the Host checks every captured executable Source ID against the wire codec
+before Reserve. Check and Fixture diagnostics can attribute only one of those
+exact captured IDs. An unrepresentable source rejects without reserving a
+command, while a historical same-key lookup remains independent of any new
+source capture. Local nonportable commands retain their source rules. REPL Task
+receipts use their separate method family.
 
 A watch belongs to one disclosed run and command key. The Host enqueues
 bounded, process-local lifecycle and approval invalidations after authoritative
@@ -39,7 +54,8 @@ blocked publication, and Daemon shutdown joins the hub before closing shared
 Host and Authoring owners. The installed HTTP and directly authenticated Unix
 server paths share this Dispatcher. The portable Developer client routes the
 same closed methods through HTTP, Unix socket and the stdio relay. It obtains
-installed capabilities only after Initialize, decodes later responses under
+installed capabilities only after Initialize, decodes the initial Developer
+capability reply under a fixed 64 KiB bound, and decodes later responses under
 those effective bounds and checks the physical host/principal and exact
 command identity before presenting a View. A failed Submit after transport
 handoff retains the original bounded request for explicit same-key retry;

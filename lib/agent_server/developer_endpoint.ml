@@ -53,6 +53,11 @@ type t =
 let error code message = P.Error.create code ~message ~retryable:false ()
 let limits t = Policy.wire_limits t.policy
 
+let validate_portable_capture capture =
+  Developer_command_wire_receipt.validate_prepared
+    (Chatml_developer_capture.prepared capture)
+;;
+
 let create ~host ~authoring ~changes ~policy =
   if not (Developer_host.uses_authoring host authoring)
   then Error (error Invalid_request "developer endpoint has a different authoring owner")
@@ -277,9 +282,7 @@ let wire_kind = function
 ;;
 
 let wire_receipt ~limits receipt =
-  P.Developer_receipt.of_json
-    ~limits:(Common.Limits.receipt limits)
-    (Store.Developer_command_receipt.to_json receipt)
+  Developer_command_wire_receipt.project receipt ~limits:(Common.Limits.receipt limits)
 ;;
 
 let wire_view ~limits view =
@@ -488,6 +491,7 @@ let handle t ?actor ~connection request =
             ~original
             ~request_current:(fun () ->
               request_current_now t ~connection ~lease ~actor ~method_)
+            ~validate_capture:validate_portable_capture
             ~resolve_fresh:(fun () ->
               let%bind () = current_request t ~connection ~lease ~actor ~method_ in
               let%bind source = fresh_source t ~connection ~actor original in
