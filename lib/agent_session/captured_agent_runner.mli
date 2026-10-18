@@ -238,10 +238,14 @@ module Claimed_developer : sig
 end
 
 module Selected_child_target : sig
-  (** Private common ancestry node used by checked Content and Model targets.
+  (** Private common ancestry node used by checked Content, Model and Tool targets.
       Only the separately minted wrappers below expose typed receivers; no
       caller can construct or serialize a node from coordinates. *)
   module Model : sig
+    type t
+  end
+
+  module Tool : sig
     type t
   end
 end
@@ -252,9 +256,10 @@ module Selected_content_target : sig
       keeps its own defining parser/reference and cannot consume the enclosing
       Tool's recorded artifact. The issuer is minted only from the actual
       selected native borrow, the original invoke triple and the immediate
-      selected parent: either the saved Tool child or another authored Content
-      child. It also retains that ancestry's original saved Tool target. Every
-      level expires when its own callback or any ancestor child ends. *)
+      selected parent: the saved Tool child or another authored Content, Model
+      or ordinary Tool child. It also retains that ancestry's original saved
+      Tool target. Every level expires when its own callback or any ancestor
+      child ends. *)
   type t
 
   (** Comparison coordinates for the immediate physical parent. Constructing a
@@ -264,6 +269,7 @@ module Selected_content_target : sig
     | Saved of Claimed_developer.Selected.Target.t
     | Content of t
     | Model of Selected_child_target.Model.t
+    | Tool of Selected_child_target.Tool.t
 
   val revision : t -> Prompt_revision.t
   val caller_revision : t -> Prompt_revision.t
@@ -335,6 +341,53 @@ module Selected_model_target : sig
     -> (unit, Agent_protocol.Error.t) result
 end
 
+module Selected_tool_target : sig
+  (** One ordinary Agent Tool declared by the exact selected child's retained
+      parser and invoked through its physically installed Native_output/
+      Source(Some preparer) registration. This is a LIVE synchronous source
+      loan, not a saved Worker Claim or a caller-supplied Agent artifact. Its
+      immutable target is selected through the original Source_binding Port:
+      Captured consumes retained bytes; File alone reads the original live
+      lease. The actual native borrow, registered implementation, invocation,
+      parser reference, binding issuer and immediate selected parent must all
+      agree. The selected_borrowed scope supplies the physical Host invocation
+      identity; the separate Ochat_function.Invocation.t supplied to the
+      callback is only its lexical observation/parent value and has no Host
+      invocation ID to compare. A denial never falls through to
+      Claimed_developer or legacy Fetch.
+      This target and descendants expire on callback exit, including exception
+      or cancellation, even if the saved ancestor remains live. *)
+  type t = Selected_child_target.Tool.t
+
+  val revision : t -> Prompt_revision.t
+  val caller_revision : t -> Prompt_revision.t
+
+  (** Comparison only; neither the saved ancestor nor a matching revision is
+      independently an execution grant. *)
+  val saved_ancestor : t -> Claimed_developer.Selected.Target.t
+
+  val matches_parent : t -> Selected_content_target.parent -> bool
+
+  (** Yielding source/reference and selected-native checks, repeated after
+      selection. Does not lend Root, provider or child runtime authority. *)
+  val check : t -> (unit, Agent_protocol.Error.t) result
+
+  (** Final nonyielding proof that the retained implementation, invocation and
+      issuer still belong to the direct selected native borrow and its live
+      parent ancestry. *)
+  val check_now : t -> (unit, Agent_protocol.Error.t) result
+
+  (** Accept the target's own borrow or a genuine selected native descendant.
+      Descendants prove physical ancestry; they do not become the original
+      Tool's implementation or invocation. *)
+  val check_current_or_descendant_now : t -> (unit, Agent_protocol.Error.t) result
+
+  val check_descendant_now
+    :  t
+    -> child:Native_tool_invocation.selected_borrowed
+    -> (unit, Agent_protocol.Error.t) result
+end
+
 (** Trusted host callback for the one selected descendant content target. The
     source runner mints the target; this function value does not itself grant
     Root, parser, provider or source authority. *)
@@ -345,6 +398,21 @@ type selected_content_runner =
   -> programs:Chatml_prompt_programs.Restored.t option
   -> ctx:Eio_unix.Stdenv.base Chat_response.Ctx.t
   -> input:Prompt.Chat_markdown.content_item list
+  -> source:string
+  -> (string, Agent_protocol.Error.t) result
+
+(** Trusted upper callback for a parser-owned ordinary Agent Tool target. The
+    lower source/native loan mints the opaque target; this function value is
+    not a source, Root, provider or child runtime grant. Callback denial cannot
+    select the claimed Worker or literal runner instead. *)
+type selected_tool_runner =
+  target:Selected_tool_target.t
+  -> startup:Chat_response.Startup_compilation.t
+  -> compilation_limits:Chatml_compilation.limits
+  -> programs:Chatml_prompt_programs.Restored.t option
+  -> ctx:Eio_unix.Stdenv.base Chat_response.Ctx.t
+  -> input:Prompt.Chat_markdown.content_item list
+  -> observer:Chat_response.Driver.agent_observer option
   -> source:string
   -> (string, Agent_protocol.Error.t) result
 
@@ -523,7 +591,8 @@ module Source_binding : sig
 
     (** Lend one Model target under the actual selected declaring or caller
         Port. [member] and [selected] must arise from this SAME binding, side,
-        physical parent and retained member; equal paths/artifact IDs alone
+        physical Saved, Content, Model or Tool parent and retained member;
+        equal paths/artifact IDs alone
         reject. The target expires when [f] returns, including exceptions and
         cancellation. The later with_selected_model_child preparation binds
         the selected revision's own parser Port for Model->Content and retains
@@ -574,6 +643,15 @@ module Source_binding : sig
   val selected_model_content_source
     :  t
     -> target:Selected_model_target.t
+    -> (Content_source.t, Agent_protocol.Error.t) result
+
+  (** Short original-lease read port for an exact selected ordinary Agent Tool
+      target. The target's parser, native implementation, current invocation,
+      binding issuer and full selected ancestry are checked; a saved artifact
+      or matching path cannot construct this port. *)
+  val selected_tool_content_source
+    :  t
+    -> target:Selected_tool_target.t
     -> (Content_source.t, Agent_protocol.Error.t) result
 
   (** Select installed child code through this genuine borrowed source template.
@@ -633,7 +711,8 @@ module Source_binding : sig
 
   (** Bind the selected child revision to its own parser-owned Agent port under
       the immediate parent's joined switch. [parent] is the exact physically
-      selected saved Tool, Content or Model child, and [revision] is this child's
+      selected saved Tool, Content, Model or ordinary Tool child, and [revision]
+      is this child's
       restored target, never its ancestor's parser. The port checks the entire
       original saved ancestry and this binding at each content invocation,
       then mints a distinct [Selected_content_target] for the trusted callback.
@@ -718,6 +797,56 @@ module Deferred_developer : sig
           -> invocation:Ochat_function.Invocation.t
           -> (Eio_unix.Stdenv.base Chat_response.Ctx.t -> string)
           -> string)
+    -> (t, Agent_protocol.Error.t) result
+
+  (** Prepare ONLY parser-owned ordinary Agent Tool registrations for the
+      exact selected child revision. [parent] is its currently entered genuine
+      Saved, Content, Model or Tool target, not a raw source coordinate. Its
+      actual revision and binding issuer must match this exact Source_binding;
+      matching paths or artifact IDs cannot substitute for physical parent
+      identity. Both [max_agents] and [max_work_steps] must be positive. Reuse
+      the existing bounded scan, duplicate-name checks, one physical parsed
+      Agent reference per declaration and exact Native_output/Source(Some)
+      registration construction. Persistent_agent and Inherited declarations
+      reject; other Tool families are left to the ordinary native constructor.
+
+      The registered [with_context] wrapper first borrows the ACTUAL selected
+      native invocation and checks its implementation, invocation ID, parsed
+      declaration/reference, original binding issuer and immediate parent. It
+      installs a lexical lower selected-Tool loan before calling the trusted
+      [borrow_child_context] callback; the latter does not manufacture this
+      proof. The installed Source_binding Port chooses fresh File versus
+      Captured from that exact reference, checks again after each yield and
+      mints [Selected_tool_target] only within this loan. No Worker Claim,
+      Root/provider, child runtime or ambient filesystem grant is created.
+      Callback denial never falls through to [prepare]'s claimed target,
+      literal Driver or Fetch. The loan and targets expire when the callback
+      exits and [sw] joins its borrowers. [borrow_child_context] and
+      [run_selected_tool] are retained callbacks, never invoked by this
+      preparation itself; the upper owner must bind its exact child runtime
+      before exposing the registered functions. Preparation and source-runner
+      selection report typed errors; the existing string-returning
+      [with_context] callback must not swallow cancellation or unexpected
+      exception identity. *)
+  val prepare_selected_child
+    :  Source_binding.t
+    -> parent:Selected_content_target.parent
+    -> script_preparation:Runtime_script_preparation.t
+    -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+    -> approval_provider:Shell_runtime.Approval_broker.provider
+    -> response_dir:Eio.Fs.dir_ty Eio.Path.t
+    -> env:Eio_unix.Stdenv.base
+    -> revision:Prompt_revision.t
+    -> sw:Eio.Switch.t
+    -> max_agents:int
+    -> max_work_steps:int
+    -> checkpoint:(unit -> unit)
+    -> borrow_child_context:
+         (implementation:Ochat_function.t
+          -> invocation:Ochat_function.Invocation.t
+          -> (Eio_unix.Stdenv.base Chat_response.Ctx.t -> string)
+          -> string)
+    -> run_selected_tool:selected_tool_runner
     -> (t, Agent_protocol.Error.t) result
 
   (** Immutable registrations for this exact prepared revision/port. An upper

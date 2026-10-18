@@ -356,12 +356,14 @@ let rec run_child
         ~check_current
         ~checkpoint
     in
+    let* select =
+      match target with
+      | Content_target.Tool _ ->
+        Error (invalid "selected Tool source has no child runtime")
+      | Content_target.Model _ -> Ok Prepared.select_prepared_model
+      | Content_target.Saved _ | Content_target.Content _ -> Ok Prepared.select_prepared
+    in
     let selected_inputs =
-      let select =
-        match target with
-        | Content_target.Model _ -> Prepared.select_prepared_model
-        | Content_target.Saved _ | Content_target.Content _ -> Prepared.select_prepared
-      in
       select
         ~ctx:guarded_ctx
         ~prompt_dir
