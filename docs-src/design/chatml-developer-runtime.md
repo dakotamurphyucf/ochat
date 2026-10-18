@@ -433,6 +433,20 @@ Task action can wait for a real Shell approval, stage a Job and admit a Model
 request; approval, Job and provider permissions remain separate from compiler
 surface selection.
 
+The hosted REPL retains the evaluator's complete frozen receipt privately under
+a distinct type-detail budget. A separate aggregate cap charges compact
+outcomes and inert Task-reference metadata. A source-owned Task reference is
+prepared before evaluation and installed without yielding when the evaluator
+actually retains its handle, before any optional rendering or receipt
+eviction. A compact response reports the true statement/reference counts and
+whether text was limited. An incomplete parse stays `Need_more` when its
+source location exceeds the response cap; only that public location is
+omitted. Exact-key reference pages and on-demand type rendering repeat live
+actor, source and epoch checks, and type rendering uses roots from the
+original immutable snapshot. These projections neither rerun a statement nor
+convey effect authority. The portable service and first-party client still
+belong to the later REPL client work.
+
 A REPL has a separate opaque ID, principal/workspace owner, project/environment, pinned source graph, reset epoch and monotone state revision. It is not an agent conversation or a durable background job. One actor serializes access to its mutable runtime and inference state. Creation carries a unique request ID bound to principal and graph/environment payload, so a lost response cannot create two sessions. Creation records the session and is inert: it does not evaluate module initializers.
 
 The REPL pins the selected project's immutable catalog, compiler contract, environment and configured scope, but **does not use the project's selected main source as an executable REPL entry**. [Linked runtime instantiation](../../lib/chatml_linked_runtime/chatml_linked_runtime.mli) evaluates its selected entry last, so calling it unchanged on the project graph would run that source's top-level body. The [incremental registry](../../lib/chatml_linked_runtime/chatml_repl_modules.mli) instead starts empty and inert, bound to the exact compiler owner/epoch and selected graph. A complete submitted snippet has its own immutable source owner with the selected configured scope. After a statement typechecks, the registry lowers newly checked canonical units with the existing resolver, validates the authentic checked order and direct value-reference closure, then acquires the typing execution reservation before effects. It never evaluates project main. Under the actor's persistent bounded execution runner, missing units initialize once in dependency-before-owner order through the [same source-owned initializer](../../lib/chatml_linked_runtime/chatml_module_initializer.mli) used by batch linked execution; type-only/open branches stay inert. The registry returns only the completed modules selected directly by this statement. The actor's statement evaluator and portable service remain to be delivered; the registry does not itself execute a submitted statement or drive a Task. A parse or typecheck failure never initializes a dependency. A failing initializer retains completed predecessors and partial effects, faults that module without replay, and preserves its captured diagnostic when available. A selected closure containing that fault fails again; unrelated work remains available under the registry. The actor's broader continuation/reset policy is separate. An explicit dependency preload, if exposed later, needs its own named selection and admitted action.

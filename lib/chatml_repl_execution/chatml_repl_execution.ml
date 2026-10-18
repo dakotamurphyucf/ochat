@@ -44,6 +44,8 @@ module Limits = struct
         ; max_retained_tasks
         }
   ;;
+
+  let max_retained_tasks t = t.max_retained_tasks
 end
 
 module Error = struct

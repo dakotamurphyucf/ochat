@@ -2321,6 +2321,9 @@ module Developer = struct
     module View = Developer_host.Repl.View
     module Submission = Developer_host.Repl.Submission
     module Task_reference = Developer_host.Repl.Task_reference
+    module Type_selector = Developer_host.Repl.Type_selector
+    module Type_inspection = Developer_host.Repl.Type_inspection
+    module Task_reference_page = Developer_host.Repl.Task_reference_page
 
     module Task = struct
       module Original = Developer_host.Repl.Task.Original
@@ -2370,6 +2373,31 @@ module Developer = struct
 
     let observe t ~actor ~instance ~key =
       with_host t (fun host -> Developer_host.Repl.observe host ~actor ~instance ~key)
+    ;;
+
+    let inspect_type t ~actor ~instance ~epoch ~key ~statement_index ~selector ~max_bytes =
+      with_host t (fun host ->
+        Developer_host.Repl.inspect_type
+          host
+          ~actor
+          ~instance
+          ~epoch
+          ~key
+          ~statement_index
+          ~selector
+          ~max_bytes)
+    ;;
+
+    let task_references_page t ~actor ~instance ~epoch ~key ~after ~limit =
+      with_host t (fun host ->
+        Developer_host.Repl.task_references_page
+          host
+          ~actor
+          ~instance
+          ~epoch
+          ~key
+          ~after
+          ~limit)
     ;;
 
     let cancel_and_wait t ~actor ~instance ~key =

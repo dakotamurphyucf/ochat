@@ -129,6 +129,8 @@
     lib/agent_server/developer_capture_host.ml %{dep:../agent_server/developer_capture_host.ml}
     lib/agent_server/developer_root_source.ml %{dep:../agent_server/developer_root_source.ml}
     lib/agent_server/developer_repl_epoch.ml %{dep:../agent_server/developer_repl_epoch.ml}
+    lib/agent_server/developer_repl_projection.ml %{dep:../agent_server/developer_repl_projection.ml}
+    lib/agent_server/developer_daemon_configuration.ml %{dep:../agent_server/developer_daemon_configuration.ml}
     lib/agent_server/developer_repl_task_original.ml %{dep:../agent_server/developer_repl_task_original.ml}
     lib/agent_server/developer_repl_task_execution.ml %{dep:../agent_server/developer_repl_task_execution.ml}
     lib/agent_server/developer_repl_task_receipt.ml %{dep:../agent_server/developer_repl_task_receipt.ml}

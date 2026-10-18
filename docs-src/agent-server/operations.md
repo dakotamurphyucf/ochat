@@ -225,6 +225,16 @@ join root-owned work before retiring the epoch. A Task terminal alone leaves
 the Root available for already admitted jobs. Ordinary developer Command
 methods do not expose Task rows.
 
+A REPL submission returns bounded statement summaries and an exact count of
+retained Task references. A small output limit can shorten the displayed
+summary or omit an oversized diagnostic location; `Output_limited` marks that
+loss without changing the parse or execution outcome. Task references remain
+available through exact-key paging while the epoch is live, even when the
+summary is limited. Type inspection renders one root from the statement's
+original immutable snapshot under a separate byte and work bound; an expired
+detail cannot be reconstructed by retyping or running the statement. Neither
+a summary nor a reference grants authority to drive a Task.
+
 The selected REPL source retains its actual Standard compiler contract: a
 `Developer_tool_v1` selection admits the matching Task surface, including
 `Model.spawn`, while `One_off_v1` and `Tool_v1` keep their narrower surfaces.
