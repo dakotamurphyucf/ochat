@@ -172,6 +172,7 @@ val create
 val with_root_action
   :  t
   -> phase:Agent_store.Developer_run_store.Checkpoint.phase
+  -> ?check_parent_now:(unit -> (unit, Agent_protocol.Error.t) result)
   -> (scope:Scope.t
       -> sw:Eio.Switch.t
       -> ('a * Chatml.Chatml_lang.eff list, Agent_protocol.Error.t) result)

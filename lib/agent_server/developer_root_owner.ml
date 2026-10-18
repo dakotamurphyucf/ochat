@@ -10,6 +10,7 @@ module Job_scope = Agent_session.Developer_job_scope
 module Model_transaction = Developer_external_model_transaction
 module Mutation_gate = Developer_root_mutation_gate
 module Publisher = Agent_store.Developer_result_publisher
+module Source = Developer_root_source
 
 module Limits = struct
   type t =
@@ -78,6 +79,16 @@ type final_admission =
   -> checkpoint:(unit -> unit)
   -> (unit -> (unit, P.Error.t) result, P.Error.t) result
 
+type final_repl_admission =
+  actor:Operator_authorization.t
+  -> selection:Developer_capture_host.Source_selection.t
+  -> checkpoint:(unit -> unit)
+  -> (unit -> (unit, P.Error.t) result, P.Error.t) result
+
+type source_admission =
+  | Command_admission of final_admission option
+  | Repl_admission of final_repl_admission
+
 type admission =
   { mutable call : call
   ; mutable claim : Store.Run_claim.t option
@@ -85,14 +96,15 @@ type admission =
   ; mutable recovery : Store.Recovery.t option
   ; mutable tracking : Store.Tracking.t option
   ; actor : Operator_authorization.t
-  ; capture : Chatml_developer_capture.t
+  ; current_actor : Operator_authorization.t
+  ; source : Source.t
   ; registry : Chat_response.Tool_capability.t
   ; selected : Chat_response.Tool_capability.t
   ; selected_model : Provider_operator_port.Model_selection.t option
   ; job_policy : Chat_response.One_off_request.policy
   ; handle : Store.handle
   ; workspace_conflict_domain : string
-  ; final_admission : final_admission option
+  ; final_admission : source_admission
   ; mutable running : bool
   }
 
@@ -114,7 +126,7 @@ and slot =
 and t =
   { registry : registry
   ; actor : Operator_authorization.t
-  ; capture : Chatml_developer_capture.t
+  ; source : Source.t
   ; owner : P.Execution_owner.developer
   ; handle : Store.handle
   ; run_claim : Store.Run_claim.t
@@ -338,6 +350,11 @@ type claim_preflight =
   }
 
 let action_key : action Eio.Fiber.key = Eio.Fiber.create_key ()
+
+let repl_task_key : (t * Developer_repl_epoch.borrowed) Eio.Fiber.key =
+  Eio.Fiber.create_key ()
+;;
+
 let root_call_key : t Eio.Fiber.key = Eio.Fiber.create_key ()
 let native_call_key : t Eio.Fiber.key = Eio.Fiber.create_key ()
 let control_call_key : t Eio.Fiber.key = Eio.Fiber.create_key ()
@@ -398,15 +415,9 @@ let selected_within ~registry selected =
     |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message))
 ;;
 
-let project_source capture =
-  let prepared = Chatml_developer_capture.prepared capture in
-  match Chatml_prepared_program.provenance prepared with
-  | Project { declaration; lock = _ } -> declaration
-  | Implicit -> Chatml_prepared_program.entry prepared
-;;
-
 let owner t = t.owner
-let capture t = t.capture
+let source t = t.source
+let command_capture t = Source.command_capture t.source
 let native_ceiling t = t.native_ceiling
 let native_selected t = t.selected
 let selected_model t = t.selected_model
@@ -499,7 +510,7 @@ module Job_result = struct
         || not
              (Chatml_source.Digest.equal
                 (P.Developer_job.capture_fingerprint job)
-                (Chatml_developer_capture.fingerprint issuer.capture))
+                (Source.fingerprint issuer.source))
       then invalid "developer result claim belongs to another root"
       else (
         match proposed.P.Developer_job.State.result with
@@ -578,7 +589,18 @@ let check_current_local
   else Ok ()
 ;;
 
-let check_effect_now t witness = check_current_local t witness ~allow_pending:false
+let check_repl_task_effect_now t =
+  match Eio.Fiber.get repl_task_key with
+  | None -> Ok ()
+  | Some (issued, borrowed) when phys_equal issued t ->
+    Developer_repl_epoch.check_now borrowed
+  | Some _ -> invalid "developer REPL Task belongs to another root"
+;;
+
+let check_effect_now t witness =
+  let* () = check_current_local t witness ~allow_pending:false in
+  check_repl_task_effect_now t
+;;
 
 let restore_live_after_retention t =
   if
@@ -636,6 +658,24 @@ let current_after_mutations t =
   if not (same_domain t.registry)
   then invalid "developer run owner belongs to another domain"
   else Mutation_gate.with_owner t.mutation_gate ~f:(fun () -> current t)
+;;
+
+let with_repl_task_borrow t borrowed f =
+  let selection = Developer_repl_epoch.source_selection borrowed in
+  if
+    (match t.source with
+     | Source.Repl owned -> not (phys_equal owned selection)
+     | Source.Command _ -> true)
+    || (not (phys_equal t.actor (Developer_repl_epoch.original_actor borrowed)))
+    || Option.is_some (Eio.Fiber.get repl_task_key)
+  then invalid "developer REPL Task borrow belongs to another root"
+  else
+    let* () = Developer_repl_epoch.check_now borrowed in
+    let* _ = current t in
+    Eio.Fiber.with_binding repl_task_key (t, borrowed) (fun () ->
+      let* value = f () in
+      let* () = Developer_repl_epoch.check_now borrowed in
+      Ok value)
 ;;
 
 let same_action_fiber action =
@@ -847,7 +887,7 @@ let check_inference_scope_local (scope : inference_scope) =
       Job_scope.Parent.check_now
         scope.inference_parent
         ~owner:issuer.owner
-        ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
+        ~capture_fingerprint:(Source.fingerprint issuer.source)
     in
     let* () = Provider_operator_port.Model_selection.check_current selection in
     let frame = Eio.Fiber.get inference_child_frame_key in
@@ -916,7 +956,7 @@ let job_parent t active =
   let issuer = Developer_job_worker.issuer t.worker in
   let* parent = Job_scope.parent issuer active in
   let* witness = current t in
-  let capture_fingerprint = Chatml_developer_capture.fingerprint t.capture in
+  let capture_fingerprint = Source.fingerprint t.source in
   let* () = Job_scope.Parent.check parent ~owner:t.owner ~capture_fingerprint in
   let* () = check_effect_now t witness in
   let* () = Job_scope.Parent.check_now parent ~owner:t.owner ~capture_fingerprint in
@@ -989,7 +1029,7 @@ module Worker_action = struct
       Job_scope.Parent.check_now
         t.parent
         ~owner:t.issuer.owner
-        ~capture_fingerprint:(Chatml_developer_capture.fingerprint t.issuer.capture)
+        ~capture_fingerprint:(Source.fingerprint t.issuer.source)
   ;;
 
   let stage_background_with t ~selected ~request ~checkpoint ~check_selected =
@@ -1014,7 +1054,7 @@ module Worker_action = struct
         let* prepared =
           Agent_session.Developer_root_job_admission.background
             ~owner:issuer.owner
-            ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
+            ~capture_fingerprint:(Source.fingerprint issuer.source)
             ~launch
             ~selected
             ~policy:issuer.job_policy
@@ -1195,7 +1235,7 @@ module Job_control = struct
     P.Execution_owner.equal_developer (P.Developer_job.owner job) t.owner
     && Chatml_source.Digest.equal
          (P.Developer_job.capture_fingerprint job)
-         (Chatml_developer_capture.fingerprint t.capture)
+         (Source.fingerprint t.source)
   ;;
 
   let find_current t id =
@@ -1327,7 +1367,8 @@ module Job_control = struct
                    ~control:pending
                    t
                    current_witness
-                   ~allow_pending:false)
+                   ~allow_pending:false
+                 |> Result.bind ~f:(fun () -> check_repl_task_effect_now t))
             in
             let committed =
               match Store.commit_inactive_cancel t.handle prepared ~admit:admission with
@@ -1419,7 +1460,7 @@ let model_source_issuer = function
 
 let model_source_now source ~check_parent_now =
   let issuer = model_source_issuer source in
-  let capture_fingerprint = Chatml_developer_capture.fingerprint issuer.capture in
+  let capture_fingerprint = Source.fingerprint issuer.source in
   let check_action action =
     if
       (not (same_domain issuer.registry))
@@ -1511,8 +1552,7 @@ let model_source_parent_check source =
     Job_scope.Parent.check
       scope.inference_parent
       ~owner:scope.inference_issuer.owner
-      ~capture_fingerprint:
-        (Chatml_developer_capture.fingerprint scope.inference_issuer.capture)
+      ~capture_fingerprint:(Source.fingerprint scope.inference_issuer.source)
   | Native_model scope ->
     (match scope.registration.job_parent with
      | None -> Ok ()
@@ -1520,7 +1560,7 @@ let model_source_parent_check source =
        Job_scope.Parent.check
          parent
          ~owner:scope.issuer.owner
-         ~capture_fingerprint:(Chatml_developer_capture.fingerprint scope.issuer.capture))
+         ~capture_fingerprint:(Source.fingerprint scope.issuer.source))
 ;;
 
 let model_source_launch source =
@@ -1649,6 +1689,7 @@ let admit_external_model_from_scope source ~request ~checkpoint ~check_parent_no
       let* () =
         check_current_local ~external_model:token issuer witness ~allow_pending:false
       in
+      let* () = check_repl_task_effect_now issuer in
       let* () = Provider_operator_port.Model_selection.check_current selection in
       model_source_now source ~check_parent_now
     in
@@ -1670,7 +1711,7 @@ let admit_external_model_from_scope source ~request ~checkpoint ~check_parent_no
       let* job =
         Developer_external_model_job.create
           ~owner:issuer.owner
-          ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
+          ~capture_fingerprint:(Source.fingerprint issuer.source)
           ~launch
           ~request
           ~target:(Provider_operator_port.Model_selection.target selection)
@@ -1814,7 +1855,7 @@ module Action = struct
           let* prepared =
             Agent_session.Developer_root_job_admission.background
               ~owner:issuer.owner
-              ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
+              ~capture_fingerprint:(Source.fingerprint issuer.source)
               ~launch
               ~selected
               ~policy:issuer.job_policy
@@ -2616,7 +2657,7 @@ module Native_terminal = struct
 
   let background_launch (t : t) =
     let context = H.context t.registration.invocation in
-    let capture_fingerprint = Chatml_developer_capture.fingerprint t.issuer.capture in
+    let capture_fingerprint = Source.fingerprint t.issuer.source in
     let* () =
       match t.registration.job_parent with
       | None -> Ok ()
@@ -3025,7 +3066,7 @@ module Model_inference = struct
       Job_scope.Parent.check
         t.inference_parent
         ~owner:issuer.owner
-        ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
+        ~capture_fingerprint:(Source.fingerprint issuer.source)
     in
     let* () =
       match t.inference_origin with
@@ -4053,7 +4094,7 @@ let with_native_registration t ?job_parent ~invocation f =
         Job_scope.Parent.check_now
           parent
           ~owner:t.owner
-          ~capture_fingerprint:(Chatml_developer_capture.fingerprint t.capture)
+          ~capture_fingerprint:(Source.fingerprint t.source)
       | None, Some _ | Some _, None | Some _, Some _ ->
         invalid "native terminal job parent lacks this root's physical claim"
     in
@@ -4077,7 +4118,7 @@ let with_native_registration t ?job_parent ~invocation f =
                 Job_scope.Parent.check
                   parent
                   ~owner:t.owner
-                  ~capture_fingerprint:(Chatml_developer_capture.fingerprint t.capture)
+                  ~capture_fingerprint:(Source.fingerprint t.source)
             in
             let* snapshot = current t in
             let* () =
@@ -4087,7 +4128,7 @@ let with_native_registration t ?job_parent ~invocation f =
                 Job_scope.Parent.check_now
                   parent
                   ~owner:t.owner
-                  ~capture_fingerprint:(Chatml_developer_capture.fingerprint t.capture)
+                  ~capture_fingerprint:(Source.fingerprint t.source)
             in
             let* staged =
               Staging.create ~max_staged_jobs:t.registry.limits.max_staged_jobs
@@ -4228,7 +4269,7 @@ let with_native_callback (scope : native_scope) ~dispatched f =
             Job_scope.Parent.check
               parent
               ~owner:issuer.owner
-              ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
+              ~capture_fingerprint:(Source.fingerprint issuer.source)
         in
         let* () = check_effect_now issuer latest in
         let* () =
@@ -4238,7 +4279,7 @@ let with_native_callback (scope : native_scope) ~dispatched f =
             Job_scope.Parent.check_now
               parent
               ~owner:issuer.owner
-              ~capture_fingerprint:(Chatml_developer_capture.fingerprint issuer.capture)
+              ~capture_fingerprint:(Source.fingerprint issuer.source)
         in
         scope.dispatched <- Some dispatched;
         scope.action.live <- true;
@@ -4363,6 +4404,7 @@ let close_owner t =
 let close_and_wait = close_owner
 
 module Registry = struct
+  type nonrec final_repl_admission = final_repl_admission
   type nonrec final_admission = final_admission
   type nonrec t = registry
 
@@ -4526,11 +4568,15 @@ module Registry = struct
   let verify_admission t (admission : admission) =
     let owner = Store.owner admission.handle in
     let principal = Operator_authorization.principal admission.actor in
+    let current_principal = Operator_authorization.principal admission.current_actor in
     if
       P.Id.Principal.equal principal.id owner.principal_id
       && Operator_authorization.is_current admission.actor
+      && Operator_authorization.is_current admission.current_actor
+      && P.Id.Principal.equal principal.id current_principal.id
+      && String.equal principal.authentication_kind current_principal.authentication_kind
       && Chatml_source.Digest.equal
-           (Chatml_developer_capture.fingerprint admission.capture)
+           (Source.fingerprint admission.source)
            (Store.capture_fingerprint admission.handle)
       && (not (String.is_empty admission.workspace_conflict_domain))
       && not t.closed
@@ -4542,7 +4588,7 @@ module Registry = struct
           if
             phys_equal
               (Provider_operator_port.Model_selection.actor selection)
-              admission.actor
+              admission.current_actor
           then Provider_operator_port.Model_selection.check_current selection
           else invalid "developer model selection belongs to another actor"
       in
@@ -4580,7 +4626,7 @@ module Registry = struct
       Terminal_queue.create ~max_native_occupancy:t.limits.max_native_occupancy
       |> Result.map_error ~f:error_of_terminal_queue
     in
-    let project_source = project_source admission.capture in
+    let project_source = Source.project_source admission.source in
     let* worker =
       Developer_job_worker.create
         ~close_policy:Retain_unclaimed
@@ -4599,10 +4645,21 @@ module Registry = struct
     let* () = verify_admission t admission in
     let* final_check =
       match admission.final_admission with
-      | None -> Ok (fun () -> Ok ())
-      | Some prepare ->
+      | Command_admission None -> Ok (fun () -> Ok ())
+      | Command_admission (Some prepare) ->
         let* check =
-          prepare ~actor:admission.actor ~capture:admission.capture ~checkpoint
+          match Source.command_capture admission.source with
+          | Some capture -> prepare ~actor:admission.actor ~capture ~checkpoint
+          | None -> invalid "developer command capture is missing"
+        in
+        let* () = verify_admission t admission in
+        Ok check
+      | Repl_admission prepare ->
+        let* check =
+          match admission.source with
+          | Source.Repl selection ->
+            prepare ~actor:admission.current_actor ~selection ~checkpoint
+          | Source.Command _ -> invalid "developer REPL source is missing"
         in
         let* () = verify_admission t admission in
         Ok check
@@ -4610,7 +4667,7 @@ module Registry = struct
     let run =
       { registry = t
       ; actor = admission.actor
-      ; capture = admission.capture
+      ; source = admission.source
       ; owner
       ; handle
       ; run_claim = token
@@ -4709,10 +4766,11 @@ module Registry = struct
   ;;
 
   let reserve_admission
-        ?final_admission
         t
         ~actor
-        ~capture
+        ~current_actor
+        ~source
+        ~final_admission
         ~registry
         ~selected
         ~selected_model
@@ -4739,7 +4797,8 @@ module Registry = struct
           ; tracking = None
           ; recovery = None
           ; actor
-          ; capture
+          ; current_actor
+          ; source
           ; registry
           ; selected
           ; selected_model
@@ -4830,10 +4889,11 @@ module Registry = struct
     else
       let* admission =
         reserve_admission
-          ?final_admission
           t
           ~actor
-          ~capture
+          ~current_actor:actor
+          ~source:(Source.command capture)
+          ~final_admission:(Command_admission final_admission)
           ~registry
           ~selected
           ~selected_model
@@ -4867,10 +4927,11 @@ module Registry = struct
     else
       let* admission =
         reserve_admission
-          ?final_admission
           t
           ~actor
-          ~capture
+          ~current_actor:actor
+          ~source:(Source.command capture)
+          ~final_admission:(Command_admission final_admission)
           ~registry
           ~selected
           ~selected_model
@@ -4883,6 +4944,38 @@ module Registry = struct
         admission
         ~transfer_finished_claim
         ~checkpoint:(Option.value checkpoint ~default:Fn.id)
+  ;;
+
+  let admit_repl_recovered
+        ~final_admission
+        ~checkpoint
+        t
+        ~original_actor
+        ~current_actor
+        ~selection
+        ~registry
+        ~selected
+        ~selected_model
+        ~job_policy
+        ~handle
+        ~workspace_conflict_domain
+        ~transfer_finished_claim
+    =
+    let* admission =
+      reserve_admission
+        t
+        ~actor:original_actor
+        ~current_actor
+        ~source:(Source.repl selection)
+        ~final_admission:(Repl_admission final_admission)
+        ~registry
+        ~selected
+        ~selected_model
+        ~job_policy
+        ~handle
+        ~workspace_conflict_domain
+    in
+    drive_finished t admission ~transfer_finished_claim ~checkpoint
   ;;
 
   let retire_admission t ~handle =
@@ -4950,7 +5043,11 @@ module Registry = struct
              && phys_equal admission.actor actor
              && phys_equal admission.handle handle
              && Option.is_some admission.recovery ->
-        if Option.is_some admission.final_admission && Option.is_none checkpoint
+        if
+          (match admission.final_admission with
+           | Command_admission None -> false
+           | Command_admission (Some _) | Repl_admission _ -> true)
+          && Option.is_none checkpoint
         then invalid "developer resumed final admission needs a fresh checkpoint"
         else (
           let finished, finish = Eio.Promise.create () in

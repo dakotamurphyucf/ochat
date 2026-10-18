@@ -150,3 +150,46 @@ let for_original t original =
   then Error (P.Error.invalid_request "invalid requested developer command budgets")
   else Ok { settings = { t.settings with execution; max_output_bytes } }
 ;;
+
+let for_repl_task t ~requested_execution ~requested_max_output_bytes =
+  let open Result.Let_syntax in
+  let execution =
+    Option.value_map
+      requested_execution
+      ~default:t.settings.execution
+      ~f:(narrow_execution t.settings.execution)
+  in
+  let max_output_bytes =
+    Option.value_map
+      requested_max_output_bytes
+      ~default:t.settings.max_output_bytes
+      ~f:(Int.min t.settings.max_output_bytes)
+  in
+  if (not (Chatml_execution.valid_limits execution)) || max_output_bytes <= 0
+  then Error (P.Error.invalid_request "invalid requested REPL Task budgets")
+  else (
+    let prior = t.settings.receipt in
+    let%bind receipt =
+      Document_schema.Limits.create
+        ~max_bytes:(Int.min (Document_schema.Limits.max_bytes prior) max_output_bytes)
+        ~max_depth:(Document_schema.Limits.max_depth prior)
+        ~max_fields:(Document_schema.Limits.max_fields prior)
+        ~max_nodes:(Document_schema.Limits.max_nodes prior)
+      |> Result.map_error ~f:(fun _ ->
+        P.Error.invalid_request "invalid requested REPL Task receipt limit")
+    in
+    match
+      Agent_store.Developer_command_receipt.create
+        Developer_repl_task_receipt.limited_fallback
+        ~limits:receipt
+        ~poll:(fun () -> ())
+    with
+    | Ok _ -> Ok { settings = { t.settings with execution; max_output_bytes; receipt } }
+    | Error _ ->
+      Error
+        (P.Error.create
+           P.Error.Resource_limit
+           ~message:"requested REPL Task output limit cannot retain a terminal result"
+           ~retryable:false
+           ()))
+;;

@@ -17,6 +17,7 @@ module F = Developer_run_store_test_suite.Developer_run_store_tests
 module Selected = Developer_run_store_test_suite.Developer_run_selected_tests
 
 let ok = T.ok
+let command_capture root = O.Source.command_capture (O.source root) |> Option.value_exn
 
 let registry ?unrelated ~custom calls =
   let module Definition = struct
@@ -1360,7 +1361,7 @@ let%test_unit "nested Agent callback cannot consume outer saved artifact pin" =
               let parent = O.job_parent root active |> ok in
               let check_current () =
                 let capture_fingerprint =
-                  Chatml_developer_capture.fingerprint (O.capture root)
+                  Chatml_developer_capture.fingerprint (command_capture root)
                 in
                 let open Result.Let_syntax in
                 let%bind () = Scope.Parent.check parent ~owner ~capture_fingerprint in
@@ -1907,7 +1908,9 @@ let%test_unit "malformed saved Async_tool enters one physical Failed attempt" =
     ~make_selected:(fun _ -> registry ~custom:false calls)
     (fun ~env ~root ~executor:_ ~handle ~owner:_ ~selected:_ ~jobs ~store ~blobs ->
        let owners, capacity = Option.value_exn !host in
-       let capture_fingerprint = Chatml_developer_capture.fingerprint (O.capture root) in
+       let capture_fingerprint =
+         Chatml_developer_capture.fingerprint (command_capture root)
+       in
        let id = Selected.job_id "job_claimed_malformed_async" in
        let original =
          Selected.job
@@ -3031,7 +3034,7 @@ let%test_unit
        in
        let id = List.hd_exn ids in
        let project_source =
-         let prepared = Chatml_developer_capture.prepared (O.capture root) in
+         let prepared = Chatml_developer_capture.prepared (command_capture root) in
          match Chatml_prepared_program.provenance prepared with
          | Project { declaration; lock = _ } -> declaration
          | Implicit -> Chatml_prepared_program.entry prepared
@@ -3204,7 +3207,7 @@ let%test_unit "claimed worker alone admits job child and inherited nested ancest
                      ancestor
                      ~owner:(T.owner "dvr_foreign_claim" 0)
                      ~capture_fingerprint:
-                       (Chatml_developer_capture.fingerprint (O.capture root))));
+                       (Chatml_developer_capture.fingerprint (command_capture root))));
               assert (
                 Result.is_error
                   (Scope.Parent.check_now
@@ -3344,7 +3347,7 @@ let%test_unit "claimed worker action atomically installs its selected child" =
       (fun ~env ~root ~executor:_ ~handle ~owner:_ ~selected ->
          let parent_id = Selected.job_id "job_claimed_retry_selected_parent" in
          let capture_fingerprint =
-           Chatml_developer_capture.fingerprint (O.capture root)
+           Chatml_developer_capture.fingerprint (command_capture root)
          in
          let original =
            Selected.job
@@ -3727,7 +3730,8 @@ let%test_unit "saved-source child retains its exact entered parent active" =
        let issuer =
          D.create
            ~owner
-           ~capture_fingerprint:(Chatml_developer_capture.fingerprint (O.capture root))
+           ~capture_fingerprint:
+             (Chatml_developer_capture.fingerprint (command_capture root))
            ~ceiling:(O.native_ceiling root)
            ~selected:(fun () -> O.native_selected root)
            ~current:(fun ~owner:_ ~capture_fingerprint:_ ->
@@ -3903,7 +3907,8 @@ let%test_unit "cancelled native parent switch rejects protected nested child" =
        let issuer =
          D.create
            ~owner
-           ~capture_fingerprint:(Chatml_developer_capture.fingerprint (O.capture root))
+           ~capture_fingerprint:
+             (Chatml_developer_capture.fingerprint (command_capture root))
            ~ceiling:(O.native_ceiling root)
            ~selected:(fun () -> O.native_selected root)
            ~current:(fun ~owner:_ ~capture_fingerprint:_ ->

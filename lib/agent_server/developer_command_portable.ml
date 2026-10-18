@@ -242,4 +242,6 @@ let run_kind ~kind ~capture ~tool_selection ~admit ~id ~budgets ~env =
       ~env
   | Live_run ->
     Error (P.Error.invalid_request "live developer command requires its physical Root")
+  | Repl_task_run ->
+    Error (P.Error.invalid_request "REPL Task requires its retained interpreter")
 ;;

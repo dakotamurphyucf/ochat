@@ -313,25 +313,32 @@ let%test_module "retained Developer Host policy" =
       ; closed : bool ref
       }
 
-    let selected_contract () =
+    let selected_contract target =
       let contracts =
         Authoring_standard_contracts.create
-          ~targets:[ Chatml.Chatml_compiler_contract.Target.One_off_v1 ]
+          ~targets:[ target ]
           ~max_identity_bytes:(16 * 1024 * 1024)
           ~max_work_steps:1_000_000
           ~checkpoint:Eio.Fiber.check
         |> required "standard contracts"
       in
-      Authoring_standard_contracts.find
-        contracts
-        Chatml.Chatml_compiler_contract.Target.One_off_v1
-      |> Option.value_exn
-      |> Authoring_context_service.Developer.Selected_contract.of_standard_entry
+      let entry =
+        Authoring_standard_contracts.find contracts target |> Option.value_exn
+      in
+      (match target with
+       | Chatml.Chatml_compiler_contract.Target.One_off_v1 ->
+         Authoring_context_service.Developer.Selected_contract.of_standard_entry entry
+       | Developer_tool_v1 ->
+         Authoring_context_service.Developer.Selected_contract
+         .of_standard_developer_tool_entry
+           entry
+       | Tool_v1 | Moderator_v1 | Delegated_moderator_v1 ->
+         failwith "unsupported Host pair selected fixture")
       |> required "selected contract"
     ;;
 
-    let capture_policy () =
-      let selected = selected_contract () in
+    let capture_policy target =
+      let selected = selected_contract target in
       Authoring_context_service.Developer.Target_policy.create
         ~local_project:(fun _ ~root:_ ~project:_ ~selection:_ -> None)
         ~local_source:(fun _ ~root:_ ~member:_ -> None)
@@ -358,7 +365,7 @@ let%test_module "retained Developer Host policy" =
       |> Or_error.ok_exn
     ;;
 
-    let config root prompt_file =
+    let config ?(manifest_grants = []) ?data_dir root prompt_file =
       let profile =
         Config.Permission_profile.
           { id = "retained.permission"
@@ -372,7 +379,7 @@ let%test_module "retained Developer Host policy" =
         { version = current_version
         ; source_file = Filename.concat root "server.sexp"
         ; server =
-            { data_dir = Filename.concat root "data"
+            { data_dir = Option.value data_dir ~default:(Filename.concat root "data")
             ; session_helpers = []
             ; authoring_packages = []
             ; authoring_budget = None
@@ -438,7 +445,7 @@ let%test_module "retained Developer Host policy" =
               }
             ]
         ; permission_profiles = [ profile ]
-        ; manifest_grants = []
+        ; manifest_grants
         }
     ;;
 
@@ -536,6 +543,8 @@ let%test_module "retained Developer Host policy" =
     ;;
 
     let with_shared
+          ~manifest_grants
+          ~data_dir
           ~env
           ~sw
           ~root
@@ -547,7 +556,7 @@ let%test_module "retained Developer Host policy" =
           ~prepare_output
           ~f
       =
-      let config = config root prompt_file in
+      let config = config ~manifest_grants ~data_dir root prompt_file in
       let options = Daemon.default_options in
       let authoring_validation_host =
         A.Authoring_runtime.configure_host
@@ -828,7 +837,94 @@ let%test_module "retained Developer Host policy" =
         Exn.raise_with_original_backtrace exn backtrace
     ;;
 
-    let start_phase shared ~clock ~max_active_agent_calls =
+    let repl_configuration () =
+      let parse =
+        Chatml.Chatml_parse.Submission.Limits.create
+          ~max_source_bytes:4096
+          ~max_tokens:4096
+          ~max_work_steps:100_000
+          ~sites:
+            (Chatml.Chatml_syntax_sites.Limits.create
+               ~max_sites:4096
+               ~max_name_bytes:16384
+             |> Or_error.ok_exn)
+        |> Or_error.ok_exn
+      in
+      let display =
+        Chatml_typechecker.Type_snapshot.Limits.create
+          ~max_nodes:4096
+          ~max_edges:4096
+          ~max_label_bytes:16384
+        |> Or_error.ok_exn
+      in
+      let root_copy =
+        Chatml_typechecker.Repl_type_roots.Limits.create
+          ~max_bindings:128
+          ~max_type_roots:256
+          ~max_type_nodes:4096
+          ~max_variable_cells:1024
+          ~max_type_edges:4096
+          ~max_copy_work:100_000
+          ~max_copy_depth:128
+          ~max_name_work:100_000
+          ~max_name_bytes:16384
+        |> Or_error.ok_exn
+      in
+      let typing_limits =
+        Chatml_repl_typing.Limits.create
+          ~parse
+          ~display
+          ~max_display_name_bytes:4096
+          ~max_statements:16
+          ~root_copy
+        |> Or_error.ok_exn
+      in
+      let evaluator_limits =
+        Chatml_repl_execution.Limits.create
+          ~max_preview_bytes:4096
+          ~max_preview_nodes:1024
+          ~max_preview_depth:16
+          ~max_diagnostic_bytes:1024
+          ~max_retained_tasks:8
+        |> Or_error.ok_exn
+      in
+      let limits =
+        Developer_repl_epoch.Limits.create
+          ~max_instances:2
+          ~max_keys_per_instance:8
+          ~max_submissions_per_epoch:8
+          ~max_source_bytes:4096
+          ~max_receipt_bytes:(512 * 1024)
+          ~max_total_receipt_bytes:(1024 * 1024)
+          ~max_task_origins:4
+        |> Or_error.ok_exn
+      in
+      Developer_repl_epoch.Configuration.create
+        ~scope_limits:
+          (Chatml_configured_lookup.Repl_scope.Limits.create
+             ~max_snippets:16
+             ~max_identity_bytes:4096
+           |> Or_error.ok_exn)
+        ~root_limits:
+          (Chatml_dependency_session.Roots.Limits.create
+             ~max_checked_modules:16
+             ~max_edges:64
+             ~max_dependency_depth:16
+           |> Or_error.ok_exn)
+        ~typing_limits
+        ~evaluator_limits
+        ~execution_policy:(Bounded Chatml_execution.default_limits)
+        ~limits
+    ;;
+
+    let start_phase
+          ?(repl = false)
+          ?(selected_target = Chatml.Chatml_compiler_contract.Target.One_off_v1)
+          ?approval
+          shared
+          ~clock
+          ~max_active_agent_calls
+      =
       if Option.is_some !(shared.active_phase)
       then failwith "prior Host phase is still open";
       let roots =
@@ -876,7 +972,7 @@ let%test_module "retained Developer Host policy" =
           ~max_work_steps:100_000
         |> Or_error.ok_exn
       in
-      let capture_policy = capture_policy () in
+      let capture_policy = capture_policy selected_target in
       let capture_limits = capture_limits () in
       let publisher_limits =
         Store.Developer_result_publisher.Limits.create
@@ -911,7 +1007,7 @@ let%test_module "retained Developer Host policy" =
           ~tool_dir:Eio.Path.(Eio.Stdenv.fs shared.env / shared.root)
           ~home:Eio.Path.(Eio.Stdenv.fs shared.env / shared.root)
           ~cache:(Chat_response.Cache.create ~max_size:8 ())
-          ~approval:None
+          ~approval
           ~max_native_bindings:8
           ~child_sources:shared.child_sources
           ~content_limits:Daemon.default_options.content_limits
@@ -935,9 +1031,10 @@ let%test_module "retained Developer Host policy" =
           ~store_limits
           ~limits
           ~budget_configuration
-          ~repl:None
+          ~repl:(if repl then Some (repl_configuration ()) else None)
           ~now:(fun () -> timestamp shared.env)
           ~checkpoint:Eio.Fiber.check
+          ()
         |> Result.map_error ~f:(fun error ->
           Sexp.to_string_hum [%sexp "Developer Host", (error : P.Error.t)])
         |> Result.ok_or_failwith
@@ -1057,7 +1154,7 @@ let%test_module "retained Developer Host policy" =
         |> Result.ok_or_failwith)
     ;;
 
-    let fixture_actor () =
+    let fixture_actor ?(repl = false) () =
       let scopes =
         P.Scope.Set.of_list
           [ List_prompts
@@ -1081,6 +1178,7 @@ let%test_module "retained Developer Host policy" =
           ; Developer_live_run
           ]
       in
+      let scopes = if repl then Set.add scopes Developer_repl else scopes in
       let principal =
         P.Principal.create
           ~id:(P.Id.Principal.of_string "pri_operator" |> required "principal ID")
@@ -1215,6 +1313,8 @@ let run ctx input =
                   let endpoint = local_model_endpoint env sw requests respond in
                   let actor = fixture_actor () in
                   with_shared
+                    ~manifest_grants:[]
+                    ~data_dir:(Filename.concat root "data")
                     ~env
                     ~sw
                     ~root
@@ -1248,10 +1348,79 @@ let run ctx input =
                         P.Idempotency_key.of_string "selected-host-a"
                         |> required "idempotency key"
                       in
-                      ignore (submit_live phase ~run_id ~key |> required "live submit");
+                      let fresh_source () =
+                        Developer_command_original.Fresh_source.Document_script
+                          { connection = phase.shared.connection }
+                      in
+                      let request_live = ref true in
+                      let denied_key =
+                        P.Idempotency_key.of_string "stale-before-reserve"
+                        |> required "stale request key"
+                      in
+                      let denied_resolutions = ref 0 in
+                      let stale =
+                        Developer_host.Command.submit_resolving
+                          phase.host
+                          ~actor:phase.shared.actor
+                          ~run_id
+                          ~key:denied_key
+                          ~original:phase.original
+                          ~request_current:(fun () -> !request_live)
+                          ~resolve_fresh:(fun () ->
+                            incr denied_resolutions;
+                            request_live := false;
+                            Ok (fresh_source ()))
+                      in
+                      (match stale with
+                       | Error error ->
+                         [%test_eq: P.Error.code] error.code Permission_denied
+                       | Ok _ -> failwith "stale request reserved a command");
+                      [%test_eq: int] !denied_resolutions 1;
+                      assert (
+                        Option.is_none
+                          (Developer_host.Command.observe
+                             phase.host
+                             ~actor:phase.shared.actor
+                             ~run_id
+                             ~key:denied_key
+                           |> required "stale request observation"));
+                      request_live := true;
+                      let resolutions = ref 0 in
+                      let initial =
+                        Developer_host.Command.submit_resolving
+                          phase.host
+                          ~actor:phase.shared.actor
+                          ~run_id
+                          ~key
+                          ~original:phase.original
+                          ~request_current:(fun () -> !request_live)
+                          ~resolve_fresh:(fun () ->
+                            incr resolutions;
+                            Ok (fresh_source ()))
+                        |> required "live submit"
+                      in
+                      request_live := false;
                       let view =
                         await_terminal phase ~run_id ~key |> required "live terminal"
                       in
+                      request_live := true;
+                      let replay =
+                        Developer_host.Command.submit_resolving
+                          phase.host
+                          ~actor:phase.shared.actor
+                          ~run_id
+                          ~key
+                          ~original:phase.original
+                          ~request_current:(fun () -> !request_live)
+                          ~resolve_fresh:(fun () ->
+                            failwith "historical key recaptured source")
+                        |> required "live replay"
+                      in
+                      [%test_eq: int] !resolutions 1;
+                      assert (
+                        Store.Developer_command_row.same_identity
+                          (Developer_host.Command.row initial)
+                          (Developer_host.Command.row replay));
                       let parent_job =
                         match
                           Option.map
@@ -1432,6 +1601,475 @@ let run ctx input =
         same old selected Agent row completed
         changed depth denied the old selected row
         |}]
+    ;;
+
+    let%expect_test "retained REPL Task stages and completes Job and Model work" =
+      Mirage_crypto_rng_unix.use_default ();
+      Eio_main.run (fun env ->
+        let real_clock = Eio.Stdenv.clock env in
+        Eio.Time.with_timeout_exn real_clock 30. (fun () ->
+          let root =
+            Filename.concat
+              "/tmp"
+              ("ochat-host-repl-jobs-" ^ P.Id.Transaction.(create () |> to_string))
+          in
+          let root_path = Eio.Path.(Eio.Stdenv.fs env / root) in
+          Eio.Path.mkdir ~perm:0o700 root_path;
+          Exn.protect
+            ~finally:(fun () -> Eio.Path.rmtree ~missing_ok:true root_path)
+            ~f:(fun () ->
+              let write member contents =
+                Eio.Path.save
+                  ~create:(`Exclusive 0o600)
+                  Eio.Path.(Eio.Stdenv.fs env / root / member)
+                  contents
+              in
+              write
+                "prompt.chatmd"
+                {|<developer>Retained REPL Task root</developer>
+<tool name="child" agent="child.chatmd" local source_mode="file"/>
+<shell_access id="approval" cwd="${workspace}">
+  <capabilities sandbox="direct_unsafe" network="false"
+      child_processes="false" arbitrary_code="false" privilege_change="false">
+    <write path="${workspace}"/>
+  </capabilities>
+  <backends merge="replace"><direct when="macos"/><direct when="linux"/></backends>
+  <policy default="ask"/>
+  <approvals provider="ui" unavailable="deny" scopes="once" durable="false"/>
+  <audit format="none"/>
+</shell_access>
+<tool name="approval_touch" type="shell" mode="fixed" runtime="approval"
+      result="stdout">
+  <command program="/usr/bin/touch">
+    <path_arg base="workspace" path="task-approval-marker"/>
+  </command>
+  <arguments mode="none"/>
+</tool>|};
+              write "child.chatmd" "<developer>Retained Task child</developer>";
+              write "model.chatmd" "<developer>Retained Task Model worker</developer>";
+              let approval_marker =
+                Eio.Path.(Eio.Stdenv.fs env / root / "task-approval-marker")
+              in
+              let actor = fixture_actor ~repl:true () in
+              let prompt_file = Filename.concat root "prompt.chatmd" in
+              let source_sha256, manifest_sha256 =
+                Eio.Switch.run (fun bootstrap_sw ->
+                  with_shared
+                    ~manifest_grants:[]
+                    ~data_dir:(Filename.concat root "bootstrap-data")
+                    ~env
+                    ~sw:bootstrap_sw
+                    ~root
+                    ~prompt_file
+                    ~actor
+                    ~script_source:"let main input = Task.pure(input)"
+                    ~provider_factory:(fun ~sw:_ ~server_id:_ -> None, None)
+                    ~authorize_native:(fun _ _ -> Ok ())
+                    ~prepare_output:(fun _ -> Ok `Null)
+                    ~f:(fun shared ->
+                      let entry =
+                        A.Prompt_catalog.find_by_name shared.prompts "restart.prompt"
+                        |> Option.value_exn
+                      in
+                      match entry.availability with
+                      | Ready revision ->
+                        let artifact = A.Prompt_revision.artifact revision in
+                        ( artifact.root_sha256
+                        , Option.value_exn artifact.shell_manifest_sha256 )
+                      | Disabled | Unavailable _ ->
+                        failwith "Task approval bootstrap prompt was unavailable"))
+              in
+              let grant =
+                Config.Manifest_grant.
+                  { id = "retained-task-approval"
+                  ; prompt = "restart.prompt"
+                  ; workspaces = [ "restart.workspace" ]
+                  ; manifest_sha256
+                  ; source_sha256
+                  ; principals =
+                      [ P.Id.Principal.to_string
+                          (Operator_authorization.principal actor).id
+                      ]
+                  }
+              in
+              Eio.Switch.run (fun sw ->
+                let requests = ref 0 in
+                let child_requests = ref 0 in
+                let model_requests = ref 0 in
+                let wall_clock, pause, resume, frozen_now =
+                  controlled_wall_clock real_clock ~initial:(Eio.Time.now real_clock)
+                in
+                pause ();
+                let respond _ body =
+                  if String.is_substring body ~substring:"Retained Task child"
+                  then incr child_requests;
+                  if String.is_substring body ~substring:"Retained Task Model worker"
+                  then incr model_requests;
+                  model_response
+                    [ `Object
+                        [ "type", `String "message"
+                        ; "id", `String "task-job-message"
+                        ; "role", `String "assistant"
+                        ; "status", `String "completed"
+                        ; ( "content"
+                          , `Array
+                              [ `Object
+                                  [ "type", `String "output_text"
+                                  ; "text", `String "task job answer"
+                                  ; "annotations", `Array []
+                                  ]
+                              ] )
+                        ]
+                    ]
+                in
+                let endpoint = local_model_endpoint env sw requests respond in
+                let approval_attempts = ref 0 in
+                with_shared
+                  ~manifest_grants:[ grant ]
+                  ~data_dir:(Filename.concat root "data")
+                  ~env
+                  ~sw
+                  ~root
+                  ~prompt_file
+                  ~actor
+                  ~script_source:"let run ctx input = Task.pure(`Complete(input))"
+                  ~provider_factory:(model_provider ~env ~root ~endpoint)
+                  ~authorize_native:(fun _ binding ->
+                    if
+                      List.mem
+                        [ "child"; "approval_touch" ]
+                        (Chat_response.Tool_capability.reference binding).name
+                        ~equal:String.equal
+                    then (
+                      if
+                        String.equal
+                          (Chat_response.Tool_capability.reference binding).name
+                          "approval_touch"
+                      then Int.incr approval_attempts;
+                      Ok ())
+                    else Error (P.Error.invalid_request "unexpected Task native call"))
+                  ~prepare_output:(function
+                    | Openai.Responses.Tool_output.Output.Text value -> Ok (`String value)
+                    | _ -> Error (P.Error.invalid_request "unexpected Task native output"))
+                  ~f:(fun shared ->
+                    let approval =
+                      Developer_approval_owner.Configuration.create
+                        ~limits:
+                          (Developer_approval_owner.Limits.create
+                             ~max_pending:2
+                             ~max_request_bytes:(32 * 1024)
+                             ~max_display_bytes:512
+                             ~max_decision_reason_bytes:128
+                             ~wait_seconds:10.
+                           |> required "Task approval limits")
+                        ~command_read:(fun _ _ -> true)
+                        ~command_respond:(fun _ _ -> true)
+                        ~job_read:(fun _ _ -> false)
+                        ~job_respond:(fun _ _ -> false)
+                    in
+                    let phase =
+                      start_phase
+                        ~repl:true
+                        ~selected_target:
+                          Chatml.Chatml_compiler_contract.Target.Developer_tool_v1
+                        ~approval
+                        shared
+                        ~clock:wall_clock
+                        ~max_active_agent_calls:2
+                    in
+                    let rec wait_for_park () =
+                      match loop_wait_deadline phase with
+                      | Some deadline when Float.(deadline > frozen_now ()) -> ()
+                      | None | Some _ ->
+                        Eio.Time.sleep real_clock 0.002;
+                        wait_for_park ()
+                    in
+                    Eio.Time.with_timeout_exn real_clock 5. wait_for_park;
+                    let module Repl = Developer_host.Repl in
+                    let run_id = P.Id.Developer_run.create () in
+                    let key name =
+                      P.Idempotency_key.of_string name |> required "Task key"
+                    in
+                    let route =
+                      Developer_command_original.Route.Document_script
+                        { expected = shared.expected
+                        ; selector =
+                            P.Authoring.Analysis.Target.selected_script "s"
+                            |> required "Task selector"
+                        }
+                    in
+                    let wrong_original =
+                      Repl.Original.create
+                        ~route
+                        ~target:Chatml.Chatml_compiler_contract.Target.One_off_v1
+                        ~prompt:(Catalog_identity.prompt_definition "restart.prompt")
+                        ~workspace:
+                          (Catalog_identity.workspace_definition "restart.workspace")
+                        ~requested_execution:None
+                        ~requested_max_output_bytes:None
+                        ~checkpoint:Eio.Fiber.check
+                      |> required "mismatched REPL original"
+                    in
+                    (match
+                       Repl.create
+                         phase.host
+                         ~actor:shared.actor
+                         ~run_id:(P.Id.Developer_run.create ())
+                         ~key:(key "repl-wrong-target")
+                         ~original:wrong_original
+                         ~fresh_source:
+                           (Some
+                              (Developer_command_original.Fresh_source.Document_script
+                                 { connection = shared.connection }))
+                     with
+                     | Error { code = Lease_stale; _ } -> ()
+                     | Ok _ | Error _ ->
+                       failwith "mismatched selected REPL ABI was accepted");
+                    let original =
+                      Repl.Original.create
+                        ~route
+                        ~target:Chatml.Chatml_compiler_contract.Target.Developer_tool_v1
+                        ~prompt:(Catalog_identity.prompt_definition "restart.prompt")
+                        ~workspace:
+                          (Catalog_identity.workspace_definition "restart.workspace")
+                        ~requested_execution:None
+                        ~requested_max_output_bytes:None
+                        ~checkpoint:Eio.Fiber.check
+                      |> required "REPL original"
+                    in
+                    let view =
+                      Repl.create
+                        phase.host
+                        ~actor:shared.actor
+                        ~run_id
+                        ~key:(key "repl-create")
+                        ~original
+                        ~fresh_source:
+                          (Some
+                             (Developer_command_original.Fresh_source.Document_script
+                                { connection = shared.connection }))
+                      |> required "REPL create"
+                    in
+                    let source =
+                      sprintf
+                        {|Task.bind(Tool.call("approval_touch", `Object([])), fun approval ->
+  match approval with
+  | `Ok(_) ->
+    Task.bind(Job.start_tool("child", `Object([{key="input"; value=`String("go")}])), fun child ->
+      Task.bind(Model.spawn("agent_prompt_v1", `Object([{key="prompt"; value=`String(%S)}, {key="input"; value=`String("from Task")}, {key="is_local"; value=`Bool(true)}, {key="source_mode"; value=`String("file")}])), fun model ->
+        Task.pure(`Object([{key="child"; value=`String(child)}, {key="model"; value=`String(model)}]))))
+  | `Error(message) -> Task.fail(message))|}
+                        (Filename.concat root "model.chatmd")
+                    in
+                    let submission =
+                      Repl.submit
+                        phase.host
+                        ~actor:shared.actor
+                        ~instance:(Repl.View.instance view)
+                        ~epoch:(Repl.View.epoch view)
+                        ~expected_revision:(Repl.View.revision view)
+                        ~key:(key "repl-expression")
+                        ~source
+                      |> required "REPL Task expression"
+                    in
+                    let reference =
+                      match Repl.Submission.task_references submission with
+                      | reference :: _ -> reference
+                      | [] ->
+                        resume ();
+                        let status =
+                          match Repl.Submission.status submission with
+                          | Finished -> "finished"
+                          | Need_more _ -> "need_more"
+                          | Rejected diagnostic ->
+                            "rejected: " ^ Repl.Submission.Diagnostic.message diagnostic
+                          | Stopped (Some diagnostic) ->
+                            "stopped: " ^ Repl.Submission.Diagnostic.message diagnostic
+                          | Stopped None -> "stopped"
+                        in
+                        let details =
+                          match Repl.Submission.details submission with
+                          | Available -> "available"
+                          | Output_limited -> "output_limited"
+                        in
+                        failwith ("REPL Task reference absent: " ^ status ^ "/" ^ details)
+                    in
+                    let task_original =
+                      Repl.Task.Original.create
+                        ~reference
+                        ~requested_execution:None
+                        ~requested_max_output_bytes:None
+                        ~checkpoint:Eio.Fiber.check
+                      |> required "Task original"
+                    in
+                    let initial =
+                      Repl.Task.submit
+                        phase.host
+                        ~actor:shared.actor
+                        ~key:(key "task-run")
+                        ~original:task_original
+                        ~fresh_epoch:
+                          (Some (Repl.View.instance view, Repl.View.epoch view))
+                      |> required "Task submit"
+                    in
+                    assert (not (Eio.Path.is_file approval_marker));
+                    let rec wait_for_approval () =
+                      match
+                        Developer_host.Approval.pending
+                          phase.host
+                          ~actor:shared.actor
+                          ~run_id
+                      with
+                      | Ok [ pending ] -> pending
+                      | Ok [] | Error { code = Invalid_request; _ } ->
+                        (match
+                           Repl.Task.observe
+                             phase.host
+                             ~actor:shared.actor
+                             ~run_id
+                             ~key:(key "task-run")
+                         with
+                         | Ok (Some current)
+                           when match
+                                  Store.Developer_command_row.phase
+                                    (Repl.Task.row current)
+                                with
+                                | Terminal _ -> true
+                                | Reserved | Waiting_permission | Execution_started ->
+                                  false ->
+                           let receipt =
+                             Option.map
+                               (Repl.Task.receipt current)
+                               ~f:Store.Developer_command_receipt.value
+                           in
+                           resume ();
+                           raise_s
+                             [%sexp
+                               "Task ended before Shell approval"
+                             , (receipt : Store.Developer_command_receipt.value option)
+                             , (!approval_attempts : int)]
+                         | Ok None | Ok (Some _) | Error _ -> ());
+                        Eio.Time.sleep real_clock 0.002;
+                        wait_for_approval ()
+                      | Ok _ -> failwith "Task published multiple approvals"
+                      | Error error ->
+                        raise_s [%sexp "Task approval lookup failed", (error : P.Error.t)]
+                    in
+                    let pending =
+                      Eio.Time.with_timeout_exn real_clock 5. wait_for_approval
+                    in
+                    (match Developer_host.Approval.Pending.owner pending with
+                     | Command receipt_id ->
+                       assert (
+                         Store.Developer_command_receipt.Id.equal
+                           receipt_id
+                           (Store.Developer_command_row.id (Repl.Task.row initial)))
+                     | Claimed_job _ -> failwith "Task approval belonged to a Job");
+                    (match Developer_host.Approval.Pending.execution pending with
+                     | Native_invocation _ -> ()
+                     | Claimed_model_job _ ->
+                       failwith "Task approval had a Model claim origin");
+                    [%test_eq: string]
+                      (Developer_host.Approval.Pending.runtime_id pending)
+                      "approval";
+                    Developer_host.Approval.respond
+                      phase.host
+                      ~actor:shared.actor
+                      ~run_id
+                      ~id:(Developer_host.Approval.Pending.id pending)
+                      Developer_host.Approval.Approve_once
+                    |> required "Task approval response";
+                    let terminal =
+                      Repl.Task.await_terminal
+                        phase.host
+                        ~actor:shared.actor
+                        ~run_id
+                        ~key:(key "task-run")
+                      |> required "Task terminal"
+                    in
+                    let receipt =
+                      Option.map
+                        (Repl.Task.receipt terminal)
+                        ~f:Store.Developer_command_receipt.value
+                    in
+                    (match receipt with
+                     | Some
+                         (Task
+                            (Store.Developer_command_receipt.Task.Succeeded
+                               { value_preview = Some _ })) -> ()
+                     | _ ->
+                       resume ();
+                       raise_s
+                         [%sexp
+                           "Task Job/Model receipt was not successful"
+                         , (receipt : Store.Developer_command_receipt.value option)]);
+                    let staged = persisted_jobs shared ~run_id in
+                    [%test_eq: int] (List.length staged) 2;
+                    List.iter staged ~f:(fun job ->
+                      let state = P.Developer_job.state job in
+                      [%test_eq: int] state.attempt 0;
+                      match state.status with
+                      | Queued -> ()
+                      | _ -> failwith "Task child claimed before scheduler resume");
+                    resume ();
+                    let rec await_jobs () =
+                      let jobs = persisted_jobs shared ~run_id in
+                      if
+                        List.for_all jobs ~f:(fun job ->
+                          match (P.Developer_job.state job).status with
+                          | Succeeded | Failed _ | Cancelled | Interrupted _ -> true
+                          | Queued | Running | Waiting_permission _ | Waiting_completion _
+                            -> false)
+                      then jobs
+                      else (
+                        Eio.Time.sleep real_clock 0.002;
+                        await_jobs ())
+                    in
+                    let finished = Eio.Time.with_timeout_exn real_clock 15. await_jobs in
+                    let replay =
+                      Repl.Task.submit
+                        phase.host
+                        ~actor:shared.actor
+                        ~key:(key "task-run")
+                        ~original:task_original
+                        ~fresh_epoch:None
+                      |> required "Task replay"
+                    in
+                    assert (
+                      Store.Developer_command_row.same_identity
+                        (Repl.Task.row initial)
+                        (Repl.Task.row replay));
+                    let reset =
+                      Repl.reset_and_wait
+                        phase.host
+                        ~actor:shared.actor
+                        ~instance:(Repl.View.instance view)
+                        ~expected_epoch:(Repl.View.epoch view)
+                        ~key:(key "repl-reset")
+                      |> required "REPL reset"
+                    in
+                    assert (
+                      not
+                        (Repl.Epoch.equal (Repl.View.epoch view) (Repl.View.epoch reset)));
+                    close_phase_and_wait phase;
+                    [%test_eq: int] (List.length (persisted_jobs shared ~run_id)) 2;
+                    [%test_eq: int] !child_requests 1;
+                    [%test_eq: int] !model_requests 1;
+                    [%test_eq: int] !requests 2;
+                    [%test_eq: int] !approval_attempts 1;
+                    assert (Eio.Path.is_file approval_marker);
+                    let kinds = List.map finished ~f:P.Developer_job.kind in
+                    assert (List.mem kinds Async_tool ~equal:P.Job.equal_kind);
+                    assert (List.mem kinds Model_call ~equal:P.Job.equal_kind);
+                    List.iter finished ~f:(fun job ->
+                      match (P.Developer_job.state job).status with
+                      | Succeeded -> ()
+                      | status ->
+                        raise_s
+                          [%sexp
+                            "Task child Job did not succeed", (status : P.Job.status)]);
+                    print_endline "Task Job and Model completed after durable staging")))));
+      [%expect {| Task Job and Model completed after durable staging |}]
     ;;
   end)
 ;;

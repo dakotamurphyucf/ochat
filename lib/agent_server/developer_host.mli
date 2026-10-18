@@ -11,6 +11,12 @@ module Store = Agent_store.Developer_run_store
     Captured Check/Fixture work is pure and never creates a fake live Root. *)
 type t
 
+module Change : sig
+  type kind =
+    | Command_changed
+    | Approval_changed
+end
+
 module Limits : sig
   type t
 
@@ -32,6 +38,7 @@ module Repl : sig
   module View = Developer_repl_epoch.View
   module Submission = Developer_repl_epoch.Submission
   module Task_origin = Developer_repl_epoch.Task_origin
+  module Task_reference = Developer_repl_epoch.Task_reference
 
   type borrowed = Developer_repl_epoch.borrowed
 
@@ -101,9 +108,76 @@ module Repl : sig
     :  borrowed
     -> Chatml_repl_execution.Task_handle.t
     -> (Task_origin.t, P.Error.t) result
+
+  module Task : sig
+    module Original = Developer_repl_task_original
+
+    type view
+
+    val row : view -> Store.Command.Row.t
+    val receipt : view -> Store.Command.Receipt.t option
+
+    (** Same-key historical lookup/disclosure is first and compares the
+        canonical Task Original before any physical Task borrow. [fresh_epoch]
+        is absent for a historical read, including after process restart; a
+        true miss requires the exact live physical instance/epoch. On a true
+        miss, atomically register this instance's Task action against reset/
+        close, authenticate its original retained source and exact physical
+        handle, reserve a real Repl_task_run row in the shared Store, and use
+        one fresh Lifecycle Start. If preparation, Store, admission or launch
+        fails before callback entry, protected cleanup abandons only that
+        unentered marker on typed error, exception or cancellation; an entered
+        or uncertain callback remains owned and must be joined. The first
+        action lazily admits the matched
+        Root/resources; later rows reuse that same Root only under exact
+        Store handle, original/current actor, source/contract and configured
+        Prompt/Workspace checks. Its daemon-owned callback drives OCH-413's
+        retained interpreter once through the existing runner, native/Job/
+        Model policy and single scheduler. Historical/uncertain Start or
+        Finish cannot enter the callback again. A Task terminal does not
+        retire its Root while children may remain queued. *)
+    val submit
+      :  t
+      -> actor:Operator_authorization.t
+      -> key:P.Idempotency_key.t
+      -> original:Original.t
+      -> fresh_epoch:(Instance.t * Epoch.t) option
+      -> (view, P.Error.t) result
+
+    (** Current disclosure of an actual persisted Task row, including after
+        process restart. A row is comparison data, never a fresh handle. *)
+    val observe
+      :  t
+      -> actor:Operator_authorization.t
+      -> run_id:P.Id.Developer_run.t
+      -> key:P.Idempotency_key.t
+      -> (view option, P.Error.t) result
+
+    val await_terminal
+      :  t
+      -> actor:Operator_authorization.t
+      -> run_id:P.Id.Developer_run.t
+      -> key:P.Idempotency_key.t
+      -> (view, P.Error.t) result
+
+    (** Distinct Task/Control permission, current actor/source and exact
+        physical callback check before cancellation. A cancelled Task remains
+        a truthful durable receipt and never clears its key. *)
+    val cancel_and_wait
+      :  t
+      -> actor:Operator_authorization.t
+      -> run_id:P.Id.Developer_run.t
+      -> key:P.Idempotency_key.t
+      -> (view, P.Error.t) result
+  end
 end
 
 module Command : sig
+  (** Existing command client/DTO boundary accepts only Check, Fixture_run
+      and Live_run rows. A persisted Repl_task_run row is never projected or
+      controlled through this surface, even if its run/key is known; use
+      [Repl.Task], which requires REPL plus effectful method permission and
+      its own disclosure/control checks. *)
   type view
 
   module Original = Developer_command_original
@@ -221,6 +295,23 @@ module Command : sig
     -> key:P.Idempotency_key.t
     -> original:Original.t
     -> fresh_source:Original.Fresh_source.t option
+    -> (view, P.Error.t) result
+
+  (** Resolve a fresh physical source at most once, only after the serialized
+      historical-key lookup misses. A same-key retry never invokes the callback.
+      Current actor and method policy are rechecked after its possible yield;
+      [request_current] is a trusted nonyielding, nonraising lease predicate.
+      It is checked through the pre-Reserve admission boundary but not retained
+      by the installed callback, so disconnect cannot cancel accepted work.
+      The returned source remains subject to ordinary Candidate admission. *)
+  val submit_resolving
+    :  t
+    -> actor:Operator_authorization.t
+    -> run_id:P.Id.Developer_run.t
+    -> key:P.Idempotency_key.t
+    -> original:Original.t
+    -> resolve_fresh:(unit -> (Original.Fresh_source.t, P.Error.t) result)
+    -> request_current:(unit -> bool)
     -> (view, P.Error.t) result
 
   (** Historical disclosure without same-request comparison. It never
@@ -362,9 +453,20 @@ val create
   -> limits:Limits.t
   -> budget_configuration:Developer_command_budgets.Configuration.t
   -> repl:Developer_repl_epoch.Configuration.t option
+  -> ?on_change:
+       (run_id:P.Id.Developer_run.t
+        -> key:P.Idempotency_key.t
+        -> kind:Change.kind
+        -> unit)
   -> now:(unit -> P.Timestamp.t)
   -> checkpoint:(unit -> unit)
+  -> unit
   -> (t, P.Error.t) result
+
+(** Comparison-only installation facts; neither accessor grants admission. *)
+val approval_installed : t -> bool
+
+val uses_authoring : t -> Authoring_installation.t -> bool
 
 (** The daemon passes this exact registry into its single
     Job_scheduler.start_controlled as developer_registry=Some. *)

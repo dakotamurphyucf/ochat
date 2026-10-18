@@ -1,8 +1,11 @@
-(** Shared method permission for independent developer Check, Fixture and Live
-    commands. This is one required principal scope, not a source, workspace,
+(** Shared method permission for independent developer Check, Fixture, Live
+    and explicit REPL Task commands. This is one required principal scope, not a source, workspace,
     native, provider, receipt-disclosure or cancellation grant. Host and wire
     adapters must use the actual persisted/original command kind; a separate
-    client-supplied kind is not authorization evidence. *)
+    client-supplied kind is not authorization evidence. Repl_task_run maps to
+    effectful Developer_live_run here; the hosted Task action also requires
+    Developer_repl on both original and current actors through
+    [check_repl_task_now]. Neither scope alone grants an effect. *)
 
 val required_scope
   :  Agent_store.Developer_command_receipt.Kind.t
@@ -30,5 +33,14 @@ val authorize_principal
 val check_now
   :  Agent_store.Developer_command_receipt.Kind.t
   -> original:Operator_authorization.t
+  -> current:Operator_authorization.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** A durable Task action requires both the original/current REPL permission
+    and effectful Live permission. Repeat for historical disclosure, fresh
+    Start and post-wait execution. Distinct receipt-read and Task/Control
+    policies still apply. *)
+val check_repl_task_now
+  :  original:Operator_authorization.t
   -> current:Operator_authorization.t
   -> (unit, Agent_protocol.Error.t) result

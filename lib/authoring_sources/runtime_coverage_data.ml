@@ -118,6 +118,31 @@ let shared_features =
       ; "test/developer_root_owner/developer_approval_tests.ml"
       ; "test/provider_runtime_host/developer_model_approval_tests.ml"
       ] )
+  ; ( "execution.developer_repl_task"
+    , "Retained REPL Task references, explicit durable Start and terminal receipt, \
+       current selected authority at new effects, and joined cancellation/reset"
+    , [ "lib/chatml_repl_execution/chatml_repl_execution.ml"
+      ; "lib/agent_store/developer_command_receipt.ml"
+      ; "lib/agent_store/developer_command_row.ml"
+      ; "lib/agent_store/developer_run_store.ml"
+      ; "lib/agent_server/developer_capture_host.ml"
+      ; "lib/agent_server/developer_root_source.ml"
+      ; "lib/agent_server/developer_repl_epoch.ml"
+      ; "lib/agent_server/developer_repl_task_original.ml"
+      ; "lib/agent_server/developer_repl_task_execution.ml"
+      ; "lib/agent_server/developer_repl_task_receipt.ml"
+      ; "lib/agent_server/developer_command_budgets.ml"
+      ; "lib/agent_server/developer_command_lifecycle.ml"
+      ; "lib/agent_server/developer_root_owner.ml"
+      ; "lib/agent_server/developer_host.ml"
+      ]
+    , "runtime.execution"
+    , [ "test/developer_root_owner/developer_host_tests.ml"
+      ; "lib/agent_server/developer_host_pair_tests.ml"
+      ; "test/developer_root_owner/command_lifecycle_tests.ml"
+      ; "test/developer_run_store/developer_command_tests.ml"
+      ; "test/developer_run_store/developer_run_store_tests.ml"
+      ] )
   ; ( "execution.trace"
     , "Optional bounded source-owned event prefix, final outcome custody and unchanged \
        execution, effects and cancellation"
@@ -394,19 +419,19 @@ let implementation_sources =
   ; ( "lib/agent_protocol/developer_wire.ml"
     , "856335626038230343a0f9736f3b47638a650919e8932002c2066c73256636a6" )
   ; ( "lib/agent_store/developer_command_receipt.ml"
-    , "05f97e97742c0668b963350de76a00596d94a0ad6a39420e792319de7d82defd" )
+    , "e5dc9cc0cdcd487287fc443b97ff996a7b1ea9319aa7c0c98c920ffcd4abe129" )
   ; ( "lib/shell_runtime/approval_broker.ml"
     , "e66598888f26cca06cdb4ae70078fd2b89aea5518adfa64d7ab5958fe8f540fc" )
   ; ( "lib/shell_runtime/call_context.ml"
     , "2a7f5fc4025ec16659aed443679e997d8828262475909815f5507a7276f06de8" )
   ; ( "lib/agent_server/developer_approval_owner.ml"
-    , "7cbc7ba6873ed1301dc232b97f1780c2c2d5eeed8b4254a73d9ccda785145336" )
+    , "b35fec39738beb88b66c4f7cd50e1fb4e432f8188b72b58057a683f17c81d657" )
   ; ( "lib/agent_server/developer_command_lifecycle.ml"
-    , "f70e577af22d50ad0d357145c07e0ff8560449e6f81cc624820f139117813e3a" )
+    , "7c57a679aecf85dfd97146ca2de0b80da313d46686b11c83f5520d7add35131b" )
   ; ( "lib/agent_server/developer_model_job_runner.ml"
     , "7604ff6140540e3b53720515526242e7bc1014c97d6895aacadbfb2909bda718" )
   ; ( "lib/agent_server/daemon.ml"
-    , "cecf9f8eb3bd913ac504c955c5cbef1986c424657c0c3308c3846dc06474d2a6" )
+    , "66737c71f350f630a0c75663f79408430597dc3f3881c509464e39fe76ee9c2a" )
   ; ( "lib/agent_session/developer_claimed_resource_owner.ml"
     , "fb251c6e022f9880820b15807018adc5cf240500050a0424321d7507d3e2bc41" )
   ; ( "lib/agent_server/developer_claim_deadline.ml"
@@ -478,7 +503,7 @@ let implementation_sources =
   ; ( "lib/agent_server/job_scheduler_developer.ml"
     , "18062ce3137c3b1782fb4015657ca304a591341a33e1d1da47d362b137b7fd19" )
   ; ( "lib/agent_server/developer_background_job_runner.ml"
-    , "edad934586db271edf232f4748993d2ed415815df9ed2b39d2a6b6e438fd6696" )
+    , "f9c06f4b60d049ae9b96400b5d3bffa531381521a75a6b787a8e590dfd1666ce" )
   ; ( "lib/agent_server/developer_child_agent_runner.ml"
     , "ec8cc90b8f7c773dff5e658eed0581831c4382932ff5814f6a38620ea490819e" )
   ; ( "lib/agent_server/developer_child_content_projection.ml"
@@ -494,15 +519,15 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_managed_tool_executor.ml"
     , "e7931b4f548e321069c442029d71c6cca47db54af468d7d30957ae6cdbd4a909" )
   ; ( "lib/agent_server/developer_native_executor.ml"
-    , "505ed4edcde09d0b38c055644203baab31b1a07e7a217c912d0e13a2dc4bb375" )
+    , "db60849c0b914c023a522a86160f0b7029b3ce3b51cdb589c13514d1770bd55e" )
   ; ( "lib/agent_server/developer_root_owner.ml"
-    , "b06f265dfe8f69f24d08d19001f1eb1c3d5cca471dec0918e4411da4498f6af9" )
+    , "c3db34e908d7379648d5d902207978e28b8f8ada828585b613f55a2dd1092d5b" )
   ; ( "lib/agent_server/developer_script_job_execution.ml"
     , "4e30550f6585c6afa97ddd12a12042d0be26b84f18aad7f6f92b2f3a3bf4bb32" )
   ; ( "lib/agent_server/developer_script_job_service.ml"
-    , "084f8f130b40d5cc1613b984de8f64468cb680bc39cac98995c1724a41add662" )
+    , "79ab45f6fd273e4f55060607c7635b52e19e724b8ff0bf0356d4c328024db6d6" )
   ; ( "lib/agent_server/developer_host.ml"
-    , "a38e7930b5e47d3f6f3a4e09b465439dc1e0a4662d70d529cc05d471b4e992c7" )
+    , "6331b6cc650c05ef79a16c11e80a831ba62d1e9d291951e1b37f87289978d8b0" )
   ; ( "lib/agent_server/schedule_scheduler.ml"
     , "37cf371632d8ad86693c162e0593d56866f76df577dceb06ddd2ac5fe5bfdae9" )
   ; ( "lib/agent_session/background_execution.ml"
@@ -517,8 +542,26 @@ let implementation_sources =
     , "c6cdff248b4433655daa72064ce42e90d9522a7e2a632b78f555f86961bc0b0e" )
   ; ( "lib/agent_store/developer_run_document.ml"
     , "7274f5aa4214a9fe6fd16614e6f9163d2aeb36b72e12160adb4389f45566fcf7" )
+  ; ( "lib/chatml_repl_execution/chatml_repl_execution.ml"
+    , "bcc574ef327cc1632f4cf53263a79beca95ac657ec3a3b2229dbf48274338dac" )
+  ; ( "lib/agent_store/developer_command_row.ml"
+    , "c7fe85fb222c80450fdc512732c9ad9fc2fd8ab8e12e65eeb64302e4904a5809" )
+  ; ( "lib/agent_server/developer_capture_host.ml"
+    , "0bf741923661e987a7f007c7b8612a2d026aea4748a60f9ed5563bd757e8ebf0" )
+  ; ( "lib/agent_server/developer_root_source.ml"
+    , "052785a90fef793261bdcdabcf5f5067269ae321d65e1fb5169952d4974fd16a" )
+  ; ( "lib/agent_server/developer_repl_epoch.ml"
+    , "d77c37b2ce6171aaaef4342768164232f266bc7175042808e45f01105de95aa4" )
+  ; ( "lib/agent_server/developer_repl_task_original.ml"
+    , "97033f759efa9952eaea486c795d7e2092a985818c424cebe36a03d219ac9089" )
+  ; ( "lib/agent_server/developer_repl_task_execution.ml"
+    , "846762edbf1c35652dc6aeca24899f3fa5219aa3000b7673087588522c815133" )
+  ; ( "lib/agent_server/developer_repl_task_receipt.ml"
+    , "209e79b8ba0f3ca9a10a8cdbc86186761aa45fb1f42a35ca1c5af47fde08b655" )
+  ; ( "lib/agent_server/developer_command_budgets.ml"
+    , "a6ee375476b7c3b37d40131159356bcda552f6e7df730a71393abbb8b114ee12" )
   ; ( "lib/agent_store/developer_run_store.ml"
-    , "e29fa72d39a266271ab8b1657c27f4c669604accd762350e079009ceaa078d02" )
+    , "2f9c2cfbb4ff17ae7ea0b38cf51014279738640ba86af788ae9752dab7940af0" )
   ; ( "lib/agent_session/background_job_event.ml"
     , "5f5a20065fb9652005e4aadeaea85d01f271aff9674a71a318bc9cd6c34e0692" )
   ; ( "lib/agent_session/external_ingress.ml"

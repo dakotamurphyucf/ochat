@@ -59,7 +59,8 @@ val phase : t -> Phase.t
 val encoded_bytes : t -> int
 val same_identity : t -> t -> bool
 
-(** Finite phase invariants shared by mutation and decoding. Only Live_run
+(** Finite phase invariants shared by mutation and decoding. Live_run and
+    Repl_task_run
     waits or crosses Execution_started. A Live success requires that barrier;
     failure/limited/cancelled/interrupted may finish before it. Check and
     Fixture terminals never claim live execution. The receipt kind must match

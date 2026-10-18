@@ -67,12 +67,14 @@ let kind_string = function
   | R.Kind.Check -> "check"
   | Fixture_run -> "fixture_run"
   | Live_run -> "live_run"
+  | Repl_task_run -> "repl_task_run"
 ;;
 
 let kind_of_string = function
   | "check" -> Ok R.Kind.Check
   | "fixture_run" -> Ok Fixture_run
   | "live_run" -> Ok Live_run
+  | "repl_task_run" -> Ok Repl_task_run
   | _ -> corrupt "invalid developer command kind"
 ;;
 
@@ -108,7 +110,7 @@ let phase_valid kind phase =
      | Waiting_permission | Execution_started -> false
      | Terminal { execution_started; receipt } ->
        (not execution_started) && R.Kind.equal kind (R.kind receipt))
-  | Live_run ->
+  | (Live_run | Repl_task_run) as kind ->
     (match phase with
      | Reserved | Waiting_permission | Execution_started -> true
      | Terminal { execution_started; receipt } ->
@@ -118,8 +120,8 @@ let phase_valid kind phase =
        then true
        else (
          match R.value receipt with
-         | R.Live (R.Live.Succeeded _) -> false
-         | Live _ -> true
+         | R.Live (R.Live.Succeeded _) | Task (R.Task.Succeeded _) -> false
+         | Live _ | Task _ -> true
          | Check _ | Fixture _ -> false))
 ;;
 
@@ -165,10 +167,11 @@ let create ~id ~key ~owner ~capture_fingerprint ~request_fingerprint ~kind ~limi
 let apply t change ~limits ~poll =
   let phase =
     match t.kind, t.phase, change with
-    | Live_run, Reserved, Change.Wait_permission
-    | Live_run, Waiting_permission, Change.Wait_permission -> Some Waiting_permission
-    | Live_run, (Reserved | Waiting_permission), Change.Start_execution ->
-      Some Execution_started
+    | (Live_run | Repl_task_run), Reserved, Change.Wait_permission
+    | (Live_run | Repl_task_run), Waiting_permission, Change.Wait_permission ->
+      Some Waiting_permission
+    | (Live_run | Repl_task_run), (Reserved | Waiting_permission), Change.Start_execution
+      -> Some Execution_started
     | _, Terminal { receipt = prior; execution_started }, Change.Finish next
       when R.equal prior next -> Some (Terminal { receipt = prior; execution_started })
     | _, (Reserved | Waiting_permission | Execution_started), Change.Finish receipt ->

@@ -625,7 +625,7 @@ let with_kernel
          })
 ;;
 
-let with_root_action service ~phase f =
+let with_root_action service ~phase ?(check_parent_now = fun () -> Ok ()) f =
   let* witness = O.current service.root in
   let selected = O.Current.selected witness in
   let* () = O.check_effect_now service.root witness in
@@ -654,7 +654,7 @@ let with_root_action service ~phase f =
              ; selected_now = (fun () -> Ok (O.native_selected service.root))
              ; current_capabilities = (fun () -> Ok (O.native_selected service.root))
              ; kernel
-             ; check_parent_now = (fun () -> Ok ())
+             ; check_parent_now
              ; managed_admitted = false
              ; frozen = None
              }
@@ -718,9 +718,7 @@ let with_claimed_worker service ~candidate ?on_capacity_decision ~expired_state 
               action := Some issued;
               let run_scope ~selected ~selected_now ~current_capabilities ~issuer ~run =
                 let* parent = O.job_parent service.root active in
-                let capture_fingerprint =
-                  Chatml_developer_capture.fingerprint (O.capture service.root)
-                in
+                let capture_fingerprint = O.Source.fingerprint (O.source service.root) in
                 let check_parent_now () =
                   let* () =
                     Agent_session.Developer_job_scope.Parent.check_now

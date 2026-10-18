@@ -177,6 +177,11 @@ let%expect_test "command receipt nested values roundtrip and strict optional loc
     ; R.Live (R.Live.Limited protocol_error)
     ; R.Live R.Live.Interrupted
     ; R.Live R.Live.Cancelled
+    ; R.Task (R.Task.Succeeded { value_preview = Some "retained value" })
+    ; R.Task (R.Task.Failed { error = protocol_error; diagnostic = Some diagnostic })
+    ; R.Task (R.Task.Limited { error = protocol_error; diagnostic = None })
+    ; R.Task R.Task.Interrupted
+    ; R.Task R.Task.Cancelled
     ]
   in
   printf
@@ -207,13 +212,30 @@ let%expect_test "command receipt nested values roundtrip and strict optional loc
     | _ -> failwith "missing receipt fields"
   in
   printf "duplicate_rejected=%b\n" (Result.is_error (R.of_json duplicate ~limits ~poll));
+  let task = receipt (R.Task (R.Task.Succeeded { value_preview = None })) in
+  let explicit_null =
+    match R.to_json task with
+    | `Object fields -> `Object (fields @ [ "value_preview", `Null ])
+    | _ -> failwith "missing Task receipt fields"
+  in
+  let task_failure =
+    receipt
+      (R.Task (R.Task.Failed { error = protocol_error; diagnostic = Some diagnostic }))
+  in
+  let null_diagnostic = replace (R.to_json task_failure) "diagnostic" `Null in
+  printf
+    "task_absent_preview=%b task_null_preview_rejected=%b task_null_diagnostic_rejected=%b\n"
+    (R.equal task (roundtrip task))
+    (Result.is_error (R.of_json explicit_null ~limits ~poll))
+    (Result.is_error (R.of_json null_diagnostic ~limits ~poll));
   [%expect
     {|
     check=true fixture=true live=true
     long_log_aggregate_limited=true
-    alternatives=19:true
+    alternatives=24:true
     null_location_rejected=true
-    duplicate_rejected=true |}]
+    duplicate_rejected=true
+    task_absent_preview=true task_null_preview_rejected=true task_null_diagnostic_rejected=true |}]
 ;;
 
 let%expect_test "command phases preserve one-shot execution and terminal identity" =
@@ -229,6 +251,17 @@ let%expect_test "command phases preserve one-shot execution and terminal identit
                ~message:"compile"
                ~retryable:false
                ())))
+  in
+  let task_success =
+    receipt (R.Task (R.Task.Succeeded { value_preview = Some "done" }))
+  in
+  let task_failure =
+    receipt
+      (R.Task
+         (R.Task.Failed
+            { error = P.Error.invalid_request "Task body did not start"
+            ; diagnostic = None
+            }))
   in
   let started = Row.Change.Start_execution in
   let waiting = Row.Change.Wait_permission in
@@ -261,6 +294,15 @@ let%expect_test "command phases preserve one-shot execution and terminal identit
     ; ( "live reopened terminal"
       , R.Kind.Live_run
       , [ started; finish success; started ]
+      , false )
+    ; "task start success", R.Kind.Repl_task_run, [ started; finish task_success ], true
+    ; "task unstarted success", R.Kind.Repl_task_run, [ finish task_success ], false
+    ; "task unstarted failure", R.Kind.Repl_task_run, [ finish task_failure ], true
+    ; "task wrong receipt", R.Kind.Repl_task_run, [ finish success ], false
+    ; "task repeat start", R.Kind.Repl_task_run, [ started; started ], false
+    ; ( "task changed terminal"
+      , R.Kind.Repl_task_run
+      , [ started; finish task_success; finish task_failure ]
       , false )
     ]
   in
@@ -310,6 +352,12 @@ let%expect_test "command phases preserve one-shot execution and terminal identit
     live repeat terminal=true
     live changed terminal=false
     live reopened terminal=false
+    task start success=true
+    task unstarted success=false
+    task unstarted failure=true
+    task wrong receipt=false
+    task repeat start=false
+    task changed terminal=false
     check terminal roundtrip=true
     unstarted_success_rejected=true |}]
 ;;

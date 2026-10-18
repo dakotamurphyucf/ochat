@@ -95,6 +95,7 @@ let interrupted t ~limits ~commands ~poll =
           | Check -> Receipt.Check Interrupted
           | Fixture_run -> Fixture Interrupted
           | Live_run -> Live Interrupted
+          | Repl_task_run -> Task Interrupted
         in
         let* receipt = Receipt.create value ~limits ~poll |> Document_fields.store in
         let* next =

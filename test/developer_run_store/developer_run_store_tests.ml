@@ -1094,6 +1094,12 @@ let%test_unit "reopened recovery interrupts exact historical commands without re
         P.Idempotency_key.of_string "command-terminal-before-restart" |> ok
       in
       let newer_key = P.Idempotency_key.of_string "command-wait-before-restart" |> ok in
+      let task_started_key =
+        P.Idempotency_key.of_string "task-start-before-restart" |> ok
+      in
+      let task_reserved_key =
+        P.Idempotency_key.of_string "task-reserved-before-restart" |> ok
+      in
       let module C = R.Command in
       let session = create_session env sw root in
       let run = open_run session sw ~max_work_steps:10_000 ~max_document_bytes:32768 () in
@@ -1119,6 +1125,20 @@ let%test_unit "reopened recovery interrupts exact historical commands without re
       in
       let started = C.commit handle start ~admit:(fun () -> true) |> run_ok in
       assert (Option.is_some started.execution_start);
+      let task_reserved = reserve handle task_started_key C.Receipt.Kind.Repl_task_run in
+      let task_start =
+        C.prepare_change
+          handle
+          ~previous:task_reserved.view
+          ~change:C.Row.Change.Start_execution
+        |> run_ok
+        |> command_prepared
+      in
+      let task_started = C.commit handle task_start ~admit:(fun () -> true) |> run_ok in
+      assert (Option.is_some task_started.execution_start);
+      let task_unstarted =
+        reserve handle task_reserved_key C.Receipt.Kind.Repl_task_run
+      in
       let checked = reserve handle check_key C.Receipt.Kind.Check in
       let fixture = reserve handle fixture_key C.Receipt.Kind.Fixture_run in
       let fixture_receipt =
@@ -1205,6 +1225,14 @@ let%test_unit "reopened recovery interrupts exact historical commands without re
         C.Receipt.Id.equal
           (C.Row.id (find fixture_key))
           (C.Row.id (C.View.row fixture_terminal.view)));
+      assert (
+        C.Receipt.Id.equal
+          (C.Row.id (find task_started_key))
+          (C.Row.id (C.View.row task_started.view)));
+      assert (
+        C.Receipt.Id.equal
+          (C.Row.id (find task_reserved_key))
+          (C.Row.id (C.View.row task_unstarted.view)));
       let latest = R.Result_root.observe_latest root |> run_ok in
       let checkpoint = R.Observation.checkpoint latest in
       let handle, _ =
@@ -1247,12 +1275,15 @@ let%test_unit "reopened recovery interrupts exact historical commands without re
           assert (Bool.equal execution_started expected_started);
           (match expected_kind, C.Receipt.value receipt with
            | `Check, C.Receipt.Check C.Receipt.Check.Interrupted
-           | `Live, C.Receipt.Live C.Receipt.Live.Interrupted -> ()
+           | `Live, C.Receipt.Live C.Receipt.Live.Interrupted
+           | `Task, C.Receipt.Task C.Receipt.Task.Interrupted -> ()
            | _ -> failwith "recovery selected a changed command terminal")
         | Reserved | Waiting_permission | Execution_started ->
           failwith "recovery retained a nonterminal command"
       in
       interrupted (find key) true `Live;
+      interrupted (find task_started_key) true `Task;
+      interrupted (find task_reserved_key) false `Task;
       interrupted (find check_key) false `Check;
       interrupted (find newer_key) false `Live;
       assert (

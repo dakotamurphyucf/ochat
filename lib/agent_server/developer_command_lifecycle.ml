@@ -81,6 +81,7 @@ type t =
   ; disclosure : Disclosure_policy.t
   ; control : Control_policy.t
   ; recovery_adapter : Recovery_adapter.t
+  ; on_committed : (Row.t -> unit) option
   ; runs : (P.Id.Developer_run.t, run_entry) Hashtbl.t
   ; mutable occupied : int
   ; mutable closed : bool
@@ -149,8 +150,13 @@ and started =
   { active : active
   ; root : Root.run
   ; generation : unit ref
+  ; actor : started_actor
   ; mutable consumed : bool
   }
+
+and started_actor =
+  | Live_actor
+  | Repl_task_actor of Operator_authorization.t
 
 and preparing =
   { active : active
@@ -219,7 +225,15 @@ let safe_view t run_id row =
   }
 ;;
 
-let create ~sw ~store:run_store ~max_active_commands ~disclosure ~control ~recovery =
+let create_with_hook
+      ~on_committed
+      ~sw
+      ~store:run_store
+      ~max_active_commands
+      ~disclosure
+      ~control
+      ~recovery
+  =
   let open Result.Let_syntax in
   let%bind limits = store (Store.limits run_store) in
   let max_runs = Store.Limits.max_runs limits in
@@ -245,11 +259,25 @@ let create ~sw ~store:run_store ~max_active_commands ~disclosure ~control ~recov
     ; disclosure
     ; control
     ; recovery_adapter = recovery
+    ; on_committed
     ; runs = Hashtbl.create (module P.Id.Developer_run)
     ; occupied = 0
     ; closed = false
     })
 ;;
+
+let create ~sw ~store ~max_active_commands ~disclosure ~control ~recovery =
+  create_with_hook
+    ~on_committed:None
+    ~sw
+    ~store
+    ~max_active_commands
+    ~disclosure
+    ~control
+    ~recovery
+;;
+
+let notify_committed t row = Option.iter t.on_committed ~f:(fun notify -> notify row)
 
 let entry t run_id =
   match Hashtbl.find t.runs run_id with
@@ -631,7 +659,7 @@ let same_active_root (active : active) root =
   Root.issued_by_store root active.issuer.store
   && P.Execution_owner.equal_developer (Root.owner root) (Store.owner active.handle)
   && Chatml_source.Digest.equal
-       (Chatml_developer_capture.fingerprint (Root.capture root))
+       (Root.Source.fingerprint (Root.source root))
        (Store.capture_fingerprint active.handle)
   && current_actor (Root.original_actor root)
 ;;
@@ -690,7 +718,67 @@ module Active = struct
           let%bind current = Root.current root in
           let%bind () = Root.check_effect_now root current in
           if same_now ()
-          then Ok { active = t.active; root; generation = t.generation; consumed = false }
+          then
+            Ok
+              { active = t.active
+              ; root
+              ; generation = t.generation
+              ; actor = Live_actor
+              ; consumed = false
+              }
+          else Error (stale ()))
+    ;;
+
+    let bind_repl_root t ~root ~borrowed ~checkpoint =
+      if t.binding_attempted
+      then Error (busy ())
+      else (
+        t.binding_attempted <- true;
+        let actor = Developer_repl_epoch.current_actor borrowed in
+        let original = Developer_repl_epoch.original_actor borrowed in
+        let selection = Developer_repl_epoch.source_selection borrowed in
+        let same_now () =
+          active_current t.active
+          && phys_equal t.generation t.active.generation
+          && phys_equal t.actor actor
+          && phys_equal original (Root.original_actor root)
+          && same_active_root t.active root
+          && (match Root.source root with
+              | Root.Source.Repl source -> phys_equal source selection
+              | Command _ -> false)
+          && Result.is_ok
+               (Developer_method_authorization.check_repl_task_now
+                  ~original
+                  ~current:actor)
+        in
+        if not (same_now ())
+        then Error (stale ())
+        else
+          let open Result.Let_syntax in
+          let%bind checked =
+            Developer_capture_host.Source_selection.Shared.check_current
+              selection
+              ~actor
+              ~checkpoint
+          in
+          let%bind current = Root.current root in
+          let%bind () = Root.check_effect_now root current in
+          let%bind () = Developer_repl_epoch.check_now borrowed in
+          let%bind () =
+            Developer_capture_host.Source_selection.Shared.check_now
+              selection
+              ~checked
+              ~actor
+          in
+          if same_now ()
+          then
+            Ok
+              { active = t.active
+              ; root
+              ; generation = t.generation
+              ; actor = Repl_task_actor actor
+              ; consumed = false
+              }
           else Error (stale ()))
     ;;
   end
@@ -702,8 +790,17 @@ module Active = struct
       active_current active
       && phys_equal active started.active
       && Started.issued_by_root started root
-      && phys_equal actor (Root.original_actor root)
-      && Operator_authorization.is_current actor
+      &&
+      match started.actor with
+      | Live_actor ->
+        phys_equal actor (Root.original_actor root)
+        && Operator_authorization.is_current actor
+      | Repl_task_actor issued ->
+        phys_equal actor issued
+        && Result.is_ok
+             (Developer_method_authorization.check_repl_task_now
+                ~original:(Root.original_actor root)
+                ~current:actor)
     then Ok ()
     else Error (stale ())
   ;;
@@ -715,50 +812,61 @@ module Active = struct
       || (not (Operator_authorization.is_current actor))
       || not (same_principal actor t.view.row)
     then Error (stale ())
-    else if t.started || not (Receipt.Kind.equal (Row.kind t.view.row) Live_run)
+    else if
+      t.started
+      || not
+           (match Row.kind t.view.row with
+            | Live_run | Repl_task_run -> true
+            | Check | Fixture_run -> false)
     then Error (busy ())
-    else
-      with_mutation t.run (fun () ->
-        let%bind () = reconcile_retained_unlocked t.run in
-        match t.view.store_view with
-        | None -> Error (stale ())
-        | Some previous ->
-          let%bind prepared =
-            store
-              (Store.Command.prepare_change
-                 t.handle
-                 ~previous
-                 ~change:Row.Change.Start_execution)
-          in
-          (match prepared with
-           | Store.Command.Unchanged _ -> Error (busy ())
-           | Prepared token ->
-             let pending =
-               Custody.create ~handle:t.handle ~token ~kind:Start ~admit:(fun () ->
-                 active_current t
-                 && Operator_authorization.is_current actor
-                 && same_principal actor t.view.row
-                 && admit ())
-             in
-             t.run.pending <- Some pending;
-             (match store (Custody.commit pending ~remaining:3) with
-              | Error _ as error -> error
-              | Ok installed ->
-                t.run.pending <- None;
-                t.view <- view_of_store t.issuer t.run.run_id installed.view;
-                (match installed.execution_start with
-                 | None -> Error (busy ())
-                 | Some acknowledged ->
-                   let%bind () =
-                     store (Store.Command.Execution_start.consume acknowledged)
-                   in
-                   t.started <- true;
-                   Ok
-                     { active = t
-                     ; actor
-                     ; generation = t.generation
-                     ; binding_attempted = false
-                     }))))
+    else (
+      let committed = ref None in
+      let outcome =
+        with_mutation t.run (fun () ->
+          let%bind () = reconcile_retained_unlocked t.run in
+          match t.view.store_view with
+          | None -> Error (stale ())
+          | Some previous ->
+            let%bind prepared =
+              store
+                (Store.Command.prepare_change
+                   t.handle
+                   ~previous
+                   ~change:Row.Change.Start_execution)
+            in
+            (match prepared with
+             | Store.Command.Unchanged _ -> Error (busy ())
+             | Prepared token ->
+               let pending =
+                 Custody.create ~handle:t.handle ~token ~kind:Start ~admit:(fun () ->
+                   active_current t
+                   && Operator_authorization.is_current actor
+                   && same_principal actor t.view.row
+                   && admit ())
+               in
+               t.run.pending <- Some pending;
+               (match store (Custody.commit pending ~remaining:3) with
+                | Error _ as error -> error
+                | Ok installed ->
+                  t.run.pending <- None;
+                  t.view <- view_of_store t.issuer t.run.run_id installed.view;
+                  committed := Some t.view.row;
+                  (match installed.execution_start with
+                   | None -> Error (busy ())
+                   | Some acknowledged ->
+                     let%bind () =
+                       store (Store.Command.Execution_start.consume acknowledged)
+                     in
+                     t.started <- true;
+                     Ok
+                       { active = t
+                       ; actor
+                       ; generation = t.generation
+                       ; binding_attempted = false
+                       }))))
+      in
+      Option.iter !committed ~f:(notify_committed t.issuer);
+      outcome)
   ;;
 
   let start_live t ~root ~admit =
@@ -807,54 +915,61 @@ let reserve t (slot : slot) ~handle ~key ~kind ~request_fingerprint ~admit =
     (not (Store.issued_by t.store handle))
     || not (P.Id.Developer_run.equal (Store.owner handle).run_id slot.run.run_id)
   then Error (stale ())
-  else
-    with_mutation slot.run (fun () ->
-      let open Result.Let_syntax in
-      let%bind () = reconcile_retained_unlocked slot.run in
-      if
-        (not (slot_current t slot))
-        ||
-        match slot.run.phase with
-        | Ready -> false
-        | Cold | Recovering | Quarantined -> true
-      then Error (stale ())
-      else (
-        let%bind prepared =
-          store (Store.Command.prepare_reservation handle ~key ~kind ~request_fingerprint)
-        in
-        match prepared with
-        | Store.Command.Unchanged value ->
-          if slot_current t slot && admit ()
-          then Ok (view_of_store t slot.run.run_id value)
-          else Error (stale ())
-        | Prepared token ->
-          let receipt = Fallback.interrupted t.fallbacks kind in
-          slot.run.unlaunched
-          <- Some
-               { handle
-               ; view = safe_view t slot.run.run_id (Store.Command.Pending.after token)
-               ; receipt
-               };
-          let pending =
-            Custody.create ~handle ~token ~kind:Reserve ~admit:(fun () ->
-              slot_current t slot && admit ())
+  else (
+    let committed = ref None in
+    let outcome =
+      with_mutation slot.run (fun () ->
+        let open Result.Let_syntax in
+        let%bind () = reconcile_retained_unlocked slot.run in
+        if
+          (not (slot_current t slot))
+          ||
+          match slot.run.phase with
+          | Ready -> false
+          | Cold | Recovering | Quarantined -> true
+        then Error (stale ())
+        else (
+          let%bind prepared =
+            store
+              (Store.Command.prepare_reservation handle ~key ~kind ~request_fingerprint)
           in
-          slot.run.pending <- Some pending;
-          (match store (Custody.commit pending ~remaining:3) with
-           | Ok installed ->
-             slot.run.pending <- None;
-             slot.run.unlaunched <- None;
-             slot.run.persisted <- true;
-             let view = fresh_reservation_view t slot installed.view in
-             slot.unlaunched <- Some { handle; view; receipt };
-             Ok view
-           | Error _ as error ->
-             best_effort_reconcile_unlocked slot.run;
-             error
-           | exception exn ->
-             let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-             best_effort_reconcile_unlocked slot.run;
-             Stdlib.Printexc.raise_with_backtrace exn backtrace)))
+          match prepared with
+          | Store.Command.Unchanged value ->
+            if slot_current t slot && admit ()
+            then Ok (view_of_store t slot.run.run_id value)
+            else Error (stale ())
+          | Prepared token ->
+            let receipt = Fallback.interrupted t.fallbacks kind in
+            slot.run.unlaunched
+            <- Some
+                 { handle
+                 ; view = safe_view t slot.run.run_id (Store.Command.Pending.after token)
+                 ; receipt
+                 };
+            let pending =
+              Custody.create ~handle ~token ~kind:Reserve ~admit:(fun () ->
+                slot_current t slot && admit ())
+            in
+            slot.run.pending <- Some pending;
+            (match store (Custody.commit pending ~remaining:3) with
+             | Ok installed ->
+               slot.run.pending <- None;
+               slot.run.unlaunched <- None;
+               slot.run.persisted <- true;
+               let view = fresh_reservation_view t slot installed.view in
+               slot.unlaunched <- Some { handle; view; receipt };
+               committed := Some view.row;
+               Ok view
+             | Error _ as error ->
+               best_effort_reconcile_unlocked slot.run;
+               error
+             | exception exn ->
+               let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+               best_effort_reconcile_unlocked slot.run;
+               Stdlib.Printexc.raise_with_backtrace exn backtrace)))
+    in
+    Option.iter !committed ~f:(notify_committed t);
+    outcome)
 ;;
 
 let conservative_receipt t (active : active) ~cancelled ~typed_failure =
@@ -870,60 +985,67 @@ let receipt_for_outcome t (active : active) = function
 
 let finish_terminal t ~run ~handle ~previous receipt =
   Eio.Cancel.protect (fun () ->
-    with_mutation run (fun () ->
-      let open Result.Let_syntax in
-      let%bind () = reconcile_retained_unlocked run in
-      let key = Row.key previous.row in
-      let rec attempt remaining =
-        let%bind observed = store (Store.Command.observe handle ~key) in
-        let%bind observed =
-          match observed with
-          | Some value -> Ok value
-          | None -> Error (stale ())
+    let committed = ref None in
+    let outcome =
+      with_mutation run (fun () ->
+        let open Result.Let_syntax in
+        let%bind () = reconcile_retained_unlocked run in
+        let key = Row.key previous.row in
+        let rec attempt remaining =
+          let%bind observed = store (Store.Command.observe handle ~key) in
+          let%bind observed =
+            match observed with
+            | Some value -> Ok value
+            | None -> Error (stale ())
+          in
+          let current_row = Store.Command.View.row observed in
+          match Row.phase current_row with
+          | Row.Phase.Terminal { receipt = installed; _ }
+            when Row.same_identity current_row previous.row
+                 && Receipt.equal installed receipt ->
+            Ok (view_of_store t run.run_id observed)
+          | Reserved | Waiting_permission | Execution_started ->
+            if not (same_row current_row previous.row)
+            then Error (stale ())
+            else (
+              match
+                Store.Command.prepare_change
+                  handle
+                  ~previous:observed
+                  ~change:(Row.Change.Finish receipt)
+              with
+              | Error Store.Error.Conflict when remaining > 0 -> attempt (remaining - 1)
+              | Error error -> Error (store_error error)
+              | Ok (Store.Command.Unchanged value) ->
+                Ok (view_of_store t run.run_id value)
+              | Ok (Prepared token) ->
+                let pending =
+                  Custody.create ~handle ~token ~kind:Finish ~admit:(fun () ->
+                    on_domain t
+                    && Store.issued_by t.store handle
+                    && P.Execution_owner.equal_developer
+                         (Row.owner previous.row)
+                         (Store.owner handle))
+                in
+                run.pending <- Some pending;
+                (match store (Custody.commit pending ~remaining:3) with
+                 | Ok installed ->
+                   run.pending <- None;
+                   committed := Some (Store.Command.View.row installed.view);
+                   Ok (view_of_store t run.run_id installed.view)
+                 | Error _ as error ->
+                   best_effort_reconcile_unlocked run;
+                   error
+                 | exception exn ->
+                   let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+                   best_effort_reconcile_unlocked run;
+                   Stdlib.Printexc.raise_with_backtrace exn backtrace))
+          | Terminal _ -> Error (busy ())
         in
-        let current_row = Store.Command.View.row observed in
-        match Row.phase current_row with
-        | Row.Phase.Terminal { receipt = installed; _ }
-          when Row.same_identity current_row previous.row
-               && Receipt.equal installed receipt ->
-          Ok (view_of_store t run.run_id observed)
-        | Reserved | Waiting_permission | Execution_started ->
-          if not (same_row current_row previous.row)
-          then Error (stale ())
-          else (
-            match
-              Store.Command.prepare_change
-                handle
-                ~previous:observed
-                ~change:(Row.Change.Finish receipt)
-            with
-            | Error Store.Error.Conflict when remaining > 0 -> attempt (remaining - 1)
-            | Error error -> Error (store_error error)
-            | Ok (Store.Command.Unchanged value) -> Ok (view_of_store t run.run_id value)
-            | Ok (Prepared token) ->
-              let pending =
-                Custody.create ~handle ~token ~kind:Finish ~admit:(fun () ->
-                  on_domain t
-                  && Store.issued_by t.store handle
-                  && P.Execution_owner.equal_developer
-                       (Row.owner previous.row)
-                       (Store.owner handle))
-              in
-              run.pending <- Some pending;
-              (match store (Custody.commit pending ~remaining:3) with
-               | Ok installed ->
-                 run.pending <- None;
-                 Ok (view_of_store t run.run_id installed.view)
-               | Error _ as error ->
-                 best_effort_reconcile_unlocked run;
-                 error
-               | exception exn ->
-                 let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-                 best_effort_reconcile_unlocked run;
-                 Stdlib.Printexc.raise_with_backtrace exn backtrace))
-        | Terminal _ -> Error (busy ())
-      in
-      attempt 3))
+        attempt 3)
+    in
+    Option.iter !committed ~f:(notify_committed t);
+    outcome)
 ;;
 
 let finish_active t (active : active) receipt =
@@ -1412,6 +1534,54 @@ let lookup t (slot : slot) ~actor ~key ~kind ~request_fingerprint =
                       (Row.request_fingerprint refreshed.row)
                       request_fingerprint -> Ok (Some refreshed)
           | None | Some _ -> Error (stale ()))))
+;;
+
+module Unlaunched = struct
+  type disposition =
+    | No_durable_row
+    | Terminal_row
+end
+
+let reconcile_unlaunched t (slot : slot) ~actor ~key ~kind ~request_fingerprint ~handle =
+  let open Result.Let_syntax in
+  let check_local () =
+    if
+      (not (slot_current t slot))
+      || Option.is_some slot.unlaunched
+      || Option.is_some slot.run.pending
+      || Option.is_some slot.run.unlaunched
+      || Option.is_some slot.run.recovery
+      || Option.is_some slot.run.claim_only
+      || List.exists slot.run.active ~f:(fun active ->
+        P.Idempotency_key.equal (Row.key active.view.row) key)
+      ||
+      match slot.run.phase with
+      | Ready | Cold -> false
+      | Recovering | Quarantined -> true
+    then Error (busy ())
+    else Ok ()
+  in
+  let%bind () =
+    if slot_current t slot then reconcile_retained slot.run else Error (stale ())
+  in
+  let%bind () = check_local () in
+  let%bind found = snapshot t slot.run.run_id ~actor ~key in
+  let%bind () = check_local () in
+  match found with
+  | None -> Ok Unlaunched.No_durable_row
+  | Some view ->
+    let row = view.row in
+    (match handle, Row.phase row with
+     | Some handle, Row.Phase.Terminal _
+       when Store.issued_by t.store handle
+            && P.Execution_owner.equal_developer (Row.owner row) (Store.owner handle)
+            && Receipt.Kind.equal (Row.kind row) kind
+            && Chatml_source.Digest.equal
+                 (Row.request_fingerprint row)
+                 request_fingerprint -> Ok Terminal_row
+     | None, _
+     | Some _, (Reserved | Waiting_permission | Execution_started)
+     | Some _, Row.Phase.Terminal _ -> Error (busy ()))
 ;;
 
 let stop_and_join t =

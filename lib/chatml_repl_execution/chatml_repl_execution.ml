@@ -69,11 +69,12 @@ end
 module Diagnostic = struct
   type t =
     { message : string
-    ; location : Chatml_source.Location.t option
+    ; site : (Chatml_source.Location.t * int) option
     }
 
   let message t = t.message
-  let location t = t.location
+  let location t = Option.map t.site ~f:fst
+  let source_bytes t = Option.map t.site ~f:snd
 end
 
 module Receipt = struct
@@ -185,12 +186,15 @@ let preview (limits : Limits.t) value =
 let bounded_text (limits : Limits.t) text = utf8_prefix text limits.max_diagnostic_bytes
 
 let diagnostic_of_text limits message =
-  { Diagnostic.message = bounded_text limits message; location = None }
+  { Diagnostic.message = bounded_text limits message; site = None }
 ;;
 
 let diagnostic_of_owned limits (owned : Chatml_diagnostic.t) =
   { Diagnostic.message = bounded_text limits owned.message
-  ; location = Option.map owned.site ~f:Chatml_diagnostic.Site.location
+  ; site =
+      Option.map owned.site ~f:(fun site ->
+        ( Chatml_diagnostic.Site.location site
+        , String.length (Chatml_source.contents (Chatml_diagnostic.Site.source site)) ))
   }
 ;;
 

@@ -189,6 +189,7 @@ let kind = function
   | Agent_store.Developer_command_receipt.Kind.Check -> "check"
   | Fixture_run -> "fixture_run"
   | Live_run -> "live_run"
+  | Repl_task_run -> "repl_task_run"
 ;;
 
 let target_name = function
@@ -260,6 +261,7 @@ let create
     | (Check | Fixture_run), None, None -> true
     | Live_run, None, _
     | Live_run, Some _, None
+    | Repl_task_run, _, _
     | (Check | Fixture_run), Some _, _
     | (Check | Fixture_run), None, Some _ -> false
   in
@@ -271,7 +273,8 @@ let create
            | ( (Check | Fixture_run)
              , (Chatml.Chatml_compiler_contract.Target.One_off_v1 | Tool_v1) )
            | Live_run, One_off_v1 -> true
-           | _ -> false))
+           | Repl_task_run, _ -> false
+           | (Check | Fixture_run | Live_run), _ -> false))
     || Option.exists requested_execution ~f:(fun limits ->
       not (Chatml_execution.valid_limits limits))
     || Option.exists requested_max_output_bytes ~f:(fun bytes -> bytes <= 0)

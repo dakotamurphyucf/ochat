@@ -52,3 +52,14 @@ val receipt : t -> Document_schema.Limits.t
     the authenticated host, not by a request digest. This is pure comparison
     and does not grant any effect. *)
 val for_original : t -> Developer_command_original.t -> (t, P.Error.t) result
+
+(** Narrow the same installed host/Store bundle for a retained REPL Task's
+    explicit requested limits. The effective receipt byte ceiling also
+    respects the Task output cap. Reject a request that cannot represent the
+    conservative Task limit fallback before Reserve or any effect. No Command
+    Original, entrypoint or source authority is constructed. *)
+val for_repl_task
+  :  t
+  -> requested_execution:Chatml_execution.limits option
+  -> requested_max_output_bytes:int option
+  -> (t, P.Error.t) result

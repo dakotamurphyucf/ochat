@@ -110,12 +110,21 @@
     lib/agent_protocol/developer_approval.ml %{dep:../agent_protocol/developer_approval.ml}
     lib/agent_protocol/developer_wire.ml %{dep:../agent_protocol/developer_wire.ml}
     lib/agent_store/developer_command_receipt.ml %{dep:../agent_store/developer_command_receipt.ml}
+    lib/agent_store/developer_command_row.ml %{dep:../agent_store/developer_command_row.ml}
+    lib/chatml_repl_execution/chatml_repl_execution.ml %{dep:../chatml_repl_execution/chatml_repl_execution.ml}
     lib/agent_protocol/job.ml %{dep:../agent_protocol/job.ml}
     lib/agent_protocol/stored_completion.ml %{dep:../agent_protocol/stored_completion.ml}
     lib/agent_protocol/subscription.ml %{dep:../agent_protocol/subscription.ml}
     lib/agent_server/job_scheduler.ml %{dep:../agent_server/job_scheduler.ml}
     lib/agent_server/job_scheduler_developer.ml %{dep:../agent_server/job_scheduler_developer.ml}
     lib/agent_server/developer_root_owner.ml %{dep:../agent_server/developer_root_owner.ml}
+    lib/agent_server/developer_capture_host.ml %{dep:../agent_server/developer_capture_host.ml}
+    lib/agent_server/developer_root_source.ml %{dep:../agent_server/developer_root_source.ml}
+    lib/agent_server/developer_repl_epoch.ml %{dep:../agent_server/developer_repl_epoch.ml}
+    lib/agent_server/developer_repl_task_original.ml %{dep:../agent_server/developer_repl_task_original.ml}
+    lib/agent_server/developer_repl_task_execution.ml %{dep:../agent_server/developer_repl_task_execution.ml}
+    lib/agent_server/developer_repl_task_receipt.ml %{dep:../agent_server/developer_repl_task_receipt.ml}
+    lib/agent_server/developer_command_budgets.ml %{dep:../agent_server/developer_command_budgets.ml}
     lib/agent_server/developer_agent_source_runtime.ml %{dep:../agent_server/developer_agent_source_runtime.ml}
     lib/agent_server/schedule_scheduler.ml %{dep:../agent_server/schedule_scheduler.ml}
     lib/agent_session/background_execution.ml %{dep:../agent_session/background_execution.ml}
