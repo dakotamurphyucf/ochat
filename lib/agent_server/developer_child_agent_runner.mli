@@ -12,10 +12,8 @@ val create
   -> root:Developer_root_owner.run
   -> native:Developer_native_executor.t
   -> runtime_policy:Chat_response.Runtime_semantics.policy
-  -> authorize:
-       (Agent_protocol.Host_invocation.t
-        -> Chat_response.Tool_capability.binding
-        -> (unit, Agent_protocol.Error.t) result)
+  -> authorize_for_runtime:
+       (Chat_response.Agent_runtime.t -> Developer_native_permission.Mode.authorizer)
   -> prepare_output:
        (Openai.Responses.Tool_output.Output.t
         -> (Jsonaf.t, Agent_protocol.Error.t) result)
@@ -40,10 +38,8 @@ val create_content
   -> root:Developer_root_owner.run
   -> native:Developer_native_executor.t
   -> runtime_policy:Chat_response.Runtime_semantics.policy
-  -> authorize:
-       (Agent_protocol.Host_invocation.t
-        -> Chat_response.Tool_capability.binding
-        -> (unit, Agent_protocol.Error.t) result)
+  -> authorize_for_runtime:
+       (Chat_response.Agent_runtime.t -> Developer_native_permission.Mode.authorizer)
   -> prepare_output:
        (Openai.Responses.Tool_output.Output.t
         -> (Jsonaf.t, Agent_protocol.Error.t) result)
@@ -65,10 +61,8 @@ val create_tool
   -> root:Developer_root_owner.run
   -> native:Developer_native_executor.t
   -> runtime_policy:Chat_response.Runtime_semantics.policy
-  -> authorize:
-       (Agent_protocol.Host_invocation.t
-        -> Chat_response.Tool_capability.binding
-        -> (unit, Agent_protocol.Error.t) result)
+  -> authorize_for_runtime:
+       (Chat_response.Agent_runtime.t -> Developer_native_permission.Mode.authorizer)
   -> prepare_output:
        (Openai.Responses.Tool_output.Output.t
         -> (Jsonaf.t, Agent_protocol.Error.t) result)

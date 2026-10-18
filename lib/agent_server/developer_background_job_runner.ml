@@ -22,7 +22,8 @@ type t =
   ; env : Eio_unix.Stdenv.base
   ; agent_runtime : Runtime.t option
   ; jobs : Jobs.t
-  ; authorize : H.t -> C.binding -> (unit, P.Error.t) result
+  ; authorize_for_runtime :
+      Runtime.t option -> Developer_native_permission.Mode.authorizer
   ; prepare_output : Openai.Responses.Tool_output.Output.t -> (Jsonaf.t, P.Error.t) result
   ; approval_owner : Approval_owner.t option
   }
@@ -47,7 +48,7 @@ let create
       ~managed_definition
       ~agent_runtime
       ~jobs
-      ~authorize
+      ~authorize_for_runtime
       ~prepare_output
   =
   if not (O.Job_result.issued_by_root results root)
@@ -77,7 +78,7 @@ let create
       ; env
       ; agent_runtime
       ; jobs
-      ; authorize
+      ; authorize_for_runtime
       ; prepare_output
       ; approval_owner = None
       }
@@ -254,6 +255,12 @@ let execute_with_budget t active claim job request deadline effective control ~i
     Option.iter control ~f:(fun control ->
       control.Chatml.Chatml_lang.before_effect ~name:"Tool.call" ~spawned:false);
     let run_native () =
+      let runtime =
+        match issuer with
+        | None -> t.agent_runtime
+        | Some issuer -> Some (Claimed.native_runtime issuer)
+      in
+      let authorize = t.authorize_for_runtime runtime in
       match issuer with
       | None ->
         N.run_job_child
@@ -262,7 +269,7 @@ let execute_with_budget t active claim job request deadline effective control ~i
           ~active
           ~reference
           ~invocation
-          ~authorize:t.authorize
+          ~authorize
           ~prepare_output:t.prepare_output
       | Some issuer ->
         N.Claimed.with_issuer ~parent:t.native ~active ~issuer (fun selected ->
@@ -270,7 +277,7 @@ let execute_with_budget t active claim job request deadline effective control ~i
             selected
             ~reference
             ~invocation
-            ~authorize:t.authorize
+            ~authorize
             ~prepare_output:t.prepare_output)
     in
     let* terminal =
@@ -432,6 +439,12 @@ let call_script_tool t ~active ~claim ~deadline ~prepared ~issuer ~name ~args =
   in
   let* invocation = H.create_developer context in
   let* terminal =
+    let runtime =
+      match issuer with
+      | None -> t.agent_runtime
+      | Some issuer -> Some (Claimed.native_runtime issuer)
+    in
+    let authorize = t.authorize_for_runtime runtime in
     match issuer with
     | None ->
       N.run_job_child
@@ -440,7 +453,7 @@ let call_script_tool t ~active ~claim ~deadline ~prepared ~issuer ~name ~args =
         ~active
         ~reference
         ~invocation
-        ~authorize:t.authorize
+        ~authorize
         ~prepare_output:t.prepare_output
     | Some issuer ->
       N.Claimed.with_issuer ~parent:t.native ~active ~issuer (fun selected ->
@@ -448,7 +461,7 @@ let call_script_tool t ~active ~claim ~deadline ~prepared ~issuer ~name ~args =
           selected
           ~reference
           ~invocation
-          ~authorize:t.authorize
+          ~authorize
           ~prepare_output:t.prepare_output)
   in
   H.outcome terminal

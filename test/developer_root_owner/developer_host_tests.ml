@@ -17,6 +17,7 @@ let checked = function
 
 let developer_configuration
       ?(tool_fixture = false)
+      ?(selected_native_profile = false)
       ?(authorize_native =
         fun _ _ -> Error (P.Error.invalid_request "no native tool selected"))
       ?(prepare_output =
@@ -135,24 +136,43 @@ let developer_configuration
       ~max_agent_cache_entries:8
     |> ok
   in
-  S.Daemon.Developer.Configuration.create
-    ~capture_policy
-    ~capture_limits
-    ~limits
-    ~result_disclosure:
-      (S.Developer_result_disclosure.Policy.create ~authorize:(fun _ _ -> true))
-    ~receipt_read
-    ~command_control
-    ~publisher_limits:
-      (Agent_store.Developer_result_publisher.Limits.create
-         ~inline_bytes:1024
-         ~max_result_bytes:65536
-         ~max_pending:2
-       |> ok)
-    ~publisher_storage:Agent_store.Developer_result_publisher.Storage.Automatic
-    ~model_target:None
-    ~authorize_native
-    ~prepare_output
+  let result_disclosure =
+    S.Developer_result_disclosure.Policy.create ~authorize:(fun _ _ -> true)
+  in
+  let publisher_limits =
+    Agent_store.Developer_result_publisher.Limits.create
+      ~inline_bytes:1024
+      ~max_result_bytes:65536
+      ~max_pending:2
+    |> ok
+  in
+  let publisher_storage = Agent_store.Developer_result_publisher.Storage.Automatic in
+  (if selected_native_profile
+   then
+     S.Daemon.Developer.Configuration.create_with_selected_prompt_profile
+       ~capture_policy
+       ~capture_limits
+       ~limits
+       ~result_disclosure
+       ~receipt_read
+       ~command_control
+       ~publisher_limits
+       ~publisher_storage
+       ~model_target:None
+       ~prepare_output
+   else
+     S.Daemon.Developer.Configuration.create
+       ~capture_policy
+       ~capture_limits
+       ~limits
+       ~result_disclosure
+       ~receipt_read
+       ~command_control
+       ~publisher_limits
+       ~publisher_storage
+       ~model_target:None
+       ~authorize_native
+       ~prepare_output)
   |> ok
 ;;
 
@@ -388,6 +408,9 @@ let repl_configuration ?(max_receipt_bytes = 8192) ?(max_keys_per_instance = 4) 
 
 let with_daemon
       ?(tool_fixture = false)
+      ?(selected_native_profile = false)
+      ?profile
+      ?reviewer_resolver
       ?(repl = false)
       ?(portable = false)
       ?(approvals = false)
@@ -397,6 +420,7 @@ let with_daemon
       ?(native_sample = false)
       ?authorize_native
       ?prepare_output
+      ?on_ready
       ?timeout_seconds
       ?after_shutdown
       f
@@ -426,7 +450,7 @@ let with_daemon
             Eio.Path.(Eio.Stdenv.fs env / root / "sample.txt")
             "developer host native sample";
         Eio.Switch.run (fun sw ->
-          let base = Agent_server_test_support.config root root prompt1 in
+          let base = Agent_server_test_support.config ?profile root root prompt1 in
           let config =
             match base.workspaces, base.prompts with
             | [ workspace ], [ prompt ] ->
@@ -446,7 +470,12 @@ let with_daemon
             | _ -> failwith "unexpected configured catalog fixture"
           in
           let developer =
-            developer_configuration ~tool_fixture ?authorize_native ?prepare_output ()
+            developer_configuration
+              ~tool_fixture
+              ~selected_native_profile
+              ?authorize_native
+              ?prepare_output
+              ()
           in
           let developer =
             if repl
@@ -496,6 +525,7 @@ let with_daemon
             { S.Daemon.default_options with
               authoring = Some (semantic_authoring_policy env)
             ; developer = Some developer
+            ; reviewer_resolver
             }
           in
           let start () =
@@ -515,7 +545,9 @@ let with_daemon
             let result =
               Fun.protect
                 ~finally:(fun () -> S.Daemon.shutdown daemon |> ok)
-                (fun () -> f daemon)
+                (fun () ->
+                   Option.iter on_ready ~f:(fun on_ready -> on_ready env config daemon);
+                   f daemon)
             in
             Option.iter after_shutdown ~f:(fun replay ->
               let reopened = start () in
@@ -2309,4 +2341,434 @@ let%expect_test "hosted REPL Task persists one terminal and joins before reset" 
          (not (Repl.Epoch.equal epoch (Repl.View.epoch reset))));
   [%expect
     {| task_succeeded=true same_row=true native_succeeded=true native_same_row=true native_calls=2 cancel_terminal=true cancel_without_effect=true reset_changed_epoch=true |}]
+;;
+
+let%expect_test
+    "selected Developer native profile follows real Live and reviewer currentness"
+  =
+  let open R in
+  let run ?reviewer_resolver ?on_ready ?(reauthorized = false) ~profile ~active () =
+    let native_outputs = ref 0 in
+    let outcome =
+      with_daemon
+        ~selected_native_profile:true
+        ~profile
+        ?reviewer_resolver
+        ~prompt_source:
+          "<developer>Selected native policy fixture.</developer>\n\
+           <tool name=\"read_file\"/>"
+        ~native_sample:true
+        ?on_ready
+        ~timeout_seconds:15.
+        ~prepare_output:(function
+          | Openai.Responses.Tool_output.Output.Text value ->
+            incr native_outputs;
+            Ok (`String value)
+          | _ -> Error (P.Error.invalid_request "unexpected native output"))
+        (fun daemon ->
+           let scopes = Set.add Agent_server_test_support.scopes Developer_live_run in
+           let principal =
+             Agent_server_test_support.principal_with_scopes "pri_selected_profile" scopes
+           in
+           let actor =
+             Operator_authorization.guarded ~principal ~is_current:(fun () -> !active)
+           in
+           let reader = Operator_authorization.trusted_local principal in
+           let source =
+             {|let main input =
+  Task.bind(Tool.call("read_file", `Object([{key="file"; value=`String("sample.txt")}])), fun result ->
+    match result with
+    | `Ok(value) -> Task.pure(value)
+    | `Error(message) -> Task.fail(message))|}
+           in
+           let connection, _transport, expected = open_document ~source daemon actor in
+           let selector = P.Authoring.Analysis.Target.selected_script "s" |> ok in
+           let bounds =
+             Chatml_developer_capture.Json_bounds.create
+               ~max_bytes:4096
+               ~max_depth:16
+               ~max_nodes:128
+             |> Or_error.ok_exn
+           in
+           let request =
+             S.Daemon.Developer.Request.create
+               ~route:(Document_script { expected; selector })
+               ~kind:Live_run
+               ~target:Chatml.Chatml_compiler_contract.Target.One_off_v1
+               ~prompt:(Some (S.Catalog_identity.prompt_definition "restart.prompt"))
+               ~workspace:
+                 (Some (S.Catalog_identity.workspace_definition "restart.workspace"))
+               ~entrypoint:"main"
+               ~input:`Null
+               ~fixtures:None
+               ~requested_execution:None
+               ~requested_max_output_bytes:None
+               ~bounds
+               ~checkpoint:ignore
+             |> ok
+           in
+           let run_id = P.Id.Developer_run.create () in
+           let key = P.Idempotency_key.of_string "selected-native-policy" |> checked in
+           ignore
+             (S.Daemon.Developer.submit
+                daemon
+                ~actor
+                ~run_id
+                ~key
+                ~request
+                ~fresh_source:
+                  (Some
+                     (S.Daemon.Developer.Request.Fresh_source.Document_script
+                        { connection }))
+              |> ok);
+           let observed =
+             S.Daemon.Developer.await_terminal daemon ~actor:reader ~run_id ~key |> ok
+           in
+           let second =
+             if reauthorized
+             then (
+               let second_key =
+                 P.Idempotency_key.of_string "selected-native-policy-reauthorized"
+                 |> checked
+               in
+               ignore
+                 (S.Daemon.Developer.submit
+                    daemon
+                    ~actor:reader
+                    ~run_id
+                    ~key:second_key
+                    ~request
+                    ~fresh_source:
+                      (Some
+                         (S.Daemon.Developer.Request.Fresh_source.Document_script
+                            { connection }))
+                  |> ok);
+               let second =
+                 S.Daemon.Developer.await_terminal
+                   daemon
+                   ~actor:reader
+                   ~run_id
+                   ~key:second_key
+                 |> ok
+               in
+               Option.map (S.Daemon.Developer.View.receipt second) ~f:R.value)
+             else None
+           in
+           Option.map (S.Daemon.Developer.View.receipt observed) ~f:R.value, second)
+    in
+    outcome, !native_outputs
+  in
+  let base = Agent_server_test_support.permission_profile in
+  let (allowed, reauthorized), allowed_outputs =
+    run ~reauthorized:true ~profile:base ~active:(ref true) ()
+  in
+  let (denied, _), denied_outputs =
+    run ~profile:{ base with tool_default = Deny } ~active:(ref true) ()
+  in
+  let active = ref true in
+  let revoke_on_review = ref false in
+  let change_profile_on_review = ref false in
+  let reload_profile = ref (fun () -> failwith "profile reload is not installed") in
+  let review_decision = ref Agent_session.Permission_reviewer.Decision.Allow in
+  let review_calls = ref 0 in
+  let reviewer =
+    Agent_session.Permission_reviewer.create
+      ~id:"selected-reviewer"
+      ~kind:Agent_session.Permission_reviewer.External
+      ~revision:"v1"
+      ~review:(fun _ ->
+        incr review_calls;
+        Eio.Fiber.yield ();
+        if !revoke_on_review then active := false;
+        if !change_profile_on_review then !reload_profile ();
+        Ok !review_decision)
+    |> ok
+  in
+  let reviewer_resolver kind id =
+    match kind with
+    | Agent_session.Permission_reviewer.External when String.equal id "selected-reviewer"
+      -> Some reviewer
+    | External | Model -> None
+  in
+  let review_profile =
+    { base with
+      tool_default = Ask
+    ; approval_fallback = External_reviewer "selected-reviewer"
+    }
+  in
+  let (reviewed_allow, _), reviewed_allow_outputs =
+    run ~reviewer_resolver ~profile:review_profile ~active ()
+  in
+  revoke_on_review := true;
+  let (reviewed_revoked, _), reviewed_revoked_outputs =
+    run ~reviewer_resolver ~profile:review_profile ~active ()
+  in
+  revoke_on_review := false;
+  active := true;
+  review_decision
+  := Agent_session.Permission_reviewer.Decision.Deny "selected reviewer denied";
+  let (reviewed_denied, _), reviewed_denied_outputs =
+    run ~reviewer_resolver ~profile:review_profile ~active ()
+  in
+  let (reviewer_unavailable, _), reviewer_unavailable_outputs =
+    run ~profile:review_profile ~active:(ref true) ()
+  in
+  let on_ready env (config : S.Config.t) daemon =
+    let module Sexp = Core.Sexp in
+    let atom value = Sexp.Atom value in
+    let list values = Sexp.List values in
+    let field name value = list [ atom name; value ] in
+    let record fields = list fields in
+    let workspace = List.hd_exn config.workspaces in
+    let workspace_source =
+      match workspace.source with
+      | S.Config.Workspace.Physical path -> list [ atom "physical"; atom path ]
+      | Temporary _ -> failwith "selected profile fixture requires a physical workspace"
+    in
+    let prompt_limits =
+      list
+        (List.map workspace.prompt_limits ~f:(fun limit ->
+           record
+             [ field "prompt" (atom limit.prompt)
+             ; field "max_root_agents" (atom (Int.to_string limit.max_root_agents))
+             ]))
+    in
+    let prompts =
+      list
+        (List.map config.prompts ~f:(fun prompt ->
+           record
+             [ field "id" (atom prompt.id)
+             ; field "path" (atom prompt.path)
+             ; field
+                 "allowed_workspaces"
+                 (list (List.map prompt.allowed_workspaces ~f:atom))
+             ; field "permission_profile" (atom prompt.permission_profile)
+             ]))
+    in
+    let server =
+      record
+        [ field "data_dir" (atom config.server.data_dir)
+        ; field "unix_socket" (atom config.server.unix_socket)
+        ; field "http" (record [ field "enabled" (atom "false") ])
+        ; field "shutdown_grace_ms" (atom "5000")
+        ; field
+            "durability"
+            (record
+               [ field "journal_flush" (atom "each")
+               ; field "journal_flush_ms" (atom "1")
+               ])
+        ]
+    in
+    let changed =
+      List.map
+        [ field "version" (atom (Int.to_string config.version))
+        ; field "server" server
+        ; field
+            "workspaces"
+            (list
+               [ record
+                   [ field "id" (atom workspace.id)
+                   ; field "source" workspace_source
+                   ; field "access" (atom "shared_write")
+                   ; field "prompt_limits" prompt_limits
+                   ]
+               ])
+        ; field "prompts" prompts
+        ; field
+            "permission_profiles"
+            (list
+               [ record
+                   [ field "id" (atom review_profile.id)
+                   ; field "tool_default" (atom "deny")
+                   ; field "approval_fallback" (atom "deny")
+                   ; field "manifest_authorization" (atom "assume_authorized")
+                   ]
+               ])
+        ]
+        ~f:Sexp.to_string_mach
+      |> String.concat ~sep:"\n"
+    in
+    let parsed =
+      S.Config_parser.parse_string ~source_file:config.source_file changed
+      |> Result.map_error ~f:(fun errors ->
+        Sexp.to_string_hum ([%sexp_of: S.Config.Diagnostic.t list] errors))
+      |> Result.ok_or_failwith
+    in
+    let candidate =
+      S.Config_validator.validate ~env parsed
+      |> Result.map_error ~f:(fun errors ->
+        Sexp.to_string_hum ([%sexp_of: S.Config.Diagnostic.t list] errors))
+      |> Result.ok_or_failwith
+    in
+    assert (
+      S.Config.equal
+        candidate
+        { config with permission_profiles = candidate.permission_profiles });
+    assert (
+      not
+        (List.equal
+           S.Config.Permission_profile.equal
+           candidate.permission_profiles
+           config.permission_profiles));
+    reload_profile
+    := fun () ->
+         Eio.Path.save
+           ~create:(`Or_truncate 0o600)
+           Eio.Path.(Eio.Stdenv.fs env / config.source_file)
+           changed;
+         ignore
+           (S.Daemon.reload_config daemon
+            |> Result.map_error ~f:(fun errors ->
+              Sexp.to_string_hum ([%sexp_of: S.Config.Diagnostic.t list] errors))
+            |> Result.ok_or_failwith
+            : S.Config_diff.t)
+  in
+  change_profile_on_review := true;
+  review_decision := Agent_session.Permission_reviewer.Decision.Allow;
+  let (profile_changed, _), profile_changed_outputs =
+    run ~reviewer_resolver ~on_ready ~profile:review_profile ~active:(ref true) ()
+  in
+  change_profile_on_review := false;
+  let retained_task_succeeded, retained_task_outputs =
+    let native_outputs = ref 0 in
+    let succeeded =
+      with_daemon
+        ~repl:true
+        ~selected_native_profile:true
+        ~profile:base
+        ~repl_receipt_bytes:(512 * 1024)
+        ~prompt_source:
+          "<developer>Selected native REPL Task.</developer>\n<tool name=\"read_file\"/>"
+        ~native_sample:true
+        ~timeout_seconds:15.
+        ~prepare_output:(function
+          | Openai.Responses.Tool_output.Output.Text value ->
+            incr native_outputs;
+            Ok (`String value)
+          | _ -> Error (P.Error.invalid_request "unexpected native output"))
+        (fun daemon ->
+           let module Repl = S.Daemon.Developer.Repl in
+           let scopes =
+             Set.add
+               (Set.add Agent_server_test_support.scopes Developer_repl)
+               Developer_live_run
+           in
+           let principal =
+             Agent_server_test_support.principal_with_scopes
+               "pri_selected_repl_task"
+               scopes
+           in
+           let creator = Operator_authorization.trusted_local principal in
+           let executor = Operator_authorization.trusted_local principal in
+           assert (not (phys_equal creator executor));
+           let connection, _transport, expected = open_document daemon creator in
+           let selector = P.Authoring.Analysis.Target.selected_script "s" |> ok in
+           let route =
+             S.Daemon.Developer.Request.Route.Document_script { expected; selector }
+           in
+           let original =
+             Repl.Original.create
+               ~route
+               ~target:Chatml.Chatml_compiler_contract.Target.One_off_v1
+               ~prompt:(S.Catalog_identity.prompt_definition "restart.prompt")
+               ~workspace:(S.Catalog_identity.workspace_definition "restart.workspace")
+               ~requested_execution:None
+               ~requested_max_output_bytes:None
+               ~checkpoint:ignore
+             |> ok
+           in
+           let run_id = P.Id.Developer_run.create () in
+           let key name = P.Idempotency_key.of_string name |> checked in
+           let view =
+             Repl.create
+               daemon
+               ~actor:creator
+               ~run_id
+               ~key:(key "selected-task-create")
+               ~original
+               ~fresh_source:
+                 (Some
+                    (S.Daemon.Developer.Request.Fresh_source.Document_script
+                       { connection }))
+             |> ok
+           in
+           let submitted =
+             Repl.submit
+               daemon
+               ~actor:creator
+               ~instance:(Repl.View.instance view)
+               ~epoch:(Repl.View.epoch view)
+               ~expected_revision:(Repl.View.revision view)
+               ~key:(key "selected-task-expression")
+               ~source:
+                 {|Tool.call("read_file", `Object([{key="file"; value=`String("sample.txt")}]))|}
+             |> ok
+           in
+           let reference = Repl.Submission.task_references submitted |> List.hd_exn in
+           let task_original =
+             Repl.Task.Original.create
+               ~reference
+               ~requested_execution:None
+               ~requested_max_output_bytes:None
+               ~checkpoint:ignore
+             |> ok
+           in
+           ignore
+             (Repl.Task.submit
+                daemon
+                ~actor:executor
+                ~key:(key "selected-task-run")
+                ~original:task_original
+                ~fresh_epoch:(Some (Repl.View.instance view, Repl.View.epoch view))
+              |> ok);
+           let terminal =
+             Repl.Task.await_terminal
+               daemon
+               ~actor:executor
+               ~run_id
+               ~key:(key "selected-task-run")
+             |> ok
+           in
+           match Repl.Task.receipt terminal with
+           | Some receipt ->
+             (match R.value receipt with
+              | R.Task (R.Task.Succeeded { value_preview = Some preview }) ->
+                String.is_substring preview ~substring:"developer host native sample"
+              | R.Task _ | R.Check _ | R.Fixture _ | R.Live _ -> false)
+           | None -> false)
+    in
+    succeeded, !native_outputs
+  in
+  let succeeded = function
+    | Some (Live (Succeeded _)) -> true
+    | _ -> false
+  in
+  let failed = function
+    | Some (Live (Failed _)) -> true
+    | _ -> false
+  in
+  printf
+    "allow=%b reauthorized=%b effect=%d deny=%b effect=%d review_allow=%b effect=%d \
+     revoked_review=%b effect=%d review_deny=%b effect=%d unavailable=%b effect=%d \
+     profile_changed=%b effect=%d calls=%d retained_task=%b effect=%d\n"
+    (succeeded allowed)
+    (succeeded reauthorized)
+    allowed_outputs
+    (failed denied)
+    denied_outputs
+    (succeeded reviewed_allow)
+    reviewed_allow_outputs
+    (failed reviewed_revoked)
+    reviewed_revoked_outputs
+    (failed reviewed_denied)
+    reviewed_denied_outputs
+    (failed reviewer_unavailable)
+    reviewer_unavailable_outputs
+    (failed profile_changed)
+    profile_changed_outputs
+    !review_calls
+    retained_task_succeeded
+    retained_task_outputs;
+  [%expect
+    {| allow=true reauthorized=true effect=2 deny=true effect=0 review_allow=true effect=1 revoked_review=true effect=0 review_deny=true effect=0 unavailable=true effect=0 profile_changed=true effect=0 calls=4 retained_task=true effect=1 |}]
 ;;

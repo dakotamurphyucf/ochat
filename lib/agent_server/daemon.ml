@@ -1592,7 +1592,7 @@ let compose
         ~active_agent_calls:limits.active_agent_calls
         ~job_policy:Chat_response.One_off_request.default_policy
         ~runtime_policy:options.chatml_runtime_policy
-        ~authorize_native:configuration.authorize_native
+        ~native_permission:configuration.native_permission
         ~remote_content:configuration.remote_content
         ~prepare_output:configuration.prepare_output
         ~capture_policy:configuration.capture_policy

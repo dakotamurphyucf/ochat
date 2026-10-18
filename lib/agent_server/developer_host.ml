@@ -30,6 +30,7 @@ type live_services =
   ; native : Native.t
   ; background : Background.t
   ; model : Model.t option
+  ; native_authorizer : Live_resources.Native_authorizer.t
   }
 
 let error code message ~retryable = P.Error.create code ~message ~retryable ()
@@ -239,10 +240,6 @@ type t =
   ; model_target : Inference.Request.Target.t option
   ; job_policy : Chat_response.One_off_request.policy
   ; runtime_policy : Chat_response.Runtime_semantics.policy
-  ; authorize_native :
-      P.Host_invocation.t
-      -> Chat_response.Tool_capability.binding
-      -> (unit, P.Error.t) result
   ; prepare_output : Openai.Responses.Tool_output.Output.t -> (Jsonaf.t, P.Error.t) result
   ; result_disclosure : Developer_result_disclosure.t
   ; publisher_limits : Agent_store.Developer_result_publisher.Limits.t
@@ -324,6 +321,12 @@ let prepare_agent_job_source ~root ~resources ~parent ~binding ~request ~checkpo
 
 let create_live_services t ~root ~resources ~approval_owner ~current_actor =
   let open Result.Let_syntax in
+  let%bind native_authorizer =
+    Live_resources.native_authorizer resources ~root ~current_actor
+  in
+  let authorize_for_runtime =
+    Live_resources.Native_authorizer.for_runtime native_authorizer
+  in
   let%bind queued_issuer =
     Developer_queued_issuer.create ~live:resources ~root ~runtime_policy:t.runtime_policy
   in
@@ -365,7 +368,11 @@ let create_live_services t ~root ~resources ~approval_owner ~current_actor =
       ~managed_definition:(Native.managed_definition native)
       ~agent_runtime:(Some (Live_resources.native_runtime resources))
       ~jobs
-      ~authorize:t.authorize_native
+      ~authorize_for_runtime:(function
+        | Some runtime -> authorize_for_runtime runtime
+        | None ->
+          fun _ _ ->
+            Error (P.Error.invalid_request "developer native runtime is not installed"))
       ~prepare_output:t.prepare_output
   in
   let%bind background =
@@ -393,7 +400,7 @@ let create_live_services t ~root ~resources ~approval_owner ~current_actor =
       ~root
       ~native
       ~runtime_policy:t.runtime_policy
-      ~authorize:t.authorize_native
+      ~authorize_for_runtime
       ~prepare_output:t.prepare_output
   in
   let%bind run_selected_content =
@@ -402,7 +409,7 @@ let create_live_services t ~root ~resources ~approval_owner ~current_actor =
       ~root
       ~native
       ~runtime_policy:t.runtime_policy
-      ~authorize:t.authorize_native
+      ~authorize_for_runtime
       ~prepare_output:t.prepare_output
   in
   let%bind selected_tool_callbacks =
@@ -411,7 +418,7 @@ let create_live_services t ~root ~resources ~approval_owner ~current_actor =
       ~root
       ~native
       ~runtime_policy:t.runtime_policy
-      ~authorize:t.authorize_native
+      ~authorize_for_runtime
       ~prepare_output:t.prepare_output
   in
   let%map () =
@@ -424,7 +431,7 @@ let create_live_services t ~root ~resources ~approval_owner ~current_actor =
       ~selected_tool_callbacks
       ~checkpoint:t.checkpoint
   in
-  { jobs; native; background; model }
+  { jobs; native; background; model; native_authorizer }
 ;;
 
 let check_method t ~actor ~kind =
@@ -1321,7 +1328,10 @@ let run_live_locked
       ~root
       ~jobs:services.jobs
       ~native:services.native
-      ~authorize:t.authorize_native
+      ~authorize:
+        (Live_resources.Native_authorizer.for_runtime
+           services.native_authorizer
+           (Live_resources.native_runtime resources))
       ~prepare_output:t.prepare_output
       ~capture:execution_capture
       ~budgets
@@ -1505,7 +1515,10 @@ let run_repl_task_locked
         ~root
         ~jobs:services.jobs
         ~native:services.native
-        ~authorize:t.authorize_native
+        ~authorize:
+          (Live_resources.Native_authorizer.for_runtime
+             services.native_authorizer
+             (Live_resources.native_runtime resources))
         ~prepare_output:t.prepare_output
         ~borrowed
         ~origin
@@ -2195,7 +2208,7 @@ let create
       ~active_agent_calls
       ~job_policy
       ~runtime_policy
-      ~authorize_native
+      ~native_permission
       ~prepare_output
       ~capture_policy
       ~capture_limits
@@ -2248,6 +2261,7 @@ let create
       ~artifact_store
       ~agent_source_limits
       ~active_agent_calls
+      ~native_permission
   in
   let%bind store_owner =
     Store.open_or_create session_store ~sw ~limits:store_limits ~checkpoint |> store
@@ -2346,7 +2360,6 @@ let create
       ; model_target
       ; job_policy
       ; runtime_policy
-      ; authorize_native
       ; prepare_output
       ; result_disclosure
       ; publisher_limits

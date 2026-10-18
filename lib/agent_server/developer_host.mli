@@ -460,10 +460,7 @@ val create
   -> active_agent_calls:Agent_session.Selected_agent_depth.Limits.t
   -> job_policy:Chat_response.One_off_request.policy
   -> runtime_policy:Chat_response.Runtime_semantics.policy
-  -> authorize_native:
-       (P.Host_invocation.t
-        -> Chat_response.Tool_capability.binding
-        -> (unit, P.Error.t) result)
+  -> native_permission:Developer_native_permission.Mode.t
   -> prepare_output:
        (Openai.Responses.Tool_output.Output.t -> (Jsonaf.t, P.Error.t) result)
   -> capture_policy:Authoring_context_service.Developer.Target_policy.t

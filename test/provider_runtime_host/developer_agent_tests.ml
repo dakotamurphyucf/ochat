@@ -12,6 +12,7 @@ let ok = function
 
 let developer_configuration
       ?remote_content
+      ?(selected_native_profile = false)
       ?(execution = Chatml_execution.default_limits)
       ?(max_invocations_per_run = 5)
       ?(max_selected_per_commit = 2)
@@ -139,64 +140,87 @@ let developer_configuration
         ~max_active_calls
       |> ok
   in
+  let result_disclosure =
+    S.Developer_result_disclosure.Policy.create ~authorize:(fun _ _ -> true)
+  in
+  let publisher_limits =
+    Agent_store.Developer_result_publisher.Limits.create
+      ~inline_bytes:1024
+      ~max_result_bytes:65536
+      ~max_pending:2
+    |> ok
+  in
+  let publisher_storage = Agent_store.Developer_result_publisher.Storage.Automatic in
+  let authorize_native invocation binding =
+    on_native ();
+    let name = (Chat_response.Tool_capability.reference binding).name in
+    Option.iter observe_native_attempt ~f:(fun observe -> observe invocation binding);
+    if List.mem [ "read_file"; "summary"; "undeclared" ] name ~equal:String.equal
+    then (
+      let expected_origin =
+        if claimed_issuer && String.equal name "read_file"
+        then P.Invocation.Script
+        else P.Invocation.Delegated_agent
+      in
+      assert (
+        P.Invocation.equal_origin
+          (P.Host_invocation.context invocation).origin
+          expected_origin);
+      Ok ())
+    else if claimed_issuer && String.equal name "queued_worker"
+    then (
+      assert (
+        P.Invocation.equal_origin
+          (P.Host_invocation.context invocation).origin
+          P.Invocation.Script);
+      Ok ())
+    else if
+      List.mem
+        [ "child"
+        ; "child_tools"
+        ; "deep"
+        ; "model_child"
+        ; "model_mixed"
+        ; "model_spawn"
+        ; "queued_producer"
+        ; "grand"
+        ]
+        name
+        ~equal:String.equal
+    then Ok ()
+    else Error (P.Error.invalid_request "unexpected native binding")
+  in
+  let prepare_output = function
+    | Openai.Responses.Tool_output.Output.Text value -> Ok (`String value)
+    | _ -> Error (P.Error.invalid_request "unexpected native output")
+  in
   let configuration =
-    S.Daemon.Developer.Configuration.create
-      ~capture_policy
-      ~capture_limits
-      ~limits
-      ~result_disclosure:
-        (S.Developer_result_disclosure.Policy.create ~authorize:(fun _ _ -> true))
-      ~receipt_read:(fun _ _ -> true)
-      ~command_control:(fun _ _ -> true)
-      ~publisher_limits:
-        (Agent_store.Developer_result_publisher.Limits.create
-           ~inline_bytes:1024
-           ~max_result_bytes:65536
-           ~max_pending:2
-         |> ok)
-      ~publisher_storage:Agent_store.Developer_result_publisher.Storage.Automatic
-      ~model_target:(Some target)
-      ~authorize_native:(fun invocation binding ->
-        on_native ();
-        let name = (Chat_response.Tool_capability.reference binding).name in
-        Option.iter observe_native_attempt ~f:(fun observe -> observe invocation binding);
-        if List.mem [ "read_file"; "summary"; "undeclared" ] name ~equal:String.equal
-        then (
-          let expected_origin =
-            if claimed_issuer && String.equal name "read_file"
-            then P.Invocation.Script
-            else P.Invocation.Delegated_agent
-          in
-          assert (
-            P.Invocation.equal_origin
-              (P.Host_invocation.context invocation).origin
-              expected_origin);
-          Ok ())
-        else if claimed_issuer && String.equal name "queued_worker"
-        then (
-          assert (
-            P.Invocation.equal_origin
-              (P.Host_invocation.context invocation).origin
-              P.Invocation.Script);
-          Ok ())
-        else if
-          List.mem
-            [ "child"
-            ; "child_tools"
-            ; "deep"
-            ; "model_child"
-            ; "model_mixed"
-            ; "model_spawn"
-            ; "queued_producer"
-            ; "grand"
-            ]
-            name
-            ~equal:String.equal
-        then Ok ()
-        else Error (P.Error.invalid_request "unexpected native binding"))
-      ~prepare_output:(function
-        | Openai.Responses.Tool_output.Output.Text value -> Ok (`String value)
-        | _ -> Error (P.Error.invalid_request "unexpected native output"))
+    (if selected_native_profile
+     then
+       S.Daemon.Developer.Configuration.create_with_selected_prompt_profile
+         ~capture_policy
+         ~capture_limits
+         ~limits
+         ~result_disclosure
+         ~receipt_read:(fun _ _ -> true)
+         ~command_control:(fun _ _ -> true)
+         ~publisher_limits
+         ~publisher_storage
+         ~model_target:(Some target)
+         ~prepare_output
+     else
+       S.Daemon.Developer.Configuration.create
+         ~capture_policy
+         ~capture_limits
+         ~limits
+         ~result_disclosure
+         ~receipt_read:(fun _ _ -> true)
+         ~command_control:(fun _ _ -> true)
+         ~publisher_limits
+         ~publisher_storage
+         ~model_target:(Some target)
+         ~authorize_native
+         ~prepare_output)
     |> ok
   in
   Option.value_map remote_content ~default:configuration ~f:(fun policy ->
@@ -1921,6 +1945,7 @@ let%expect_test "developer child moderator uses the daemon's configured runtime 
          in
          let run_case
                ?(queued_case = Queued_case.Ordinary)
+               ?(selected_native_profile = false)
                name
                runtime_policy
                expected_status
@@ -2083,6 +2108,7 @@ let on_event : context -> state -> event -> state task = fun _ st _ -> Task.pure
                       ~max_selected_per_commit
                       ~max_job_payload_bytes
                       ~claimed_issuer
+                      ~selected_native_profile
                       ~on_native:(fun () -> Int.incr native_admissions)
                       target)
              ; provider_operator_factory = Some provider_factory
@@ -2758,7 +2784,7 @@ let on_event : context -> state -> event -> state task = fun _ st _ -> Task.pure
                   raise exn)
          in
          let default_policy = Chat_response.Runtime_semantics.default_policy in
-         run_case "default" default_policy `Succeeded 1;
+         run_case ~selected_native_profile:true "default" default_policy `Succeeded 1;
          assert (
            List.exists !bodies ~f:(fun body ->
              String.is_substring body ~substring:"OCH415 selected policy child marker"));
@@ -2773,6 +2799,7 @@ let on_event : context -> state -> event -> state task = fun _ st _ -> Task.pure
          run_case "paused" paused_policy `Failed 1;
          run_case
            ~queued_case:Queued_case.Claimed
+           ~selected_native_profile:true
            "queued-claimed"
            default_policy
            `Succeeded

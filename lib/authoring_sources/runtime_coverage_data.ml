@@ -139,6 +139,23 @@ let shared_features =
       ; "test/developer_root_owner/developer_approval_tests.ml"
       ; "test/provider_runtime_host/developer_model_approval_tests.ml"
       ] )
+  ; ( "execution.developer_native_profile"
+    , "Opt-in selected Prompt native profile pinned to the Live catalog; exact runtime \
+       bindings, reviewer currentness and independent Shell grant admission"
+    , [ "lib/agent_server/developer_daemon_configuration.ml"
+      ; "lib/agent_server/developer_native_permission.ml"
+      ; "lib/agent_server/developer_live_resources.ml"
+      ; "lib/agent_server/developer_child_agent_runner.ml"
+      ; "lib/agent_server/developer_background_job_runner.ml"
+      ; "lib/agent_server/developer_host.ml"
+      ; "lib/agent_server/daemon.ml"
+      ]
+    , "runtime.execution"
+    , [ "test/developer_root_owner/developer_host_tests.ml"
+      ; "test/developer_root_owner/developer_approval_tests.ml"
+      ; "test/provider_runtime_host/developer_agent_tests.ml"
+      ; "docs-src/design/chatml-developer-runtime.md"
+      ] )
   ; ( "execution.developer_repl_task"
     , "Retained REPL Task references and bounded frozen-type projection, explicit \
        durable Start and terminal receipt, current selected authority at new effects, \
@@ -469,10 +486,14 @@ let implementation_sources =
     , "b35fec39738beb88b66c4f7cd50e1fb4e432f8188b72b58057a683f17c81d657" )
   ; ( "lib/agent_server/developer_command_lifecycle.ml"
     , "7c57a679aecf85dfd97146ca2de0b80da313d46686b11c83f5520d7add35131b" )
+  ; ( "lib/agent_server/developer_daemon_configuration.ml"
+    , "70be5ce34b6461eada36407b2034ab9711a6ee8cc778e2b925fbf11ffafde73f" )
+  ; ( "lib/agent_server/developer_native_permission.ml"
+    , "fee57b82d1415cee8cf1a5e82cf4f6612d8de53484ed638d7c51c33fdefecccd" )
   ; ( "lib/agent_server/developer_model_job_runner.ml"
     , "7604ff6140540e3b53720515526242e7bc1014c97d6895aacadbfb2909bda718" )
   ; ( "lib/agent_server/daemon.ml"
-    , "10b9cab3d0ba19d273a85a47e27b9b09e0902a3e59f25deac26651e84cb08bc7" )
+    , "b1374c214db6af9c9b6f20b1640623c891c708683474da612e4de5de84327f05" )
   ; ( "lib/agent_session/developer_claimed_resource_owner.ml"
     , "fb251c6e022f9880820b15807018adc5cf240500050a0424321d7507d3e2bc41" )
   ; ( "lib/agent_server/developer_claim_deadline.ml"
@@ -544,9 +565,9 @@ let implementation_sources =
   ; ( "lib/agent_server/job_scheduler_developer.ml"
     , "18062ce3137c3b1782fb4015657ca304a591341a33e1d1da47d362b137b7fd19" )
   ; ( "lib/agent_server/developer_background_job_runner.ml"
-    , "f9c06f4b60d049ae9b96400b5d3bffa531381521a75a6b787a8e590dfd1666ce" )
+    , "9450ea610c424f91480b70ca733226137fa0b18325f07bf789da3e582e8d1876" )
   ; ( "lib/agent_server/developer_child_agent_runner.ml"
-    , "ec8cc90b8f7c773dff5e658eed0581831c4382932ff5814f6a38620ea490819e" )
+    , "f36785908137bab10e2fe335180987c96c971e3a2145eef33cafc18c19b25e1b" )
   ; ( "lib/agent_server/developer_child_content_projection.ml"
     , "17dbb6bc0891ad5bb5c3879a2b1e946c05a01d13db32a15d220faa531cb82ba8" )
   ; ( "lib/agent_server/developer_child_selection.ml"
@@ -556,7 +577,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_agent_source_runtime.ml"
     , "9a4e50dd8f52dee6f5b9171f416d01078f79c257e563e66d1ad1623493b6f7e3" )
   ; ( "lib/agent_server/developer_live_resources.ml"
-    , "2689af45567c970187aec06245bf69fafe126b8fd4a023e9d326e0b74b9ceb78" )
+    , "7dcdb1c031b7fb173a5e55ea7590645725b3904550d6aac056599b580a9b6315" )
   ; ( "lib/agent_server/developer_managed_tool_executor.ml"
     , "e7931b4f548e321069c442029d71c6cca47db54af468d7d30957ae6cdbd4a909" )
   ; ( "lib/agent_server/developer_native_executor.ml"
@@ -568,9 +589,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_script_job_service.ml"
     , "79ab45f6fd273e4f55060607c7635b52e19e724b8ff0bf0356d4c328024db6d6" )
   ; ( "lib/agent_server/developer_host.ml"
-    , "f1a79a6c36625d67e8aafa55ef2605485e9cf75d83b11fcf526929c0e3ec0cee" )
-  ; ( "lib/agent_server/developer_daemon_configuration.ml"
-    , "f4662dd7d90be9428279299454ae477c9084e1ef2dd0da25a64f2059480b1114" )
+    , "c7fb3e62de0fbbb0f0e071203d576b85376f5ee708a622c27b8aea413f364865" )
   ; ( "lib/agent_server/schedule_scheduler.ml"
     , "37cf371632d8ad86693c162e0593d56866f76df577dceb06ddd2ac5fe5bfdae9" )
   ; ( "lib/agent_session/background_execution.ml"

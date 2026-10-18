@@ -169,6 +169,30 @@ module Developer_configuration : sig
           -> (Jsonaf.t, Agent_protocol.Error.t) result)
     -> (t, Agent_protocol.Error.t) result
 
+  (** The configured-Prompt sibling of [create]. It selects the existing
+      Permission_policy only after the actual Live Prompt/Workspace and physical
+      Root are admitted. No caller callback, dummy allow function or new grant
+      language is supplied. The selected profile is rechecked after policy or
+      reviewer waits; Shell remains under exact Manifest_grant plus Once. This
+      constructor is for the future declarative startup builder and still does
+      not select a source or install an endpoint. *)
+  val create_with_selected_prompt_profile
+    :  capture_policy:Authoring_context_service.Developer.Target_policy.t
+    -> capture_limits:Authoring_context_service.Developer.Limits.t
+    -> limits:Limits.t
+    -> result_disclosure:Developer_result_disclosure.Policy.t
+    -> receipt_read:
+         (Operator_authorization.t -> Agent_store.Developer_command_row.t -> bool)
+    -> command_control:
+         (Operator_authorization.t -> Agent_store.Developer_command_row.t -> bool)
+    -> publisher_limits:Agent_store.Developer_result_publisher.Limits.t
+    -> publisher_storage:Agent_store.Developer_result_publisher.Storage.t
+    -> model_target:Inference.Request.Target.t option
+    -> prepare_output:
+         (Openai.Responses.Tool_output.Output.t
+          -> (Jsonaf.t, Agent_protocol.Error.t) result)
+    -> (t, Agent_protocol.Error.t) result
+
   (** Attach an explicitly admitted remote child-content policy before daemon
       construction. Omission keeps remote reads disabled. *)
   val with_remote_content : t -> Remote_content.t -> t

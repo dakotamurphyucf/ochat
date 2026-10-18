@@ -288,7 +288,7 @@ let run_selected_moderator run ~stop_reason ~stop_result =
 let rec run_child
           ~root
           ~runtime_policy
-          ~authorize
+          ~authorize_for_runtime
           ~prepare_output
           ~prepared
           ~child
@@ -303,6 +303,7 @@ let rec run_child
           ~history_compaction
           ~selected_session_id
   =
+  let authorize = authorize_for_runtime (Live.Child_prepared.runtime prepared) in
   let revision = Live.Child_prepared.revision prepared in
   let context = { prepared; child; budget; target } in
   Eio.Fiber.with_binding child_key context (fun () ->
@@ -485,7 +486,7 @@ let rec run_child
               selected_model_source
                 ~root
                 ~runtime_policy
-                ~authorize
+                ~authorize_for_runtime
                 ~prepare_output
                 ~prepared
                 ~child
@@ -534,7 +535,7 @@ let rec run_child
 and selected_model_source
       ~root
       ~runtime_policy
-      ~authorize
+      ~authorize_for_runtime
       ~prepare_output
       ~prepared
       ~child
@@ -584,7 +585,7 @@ and selected_model_source
                          run_child
                            ~root
                            ~runtime_policy
-                           ~authorize
+                           ~authorize_for_runtime
                            ~prepare_output
                            ~prepared:selected
                            ~child
@@ -612,7 +613,7 @@ let run_selected
       ~root
       ~native
       ~runtime_policy
-      ~authorize
+      ~authorize_for_runtime
       ~prepare_output
       ~target
       ~startup
@@ -647,7 +648,7 @@ let run_selected
         run_child
           ~root
           ~runtime_policy
-          ~authorize
+          ~authorize_for_runtime
           ~prepare_output
           ~prepared
           ~child
@@ -663,16 +664,29 @@ let run_selected
           ~selected_session_id:None))
 ;;
 
-let create ~live ~root ~native ~runtime_policy ~authorize ~prepare_output =
+let create ~live ~root ~native ~runtime_policy ~authorize_for_runtime ~prepare_output =
   if not (N.issued_by_root native root)
   then Error (invalid "saved child runner belongs to another physical Root")
   else
     Ok
-      (run_selected ~live ~root ~native ~runtime_policy ~authorize ~prepare_output
+      (run_selected
+         ~live
+         ~root
+         ~native
+         ~runtime_policy
+         ~authorize_for_runtime
+         ~prepare_output
        : Developer_agent_source_runtime.Selected_target.runner)
 ;;
 
-let create_content ~live ~root ~native ~runtime_policy ~authorize ~prepare_output =
+let create_content
+      ~live
+      ~root
+      ~native
+      ~runtime_policy
+      ~authorize_for_runtime
+      ~prepare_output
+  =
   if not (N.issued_by_root native root)
   then Error (invalid "content child runner belongs to another physical Root")
   else
@@ -711,7 +725,7 @@ let create_content ~live ~root ~native ~runtime_policy ~authorize ~prepare_outpu
                  run_child
                    ~root
                    ~runtime_policy
-                   ~authorize
+                   ~authorize_for_runtime
                    ~prepare_output
                    ~prepared
                    ~child
@@ -727,7 +741,8 @@ let create_content ~live ~root ~native ~runtime_policy ~authorize ~prepare_outpu
                    ~selected_session_id:None)))
 ;;
 
-let create_tool ~live ~root ~native ~runtime_policy ~authorize ~prepare_output =
+let create_tool ~live ~root ~native ~runtime_policy ~authorize_for_runtime ~prepare_output
+  =
   if not (N.issued_by_root native root)
   then Error (invalid "ordinary Agent Tool runner belongs to another physical Root")
   else (
@@ -826,7 +841,7 @@ let create_tool ~live ~root ~native ~runtime_policy ~authorize ~prepare_output =
             run_child
               ~root
               ~runtime_policy
-              ~authorize
+              ~authorize_for_runtime
               ~prepare_output
               ~prepared
               ~child

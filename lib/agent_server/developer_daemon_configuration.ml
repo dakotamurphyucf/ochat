@@ -162,15 +162,12 @@ type t =
   ; repl : Repl.t option
   ; shell_approvals : Shell_approvals.t option
   ; portable_wire : Portable.t option
-  ; authorize_native :
-      Agent_protocol.Host_invocation.t
-      -> Chat_response.Tool_capability.binding
-      -> (unit, Agent_protocol.Error.t) result
+  ; native_permission : Developer_native_permission.Mode.t
   ; prepare_output :
       Openai.Responses.Tool_output.Output.t -> (Jsonaf.t, Agent_protocol.Error.t) result
   }
 
-let create
+let create_with_mode
       ~capture_policy
       ~capture_limits
       ~limits
@@ -180,7 +177,7 @@ let create
       ~publisher_limits
       ~publisher_storage
       ~model_target
-      ~authorize_native
+      ~native_permission
       ~prepare_output
   =
   Ok
@@ -197,9 +194,63 @@ let create
     ; repl = None
     ; shell_approvals = None
     ; portable_wire = None
-    ; authorize_native
+    ; native_permission
     ; prepare_output
     }
+;;
+
+let create
+      ~capture_policy
+      ~capture_limits
+      ~limits
+      ~result_disclosure
+      ~receipt_read
+      ~command_control
+      ~publisher_limits
+      ~publisher_storage
+      ~model_target
+      ~authorize_native
+      ~prepare_output
+  =
+  create_with_mode
+    ~capture_policy
+    ~capture_limits
+    ~limits
+    ~result_disclosure
+    ~receipt_read
+    ~command_control
+    ~publisher_limits
+    ~publisher_storage
+    ~model_target
+    ~native_permission:
+      (Developer_native_permission.Mode.Explicit_callback authorize_native)
+    ~prepare_output
+;;
+
+let create_with_selected_prompt_profile
+      ~capture_policy
+      ~capture_limits
+      ~limits
+      ~result_disclosure
+      ~receipt_read
+      ~command_control
+      ~publisher_limits
+      ~publisher_storage
+      ~model_target
+      ~prepare_output
+  =
+  create_with_mode
+    ~capture_policy
+    ~capture_limits
+    ~limits
+    ~result_disclosure
+    ~receipt_read
+    ~command_control
+    ~publisher_limits
+    ~publisher_storage
+    ~model_target
+    ~native_permission:Developer_native_permission.Mode.Selected_prompt_profile
+    ~prepare_output
 ;;
 
 let with_remote_content t remote_content = { t with remote_content = Some remote_content }
