@@ -276,7 +276,11 @@ end
     Assume_approved or Session-scoped grant is substituted.
     The live Developer facade borrows the exact Authoring_installation owner;
     it does not reconstruct a context/source owner. No command or
-    Root effect occurs here. Caller supplies explicit trusted policy/budgets;
+    Root effect occurs here. [runtime_policy] is the daemon's immutable initial
+    moderator policy for every selected child of this Host, including recursive
+    Content and Model children. It comes from Host configuration rather than
+    [Prompt_definition.runtime_policy] text. Caller supplies
+    explicit trusted policy/budgets;
     Developer_command_budgets.bind checks the Store's actual limits after
     opening it; Configuration itself has no physical Store dependency. *)
 val create
@@ -304,6 +308,7 @@ val create
   -> remote_content:Developer_child_remote_content.Policy.t option
   -> agent_source_limits:Developer_agent_source_runtime.Limits.t
   -> job_policy:Chat_response.One_off_request.policy
+  -> runtime_policy:Chat_response.Runtime_semantics.policy
   -> authorize_native:
        (P.Host_invocation.t
         -> Chat_response.Tool_capability.binding

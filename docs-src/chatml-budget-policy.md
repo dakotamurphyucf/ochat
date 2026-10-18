@@ -98,6 +98,12 @@ The runtime builder uses that same captured policy for foreground moderation.
 Existing sessions load their saved policy instead of adopting a changed host
 default. This adds no CLI or configuration-file setting.
 
+For a new process-local developer Live command, the daemon also captures this
+initial policy in its developer Host. Selected Saved, Content and Model children
+inherit that same policy for moderator startup and event drains, including
+recursive children. Prompt text does not select a different daemon policy; the
+ordinary session's recorded policy remains a separate saved-session contract.
+
 Counted turns use `Moderator_request` or `Idle_followup`. A newly admitted
 `User_submit` resets the count, including genuine deferred user input coalesced
 with an idle request. In-loop model calls, updates to the same operation and

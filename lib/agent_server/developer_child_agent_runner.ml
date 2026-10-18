@@ -132,6 +132,7 @@ let child_key : child_context Eio.Fiber.key = Eio.Fiber.create_key ()
 
 type selected_moderator_run =
   { prepared : Live.Child_prepared.t
+  ; runtime_policy : Chat_response.Runtime_semantics.policy
   ; ctx : Eio_unix.Stdenv.base Chat_response.Ctx.t
   ; executor : Model_executor.t
   ; session_id : string
@@ -150,6 +151,7 @@ let run_selected_moderator run ~stop_reason ~stop_result =
     raise stop_reason
   in
   let { prepared
+      ; runtime_policy
       ; ctx
       ; executor
       ; session_id
@@ -192,7 +194,7 @@ let run_selected_moderator run ~stop_reason ~stop_result =
       ~history
       ~available_tools:tools
       ~capabilities
-      ~runtime_policy:Chat_response.Runtime_semantics.default_policy
+      ~runtime_policy
       ?on_process_run:(Chat_response.Agent_runtime.moderator_process_handler runtime)
       ()
   in
@@ -263,6 +265,7 @@ let run_selected_moderator run ~stop_reason ~stop_result =
 
 let rec run_child
           ~root
+          ~runtime_policy
           ~authorize
           ~prepare_output
           ~prepared
@@ -418,6 +421,7 @@ let rec run_child
             | Some executor ->
               run_selected_moderator
                 { prepared
+                ; runtime_policy
                 ; ctx
                 ; executor
                 ; session_id
@@ -453,6 +457,7 @@ let rec run_child
             let source_port =
               selected_model_source
                 ~root
+                ~runtime_policy
                 ~authorize
                 ~prepare_output
                 ~prepared
@@ -496,6 +501,7 @@ let rec run_child
 
 and selected_model_source
       ~root
+      ~runtime_policy
       ~authorize
       ~prepare_output
       ~prepared
@@ -545,6 +551,7 @@ and selected_model_source
                          in
                          run_child
                            ~root
+                           ~runtime_policy
                            ~authorize
                            ~prepare_output
                            ~prepared:selected
@@ -572,6 +579,7 @@ let run_selected
       ~live
       ~root
       ~native
+      ~runtime_policy
       ~authorize
       ~prepare_output
       ~target
@@ -606,6 +614,7 @@ let run_selected
         in
         run_child
           ~root
+          ~runtime_policy
           ~authorize
           ~prepare_output
           ~prepared
@@ -622,16 +631,16 @@ let run_selected
           ~selected_session_id:None))
 ;;
 
-let create ~live ~root ~native ~authorize ~prepare_output =
+let create ~live ~root ~native ~runtime_policy ~authorize ~prepare_output =
   if not (N.issued_by_root native root)
   then Error (invalid "saved child runner belongs to another physical Root")
   else
     Ok
-      (run_selected ~live ~root ~native ~authorize ~prepare_output
+      (run_selected ~live ~root ~native ~runtime_policy ~authorize ~prepare_output
        : Developer_agent_source_runtime.Selected_target.runner)
 ;;
 
-let create_content ~live ~root ~native ~authorize ~prepare_output =
+let create_content ~live ~root ~native ~runtime_policy ~authorize ~prepare_output =
   if not (N.issued_by_root native root)
   then Error (invalid "content child runner belongs to another physical Root")
   else
@@ -669,6 +678,7 @@ let create_content ~live ~root ~native ~authorize ~prepare_output =
                  in
                  run_child
                    ~root
+                   ~runtime_policy
                    ~authorize
                    ~prepare_output
                    ~prepared

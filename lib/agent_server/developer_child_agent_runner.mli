@@ -4,11 +4,14 @@ open! Core
     to prepared Driver entries and the same Root native/Job/managed kernel.
     The returned runner contains no source selector, provider factory or
     independent capability registry. It is installed exactly once in the
-    original SourceRuntime Bound state before the Host exposes the executor. *)
+    original SourceRuntime Bound state before the Host exposes the executor.
+    [runtime_policy] is the Host's captured daemon policy and is lent unchanged
+    to every recursive selected moderator. *)
 val create
   :  live:Developer_live_resources.live
   -> root:Developer_root_owner.run
   -> native:Developer_native_executor.t
+  -> runtime_policy:Chat_response.Runtime_semantics.policy
   -> authorize:
        (Agent_protocol.Host_invocation.t
         -> Chat_response.Tool_capability.binding
@@ -36,6 +39,7 @@ val create_content
   :  live:Developer_live_resources.live
   -> root:Developer_root_owner.run
   -> native:Developer_native_executor.t
+  -> runtime_policy:Chat_response.Runtime_semantics.policy
   -> authorize:
        (Agent_protocol.Host_invocation.t
         -> Chat_response.Tool_capability.binding
