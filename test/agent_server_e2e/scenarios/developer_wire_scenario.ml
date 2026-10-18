@@ -3,6 +3,7 @@ module P = Agent_protocol
 module S = Agent_server
 module D = P.Developer_common
 module W = P.Developer_wire
+module R = P.Developer_repl_wire
 
 let fail message = raise_s [%sexp "developer transport E2E failed", (message : string)]
 let require condition message = if not condition then fail message
@@ -80,6 +81,32 @@ let configured_wire_limits () =
   |> ok
 ;;
 
+let configured_repl_decoder_limits () =
+  let document ~bytes ~depth ~fields ~nodes =
+    match
+      Document_schema.Limits.create
+        ~max_bytes:bytes
+        ~max_depth:depth
+        ~max_fields:fields
+        ~max_nodes:nodes
+    with
+    | Ok value -> value
+    | Error _ -> fail "invalid configured REPL decoder limits"
+  in
+  R.Limits.create
+    ~request:(document ~bytes:512000 ~depth:24 ~fields:2048 ~nodes:4096)
+    ~result:(document ~bytes:512000 ~depth:20 ~fields:2048 ~nodes:4096)
+    ~page:(document ~bytes:8192 ~depth:8 ~fields:128 ~nodes:128)
+    ~response:(document ~bytes:1048576 ~depth:24 ~fields:4096 ~nodes:8192)
+    ~max_source_bytes:65536
+    ~max_reference_bytes:384
+    ~max_output_bytes:32768
+    ~max_page_items:8
+    ~max_event_bytes:4096
+    ~max_registry_entries:2056
+  |> ok
+;;
+
 type raw_client =
   { send : P.Envelope.t -> P.Envelope.t
   ; close : unit -> unit
@@ -112,7 +139,13 @@ let call_developer client ~limits request =
   W.Response.of_method_and_json ~limits ~method_ result |> ok
 ;;
 
-let initialize_response client =
+let call_repl client ~limits request =
+  let method_ = R.Request.method_name request in
+  let result = call client ~method_ ~params:(R.Request.params request) in
+  R.Response.of_method_and_json ~limits ~method_ result |> ok
+;;
+
+let initialize_response ?(repl = false) client =
   let implementation =
     P.Initialize.Implementation.create ~name:"developer-wire-e2e" ~version:"1" |> ok
   in
@@ -122,7 +155,8 @@ let initialize_response client =
       ~protocol_min:P.Version.current
       ~protocol_max:P.Version.current
       ~features:
-        [ P.Authoring.Features.core; P.Authoring.Features.semantic; D.Features.run ]
+        ([ P.Authoring.Features.core; P.Authoring.Features.semantic; D.Features.run ]
+         @ if repl then [ R.Features.repl; R.Features.events ] else [])
       ~event_encodings:[ Json ]
       ~max_inbound_event_bytes:(2 * 1024 * 1024)
       ()
@@ -301,6 +335,219 @@ let qualify_client ?expected_wire_limits ?(after_check = fun _ _ -> ()) client =
           | _ -> fail "Developer Check did not produce Ready")
        | _ -> fail "Developer Check was not terminal");
       after_check run_id key)
+    ~finally:client.close
+;;
+
+let qualify_configured_repl client =
+  Exn.protect
+    ~f:(fun () ->
+      let initialized = initialize_response ~repl:true client in
+      require
+        (List.mem initialized.enabled_features R.Features.repl ~equal:String.equal)
+        "configured REPL feature was not selected";
+      let caps =
+        match
+          call_repl
+            client
+            ~limits:(configured_repl_decoder_limits ())
+            R.Request.Capabilities
+        with
+        | R.Response.Capabilities caps -> caps
+        | _ -> fail "configured REPL capabilities returned another method"
+      in
+      let limits = R.Capabilities.limits caps in
+      require
+        (R.Capabilities.supports caps (R.Request.method_name R.Request.Capabilities))
+        "configured REPL capabilities did not advertise REPL";
+      require
+        (Int.equal (R.Limits.max_output_bytes limits) 32768)
+        "configured REPL wire output ceiling changed";
+      let expected, selector = open_and_analyze client in
+      let route =
+        D.Route.document_script ~limits:(R.Limits.request limits) ~expected ~selector
+        |> ok
+      in
+      let key value = P.Idempotency_key.of_string value |> ok in
+      let created =
+        let request =
+          R.Create.create
+            ~limits
+            ~run_id:(P.Id.Developer_run.create ())
+            ~key:(key "configured-wire-repl-create")
+            ~route
+            ~target:One_off_v1
+            ~prompt:(S.Catalog_identity.prompt_definition "smoke")
+            ~workspace:(S.Catalog_identity.workspace_definition "physical")
+            ~requested_execution:None
+            ~requested_max_output_bytes:None
+          |> ok
+        in
+        match call_repl client ~limits (R.Request.Create request) with
+        | R.Response.Create value -> value
+        | _ -> fail "configured REPL Create returned another method"
+      in
+      let submitted =
+        let request =
+          R.Submit.create
+            ~limits
+            ~instance:(R.View.instance created)
+            ~epoch:(R.View.epoch created)
+            ~expected_revision:(R.View.revision created)
+            ~key:(key "configured-wire-repl-submit")
+            ~source:"Task.pure(8)"
+          |> ok
+        in
+        match call_repl client ~limits (R.Request.Submit request) with
+        | R.Response.Submit value -> value
+        | _ -> fail "configured REPL Submit returned another method"
+      in
+      let reference =
+        match R.Submission.task_references submitted with
+        | [ reference ] -> reference
+        | _ -> fail "4 KiB REPL receipt did not expose its Task reference"
+      in
+      let lookup =
+        R.Lookup.create
+          ~instance:(R.View.instance created)
+          ~key:(key "configured-wire-repl-submit")
+      in
+      let observed =
+        match call_repl client ~limits (R.Request.Observe lookup) with
+        | R.Response.Observe (Some value) -> value
+        | _ -> fail "configured REPL submission was not observable"
+      in
+      require
+        (R.Wire_id.Revision.equal
+           (R.Submission.revision submitted)
+           (R.Submission.revision observed))
+        "configured REPL Observe changed revision";
+      let current =
+        R.Current_epoch.create
+          ~instance:(R.View.instance created)
+          ~epoch:(R.View.epoch created)
+          ~key:(key "configured-wire-repl-submit")
+      in
+      let page =
+        let request =
+          R.Reference_page_request.create ~limits ~current ~after:None ~limit:1 |> ok
+        in
+        match call_repl client ~limits (R.Request.Task_references_page request) with
+        | R.Response.Task_references_page value -> value
+        | _ -> fail "configured REPL reference page returned another method"
+      in
+      require
+        (List.equal String.equal (R.Reference_page.items page) [ reference ])
+        "configured REPL reference page lost its Task";
+      let inspected =
+        let request =
+          R.Inspect.create
+            ~limits
+            ~current
+            ~statement_index:0
+            ~selector:R.Type_selector.Expression
+            ~max_bytes:256
+          |> ok
+        in
+        match call_repl client ~limits (R.Request.Inspect_type request) with
+        | R.Response.Inspect_type value -> value
+        | _ -> fail "configured REPL Inspect_type returned another method"
+      in
+      require
+        (not
+           (String.is_empty
+              (R.Submission.Rendered_type.text (R.Type_inspection.rendered inspected))))
+        "configured REPL type inspection was empty";
+      let task_key = key "configured-wire-repl-task" in
+      let task_lookup = D.Lookup.create ~run_id:(R.View.run_id created) ~key:task_key in
+      (match call_repl client ~limits (R.Request.Task_observe task_lookup) with
+       | R.Response.Task_observe None -> ()
+       | _ -> fail "unsubmitted configured REPL Task key was unexpectedly present");
+      let task_request =
+        R.Task_submit.create
+          ~limits
+          ~key:task_key
+          ~reference
+          ~requested_execution:None
+          ~requested_max_output_bytes:None
+          ~fresh_epoch:(Some (R.View.instance created, R.View.epoch created))
+        |> ok
+      in
+      let started =
+        match call_repl client ~limits (R.Request.Task_submit task_request) with
+        | R.Response.Task_submit value -> value
+        | _ -> fail "configured REPL Task_submit returned another method"
+      in
+      let terminal =
+        match call_repl client ~limits (R.Request.Task_await_terminal task_lookup) with
+        | R.Response.Task_await_terminal value -> value
+        | _ -> fail "configured REPL Task_await_terminal returned another method"
+      in
+      require
+        (P.Developer_command_id.equal
+           (R.Task_view.command_id started)
+           (R.Task_view.command_id terminal))
+        "configured REPL Task identity changed";
+      (match R.Task_view.phase terminal with
+       | Terminal { execution_started = true; outcome = Succeeded (Some preview) } ->
+         require
+           (String.equal preview "8")
+           "configured REPL Task returned an unexpected result"
+       | Terminal { outcome = Failed { error; diagnostic = _ }; _ }
+       | Terminal { outcome = Limited { error; diagnostic = _ }; _ } ->
+         raise_s [%sexp "configured REPL Task failed", (error : P.Error.t)]
+       | _ -> fail "configured REPL Task was not successful");
+      (match call_repl client ~limits (R.Request.Task_observe task_lookup) with
+       | R.Response.Task_observe (Some value)
+         when P.Developer_command_id.equal
+                (R.Task_view.command_id terminal)
+                (R.Task_view.command_id value) -> ()
+       | _ -> fail "configured REPL Task was not observable");
+      (* A native-shaped Task carries the recursive JSON type graph. Its
+         compact reference must survive the configured 4 KiB receipt ceiling
+         without increasing that ceiling to fit frozen type details. *)
+      let native_submission =
+        R.Submit.create
+          ~limits
+          ~instance:(R.View.instance created)
+          ~epoch:(R.View.epoch created)
+          ~expected_revision:(R.Submission.revision submitted)
+          ~key:(key "configured-wire-repl-native-shape")
+          ~source:
+            {|Tool.call("read_file", `Object([{key="file"; value=`String("sample.txt")}]))|}
+        |> ok
+      in
+      (match call_repl client ~limits (R.Request.Submit native_submission) with
+       | R.Response.Submit value ->
+         require
+           (Int.equal (List.length (R.Submission.task_references value)) 1)
+           "4 KiB REPL receipt lost the native Task reference"
+       | _ -> fail "configured native-shaped Submit returned another method");
+      (match
+         call_repl
+           client
+           ~limits
+           (R.Request.Reset_and_wait
+              (R.Current_epoch.create
+                 ~instance:(R.View.instance created)
+                 ~epoch:(R.View.epoch created)
+                 ~key:(key "configured-wire-repl-reset")))
+       with
+       | R.Response.Reset_and_wait next ->
+         require
+           (not (R.Wire_id.Epoch.equal (R.View.epoch created) (R.View.epoch next)))
+           "configured REPL Reset did not replace epoch"
+       | _ -> fail "configured REPL Reset returned another method");
+      match
+        call_repl
+          client
+          ~limits
+          (R.Request.Close_and_wait
+             (R.Lookup.create
+                ~instance:(R.View.instance created)
+                ~key:(key "configured-wire-repl-close")))
+      with
+      | R.Response.Close_and_wait -> ()
+      | _ -> fail "configured REPL Close returned another method")
     ~finally:client.close
 ;;
 
@@ -828,6 +1075,7 @@ let run_configured env =
                 ~expected_wire_limits:(configured_wire_limits ())
                 ~after_check:(qualify_own_control_without_approval_scope daemon fixture)
                 (http_client ~sw env fixture);
+              qualify_configured_repl (http_client ~sw env fixture);
               qualify_unselected_principal
                 (http_client
                    ~token:(Support.Config_fixture.admin_token fixture)
@@ -836,7 +1084,8 @@ let run_configured env =
                    fixture);
               qualify_client
                 ~expected_wire_limits:(configured_wire_limits ())
-                (unix_client ~sw env fixture))));
+                (unix_client ~sw env fixture);
+              qualify_configured_repl (unix_client ~sw env fixture))));
   Eio.Flow.copy_string
     "configured Developer HTTP and Unix passed\n"
     (Eio.Stdenv.stdout env)

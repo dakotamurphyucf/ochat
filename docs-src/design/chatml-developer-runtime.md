@@ -67,9 +67,12 @@ script capture is limited by the existing 256 KiB source route, while REPL
 submissions have a 64 KiB source limit and Project build input has a separate
 1 MiB ceiling. These values are finite starting choices in an explicit
 operator profile, not grants inferred from an opened document or a client
-request. Local `--local` operator-policy setup and portable REPL method
-installation have separate integration work; the configured HTTP and directly
-authenticated Unix command paths use the installed daemon service.
+request. With both portable access and REPL enabled, the daemon installs
+REPL wire limits derived from the same owner and Initialize bounds. The
+ordinary compact statement receipt remains 4 KiB; on-demand type inspection
+has a separate 32 KiB output ceiling and frozen type details have an
+independent 1 MiB retention pool. HTTP and directly authenticated Unix use
+that installed service. Local `--local` operator-policy setup remains separate.
 
 For example, this `server` record field admits the selected `s` script from
 an already authorized supplied ChatMD document for one configured bearer
