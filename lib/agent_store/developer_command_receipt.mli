@@ -23,6 +23,7 @@ module Kind : sig
     | Check
     | Fixture_run
     | Live_run
+    | Repl_task_run
   [@@deriving equal, sexp_of]
 end
 
@@ -49,10 +50,34 @@ module Live : sig
   [@@deriving sexp_of]
 end
 
+module Task : sig
+  (** Retained REPL Task projection. [value_preview] is the evaluator's
+      already-bounded text preview, not a serialized language value. Absence
+      is encoded by omitting the member; explicit null is invalid. Failure
+      keeps the actual bounded diagnostic when one was produced and a typed
+      error for admission/runtime classification. The row's
+      [execution_started] flag records whether this outcome followed the
+      unique durable Start; a success is valid only after Start. *)
+  type t =
+    | Succeeded of { value_preview : string option }
+    | Failed of
+        { error : Agent_protocol.Error.t
+        ; diagnostic : Diagnostic.t option
+        }
+    | Limited of
+        { error : Agent_protocol.Error.t
+        ; diagnostic : Diagnostic.t option
+        }
+    | Interrupted
+    | Cancelled
+  [@@deriving sexp_of]
+end
+
 type value =
   | Check of Check.t
   | Fixture of Fixture.t
   | Live of Live.t
+  | Task of Task.t
 [@@deriving sexp_of]
 
 type t

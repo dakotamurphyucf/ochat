@@ -8,6 +8,11 @@ module Store = Agent_store.Developer_run_store
     result ledger. Store.Command remains the sole durable phase writer. *)
 type t
 
+(** [on_committed] is an optional trusted, nonyielding and nonraising hint.
+    It runs outside the lifecycle mutation gate only after a successful
+    Reserve, Start or Finish Store commit. Consumers must reauthorize reads;
+    the row is comparison data, not a disclosure grant. *)
+
 module Disclosure_policy : sig
   type t
 
@@ -64,7 +69,8 @@ module Active : sig
   module Started : sig
     (** One callback-local proof that the exact fresh Start was durably
         installed and its process-local Execution_start consumed. It is bound
-        to this Active's exact row, owner, capture and callback generation,
+        to this Active's exact row, owner, command capture or REPL source
+        fingerprint, and callback generation,
         expires with Active, and is one-use for the interpreter. A historical
         read or reconciliation cannot mint it. The lower Store ack alone is
         not Root authority. *)
@@ -82,13 +88,33 @@ module Active : sig
         runtime construction. *)
     type t
 
-    (** Bind at most once to the subsequently admitted physical Root. The
-        Root must carry the SAME original actor token, Store owner and capture
-        as the prepared Active, and be current after its yielding check.
+    (** Bind a Live command at most once to the subsequently admitted physical
+        Root. The Root must carry the SAME original actor token, Store owner
+        and command capture as the prepared Active, and be current after its
+        yielding check.
         Failure consumes this binding attempt; another Root cannot replace it.
         This neither writes nor consumes another durable Start. The returned
         Started remains one-use for the interpreter. *)
     val bind_root : t -> root:Developer_root_owner.run -> (Started.t, P.Error.t) result
+
+    (** Task-only binding after the SAME fresh durable Start. [borrowed] is
+        lent by the exact registered Task callback, with its retained selected
+        source, original actor and current actor. The Root must contain that
+        physical REPL selection, retain the borrowed original actor, and have
+        the same Store owner and canonical REPL fingerprint as the Task row.
+        The current actor may be a later token, but must be physically the
+        Preparing actor and [Developer_repl_epoch.current_actor borrowed],
+        current, and have the same principal ID/authentication kind as
+        the current original actor. Recheck the borrowed selection, Root and
+        actor after yielding admission, then use a final nonyielding suffix.
+        This does not relax [bind_root] for Live or mint another Start. A
+        failed attempt consumes this Preparing binding. *)
+    val bind_repl_root
+      :  t
+      -> root:Developer_root_owner.run
+      -> borrowed:Developer_repl_epoch.borrowed
+      -> checkpoint:(unit -> unit)
+      -> (Started.t, P.Error.t) result
 
     (** Comparison only: [started] must be the unique result of binding this
         Preparing token's same Active/callback generation, and both must
@@ -99,10 +125,16 @@ module Active : sig
   val view : t -> View.t
 
   (** Nonyielding lexical Started check for this exact current Active and
-      physical Root. It accepts the Started token after its one interpreter
+      physical Root. Live requires the physical original actor as before;
+      Task requires the exact current actor paired during [bind_repl_root]
+      plus its still-current original actor and original/current principal
+      identity. It accepts the Started token after its one interpreter
       consumption, while this same callback is still live; it never revives
       an expired callback or creates another Start. Caller also rechecks the
-      Root/Store/source after yielding approval work. *)
+      Root/Store/source after yielding approval work. Approval-owner's shared
+      started-command bracket uses this same typed origin check for both
+      kinds; Task approval disclosure/control additionally requires REPL and
+      Live policy, not the ordinary Command DTO. *)
   val check_started_now
     :  t
     -> started:Started.t
@@ -111,12 +143,15 @@ module Active : sig
     -> (unit, P.Error.t) result
 
   (** Commit and consume the unique fresh durable Start for this Active
-      before any native/shell/MCP initialization or language effect. [actor]
-      is the original authenticated token from the captured request; current
-      principal/owner and the trusted nonyielding [admit] are rechecked at the
+      before any native/shell/MCP initialization or language effect. For Live,
+      [actor] is the original captured token. For Task, it is the exact
+      current actor in the registered REPL action, subsequently paired with
+      its retained original actor by [bind_repl_root]. Current principal/owner
+      and the trusted nonyielding [admit] are rechecked at the
       exact Store boundary. No Root exists yet, so this returns only opaque
       preparation custody. A failed/unknown Start yields no token and no
-      native runtime may start. A later callback failure settles a truthful
+      native runtime may start. Only Live_run and Repl_task_run may take this
+      barrier; Check and Fixture remain pure. A later callback failure settles a truthful
       started partial-effect receipt; same-key retry never replays it. *)
   val start_preparation
     :  t
@@ -175,6 +210,16 @@ val create
   -> recovery:Recovery_adapter.t
   -> (t, P.Error.t) result
 
+val create_with_hook
+  :  on_committed:(Store.Command.Row.t -> unit) option
+  -> sw:Eio.Switch.t
+  -> store:Store.t
+  -> max_active_commands:int
+  -> disclosure:Disclosure_policy.t
+  -> control:Control_policy.t
+  -> recovery:Recovery_adapter.t
+  -> (t, P.Error.t) result
+
 (** Reserve this run's host startup/admission slot without yielding, before
     any historical read. A second same-run startup or epoch replacement waits
     outside the slot or returns typed Busy; it cannot race Recovery.finish
@@ -209,6 +254,30 @@ val lookup
   -> kind:Store.Command.Receipt.Kind.t
   -> request_fingerprint:Chatml_source.Digest.t
   -> (View.t option, P.Error.t) result
+
+module Unlaunched : sig
+  type disposition =
+    | No_durable_row
+    | Terminal_row
+end
+
+(** Trusted Task-only cleanup proof inside a fresh exact run Slot after a
+    failed prelaunch/Launch attempt. Reconcile retained Reserve custody and
+    settle any unlaunched selected row before inspecting Store. Unknown
+    Pending, recovery, callback or partial reservation returns an error and
+    must retain the independent Task marker. [No_durable_row] proves the
+    exact key is absent; [Terminal_row] requires a supplied physical handle
+    and an exact terminal row with its owner/kind/request fingerprint. A raw
+    Result_root snapshot outside this Slot is not a cleanup proof. *)
+val reconcile_unlaunched
+  :  t
+  -> Slot.t
+  -> actor:Operator_authorization.t
+  -> key:P.Idempotency_key.t
+  -> kind:Store.Command.Receipt.Kind.t
+  -> request_fingerprint:Chatml_source.Digest.t
+  -> handle:Store.handle option
+  -> (Unlaunched.disposition, P.Error.t) result
 
 (** Run exactly once for an abandoned/reopened physical run while its Slot is
     held, before ANY new command reservation. For a Cold persisted run, use
@@ -298,7 +367,9 @@ val reserve
     source bytes never appear in [View] or [await_terminal]. An unhandled
     child exception cannot cancel the daemon switch. A retained unknown
     terminal save keeps the same selected receipt and per-run occupancy. The
-    caller receives the initial persisted
+      Repl_task_run uses the same Start/Finish/uncertain-result path; its
+      independently registered epoch action is cancelled and joined before
+      reset/close retires the Root. The caller receives the initial persisted
     View after registration; disconnect only drops that caller's waiter.
     Failure to register/fork selects a bounded Interrupted terminal and
     performs exact cleanup before propagating the original exception; an

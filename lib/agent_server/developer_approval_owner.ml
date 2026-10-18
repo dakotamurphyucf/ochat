@@ -39,6 +39,10 @@ module Limits = struct
     ; broker : Broker.Limits.t
     }
 
+  let max_pending t = t.max_pending
+  let max_display_bytes t = t.max_display_bytes
+  let max_decision_reason_bytes t = t.max_decision_reason_bytes
+
   let create
         ~max_pending
         ~max_request_bytes
@@ -169,6 +173,7 @@ type core =
   { identity : unit ref
   ; store : Store.t
   ; configuration : Configuration.t
+  ; on_change : (Row.t -> unit) option
   ; mutable state : state
   ; pending_by_broker : retained String.Table.t
   ; pending_by_public : retained String.Table.t
@@ -233,9 +238,7 @@ let source_check core (scope : source_scope) =
       Lifecycle.Active.check_started_now active ~started ~root ~actor
     | Claimed_job { parent; _ } ->
       let owner = Root.owner root in
-      let capture_fingerprint =
-        Chatml_developer_capture.fingerprint (Root.capture root)
-      in
+      let capture_fingerprint = Root.Source.fingerprint (Root.source root) in
       let%bind () = Job_scope.Parent.check parent ~owner ~capture_fingerprint in
       Job_scope.Parent.check_now parent ~owner ~capture_fingerprint)
 ;;
@@ -253,7 +256,7 @@ let source_check_now core (scope : source_scope) =
       Job_scope.Parent.check_now
         parent
         ~owner:(Root.owner root)
-        ~capture_fingerprint:(Chatml_developer_capture.fingerprint (Root.capture root)))
+        ~capture_fingerprint:(Root.Source.fingerprint (Root.source root)))
 ;;
 
 let local_admit core =
@@ -384,6 +387,16 @@ let project_execution = function
       { job_id = P.Developer_job.id job; attempt = (P.Developer_job.state job).attempt }
 ;;
 
+let notify_live_change core (source : source_scope) =
+  match source.origin with
+  | Started_command { row; _ }
+    when Store.Command.Receipt.Kind.equal
+           (Row.kind row)
+           Store.Command.Receipt.Kind.Live_run ->
+    Option.iter core.on_change ~f:(fun notify -> notify row)
+  | Started_command _ | Claimed_job _ -> ()
+;;
+
 let broker_on_pending core (request : Broker.ui_request) =
   match source_now core, execution_now core with
   | Ok source_scope, Ok execution_scope ->
@@ -416,7 +429,8 @@ let broker_on_pending core (request : Broker.ui_request) =
       Hashtbl.set
         core.pending_by_public
         ~key:(P.Id.Permission.to_string projection.id)
-        ~data:retained)
+        ~data:retained);
+    notify_live_change core source_scope
   | Error _, _ | _, Error _ ->
     (* An entered scope cannot normally expire between broker admission and
        this callback on its own fiber. If cancellation did so, the bounded
@@ -425,14 +439,18 @@ let broker_on_pending core (request : Broker.ui_request) =
 ;;
 
 let broker_on_finished core (request : Broker.ui_request) =
-  with_lock core (fun () ->
-    match Hashtbl.find core.pending_by_broker request.id with
-    | Some retained when phys_equal retained.ui_request request ->
-      Hashtbl.remove core.pending_by_broker request.id;
-      Hashtbl.remove
-        core.pending_by_public
-        (P.Id.Permission.to_string retained.projection.id)
-    | None | Some _ -> ())
+  let removed =
+    with_lock core (fun () ->
+      match Hashtbl.find core.pending_by_broker request.id with
+      | Some retained when phys_equal retained.ui_request request ->
+        Hashtbl.remove core.pending_by_broker request.id;
+        Hashtbl.remove
+          core.pending_by_public
+          (P.Id.Permission.to_string retained.projection.id);
+        Some retained.source
+      | None | Some _ -> None)
+  in
+  Option.iter removed ~f:(notify_live_change core)
 ;;
 
 let close t =
@@ -444,12 +462,13 @@ let close t =
   Broker.close t.broker
 ;;
 
-let create ~sw ~env ~store ~preparing ~configuration =
+let create_with_change_option ~sw ~env ~store ~preparing ~configuration ~on_change =
   let identity = ref () in
   let core =
     { identity
     ; store
     ; configuration
+    ; on_change
     ; state = Awaiting_pair preparing
     ; pending_by_broker = String.Table.create ()
     ; pending_by_public = String.Table.create ()
@@ -488,6 +507,20 @@ let create ~sw ~env ~store ~preparing ~configuration =
   in
   owner.release_hook <- Eio.Switch.on_release_cancellable sw (fun () -> close owner);
   Ok owner
+;;
+
+let create ~sw ~env ~store ~preparing ~configuration =
+  create_with_change_option ~sw ~env ~store ~preparing ~configuration ~on_change:None
+;;
+
+let create_with_change ~sw ~env ~store ~preparing ~configuration ~on_change =
+  create_with_change_option
+    ~sw
+    ~env
+    ~store
+    ~preparing
+    ~configuration
+    ~on_change:(Some on_change)
 ;;
 
 let bind_root t ~root ~started =
@@ -624,7 +657,7 @@ let observe_root core actor =
       || (not
             (Chatml_source.Digest.equal
                (Store.Checkpoint.capture_fingerprint checkpoint)
-               (Chatml_developer_capture.fingerprint (Root.capture root))))
+               (Root.Source.fingerprint (Root.source root))))
       || not
            (Store.Checkpoint.phase checkpoint
             |> Store.Checkpoint.equal_phase Store.Checkpoint.Active)

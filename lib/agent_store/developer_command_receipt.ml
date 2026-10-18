@@ -24,6 +24,7 @@ module Kind = struct
     | Check
     | Fixture_run
     | Live_run
+    | Repl_task_run
   [@@deriving equal, sexp_of]
 end
 
@@ -50,10 +51,27 @@ module Live = struct
   [@@deriving sexp_of]
 end
 
+module Task = struct
+  type t =
+    | Succeeded of { value_preview : string option }
+    | Failed of
+        { error : P.Error.t
+        ; diagnostic : Diagnostic.t option
+        }
+    | Limited of
+        { error : P.Error.t
+        ; diagnostic : Diagnostic.t option
+        }
+    | Interrupted
+    | Cancelled
+  [@@deriving sexp_of]
+end
+
 type value =
   | Check of Check.t
   | Fixture of Fixture.t
   | Live of Live.t
+  | Task of Task.t
 [@@deriving sexp_of]
 
 type t =
@@ -71,11 +89,24 @@ let kind t =
   | Check _ -> Kind.Check
   | Fixture _ -> Fixture_run
   | Live _ -> Live_run
+  | Task _ -> Repl_task_run
 ;;
 
 let equal a b = D.Json.equal a.json b.json
 let decimal n = `Number (Int.to_string n)
 let digest d = `String (S.Digest.to_hex d)
+
+let task_failure_json ~state ~error ~diagnostic =
+  `Object
+    ([ "kind", `String "repl_task_run"
+     ; "state", `String state
+     ; "error", P.Error.to_json error
+     ]
+     @
+     match diagnostic with
+     | None -> []
+     | Some diagnostic -> [ "diagnostic", Diagnostic.to_json diagnostic ])
+;;
 
 let json_of_value ~poll = function
   | Check Check.Ready -> `Object [ "kind", `String "check"; "state", `String "ready" ]
@@ -106,6 +137,21 @@ let json_of_value ~poll = function
   | Live Interrupted ->
     `Object [ "kind", `String "live_run"; "state", `String "interrupted" ]
   | Live Cancelled -> `Object [ "kind", `String "live_run"; "state", `String "cancelled" ]
+  | Task (Succeeded { value_preview }) ->
+    `Object
+      ([ "kind", `String "repl_task_run"; "state", `String "succeeded" ]
+       @
+       match value_preview with
+       | None -> []
+       | Some preview -> [ "value_preview", `String preview ])
+  | Task (Failed { error; diagnostic }) ->
+    task_failure_json ~state:"failed" ~error ~diagnostic
+  | Task (Limited { error; diagnostic }) ->
+    task_failure_json ~state:"limited" ~error ~diagnostic
+  | Task Interrupted ->
+    `Object [ "kind", `String "repl_task_run"; "state", `String "interrupted" ]
+  | Task Cancelled ->
+    `Object [ "kind", `String "repl_task_run"; "state", `String "cancelled" ]
 ;;
 
 let validate_value ~limits ~poll = function
@@ -113,6 +159,9 @@ let validate_value ~limits ~poll = function
   | Fixture fixture -> Fixture.validate fixture ~limits ~poll
   | Check (Ready | Interrupted | Cancelled)
   | Live (Succeeded _ | Failed _ | Limited _ | Interrupted | Cancelled) -> Ok ()
+  | Task (Failed { diagnostic; _ } | Limited { diagnostic; _ }) ->
+    Option.value_map diagnostic ~default:(Ok ()) ~f:Diagnostic.validate
+  | Task (Succeeded _ | Interrupted | Cancelled) -> Ok ()
 ;;
 
 let create value ~limits ~poll =
@@ -397,6 +446,35 @@ let decode_value json ~poll =
   | "live_run", "interrupted" | "live_run", "cancelled" ->
     let* () = exact json ~required:[ "kind"; "state" ] ~optional:[] in
     Ok (Live (if String.equal state "interrupted" then Interrupted else Cancelled))
+  | "repl_task_run", "succeeded" ->
+    let* () = exact json ~required:[ "kind"; "state" ] ~optional:[ "value_preview" ] in
+    let* value_preview =
+      match D.Json.field json ~name:"value_preview" with
+      | Absent -> Ok None
+      | Null -> invalid "value_preview" "explicit null is not absence"
+      | Value (`String preview) -> Ok (Some preview)
+      | Value _ -> invalid "value_preview" "expected string"
+    in
+    Ok (Task (Succeeded { value_preview }))
+  | "repl_task_run", "failed" | "repl_task_run", "limited" ->
+    let* () =
+      exact json ~required:[ "kind"; "state"; "error" ] ~optional:[ "diagnostic" ]
+    in
+    let* error = field json "error" |> Result.bind ~f:decode_protocol_error in
+    let* diagnostic =
+      match D.Json.field json ~name:"diagnostic" with
+      | Absent -> Ok None
+      | Null -> invalid "diagnostic" "explicit null is not absence"
+      | Value diagnostic -> Result.map (decode_diagnostic diagnostic) ~f:Option.some
+    in
+    Ok
+      (Task
+         (if String.equal state "failed"
+          then Failed { error; diagnostic }
+          else Limited { error; diagnostic }))
+  | "repl_task_run", "interrupted" | "repl_task_run", "cancelled" ->
+    let* () = exact json ~required:[ "kind"; "state" ] ~optional:[] in
+    Ok (Task (if String.equal state "interrupted" then Interrupted else Cancelled))
   | _ -> invalid "kind" "unsupported receipt kind or state"
 ;;
 

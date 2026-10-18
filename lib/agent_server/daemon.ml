@@ -1550,6 +1550,7 @@ let compose
         ~repl:configuration.repl
         ~now:(fun () -> timestamp env)
         ~checkpoint:Eio.Fiber.check
+        ()
       |> Result.map ~f:Option.some
   in
   Option.iter developer ~f:(fun developer ->
@@ -2212,6 +2213,36 @@ module Developer = struct
     module Revision = Developer_host.Repl.Revision
     module View = Developer_host.Repl.View
     module Submission = Developer_host.Repl.Submission
+    module Task_reference = Developer_host.Repl.Task_reference
+
+    module Task = struct
+      module Original = Developer_host.Repl.Task.Original
+
+      type view = Developer_host.Repl.Task.view
+
+      let row = Developer_host.Repl.Task.row
+      let receipt = Developer_host.Repl.Task.receipt
+
+      let submit t ~actor ~key ~original ~fresh_epoch =
+        with_host t (fun host ->
+          Developer_host.Repl.Task.submit host ~actor ~key ~original ~fresh_epoch)
+      ;;
+
+      let observe t ~actor ~run_id ~key =
+        with_host t (fun host ->
+          Developer_host.Repl.Task.observe host ~actor ~run_id ~key)
+      ;;
+
+      let await_terminal t ~actor ~run_id ~key =
+        with_host t (fun host ->
+          Developer_host.Repl.Task.await_terminal host ~actor ~run_id ~key)
+      ;;
+
+      let cancel_and_wait t ~actor ~run_id ~key =
+        with_host t (fun host ->
+          Developer_host.Repl.Task.cancel_and_wait host ~actor ~run_id ~key)
+      ;;
+    end
 
     let create t ~actor ~run_id ~key ~original ~fresh_source =
       with_host t (fun host ->

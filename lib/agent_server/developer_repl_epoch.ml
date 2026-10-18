@@ -71,8 +71,8 @@ module Original = struct
       (not (Original_identity.valid_route route))
       || (not
             (match target with
-             | Contract.Target.One_off_v1 | Tool_v1 -> true
-             | Developer_tool_v1 | Moderator_v1 | Delegated_moderator_v1 -> false))
+             | Contract.Target.One_off_v1 | Tool_v1 | Developer_tool_v1 -> true
+             | Moderator_v1 | Delegated_moderator_v1 -> false))
       || (not (Option.for_all requested_execution ~f:Chatml_execution.valid_limits))
       || not (Option.for_all requested_max_output_bytes ~f:(fun value -> value >= 256))
     then Error (invalid "invalid original developer REPL request")
@@ -116,6 +116,63 @@ module Instance = struct
   type t = { token : unit ref }
 
   let equal left right = phys_equal left.token right.token
+end
+
+module Task_reference = struct
+  type t =
+    { encoded : string
+    ; run_id : P.Id.Developer_run.t
+    }
+
+  let version = "developer_repl_task_v1"
+  let max_bytes = 384
+  let to_string t = t.encoded
+  let run_id t = t.run_id
+  let equal left right = String.equal left.encoded right.encoded
+
+  let canonical_nonnegative text =
+    String.length text > 0
+    && (String.length text = 1 || not (Char.equal text.[0] '0'))
+    && String.for_all text ~f:Char.is_digit
+    && Option.value_map (Int.of_string_opt text) ~default:false ~f:(fun value ->
+      value >= 0)
+  ;;
+
+  let of_string encoded =
+    let invalid () = Error (invalid "invalid developer REPL Task reference") in
+    if String.length encoded > max_bytes
+    then invalid ()
+    else (
+      match String.split encoded ~on:'.' with
+      | [ wire_version; run; instance_nonce; epoch; ordinal; source ]
+        when String.equal wire_version version
+             && canonical_nonnegative epoch
+             && canonical_nonnegative ordinal
+             && not (String.equal ordinal "0") ->
+        (match
+           ( P.Id.Developer_run.of_string run
+           , P.Id.Transaction.of_string instance_nonce
+           , Captured.Digest.of_hex source )
+         with
+         | Ok run_id, Ok _, Ok _ -> Ok { encoded; run_id }
+         | _ -> invalid ())
+      | _ -> invalid ())
+  ;;
+
+  let issue ~run_id ~instance_nonce ~epoch ~ordinal ~source =
+    let encoded =
+      String.concat
+        ~sep:"."
+        [ version
+        ; P.Id.Developer_run.to_string run_id
+        ; P.Id.Transaction.to_string instance_nonce
+        ; Int.to_string epoch
+        ; Int.to_string ordinal
+        ; Captured.Digest.to_hex source
+        ]
+    in
+    { encoded; run_id }
+  ;;
 end
 
 module Epoch = struct
@@ -258,6 +315,7 @@ module Submission = struct
     ; revision : Revision.t
     ; statements : Evaluator.Receipt.t list
     ; task_handles : Evaluator.Task_handle.t list
+    ; task_references : Task_reference.t list
     }
 
   let status t = t.status
@@ -266,14 +324,29 @@ module Submission = struct
   let revision t = t.revision
   let statements t = t.statements
   let task_handles t = t.task_handles
+  let task_references t = t.task_references
 end
 
 open Submission
+
+type task_unlaunched_disposition =
+  | No_durable_row
+  | Terminal_row
+
+type task_phase =
+  | Registered
+  | Launching
+  | Entered
+  | Body_exited
+  | Unlaunched of task_unlaunched_disposition
+  | Settled
+  | Uncertain
 
 type task_origin =
   { source : Captured.t
   ; owner : instance_state
   ; handle : Evaluator.Task_handle.t
+  ; reference : Task_reference.t
   }
 
 and key_entry =
@@ -288,14 +361,30 @@ and key_entry =
 
 and active =
   { key : P.Idempotency_key.t
+  ; kind : active_kind
   ; finished : unit Eio.Promise.t
   ; mutable cancel : Eio.Cancel.t option
   ; mutable cancel_requested : bool
   ; mutable private_failure : (exn * Stdlib.Printexc.raw_backtrace) option
   }
 
+and active_kind =
+  | Statement
+  | Task of task_state
+
+and task_state =
+  { owner : instance_state
+  ; actor : Operator_authorization.t
+  ; epoch : Epoch.t
+  ; domain : int
+  ; checkpoint : unit -> unit
+  ; mutable phase : task_phase
+  ; mutable callback_cancel : Eio.Cancel.t option
+  }
+
 and instance_state =
   { id : Instance.t
+  ; instance_nonce : P.Id.Transaction.t
   ; host_state : owner_state ref
   ; run_id : P.Id.Developer_run.t
   ; original : Original.t
@@ -310,9 +399,11 @@ and instance_state =
   ; mutable submission_count : int
   ; mutable pending_source : string
   ; mutable keys : key_entry list
+  ; mutable task_keys : P.Idempotency_key.t list
   ; mutable reset_keys : (P.Idempotency_key.t * Epoch.t * View.t) list
   ; mutable close_keys : P.Idempotency_key.t list
   ; mutable task_origins : task_origin list
+  ; mutable task_ordinal : int
   ; mutable retained_bytes : int
   ; mutable active : active option
   ; mutable closed : bool
@@ -332,6 +423,7 @@ and control_outcome =
 and control =
   { kind : control_kind
   ; key : P.Idempotency_key.t
+  ; custody : unit ref
   ; finished : unit Eio.Promise.t
   ; finish : unit Eio.Promise.u
   ; mutable outcome : control_outcome option
@@ -342,6 +434,14 @@ and owner_state =
   | Owner_open
   | Owner_closing
   | Owner_closed
+
+type task_cleanup =
+  { authorize_retirement :
+      actor:Operator_authorization.t -> instance:Instance.t -> (unit, P.Error.t) result
+  ; retire_instance :
+      actor:Operator_authorization.t -> Instance.t -> (unit, P.Error.t) result
+  ; retire_all : unit -> (unit, P.Error.t) result
+  }
 
 type t =
   { sw : Eio.Switch.t
@@ -356,12 +456,14 @@ type t =
   ; mutable create_keys :
       (P.Id.Developer_run.t * P.Idempotency_key.t * Captured.Digest.t * View.t) list
   ; owner_state : owner_state ref
+  ; mutable task_cleanup : task_cleanup option
   }
 
 module Task_origin = struct
   type t = task_origin
 
   let source t = t.source
+  let reference t = t.reference
 
   let check_current t ~actor ~checkpoint =
     let open Result.Let_syntax in
@@ -463,6 +565,7 @@ let install ~sw ~capture_host ~env ~clock ~configuration ~checkpoint =
   ; instances = []
   ; create_keys = []
   ; owner_state = ref Owner_open
+  ; task_cleanup = None
   }
 ;;
 
@@ -480,7 +583,7 @@ let view state =
   ; revision = state.revision
   ; run_id = state.run_id
   ; capture_fingerprint =
-      Prepared.fingerprint (Capture_host.Source_selection.prepared state.selection)
+      Capture_host.Source_selection.repl_root_fingerprint state.selection
   }
 ;;
 
@@ -508,6 +611,13 @@ let check_selection state ~actor ~checkpoint =
   let%bind () = check_state_open state in
   let%bind () = check_method ~original:state.original_actor ~current:actor in
   Capture_host.Source_selection.Shared.check_now state.selection ~checked ~actor
+;;
+
+let surface_of_target = function
+  | Contract.Target.One_off_v1 -> Chatml.Chatml_extension_surface.one_off_v1
+  | Tool_v1 -> Chatml.Chatml_extension_surface.tool_v1
+  | Developer_tool_v1 -> Chatml.Chatml_extension_surface.developer_tool_v1
+  | Moderator_v1 | Delegated_moderator_v1 -> assert false
 ;;
 
 let make_epoch_resources t ~selection ~(original : Original.t) =
@@ -539,12 +649,7 @@ let make_epoch_resources t ~selection ~(original : Original.t) =
       ~checkpoint:t.checkpoint
     |> Result.map_error ~f:(fun _ -> invalid "developer REPL typing setup rejected")
   in
-  let surface =
-    match original.target with
-    | Contract.Target.One_off_v1 -> Chatml.Chatml_extension_surface.one_off_v1
-    | Tool_v1 -> Chatml.Chatml_extension_surface.tool_v1
-    | Developer_tool_v1 | Moderator_v1 | Delegated_moderator_v1 -> assert false
-  in
+  let surface = surface_of_target original.target in
   let%map evaluator =
     Evaluator.create
       ~typing
@@ -609,6 +714,7 @@ let create_state t ~run_id ~original ~fresh_source ~actor =
   let revision = { Revision.token = ref (); serial = 0 } in
   Ok
     { id
+    ; instance_nonce = P.Id.Transaction.create ()
     ; host_state = t.owner_state
     ; run_id
     ; original
@@ -623,9 +729,11 @@ let create_state t ~run_id ~original ~fresh_source ~actor =
     ; submission_count = 0
     ; pending_source = ""
     ; keys = []
+    ; task_keys = []
     ; reset_keys = []
     ; close_keys = []
     ; task_origins = []
+    ; task_ordinal = 0
     ; retained_bytes = 0
     ; active = None
     ; closed = false
@@ -807,7 +915,10 @@ let submission_details_bytes submission =
             (Evaluator.Receipt.diagnostic receipt)
             ~default:0
             ~f:(fun diagnostic -> String.length (Evaluator.Diagnostic.message diagnostic)))
-  + (64 * List.length submission.task_handles)
+  + List.sum
+      (module Int)
+      submission.task_references
+      ~f:(fun reference -> 16 + String.length (Task_reference.to_string reference))
 ;;
 
 let limit_details state submission =
@@ -824,6 +935,7 @@ let limit_details state submission =
       details = Output_limited
     ; statements = []
     ; task_handles = []
+    ; task_references = []
     ; status =
         (match submission.status with
          | Rejected _ ->
@@ -870,6 +982,17 @@ let discard_if_current state candidate =
        | Error _ -> failwith "current developer REPL candidate could not discard"))
 ;;
 
+let task_source_digest source ~checkpoint =
+  let id = Captured.id source in
+  [%sexp
+    "developer-repl-task-source.v1"
+  , (Captured.Id.package_namespace id : string)
+  , (Captured.Id.relative_path id : string)
+  , (Captured.Digest.to_hex (Captured.digest source) : string)]
+  |> Sexp.to_string_mach
+  |> Captured.Digest.of_contents ~checkpoint
+;;
+
 let execute_ready t state ~actor ready ~checked =
   let guard = guarded_checkpoint t state ~actor ~checked in
   let rec loop remaining receipts origins =
@@ -907,8 +1030,17 @@ let execute_ready t state ~actor ready ~checked =
                 let origins =
                   match Evaluator.Receipt.task_retention receipt with
                   | Evaluator.Receipt.Retained handle ->
-                    { source = Typing.Candidate.source candidate; owner = state; handle }
-                    :: origins
+                    let source = Typing.Candidate.source candidate in
+                    state.task_ordinal <- state.task_ordinal + 1;
+                    let reference =
+                      Task_reference.issue
+                        ~run_id:state.run_id
+                        ~instance_nonce:state.instance_nonce
+                        ~epoch:state.epoch.Epoch.serial
+                        ~ordinal:state.task_ordinal
+                        ~source:(task_source_digest source ~checkpoint:guard)
+                    in
+                    { source; owner = state; handle; reference } :: origins
                   | Not_a_task | Limit_reached -> origins
                 in
                 loop (remaining - 1) (receipt :: receipts) origins))
@@ -965,6 +1097,7 @@ let process_submission t state ~actor source =
         ; revision
         ; statements = []
         ; task_handles = []
+        ; task_references = []
         }
       |> Result.map ~f:(limit_details state)
     | Typing.Submission.Rejected rejection ->
@@ -976,6 +1109,7 @@ let process_submission t state ~actor source =
         ; revision
         ; statements = []
         ; task_handles = []
+        ; task_references = []
         }
       |> Result.map ~f:(limit_details state)
     | Typing.Submission.Ready ready ->
@@ -988,6 +1122,7 @@ let process_submission t state ~actor source =
           | Failed _ -> false)
       in
       let handles = List.map origins ~f:(fun origin -> origin.handle) in
+      let references = List.map origins ~f:(fun origin -> origin.reference) in
       let submission =
         { Submission.status
         ; details = Available
@@ -995,6 +1130,7 @@ let process_submission t state ~actor source =
         ; revision
         ; statements
         ; task_handles = handles
+        ; task_references = references
         }
         |> limit_details state
       in
@@ -1003,7 +1139,12 @@ let process_submission t state ~actor source =
         > state.limits.max_task_origins
       then
         Ok
-          { submission with details = Output_limited; statements = []; task_handles = [] }
+          { submission with
+            details = Output_limited
+          ; statements = []
+          ; task_handles = []
+          ; task_references = []
+          }
       else (
         if List.is_empty submission.task_handles
         then ()
@@ -1023,13 +1164,19 @@ let key_result entry =
 let request_cancel active =
   active.cancel_requested <- true;
   Option.iter active.cancel ~f:(fun cancel ->
-    Eio.Cancel.cancel cancel Cancelled_statement)
+    Eio.Cancel.cancel cancel Cancelled_statement);
+  match active.kind with
+  | Statement -> ()
+  | Task task ->
+    Option.iter task.callback_cancel ~f:(fun cancel ->
+      Eio.Cancel.cancel cancel Cancelled_statement)
 ;;
 
 let launch_submission t state entry ~actor ~source =
   let finished, finish = Eio.Promise.create () in
   let active =
     { key = entry.key
+    ; kind = Statement
     ; finished
     ; cancel = None
     ; cancel_requested = false
@@ -1056,6 +1203,7 @@ let launch_submission t state entry ~actor ~source =
              ; revision = state.revision
              ; statements = []
              ; task_handles = []
+             ; task_references = []
              }
          | Admission_revoked error -> Error error
          | _ ->
@@ -1142,6 +1290,7 @@ let submit t ~actor ~instance ~epoch ~expected_revision ~key ~source =
       then Error (busy "developer REPL statement is active")
       else if
         List.length state.keys
+        + List.length state.task_keys
         + List.length state.reset_keys
         + List.length state.close_keys
         >= state.limits.max_keys_per_instance - 1
@@ -1149,6 +1298,7 @@ let submit t ~actor ~instance ~epoch ~expected_revision ~key ~source =
       else if
         List.exists state.reset_keys ~f:(fun (prior, _, _) ->
           P.Idempotency_key.equal prior key)
+        || List.exists state.task_keys ~f:(P.Idempotency_key.equal key)
         || List.exists state.close_keys ~f:(P.Idempotency_key.equal key)
       then Error (busy "developer REPL key used for another action")
       else if state.submission_count >= state.limits.max_submissions_per_epoch
@@ -1168,6 +1318,7 @@ let submit t ~actor ~instance ~epoch ~expected_revision ~key ~source =
                || Option.is_some state.control
                || state.closed
                || List.length state.keys
+                  + List.length state.task_keys
                   + List.length state.reset_keys
                   + List.length state.close_keys
                   >= state.limits.max_keys_per_instance - 1 ->
@@ -1175,6 +1326,7 @@ let submit t ~actor ~instance ~epoch ~expected_revision ~key ~source =
         | None
           when List.exists state.reset_keys ~f:(fun (prior, _, _) ->
                  P.Idempotency_key.equal prior key)
+               || List.exists state.task_keys ~f:(P.Idempotency_key.equal key)
                || List.exists state.close_keys ~f:(P.Idempotency_key.equal key) ->
           Error (busy "developer REPL key used for another action")
         | None when state.submission_count >= state.limits.max_submissions_per_epoch ->
@@ -1259,7 +1411,8 @@ let check_now borrowed =
     || (match !(borrowed.state.host_state) with
         | Owner_open -> false
         | Owner_closing | Owner_closed -> true)
-    || not (Epoch.equal borrowed.state.epoch borrowed.epoch)
+    || (not (Epoch.equal borrowed.state.epoch borrowed.epoch))
+    || Option.is_some borrowed.state.control
   then Error (stale "developer REPL borrow expired")
   else (
     let%bind () =
@@ -1272,6 +1425,13 @@ let check_now borrowed =
 ;;
 
 let evaluator borrowed = borrowed.state.evaluator
+let execution_surface borrowed = surface_of_target borrowed.state.original.target
+let source_selection borrowed = borrowed.state.selection
+let prompt borrowed = borrowed.state.original.prompt
+let workspace borrowed = borrowed.state.original.workspace
+let original_actor borrowed = borrowed.state.original_actor
+let current_actor borrowed = borrowed.actor
+let run_id borrowed = borrowed.state.run_id
 
 let task_origin borrowed handle =
   let open Result.Let_syntax in
@@ -1323,7 +1483,441 @@ let with_current t ~actor ~instance ~epoch ~f =
 ;;
 
 let key_count state =
-  List.length state.keys + List.length state.reset_keys + List.length state.close_keys
+  List.length state.keys
+  + List.length state.task_keys
+  + List.length state.reset_keys
+  + List.length state.close_keys
+;;
+
+module Task_action = struct
+  type nonrec active = active
+
+  type unlaunched_disposition = task_unlaunched_disposition =
+    | No_durable_row
+    | Terminal_row
+
+  let owner_key : active Eio.Fiber.key = Eio.Fiber.create_key ()
+  let callback_key : active Eio.Fiber.key = Eio.Fiber.create_key ()
+
+  let task active =
+    match active.kind with
+    | Task task -> Some task
+    | Statement -> None
+  ;;
+
+  let owns_active active (task : task_state) =
+    Option.value_map task.owner.active ~default:false ~f:(phys_equal active)
+  ;;
+
+  let owns_owner_fiber active =
+    Option.value_map (Eio.Fiber.get owner_key) ~default:false ~f:(phys_equal active)
+  ;;
+
+  let owns_callback_fiber active =
+    Option.value_map (Eio.Fiber.get callback_key) ~default:false ~f:(phys_equal active)
+  ;;
+
+  let task_now active =
+    match task active with
+    | None -> Error (stale "developer REPL Task action is foreign")
+    | Some task ->
+      if
+        (not (owns_active active task))
+        || (not (Int.equal task.domain (Stdlib.Domain.self () :> int)))
+        || task.owner.closed
+        || (not (Epoch.equal task.owner.epoch task.epoch))
+        || not (Operator_authorization.is_current task.actor)
+      then Error (stale "developer REPL Task action expired")
+      else check_method ~original:task.owner.original_actor ~current:task.actor
+  ;;
+
+  let mark_launching active =
+    let open Result.Let_syntax in
+    let%bind () = task_now active in
+    match task active with
+    | Some task when owns_owner_fiber active ->
+      (match task.phase with
+       | Registered ->
+         task.phase <- Launching;
+         Ok ()
+       | Launching | Entered | Body_exited | Unlaunched _ | Settled | Uncertain ->
+         Error (stale "developer REPL Task launch marker changed"))
+    | None | Some _ -> Error (stale "developer REPL Task launch marker changed")
+  ;;
+
+  let finish_unlaunched active ~disposition =
+    match task active with
+    | Some task
+      when owns_active active task
+           && owns_owner_fiber active
+           &&
+           match task.phase with
+           | Registered | Launching -> true
+           | Entered | Body_exited | Unlaunched _ | Settled | Uncertain -> false ->
+      task.phase <- Unlaunched disposition;
+      Ok ()
+    | None | Some _ -> Error (stale "developer REPL Task cleanup marker changed")
+  ;;
+
+  let mark_settled active =
+    match task active with
+    | Some task
+      when owns_active active task
+           && owns_owner_fiber active
+           &&
+           match task.phase with
+           | Launching | Body_exited -> true
+           | Registered | Entered | Unlaunched _ | Settled | Uncertain -> false ->
+      task.phase <- Settled;
+      Ok ()
+    | None | Some _ -> Error (stale "developer REPL Task terminal marker changed")
+  ;;
+
+  let preflight active ~actor ~reference =
+    let open Result.Let_syntax in
+    let%bind () = task_now active in
+    let%bind task =
+      task active
+      |> Result.of_option ~error:(stale "developer REPL Task action is foreign")
+    in
+    if
+      (not (owns_owner_fiber active && phys_equal actor task.actor))
+      || Option.is_some task.owner.control
+    then Error (stale "developer REPL Task action actor changed")
+    else if
+      not (P.Id.Developer_run.equal (Task_reference.run_id reference) task.owner.run_id)
+    then Error (stale "developer REPL Task reference belongs to another run")
+    else (
+      let%bind () = check_selection task.owner ~actor ~checkpoint:task.checkpoint in
+      let%bind () = task_now active in
+      match
+        List.find task.owner.task_origins ~f:(fun origin ->
+          Task_reference.equal origin.reference reference
+          && Evaluator.current_task_handle task.owner.evaluator origin.handle)
+      with
+      | Some _ -> Ok task.owner.selection
+      | None -> Error (stale "developer REPL Task reference expired"))
+  ;;
+
+  let enter active ~sw ~f =
+    let open Result.Let_syntax in
+    let%bind () = task_now active in
+    let%bind task =
+      task active
+      |> Result.of_option ~error:(stale "developer REPL Task action is foreign")
+    in
+    if
+      (match task.phase with
+       | Launching -> false
+       | Registered | Entered | Body_exited | Unlaunched _ | Settled | Uncertain -> true)
+      || Option.is_some task.owner.control
+      || active.cancel_requested
+    then Error (stale "developer REPL Task callback entry expired")
+    else (
+      Eio.Switch.check sw;
+      task.phase <- Entered;
+      Exn.protect
+        ~finally:(fun () ->
+          task.callback_cancel <- None;
+          task.phase <- Body_exited)
+        ~f:(fun () ->
+          Eio.Cancel.sub (fun cancel ->
+            task.callback_cancel <- Some cancel;
+            if active.cancel_requested then Eio.Cancel.cancel cancel Cancelled_statement;
+            Eio.Fiber.with_binding callback_key active f)))
+  ;;
+
+  let with_current active ~actor ~reference ~f =
+    let open Result.Let_syntax in
+    let%bind () = task_now active in
+    let%bind task =
+      task active
+      |> Result.of_option ~error:(stale "developer REPL Task action is foreign")
+    in
+    if
+      (not (owns_callback_fiber active))
+      || (not (phys_equal actor task.actor))
+      ||
+      match task.phase with
+      | Entered -> false
+      | Registered | Launching | Body_exited | Unlaunched _ | Settled | Uncertain -> true
+    then Error (stale "developer REPL Task callback scope expired")
+    else
+      with_gate task.owner.gate (fun () ->
+        let%bind () = task_now active in
+        if Option.is_some task.owner.control || active.cancel_requested
+        then Error (stale "developer REPL Task control was reserved")
+        else (
+          let%bind checked =
+            Capture_host.Source_selection.Shared.check_current
+              task.owner.selection
+              ~actor
+              ~checkpoint:task.checkpoint
+          in
+          let%bind () = task_now active in
+          let%bind () =
+            Capture_host.Source_selection.Shared.check_now
+              task.owner.selection
+              ~checked
+              ~actor
+          in
+          let%bind origin =
+            List.find task.owner.task_origins ~f:(fun origin ->
+              Task_reference.equal origin.reference reference
+              && Evaluator.current_task_handle task.owner.evaluator origin.handle)
+            |> Result.of_option ~error:(stale "developer REPL Task reference expired")
+          in
+          let borrowed =
+            { state = task.owner; actor; epoch = task.epoch; checked; live = true }
+          in
+          let%bind () = check_now borrowed in
+          task.owner.borrowed <- task.owner.borrowed + 1;
+          Exn.protect
+            ~f:(fun () -> f borrowed origin.handle origin)
+            ~finally:(fun () ->
+              borrowed.live <- false;
+              task.owner.borrowed <- task.owner.borrowed - 1)))
+  ;;
+
+  let start
+        (type a)
+        t
+        ~actor
+        ~instance
+        ~epoch
+        ~key
+        ~(f :
+           active
+           -> publish_initial:((a, P.Error.t) result -> unit)
+           -> (unit, P.Error.t) result)
+    : (a, P.Error.t) result
+    =
+    let open Result.Let_syntax in
+    let%bind () = check_host t in
+    let%bind () =
+      match t.task_cleanup with
+      | Some _ -> Ok ()
+      | None -> Error (invalid "developer REPL Task cleanup is not installed")
+    in
+    let%bind state =
+      find_instance t instance
+      |> Result.of_option ~error:(stale "developer REPL instance not found")
+    in
+    let%bind () = check_instance t state ~actor in
+    let%bind active =
+      with_gate state.gate (fun () ->
+        if
+          state.closed
+          || (not (Epoch.equal state.epoch epoch))
+          || Option.is_some state.active
+          || Option.is_some state.control
+          || state.borrowed > 0
+        then Error (busy "developer REPL Task admission is occupied")
+        else if key_count state >= state.limits.max_keys_per_instance - 1
+        then Error (limit "developer REPL key ledger full")
+        else if
+          List.exists state.keys ~f:(fun entry -> P.Idempotency_key.equal entry.key key)
+          || List.exists state.task_keys ~f:(P.Idempotency_key.equal key)
+          || List.exists state.reset_keys ~f:(fun (prior, _, _) ->
+            P.Idempotency_key.equal prior key)
+          || List.exists state.close_keys ~f:(P.Idempotency_key.equal key)
+        then Error (busy "developer REPL key used for another action")
+        else (
+          Eio.Switch.check t.sw;
+          let finished, finish = Eio.Promise.create () in
+          let task =
+            { owner = state
+            ; actor
+            ; epoch
+            ; domain = t.domain
+            ; checkpoint = t.checkpoint
+            ; phase = Registered
+            ; callback_cancel = None
+            }
+          in
+          let active =
+            { key
+            ; kind = Task task
+            ; finished
+            ; cancel = None
+            ; cancel_requested = false
+            ; private_failure = None
+            }
+          in
+          state.active <- Some active;
+          state.task_keys <- key :: state.task_keys;
+          Ok (active, finish)))
+    in
+    let active, finish = active in
+    let initial, resolve_initial = Eio.Promise.create () in
+    let published = ref false in
+    let publish_initial result =
+      if not !published
+      then (
+        published := true;
+        Eio.Promise.resolve resolve_initial (`Returned result))
+    in
+    let worker () =
+      let outcome =
+        try
+          `Returned
+            (Eio.Cancel.sub (fun cancel ->
+               active.cancel <- Some cancel;
+               if active.cancel_requested
+               then Eio.Cancel.cancel cancel Cancelled_statement;
+               Eio.Fiber.with_binding owner_key active (fun () ->
+                 f active ~publish_initial)))
+        with
+        | exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+      in
+      Eio.Cancel.protect (fun () ->
+        active.cancel <- None;
+        (match outcome with
+         | `Raised failure -> active.private_failure <- Some failure
+         | `Returned _ -> ());
+        if not !published
+        then (
+          published := true;
+          Eio.Promise.resolve
+            resolve_initial
+            (match outcome with
+             | `Returned (Error error) -> `Returned (Error error)
+             | `Returned (Ok ()) ->
+               `Returned
+                 (Error (invalid "developer REPL Task launch did not publish a result"))
+             | `Raised failure -> `Raised failure));
+        (match task active with
+         | Some task ->
+           (match task.phase with
+            | Unlaunched No_durable_row ->
+              state.task_keys
+              <- List.filter state.task_keys ~f:(fun prior ->
+                   not (P.Idempotency_key.equal prior key));
+              state.active <- None
+            | Unlaunched Terminal_row | Settled -> state.active <- None
+            | Registered | Launching | Entered | Body_exited | Uncertain ->
+              task.phase <- Uncertain)
+         | None -> ());
+        Eio.Promise.resolve finish ())
+    in
+    match Eio.Fiber.fork ~sw:t.sw worker with
+    | () ->
+      (match Eio.Promise.await initial with
+       | `Returned result -> result
+       | `Raised (exn, backtrace) -> Stdlib.Printexc.raise_with_backtrace exn backtrace)
+    | exception exn ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      state.active <- None;
+      state.task_keys
+      <- List.filter state.task_keys ~f:(fun prior ->
+           not (P.Idempotency_key.equal prior key));
+      Stdlib.Printexc.raise_with_backtrace exn backtrace
+  ;;
+end
+
+type owner = t
+
+let instance_run_id t instance =
+  if not (on_domain t)
+  then Error (stale "developer REPL owner used from another domain")
+  else
+    find_instance t instance
+    |> Result.of_option ~error:(stale "developer REPL instance not found")
+    |> Result.map ~f:(fun state -> state.run_id)
+;;
+
+let instance_paired_to t instance ~selection ~original_actor =
+  on_domain t
+  && Option.value_map (find_instance t instance) ~default:false ~f:(fun state ->
+    phys_equal state.selection selection && phys_equal state.original_actor original_actor)
+;;
+
+let instance_uses_selection t instance selection =
+  on_domain t
+  && Option.value_map (find_instance t instance) ~default:false ~f:(fun state ->
+    phys_equal state.selection selection)
+;;
+
+module Task_cleanup = struct
+  type t = task_cleanup
+  type custody = unit ref
+
+  let current_custody owner instance =
+    let open Result.Let_syntax in
+    let%bind state =
+      find_instance owner instance
+      |> Result.of_option ~error:(stale "developer REPL instance not found")
+    in
+    if not (on_domain owner)
+    then Error (stale "developer REPL owner used from another domain")
+    else (
+      match state.control with
+      | Some control
+        when Option.value_map state.active ~default:true ~f:(fun active ->
+               Eio.Promise.is_resolved active.finished) -> Ok control.custody
+      | Some _ | None -> Error (stale "developer REPL retirement control changed"))
+  ;;
+
+  let same_custody = phys_equal
+
+  let check_retiring_current t ~actor ~instance =
+    let open Result.Let_syntax in
+    let%bind state =
+      find_instance t instance
+      |> Result.of_option ~error:(stale "developer REPL instance not found")
+    in
+    let expected = state.control in
+    let check_local () =
+      let%bind () = check_instance t state ~actor in
+      if
+        Option.value_map expected ~default:false ~f:(fun before ->
+          Option.value_map state.control ~default:false ~f:(phys_equal before))
+        && Option.value_map state.active ~default:true ~f:(fun active ->
+          Eio.Promise.is_resolved active.finished)
+      then Ok ()
+      else Error (stale "developer REPL retirement control changed")
+    in
+    let%bind () = check_local () in
+    let%bind () = check_selection state ~actor ~checkpoint:t.checkpoint in
+    check_local ()
+  ;;
+
+  let create ~authorize_retirement ~retire_instance ~retire_all =
+    { authorize_retirement; retire_instance; retire_all }
+  ;;
+
+  let install_once owner cleanup =
+    match owner.task_cleanup with
+    | None ->
+      owner.task_cleanup <- Some cleanup;
+      Ok ()
+    | Some _ -> Error (invalid "developer REPL Task cleanup already installed")
+  ;;
+end
+
+let authorize_retirement t ~actor ~instance =
+  match t.task_cleanup with
+  | None -> Ok ()
+  | Some cleanup -> cleanup.authorize_retirement ~actor ~instance
+;;
+
+let retire_instance t ~actor ~instance =
+  match t.task_cleanup with
+  | None -> Ok ()
+  | Some cleanup -> cleanup.retire_instance ~actor instance
+;;
+
+let retire_all t =
+  match t.task_cleanup with
+  | None -> Ok ()
+  | Some cleanup -> cleanup.retire_all ()
+;;
+
+let clear_settled_task state =
+  match state.active with
+  | Some ({ kind = Task _; _ } as active) when Eio.Promise.is_resolved active.finished ->
+    state.active <- None
+  | Some { kind = Statement; _ } | Some { kind = Task _; _ } | None -> ()
 ;;
 
 type control_admission =
@@ -1331,16 +1925,16 @@ type control_admission =
   | Control_follower of control
 
 let begin_control state ~kind ~key =
-  let create () =
+  let create custody =
     let finished, finish = Eio.Promise.create () in
     let control =
-      { kind; key; finished; finish; outcome = None; retry_cleanup = false }
+      { kind; key; custody; finished; finish; outcome = None; retry_cleanup = false }
     in
     state.control <- Some control;
     Control_owner control
   in
   match state.control with
-  | None -> Ok (create ())
+  | None -> Ok (create (ref ()))
   | Some current ->
     let same_kind =
       match current.kind, kind with
@@ -1350,7 +1944,7 @@ let begin_control state ~kind ~key =
     if not (same_kind && P.Idempotency_key.equal current.key key)
     then Error (busy "developer REPL control action is active")
     else if current.retry_cleanup && Option.is_some current.outcome
-    then Ok (create ())
+    then Ok (create current.custody)
     else Ok (Control_follower current)
 ;;
 
@@ -1376,6 +1970,7 @@ let reset_key_result state ~key ~expected_epoch =
   | None ->
     if
       List.exists state.keys ~f:(fun entry -> P.Idempotency_key.equal entry.key key)
+      || List.exists state.task_keys ~f:(P.Idempotency_key.equal key)
       || List.exists state.close_keys ~f:(P.Idempotency_key.equal key)
     then Error (busy "developer REPL key used for another action")
     else Ok None
@@ -1386,6 +1981,7 @@ let close_key_result state ~key =
   then Ok true
   else if
     List.exists state.keys ~f:(fun entry -> P.Idempotency_key.equal entry.key key)
+    || List.exists state.task_keys ~f:(P.Idempotency_key.equal key)
     || List.exists state.reset_keys ~f:(fun (prior, _, _) ->
       P.Idempotency_key.equal prior key)
   then Error (busy "developer REPL key used for another action")
@@ -1409,11 +2005,13 @@ let reset_and_wait t ~actor ~instance ~expected_epoch ~key =
     |> Result.of_option ~error:(stale "developer REPL instance not found")
   in
   let%bind () = check_instance t state ~actor in
-  let%bind () = check_selection state ~actor ~checkpoint:t.checkpoint in
   let%bind prior = reset_key_result state ~key ~expected_epoch in
   match prior with
-  | Some previous -> Ok previous
+  | Some previous ->
+    let%map () = check_selection state ~actor ~checkpoint:t.checkpoint in
+    previous
   | None ->
+    let%bind () = authorize_retirement t ~actor ~instance in
     if not (Epoch.equal state.epoch expected_epoch)
     then Error (stale "developer REPL epoch changed")
     else if key_count state >= state.limits.max_keys_per_instance - 1
@@ -1435,6 +2033,9 @@ let reset_and_wait t ~actor ~instance ~expected_epoch ~key =
         let run () =
           Eio.Cancel.protect (fun () ->
             join_active state;
+            old_close_started := true;
+            let%bind () = retire_instance t ~actor ~instance in
+            clear_settled_task state;
             with_gate state.gate (fun () ->
               let%bind prior = reset_key_result state ~key ~expected_epoch in
               match prior with
@@ -1490,6 +2091,7 @@ let reset_and_wait t ~actor ~instance ~expected_epoch ~key =
                        state.submission_count <- 0;
                        state.pending_source <- "";
                        state.task_origins <- [];
+                       state.task_ordinal <- 0;
                        let result = view state in
                        state.reset_keys
                        <- (key, expected_epoch, result) :: state.reset_keys;
@@ -1529,6 +2131,7 @@ let close_and_wait t ~actor ~instance ~key =
   else if key_count state >= state.limits.max_keys_per_instance
   then Error (limit "developer REPL key ledger full")
   else (
+    let%bind () = authorize_retirement t ~actor ~instance in
     let%bind control = begin_control state ~kind:Close_action ~key in
     match control with
     | Control_follower control ->
@@ -1545,6 +2148,9 @@ let close_and_wait t ~actor ~instance ~key =
         Eio.Cancel.protect (fun () ->
           let%bind () = check_selection state ~actor ~checkpoint:t.checkpoint in
           join_active state;
+          evaluator_close_started := true;
+          let%bind () = retire_instance t ~actor ~instance in
+          clear_settled_task state;
           with_gate state.gate (fun () ->
             let%bind prior = close_key_result state ~key in
             if prior
@@ -1565,6 +2171,7 @@ let close_and_wait t ~actor ~instance ~key =
                 state.closed <- true;
                 state.pending_source <- "";
                 state.task_origins <- [];
+                state.task_ordinal <- 0;
                 state.close_keys <- key :: state.close_keys;
                 Ok ()))))
       in
@@ -1599,6 +2206,8 @@ let shutdown_and_wait t =
     Eio.Cancel.protect (fun () ->
       List.iter t.instances ~f:join_active;
       let open Result.Let_syntax in
+      let%bind () = retire_all t in
+      List.iter t.instances ~f:clear_settled_task;
       let%bind () =
         List.fold_result t.instances ~init:() ~f:(fun () state ->
           with_gate state.gate (fun () ->

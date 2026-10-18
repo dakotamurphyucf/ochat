@@ -221,7 +221,7 @@ let semantic_authoring_policy env =
   Policy.with_semantic base ~semantic |> ok
 ;;
 
-let repl_configuration () =
+let repl_configuration ?(max_receipt_bytes = 8192) ?(max_keys_per_instance = 4) () =
   let parse =
     Chatml.Chatml_parse.Submission.Limits.create
       ~max_source_bytes:4096
@@ -284,11 +284,11 @@ let repl_configuration () =
        |> Or_error.ok_exn)
     ~execution_policy:(Bounded Chatml_execution.default_limits)
     ~max_instances:2
-    ~max_keys_per_instance:4
+    ~max_keys_per_instance
     ~max_submissions_per_epoch:8
     ~max_source_bytes:4096
-    ~max_receipt_bytes:8192
-    ~max_total_receipt_bytes:16384
+    ~max_receipt_bytes
+    ~max_total_receipt_bytes:(Int.max 16384 (max_receipt_bytes * 2))
     ~max_task_origins:4
   |> ok
 ;;
@@ -296,6 +296,8 @@ let repl_configuration () =
 let with_daemon
       ?(tool_fixture = false)
       ?(repl = false)
+      ?(repl_receipt_bytes = 8192)
+      ?(repl_keys_per_instance = 4)
       ?(prompt_source = "<developer>Developer host fixture.</developer>")
       ?(native_sample = false)
       ?authorize_native
@@ -354,7 +356,12 @@ let with_daemon
           let developer =
             if repl
             then
-              S.Daemon.Developer_configuration.with_repl developer (repl_configuration ())
+              S.Daemon.Developer_configuration.with_repl
+                developer
+                (repl_configuration
+                   ~max_receipt_bytes:repl_receipt_bytes
+                   ~max_keys_per_instance:repl_keys_per_instance
+                   ())
             else developer
           in
           let options =
@@ -1206,4 +1213,297 @@ let%expect_test "hosted REPL retains partial work and closes at key saturation" 
       (Result.is_ok close));
   [%expect
     {| same_instance=true foreign_denied=true first_finished=true second_stopped=true truthful_limited=true completed=1 first_observed=true reset_changed_epoch=true old_key_replay=true changed_old_key_conflicts=true fresh_denied=true close_ok=true |}]
+;;
+
+let%expect_test "hosted REPL Task persists one terminal and joins before reset" =
+  (* The retained expression's type graph has a conservative charged bound
+     near 430 KiB; keep its bounded receipt visible for the issued reference. *)
+  let native_calls = ref 0 in
+  let native_outputs = ref 0 in
+  let cancel_entered, signal_cancel_entered = Eio.Promise.create () in
+  let cancel_release, signal_cancel_release = Eio.Promise.create () in
+  with_daemon
+    ~repl:true
+    ~repl_receipt_bytes:(512 * 1024)
+    ~repl_keys_per_instance:8
+    ~timeout_seconds:15.
+    ~prompt_source:
+      "<developer>Developer REPL Task fixture.</developer>\n<tool name=\"read_file\"/>"
+    ~native_sample:true
+    ~authorize_native:(fun invocation binding ->
+      [%test_eq: string]
+        (Chat_response.Tool_capability.reference binding).name
+        "read_file";
+      assert (
+        P.Invocation.equal_origin
+          (P.Host_invocation.context invocation).origin
+          P.Invocation.Script);
+      incr native_calls;
+      if Int.equal !native_calls 2
+      then (
+        Eio.Promise.resolve signal_cancel_entered ();
+        Eio.Promise.await cancel_release);
+      Ok ())
+    ~prepare_output:(function
+      | Openai.Responses.Tool_output.Output.Text value ->
+        incr native_outputs;
+        Ok (`String value)
+      | _ -> Error (P.Error.invalid_request "unexpected native output"))
+    (fun daemon ->
+       let module Repl = S.Daemon.Developer.Repl in
+       let scopes =
+         Set.add
+           (Set.add Agent_server_test_support.scopes Developer_repl)
+           Developer_live_run
+       in
+       let principal =
+         Agent_server_test_support.principal_with_scopes "pri_repl_task" scopes
+       in
+       let actor = Operator_authorization.trusted_local principal in
+       let connection, _transport, expected = open_document daemon actor in
+       let selector = P.Authoring.Analysis.Target.selected_script "s" |> ok in
+       let route =
+         S.Daemon.Developer.Request.Route.Document_script { expected; selector }
+       in
+       let original =
+         Repl.Original.create
+           ~route
+           ~target:Chatml.Chatml_compiler_contract.Target.One_off_v1
+           ~prompt:(S.Catalog_identity.prompt_definition "restart.prompt")
+           ~workspace:(S.Catalog_identity.workspace_definition "restart.workspace")
+           ~requested_execution:None
+           ~requested_max_output_bytes:None
+           ~checkpoint:ignore
+         |> ok
+       in
+       let run_id = P.Id.Developer_run.create () in
+       let key name = P.Idempotency_key.of_string name |> checked in
+       let view =
+         Repl.create
+           daemon
+           ~actor
+           ~run_id
+           ~key:(key "task-create")
+           ~original
+           ~fresh_source:
+             (Some
+                (S.Daemon.Developer.Request.Fresh_source.Document_script { connection }))
+         |> ok
+       in
+       let instance = Repl.View.instance view in
+       let epoch = Repl.View.epoch view in
+       let submitted =
+         Repl.submit
+           daemon
+           ~actor
+           ~instance
+           ~epoch
+           ~expected_revision:(Repl.View.revision view)
+           ~key:(key "task-inert")
+           ~source:"Task.pure(8)"
+         |> ok
+       in
+       let reference =
+         match Repl.Submission.task_references submitted with
+         | reference :: _ -> reference
+         | [] ->
+           let finished =
+             match Repl.Submission.status submitted with
+             | Finished -> true
+             | Need_more _ | Rejected _ | Stopped _ -> false
+           in
+           let limited =
+             match Repl.Submission.details submitted with
+             | Output_limited -> true
+             | Available -> false
+           in
+           failwith
+             (Printf.sprintf
+                "REPL did not retain Task: finished=%b limited=%b completed=%d \
+                 statements=%d handles=%d"
+                finished
+                limited
+                (Repl.Submission.completed_statements submitted)
+                (List.length (Repl.Submission.statements submitted))
+                (List.length (Repl.Submission.task_handles submitted)))
+       in
+       let task_original =
+         Repl.Task.Original.create
+           ~reference
+           ~requested_execution:None
+           ~requested_max_output_bytes:None
+           ~checkpoint:ignore
+         |> ok
+       in
+       let initial =
+         Repl.Task.submit
+           daemon
+           ~actor
+           ~key:(key "task-run")
+           ~original:task_original
+           ~fresh_epoch:(Some (instance, epoch))
+         |> ok
+       in
+       let terminal =
+         Repl.Task.await_terminal daemon ~actor ~run_id ~key:(key "task-run") |> ok
+       in
+       let replay =
+         Repl.Task.submit
+           daemon
+           ~actor
+           ~key:(key "task-run")
+           ~original:task_original
+           ~fresh_epoch:None
+         |> ok
+       in
+       let succeeded =
+         match Repl.Task.receipt terminal with
+         | Some receipt ->
+           (match R.value receipt with
+            | R.Task (R.Task.Succeeded { value_preview = Some "8" }) -> true
+            | R.Task (R.Task.Succeeded { value_preview = Some _ | None })
+            | R.Task _ | R.Check _ | R.Fixture _ | R.Live _ -> false)
+         | None -> false
+       in
+       let same_row =
+         Agent_store.Developer_command_row.same_identity
+           (Repl.Task.row initial)
+           (Repl.Task.row replay)
+       in
+       let native_task =
+         Repl.submit
+           daemon
+           ~actor
+           ~instance
+           ~epoch
+           ~expected_revision:(Repl.Submission.revision submitted)
+           ~key:(key "task-native-expression")
+           ~source:
+             {|Tool.call("read_file", `Object([{key="file"; value=`String("sample.txt")}]))|}
+         |> ok
+       in
+       let native_reference =
+         Repl.Submission.task_references native_task |> List.hd_exn
+       in
+       let native_original =
+         Repl.Task.Original.create
+           ~reference:native_reference
+           ~requested_execution:None
+           ~requested_max_output_bytes:None
+           ~checkpoint:ignore
+         |> ok
+       in
+       [%test_eq: int] !native_calls 0;
+       let _native_initial =
+         Repl.Task.submit
+           daemon
+           ~actor
+           ~key:(key "task-native-run")
+           ~original:native_original
+           ~fresh_epoch:(Some (instance, epoch))
+         |> ok
+       in
+       let native_terminal =
+         Repl.Task.await_terminal daemon ~actor ~run_id ~key:(key "task-native-run") |> ok
+       in
+       let native_succeeded =
+         match Repl.Task.receipt native_terminal with
+         | Some receipt ->
+           (match R.value receipt with
+            | R.Task (R.Task.Succeeded { value_preview = Some preview }) ->
+              String.is_substring preview ~substring:"Ok"
+              && String.is_substring preview ~substring:"developer host native sample"
+            | R.Task _ | R.Check _ | R.Fixture _ | R.Live _ -> false)
+         | None -> false
+       in
+       let native_replay =
+         Repl.Task.submit
+           daemon
+           ~actor
+           ~key:(key "task-native-run")
+           ~original:native_original
+           ~fresh_epoch:None
+         |> ok
+       in
+       let native_same_row =
+         Agent_store.Developer_command_row.same_identity
+           (Repl.Task.row native_terminal)
+           (Repl.Task.row native_replay)
+       in
+       let cancellation_task =
+         Repl.submit
+           daemon
+           ~actor
+           ~instance
+           ~epoch
+           ~expected_revision:(Repl.Submission.revision native_task)
+           ~key:(key "task-cancel-expression")
+           ~source:
+             {|Tool.call("read_file", `Object([{key="file"; value=`String("sample.txt")}]))|}
+         |> ok
+       in
+       let cancellation_original =
+         Repl.Task.Original.create
+           ~reference:(Repl.Submission.task_references cancellation_task |> List.hd_exn)
+           ~requested_execution:None
+           ~requested_max_output_bytes:None
+           ~checkpoint:ignore
+         |> ok
+       in
+       let _cancellation_initial =
+         Repl.Task.submit
+           daemon
+           ~actor
+           ~key:(key "task-cancel-run")
+           ~original:cancellation_original
+           ~fresh_epoch:(Some (instance, epoch))
+         |> ok
+       in
+       Eio.Promise.await cancel_entered;
+       let cancelled =
+         Repl.Task.cancel_and_wait daemon ~actor ~run_id ~key:(key "task-cancel-run")
+         |> ok
+       in
+       Eio.Promise.resolve signal_cancel_release ();
+       let cancelled_terminal =
+         match Agent_store.Developer_command_row.phase (Repl.Task.row cancelled) with
+         | Terminal _ -> true
+         | Reserved | Waiting_permission | Execution_started -> false
+       in
+       let cancelled_without_effect =
+         match Repl.Task.receipt cancelled with
+         | Some receipt ->
+           (match R.value receipt with
+            | R.Task R.Task.Cancelled -> Int.equal !native_outputs 1
+            | R.Task
+                ( R.Task.Interrupted
+                | R.Task.Limited _
+                | R.Task.Failed _
+                | R.Task.Succeeded _ )
+            | R.Check _ | R.Fixture _ | R.Live _ -> false)
+         | None -> false
+       in
+       let reset =
+         Repl.reset_and_wait
+           daemon
+           ~actor
+           ~instance
+           ~expected_epoch:epoch
+           ~key:(key "task-reset")
+         |> ok
+       in
+       printf
+         "task_succeeded=%b same_row=%b native_succeeded=%b native_same_row=%b \
+          native_calls=%d cancel_terminal=%b cancel_without_effect=%b \
+          reset_changed_epoch=%b\n"
+         succeeded
+         same_row
+         native_succeeded
+         native_same_row
+         !native_calls
+         cancelled_terminal
+         cancelled_without_effect
+         (not (Repl.Epoch.equal epoch (Repl.View.epoch reset))));
+  [%expect
+    {| task_succeeded=true same_row=true native_succeeded=true native_same_row=true native_calls=2 cancel_terminal=true cancel_without_effect=true reset_changed_epoch=true |}]
 ;;

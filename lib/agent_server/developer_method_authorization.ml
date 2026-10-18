@@ -6,13 +6,19 @@ let required_scope = function
   | Agent_store.Developer_command_receipt.Kind.Check -> P.Scope.Developer_check
   | Fixture_run -> P.Scope.Developer_fixture_run
   | Live_run -> P.Scope.Developer_live_run
+  | Repl_task_run -> P.Scope.Developer_live_run
 ;;
 
 let denied message = P.Error.create P.Error.Permission_denied ~message ~retryable:false ()
 
 let authorize_principal kind ~principal =
   let scope = required_scope kind in
-  if P.Principal.has_scope principal scope
+  if
+    P.Principal.has_scope principal scope
+    &&
+    match kind with
+    | Repl_task_run -> P.Principal.has_scope principal P.Scope.Developer_repl
+    | Check | Fixture_run | Live_run -> true
   then Ok ()
   else Error (denied ("missing scope " ^ P.Scope.to_string scope))
 ;;
@@ -34,4 +40,8 @@ let check_now kind ~original ~current =
       let open Result.Let_syntax in
       let%bind () = authorize_principal kind ~principal:original_principal in
       authorize_principal kind ~principal:current_principal)
+;;
+
+let check_repl_task_now ~original ~current =
+  check_now Agent_store.Developer_command_receipt.Kind.Repl_task_run ~original ~current
 ;;

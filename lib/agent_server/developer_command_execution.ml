@@ -35,7 +35,9 @@ module Live = struct
   let create ~root ~jobs ~native ~authorize ~prepare_output ~capture ~budgets ~env =
     let open Result.Let_syntax in
     if
-      (not (phys_equal (O.capture root) capture))
+      (not
+         (Option.value_map (O.command_capture root) ~default:false ~f:(fun owned ->
+            phys_equal owned capture)))
       || (not (Jobs.issued_by_root jobs root))
       || not (N.issued_by_root native root)
     then invalid "live command resources belong to another physical root"

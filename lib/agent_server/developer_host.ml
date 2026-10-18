@@ -6,6 +6,7 @@ module Row = Store.Command.Row
 module Lifecycle = Developer_command_lifecycle
 module Original = Developer_command_original
 module Budgets = Developer_command_budgets
+module Task_receipt = Developer_repl_task_receipt
 module Capture = Authoring_context_service.Developer
 module Root = Developer_root_owner
 module Jobs = Developer_script_job_service
@@ -17,6 +18,12 @@ module Live_resources = Developer_live_resources
 module Child_runner = Developer_child_agent_runner
 module Repl_epoch = Developer_repl_epoch
 module Approval_owner = Developer_approval_owner
+
+module Change = struct
+  type kind =
+    | Command_changed
+    | Approval_changed
+end
 
 type live_services =
   { jobs : Jobs.t
@@ -152,15 +159,6 @@ let equal_live_selection left right =
   && P.Id.Workspace_definition.equal left.workspace right.workspace
 ;;
 
-type ready_run =
-  { handle : Store.handle
-  ; mutable actor : Operator_authorization.t
-  ; capture_fingerprint : Chatml_source.Digest.t
-  ; mutable live_selection : live_selection option
-  ; mutable live_owner : live_owner option
-  ; live_gate : Eio.Mutex.t
-  }
-
 type retirement_step =
   | Join_callbacks
   | Detach_scheduler
@@ -168,11 +166,37 @@ type retirement_step =
   | Close_resources
   | Select_epoch
 
+type repl_retirement_step =
+  | Retire_task_lifecycle
+  | Detach_task_scheduler
+  | Close_task_root
+  | Retire_task_admission
+  | Close_task_resources
+  | Select_task_epoch
+
+type repl_retirement =
+  { mutable step : repl_retirement_step
+  ; instance : Repl_epoch.Instance.t
+  ; custody : Repl_epoch.Task_cleanup.custody
+  }
+
+type ready_run =
+  { handle : Store.handle
+  ; mutable actor : Operator_authorization.t
+  ; capture_fingerprint : Chatml_source.Digest.t
+  ; repl_selection : Capture.Source_selection.t option
+  ; mutable live_selection : live_selection option
+  ; mutable live_owner : live_owner option
+  ; live_gate : Eio.Mutex.t
+  ; mutable repl_retirement : repl_retirement option
+  }
+
 type retiring_run =
   { old : ready_run
   ; target_key : P.Idempotency_key.t
   ; target_request : Chatml_source.Digest.t
   ; target_capture : Chatml_source.Digest.t
+  ; target_repl_selection : Capture.Source_selection.t option
   ; principal : P.Principal.t
   ; mutable step : retirement_step
   }
@@ -182,6 +206,7 @@ type appending_epoch =
   ; key : P.Idempotency_key.t
   ; request_fingerprint : Chatml_source.Digest.t
   ; capture_fingerprint : Chatml_source.Digest.t
+  ; repl_selection : Capture.Source_selection.t option
   ; previous : Store.Observation.t option
   ; principal : P.Principal.t
   }
@@ -201,9 +226,13 @@ type t =
   ; roots : Root.Registry.t
   ; lifecycle : Lifecycle.t
   ; capture : Capture.t
+  ; authoring : Authoring_installation.t
   ; repl : Repl_epoch.t option
   ; live_resources : Developer_live_resources.t
   ; approval : Approval_owner.Configuration.t option
+  ; on_change :
+      (run_id:P.Id.Developer_run.t -> key:P.Idempotency_key.t -> kind:Change.kind -> unit)
+        option
   ; disclosure_policy : Command_view.Disclosure_policy.t
   ; control_policy : Command_view.Control_policy.t
   ; provider : Provider_operator_port.t option
@@ -228,6 +257,8 @@ type t =
   }
 
 let registry t = t.roots
+let approval_installed t = Option.is_some t.approval
+let uses_authoring t authoring = phys_equal t.authoring authoring
 
 let install_scheduler t scheduler =
   if t.closed
@@ -459,230 +490,64 @@ let admit_live_root t ~actor ~capture ~candidate ~ready ~resources ~active =
       Lifecycle.Active.transfer_finished_claim active ~handle:ready.handle ~accept)
 ;;
 
-let create
-      ~sw
-      ~env
-      ~session_store
-      ~blobs
-      ~capacity
-      ~authoring
-      ~provider
-      ~model_target
-      ~prompts
-      ~catalogs
-      ~workspace_leases
-      ~physical_roots
-      ~workspace_cleanup
-      ~script_preparation
-      ~tool_dir
-      ~home
-      ~cache
-      ~approval
-      ~max_native_bindings
-      ~child_sources
-      ~content_limits
-      ~remote_content
-      ~agent_source_limits
-      ~active_agent_calls
-      ~job_policy
-      ~runtime_policy
-      ~authorize_native
-      ~prepare_output
-      ~capture_policy
-      ~capture_limits
-      ~command_disclosure
-      ~command_control
-      ~result_disclosure
-      ~publisher_limits
-      ~publisher_storage
-      ~store_limits
-      ~(limits : Limits.t)
-      ~budget_configuration
-      ~repl
-      ~now
-      ~checkpoint
-  =
+let check_repl_selection t ~actor selection =
   let open Result.Let_syntax in
-  let%bind capture =
-    Authoring_installation.developer_capture
-      authoring
-      ~policy:capture_policy
-      ~limits:capture_limits
+  let%bind () = check_method t ~actor ~kind:Receipt.Kind.Repl_task_run in
+  let%bind checked =
+    Capture.Source_selection.Shared.check_current
+      selection
+      ~actor
+      ~checkpoint:t.checkpoint
   in
-  let%bind artifact_store =
-    Agent_store.Prompt_artifact_store.create
-      ~env
-      ~root:
-        (Agent_store.Data_root.prompt_artifacts_path
-           (Agent_store.Session_store.data_root session_store))
-    |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
-  in
-  let%bind live_resources =
-    Developer_live_resources.create
-      ~sw
-      ~env
-      ~prompts
-      ~catalogs
-      ~workspace_leases
-      ~physical_roots
-      ~workspace_cleanup
-      ~script_preparation
-      ~tool_dir
-      ~home
-      ~cache
-      ~max_native_bindings
-      ~child_sources
-      ~content_limits
-      ~remote_content
-      ~artifact_store
-      ~agent_source_limits
-      ~active_agent_calls
-  in
-  let%bind store_owner =
-    Store.open_or_create session_store ~sw ~limits:store_limits ~checkpoint |> store
-  in
-  let acquired_roots = ref None in
-  let acquired_lifecycle = ref None in
-  let build () =
-    let%bind () =
-      Agent_store.Blob_store.bind_developer_runs blobs ~session_store store_owner
-      |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
-    in
-    let%bind budgets = Budgets.bind budget_configuration ~store:store_owner in
-    let%bind configured_store_limits = store (Store.limits store_owner) in
-    let%bind result_disclosure =
-      Developer_result_disclosure.create
-        ~runs:store_owner
-        ~blobs
-        ~policy:result_disclosure
-        ~limits:limits.disclosure
-    in
-    let roots =
-      Root.Registry.create ~sw ~store:store_owner ~capacity ~now ~limits:limits.roots
-    in
-    acquired_roots := Some roots;
-    let disclosure =
-      Lifecycle.Disclosure_policy.create ~authorize:(fun actor row ->
-        Result.is_ok
-          (Developer_method_authorization.authorize_principal
-             (Row.kind row)
-             ~principal:(Operator_authorization.principal actor))
-        && Command_view.Disclosure_policy.authorize command_disclosure actor row)
-    in
-    let control =
-      Lifecycle.Control_policy.create ~authorize:(fun actor row ->
-        Result.is_ok
-          (Developer_method_authorization.authorize_principal
-             (Row.kind row)
-             ~principal:(Operator_authorization.principal actor))
-        && Command_view.Control_policy.authorize command_control actor row)
-    in
-    let recovery =
-      Lifecycle.Recovery_adapter.create ~recover:(fun ~claim:_ ~handle:_ ~window ->
-        Developer_command_recovery.recover window ~now)
-    in
-    let%map lifecycle =
-      Lifecycle.create
-        ~sw
-        ~store:store_owner
-        ~max_active_commands:limits.max_active_commands
-        ~disclosure
-        ~control
-        ~recovery
-    in
-    acquired_lifecycle := Some lifecycle;
-    let repl =
-      Option.map repl ~f:(fun configuration ->
-        Repl_epoch.install
-          ~sw
-          ~capture_host:capture
-          ~env
-          ~clock:(Eio.Stdenv.mono_clock env)
-          ~configuration
-          ~checkpoint)
-    in
-    { sw
-    ; env
-    ; session_store
-    ; blobs
-    ; capacity
-    ; store = store_owner
-    ; roots
-    ; lifecycle
-    ; capture
-    ; repl
-    ; live_resources
-    ; approval
-    ; disclosure_policy = command_disclosure
-    ; control_policy = command_control
-    ; provider
-    ; model_target
-    ; job_policy
-    ; runtime_policy
-    ; authorize_native
-    ; prepare_output
-    ; result_disclosure
-    ; publisher_limits
-    ; publisher_storage
-    ; budgets
-    ; max_runs = Store.Limits.max_runs configured_store_limits
-    ; now
-    ; checkpoint
-    ; runs = Hashtbl.create (module P.Id.Developer_run)
-    ; scheduler = None
-    ; closed = false
-    }
-  in
-  let cleanup () =
-    Eio.Cancel.protect (fun () ->
-      let open Result.Let_syntax in
-      let%bind () =
-        match !acquired_lifecycle with
-        | None -> Ok ()
-        | Some lifecycle -> Lifecycle.close_and_wait lifecycle
+  let%map () = Capture.Source_selection.Shared.check_now selection ~checked ~actor in
+  checked
+;;
+
+let admit_repl_root t ~actor ~selection ~ready ~resources ~active ~borrowed =
+  let open Result.Let_syntax in
+  let%bind selected_model = select_live_model t ~actor ~resources in
+  let final_admission ~actor:now_actor ~selection:now_selection ~checkpoint =
+    if not (phys_equal now_actor actor && phys_equal now_selection selection)
+    then Error (P.Error.invalid_request "developer REPL Root selection changed")
+    else (
+      let%bind checked =
+        Capture.Source_selection.Shared.check_current selection ~actor ~checkpoint
       in
+      let%bind () = Live_resources.check_current resources in
+      let%bind () = Capture.Source_selection.Shared.check_now selection ~checked ~actor in
+      let%bind () = Repl_epoch.check_now borrowed in
       let%bind () =
-        match !acquired_roots with
+        match selected_model with
         | None -> Ok ()
-        | Some roots -> Root.Registry.close_and_wait roots
+        | Some selected -> Provider_operator_port.Model_selection.check_current selected
       in
-      store (Store.close_and_wait store_owner))
+      Ok
+        (fun () ->
+          let%bind () = check_method t ~actor ~kind:Receipt.Kind.Repl_task_run in
+          let%bind () =
+            Capture.Source_selection.Shared.check_now selection ~checked ~actor
+          in
+          let%bind () = Repl_epoch.check_now borrowed in
+          let%bind () = Live_resources.check_current resources in
+          match selected_model with
+          | None -> Ok ()
+          | Some selected -> Provider_operator_port.Model_selection.check_current selected))
   in
-  let outcome =
-    match build () with
-    | result -> `Returned result
-    | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
-  in
-  match outcome with
-  | `Returned (Ok _ as value) -> value
-  | `Returned (Error original) ->
-    let closed = cleanup () in
-    (match closed with
-     | Ok () -> Error original
-     | Error cleanup_error ->
-       Error
-         (P.Error.create
-            P.Error.Persistence_error
-            ~message:"developer host startup and cleanup failed"
-            ~retryable:true
-            ~data:
-              (`Object
-                  [ "startup", P.Error.to_json original
-                  ; "cleanup", P.Error.to_json cleanup_error
-                  ])
-            ())
-     | exception _ ->
-       Error
-         (P.Error.create
-            P.Error.Persistence_error
-            ~message:"developer host startup cleanup raised"
-            ~retryable:true
-            ~data:(`Object [ "startup", P.Error.to_json original ])
-            ()))
-  | `Raised (exn, backtrace) ->
-    (try ignore (cleanup () : (unit, P.Error.t) result) with
-     | _ -> ());
-    Exn.raise_with_original_backtrace exn backtrace
+  Root.Registry.admit_repl_recovered
+    ~final_admission
+    ~checkpoint:t.checkpoint
+    t.roots
+    ~original_actor:(Repl_epoch.original_actor borrowed)
+    ~current_actor:actor
+    ~selection
+    ~registry:(Live_resources.native_registry resources)
+    ~selected:(Live_resources.selected_native resources)
+    ~selected_model
+    ~job_policy:t.job_policy
+    ~handle:ready.handle
+    ~workspace_conflict_domain:(Live_resources.conflict_domain resources)
+    ~transfer_finished_claim:(fun ~accept ->
+      Lifecycle.Active.transfer_finished_claim active ~handle:ready.handle ~accept)
 ;;
 
 let same_principal (left : P.Principal.t) (right : P.Principal.t) =
@@ -697,10 +562,12 @@ let check_old_live_control t ~actor (ready : ready_run) =
     let row = live_origin_row live in
     let principal = Operator_authorization.principal actor in
     if
-      Receipt.Kind.equal (Row.kind row) Receipt.Kind.Live_run
+      (match Row.kind row with
+       | Receipt.Kind.Live_run | Repl_task_run -> true
+       | Check | Fixture_run -> false)
       && P.Id.Principal.equal (Row.owner row).principal_id principal.id
       && P.Execution_owner.equal_developer (Row.owner row) (Store.owner ready.handle)
-      && Result.is_ok (check_method t ~actor ~kind:Receipt.Kind.Live_run)
+      && Result.is_ok (check_method t ~actor ~kind:(Row.kind row))
       && Command_view.Control_policy.authorize t.control_policy actor row
       && Operator_authorization.is_current actor
     then Ok ()
@@ -734,6 +601,7 @@ let select_next_epoch
       ~request_fingerprint
       ~(principal : P.Principal.t)
       ~capture_fingerprint
+      ~repl_selection
   =
   let open Result.Let_syntax in
   let%bind previous =
@@ -776,7 +644,14 @@ let select_next_epoch
       | P.Execution_owner.Developer owner -> Ok owner
       | Conversation _ -> Error (P.Error.invalid_request "invalid developer owner"))
   in
-  { owner; key; request_fingerprint; capture_fingerprint; previous; principal }
+  { owner
+  ; key
+  ; request_fingerprint
+  ; capture_fingerprint
+  ; repl_selection
+  ; previous
+  ; principal
+  }
 ;;
 
 let append_selected_epoch t ~run_id ~actor ~authorize_now ~live_selection selected =
@@ -799,9 +674,11 @@ let append_selected_epoch t ~run_id ~actor ~authorize_now ~live_selection select
       { handle
       ; actor
       ; capture_fingerprint = selected.capture_fingerprint
+      ; repl_selection = selected.repl_selection
       ; live_selection
       ; live_owner = None
       ; live_gate = Eio.Mutex.create ()
+      ; repl_retirement = None
       }
     in
     Hashtbl.set t.runs ~key:run_id ~data:(Ready ready);
@@ -869,6 +746,7 @@ let rec retire_admitted t slot ~run_id ~actor ~authorize_now ~live_selection ret
         ~request_fingerprint:retiring.target_request
         ~principal:retiring.principal
         ~capture_fingerprint:retiring.target_capture
+        ~repl_selection:retiring.target_repl_selection
     in
     Hashtbl.set t.runs ~key:run_id ~data:(Appending selected);
     append_selected_epoch t ~run_id ~actor ~authorize_now ~live_selection selected
@@ -877,6 +755,7 @@ let rec retire_admitted t slot ~run_id ~actor ~authorize_now ~live_selection ret
 let admit_fresh_run
       t
       slot
+      ~repl_selection
       ~actor
       ~run_id
       ~key
@@ -928,9 +807,11 @@ let admit_fresh_run
             { handle
             ; actor
             ; capture_fingerprint
+            ; repl_selection
             ; live_selection
             ; live_owner = None
             ; live_gate = Eio.Mutex.create ()
+            ; repl_retirement = None
             }
           in
           Hashtbl.set t.runs ~key:run_id ~data:(Ready ready);
@@ -950,6 +831,7 @@ let admit_fresh_run
            ~request_fingerprint
            ~principal
            ~capture_fingerprint
+           ~repl_selection
        in
        Hashtbl.set t.runs ~key:run_id ~data:(Appending selected);
        append_selected_epoch t ~run_id ~actor ~authorize_now ~live_selection selected)
@@ -968,12 +850,27 @@ let admit_fresh_run
       && P.Idempotency_key.equal retiring.target_key key
       && Chatml_source.Digest.equal retiring.target_request request_fingerprint
       && Chatml_source.Digest.equal retiring.target_capture capture_fingerprint
+      &&
+      match repl_selection, retiring.target_repl_selection with
+      | None, None -> true
+      | Some left, Some right -> phys_equal left right
+      | None, Some _ | Some _, None -> false
     then
       Eio.Cancel.protect (fun () ->
         retire_admitted t slot ~run_id ~actor ~authorize_now ~live_selection retiring)
     else
       Error (error P.Error.Conflict "developer run retirement is pending" ~retryable:true)
   | Some (Ready ready) ->
+    let%bind () =
+      match ready.repl_retirement with
+      | None -> Ok ()
+      | Some _ ->
+        Error
+          (error
+             P.Error.Conflict
+             "developer REPL Task retirement is pending"
+             ~retryable:true)
+    in
     let%bind () = persisted_owner_now t ~run_id ~expected:(Store.owner ready.handle) in
     let%bind () = authorize_now () in
     if not (same_principal (Operator_authorization.principal ready.actor) principal)
@@ -985,6 +882,17 @@ let admit_fresh_run
            ~retryable:false)
     else if
       Chatml_source.Digest.equal ready.capture_fingerprint capture_fingerprint
+      && (match repl_selection, ready.repl_selection with
+          | None, None -> true
+          | Some requested, Some installed -> phys_equal requested installed
+          | None, Some _ | Some _, None -> false)
+      && (match repl_selection, ready.live_owner with
+          | None, _ -> true
+          | Some requested, Some (Root_owned { root; _ }) ->
+            (match Root.source root with
+             | Root.Source.Repl installed -> phys_equal requested installed
+             | Command _ -> false)
+          | Some _, None | Some _, Some (Prepared _ | Root_provisional _) -> false)
       && (match live_selection, ready.live_selection with
           | None, _ -> true
           | Some _, None -> true
@@ -994,10 +902,20 @@ let admit_fresh_run
       | None -> true
       | Some _ ->
         (match ready.live_owner with
-         | None -> Option.is_none ready.live_selection || phys_equal ready.actor actor
-         | Some (Root_owned _) -> phys_equal ready.actor actor
+         | None ->
+           Option.is_none ready.live_selection
+           || phys_equal ready.actor actor
+           || Option.is_some repl_selection
+         | Some (Root_owned { root; _ }) ->
+           phys_equal ready.actor actor
+           ||
+             (match repl_selection, Root.source root with
+             | Some requested, Root.Source.Repl installed ->
+               phys_equal requested installed
+             | None, _ | Some _, Command _ -> false)
          | Some (Prepared _ | Root_provisional _) -> false)
     then (
+      if Option.is_some repl_selection then ready.actor <- actor;
       (match live_selection with
        | None -> ()
        | Some requested ->
@@ -1032,6 +950,7 @@ let admit_fresh_run
         ; target_key = key
         ; target_request = request_fingerprint
         ; target_capture = capture_fingerprint
+        ; target_repl_selection = repl_selection
         ; principal
         ; step = Join_callbacks
         }
@@ -1041,11 +960,33 @@ let admit_fresh_run
         retire_admitted t slot ~run_id ~actor ~authorize_now ~live_selection retiring))
 ;;
 
-let submit_fresh t ~actor ~run_id ~key ~original ~fresh_source ~kind ~run =
+let submit_fresh
+      t
+      ~actor
+      ~run_id
+      ~key
+      ~original
+      ~resolve_fresh
+      ~request_current
+      ~kind
+      ~run
+  =
   let open Result.Let_syntax in
+  let check_request () =
+    if request_current ()
+    then Ok ()
+    else
+      Error
+        (error
+           P.Error.Permission_denied
+           "developer request lease changed"
+           ~retryable:false)
+  in
+  let%bind () = check_request () in
   let%bind () = check_method t ~actor ~kind in
   Lifecycle.with_slot t.lifecycle ~run_id ~f:(fun slot ->
     let open Result.Let_syntax in
+    let%bind () = check_request () in
     let%bind () = check_method t ~actor ~kind in
     let%bind found =
       Lifecycle.lookup
@@ -1076,15 +1017,15 @@ let submit_fresh t ~actor ~run_id ~key ~original ~fresh_source ~kind ~run =
       | None -> Ok None
     in
     let%bind () = check_method t ~actor ~kind in
+    let%bind () = check_request () in
     match found with
     | Some view -> Ok view
     | None ->
       let%bind () = Lifecycle.ensure_startup_recovered t.lifecycle slot in
-      let%bind fresh =
-        fresh_source
-        |> Result.of_option
-             ~error:(P.Error.invalid_request "developer source is unavailable")
-      in
+      let%bind () = check_request () in
+      let%bind fresh = resolve_fresh () in
+      let%bind () = check_request () in
+      let%bind () = check_method t ~actor ~kind in
       let%bind candidate =
         Developer_command_source.prepare
           t.capture
@@ -1097,6 +1038,7 @@ let submit_fresh t ~actor ~run_id ~key ~original ~fresh_source ~kind ~run =
       let capture = Capture.Candidate.capture candidate in
       let capture_fingerprint = Chatml_developer_capture.fingerprint capture in
       let%bind budgets = Budgets.for_original t.budgets original in
+      let%bind () = check_request () in
       let%bind () = check_method t ~actor ~kind in
       let%bind before_retirement =
         Capture.Candidate.final_admission
@@ -1107,6 +1049,7 @@ let submit_fresh t ~actor ~run_id ~key ~original ~fresh_source ~kind ~run =
       in
       let authorize_now () =
         let open Result.Let_syntax in
+        let%bind () = check_request () in
         let%bind () = check_method t ~actor ~kind in
         before_retirement ()
       in
@@ -1114,6 +1057,7 @@ let submit_fresh t ~actor ~run_id ~key ~original ~fresh_source ~kind ~run =
         admit_fresh_run
           t
           slot
+          ~repl_selection:None
           ~actor
           ~run_id
           ~key
@@ -1134,6 +1078,7 @@ let submit_fresh t ~actor ~run_id ~key ~original ~fresh_source ~kind ~run =
       let admit () =
         Result.is_ok (check_method t ~actor ~kind) && Result.is_ok (final_check ())
       in
+      let%bind () = check_request () in
       let%bind reserved =
         Lifecycle.reserve
           t.lifecycle
@@ -1142,21 +1087,22 @@ let submit_fresh t ~actor ~run_id ~key ~original ~fresh_source ~kind ~run =
           ~key
           ~kind
           ~request_fingerprint:(Original.fingerprint original)
-          ~admit
+          ~admit:(fun () -> request_current () && admit ())
       in
       let id = Lifecycle.View.row reserved |> Row.id in
       Lifecycle.launch t.lifecycle slot ~handle ~reserved ~f:(fun active ~sw ->
         run t ~actor ~candidate ~admitted ~capture ~budgets ~id ~active ~sw ~admit))
 ;;
 
-let submit_pure t ~actor ~run_id ~key ~original ~fresh_source ~kind =
+let submit_pure t ~actor ~run_id ~key ~original ~resolve_fresh ~request_current ~kind =
   submit_fresh
     t
     ~actor
     ~run_id
     ~key
     ~original
-    ~fresh_source
+    ~resolve_fresh
+    ~request_current
     ~kind
     ~run:
       (fun
@@ -1202,6 +1148,8 @@ let submit_pure t ~actor ~run_id ~key ~original ~fresh_source ~kind =
           Error (P.Error.invalid_request "unsupported developer fixture target")
         | Live_run, (One_off_v1 | Tool_v1) ->
           Error (P.Error.invalid_request "live command cannot use fixture runner")
+        | Repl_task_run, _ ->
+          Error (P.Error.invalid_request "REPL Task cannot use command fixture runner")
       in
       Developer_command_portable.run_kind
         ~kind
@@ -1273,12 +1221,18 @@ let run_live_locked
         match t.approval with
         | None -> Ok None
         | Some configuration ->
-          Approval_owner.create
+          Approval_owner.create_with_change
             ~sw:t.sw
             ~env:t.env
             ~store:t.store
             ~preparing
             ~configuration
+            ~on_change:(fun row ->
+              Option.iter t.on_change ~f:(fun notify ->
+                notify
+                  ~run_id:(Row.owner row).run_id
+                  ~key:(Row.key row)
+                  ~kind:Change.Approval_changed))
           |> Result.map ~f:Option.some
       in
       let build_initial () =
@@ -1337,7 +1291,15 @@ let run_live_locked
   in
   let%bind current = Root.current root in
   let%bind () = Root.check_effect_now root current in
-  let execution_capture = Root.capture root in
+  let%bind execution_capture =
+    Root.command_capture root
+    |> Result.of_option
+         ~error:
+           (error
+              P.Error.Lease_stale
+              "developer live command source changed"
+              ~retryable:false)
+  in
   let%bind () =
     if
       Chatml_source.Digest.equal
@@ -1409,11 +1371,407 @@ let run_live
           ~admit))
 ;;
 
-let submit_command t ~actor ~run_id ~key ~original ~fresh_source =
+let run_repl_task_locked
+      t
+      ~actor
+      ~budgets
+      ~selection
+      ~admitted
+      ~active
+      ~borrowed
+      ~task_handle
+      ~origin
+      ~admit
+  =
+  let open Result.Let_syntax in
+  let%bind scheduler =
+    t.scheduler
+    |> Result.of_option
+         ~error:
+           (error
+              P.Error.Invalid_state
+              "developer scheduler is unavailable"
+              ~retryable:false)
+  in
+  let%bind () = Repl_epoch.check_now borrowed in
+  let%bind () = check_repl_selection t ~actor selection |> Result.map ~f:ignore in
+  let%bind preparing = Lifecycle.Active.start_preparation active ~actor ~admit in
+  let origin_row = Lifecycle.Active.view active |> Lifecycle.View.row in
+  let%bind root, resources, services, approval_owner, started =
+    match admitted.live_owner with
+    | Some (Root_owned { root; resources; services; approval_owner; _ }) ->
+      let%bind () = Live_resources.check_current resources in
+      let%map started =
+        Lifecycle.Active.Preparing.bind_repl_root
+          preparing
+          ~root
+          ~borrowed
+          ~checkpoint:t.checkpoint
+      in
+      root, resources, services, approval_owner, started
+    | Some (Prepared _ | Root_provisional _) ->
+      Error
+        (error
+           P.Error.Conflict
+           "developer REPL Task preparation is incomplete"
+           ~retryable:true)
+    | None ->
+      let%bind approval_owner =
+        match t.approval with
+        | None -> Ok None
+        | Some configuration ->
+          Approval_owner.create_with_change
+            ~sw:t.sw
+            ~env:t.env
+            ~store:t.store
+            ~preparing
+            ~configuration
+            ~on_change:(fun row ->
+              Option.iter t.on_change ~f:(fun notify ->
+                notify
+                  ~run_id:(Row.owner row).run_id
+                  ~key:(Row.key row)
+                  ~kind:Change.Approval_changed))
+          |> Result.map ~f:Option.some
+      in
+      let build_initial () =
+        let%bind resources =
+          Live_resources.prepare
+            t.live_resources
+            ~handle:admitted.handle
+            ~approval_owner
+            ~original_actor:(Repl_epoch.original_actor borrowed)
+            ~prompt:(Repl_epoch.prompt borrowed)
+            ~workspace:(Repl_epoch.workspace borrowed)
+            ~checkpoint:t.checkpoint
+            ~retain:(fun resources ->
+              admitted.live_owner
+              <- Some (Prepared { resources; origin_row; approval_owner }))
+        in
+        let%bind root =
+          admit_repl_root t ~actor ~selection ~ready:admitted ~resources ~active ~borrowed
+        in
+        admitted.live_owner
+        <- Some (Root_provisional { root; resources; origin_row; approval_owner });
+        let%bind started =
+          Lifecycle.Active.Preparing.bind_repl_root
+            preparing
+            ~root
+            ~borrowed
+            ~checkpoint:t.checkpoint
+        in
+        let%bind () =
+          match approval_owner with
+          | None -> Ok ()
+          | Some owner -> Approval_owner.bind_root owner ~root ~started
+        in
+        let%bind services =
+          create_live_services
+            t
+            ~root
+            ~resources
+            ~approval_owner
+            ~current_actor:(fun () -> admitted.actor)
+        in
+        let%bind () =
+          Job_scheduler.attach_developer scheduler ~root ~runner:services.background
+        in
+        let%map () =
+          match services.model with
+          | None -> Ok ()
+          | Some model ->
+            Job_scheduler.attach_developer_model scheduler ~root ~runner:model
+        in
+        root, resources, services, approval_owner, started
+      in
+      (match build_initial () with
+       | Ok value -> Ok value
+       | Error error ->
+         Option.iter approval_owner ~f:Approval_owner.close;
+         Error error
+       | exception exn ->
+         let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+         Option.iter approval_owner ~f:Approval_owner.close;
+         Exn.raise_with_original_backtrace exn backtrace)
+  in
+  let%bind () = Repl_epoch.check_now borrowed in
+  let%bind () = Live_resources.check_current resources in
+  let%bind () = check_repl_selection t ~actor selection |> Result.map ~f:ignore in
+  admitted.live_owner
+  <- Some (Root_owned { root; resources; services; origin_row; approval_owner });
+  let run () =
+    let%bind result =
+      Developer_repl_task_execution.run
+        ~root
+        ~jobs:services.jobs
+        ~native:services.native
+        ~authorize:t.authorize_native
+        ~prepare_output:t.prepare_output
+        ~borrowed
+        ~origin
+        ~handle:task_handle
+        ~started
+        ~action_policy:(Chatml_execution.Bounded (Budgets.execution budgets))
+        ~check_current:(fun () ->
+          let%bind () = Repl_epoch.check_now borrowed in
+          let%bind () = Live_resources.check_current resources in
+          let%map _checked = check_repl_selection t ~actor selection in
+          ())
+    in
+    Task_receipt.project ~limits:(Budgets.receipt budgets) ~poll:t.checkpoint result
+  in
+  match approval_owner with
+  | None -> run ()
+  | Some owner -> Approval_owner.with_started_command owner ~active ~started ~actor run
+;;
+
+let run_repl_task
+      t
+      ~actor
+      ~budgets
+      ~selection
+      ~admitted
+      ~active
+      ~borrowed
+      ~task_handle
+      ~origin
+      ~admit
+  =
+  Eio.Mutex.use_rw ~protect:false admitted.live_gate (fun () ->
+    Exn.protect
+      ~finally:(fun () ->
+        match admitted.live_owner with
+        | Some (Prepared { approval_owner; _ } | Root_provisional { approval_owner; _ })
+          -> Option.iter approval_owner ~f:Approval_owner.close
+        | None | Some (Root_owned _) -> ())
+      ~f:(fun () ->
+        run_repl_task_locked
+          t
+          ~actor
+          ~budgets
+          ~selection
+          ~admitted
+          ~active
+          ~borrowed
+          ~task_handle
+          ~origin
+          ~admit))
+;;
+
+let submit_repl_task t ~actor ~key ~original ~fresh_epoch =
+  let open Result.Let_syntax in
+  let kind = Receipt.Kind.Repl_task_run in
+  let reference = Developer_repl_task_original.reference original in
+  let run_id = Repl_epoch.Task_reference.run_id reference in
+  let request_fingerprint = Developer_repl_task_original.fingerprint original in
+  let%bind () = check_method t ~actor ~kind in
+  let%bind existing =
+    Lifecycle.with_slot t.lifecycle ~run_id ~f:(fun slot ->
+      let%bind () = check_method t ~actor ~kind in
+      let%bind found =
+        Lifecycle.lookup t.lifecycle slot ~actor ~key ~kind ~request_fingerprint
+      in
+      match found with
+      | Some view ->
+        (match Row.phase (Lifecycle.View.row view) with
+         | Row.Phase.Terminal _ -> Ok (Some view)
+         | Reserved | Waiting_permission | Execution_started ->
+           let%bind () = Lifecycle.ensure_startup_recovered t.lifecycle slot in
+           Lifecycle.lookup t.lifecycle slot ~actor ~key ~kind ~request_fingerprint)
+      | None -> Ok None)
+  in
+  match existing with
+  | Some view -> Ok view
+  | None ->
+    let%bind budgets =
+      Budgets.for_repl_task
+        t.budgets
+        ~requested_execution:(Developer_repl_task_original.requested_execution original)
+        ~requested_max_output_bytes:
+          (Developer_repl_task_original.requested_max_output_bytes original)
+    in
+    let%bind instance, epoch =
+      fresh_epoch
+      |> Result.of_option
+           ~error:(P.Error.invalid_request "developer REPL Task instance is unavailable")
+    in
+    let%bind repl =
+      t.repl
+      |> Result.of_option
+           ~error:(P.Error.invalid_request "developer REPL is not installed")
+    in
+    Repl_epoch.Task_action.start
+      repl
+      ~actor
+      ~instance
+      ~epoch
+      ~key
+      ~f:(fun action ~publish_initial ->
+        let launched = ref false in
+        let admitted_handle = ref None in
+        let attempt () =
+          let%bind selection =
+            Repl_epoch.Task_action.preflight action ~actor ~reference
+          in
+          let capture_fingerprint =
+            Capture.Source_selection.repl_root_fingerprint selection
+          in
+          Lifecycle.with_slot t.lifecycle ~run_id ~f:(fun slot ->
+            let%bind () = check_method t ~actor ~kind in
+            let%bind found =
+              Lifecycle.lookup t.lifecycle slot ~actor ~key ~kind ~request_fingerprint
+            in
+            let%bind () =
+              match found with
+              | None -> Ok ()
+              | Some _ ->
+                Error
+                  (error
+                     P.Error.Conflict
+                     "developer REPL Task key was installed concurrently"
+                     ~retryable:true)
+            in
+            let%bind () = Lifecycle.ensure_startup_recovered t.lifecycle slot in
+            let%bind checked = check_repl_selection t ~actor selection in
+            let authorize_now () =
+              let%bind () = check_method t ~actor ~kind in
+              let%bind () =
+                Capture.Source_selection.Shared.check_now selection ~checked ~actor
+              in
+              if Operator_authorization.is_current actor
+              then Ok ()
+              else
+                Error
+                  (error
+                     P.Error.Permission_denied
+                     "developer REPL Task actor is no longer current"
+                     ~retryable:false)
+            in
+            let%bind admitted =
+              admit_fresh_run
+                t
+                slot
+                ~repl_selection:(Some selection)
+                ~actor
+                ~run_id
+                ~key
+                ~request_fingerprint
+                ~capture_fingerprint
+                ~live_selection:None
+                ~authorize_now
+            in
+            admitted_handle := Some admitted.handle;
+            let%bind () =
+              Lifecycle.ensure_admitted_claim t.lifecycle slot ~handle:admitted.handle
+            in
+            let%bind checked = check_repl_selection t ~actor selection in
+            let admit () =
+              Result.is_ok (check_method t ~actor ~kind)
+              && Result.is_ok
+                   (Capture.Source_selection.Shared.check_now selection ~checked ~actor)
+            in
+            let%bind reserved =
+              Lifecycle.reserve
+                t.lifecycle
+                slot
+                ~handle:admitted.handle
+                ~key
+                ~kind
+                ~request_fingerprint
+                ~admit
+            in
+            let%bind () = Repl_epoch.Task_action.mark_launching action in
+            launched := true;
+            Lifecycle.launch
+              t.lifecycle
+              slot
+              ~handle:admitted.handle
+              ~reserved
+              ~f:(fun active ~sw ->
+                Repl_epoch.Task_action.enter action ~sw ~f:(fun () ->
+                  Repl_epoch.Task_action.with_current
+                    action
+                    ~actor
+                    ~reference
+                    ~f:(fun borrowed task_handle origin ->
+                      run_repl_task
+                        t
+                        ~actor
+                        ~budgets
+                        ~selection
+                        ~admitted
+                        ~active
+                        ~borrowed
+                        ~task_handle
+                        ~origin
+                        ~admit))))
+        in
+        let initial = attempt () in
+        publish_initial initial;
+        match initial with
+        | Error error ->
+          (match
+             Lifecycle.with_slot t.lifecycle ~run_id ~f:(fun slot ->
+               Lifecycle.reconcile_unlaunched
+                 t.lifecycle
+                 slot
+                 ~actor
+                 ~key
+                 ~kind
+                 ~request_fingerprint
+                 ~handle:!admitted_handle)
+           with
+           | Ok disposition ->
+             let disposition =
+               match disposition with
+               | Lifecycle.Unlaunched.No_durable_row ->
+                 Repl_epoch.Task_action.No_durable_row
+               | Terminal_row -> Terminal_row
+             in
+             Repl_epoch.Task_action.finish_unlaunched action ~disposition
+           | Error _ -> Error error)
+        | Ok initial ->
+          if not !launched
+          then
+            Error
+              (error
+                 P.Error.Invalid_state
+                 "developer REPL Task was returned without Launch"
+                 ~retryable:true)
+          else (
+            let%bind terminal =
+              Lifecycle.await_terminal t.lifecycle ~actor ~run_id ~key
+            in
+            let row = Lifecycle.View.row terminal in
+            if
+              Row.same_identity (Lifecycle.View.row initial) row
+              && Receipt.Kind.equal (Row.kind row) kind
+              &&
+              match Row.phase row with
+              | Row.Phase.Terminal _ -> true
+              | Reserved | Waiting_permission | Execution_started -> false
+            then Repl_epoch.Task_action.mark_settled action
+            else
+              Error
+                (error
+                   P.Error.Persistence_error
+                   "developer REPL Task terminal identity changed"
+                   ~retryable:true)))
+;;
+
+let submit_resolving_command
+      t
+      ~actor
+      ~run_id
+      ~key
+      ~original
+      ~resolve_fresh
+      ~request_current
+  =
   let kind = Original.kind original in
   (match kind with
    | Receipt.Kind.Check | Fixture_run ->
-     submit_pure t ~actor ~run_id ~key ~original ~fresh_source ~kind
+     submit_pure t ~actor ~run_id ~key ~original ~resolve_fresh ~request_current ~kind
    | Live_run ->
      submit_fresh
        t
@@ -1421,10 +1779,27 @@ let submit_command t ~actor ~run_id ~key ~original ~fresh_source =
        ~run_id
        ~key
        ~original
-       ~fresh_source
+       ~resolve_fresh
+       ~request_current
        ~kind
-       ~run:(run_live ~original))
+       ~run:(run_live ~original)
+   | Repl_task_run ->
+     Error (P.Error.invalid_request "REPL Task requires its retained interpreter"))
   |> Result.map ~f:Command_view.of_lifecycle
+;;
+
+let submit_command t ~actor ~run_id ~key ~original ~fresh_source =
+  submit_resolving_command
+    t
+    ~actor
+    ~run_id
+    ~key
+    ~original
+    ~request_current:(fun () -> true)
+    ~resolve_fresh:(fun () ->
+      fresh_source
+      |> Result.of_option
+           ~error:(P.Error.invalid_request "developer source is unavailable"))
 ;;
 
 let observe_once t ~actor ~run_id ~key =
@@ -1464,6 +1839,8 @@ let observe_once t ~actor ~run_id ~key =
                 P.Error.Permission_denied
                 "developer command actor is no longer current"
                 ~retryable:false)
+       | Some row when Receipt.Kind.equal (Row.kind row) Repl_task_run ->
+         Error (P.Error.invalid_request "REPL Task requires its own receipt method")
        | Some row ->
          let%bind () = check_method t ~actor ~kind:(Row.kind row) in
          if
@@ -1499,7 +1876,18 @@ let await_command t ~actor ~run_id ~key =
     then Error (error P.Error.Invalid_state "developer host is closed" ~retryable:false)
     else Ok ()
   in
+  let%bind prior = observe_command t ~actor ~run_id ~key in
+  let%bind () =
+    match prior with
+    | Some _ -> Ok ()
+    | None -> Error (P.Error.invalid_request "developer command is absent")
+  in
   let%bind view = Lifecycle.await_terminal t.lifecycle ~actor ~run_id ~key in
+  let%bind () =
+    if Receipt.Kind.equal (Row.kind (Lifecycle.View.row view)) Repl_task_run
+    then Error (P.Error.invalid_request "REPL Task requires its own receipt method")
+    else Ok ()
+  in
   let%bind () = check_method t ~actor ~kind:(Row.kind (Lifecycle.View.row view)) in
   Ok (Command_view.of_lifecycle view)
 ;;
@@ -1556,6 +1944,486 @@ module Approval = struct
   ;;
 end
 
+let repl_cleanup_pair repl ~instance ready =
+  let open Result.Let_syntax in
+  let%bind run_id = Repl_epoch.instance_run_id repl instance in
+  let owner = Store.owner ready.handle in
+  let%bind selection =
+    ready.repl_selection
+    |> Result.of_option
+         ~error:(P.Error.invalid_request "developer REPL Task source is unavailable")
+  in
+  let%bind () =
+    if
+      P.Id.Developer_run.equal owner.run_id run_id
+      && Chatml_source.Digest.equal
+           ready.capture_fingerprint
+           (Capture.Source_selection.repl_root_fingerprint selection)
+      && Repl_epoch.instance_uses_selection repl instance selection
+    then Ok ()
+    else Error (P.Error.invalid_request "developer REPL Task owner changed")
+  in
+  let%bind () =
+    match ready.live_owner with
+    | None -> Ok ()
+    | Some live ->
+      let row = live_origin_row live in
+      let%bind () =
+        if
+          Receipt.Kind.equal (Row.kind row) Repl_task_run
+          && P.Execution_owner.equal_developer (Row.owner row) owner
+          && Chatml_source.Digest.equal
+               (Row.capture_fingerprint row)
+               ready.capture_fingerprint
+        then Ok ()
+        else Error (P.Error.invalid_request "developer REPL Task row changed")
+      in
+      (match live_root live with
+       | None -> Ok ()
+       | Some root ->
+         (match Root.source root with
+          | Root.Source.Repl installed
+            when phys_equal installed selection
+                 && P.Execution_owner.equal_developer (Root.owner root) owner
+                 && Repl_epoch.instance_paired_to
+                      repl
+                      instance
+                      ~selection:installed
+                      ~original_actor:(Root.original_actor root) -> Ok ()
+          | Command _ | Repl _ ->
+            Error (P.Error.invalid_request "developer REPL Task Root changed")))
+  in
+  Ok ()
+;;
+
+let authorize_repl_retirement t repl ~actor ~instance =
+  let open Result.Let_syntax in
+  let%bind run_id = Repl_epoch.instance_run_id repl instance in
+  match Hashtbl.find t.runs run_id with
+  | None -> Ok ()
+  | Some (Ready ready) ->
+    let%bind () = check_method t ~actor ~kind:Receipt.Kind.Repl_task_run in
+    let%bind () = repl_cleanup_pair repl ~instance ready in
+    (match ready.repl_retirement with
+     | None -> check_old_live_control t ~actor ready
+     | Some _ -> Ok ())
+  | Some (Retiring _ | Appending _) ->
+    Error
+      (error
+         P.Error.Conflict
+         "developer REPL Task run retirement is occupied"
+         ~retryable:true)
+;;
+
+let retire_repl_instance t repl ~actor instance =
+  let open Result.Let_syntax in
+  let%bind run_id = Repl_epoch.instance_run_id repl instance in
+  match Hashtbl.find t.runs run_id with
+  | None -> Ok ()
+  | Some (Retiring _ | Appending _) ->
+    Error
+      (error
+         P.Error.Conflict
+         "developer REPL Task run retirement is occupied"
+         ~retryable:true)
+  | Some (Ready ready) ->
+    let%bind () = check_method t ~actor ~kind:Receipt.Kind.Repl_task_run in
+    let%bind () = repl_cleanup_pair repl ~instance ready in
+    Lifecycle.with_slot t.lifecycle ~run_id ~f:(fun slot ->
+      let check_custody retirement =
+        let%bind custody = Repl_epoch.Task_cleanup.current_custody repl instance in
+        match Hashtbl.find t.runs run_id with
+        | Some (Ready current)
+          when phys_equal current ready
+               && Repl_epoch.Instance.equal retirement.instance instance
+               && Repl_epoch.Task_cleanup.same_custody retirement.custody custody ->
+          repl_cleanup_pair repl ~instance ready
+        | None | Some (Retiring _ | Appending _ | Ready _) ->
+          Error (P.Error.invalid_request "developer REPL Task cleanup owner changed")
+      in
+      let rec advance retirement =
+        let%bind () = check_custody retirement in
+        match retirement.step with
+        | Retire_task_lifecycle ->
+          Option.iter ready.live_owner ~f:(fun live ->
+            Option.iter (live_approval_owner live) ~f:Approval_owner.close);
+          let%bind () = Lifecycle.retire_run t.lifecycle slot ~actor in
+          retirement.step <- Detach_task_scheduler;
+          advance retirement
+        | Detach_task_scheduler ->
+          let%bind () =
+            match ready.live_owner with
+            | None -> Ok ()
+            | Some live ->
+              (match live_root live, t.scheduler with
+               | None, _ -> Ok ()
+               | Some _, None ->
+                 Error
+                   (error
+                      P.Error.Invalid_state
+                      "developer scheduler is unavailable"
+                      ~retryable:true)
+               | Some root, Some scheduler ->
+                 Job_scheduler.retire_developer scheduler ~root)
+          in
+          retirement.step <- Close_task_root;
+          advance retirement
+        | Close_task_root ->
+          let%bind () =
+            match ready.live_owner with
+            | None -> Ok ()
+            | Some live ->
+              (match live_root live with
+               | None -> Ok ()
+               | Some root -> Root.close_and_wait root)
+          in
+          retirement.step <- Retire_task_admission;
+          advance retirement
+        | Retire_task_admission ->
+          let%bind () = Root.Registry.retire_admission t.roots ~handle:ready.handle in
+          let%bind () =
+            match ready.live_owner with
+            | Some live when Option.is_some (live_root live) ->
+              Lifecycle.confirm_transferred_retired t.lifecycle slot ~handle:ready.handle
+            | None | Some _ -> Ok ()
+          in
+          retirement.step <- Close_task_resources;
+          advance retirement
+        | Close_task_resources ->
+          let%bind () =
+            match ready.live_owner with
+            | None -> Ok ()
+            | Some live -> Developer_live_resources.close_and_wait (live_resources live)
+          in
+          retirement.step <- Select_task_epoch;
+          advance retirement
+        | Select_task_epoch ->
+          let%bind () = Lifecycle.release_finished_epoch t.lifecycle slot in
+          Hashtbl.remove t.runs run_id;
+          Ok ()
+      in
+      match ready.repl_retirement with
+      | None ->
+        let%bind () =
+          Repl_epoch.Task_cleanup.check_retiring_current repl ~actor ~instance
+        in
+        let%bind () = repl_cleanup_pair repl ~instance ready in
+        let%bind () = check_old_live_control t ~actor ready in
+        let%bind custody = Repl_epoch.Task_cleanup.current_custody repl instance in
+        let retirement = { step = Retire_task_lifecycle; instance; custody } in
+        ready.repl_retirement <- Some retirement;
+        advance retirement
+      | Some retirement -> advance retirement)
+;;
+
+let close_physical_runs t =
+  let open Result.Let_syntax in
+  let live_runs =
+    Hashtbl.data t.runs
+    |> List.filter_map ~f:(function
+      | Ready ready -> Option.map ready.live_owner ~f:(fun live -> ready.handle, live)
+      | Retiring retiring ->
+        Option.map retiring.old.live_owner ~f:(fun live -> retiring.old.handle, live)
+      | Appending _ -> None)
+  in
+  let%bind () =
+    List.fold_result live_runs ~init:() ~f:(fun () (_, live) ->
+      match live_root live, t.scheduler with
+      | None, _ -> Ok ()
+      | Some _, None ->
+        Error
+          (error
+             P.Error.Invalid_state
+             "developer scheduler is unavailable"
+             ~retryable:true)
+      | Some root, Some scheduler -> Job_scheduler.retire_developer scheduler ~root)
+  in
+  let%bind () =
+    List.fold_result live_runs ~init:() ~f:(fun () (_, live) ->
+      match live_root live with
+      | None -> Ok ()
+      | Some root -> Root.close_and_wait root)
+  in
+  let%bind () =
+    List.fold_result live_runs ~init:() ~f:(fun () (handle, _) ->
+      Root.Registry.retire_admission t.roots ~handle)
+  in
+  let%bind () =
+    List.fold_result live_runs ~init:() ~f:(fun () (_, live) ->
+      Developer_live_resources.close_and_wait (live_resources live))
+  in
+  Hashtbl.clear t.runs;
+  Ok ()
+;;
+
+let install_repl_task_cleanup t repl =
+  Repl_epoch.Task_cleanup.create
+    ~authorize_retirement:(fun ~actor ~instance ->
+      authorize_repl_retirement t repl ~actor ~instance)
+    ~retire_instance:(retire_repl_instance t repl)
+    ~retire_all:(fun () ->
+      let open Result.Let_syntax in
+      let%bind () = Lifecycle.stop_and_join t.lifecycle in
+      close_physical_runs t)
+  |> Repl_epoch.Task_cleanup.install_once repl
+;;
+
+let create
+      ~sw
+      ~env
+      ~session_store
+      ~blobs
+      ~capacity
+      ~authoring
+      ~provider
+      ~model_target
+      ~prompts
+      ~catalogs
+      ~workspace_leases
+      ~physical_roots
+      ~workspace_cleanup
+      ~script_preparation
+      ~tool_dir
+      ~home
+      ~cache
+      ~approval
+      ~max_native_bindings
+      ~child_sources
+      ~content_limits
+      ~remote_content
+      ~agent_source_limits
+      ~active_agent_calls
+      ~job_policy
+      ~runtime_policy
+      ~authorize_native
+      ~prepare_output
+      ~capture_policy
+      ~capture_limits
+      ~command_disclosure
+      ~command_control
+      ~result_disclosure
+      ~publisher_limits
+      ~publisher_storage
+      ~store_limits
+      ~(limits : Limits.t)
+      ~budget_configuration
+      ~repl
+      ?on_change
+      ~now
+      ~checkpoint
+      ()
+  =
+  let open Result.Let_syntax in
+  let%bind capture =
+    Authoring_installation.developer_capture
+      authoring
+      ~policy:capture_policy
+      ~limits:capture_limits
+  in
+  let%bind artifact_store =
+    Agent_store.Prompt_artifact_store.create
+      ~env
+      ~root:
+        (Agent_store.Data_root.prompt_artifacts_path
+           (Agent_store.Session_store.data_root session_store))
+    |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+  in
+  let%bind live_resources =
+    Developer_live_resources.create
+      ~sw
+      ~env
+      ~prompts
+      ~catalogs
+      ~workspace_leases
+      ~physical_roots
+      ~workspace_cleanup
+      ~script_preparation
+      ~tool_dir
+      ~home
+      ~cache
+      ~max_native_bindings
+      ~child_sources
+      ~content_limits
+      ~remote_content
+      ~artifact_store
+      ~agent_source_limits
+      ~active_agent_calls
+  in
+  let%bind store_owner =
+    Store.open_or_create session_store ~sw ~limits:store_limits ~checkpoint |> store
+  in
+  let acquired_roots = ref None in
+  let acquired_lifecycle = ref None in
+  let acquired_repl = ref None in
+  let build () =
+    let%bind () =
+      Agent_store.Blob_store.bind_developer_runs blobs ~session_store store_owner
+      |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+    in
+    let%bind budgets = Budgets.bind budget_configuration ~store:store_owner in
+    let%bind configured_store_limits = store (Store.limits store_owner) in
+    let%bind result_disclosure =
+      Developer_result_disclosure.create
+        ~runs:store_owner
+        ~blobs
+        ~policy:result_disclosure
+        ~limits:limits.disclosure
+    in
+    let roots =
+      Root.Registry.create ~sw ~store:store_owner ~capacity ~now ~limits:limits.roots
+    in
+    acquired_roots := Some roots;
+    let disclosure =
+      Lifecycle.Disclosure_policy.create ~authorize:(fun actor row ->
+        Result.is_ok
+          (Developer_method_authorization.authorize_principal
+             (Row.kind row)
+             ~principal:(Operator_authorization.principal actor))
+        && Command_view.Disclosure_policy.authorize command_disclosure actor row)
+    in
+    let control =
+      Lifecycle.Control_policy.create ~authorize:(fun actor row ->
+        Result.is_ok
+          (Developer_method_authorization.authorize_principal
+             (Row.kind row)
+             ~principal:(Operator_authorization.principal actor))
+        && Command_view.Control_policy.authorize command_control actor row)
+    in
+    let recovery =
+      Lifecycle.Recovery_adapter.create ~recover:(fun ~claim:_ ~handle:_ ~window ->
+        Developer_command_recovery.recover window ~now)
+    in
+    let lifecycle_change row =
+      match Row.kind row with
+      | Receipt.Kind.Check | Fixture_run | Live_run ->
+        Option.iter on_change ~f:(fun notify ->
+          notify
+            ~run_id:(Row.owner row).run_id
+            ~key:(Row.key row)
+            ~kind:Change.Command_changed)
+      | Repl_task_run -> ()
+    in
+    let%bind lifecycle =
+      Lifecycle.create_with_hook
+        ~on_committed:(Some lifecycle_change)
+        ~sw
+        ~store:store_owner
+        ~max_active_commands:limits.max_active_commands
+        ~disclosure
+        ~control
+        ~recovery
+    in
+    acquired_lifecycle := Some lifecycle;
+    let repl =
+      Option.map repl ~f:(fun configuration ->
+        Repl_epoch.install
+          ~sw
+          ~capture_host:capture
+          ~env
+          ~clock:(Eio.Stdenv.mono_clock env)
+          ~configuration
+          ~checkpoint)
+    in
+    acquired_repl := repl;
+    let host =
+      { sw
+      ; env
+      ; session_store
+      ; blobs
+      ; capacity
+      ; store = store_owner
+      ; roots
+      ; lifecycle
+      ; capture
+      ; authoring
+      ; repl
+      ; live_resources
+      ; approval
+      ; on_change
+      ; disclosure_policy = command_disclosure
+      ; control_policy = command_control
+      ; provider
+      ; model_target
+      ; job_policy
+      ; runtime_policy
+      ; authorize_native
+      ; prepare_output
+      ; result_disclosure
+      ; publisher_limits
+      ; publisher_storage
+      ; budgets
+      ; max_runs = Store.Limits.max_runs configured_store_limits
+      ; now
+      ; checkpoint
+      ; runs = Hashtbl.create (module P.Id.Developer_run)
+      ; scheduler = None
+      ; closed = false
+      }
+    in
+    let%map () =
+      match repl with
+      | None -> Ok ()
+      | Some repl -> install_repl_task_cleanup host repl
+    in
+    host
+  in
+  let cleanup () =
+    Eio.Cancel.protect (fun () ->
+      let open Result.Let_syntax in
+      let%bind () =
+        match !acquired_repl with
+        | None -> Ok ()
+        | Some repl -> Repl_epoch.shutdown_and_wait repl
+      in
+      let%bind () =
+        match !acquired_lifecycle with
+        | None -> Ok ()
+        | Some lifecycle -> Lifecycle.close_and_wait lifecycle
+      in
+      let%bind () =
+        match !acquired_roots with
+        | None -> Ok ()
+        | Some roots -> Root.Registry.close_and_wait roots
+      in
+      store (Store.close_and_wait store_owner))
+  in
+  let outcome =
+    match build () with
+    | result -> `Returned result
+    | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+  in
+  match outcome with
+  | `Returned (Ok _ as value) -> value
+  | `Returned (Error original) ->
+    let closed = cleanup () in
+    (match closed with
+     | Ok () -> Error original
+     | Error cleanup_error ->
+       Error
+         (P.Error.create
+            P.Error.Persistence_error
+            ~message:"developer host startup and cleanup failed"
+            ~retryable:true
+            ~data:
+              (`Object
+                  [ "startup", P.Error.to_json original
+                  ; "cleanup", P.Error.to_json cleanup_error
+                  ])
+            ())
+     | exception _ ->
+       Error
+         (P.Error.create
+            P.Error.Persistence_error
+            ~message:"developer host startup cleanup raised"
+            ~retryable:true
+            ~data:(`Object [ "startup", P.Error.to_json original ])
+            ()))
+  | `Raised (exn, backtrace) ->
+    (try ignore (cleanup () : (unit, P.Error.t) result) with
+     | _ -> ());
+    Exn.raise_with_original_backtrace exn backtrace
+;;
+
 let close_and_wait t =
   t.closed <- true;
   Eio.Cancel.protect (fun () ->
@@ -1574,42 +2442,9 @@ let close_and_wait t =
       | Some repl -> Repl_epoch.shutdown_and_wait repl
     in
     let%bind () = Lifecycle.stop_and_join t.lifecycle in
-    let live_runs =
-      Hashtbl.data t.runs
-      |> List.filter_map ~f:(function
-        | Ready ready -> Option.map ready.live_owner ~f:(fun live -> ready.handle, live)
-        | Retiring retiring ->
-          Option.map retiring.old.live_owner ~f:(fun live -> retiring.old.handle, live)
-        | Appending _ -> None)
-    in
-    let%bind () =
-      List.fold_result live_runs ~init:() ~f:(fun () (_, live) ->
-        match live_root live, t.scheduler with
-        | None, _ -> Ok ()
-        | Some _, None ->
-          Error
-            (error
-               P.Error.Invalid_state
-               "developer scheduler is unavailable"
-               ~retryable:true)
-        | Some root, Some scheduler -> Job_scheduler.retire_developer scheduler ~root)
-    in
-    let%bind () =
-      List.fold_result live_runs ~init:() ~f:(fun () (_, live) ->
-        match live_root live with
-        | None -> Ok ()
-        | Some root -> Root.close_and_wait root)
-    in
-    let%bind () =
-      List.fold_result live_runs ~init:() ~f:(fun () (handle, _) ->
-        Root.Registry.retire_admission t.roots ~handle)
-    in
+    let%bind () = close_physical_runs t in
     let%bind () = Root.Registry.close_and_wait t.roots in
     let%bind () = Lifecycle.close_and_wait t.lifecycle in
-    let%bind () =
-      List.fold_result live_runs ~init:() ~f:(fun () (_, live) ->
-        Developer_live_resources.close_and_wait (live_resources live))
-    in
     let%bind () = Developer_live_resources.drain_unresolved t.live_resources in
     store (Store.close_and_wait t.store))
 ;;
@@ -1618,6 +2453,7 @@ module Command = struct
   include Command_view
 
   let submit = submit_command
+  let submit_resolving = submit_resolving_command
   let observe = observe_command
   let await_terminal = await_command
   let cancel_and_wait = cancel_command
@@ -1631,6 +2467,7 @@ module Repl = struct
   module View = Repl_epoch.View
   module Submission = Repl_epoch.Submission
   module Task_origin = Repl_epoch.Task_origin
+  module Task_reference = Repl_epoch.Task_reference
 
   type borrowed = Repl_epoch.borrowed
 
@@ -1679,4 +2516,110 @@ module Repl = struct
   let evaluator = Repl_epoch.evaluator
   let check_now = Repl_epoch.check_now
   let task_origin = Repl_epoch.task_origin
+
+  module Task = struct
+    module Original = Developer_repl_task_original
+
+    type view = { row : Row.t }
+
+    let of_lifecycle value = { row = Lifecycle.View.row value }
+    let row value = value.row
+
+    let submit t ~actor ~key ~original ~fresh_epoch =
+      submit_repl_task t ~actor ~key ~original ~fresh_epoch |> Result.map ~f:of_lifecycle
+    ;;
+
+    let receipt value =
+      match Row.phase value.row with
+      | Row.Phase.Terminal { receipt; _ } -> Some receipt
+      | Reserved | Waiting_permission | Execution_started -> None
+    ;;
+
+    let check_row t ~actor row =
+      if not (Receipt.Kind.equal (Row.kind row) Repl_task_run)
+      then Error (P.Error.invalid_request "developer row is not a REPL Task")
+      else
+        let open Result.Let_syntax in
+        let%bind () = check_method t ~actor ~kind:Repl_task_run in
+        let principal = Operator_authorization.principal actor in
+        if
+          P.Id.Principal.equal (Row.owner row).principal_id principal.id
+          && Command_view.Disclosure_policy.authorize t.disclosure_policy actor row
+          && Operator_authorization.is_current actor
+        then Ok ()
+        else
+          Error
+            (error
+               P.Error.Permission_denied
+               "developer REPL Task receipt access denied"
+               ~retryable:false)
+    ;;
+
+    let observe_once t ~actor ~run_id ~key =
+      let open Result.Let_syntax in
+      let%bind () = check_method t ~actor ~kind:Repl_task_run in
+      let%bind existing = store (Store.Result_root.find_existing t.store run_id) in
+      match existing with
+      | None ->
+        let%map () = check_method t ~actor ~kind:Repl_task_run in
+        None
+      | Some existing ->
+        let principal = Operator_authorization.principal actor in
+        let%bind found =
+          store
+            (Store.Result_root.find_command_snapshot
+               existing
+               ~principal:principal.id
+               ~key)
+        in
+        (match found with
+         | None ->
+           let%map () = check_method t ~actor ~kind:Repl_task_run in
+           None
+         | Some row ->
+           let%map () = check_row t ~actor row in
+           Some { row })
+    ;;
+
+    let observe t ~actor ~run_id ~key =
+      let open Result.Let_syntax in
+      let%bind found = observe_once t ~actor ~run_id ~key in
+      match found with
+      | None -> Ok None
+      | Some ({ row; _ } as view) ->
+        (match Row.phase row with
+         | Row.Phase.Terminal _ -> Ok (Some view)
+         | Reserved | Waiting_permission | Execution_started ->
+           Lifecycle.with_slot t.lifecycle ~run_id ~f:(fun slot ->
+             let%bind () = Lifecycle.ensure_startup_recovered t.lifecycle slot in
+             observe_once t ~actor ~run_id ~key))
+    ;;
+
+    let await_terminal t ~actor ~run_id ~key =
+      let open Result.Let_syntax in
+      let%bind prior = observe t ~actor ~run_id ~key in
+      let%bind () =
+        match prior with
+        | None -> Error (P.Error.invalid_request "developer REPL Task is absent")
+        | Some _ -> Ok ()
+      in
+      let%bind view = Lifecycle.await_terminal t.lifecycle ~actor ~run_id ~key in
+      let%map () = check_row t ~actor (Lifecycle.View.row view) in
+      of_lifecycle view
+    ;;
+
+    let cancel_and_wait t ~actor ~run_id ~key =
+      let open Result.Let_syntax in
+      let%bind prior = observe t ~actor ~run_id ~key in
+      match prior with
+      | None -> Error (P.Error.invalid_request "developer REPL Task is absent")
+      | Some view ->
+        (match Row.phase view.row with
+         | Row.Phase.Terminal _ -> Ok view
+         | Reserved | Waiting_permission | Execution_started ->
+           let%bind settled = Lifecycle.cancel_and_wait t.lifecycle ~actor ~run_id ~key in
+           let%map () = check_row t ~actor (Lifecycle.View.row settled) in
+           of_lifecycle settled)
+    ;;
+  end
 end

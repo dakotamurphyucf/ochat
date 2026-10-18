@@ -215,6 +215,23 @@ an effect. Cancellation, timeout, run retirement and daemon shutdown remove
 pending requests. After restart, inspect the command or job terminal state; do
 not treat a previous pending ID or approval as a reusable grant.
 
+Starting a new library `Developer.Repl.Task` action requires an issued Task
+reference and its exact live REPL epoch. Explicit submission creates a durable
+Task row; terminal receipts contain a bounded value preview or diagnostic
+rather than an unrestricted interpreter value. Repeating the same key reads
+that row, including after restart, without recreating the evaluator or
+rerunning effects. Task cancellation joins that execution; REPL reset and close
+join root-owned work before retiring the epoch. A Task terminal alone leaves
+the Root available for already admitted jobs. Ordinary developer Command
+methods do not expose Task rows.
+
+The selected REPL source retains its actual Standard compiler contract: a
+`Developer_tool_v1` selection admits the matching Task surface, including
+`Model.spawn`, while `One_off_v1` and `Tool_v1` keep their narrower surfaces.
+Native tools and model work still require current Root and actor authority,
+with a pinned provider for Model work. Shell execution additionally requires
+the exact captured manifest grant and a current approval decision.
+
 Reset/rebuild/delete are authorized protocol mutations with revision checks.
 Review preservation flags and archive/remove choices in [the protocol](protocol.md).
 Never delete locks, broad directories or unknown processes as a generic fix for

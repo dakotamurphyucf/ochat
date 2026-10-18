@@ -12,6 +12,9 @@ type t =
   ; live_cancelled : Receipt.t
   ; live_failed : Receipt.t
   ; live_interrupted : Receipt.t
+  ; task_cancelled : Receipt.t
+  ; task_failed : Receipt.t
+  ; task_interrupted : Receipt.t
   }
 
 let limited () =
@@ -65,7 +68,22 @@ let create limits =
                ~retryable:false
                ())))
   in
-  let%map live_interrupted = admit (Receipt.Live Receipt.Live.Interrupted) in
+  let%bind live_interrupted = admit (Receipt.Live Receipt.Live.Interrupted) in
+  let%bind task_cancelled = admit (Receipt.Task Receipt.Task.Cancelled) in
+  let%bind task_failed =
+    admit
+      (Receipt.Task
+         (Receipt.Task.Failed
+            { error =
+                P.Error.create
+                  P.Error.Invalid_state
+                  ~message:"developer REPL Task failed before producing a result"
+                  ~retryable:false
+                  ()
+            ; diagnostic = None
+            }))
+  in
+  let%map task_interrupted = admit (Receipt.Task Receipt.Task.Interrupted) in
   { check_cancelled
   ; check_failed
   ; check_interrupted
@@ -74,6 +92,9 @@ let create limits =
   ; live_cancelled
   ; live_failed
   ; live_interrupted
+  ; task_cancelled
+  ; task_failed
+  ; task_interrupted
   }
 ;;
 
@@ -81,6 +102,7 @@ let interrupted t = function
   | Receipt.Kind.Check -> t.check_interrupted
   | Fixture_run -> t.fixture_interrupted
   | Live_run -> t.live_interrupted
+  | Repl_task_run -> t.task_interrupted
 ;;
 
 let choose t kind ~cancelled ~typed_failure =
@@ -98,4 +120,10 @@ let choose t kind ~cancelled ~typed_failure =
     else if typed_failure
     then t.live_failed
     else t.live_interrupted
+  | Repl_task_run ->
+    if cancelled
+    then t.task_cancelled
+    else if typed_failure
+    then t.task_failed
+    else t.task_interrupted
 ;;

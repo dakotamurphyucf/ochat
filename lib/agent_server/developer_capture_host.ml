@@ -101,13 +101,13 @@ module Selected_contract = struct
     ; tool_fixture : Tool_fixture.t option
     }
 
-  let of_standard_entry entry =
+  let of_standard_target entry ~target =
     let contract = Authoring_standard_contracts.Entry.contract entry in
     if
       not
         (match Contract.kind contract with
-         | Contract.Kind.Standard Contract.Target.One_off_v1 -> true
-         | Standard _ | Native -> false)
+         | Contract.Kind.Standard actual -> Contract.Target.equal actual target
+         | Native -> false)
     then Error (invalid ())
     else
       Ok
@@ -116,6 +116,14 @@ module Selected_contract = struct
         ; identity_bytes = Authoring_standard_contracts.Entry.identity_bytes entry
         ; tool_fixture = None
         }
+  ;;
+
+  let of_standard_entry entry =
+    of_standard_target entry ~target:Contract.Target.One_off_v1
+  ;;
+
+  let of_standard_developer_tool_entry entry =
+    of_standard_target entry ~target:Contract.Target.Developer_tool_v1
   ;;
 
   let of_standard_tool_entry entry ~tool_name ~input_schema ~output_schema =
@@ -177,6 +185,7 @@ module Selected_contract = struct
   ;;
 
   let contract t = t.contract
+  let fingerprint t = t.fingerprint
   let tool_fixture t = t.tool_fixture
 
   let same_identity a b =
@@ -324,6 +333,7 @@ module Source_selection = struct
         -> (unit, P.Error.t) result
     ; owner_now : actor:Operator_authorization.t -> (unit, P.Error.t) result
     ; selection : Operator_authorization.t -> Selected_contract.t option
+    ; repl_root_fingerprint : Captured.Digest.t
     ; domain : int
     ; mutable busy : bool
     ; mutable checked_nonce : unit ref option
@@ -342,6 +352,7 @@ module Source_selection = struct
   ;;
 
   let selected_contract t = t.selected
+  let repl_root_fingerprint t = t.repl_root_fingerprint
 
   let check_domain t =
     if Int.equal t.domain (Stdlib.Domain.self () :> int) then Ok () else Error (stale ())
@@ -442,6 +453,14 @@ let make_source_selection
       ~owner_now
       ~selection
   =
+  let repl_root_identity =
+    String.concat
+      ~sep:"\000"
+      [ "developer-repl-root-source.v1"
+      ; Captured.Digest.to_hex (Prepared.fingerprint prepared)
+      ; Captured.Digest.to_hex (Selected_contract.fingerprint selected)
+      ]
+  in
   ({ Source_selection.prepared
    ; origin
    ; original_actor
@@ -450,6 +469,8 @@ let make_source_selection
    ; full_owner
    ; owner_now
    ; selection
+   ; repl_root_fingerprint =
+       Captured.Digest.of_contents repl_root_identity ~checkpoint:(fun () -> ())
    ; domain = (Stdlib.Domain.self () :> int)
    ; busy = false
    ; checked_nonce = None

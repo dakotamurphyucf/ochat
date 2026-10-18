@@ -35,6 +35,14 @@ module Selected_contract : sig
       Neither the entry nor this comparison wrapper grants execution. *)
   val of_standard_entry : Authoring_standard_contracts.Entry.t -> (t, P.Error.t) result
 
+  (** Comparison-only selected Developer_tool_v1 identity from the same
+      bounded Standard cache. This constructor does not infer a tool fixture,
+      grant Model access, or bypass physical source selection. The retained
+      contract and canonical fingerprint are checked again after waits. *)
+  val of_standard_developer_tool_entry
+    :  Authoring_standard_contracts.Entry.t
+    -> (t, P.Error.t) result
+
   (** Trusted policy pairs an actual configured Standard Tool_v1 entry with its
       selected top-level tool label and already compiled input/output schemas.
       These are not inferred from source text or an ordered Tool.call fixture.
@@ -58,6 +66,12 @@ module Selected_contract : sig
   end
 
   val contract : t -> Contract.t
+
+  (** Canonical selected Standard entry identity; Tool_v1 also binds the
+      declared label and exact input/output schema identities. Comparison
+      data only, never authority without the issuing Source_selection. *)
+  val fingerprint : t -> Chatml_source.Digest.t
+
   val tool_fixture : t -> Tool_fixture.t option
   val same_identity : t -> t -> bool
 end
@@ -176,6 +190,14 @@ module Source_selection : sig
      source. This accessor preserves that constructor invariant. *)
   val entry_source : t -> Chatml_source.t
   val selected_contract : t -> Selected_contract.t
+
+  (** Versioned, domain-separated REPL Root identity over the exact selected
+      Prepared graph and Selected_contract fingerprint. Stored once with this
+      physical selection; unlike a command capture it contains no synthetic
+      entrypoint/input/fixtures. Source_selection currentness still rechecks
+      its original route/actor and both selected policies. The REPL View,
+      Store.handle and Root.Source.Repl use these identical bytes. *)
+  val repl_root_fingerprint : t -> Chatml_source.Digest.t
 
   (** Full original/current actor, route/source and selected-contract check.
       The returned attempt-local proof belongs to this physical selection. *)

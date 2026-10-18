@@ -1,7 +1,8 @@
 open! Core
 
 (** One physical host owner for an admitted developer run epoch. The actor holds the
-    original authenticated principal, exact immutable capture, pinned live
+    original authenticated principal, one closed Command-capture or REPL-source
+    origin, pinned live
     capability registry, an exclusive per-run physical claim on the shared
     daemon-owned Store, and the daemon-wide capacity ledger. It owns root action
     and physical worker lifetime. The host supplies source/selection admission
@@ -9,6 +10,8 @@ open! Core
 
 type t
 type run = t
+
+module Source = Developer_root_source
 
 module Limits : sig
   type t
@@ -50,6 +53,15 @@ module Registry : sig
   type final_admission =
     actor:Operator_authorization.t
     -> capture:Chatml_developer_capture.t
+    -> checkpoint:(unit -> unit)
+    -> (unit -> (unit, Agent_protocol.Error.t) result, Agent_protocol.Error.t) result
+
+  (** Same final publication suffix for the actual REPL Source_selection.
+      The checked proof comes from this physical selection and current actor,
+      never an independently paired digest or caller-supplied Prepared value. *)
+  type final_repl_admission =
+    actor:Operator_authorization.t
+    -> selection:Developer_capture_host.Source_selection.t
     -> checkpoint:(unit -> unit)
     -> (unit -> (unit, Agent_protocol.Error.t) result, Agent_protocol.Error.t) result
 
@@ -136,6 +148,45 @@ module Registry : sig
     -> t
     -> actor:Operator_authorization.t
     -> capture:Chatml_developer_capture.t
+    -> registry:Chat_response.Tool_capability.t
+    -> selected:Chat_response.Tool_capability.t
+    -> selected_model:Provider_operator_port.Model_selection.t option
+    -> job_policy:Chat_response.One_off_request.policy
+    -> handle:Agent_store.Developer_run_store.handle
+    -> workspace_conflict_domain:string
+    -> transfer_finished_claim:
+         (accept:
+            (claim:Agent_store.Developer_run_store.Run_claim.t
+             -> window:Agent_store.Developer_run_store.Recovery.t
+             -> (unit, Agent_protocol.Error.t) result)
+          -> (unit, Agent_protocol.Error.t) result)
+    -> (run, Agent_protocol.Error.t) result
+
+  (** First effectful REPL Task only. The host supplies the same physical
+      Source_selection retained by its authenticated REPL instance and its
+      selected registry/Prompt/Workspace policy. [original_actor] is the
+      physical token retained when that selection was issued; [current_actor]
+      is the authenticated actor of this Task action and may be a later token
+      with the same principal ID/authentication kind. Both remain current and
+      are checked with the selected source before and after yields. The Root
+      retains the original token as its source actor; later Tasks bind their
+      own current actor through a Task-specific Lifecycle Started proof.
+      Store.handle must be issued
+      by this Registry's Store and pin Source.fingerprint(Repl selection).
+      The fresh Task Active has already consumed one durable Start, finished
+      its startup claim and transfers that exact claim/window nonyieldingly.
+      No ordinary command capture, synthetic entrypoint or second recovery
+      pass exists. Publication repeats full selection/actor checks after
+      worker/Store waits, then the final nonyielding check. Subsequent Task
+      actions reuse this Root only while the exact source/actor/Store policy
+      remains current. *)
+  val admit_repl_recovered
+    :  final_admission:final_repl_admission
+    -> checkpoint:(unit -> unit)
+    -> t
+    -> original_actor:Operator_authorization.t
+    -> current_actor:Operator_authorization.t
+    -> selection:Developer_capture_host.Source_selection.t
     -> registry:Chat_response.Tool_capability.t
     -> selected:Chat_response.Tool_capability.t
     -> selected_model:Provider_operator_port.Model_selection.t option
@@ -635,11 +686,30 @@ module Native_terminal : sig
 end
 
 val owner : t -> Agent_protocol.Execution_owner.developer
-val capture : t -> Chatml_developer_capture.t
+val source : t -> Source.t
+val command_capture : t -> Chatml_developer_capture.t option
 
 (** Host-only admission facts retained by this physical owner. The captured
     actor and policy are not reconstructed from request coordinates. *)
 val original_actor : t -> Operator_authorization.t
+
+(** Lexically pair one physically borrowed REPL Task with its REPL-issued Root.
+    This accepts only a Root whose retained Source.Repl is the borrowed exact
+    Source_selection and whose original actor is the borrow's original actor.
+    The borrow and current Task actor remain live throughout [f]. The binding
+    is inherited only by joined Root-action/native child fibers: the existing
+    scheduler's later queued Worker Claims run outside it under the Root's
+    original authority. [check_effect_now] repeats the borrow's nonyielding
+    currentness at each Task effect gate, including after native authorization
+    and approval waits; no arbitrary callback or saved reference can mint it.
+    Root's general current/recovery/terminal-only settlement remains under
+    its original actor so revocation does not strand already-durable cleanup.
+    The binding expires when [f] and its joined children finish. *)
+val with_repl_task_borrow
+  :  t
+  -> Developer_repl_epoch.borrowed
+  -> (unit -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
 
 val job_policy : t -> Chat_response.One_off_request.policy
 

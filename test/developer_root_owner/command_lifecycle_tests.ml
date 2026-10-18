@@ -42,6 +42,79 @@ let%test_unit "daemon owner rejects Store limits too small for its own fallback"
            ~recovery:(recovery ()))))
 ;;
 
+let%test_unit "Task cleanup distinguishes a retained Store Pending from absent" =
+  F.with_store (fun _env sw store ->
+    let run_owner = F.owner "dvr_task_pending_cleanup" 0 in
+    let captured = F.capture () in
+    let handle, _ =
+      R.admit_epoch
+        store
+        ~owner:run_owner
+        ~capture_fingerprint:(Chatml_developer_capture.fingerprint captured)
+        ~previous:None
+      |> ok
+    in
+    let disclosure, control = policy () in
+    let lifecycle =
+      L.create
+        ~sw
+        ~store
+        ~max_active_commands:1
+        ~disclosure
+        ~control
+        ~recovery:(recovery ())
+      |> ok
+    in
+    let actor = Operator_authorization.trusted_local F.principal in
+    let key = P.Idempotency_key.of_string "task-pending-cleanup" |> ok in
+    let request_fingerprint =
+      Chatml_source.Digest.of_contents "task pending" ~checkpoint:ignore
+    in
+    let pending =
+      match
+        R.Command.prepare_reservation
+          handle
+          ~key
+          ~kind:R.Command.Receipt.Kind.Repl_task_run
+          ~request_fingerprint
+        |> ok
+      with
+      | Prepared pending -> pending
+      | Unchanged _ -> failwith "expected a fresh Task Pending"
+    in
+    assert (Option.is_some (R.Command.pending handle |> ok));
+    L.with_slot lifecycle ~run_id:run_owner.run_id ~f:(fun slot ->
+      let result =
+        L.reconcile_unlaunched
+          lifecycle
+          slot
+          ~actor
+          ~key
+          ~kind:R.Command.Receipt.Kind.Repl_task_run
+          ~request_fingerprint
+          ~handle:None
+      in
+      (match result with
+       | Error { P.Error.code = Conflict; _ } -> ()
+       | Error _ | Ok _ -> failwith "Task Pending was treated as absent");
+      R.Command.retire_absent_admission handle pending |> ok;
+      match
+        L.reconcile_unlaunched
+          lifecycle
+          slot
+          ~actor
+          ~key
+          ~kind:R.Command.Receipt.Kind.Repl_task_run
+          ~request_fingerprint
+          ~handle:None
+      with
+      | Ok L.Unlaunched.No_durable_row -> Ok ()
+      | Ok L.Unlaunched.Terminal_row | Error _ ->
+        failwith "retired Pending was not absent")
+    |> ok;
+    L.close_and_wait lifecycle |> ok)
+;;
+
 let%test_unit "daemon command callback survives its submitting slot and publishes once" =
   let fault_armed = ref false in
   let rename_armed = ref false in
@@ -153,7 +226,7 @@ let%test_unit "daemon command callback survives its submitting slot and publishe
         | Some receipt ->
           (match R.Command.Receipt.value receipt with
            | R.Command.Receipt.Check Ready -> ()
-           | Check (Rejected _ | Interrupted | Cancelled) | Fixture _ | Live _ ->
+           | Check (Rejected _ | Interrupted | Cancelled) | Fixture _ | Live _ | Task _ ->
              failwith "wrong command completion")
         | None -> failwith "callback did not settle terminal");
        let retained =
@@ -220,7 +293,8 @@ let%test_unit "daemon command callback survives its submitting slot and publishe
         | R.Command.Row.Phase.Terminal { receipt; _ } ->
           (match R.Command.Receipt.value receipt with
            | R.Command.Receipt.Check Interrupted -> ()
-           | Check _ | Fixture _ | Live _ -> failwith "abandoned slot chose wrong receipt")
+           | Check _ | Fixture _ | Live _ | Task _ ->
+             failwith "abandoned slot chose wrong receipt")
         | Reserved | Waiting_permission | Execution_started ->
           failwith "abandoned slot stayed Reserved");
        let fault_key = P.Idempotency_key.of_string "command-lifecycle-fault" |> ok in
@@ -322,7 +396,8 @@ let%test_unit "daemon command callback survives its submitting slot and publishe
         | R.Command.Row.Phase.Terminal { receipt; _ } ->
           (match R.Command.Receipt.value receipt with
            | R.Command.Receipt.Check Interrupted -> ()
-           | Check _ | Fixture _ | Live _ -> failwith "unlaunched reservation not retired")
+           | Check _ | Fixture _ | Live _ | Task _ ->
+             failwith "unlaunched reservation not retired")
         | Reserved | Waiting_permission | Execution_started ->
           failwith "unlaunched reservation stayed open");
        L.close_and_wait dead_lifecycle |> ok;
@@ -572,7 +647,8 @@ let%test_unit
         | Some value ->
           (match R.Command.Receipt.value value with
            | R.Command.Receipt.Live R.Command.Receipt.Live.Cancelled -> ()
-           | Check _ | Fixture _ | Live _ -> failwith "wrong cancellation receipt")
+           | Check _ | Fixture _ | Live _ | Task _ ->
+             failwith "wrong cancellation receipt")
         | None -> failwith "cancellation did not settle");
        let retire_key = P.Idempotency_key.of_string "command-live-retire-run" |> ok in
        let retire_entered, signal_retire_entered = Eio.Promise.create () in
@@ -634,7 +710,8 @@ let%test_unit
         | Some value ->
           (match R.Command.Receipt.value value with
            | R.Command.Receipt.Live R.Command.Receipt.Live.Cancelled -> ()
-           | Check _ | Fixture _ | Live _ -> failwith "retirement chose wrong receipt")
+           | Check _ | Fixture _ | Live _ | Task _ ->
+             failwith "retirement chose wrong receipt")
         | None -> failwith "retirement did not join and settle its callback");
        let uncertain_key =
          P.Idempotency_key.of_string "command-live-uncertain-start" |> ok

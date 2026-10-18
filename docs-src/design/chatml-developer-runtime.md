@@ -20,7 +20,7 @@ publisher is installed merely by defining the DTOs. The eventual Host must
 advertise only its installed methods and reauthorize each decoded operation
 against its live physical owner and source after waits.
 
-Status: M5 design v1, 2026-10-15. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission, durable developer run checkpoint foundation, selected-document transactions, physical job-claim worker, compiler-side REPL typing transaction and incremental module registry described below are implemented. The developer root staging owner, bounded root/native terminal coordinator, selected native policy and claimed job-parent effect-entry proof are implemented. The owner-neutral lexical script-job kernel and its physical developer adapter are implemented. Actor-bound provider selection, the shared Model.spawn recipe decoder, durable intent, physical call-boundary admission, selected compiled-script adapter and claimed model-job runner are implemented. Hosted command, native, job and Model approval callbacks are implemented. User-facing transport clients and the REPL Task service remain pending. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
+Status: M5 design v1, 2026-10-15. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission, durable developer run checkpoint foundation, selected-document transactions, physical job-claim worker, compiler-side REPL typing transaction and incremental module registry described below are implemented. The developer root staging owner, bounded root/native terminal coordinator, selected native policy and claimed job-parent effect-entry proof are implemented. The owner-neutral lexical script-job kernel and its physical developer adapter are implemented. Actor-bound provider selection, the shared Model.spawn recipe decoder, durable intent, physical call-boundary admission, selected compiled-script adapter and claimed model-job runner are implemented. Hosted command, native, job and Model approval callbacks are implemented. The hosted library REPL Task service retains exact Task references, starts work durably on explicit request, and joins cancellation and reset. User-facing REPL Task transport remains pending. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
 
 The [authoring service design](chatml-authoring-services.md) owns source context,
 overlay and immutable upload contracts used here. Implementation and validation
@@ -388,6 +388,16 @@ A check has its own check ID and bounded `Checking -> Ready | Rejected` receipt.
 The developer service should expose check, submit, inspect, events, cancel and repeat through one portable contract used by local code and HTTP/stdio adapters. Authenticated reconnect reads the same bounded receipt. A disconnected client does not silently cancel an admitted run. Host crash marks unfinished top-level work interrupted unless a child job is proven safe to resume under its existing scheduler contract; source is never replayed automatically. Stale source/editor submissions reject before admission.
 
 ## 3. REPL ownership and lifecycle
+
+The hosted library REPL selects the actual captured Standard compiler ABI for
+both statement evaluation and a later explicit Task drive. The retained
+`Developer_tool_v1` selection alone exposes the Model operation to Task code;
+`One_off_v1` and `Tool_v1` remain unchanged, and a mismatched captured target
+is rejected before evaluator construction. A Task effect still crosses the
+physical Root's current actor and selected-source checks. The same durable
+Task action can wait for a real Shell approval, stage a Job and admit a Model
+request; approval, Job and provider permissions remain separate from compiler
+surface selection.
 
 A REPL has a separate opaque ID, principal/workspace owner, project/environment, pinned source graph, reset epoch and monotone state revision. It is not an agent conversation or a durable background job. One actor serializes access to its mutable runtime and inference state. Creation carries a unique request ID bound to principal and graph/environment payload, so a lost response cannot create two sessions. Creation records the session and is inert: it does not evaluate module initializers.
 

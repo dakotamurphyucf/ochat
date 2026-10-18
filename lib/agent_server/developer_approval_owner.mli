@@ -12,6 +12,12 @@ type t
 module Limits : sig
   type t
 
+  (** Comparison-only validated ceilings for portable composition. *)
+  val max_pending : t -> int
+
+  val max_display_bytes : t -> int
+  val max_decision_reason_bytes : t -> int
+
   (** Request capacity is at least 2048 bytes for fixed context framing; the
       other byte bounds and pending count are positive. The finite wait is
       representable on the daemon's monotonic clock and at most one hour.
@@ -94,6 +100,18 @@ val create
   -> configuration:Configuration.t
   -> (t, P.Error.t) result
 
+(** Trusted nonyielding, nonraising hint after the process-local pending index
+    changes, outside its mutex. Only an entered Live Started command supplies
+    a row; claimed Jobs and REPL Tasks have no Command watch key here. *)
+val create_with_change
+  :  sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
+  -> store:Store.t
+  -> preparing:Lifecycle.Active.Preparing.t
+  -> configuration:Configuration.t
+  -> on_change:(Store.Command.Row.t -> unit)
+  -> (t, P.Error.t) result
+
 (** After [Preparing.bind_root] returns [started], pair this owner with that
     exact physical Root once. [Preparing.issued_started] verifies the token
     pair; Root must be issued by [store] and [started] by Root. Failed pairing
@@ -111,11 +129,17 @@ val bind_root
     Native.with_approval_owner requires this before installing callbacks. *)
 val issued_by_root : t -> Root.run -> bool
 
-(** Enter an exact current command callback or claimed Worker. Each later
-    command supplies its own fresh Started token; the first Active is never
-    reused. The claimed branch derives Root.job_parent from the actual active
-    Worker. Fiber-local scopes expire on return and are rechecked after waits.
-    Neither a saved row nor a pending ID can enter them. *)
+(** Enter an exact current Live or REPL Task callback, or a claimed Worker.
+    Every later action supplies its own fresh Started token; the first Active
+    is never reused. Lifecycle validates the token's closed Live-original or
+    Task-original/current actor pairing against this exact physical Root.
+    Task approval read/respond requires REPL plus Live permission and its own
+    row policy; the ordinary Command DTO cannot disclose a Task pending row.
+    The claimed branch derives Root.job_parent from the actual active Worker.
+    Fiber-local scopes expire on return and are rechecked after waits. The
+    Root source fingerprint is the exact command capture or retained REPL
+    selection, never a fabricated command capture for Task. Neither a saved
+    row nor a pending ID can enter these scopes. *)
 val with_started_command
   :  t
   -> active:Lifecycle.Active.t

@@ -410,6 +410,14 @@ module Developer : sig
       val equal : t -> t -> bool
     end
 
+    module Task_reference : sig
+      type t
+
+      val to_string : t -> string
+      val of_string : string -> (t, Agent_protocol.Error.t) result
+      val equal : t -> t -> bool
+    end
+
     module View : sig
       type t
 
@@ -451,6 +459,54 @@ module Developer : sig
       val revision : t -> Revision.t
       val statements : t -> Chatml_repl_execution.Receipt.t list
       val task_handles : t -> Chatml_repl_execution.Task_handle.t list
+      val task_references : t -> Task_reference.t list
+    end
+
+    module Task : sig
+      module Original : sig
+        type t
+
+        val create
+          :  reference:Task_reference.t
+          -> requested_execution:Chatml_execution.limits option
+          -> requested_max_output_bytes:int option
+          -> checkpoint:(unit -> unit)
+          -> (t, Agent_protocol.Error.t) result
+      end
+
+      type view
+
+      val row : view -> Agent_store.Developer_run_store.Command.Row.t
+      val receipt : view -> Agent_store.Developer_run_store.Command.Receipt.t option
+
+      val submit
+        :  t
+        -> actor:Operator_authorization.t
+        -> key:Agent_protocol.Idempotency_key.t
+        -> original:Original.t
+        -> fresh_epoch:(Instance.t * Epoch.t) option
+        -> (view, Agent_protocol.Error.t) result
+
+      val observe
+        :  t
+        -> actor:Operator_authorization.t
+        -> run_id:Agent_protocol.Id.Developer_run.t
+        -> key:Agent_protocol.Idempotency_key.t
+        -> (view option, Agent_protocol.Error.t) result
+
+      val await_terminal
+        :  t
+        -> actor:Operator_authorization.t
+        -> run_id:Agent_protocol.Id.Developer_run.t
+        -> key:Agent_protocol.Idempotency_key.t
+        -> (view, Agent_protocol.Error.t) result
+
+      val cancel_and_wait
+        :  t
+        -> actor:Operator_authorization.t
+        -> run_id:Agent_protocol.Id.Developer_run.t
+        -> key:Agent_protocol.Idempotency_key.t
+        -> (view, Agent_protocol.Error.t) result
     end
 
     (** Same run/key/original request reuses its authenticated instance without

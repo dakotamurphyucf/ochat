@@ -458,10 +458,18 @@ module Developer : sig
   module Selected_contract : sig
     type t
 
-    (** Only the existing bounded Standard-contract cache can supply this
-        immutable One_off_v1 or explicit Tool_v1 comparison identity. Host selection/currentness
-        remains independent. *)
+    (** Only the existing bounded Standard-contract cache can supply these
+        immutable selected identities. This constructor admits One_off_v1;
+        the distinct Tool_v1 and Developer_tool_v1 constructors below retain
+        their own exact contracts. Host selection/currentness remains
+        independent. *)
     val of_standard_entry : Authoring_standard_contracts.Entry.t -> (t, P.Error.t) result
+
+    (** Comparison-only actual Standard Developer_tool_v1 selection for a
+        retained REPL Task; no synthetic tool schema or execution grant. *)
+    val of_standard_developer_tool_entry
+      :  Authoring_standard_contracts.Entry.t
+      -> (t, P.Error.t) result
 
     val of_standard_tool_entry
       :  Authoring_standard_contracts.Entry.t
@@ -479,6 +487,7 @@ module Developer : sig
     end
 
     val contract : t -> Chatml.Chatml_compiler_contract.t
+    val fingerprint : t -> Chatml_source.Digest.t
     val tool_fixture : t -> Tool_fixture.t option
     val same_identity : t -> t -> bool
   end
@@ -568,13 +577,14 @@ module Developer : sig
     (** Exact source/contract selection shared by command capture and one
         process-local REPL epoch. Minted only from this installed Developer
         service; it does not create a command or grant interpreter effects. *)
-    type t
+    type t = Developer_capture_host.Source_selection.t
 
     type checked
 
     val prepared : t -> Chatml_prepared_program.t
     val entry_source : t -> Chatml_source.t
     val selected_contract : t -> Selected_contract.t
+    val repl_root_fingerprint : t -> Chatml_source.Digest.t
 
     val check_current
       :  t

@@ -304,9 +304,7 @@ let execute_with_budget t active claim job request deadline effective control ~i
           ~invocation
           ~check_current:(fun () ->
             let owner = O.owner t.root in
-            let capture_fingerprint =
-              Chatml_developer_capture.fingerprint (O.capture t.root)
-            in
+            let capture_fingerprint = O.Source.fingerprint (O.source t.root) in
             let* () = Claim_scope.Parent.check parent ~owner ~capture_fingerprint in
             Claim_scope.Parent.check_now parent ~owner ~capture_fingerprint)
           run_native

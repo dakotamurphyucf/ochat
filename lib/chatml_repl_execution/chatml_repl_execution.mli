@@ -87,6 +87,13 @@ module Diagnostic : sig
 
   val message : t -> string
   val location : t -> Chatml_source.Location.t option
+
+  (** Length of the exact source retained by an authenticated diagnostic
+      Site, paired with [location]. It is None precisely when the diagnostic
+      has no owned site; no source text or replacement latest snippet is
+      exposed. Hosts can form a bounded persisted location without guessing
+      the source length from the span. *)
+  val source_bytes : t -> int option
 end
 
 module Receipt : sig

@@ -46,7 +46,7 @@ let ( let* ) result f = Result.bind result ~f
 
 let create ~root =
   let owner = O.owner root in
-  let capture_fingerprint = Chatml_developer_capture.fingerprint (O.capture root) in
+  let capture_fingerprint = O.Source.fingerprint (O.source root) in
   let current ~owner:claimed_owner ~capture_fingerprint:claimed_fingerprint =
     if
       (not (P.Execution_owner.equal_developer owner claimed_owner))
@@ -324,8 +324,7 @@ let rec run
               Job_scope.Parent.check
                 ancestor
                 ~owner:(O.owner t.root)
-                ~capture_fingerprint:
-                  (Chatml_developer_capture.fingerprint (O.capture t.root))
+                ~capture_fingerprint:(O.Source.fingerprint (O.source t.root))
           in
           (* The parent read above may yield. Resolve the SAME execution
              selection again before the final nonyielding Root/parent gate. *)
@@ -401,8 +400,7 @@ let rec run
               Job_scope.Parent.check_now
                 ancestor
                 ~owner:(O.owner t.root)
-                ~capture_fingerprint:
-                  (Chatml_developer_capture.fingerprint (O.capture t.root))
+                ~capture_fingerprint:(O.Source.fingerprint (O.source t.root))
           in
           D.check_parent_now execution.issuer ~parent invocation
         in
@@ -667,9 +665,7 @@ module Claimed = struct
     let* () = Claimed_runtime.check issuer in
     let* () = Result.map (O.current_after_mutations parent.root) ~f:ignore in
     let owner = O.owner parent.root in
-    let capture_fingerprint =
-      Chatml_developer_capture.fingerprint (O.capture parent.root)
-    in
+    let capture_fingerprint = O.Source.fingerprint (O.source parent.root) in
     let live = ref true in
     let check_live () =
       if !live

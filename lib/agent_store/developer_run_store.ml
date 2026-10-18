@@ -560,9 +560,7 @@ module Run_claim = struct
         | Some _ | None -> Error Error.Foreign_or_stale))
   ;;
 
-  let is_released t =
-    with_run_lifecycle t.store (fun () -> t.record.released)
-  ;;
+  let is_released t = with_run_lifecycle t.store (fun () -> t.record.released)
 end
 
 let with_lease t f =
@@ -3984,7 +3982,7 @@ module Recovery = struct
       && phys_equal t.claim.record.token claim.record.token
       && phys_equal claim.record.handle_token handle.token
       && Int.equal claim.record.domain (Stdlib.Domain.self () :> int)
-      && not claim.record.released
+      && (not claim.record.released)
       &&
       match Hashtbl.find t.store.run_claims claim.run_id with
       | Some record when phys_equal record.token claim.record.token ->
@@ -5308,12 +5306,12 @@ module Command = struct
     | Receipt.Kind.Check, Row.Change.Finish receipt ->
       (match Receipt.value receipt with
        | Receipt.Check Receipt.Check.Interrupted -> true
-       | Check _ | Fixture _ | Live _ -> false)
+       | Check _ | Fixture _ | Live _ | Task _ -> false)
     | Fixture_run, Finish receipt ->
       (match Receipt.value receipt with
        | Receipt.Fixture Receipt.Fixture.Interrupted -> true
-       | Check _ | Fixture _ | Live _ -> false)
-    | Live_run, _ -> true
+       | Check _ | Fixture _ | Live _ | Task _ -> false)
+    | (Live_run | Repl_task_run), _ -> true
     | (Check | Fixture_run), (Wait_permission | Start_execution) -> false
   ;;
 
