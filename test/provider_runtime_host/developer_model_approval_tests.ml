@@ -169,6 +169,13 @@ let run ctx input =
       in
       let options =
         let module Approval = S.Daemon.Developer_configuration.Shell_approvals in
+        let wire_limits =
+          DH.portable_wire_limits
+            ~max_approval_display_bytes:4096
+            ~max_approval_decision_reason_bytes:1024
+            ~approval_page_bytes:100_000
+            ()
+        in
         let limits =
           Approval.Limits.create
             ~max_pending:2
@@ -188,9 +195,16 @@ let run ctx input =
           authoring = Some (DH.semantic_authoring_policy env)
         ; developer =
             Some
-              (S.Daemon.Developer_configuration.with_shell_approvals
-                 (DA.developer_configuration target)
-                 approvals)
+              (S.Daemon.Developer_configuration.with_portable_wire
+                 (S.Daemon.Developer_configuration.with_shell_approvals
+                    (DA.developer_configuration target)
+                    approvals)
+                 (S.Daemon.Developer_configuration.Portable.create
+                    ~wire_limits
+                    ~max_connections:4
+                    ~max_watches_per_connection:2
+                    ~max_pending_hints_per_connection:2
+                  |> ok))
         ; provider_operator_factory = Some provider_factory
         }
       in
@@ -394,6 +408,51 @@ let main input =
            let approval =
              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (pending run_id)
            in
+           let portable, portable_connection =
+             DH.open_portable_client
+               ~limits:
+                 (DH.portable_wire_limits
+                    ~max_approval_display_bytes:4096
+                    ~max_approval_decision_reason_bytes:1024
+                    ~approval_page_bytes:100_000
+                    ())
+               daemon
+               actor
+           in
+           let portable_page =
+             match
+               Agent_client.Developer_connection.send
+                 portable
+                 (P.Developer_wire.Request.Approval_list run_id)
+               |> ok
+             with
+             | P.Developer_wire.Response.Approval_list page -> page
+             | _ -> failwith "claimed Model approval client returned another method"
+           in
+           (match P.Developer_approval.Page.pending portable_page with
+            | [ item ] ->
+              assert (
+                P.Id.Permission.equal
+                  (P.Developer_approval.Pending.id item)
+                  (S.Daemon.Developer.Approval.Pending.id approval));
+              (match
+                 ( P.Developer_approval.Pending.owner item
+                 , P.Developer_approval.Pending.execution item
+                 , S.Daemon.Developer.Approval.Pending.owner approval
+                 , S.Daemon.Developer.Approval.Pending.execution approval )
+               with
+               | ( Claimed_job { job_id; attempt }
+                 , Claimed_model_job execution
+                 , Claimed_job actual
+                 , Claimed_model_job actual_execution ) ->
+                 assert (P.Id.Job.equal job_id actual.job_id);
+                 [%test_eq: int] attempt actual.attempt;
+                 assert (P.Id.Job.equal execution.job_id actual_execution.job_id);
+                 [%test_eq: int] execution.attempt actual_execution.attempt
+               | _ -> failwith "claimed Model approval client changed owner or origin")
+            | _ ->
+              failwith "claimed Model approval client did not return one pending request");
+           Agent_client.Connection.close portable_connection;
            let module A = S.Daemon.Developer.Approval in
            (match A.Pending.owner approval, A.Pending.execution approval with
             | Claimed_job { job_id; attempt }, Claimed_model_job execution ->

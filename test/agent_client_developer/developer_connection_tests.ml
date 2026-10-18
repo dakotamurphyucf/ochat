@@ -45,7 +45,7 @@ let capabilities =
   |> must
 ;;
 
-let initialization () =
+let initialization ?(events = false) () =
   let implementation =
     P.Initialize.Implementation.create ~name:"developer-test" ~version:"1" |> must
   in
@@ -62,7 +62,8 @@ let initialization () =
     ~selected_version:P.Version.current
     ~implementation
     ~server_id:(P.Id.Server.create_with generator)
-    ~enabled_features:[ C.Features.run ]
+    ~enabled_features:
+      (if events then [ C.Features.run; C.Features.events ] else [ C.Features.run ])
     ~extensions:None
     ~principal
     ~limits:
@@ -83,14 +84,15 @@ let initialization () =
   |> must
 ;;
 
-let initialize connection (response : P.Initialize.Response.t) =
+let initialize ?(events = false) connection (response : P.Initialize.Response.t) =
   let request =
     P.Initialize.Request.create
       ~implementation:
         (P.Initialize.Implementation.create ~name:"developer-test" ~version:"1" |> must)
       ~protocol_min:P.Version.current
       ~protocol_max:P.Version.current
-      ~features:[ C.Features.run ]
+      ~features:
+        (if events then [ C.Features.run; C.Features.events ] else [ C.Features.run ])
       ~event_encodings:[ Json ]
       ~max_inbound_event_bytes:(16 * 1024 * 1024)
       ()
@@ -293,4 +295,108 @@ let%expect_test "malformed and rejected Submit replies retain original retry cus
       "uncertain Submit retains original; only successful explicit retry clears it");
   [%expect
     {| uncertain Submit retains original; only successful explicit retry clears it |}]
+;;
+
+let%expect_test "resync hint requires an exact-key Watch and Observe baseline" =
+  Eio_main.run (fun _ ->
+    let initialized = initialization ~events:true () in
+    let capabilities =
+      C.Capabilities.create
+        ~format_version:1
+        ~methods:[ "developer.capabilities"; "developer.watch"; "developer.observe" ]
+        ~limits
+      |> must
+    in
+    let original = submit () in
+    let run_id = C.Submit.run_id original in
+    let key = C.Submit.key original in
+    let lookup = C.Lookup.create ~run_id ~key in
+    let same_lookup requested =
+      P.Id.Developer_run.equal requested.C.Lookup.run_id run_id
+      && P.Idempotency_key.equal requested.key key
+    in
+    let receipt =
+      P.Developer_receipt.create
+        ~limits:(C.Limits.receipt limits)
+        (P.Developer_receipt.Check P.Developer_receipt.Check.Ready)
+      |> must
+    in
+    let owner =
+      C.Owner.create
+        ~host_id:initialized.server_id
+        ~run_id
+        ~epoch:1
+        ~principal_id:initialized.principal.id
+      |> must
+    in
+    let digest = Chatml_source.Digest.of_contents "resync" ~checkpoint:Fn.id in
+    let view =
+      C.View.create
+        ~limits
+        ~command_id:(P.Developer_command_id.of_string "cmd_resync" |> must)
+        ~owner
+        ~key
+        ~kind:Check
+        ~phase:(C.View.Terminal { execution_started = false; receipt })
+        ~request_fingerprint:digest
+        ~capture_fingerprint:digest
+      |> must
+    in
+    let watched = ref false in
+    let observed = ref false in
+    let public_initialized =
+      P.Public.Result.Non_history.of_internal (Protocol_initialize initialized)
+      |> must
+      |> fun value -> P.Public.Result.Non_history value
+    in
+    let transport =
+      Agent_client.Transport.create_with_developer
+        ~request:(function
+          | P.Command.Protocol_initialize _ -> Ok public_initialized
+          | _ -> Error (P.Error.invalid_request "unexpected command"))
+        ~request_developer:(fun ~bound:_ request ->
+          match request with
+          | P.Developer_wire.Request.Capabilities ->
+            Ok (C.Capabilities.to_json capabilities)
+          | Watch requested when same_lookup requested ->
+            watched := true;
+            P.Developer_wire.Response.to_json Watch ~limits
+          | Observe requested when same_lookup requested && !watched ->
+            observed := true;
+            P.Developer_wire.Response.to_json (Observe (Some view)) ~limits
+          | _ -> Error (P.Error.invalid_request "unexpected recovery request"))
+        ~next_notification:(fun () -> None)
+        ~close:Fn.id
+    in
+    let connection = Agent_client.Connection.create transport in
+    initialize ~events:true connection initialized;
+    let developer = Agent_client.Developer_connection.create connection |> must in
+    let resync =
+      P.Developer_wire.Change.create ~limits ~run_id ~key ~kind:Resync_required |> must
+    in
+    let envelope =
+      P.Envelope.notification
+        ~method_:P.Developer_wire.Change.method_name
+        ~params:(P.Developer_wire.Change.to_json resync)
+        ()
+    in
+    (match
+       Agent_client.Developer_connection.change_of_notification developer envelope |> must
+     with
+     | Some change ->
+       (match change.kind with
+        | Resync_required -> ()
+        | Command_changed | Approval_changed -> failwith "resync hint changed kind")
+     | None -> failwith "resync hint was ignored");
+    let recovered =
+      Agent_client.Developer_connection.watch_and_observe developer lookup
+      |> must
+      |> Option.value_exn
+    in
+    assert !watched;
+    assert !observed;
+    assert (
+      P.Developer_command_id.equal (C.View.command_id recovered) (C.View.command_id view));
+    print_endline "resync hint rewatched and reobserved the exact key");
+  [%expect {| resync hint rewatched and reobserved the exact key |}]
 ;;

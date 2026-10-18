@@ -268,6 +268,23 @@ let with_shell_daemon f =
                ~job_read:(fun _ _ -> false)
                ~job_respond:(fun _ _ -> false))
         in
+        let wire_limits =
+          Developer_host_tests.portable_wire_limits
+            ~max_approval_display_bytes:512
+            ~max_approval_decision_reason_bytes:128
+            ~approval_page_bytes:40_000
+            ()
+        in
+        let developer =
+          D.Developer_configuration.with_portable_wire
+            developer
+            (D.Developer_configuration.Portable.create
+               ~wire_limits
+               ~max_connections:4
+               ~max_watches_per_connection:2
+               ~max_pending_hints_per_connection:2
+             |> ok)
+        in
         let run_phase g =
           Eio.Switch.run (fun sw ->
             let daemon =
@@ -285,6 +302,7 @@ let with_shell_daemon f =
           ~foreign
           ~owner_current
           ~manifest_sha256
+          ~wire_limits
           ~authorization_attempts
           ~run_phase))
 ;;
@@ -328,6 +346,7 @@ let%expect_test "hosted Developer shell approval waits keep exact native custody
          ~foreign
          ~owner_current
          ~manifest_sha256
+         ~wire_limits
          ~authorization_attempts
          ~run_phase
        ->
@@ -386,6 +405,37 @@ let%expect_test "hosted Developer shell approval waits keep exact native custody
            let approve_key, approve_pending, approved_start =
              submit daemon ~expected ~connection ~name:"approval-approve-once"
            in
+           let portable, portable_connection =
+             Developer_host_tests.open_portable_client ~limits:wire_limits daemon owner
+           in
+           let page =
+             match
+               Agent_client.Developer_connection.send
+                 portable
+                 (P.Developer_wire.Request.Approval_list run_id)
+               |> ok
+             with
+             | Approval_list page -> page
+             | _ -> failwith "native approval client returned another method"
+           in
+           (match P.Developer_approval.Page.pending page with
+            | [ item ] ->
+              assert (
+                P.Id.Permission.equal
+                  (P.Developer_approval.Pending.id item)
+                  (Pending.id approve_pending));
+              (match P.Developer_approval.Pending.owner item with
+               | Command id -> assert (R.Id.equal id (D.Developer.View.id approved_start))
+               | Claimed_job _ -> failwith "native approval client changed owner");
+              (match P.Developer_approval.Pending.execution item with
+               | Native_invocation id ->
+                 (match Pending.execution approve_pending with
+                  | Native_invocation actual -> assert (P.Id.Invocation.equal id actual)
+                  | Claimed_model_job _ -> failwith "native approval source changed")
+               | Claimed_model_job _ -> failwith "native approval client changed origin")
+            | _ ->
+              failwith "native approval client did not return exactly one pending request");
+           Agent_client.Connection.close portable_connection;
            let read_only =
              D.Developer.Approval.pending daemon ~actor:reader ~run_id |> ok
            in
