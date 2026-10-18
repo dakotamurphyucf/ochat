@@ -22,6 +22,8 @@ let repl t = t.repl
 let portable t = t.portable
 let invalid () = P.Error.invalid_request "invalid developer startup capacity"
 let admitted result = Result.map_error result ~f:(fun _ -> invalid ())
+let repl_compact_receipt_bytes = 4096
+let repl_type_output_bytes = 32768
 
 let json ~bytes ~depth ~fields ~nodes =
   D.Limits.create ~max_bytes:bytes ~max_depth:depth ~max_fields:fields ~max_nodes:nodes
@@ -201,7 +203,7 @@ let repl_preset (capacity : Config.Capacity.t) =
         ~max_depth:32
         ~max_work_steps:131072
         ~max_text_bytes:4096
-        ~max_output_bytes:32768
+        ~max_output_bytes:repl_type_output_bytes
       |> admitted
     in
     Dev.Repl.create
@@ -215,7 +217,7 @@ let repl_preset (capacity : Config.Capacity.t) =
       ~max_keys_per_instance:capacity.max_repl_keys_per_instance
       ~max_submissions_per_epoch:capacity.max_repl_submissions_per_epoch
       ~max_source_bytes:capacity.max_repl_source_bytes
-      ~max_receipt_bytes:4096
+      ~max_receipt_bytes:repl_compact_receipt_bytes
       ~max_total_receipt_bytes:(1024 * 1024)
       ~max_total_type_detail_bytes:(1024 * 1024)
       ~max_task_origins:retained
@@ -226,6 +228,86 @@ let bounded_product value factor extra =
   if value <= 0 || factor <= 0 || extra < 0 || value > (Int.max_value - extra) / factor
   then Error (invalid ())
   else Ok ((value * factor) + extra)
+;;
+
+let repl_wire_preset (repl : Dev.Repl.t) ~task_receipt initialize =
+  let open Result.Let_syntax in
+  let owner = Developer_repl_epoch.Configuration.limits repl in
+  let source_bytes = Developer_repl_epoch.Limits.max_source_bytes owner in
+  let receipt_bytes = Developer_repl_epoch.Limits.max_receipt_bytes owner in
+  let page_items = Developer_repl_epoch.Limits.max_task_origins owner in
+  let reference_bytes = Developer_repl_epoch.Task_reference.max_encoded_bytes in
+  let%bind registry_entries =
+    Developer_repl_epoch.Limits.registry_required_entries owner
+  in
+  let%bind request_bytes = bounded_product source_bytes 6 1024 in
+  let%bind summary_bytes = bounded_product receipt_bytes 6 2048 in
+  let%bind reference_result_bytes = bounded_product page_items reference_bytes 0 in
+  let%bind summary_result_bytes =
+    bounded_product 1 summary_bytes reference_result_bytes
+  in
+  (* Inspect_type can return both an independently escaped binding name and
+     rendered type. Its wire ceiling is separate from the compact receipt. *)
+  let%bind inspect_result_bytes = bounded_product repl_type_output_bytes 12 2048 in
+  let%bind task_result_bytes = bounded_product 1 (D.Limits.max_bytes task_receipt) 2048 in
+  let result_bytes =
+    List.fold
+      [ summary_result_bytes; inspect_result_bytes; task_result_bytes ]
+      ~init:1
+      ~f:Int.max
+  in
+  let max_summaries = receipt_bytes / 64 in
+  let%bind reference_nodes = bounded_product page_items 2 64 in
+  let%bind summary_nodes = bounded_product max_summaries 32 reference_nodes in
+  let%bind summary_fields = bounded_product max_summaries 24 64 in
+  let%bind summary_fields = bounded_product 1 summary_fields page_items in
+  let%bind task_result_nodes = bounded_product 1 (D.Limits.max_nodes task_receipt) 32 in
+  let%bind task_result_fields = bounded_product 1 (D.Limits.max_fields task_receipt) 32 in
+  let result_nodes = Int.max summary_nodes task_result_nodes in
+  let result_fields = Int.max summary_fields task_result_fields in
+  let%bind page_items_with_cursor = bounded_product 1 page_items 1 in
+  let%bind page_bytes = bounded_product page_items_with_cursor reference_bytes 512 in
+  let%bind page_nodes = bounded_product 1 page_items 8 in
+  let%bind response_result_bytes = bounded_product 1 result_bytes 1024 in
+  let%bind response_page_bytes = bounded_product 1 page_bytes 1024 in
+  let%bind response_result_nodes = bounded_product 1 result_nodes 16 in
+  let%bind response_page_nodes = bounded_product 1 page_nodes 16 in
+  let%bind response_result_fields = bounded_product 1 result_fields 16 in
+  let%bind response_page_fields = bounded_product 1 8 16 in
+  let%bind request = json ~bytes:request_bytes ~depth:24 ~fields:2048 ~nodes:4096 in
+  let%bind result =
+    json
+      ~bytes:result_bytes
+      ~depth:(Int.max 6 (D.Limits.max_depth task_receipt + 3))
+      ~fields:result_fields
+      ~nodes:result_nodes
+  in
+  let%bind page = json ~bytes:page_bytes ~depth:8 ~fields:8 ~nodes:page_nodes in
+  let%bind response =
+    json
+      ~bytes:(Int.max response_result_bytes response_page_bytes)
+      ~depth:(Int.max (D.Limits.max_depth result + 2) 10)
+      ~fields:(Int.max response_result_fields response_page_fields)
+      ~nodes:(Int.max response_result_nodes response_page_nodes)
+  in
+  let%bind limits =
+    P.Developer_repl_wire.Limits.create
+      ~request
+      ~result
+      ~page
+      ~response
+      ~max_source_bytes:source_bytes
+      ~max_reference_bytes:reference_bytes
+      ~max_output_bytes:(Int.max receipt_bytes repl_type_output_bytes)
+      ~max_page_items:page_items
+      ~max_event_bytes:4096
+      ~max_registry_entries:registry_entries
+  in
+  if
+    Document_schema.Limits.max_bytes request
+    > initialize.P.Initialize.Limits.max_request_bytes
+  then Error (invalid ())
+  else Ok limits
 ;;
 
 let portable_preset (capacity : Config.Capacity.t) initialize_limits ~pending =
@@ -285,7 +367,7 @@ let create
   =
   let open Result.Let_syntax in
   let%bind () = Config.Capacity.validate capacity in
-  let%bind capture, host, publisher, _receipt = create_base capacity in
+  let%bind capture, host, publisher, receipt = create_base capacity in
   let%bind approvals =
     match approvals with
     | Config.Disabled -> Ok None
@@ -303,7 +385,7 @@ let create
     | Config.Disabled -> Ok None
     | Standard_v1 -> repl_preset capacity |> Result.map ~f:Option.some
   in
-  let%map portable =
+  let%bind portable =
     if portable
     then
       portable_preset
@@ -312,6 +394,13 @@ let create
         ~pending:(if Option.is_some approvals then capacity.max_pending_approvals else 1)
       |> Result.map ~f:Option.some
     else Ok None
+  in
+  let%map portable =
+    match portable, repl with
+    | Some policy, Some repl ->
+      let%bind wire = repl_wire_preset repl ~task_receipt:receipt initialize_limits in
+      Dev.Portable.with_repl_wire policy wire |> Result.map ~f:Option.some
+    | Some _, None | None, Some _ | None, None -> Ok portable
   in
   { capture; host; publisher; approvals; repl; portable }
 ;;

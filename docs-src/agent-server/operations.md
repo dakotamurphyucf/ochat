@@ -235,6 +235,11 @@ original immutable snapshot under a separate byte and work bound; an expired
 detail cannot be reconstructed by retyping or running the statement. Neither
 a summary nor a reference grants authority to drive a Task.
 
+The configured portable REPL uses a 4 KiB compact statement receipt and a
+separate 32 KiB on-demand type inspection ceiling. It admits requests against
+the actual REPL owner, durable Task receipt and Initialize framing limits at
+startup, before advertising REPL methods.
+
 An admitted REPL keeps its selected captured source and compiler contract after
 the editor context or transport connection closes. Reconnecting with a current
 authorized actor can inspect the same instance and drive an issued Task in its
