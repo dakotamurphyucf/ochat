@@ -1606,6 +1606,7 @@ let compose
         ~limits:limits.host
         ~budget_configuration:limits.budgets
         ~repl:configuration.repl
+        ~trace:None
         ?on_change:on_developer_change
         ~now:(fun () -> timestamp env)
         ~checkpoint:Eio.Fiber.check

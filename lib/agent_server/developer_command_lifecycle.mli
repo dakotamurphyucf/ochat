@@ -11,7 +11,14 @@ type t
 (** [on_committed] is an optional trusted, nonyielding and nonraising hint.
     It runs outside the lifecycle mutation gate only after a successful
     Reserve, Start or Finish Store commit. Consumers must reauthorize reads;
-    the row is comparison data, not a disclosure grant. *)
+    the row is comparison data, not a disclosure grant.
+
+    [on_joined_terminal] has a narrower, separate meaning: the exact terminal
+    row was authoritatively installed or reconciled AND this Active's joined
+    execution switch has returned. It also runs outside the mutation gate,
+    nonyielding and nonraising. An uncertain Finish supplies no such signal
+    until reconciliation proves the matching terminal. Neither callback may
+    alter Store custody, command outcome or cancellation. *)
 
 module Disclosure_policy : sig
   type t
@@ -212,6 +219,7 @@ val create
 
 val create_with_hook
   :  on_committed:(Store.Command.Row.t -> unit) option
+  -> on_joined_terminal:(Store.Command.Row.t -> unit) option
   -> sw:Eio.Switch.t
   -> store:Store.t
   -> max_active_commands:int

@@ -145,8 +145,22 @@ let%test_unit "daemon command callback survives its submitting slot and publishe
          |> ok
        in
        let disclosure, control = policy () in
+       let joined_keys = ref [] in
+       let observer_fail_key = ref None in
        let lifecycle =
-         L.create
+         L.create_with_hook
+           ~on_committed:None
+           ~on_joined_terminal:
+             (Some
+                (fun row ->
+                  let key = R.Command.Row.key row in
+                  if
+                    Option.value_map
+                      !observer_fail_key
+                      ~default:false
+                      ~f:(P.Idempotency_key.equal key)
+                  then failwith "injected trace observer failure";
+                  joined_keys := key :: !joined_keys))
            ~sw
            ~store
            ~max_active_commands:2
@@ -159,6 +173,7 @@ let%test_unit "daemon command callback survives its submitting slot and publishe
        let run_id = run_owner.run_id in
        let key = P.Idempotency_key.of_string "command-lifecycle-check" |> ok in
        let second_key = P.Idempotency_key.of_string "command-lifecycle-second" |> ok in
+       observer_fail_key := Some key;
        let request_fingerprint =
          Chatml_source.Digest.of_contents "command check payload" ~checkpoint:ignore
        in
@@ -330,6 +345,7 @@ let%test_unit "daemon command callback survives its submitting slot and publishe
        assert (
          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
            Result.is_error (L.await_terminal lifecycle ~actor ~run_id ~key:fault_key)));
+       assert (not (List.mem !joined_keys fault_key ~equal:P.Idempotency_key.equal));
        sync_blocked := true;
        assert (
          Result.is_error
@@ -353,6 +369,7 @@ let%test_unit "daemon command callback survives its submitting slot and publishe
        in
        assert (Option.is_some (L.View.receipt recovered));
        assert (Int.equal !calls 1);
+       [%test_eq: int] (List.count !joined_keys ~f:(P.Idempotency_key.equal fault_key)) 1;
        L.close_and_wait lifecycle |> ok;
        let dead_lifecycle =
          Eio.Switch.run (fun dead_sw ->

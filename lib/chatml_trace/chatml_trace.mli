@@ -224,6 +224,13 @@ module Recorder : sig
       -> max_normal_bytes:int
       -> max_terminal_bytes:int
       -> t Or_error.t
+
+    (** Comparison-only validated capacities for an outer host's conservative
+        aggregate retention charge. These do not mint another recorder budget
+        or change event admission. *)
+    val max_normal_bytes : t -> int
+
+    val max_terminal_bytes : t -> int
   end
 
   module Drop_count : sig
@@ -249,6 +256,20 @@ module Recorder : sig
         possibly older than many omitted observations. Never a claimed failure
         origin or a substitute for the canonical structured diagnostic. *)
     val last_retained_site_context : t -> Chatml_source.Location.t option
+
+    (** Number of retained event sites omitted by a historical source-read
+        projection. Recorder snapshots start at zero; repeated projection
+        preserves prior omissions and cannot restore a hidden site. This count
+        is distinct from normal-event saturation/drop metadata. *)
+    val omitted_site_count : t -> int
+
+    (** Pure bounded copy over the retained prefix. [authorize] must be a
+        nonyielding, nonraising site predicate. Unauthorized source locations
+        become absent while event sequence/order/kind/correlation, header,
+        terminal and existing drop metadata remain unchanged. The last-site
+        context is recomputed from the still-authorized prefix. No source ID
+        or position of an omitted site is returned. *)
+    val with_authorized_sites : t -> authorize:(Chatml_source.Location.t -> bool) -> t
 
     val state : t -> state
   end

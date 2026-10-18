@@ -111,6 +111,7 @@ module Original = struct
   ;;
 
   let fingerprint t = t.fingerprint
+  let route t = t.route
 end
 
 module Instance = struct
@@ -415,6 +416,7 @@ and key_entry =
   ; mutable reference_bytes : int
   ; mutable type_details : Evaluator.Receipt.t list option
   ; mutable type_detail_bytes : int
+  ; mutable trace_entry : Developer_trace_retention.Entry.t option
   }
 
 and active =
@@ -468,6 +470,7 @@ and instance_state =
   ; mutable closed : bool
   ; mutable borrowed : int
   ; mutable control : control option
+  ; mutable trace_provenance : Developer_trace_retention.Provenance.t option
   }
 
 and control_kind =
@@ -516,6 +519,7 @@ type t =
       (P.Id.Developer_run.t * P.Idempotency_key.t * Captured.Digest.t * View.t) list
   ; owner_state : owner_state ref
   ; mutable task_cleanup : task_cleanup option
+  ; traces : Developer_trace_retention.t option
   }
 
 module Task_origin = struct
@@ -523,6 +527,7 @@ module Task_origin = struct
 
   let source t = t.source
   let reference t = t.reference
+  let trace_provenance t = t.owner.trace_provenance
 
   let check_current t ~actor ~checkpoint =
     let open Result.Let_syntax in
@@ -612,7 +617,7 @@ let narrowed_execution policy requested =
       }
 ;;
 
-let install ~sw ~capture_host ~env ~clock ~configuration ~checkpoint =
+let install ~sw ~capture_host ~traces ~env ~clock ~configuration ~checkpoint =
   { sw
   ; capture_host
   ; env
@@ -625,6 +630,7 @@ let install ~sw ~capture_host ~env ~clock ~configuration ~checkpoint =
   ; create_keys = []
   ; owner_state = ref Owner_open
   ; task_cleanup = None
+  ; traces
   }
 ;;
 
@@ -730,6 +736,20 @@ let discard_unpublished_evaluator evaluator =
     | Error _ -> failwith "unpublished developer REPL evaluator could not close")
 ;;
 
+let initial_trace_provenance t ~selection ~original ~actor =
+  Option.bind t.traces ~f:(fun traces ->
+    Developer_trace_retention.Provenance.of_prepared
+      ~action:Repl_statement
+      ~original_actor:actor
+      ~route:(Original.route original)
+      ~capture_fingerprint:None
+      ~selection_fingerprint:
+        (Capture_host.Source_selection.repl_root_fingerprint selection)
+      ~prepared:(Capture_host.Source_selection.prepared selection)
+      ~limits:(Developer_trace_retention.limits traces)
+    |> Result.ok)
+;;
+
 let create_state t ~run_id ~original ~fresh_source ~actor =
   let open Result.Let_syntax in
   let%bind selection =
@@ -771,6 +791,7 @@ let create_state t ~run_id ~original ~fresh_source ~actor =
   let id = { Instance.token = ref () } in
   let epoch = { Epoch.token = ref (); serial = 0 } in
   let revision = { Revision.token = ref (); serial = 0 } in
+  let trace_provenance = initial_trace_provenance t ~selection ~original ~actor in
   Ok
     { id
     ; instance_nonce = P.Id.Transaction.create ()
@@ -799,6 +820,7 @@ let create_state t ~run_id ~original ~fresh_source ~actor =
     ; closed = false
     ; borrowed = 0
     ; control = None
+    ; trace_provenance
     }
 ;;
 
@@ -1270,6 +1292,53 @@ let execute_ready t state ~actor ~key ready ~checked =
   loop (Typing.Submission.statement_count ready) [] []
 ;;
 
+let begin_statement_trace t state entry captured =
+  match t.traces, state.trace_provenance with
+  | None, _ | _, None -> None
+  | Some traces, Some provenance ->
+    (match
+       Developer_trace_retention.Provenance.add_captured_source
+         provenance
+         captured
+         ~limits:(Developer_trace_retention.limits traces)
+     with
+     | Error _ ->
+       state.trace_provenance <- None;
+       None
+     | Ok provenance ->
+       state.trace_provenance <- Some provenance;
+       let selection_fingerprint =
+         Capture_host.Source_selection.repl_root_fingerprint state.selection
+       in
+       (match
+          Developer_trace_retention.Association.repl_statement
+            ~run_id:state.run_id
+            ~instance_nonce:state.instance_nonce
+            ~epoch_serial:entry.epoch.serial
+            ~key:entry.key
+            ~selection_fingerprint
+        with
+        | Error _ -> None
+        | Ok association ->
+          let trace_entry =
+            Developer_trace_retention.begin_submitted
+              traces
+              ~association
+              ~provenance
+              ~submission_fingerprint:entry.fingerprint
+              ~source:captured
+              ~checkpoint:Eio.Fiber.check
+          in
+          entry.trace_entry <- trace_entry;
+          trace_entry))
+;;
+
+let within_statement_trace t entry f =
+  match t.traces with
+  | None -> f ()
+  | Some traces -> Developer_trace_retention.within traces entry.trace_entry f
+;;
+
 let process_submission t state ~actor ~entry source =
   let open Result.Let_syntax in
   let previous_bytes = String.length state.pending_source in
@@ -1310,6 +1379,9 @@ let process_submission t state ~actor ~entry source =
            ~references:[])
     | Typing.Submission.Rejected rejection ->
       state.pending_source <- "";
+      ignore
+        (begin_statement_trace t state entry captured
+         : Developer_trace_retention.Entry.t option);
       Ok
         (compact_submission
            t
@@ -1322,8 +1394,12 @@ let process_submission t state ~actor ~entry source =
            ~references:[])
     | Typing.Submission.Ready ready ->
       state.pending_source <- "";
+      ignore
+        (begin_statement_trace t state entry captured
+         : Developer_trace_retention.Entry.t option);
       let status, statements, origins =
-        execute_ready t state ~actor ~key:entry.key ready ~checked
+        within_statement_trace t entry (fun () ->
+          execute_ready t state ~actor ~key:entry.key ready ~checked)
       in
       let completed_statements =
         List.count statements ~f:(fun receipt ->
@@ -1426,6 +1502,24 @@ let launch_submission t state entry ~actor ~source =
       active.cancel <- None;
       state.active <- None;
       remember_outcome state entry outcome;
+      (try
+         Option.iter t.traces ~f:(fun traces ->
+           Option.iter entry.trace_entry ~f:(fun trace_entry ->
+             let disposition =
+               if active.cancel_requested
+               then Chatml_trace.Terminal.Disposition.Cancelled
+               else (
+                 match outcome with
+                 | Ok { Submission.status = Finished; _ } -> Succeeded
+                 | Ok { status = Rejected _; _ } -> Failed Parse
+                 | Ok { status = Stopped _; _ } -> Failed Runtime
+                 | Ok { status = Need_more _; _ } | Error _ -> Interrupted)
+             in
+             match Chatml_trace.Terminal.create ~receipt_version:1 ~disposition with
+             | Error _ -> ()
+             | Ok terminal -> Developer_trace_retention.finish traces trace_entry terminal))
+       with
+       | _ -> ());
       Eio.Promise.resolve finish ())
   in
   match Eio.Fiber.fork ~sw:t.sw worker with
@@ -1551,6 +1645,7 @@ let submit t ~actor ~instance ~epoch ~expected_revision ~key ~source =
             ; reference_bytes = 0
             ; type_details = None
             ; type_detail_bytes = 0
+            ; trace_entry = None
             }
           in
           state.keys <- entry :: state.keys;
@@ -1579,6 +1674,30 @@ let observe t ~actor ~instance ~key =
      | Some active when P.Idempotency_key.equal active.key key ->
        Error (busy "developer REPL submission is still active")
      | Some _ | None -> Result.map (key_result entry) ~f:Option.some)
+;;
+
+let historical_trace t ~actor ~instance ~epoch ~key =
+  let open Result.Let_syntax in
+  let%bind () = check_host t in
+  let%bind state =
+    find_instance t instance
+    |> Result.of_option ~error:(stale "developer REPL instance not found")
+  in
+  let original = Operator_authorization.principal state.original_actor in
+  let current = Operator_authorization.principal actor in
+  if
+    (not (Operator_authorization.is_current actor))
+    || (not (P.Id.Principal.equal original.id current.id))
+    || (not (String.equal original.authentication_kind current.authentication_kind))
+    || not (P.Principal.has_scope current P.Scope.Developer_repl)
+  then Error (denied "developer REPL historical read denied")
+  else (
+    match
+      List.find state.keys ~f:(fun entry ->
+        Epoch.equal entry.epoch epoch && P.Idempotency_key.equal entry.key key)
+    with
+    | None -> Error (stale "developer REPL historical key not found")
+    | Some entry -> Ok entry.trace_entry)
 ;;
 
 let inspect_type t ~actor ~instance ~epoch ~key ~statement_index ~selector ~max_bytes =
@@ -2417,6 +2536,13 @@ let reset_and_wait t ~actor ~instance ~expected_epoch ~key =
                     error
                   | Ok () ->
                     old_close_started := true;
+                    let trace_provenance =
+                      initial_trace_provenance
+                        t
+                        ~selection:state.selection
+                        ~original:state.original
+                        ~actor:state.original_actor
+                    in
                     (match Evaluator.close state.evaluator with
                      | exception exn ->
                        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
@@ -2433,6 +2559,7 @@ let reset_and_wait t ~actor ~instance ~expected_epoch ~key =
                        state.revision <- { Revision.token = ref (); serial = 0 };
                        state.submission_count <- 0;
                        state.pending_source <- "";
+                       state.trace_provenance <- trace_provenance;
                        List.iter state.keys ~f:(fun entry ->
                          state.retained_bytes
                          <- state.retained_bytes - entry.reference_bytes;
@@ -2533,6 +2660,7 @@ let close_and_wait t ~actor ~instance ~key =
                 in
                 state.closed <- true;
                 state.pending_source <- "";
+                state.trace_provenance <- None;
                 state.task_origins <- [];
                 state.task_ordinal <- 0;
                 state.close_keys <- key :: state.close_keys;

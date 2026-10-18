@@ -201,6 +201,20 @@ let shared_features =
     , [ "test/chatml_trace/trace_tests.ml"
       ; "docs-src/design/chatml-execution-tracing.md"
       ] )
+  ; ( "execution.developer_trace_attachment"
+    , "Bounded source-owned recording for Developer commands and retained REPL work; \
+       joined terminal custody and authenticated historical source projection"
+    , [ "lib/agent_server/developer_trace_retention.ml"
+      ; "lib/agent_server/developer_command_lifecycle.ml"
+      ; "lib/agent_server/developer_repl_epoch.ml"
+      ; "lib/agent_server/developer_host.ml"
+      ; "lib/chatml_trace/chatml_trace.ml"
+      ]
+    , "runtime.execution"
+    , [ "lib/agent_server/developer_host_pair_tests.ml"
+      ; "test/developer_root_owner/command_lifecycle_tests.ml"
+      ; "test/chatml_trace/trace_tests.ml"
+      ] )
   ; ( "execution.configured_modules"
     , "Contract and invocation preflight before effects, canonical once-only value \
        dependencies, execution-local state and shared controls"
@@ -484,8 +498,10 @@ let implementation_sources =
     , "2a7f5fc4025ec16659aed443679e997d8828262475909815f5507a7276f06de8" )
   ; ( "lib/agent_server/developer_approval_owner.ml"
     , "b35fec39738beb88b66c4f7cd50e1fb4e432f8188b72b58057a683f17c81d657" )
+  ; ( "lib/agent_server/developer_trace_retention.ml"
+    , "66795ac4a19b011885cde1b4814c3d0382314e64d024d7b43384e35f15a11ce4" )
   ; ( "lib/agent_server/developer_command_lifecycle.ml"
-    , "7c57a679aecf85dfd97146ca2de0b80da313d46686b11c83f5520d7add35131b" )
+    , "6b91faa075d3a7d9b94ded675f6feb65e4bf105c7db48437178b75cd66963877" )
   ; ( "lib/agent_server/developer_daemon_configuration.ml"
     , "70be5ce34b6461eada36407b2034ab9711a6ee8cc778e2b925fbf11ffafde73f" )
   ; ( "lib/agent_server/developer_native_permission.ml"
@@ -493,7 +509,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_model_job_runner.ml"
     , "7604ff6140540e3b53720515526242e7bc1014c97d6895aacadbfb2909bda718" )
   ; ( "lib/agent_server/daemon.ml"
-    , "b1374c214db6af9c9b6f20b1640623c891c708683474da612e4de5de84327f05" )
+    , "8b95ee71cd38fa97e9f6512279723e4813a207b2a2433ae57cefb1e64ef31c72" )
   ; ( "lib/agent_session/developer_claimed_resource_owner.ml"
     , "fb251c6e022f9880820b15807018adc5cf240500050a0424321d7507d3e2bc41" )
   ; ( "lib/agent_server/developer_claim_deadline.ml"
@@ -529,9 +545,9 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_eval.ml"
     , "fd6017ab5a829ce8ae18056cb13da322c7ddae323815cf803bfe5fd804e21444" )
   ; ( "lib/chatml_trace/chatml_trace.ml"
-    , "6952bb534057fdaefcc42aac25b313122ea39a0e71b30bf20d656047b0c5bd65" )
+    , "c3ed7861fc275a7339c535dd4baec97dba8dad8d3ec4f0baa73340fdf7629ce3" )
   ; ( "lib/chatml_trace/chatml_trace.mli"
-    , "a5362f26f1c83fe3223298ba09d523728f35d0002ad74d3857378fbc21b1effa" )
+    , "cfda28aa29fac3f8af0ea78c702008a567b0e2450a54befd9434dc1d5ce422c7" )
   ; ( "lib/agent_session/administration.ml"
     , "00ae2dcdef80bd0552e6a7dded2e3872ed547b82b2ee85297ca5eb7d3ccd9f8a" )
   ; ( "lib/agent_server/command_handler.ml"
@@ -589,7 +605,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_script_job_service.ml"
     , "79ab45f6fd273e4f55060607c7635b52e19e724b8ff0bf0356d4c328024db6d6" )
   ; ( "lib/agent_server/developer_host.ml"
-    , "c7fb3e62de0fbbb0f0e071203d576b85376f5ee708a622c27b8aea413f364865" )
+    , "2ec6b3a03787b233c474f1cf64a2f2eaffb077bc355a3b820547533f78fa291d" )
   ; ( "lib/agent_server/schedule_scheduler.ml"
     , "37cf371632d8ad86693c162e0593d56866f76df577dceb06ddd2ac5fe5bfdae9" )
   ; ( "lib/agent_session/background_execution.ml"
@@ -613,7 +629,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_root_source.ml"
     , "052785a90fef793261bdcdabcf5f5067269ae321d65e1fb5169952d4974fd16a" )
   ; ( "lib/agent_server/developer_repl_epoch.ml"
-    , "15bdc53210567b2b1a20889575c758c9050e48873ef27eef3dfe8fb883f47803" )
+    , "2bbc8e09b0af9c799255eafce3b3a5f3656dab7fe7897406248e954eca1a775c" )
   ; ( "lib/agent_server/developer_repl_projection.ml"
     , "d8240d92b432b2d40c4401e08c53b1c16c3445cbadd0f005a1cf59ae2da2657b" )
   ; ( "lib/agent_server/developer_repl_task_original.ml"
