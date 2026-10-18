@@ -56,6 +56,15 @@ type inference_policy =
       prompt_revision_id:Agent_protocol.Id.Prompt_revision.t
       -> config:Chat_response.Config.t
       -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t
+  ; capture_developer_default_target :
+      unit -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t
+    (** Trusted startup capture only for an explicitly configured Developer
+        Provider_default. The composition root closes this over the SAME host
+        as capture/profile/resolve below; unlike Prompt capture it has no
+        prompt revision and cannot accept a fabricated one. Never invoked for
+        Disabled or for an embedding-supplied Developer configuration. Startup
+        resolves its result through this policy's exact resolver and fails on
+        capture/resolve error. It is not a client model-selection grant. *)
   ; select_inference_profile :
       current:Inference.Request.Target.t
       -> profile:string

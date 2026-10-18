@@ -7,6 +7,7 @@ module Host_policy = Authoring_host_policy
 
 type t =
   { policy : Host_policy.t
+  ; source_host : Project_source_host.t
   ; service : Service.t
   ; semantic : Service.Semantic.t option
   ; assistance : Service.Assistance.t option
@@ -201,6 +202,7 @@ let create ~env ~sw ~clock ~project_sources ~store ~policy ~initialize_limits ~c
         |> Result.map_error ~f:Service.Error.to_protocol
     in
     { policy
+    ; source_host = project_sources
     ; service
     ; semantic
     ; assistance
@@ -239,6 +241,34 @@ let available_features (t : t) =
 
 let selected negotiation feature =
   Connection_context.Authoring_negotiation.selected negotiation feature
+;;
+
+module Origins = struct
+  type t =
+    { host_source : bool
+    ; uploaded_project : bool
+    ; supplied_document : bool
+    }
+
+  let host_source t = t.host_source
+  let uploaded_project t = t.uploaded_project
+  let supplied_document t = t.supplied_document
+end
+
+let installed_origins (t : t) =
+  if t.closed
+  then None
+  else
+    Some
+      Origins.
+        { host_source = t.policy.core && Option.is_some t.source
+        ; uploaded_project =
+            t.policy.core
+            && Option.is_some t.upload
+            && Option.value_map t.policy.upload ~default:false ~f:(fun upload ->
+              Option.is_some upload.rebind)
+        ; supplied_document = t.policy.core && Option.is_some t.policy.supplied_document
+        }
 ;;
 
 let installed_method_groups (t : t) =
@@ -395,6 +425,8 @@ let developer_capture (t : t) ~policy ~limits =
   then Error (error Server_shutting_down "authoring is closed" ~retryable:true)
   else Ok (Service.Developer.create ~owner:t.service ~policy ~limits)
 ;;
+
+let issued_by_source_host (t : t) source_host = phys_equal t.source_host source_host
 
 let developer_roots (t : t) ~actor ~checkpoint =
   if t.closed

@@ -181,6 +181,15 @@ finite per-target and aggregate conversion limits. When native authoring and
 upload are both configured, they share that immutable contract cache. Upload
 budgets remain finite at each request and publication boundary.
 
+`server.developer` is an explicit opt-in for the daemon's Developer command
+service. Its source/target/principal rows and capacity are comparison policy;
+they reuse the Authoring read or upload grants above, authenticated method
+scopes, the native permission profile and the same Standard contract cache.
+The [complete `server.developer` field example](../design/chatml-developer-runtime.md)
+selects a supplied ChatMD script and a bearer principal. Omitting the field
+leaves Developer methods unavailable. Local `--local` policy-file setup has
+its own integration path and is not implied by this daemon setting.
+
 ### Scoped external session helpers
 
 `server.session_helpers` optionally grants a named shell tool access to the same

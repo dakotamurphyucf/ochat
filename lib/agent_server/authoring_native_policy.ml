@@ -4,7 +4,10 @@ module Service = Authoring_context_service
 module Host_policy = Authoring_installation.Host_policy
 module Bound = Authoring_configured_project_policy
 
-type t = { host_policy : Host_policy.t option }
+type t =
+  { host_policy : Host_policy.t option
+  ; configured_project : Bound.t option
+  }
 
 module Limits = struct
   type t =
@@ -152,7 +155,7 @@ let create
       ~checkpoint
   =
   match configured with
-  | None -> Ok { host_policy = base }
+  | None -> Ok { host_policy = base; configured_project = None }
   | Some configuration ->
     let open Result.Let_syntax in
     let%bind base =
@@ -198,7 +201,8 @@ let create
         ~document_dir
     in
     let%map policy = Host_policy.with_semantic policy ~semantic in
-    { host_policy = Some policy }
+    { host_policy = Some policy; configured_project = Some bound }
 ;;
 
 let host_policy t = t.host_policy
+let configured_project t = t.configured_project

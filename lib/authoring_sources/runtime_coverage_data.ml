@@ -156,6 +156,23 @@ let shared_features =
       ; "test/provider_runtime_host/developer_agent_tests.ml"
       ; "docs-src/design/chatml-developer-runtime.md"
       ] )
+  ; ( "execution.developer_configured_startup"
+    , "Explicit finite daemon Developer selection bound to installed Authoring, source, \
+       native and provider owners; shared Standard contracts and truthful opt-in"
+    , [ "lib/agent_server/developer_startup_configuration.ml"
+      ; "lib/agent_server/developer_startup_limits.ml"
+      ; "lib/agent_server/developer_startup_policy.ml"
+      ; "lib/agent_server/config_validator.ml"
+      ; "lib/agent_server/authoring_installation.ml"
+      ; "lib/agent_server/session_factory.ml"
+      ; "lib/agent_server/daemon.ml"
+      ; "bin/inference_composition.ml"
+      ]
+    , "runtime.execution"
+    , [ "lib/agent_server/developer_startup_tests.ml"
+      ; "test/agent_server_e2e/scenarios/developer_wire_scenario.ml"
+      ; "docs-src/design/chatml-developer-runtime.md"
+      ] )
   ; ( "execution.developer_repl_task"
     , "Retained REPL Task references and bounded frozen-type projection, explicit \
        durable Start and terminal receipt, current selected authority at new effects, \
@@ -452,7 +469,19 @@ let moderator_features =
 ;;
 
 let implementation_sources =
-  [ ( "lib/agent_protocol/developer_command_id.ml"
+  [ ( "lib/agent_server/developer_startup_configuration.ml"
+    , "a213477bdb26122195bf04d4dd2824656365f990f005a960ed21dbcb6aac3460" )
+  ; ( "lib/agent_server/developer_startup_limits.ml"
+    , "188123dd02fcc3db822705c6618116c8cddb9e250fb70846ca0e4f57992db28f" )
+  ; ( "lib/agent_server/developer_startup_policy.ml"
+    , "9b344871a5abc8f9177b946b2f8fad9ff4a4507a90a472548c9d0c6fede68c29" )
+  ; ( "lib/agent_server/config_validator.ml"
+    , "a14c0912f618a4eb522c719ed1b10791c7a9fc2508f35d68e0e9dbbd0a916707" )
+  ; ( "lib/agent_server/session_factory.ml"
+    , "6d91a79fe221939cafec72f63e21a5ab8a81476defb7a63999a4fc97012a90ac" )
+  ; ( "bin/inference_composition.ml"
+    , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
+  ; ( "lib/agent_protocol/developer_command_id.ml"
     , "169796d1fcf9fd4003ab3c0985220b3c29e937a3e0893fbfde4736f378e0750e" )
   ; ( "lib/agent_protocol/developer_codec.ml"
     , "7b3ce2ecabdaeab666cd622b139e17e05d0aee107fd55bc8e39cf74568a48690" )
@@ -483,7 +512,7 @@ let implementation_sources =
   ; ( "lib/agent_server/dispatcher.ml"
     , "eeca6bf0d65392edf75c236371a11e8bfa4eb7d8f4b7fbfed440ad8b58f01a6b" )
   ; ( "lib/agent_server/authoring_installation.ml"
-    , "d052170d9b765b9df1f928805fcc2c28ff068982ace4728eba9e70313e96163b" )
+    , "ad9958019b5e5df1937281e63cca36cea6d74bbe92c75baf58cdab9d9f2c2336" )
   ; ( "lib/agent_server/connection_context.ml"
     , "6efbe0038e4d033c7fd06b441e88e0f37194f444a8a79cf54c8c78def67c1584" )
   ; ( "lib/agent_server/startup_cleanup.ml"
@@ -503,13 +532,13 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_command_lifecycle.ml"
     , "6b91faa075d3a7d9b94ded675f6feb65e4bf105c7db48437178b75cd66963877" )
   ; ( "lib/agent_server/developer_daemon_configuration.ml"
-    , "70be5ce34b6461eada36407b2034ab9711a6ee8cc778e2b925fbf11ffafde73f" )
+    , "d445cd1d4c273778ddaaf798deb81bc43185e6f711ce26e18b068d030af6d27b" )
   ; ( "lib/agent_server/developer_native_permission.ml"
     , "fee57b82d1415cee8cf1a5e82cf4f6612d8de53484ed638d7c51c33fdefecccd" )
   ; ( "lib/agent_server/developer_model_job_runner.ml"
     , "7604ff6140540e3b53720515526242e7bc1014c97d6895aacadbfb2909bda718" )
   ; ( "lib/agent_server/daemon.ml"
-    , "8b95ee71cd38fa97e9f6512279723e4813a207b2a2433ae57cefb1e64ef31c72" )
+    , "d054f77dc0e4d150a7ac0fc865fd914fd15124fc99218130c58b4a411bfad73f" )
   ; ( "lib/agent_session/developer_claimed_resource_owner.ml"
     , "fb251c6e022f9880820b15807018adc5cf240500050a0424321d7507d3e2bc41" )
   ; ( "lib/agent_server/developer_claim_deadline.ml"
@@ -625,7 +654,7 @@ let implementation_sources =
   ; ( "lib/agent_store/developer_command_row.ml"
     , "c7fe85fb222c80450fdc512732c9ad9fc2fd8ab8e12e65eeb64302e4904a5809" )
   ; ( "lib/agent_server/developer_capture_host.ml"
-    , "0bf741923661e987a7f007c7b8612a2d026aea4748a60f9ed5563bd757e8ebf0" )
+    , "27d1945d638d52c95508d5525d8a06bd0c5518fdb6e91b7174d77e8ac2abf8b9" )
   ; ( "lib/agent_server/developer_root_source.ml"
     , "052785a90fef793261bdcdabcf5f5067269ae321d65e1fb5169952d4974fd16a" )
   ; ( "lib/agent_server/developer_repl_epoch.ml"

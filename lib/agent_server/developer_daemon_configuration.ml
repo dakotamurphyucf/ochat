@@ -19,9 +19,15 @@ module Shell_approvals = struct
     { limits : Limits.t
     ; job_read : Operator_authorization.t -> Agent_protocol.Developer_job.t -> bool
     ; job_respond : Operator_authorization.t -> Agent_protocol.Developer_job.t -> bool
+    ; command_respond :
+        (Operator_authorization.t -> Agent_store.Developer_command_row.t -> bool) option
     }
 
-  let create ~limits ~job_read ~job_respond = { limits; job_read; job_respond }
+  let create ~limits ~job_read ~job_respond =
+    { limits; job_read; job_respond; command_respond = None }
+  ;;
+
+  let with_command_respond t ~authorize = { t with command_respond = Some authorize }
 end
 
 module Repl = struct

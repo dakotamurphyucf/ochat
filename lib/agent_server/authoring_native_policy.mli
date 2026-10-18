@@ -67,3 +67,10 @@ val create
   -> (t, P.Error.t) result
 
 val host_policy : t -> Authoring_installation.Host_policy.t option
+
+(** The immutable configured-project comparison binding already installed in
+    [host_policy]. None when no configured project read policy was supplied.
+    Issued by the exact physical [Project_source_host] passed to [create]; the
+    Developer startup binder must check [issued_by] before using it. This
+    exposes no Root, source borrow, read or additional target conversion. *)
+val configured_project : t -> Authoring_configured_project_policy.t option

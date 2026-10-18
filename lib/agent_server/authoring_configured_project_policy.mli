@@ -60,6 +60,14 @@ val issued_by : t -> Project_source_host.t -> bool
     from equal paths, current protocol feature names or catalog labels. *)
 val read_policy : t -> Sources.Read_policy.t
 
+(** Bounded, nonyielding comparison against this binding's installed grants
+    for an actual Source_host Root supplied by the caller. This repeats the
+    same current-actor decision as [read_policy]; Root.index alone does not
+    prove physical affinity, which the enclosing Source/Context owner must
+    check. It performs no I/O and lends no Root or read capability. Callers
+    check original and current actors separately around yields. *)
+val read_admitted : t -> Operator_authorization.t -> root:Sources.Root.t -> bool
+
 (** Current comparison for one genuine, separately acquired document project
     receipt. The receipt must be from this bound physical host and the exact
     original Root actor; both original and request actors must still have this

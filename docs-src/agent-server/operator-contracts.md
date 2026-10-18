@@ -140,6 +140,12 @@ module Server : sig
           actual authentication; it grants no native source read. Changed
           access requires daemon restart through the existing Server snapshot
           guard. *)
+    ; developer : Developer_startup_configuration.t option [@sexp.option]
+      (** Opt-in finite Developer selection/capacity profile, bound by Daemon to
+          the same installed Authoring/source owners and shared Standard cache.
+          It does not grant source reads, native effects or provider credentials.
+          Conflicts with an embedding-supplied Daemon.options.developer rather
+          than silently combining them. Changes require daemon restart. *)
     ; session_helpers : Session_helper_policy.t list [@sexp.list]
       (** Explicit operator grants for optional external helpers. Changes require
           restart. The helpers still require declared shell tools and normal

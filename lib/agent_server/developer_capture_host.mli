@@ -96,6 +96,18 @@ end
 module Target_policy : sig
   type t
 
+  module Project_origin : sig
+    type t =
+      | Host_project of Sources.Root.t
+      | Uploaded_project
+  end
+
+  module Document_origin : sig
+    type t =
+      | Host_document of Sources.Root.t
+      | Supplied_document
+  end
+
   (** All callbacks are trusted bounded NONYIELDING reads of already admitted
       policy/catalog state. Arguments are comparison data, never source or
       execution grants. They return only previously admitted Selected_contract
@@ -116,11 +128,13 @@ module Target_policy : sig
           -> Selected_contract.t option)
     -> authoring_project:
          (Operator_authorization.t
+          -> origin:Project_origin.t
           -> context:P.Authoring.Context.t
           -> current:Ledger.Inputs.t
           -> Selected_contract.t option)
     -> document_project:
          (Operator_authorization.t
+          -> origin:Document_origin.t
           -> context:P.Authoring.Context.t
           -> current:Ledger.Document.Inputs.t
           -> parsed:Prompt.Chat_markdown.Parsed.t
@@ -130,6 +144,7 @@ module Target_policy : sig
           -> Selected_contract.t option)
     -> document_source:
          (Operator_authorization.t
+          -> origin:Document_origin.t
           -> context:P.Authoring.Context.t
           -> current:Ledger.Document.Inputs.t
           -> parsed:Prompt.Chat_markdown.Parsed.t

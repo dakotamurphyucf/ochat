@@ -1415,6 +1415,7 @@ module Document_context = struct
   end
 
   let origin t = if Option.is_some t.root then Origin.Host_member else Origin.Supplied
+  let root t = t.root
   let source_id t = t.source_id
   let check_current t ~actor = check_all t.common actor
 

@@ -54,6 +54,64 @@ uses Watch followed by Observe, or a separately initialized control
 connection for concurrent cancellation. A change hint invites reobservation
 of its key; it carries no durable cursor.
 
+The shipped daemon has an explicit `server.developer` startup profile. Its
+bounded rows compare an admitted source origin, compiled target and authenticated
+principal; the rows do not create source or native permission. Startup reuses
+the installed Authoring/source grants and one Standard compiler-contract cache,
+and rejects a selected origin that has no corresponding physical owner. The
+`Provider_default` model choice obtains its target from the same configured
+inference host; `Disabled` performs no provider-target capture. The standard
+capacity keeps cumulative run documents, concurrent calls, retained REPL Task
+handles and REPL submission history as separate bounds. The inline ChatMD
+script capture is limited by the existing 256 KiB source route, while REPL
+submissions have a 64 KiB source limit and Project build input has a separate
+1 MiB ceiling. These values are finite starting choices in an explicit
+operator profile, not grants inferred from an opened document or a client
+request. Local `--local` operator-policy setup and portable REPL method
+installation have separate integration work; the configured HTTP and directly
+authenticated Unix command paths use the installed daemon service.
+
+For example, this `server` record field admits the selected `s` script from
+an already authorized supplied ChatMD document for one configured bearer
+principal. The token configuration must actually issue `pri_operator` with
+authentication kind `http.static_bearer` and the chosen Developer method
+scope; spelling it here grants neither the identity nor that scope.
+
+```sexp
+(developer
+ ((selections
+   (((source (Document_source (origin Supplied_document) (script_id s)))
+     (target One_off_v1)
+     (principals
+      (((principal_id pri_operator)
+        (authentication_kind http.static_bearer)))))))
+  (capacity
+   ((max_runs 128)
+    (max_active_commands 4)
+    (max_active_agent_calls 8)
+    (max_agent_sources 6)
+    (max_native_bindings 32)
+    (max_retained_tasks 8)
+    (max_watches_per_connection 4)
+    (max_pending_approvals 4)
+    (max_repl_instances 8)
+    (max_repl_keys_per_instance 128)
+    (max_repl_submissions_per_epoch 64)
+    (max_repl_source_bytes 65536)))
+  (model Disabled)
+  (approvals Disabled)
+  (repl Standard_v1)
+  (portable true)))
+```
+
+`Supplied_document` still requires the current installed Authoring context
+owner and exact selected script. `Local_source`, `Local_project`, and host
+document/project selections additionally require their existing configured
+source roots and explicit Authoring read/selection grants. An uploaded Project
+uses its own installed upload and rebind policy. No Developer row substitutes
+for any of those source grants. Omit the `developer` field to leave the
+Developer service unavailable.
+
 Status: M5 design v1, 2026-10-15. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission, durable developer run checkpoint foundation, selected-document transactions, physical job-claim worker, compiler-side REPL typing transaction and incremental module registry described below are implemented. The developer root staging owner, bounded root/native terminal coordinator, selected native policy and claimed job-parent effect-entry proof are implemented. The owner-neutral lexical script-job kernel and its physical developer adapter are implemented. Actor-bound provider selection, the shared Model.spawn recipe decoder, durable intent, physical call-boundary admission, selected compiled-script adapter and claimed model-job runner are implemented. Hosted command, native, job and Model approval callbacks and the portable Developer transport client are implemented. The hosted library REPL Task service retains exact Task references, starts work durably on explicit request, and joins cancellation and reset. User-facing REPL Task transport remains pending. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
 
 The [authoring service design](chatml-authoring-services.md) owns source context,

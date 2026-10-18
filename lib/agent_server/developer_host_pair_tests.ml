@@ -342,13 +342,21 @@ let%test_module "retained Developer Host policy" =
       Authoring_context_service.Developer.Target_policy.create
         ~local_project:(fun _ ~root:_ ~project:_ ~selection:_ -> None)
         ~local_source:(fun _ ~root:_ ~member:_ -> None)
-        ~authoring_project:(fun _ ~context:_ ~current:_ -> None)
+        ~authoring_project:(fun _ ~origin:_ ~context:_ ~current:_ -> None)
         ~document_project:
           (fun
-            _ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~build:_ ~metadata:_ -> None)
+            _
+            ~origin:_
+            ~context:_
+            ~current:_
+            ~parsed:_
+            ~declaration:_
+            ~build:_
+            ~metadata:_ -> None)
         ~document_source:
           (fun
-            _ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~script:_ -> Some selected)
+            _ ~origin:_ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~script:_ ->
+          Some selected)
     ;;
 
     let capture_limits () =
@@ -383,6 +391,7 @@ let%test_module "retained Developer Host policy" =
             ; session_helpers = []
             ; authoring_packages = []
             ; authoring_budget = None
+            ; developer = None
             ; project_sources = None
             ; authoring_project_access = None
             ; authoring_upload_access = None

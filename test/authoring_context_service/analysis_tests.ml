@@ -667,14 +667,20 @@ let%test_unit
          Core_owner.Developer.Target_policy.create
            ~local_project:(fun _ ~root:_ ~project:_ ~selection:_ -> None)
            ~local_source:(fun _ ~root:_ ~member:_ -> None)
-           ~authoring_project:(fun _ ~context:_ ~current:_ -> None)
+           ~authoring_project:(fun _ ~origin:_ ~context:_ ~current:_ -> None)
            ~document_project:
              (fun
-               _ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~build:_ ~metadata:_ ->
-             None)
+               _
+               ~origin:_
+               ~context:_
+               ~current:_
+               ~parsed:_
+               ~declaration:_
+               ~build:_
+               ~metadata:_ -> None)
            ~document_source:
              (fun
-               _ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~script:_ ->
+               _ ~origin:_ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~script:_ ->
              if !allowed then Some selected else None)
        in
        let limits =

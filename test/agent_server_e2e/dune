@@ -227,7 +227,22 @@
 
 (alias
  (name agent-e2e-transports)
- (deps (alias agent-e2e-developer-wire)))
+ (deps
+  (alias agent-e2e-developer-wire)
+  (alias agent-e2e-developer-configured)))
+
+(rule
+ (alias agent-e2e-developer-configured)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (run
+    %{exe:agent_server_e2e.exe}
+    --scenario
+    developer-wire-transport
+    --case
+    configured))))
 
 (rule
  (alias agent-e2e-developer-wire)

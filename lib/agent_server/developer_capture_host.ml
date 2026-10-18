@@ -214,6 +214,18 @@ module Request = struct
 end
 
 module Target_policy = struct
+  module Project_origin = struct
+    type t =
+      | Host_project of Sources.Root.t
+      | Uploaded_project
+  end
+
+  module Document_origin = struct
+    type t =
+      | Host_document of Sources.Root.t
+      | Supplied_document
+  end
+
   type t =
     { local_project :
         Operator_authorization.t
@@ -228,11 +240,13 @@ module Target_policy = struct
         -> Selected_contract.t option
     ; authoring_project :
         Operator_authorization.t
+        -> origin:Project_origin.t
         -> context:P.Authoring.Context.t
         -> current:Ledger.Inputs.t
         -> Selected_contract.t option
     ; document_project :
         Operator_authorization.t
+        -> origin:Document_origin.t
         -> context:P.Authoring.Context.t
         -> current:Ledger.Document.Inputs.t
         -> parsed:Prompt.Chat_markdown.Parsed.t
@@ -242,6 +256,7 @@ module Target_policy = struct
         -> Selected_contract.t option
     ; document_source :
         Operator_authorization.t
+        -> origin:Document_origin.t
         -> context:P.Authoring.Context.t
         -> current:Ledger.Document.Inputs.t
         -> parsed:Prompt.Chat_markdown.Parsed.t
@@ -826,8 +841,19 @@ let prepare_authoring_project_selection t ~actor ~connection ~expected ~checkpoi
           |> Result.map_error ~f:owner_error
         in
         let view = current.context.view in
+        let%bind selected_origin =
+          match current.context.owner with
+          | Owner.Host_project source ->
+            Ok (Target_policy.Project_origin.Host_project (Sources.Context.root source))
+          | Owner.Uploaded_project _ -> Ok Target_policy.Project_origin.Uploaded_project
+          | Owner.Host_document _ | Owner.Supplied_document _ -> Error (unavailable ())
+        in
         let select actor =
-          t.policy.authoring_project actor ~context:view ~current:inputs
+          t.policy.authoring_project
+            actor
+            ~origin:selected_origin
+            ~context:view
+            ~current:inputs
         in
         let%bind selected = selected_initial ~original_actor ~actor select in
         let%bind overlay =
@@ -1022,6 +1048,15 @@ let prepare_document_script_selection
         |> Result.map_error ~f:owner_error
       in
       let view = current.context.view in
+      let%bind selected_document_origin =
+        match current.context.owner with
+        | Owner.Host_document document ->
+          (match Sources.Document_context.root document with
+           | Some root -> Ok (Target_policy.Document_origin.Host_document root)
+           | None -> Error (unavailable ()))
+        | Owner.Supplied_document _ -> Ok Target_policy.Document_origin.Supplied_document
+        | Owner.Host_project _ | Owner.Uploaded_project _ -> Error (unavailable ())
+      in
       let selected_row =
         match row with
         | Some row ->
@@ -1038,6 +1073,7 @@ let prepare_document_script_selection
           let select actor =
             t.policy.document_project
               actor
+              ~origin:selected_document_origin
               ~context:view
               ~current:inputs
               ~parsed
@@ -1091,6 +1127,7 @@ let prepare_document_script_selection
             let select actor =
               t.policy.document_source
                 actor
+                ~origin:selected_document_origin
                 ~context:view
                 ~current:inputs
                 ~parsed

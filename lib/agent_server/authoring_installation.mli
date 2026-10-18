@@ -135,6 +135,30 @@ end
 
 type t
 
+(** Comparison only with the exact physical source host supplied at
+    installation, including an upload-only installation. This does not lend a
+    Root or grant a native read. *)
+val issued_by_source_host : t -> Project_source_host.t -> bool
+
+module Origins : sig
+  type t
+
+  (** Comparison-only facts about constructed context owners. These do not
+      lend a Root, select a source, or authorize an actor. *)
+  val host_source : t -> bool
+
+  val uploaded_project : t -> bool
+  val supplied_document : t -> bool
+end
+
+(** [None] once the installation is closing or closed. Each available origin
+    requires installed core context support and its actual child/policy:
+    [host_source] requires Source_host; [uploaded_project] requires Upload_host
+    with a rebind policy; [supplied_document] requires its installed policy.
+    Upload-only publication does not make an uploaded Project executable.
+    Capture still performs the original actor, Root and source checks. *)
+val installed_origins : t -> Origins.t option
+
 (** Revalidate [policy]'s advertised request ceiling against the CURRENT
     daemon [initialize_limits] at every installation. A policy made using
     default limits cannot silently widen a later options override. This

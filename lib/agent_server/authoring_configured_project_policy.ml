@@ -203,6 +203,8 @@ let read_policy t =
     admitted_actor t actor ~index:root_index)
 ;;
 
+let read_admitted t actor ~root = admitted_actor t actor ~index:(Sources.Root.index root)
+
 let project_capture_authorized t ~original_actor ~actor capture =
   match
     Sources.Document_context.Project_capture.root_index_if_bound
