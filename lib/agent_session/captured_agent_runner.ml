@@ -121,6 +121,21 @@ type t =
   ; response_dir : Eio.Fs.dir_ty Eio.Path.t
   }
 
+let runtime_policy_identity
+      ~script_preparation
+      ~tool_contract
+      ~content_limits
+      ~policy_revision
+  =
+  numeric_identity
+    policy_revision
+    [%sexp
+      ("runtime.v1" : string)
+    , (Preparation.policy_identity script_preparation : Sexp.t)
+    , (tool_contract : Chatml_compilation.Tool_contract.t)
+    , (content_policy_identity content_limits : Sexp.t)]
+;;
+
 let create
       ~script_preparation
       ~tool_contract
@@ -131,13 +146,11 @@ let create
       ~response_dir
   =
   let policy_revision =
-    numeric_identity
-      policy_revision
-      [%sexp
-        ("runtime.v1" : string)
-      , (Preparation.policy_identity script_preparation : Sexp.t)
-      , (tool_contract : Chatml_compilation.Tool_contract.t)
-      , (content_policy_identity content_limits : Sexp.t)]
+    runtime_policy_identity
+      ~script_preparation
+      ~tool_contract
+      ~content_limits
+      ~policy_revision
   in
   { domain_id = (Stdlib.Domain.self () :> int)
   ; script_preparation
@@ -1294,6 +1307,28 @@ module Source_binding = struct
     ; artifact_store
     ; source_lease = Prompt_source_lease.borrow source_lease
     }
+  ;;
+
+  module Policy_identity = struct
+    type t =
+      { source : Chatml_source.Digest.t
+      ; runtime : Chatml_source.Digest.t
+      }
+
+    let source t = t.source
+    let runtime t = t.runtime
+  end
+
+  let policy_identity t ~script_preparation =
+    let runtime_digest =
+      runtime_policy_identity
+        ~script_preparation
+        ~tool_contract:t.tool_contract
+        ~content_limits:t.content_limits
+        ~policy_revision:t.runtime_policy_revision
+      |> fun base -> numeric_identity base [%sexp ("developer-literal-child.v1" : string)]
+    in
+    Policy_identity.{ source = Source.policy_identity t.source; runtime = runtime_digest }
   ;;
 
   let content_source_error failure =

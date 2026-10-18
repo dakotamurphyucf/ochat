@@ -90,6 +90,33 @@ val issuer : t -> Agent_session.Developer_invocation_owner.Selected.t
     different physical Root. *)
 val issued_by_root : t -> Developer_root_owner.run -> bool
 
+(** Capture only from this checked selected child's retained Live preparation.
+    [live] must be the exact same physical package; it grants no selection by
+    itself. Refresh before and after yielding projection, including the actual
+    native borrow, immediate target and Root/actor source proof. *)
+val capture_issuer_source
+  :  t
+  -> live:Developer_live_resources.live
+  -> checkpoint:(unit -> unit)
+  -> (Chat_response.Background_request.Issuer_source.t, Agent_protocol.Error.t) result
+
+(** Prepare a source artifact from this child's OWN installed native runtime.
+    The supplied [live] must physically own its Prepared resources. Refresh
+    the exact Target, Root and source before and after the potentially yielding
+    preparation; never retry a denied child binding against the root runtime.
+    The caller also checks the binding against its lexical Job scope. *)
+val prepare_agent_source
+  :  t
+  -> live:Developer_live_resources.live
+  -> binding:Chat_response.Tool_capability.binding
+  -> launch:Chat_response.Source_launch.t
+  -> request:Chat_response.Background_request.t
+  -> max_registrations:int
+  -> checkpoint:(unit -> unit)
+  -> ( Chat_response.Background_request.Agent_artifact.t option
+       , Agent_protocol.Error.t )
+       result
+
 val first_parent : t -> Agent_session.Developer_invocation_owner.Selected.parent
 
 (** The first child tool entry must still be under the exact saved parent

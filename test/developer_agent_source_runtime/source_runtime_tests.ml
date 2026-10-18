@@ -240,6 +240,7 @@ let%expect_test "deferred saved Agent binds one physical Root/runtime" =
       let jobs =
         Jobs.create
           ~root
+          ~queued_issuer:None
           ~store
           ~disclosure
           ~env

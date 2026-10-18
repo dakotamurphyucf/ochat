@@ -241,13 +241,24 @@ let prepare_agent_job_source ~root ~resources ~parent ~binding ~request ~checkpo
   let%bind () = Live_resources.check_current resources in
   let%bind launch = Jobs.Source_parent.launch parent in
   let%bind artifact =
-    Chat_response.Agent_runtime.prepare_agent_source
-      (Live_resources.native_runtime resources)
-      ~binding
-      ~launch
-      ~request
-      ~max_registrations:(Root.job_policy root).execution.max_array_items
-      ~checkpoint
+    match Jobs.Source_parent.selected_child parent with
+    | Some child ->
+      Developer_child_selection.prepare_agent_source
+        child
+        ~live:resources
+        ~binding
+        ~launch
+        ~request
+        ~max_registrations:(Root.job_policy root).execution.max_array_items
+        ~checkpoint
+    | None ->
+      Chat_response.Agent_runtime.prepare_agent_source
+        (Live_resources.native_runtime resources)
+        ~binding
+        ~launch
+        ~request
+        ~max_registrations:(Root.job_policy root).execution.max_array_items
+        ~checkpoint
   in
   let%bind () = Jobs.Source_parent.check parent ~binding in
   let%map () = Live_resources.check_current resources in
@@ -256,6 +267,9 @@ let prepare_agent_job_source ~root ~resources ~parent ~binding ~request ~checkpo
 
 let create_live_services t ~root ~resources ~current_actor =
   let open Result.Let_syntax in
+  let%bind queued_issuer =
+    Developer_queued_issuer.create ~live:resources ~root ~runtime_policy:t.runtime_policy
+  in
   let%bind jobs =
     Jobs.create
       ~root
@@ -263,6 +277,7 @@ let create_live_services t ~root ~resources ~current_actor =
       ~disclosure:t.result_disclosure
       ~env:t.env
       ~current_actor
+      ~queued_issuer:(Some queued_issuer)
       ~prepare_source:(prepare_agent_job_source ~root ~resources)
   in
   let%bind native = Native.create ~root in

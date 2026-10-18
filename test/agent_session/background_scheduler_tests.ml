@@ -278,6 +278,7 @@ let with_physical_developer
         let jobs =
           Agent_server.Developer_script_job_service.create
             ~root
+            ~queued_issuer:None
             ~store
             ~disclosure
             ~env
@@ -761,6 +762,7 @@ let%test_unit "a saturated developer root leaves another physical root runnable"
                 let other_jobs =
                   Agent_server.Developer_script_job_service.create
                     ~root:other_root
+                    ~queued_issuer:None
                     ~store
                     ~disclosure
                     ~env

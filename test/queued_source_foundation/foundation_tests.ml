@@ -112,6 +112,26 @@ let%test_unit "v1 independent byte oracle and strict selected-code admission" =
     let artifact = selected () in
     let captured = B.with_agent_artifact original artifact |> ok in
     let wire = B.to_json captured in
+    let old_v2_bytes =
+      String.drop_suffix
+        (String.substr_replace_first
+           old_bytes
+           ~pattern:{|"version":1|}
+           ~with_:{|"version":2|})
+        1
+      ^ {|,"agent_artifact":{"revision_id":"|}
+      ^ P.Id.Prompt_revision.to_string (A.revision_id artifact)
+      ^ {|","manifest_sha256":"|}
+      ^ digest "complete-manifest"
+      ^ {|","root_relative_path":"nested/child.chatmd"}}|}
+    in
+    [%test_eq: string] (Jsonaf.to_string wire) old_v2_bytes;
+    let old_v2_canonical =
+      P.Json_codec.canonical_string (Jsonaf.of_string old_v2_bytes) |> ok
+    in
+    [%test_eq: string]
+      (B.fingerprint captured)
+      (digest ("ochat.background-request.v2\n" ^ old_v2_canonical));
     let saved = P.Developer_agent_artifact.Saved_tool_request.of_payload wire |> ok in
     [%test_eq: string]
       (P.Developer_agent_artifact.Saved_tool_request.selected_name saved)
@@ -198,6 +218,153 @@ let%test_unit "v1 independent byte oracle and strict selected-code admission" =
          reference.fingerprint
          (C.reference (binding registry)).fingerprint
      | Script _ -> assert false);
+    [%test_eq: int] !calls 0)
+;;
+
+let%test_unit "v3 issuer is strict comparison data distinct from Tool target" =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let calls = ref 0 in
+    let registry = bindings (native calls) in
+    let issuer_artifact = selected () in
+    let target_artifact = selected () in
+    assert (
+      not
+        (P.Id.Prompt_revision.equal
+           (A.revision_id issuer_artifact)
+           (A.revision_id target_artifact)));
+    let prompt = P.Id.Prompt_definition.create () in
+    let workspace = P.Id.Workspace_definition.create () in
+    let source_policy =
+      Chatml_source.Digest.of_hex (digest "issuer-source-policy") |> Or_error.ok_exn
+    in
+    let runtime_policy =
+      Chatml_source.Digest.of_hex (digest "issuer-runtime-policy") |> Or_error.ok_exn
+    in
+    let issuer =
+      B.Issuer_source.create
+        ~artifact:issuer_artifact
+        ~prompt
+        ~workspace
+        ~tool_contract:Chatml_compilation.Tool_contract.Developer_model_spawn
+        ~source_policy
+        ~runtime_policy
+    in
+    let tool =
+      request registry
+      |> fun request ->
+      B.with_agent_artifact request target_artifact
+      |> ok
+      |> fun request -> B.with_issuer_source request issuer |> ok
+    in
+    let prepared =
+      Chat_response.One_off_script.prepare_in_domain
+        ~env
+        ~capabilities:registry
+        ~tools:[ "agent" ]
+        ~source:"let main input = Task.pure(input)"
+        ()
+      |> Result.map_error ~f:(fun diagnostics ->
+        Sexp.to_string_hum [%sexp (diagnostics : Chatmd_shell_spec.Diagnostic.t list)])
+      |> Result.ok_or_failwith
+    in
+    let script =
+      B.script ~prepared ~input:`Null ~policy
+      |> ok
+      |> fun request -> B.with_issuer_source request issuer |> ok
+    in
+    List.iter [ tool; script ] ~f:(fun request ->
+      let wire = B.to_json request in
+      assert (Jsonaf.exactly_equal (Jsonaf.member_exn "version" wire) (`Number "3"));
+      let decoded = B.of_json ~policy wire |> ok in
+      [%test_eq: string] (Jsonaf.to_string (B.to_json decoded)) (Jsonaf.to_string wire);
+      let encoded = P.Json_codec.canonical_string wire |> ok in
+      [%test_eq: string]
+        (B.fingerprint request)
+        (digest ("ochat.background-request.v3\n" ^ encoded));
+      [%test_eq: string] (B.fingerprint decoded) (B.fingerprint request);
+      let actual = B.issuer_source decoded |> Option.value_exn in
+      assert (
+        P.Id.Prompt_revision.equal
+          (A.revision_id (B.Issuer_source.artifact actual))
+          (A.revision_id issuer_artifact));
+      assert (P.Id.Prompt_definition.equal (B.Issuer_source.prompt actual) prompt);
+      assert (P.Id.Workspace_definition.equal (B.Issuer_source.workspace actual) workspace);
+      assert (
+        Chatml_compilation.Tool_contract.equal
+          (B.Issuer_source.tool_contract actual)
+          Chatml_compilation.Tool_contract.Developer_model_spawn);
+      assert (
+        Chatml_source.Digest.equal (B.Issuer_source.source_policy actual) source_policy);
+      assert (
+        Chatml_source.Digest.equal (B.Issuer_source.runtime_policy actual) runtime_policy);
+      assert (Result.is_error (B.with_issuer_source decoded issuer)));
+    let tool_wire = B.to_json tool in
+    let saved =
+      P.Developer_agent_artifact.Saved_tool_request.of_payload tool_wire |> ok
+    in
+    assert (
+      P.Id.Prompt_revision.equal
+        (A.revision_id (P.Developer_agent_artifact.Saved_tool_request.artifact saved))
+        (A.revision_id target_artifact));
+    assert (
+      P.Id.Prompt_revision.equal
+        (A.revision_id
+           (B.Issuer_source.artifact (B.issuer_source tool |> Option.value_exn)))
+        (A.revision_id issuer_artifact));
+    [%test_eq: string]
+      (P.Developer_agent_artifact.Saved_tool_request.selected_name saved)
+      "agent";
+    assert (
+      Result.is_error
+        (P.Developer_agent_artifact.Saved_tool_request.of_payload (B.to_json script)));
+    assert (Result.is_error (B.with_agent_artifact script target_artifact));
+    let issuer_json = Jsonaf.member_exn "issuer_source" tool_wire in
+    let bad_issuer =
+      [ `Null
+      ; remove issuer_json "artifact"
+      ; replace issuer_json "tool_contract" (`String "foreign")
+      ; replace issuer_json "source_policy" (`String "not-a-digest")
+      ; replace
+          issuer_json
+          "artifact"
+          (replace
+             (Jsonaf.member_exn "artifact" issuer_json)
+             "revision_id"
+             (`String "bad"))
+      ; (match issuer_json with
+         | `Object fields ->
+           `Object (("workspace", P.Id.Workspace_definition.to_json workspace) :: fields)
+         | _ -> assert false)
+      ; (match issuer_json with
+         | `Object fields -> `Object (("unexpected", `Null) :: fields)
+         | _ -> assert false)
+      ; `Object (List.init 1000 ~f:(fun _ -> "artifact", `Null))
+      ]
+    in
+    List.iter bad_issuer ~f:(fun data ->
+      let invalid = replace tool_wire "issuer_source" data in
+      assert (Result.is_error (B.of_json ~policy invalid));
+      assert (Result.is_error (P.Developer_agent_artifact.Issuer_source.of_json data));
+      assert (
+        Result.is_error (P.Developer_agent_artifact.Saved_tool_request.of_payload invalid)));
+    List.iter
+      [ remove tool_wire "issuer_source"
+      ; replace tool_wire "version" (`Number "2")
+      ; (match tool_wire with
+         | `Object fields -> `Object (("issuer_source", issuer_json) :: fields)
+         | _ -> assert false)
+      ]
+      ~f:(fun invalid ->
+        assert (Result.is_error (B.of_json ~policy invalid));
+        assert (
+          Result.is_error
+            (P.Developer_agent_artifact.Saved_tool_request.of_payload invalid)));
+    let no_target = B.with_issuer_source (request registry) issuer |> ok in
+    ignore (B.of_json ~policy (B.to_json no_target) |> ok : B.t);
+    assert (
+      Result.is_error
+        (P.Developer_agent_artifact.Saved_tool_request.of_payload (B.to_json no_target)));
     [%test_eq: int] !calls 0)
 ;;
 

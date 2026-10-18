@@ -58,11 +58,13 @@ let reference_of_artifact (artifact : Store.Artifact.t) ~checkpoint =
     ~root_relative_path
 ;;
 
+let reference_of_revision revision ~checkpoint =
+  reference_of_artifact (Prompt_revision.artifact revision) ~checkpoint
+;;
+
 let admit revision ~checkpoint =
   let open Result.Let_syntax in
-  let%map reference =
-    reference_of_artifact (Prompt_revision.artifact revision) ~checkpoint
-  in
+  let%map reference = reference_of_revision revision ~checkpoint in
   { revision; reference }
 ;;
 

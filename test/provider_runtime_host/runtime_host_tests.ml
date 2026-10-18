@@ -841,6 +841,7 @@ let%test_unit "saved Agent keeps baseline and derived child provider targets sep
     let jobs =
       Jobs.create
         ~root
+        ~queued_issuer:None
         ~store
         ~disclosure
         ~env
@@ -1189,6 +1190,7 @@ let%test_unit "claimed developer model runner publishes a real offline response"
            let jobs =
              Jobs.create
                ~root
+               ~queued_issuer:None
                ~store
                ~disclosure
                ~env
@@ -2207,6 +2209,7 @@ let%test_unit
     let jobs =
       Jobs.create
         ~root:failed_run
+        ~queued_issuer:None
         ~store
         ~disclosure
         ~env

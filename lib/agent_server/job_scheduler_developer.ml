@@ -128,6 +128,7 @@ module Batch = struct
              | Runner.Availability.Runnable -> Availability.Runnable
              | Malformed_supported -> Malformed_supported
              | Agent_artifact_installer_unavailable -> Artifact_installer_unavailable
+             | Issuer_source_installer_unavailable -> Executor_unavailable
              | Unsupported_kind -> Executor_unavailable)
          | None -> Ok Availability.Executor_unavailable)
       | Model_call ->

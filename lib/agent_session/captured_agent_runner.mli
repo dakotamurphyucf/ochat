@@ -354,6 +354,22 @@ module Source_binding : sig
       switch. Join them before releasing the borrowed host owners. *)
   type t
 
+  module Policy_identity : sig
+    type t
+
+    val source : t -> Chatml_source.Digest.t
+    val runtime : t -> Chatml_source.Digest.t
+  end
+
+  (** Comparison-only identities of this installed source policy and the
+      runtime factory that [bind_selected_child] actually constructs. Reuse
+      its existing digest composition, including the exact script/content
+      numeric limits; no caller-supplied revision or digest enters. *)
+  val policy_identity
+    :  t
+    -> script_preparation:Runtime_script_preparation.t
+    -> Policy_identity.t
+
   module Content_source : sig
     type t
 

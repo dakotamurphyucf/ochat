@@ -18,7 +18,10 @@ type t =
   ; pins : (string * string) list
   ; policy : P.policy
   ; agent_artifact : Agent_artifact.t option
+  ; issuer_source : issuer_source option
   }
+
+and issuer_source = Agent_artifact.Issuer_source.t
 
 type execution =
   | Tool of
@@ -36,6 +39,43 @@ type execution =
 let invalid message = Error (Agent_protocol.Error.invalid_request message)
 let policy t = t.policy
 let agent_artifact t = t.agent_artifact
+let issuer_source t = t.issuer_source
+
+module Issuer_source = struct
+  type t = issuer_source
+
+  let create ~artifact ~prompt ~workspace ~tool_contract ~source_policy ~runtime_policy =
+    let tool_contract =
+      match tool_contract with
+      | Chatml_compilation.Tool_contract.Standard ->
+        Agent_artifact.Issuer_source.Tool_contract.Standard
+      | Chatml_compilation.Tool_contract.Developer_model_spawn ->
+        Agent_artifact.Issuer_source.Tool_contract.Developer_model_spawn
+    in
+    Agent_artifact.Issuer_source.create
+      ~artifact
+      ~prompt
+      ~workspace
+      ~tool_contract
+      ~source_policy
+      ~runtime_policy
+  ;;
+
+  let artifact = Agent_artifact.Issuer_source.artifact
+  let prompt = Agent_artifact.Issuer_source.prompt
+  let workspace = Agent_artifact.Issuer_source.workspace
+  let source_policy = Agent_artifact.Issuer_source.source_policy
+  let runtime_policy = Agent_artifact.Issuer_source.runtime_policy
+
+  let tool_contract t =
+    match Agent_artifact.Issuer_source.tool_contract t with
+    | Agent_artifact.Issuer_source.Tool_contract.Standard ->
+      Chatml_compilation.Tool_contract.Standard
+    | Developer_model_spawn -> Chatml_compilation.Tool_contract.Developer_model_spawn
+  ;;
+
+  let to_json = Agent_artifact.Issuer_source.to_json
+end
 
 module Target_kind = struct
   type t =
@@ -108,6 +148,12 @@ let with_agent_artifact t selected =
   | Tool_target _, None -> Ok { t with agent_artifact = Some selected }
   | Tool_target _, Some _ -> invalid "background request already selects agent code"
   | Script_target _, _ -> invalid "background script cannot select agent code"
+;;
+
+let with_issuer_source t selected =
+  match t.issuer_source with
+  | None -> Ok { t with issuer_source = Some selected }
+  | Some _ -> invalid "background request already selects an issuing source"
 ;;
 
 let policy_of_json json =
@@ -208,7 +254,13 @@ let target_to_json = function
 
 let to_json t =
   `Object
-    ([ "version", number (if Option.is_some t.agent_artifact then 2 else 1)
+    ([ ( "version"
+       , number
+           (if Option.is_some t.issuer_source
+            then 3
+            else if Option.is_some t.agent_artifact
+            then 2
+            else 1) )
      ; "target", target_to_json t.target
      ; "input", t.input
      ; "pins", `Object (List.map t.pins ~f:(fun (name, pin) -> name, `String pin))
@@ -216,7 +268,10 @@ let to_json t =
      ]
      @ Option.to_list
          (Option.map t.agent_artifact ~f:(fun artifact ->
-            "agent_artifact", Agent_artifact.to_json artifact)))
+            "agent_artifact", Agent_artifact.to_json artifact))
+     @ Option.to_list
+         (Option.map t.issuer_source ~f:(fun issuer ->
+            "issuer_source", Issuer_source.to_json issuer)))
 ;;
 
 let source = function
@@ -286,6 +341,7 @@ let tool ~capabilities ~(reference : C.reference) ~input ~policy =
     ; pins = [ reference.name, C.permission_fingerprint binding ]
     ; policy
     ; agent_artifact = None
+    ; issuer_source = None
     }
   in
   let%map () = validate t in
@@ -305,6 +361,7 @@ let script ~prepared ~input ~policy =
     ; pins
     ; policy
     ; agent_artifact = None
+    ; issuer_source = None
     }
   in
   let%map () = validate t in
@@ -316,17 +373,35 @@ let of_json ~policy json =
   let%bind () = validate_policy ~ceiling:policy policy in
   let%bind fields =
     strict_fields
-      [ "version"; "target"; "input"; "pins"; "policy"; "agent_artifact" ]
+      [ "version"
+      ; "target"
+      ; "input"
+      ; "pins"
+      ; "policy"
+      ; "agent_artifact"
+      ; "issuer_source"
+      ]
       json
   in
-  let%bind version = J.required_as fields "version" (J.bounded_int ~min:1 ~max:2) in
+  let%bind version = J.required_as fields "version" (J.bounded_int ~min:1 ~max:3) in
   let%bind agent_artifact =
     match version, J.optional fields "agent_artifact" with
     | 1, None -> Ok None
     | 2, Some json -> Agent_artifact.of_json json |> Result.map ~f:Option.some
+    | 3, None -> Ok None
+    | 3, Some json -> Agent_artifact.of_json json |> Result.map ~f:Option.some
     | 1, Some _ -> invalid "version 1 cannot select agent code"
     | 2, None -> invalid "version 2 requires selected agent code"
-    | _ -> assert false
+    | _, _ -> invalid "invalid background request version"
+  in
+  let%bind issuer_source =
+    match version, J.optional fields "issuer_source" with
+    | (1 | 2), None -> Ok None
+    | 3, Some json ->
+      Agent_artifact.Issuer_source.of_json json |> Result.map ~f:Option.some
+    | (1 | 2), Some _ -> invalid "older background request cannot select an issuer"
+    | 3, None -> invalid "version 3 requires an issuing source"
+    | _, _ -> invalid "invalid background request version"
   in
   let%bind stored_policy = J.required_as fields "policy" policy_of_json in
   let%bind () = validate_policy ~ceiling:policy stored_policy in
@@ -378,7 +453,9 @@ let of_json ~policy json =
     | Tool_target _, _ | Script_target _, None -> Ok ()
     | Script_target _, Some _ -> invalid "background script cannot select agent code"
   in
-  let t = { target; input; pins; policy = stored_policy; agent_artifact } in
+  let t =
+    { target; input; pins; policy = stored_policy; agent_artifact; issuer_source }
+  in
   let%map () = validate t in
   t
 ;;
@@ -390,7 +467,9 @@ let fingerprint t =
   |> Result.ok_or_failwith
   |> fun encoded ->
   let prefix =
-    if Option.is_some t.agent_artifact
+    if Option.is_some t.issuer_source
+    then "ochat.background-request.v3\n"
+    else if Option.is_some t.agent_artifact
     then "ochat.background-request.v2\n"
     else "ochat.background-request.v1\n"
   in

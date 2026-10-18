@@ -329,6 +329,26 @@ let%test_unit
         ~policy:Chat_response.One_off_request.default_policy
       |> ok
     in
+    let issuer =
+      let digest value = Chatml_source.Digest.of_contents value ~checkpoint:ignore in
+      let artifact =
+        P.Developer_agent_artifact.create
+          ~revision_id:(P.Id.Prompt_revision.create ())
+          ~manifest_sha256:(digest "copied selected artifact")
+          ~root_relative_path:
+            (Source.Portable_path.create "children/copied.chatmd" |> or_error)
+      in
+      Chat_response.Background_request.Issuer_source.create
+        ~artifact
+        ~prompt:(P.Id.Prompt_definition.create ())
+        ~workspace:(P.Id.Workspace_definition.create ())
+        ~tool_contract:Chatml_compilation.Tool_contract.Standard
+        ~source_policy:(digest "copied source policy")
+        ~runtime_policy:(digest "copied runtime policy")
+    in
+    let preattached =
+      Chat_response.Background_request.with_issuer_source request issuer |> ok
+    in
     let checked = ref 0 in
     let staged_ids = ref None in
     let value =
@@ -336,6 +356,11 @@ let%test_unit
         incr checked;
         assert (Result.is_error (O.Registry.close_and_wait owner_registry));
         assert (Result.is_error (O.reconcile_pending run));
+        (match
+           O.Action.stage_background action ~request:preattached ~checkpoint:ignore
+         with
+         | Error error when P.Error.equal_code error.code P.Error.Invalid_request -> ()
+         | Error _ | Ok _ -> failwith "root accepted a caller-preattached queued issuer");
         let chosen = O.Action.stage_background action ~request ~checkpoint:ignore |> ok in
         let unselected =
           O.Action.stage_background action ~request ~checkpoint:ignore |> ok
@@ -362,6 +387,9 @@ let%test_unit
     let chosen, unselected = Option.value_exn !staged_ids in
     assert (Option.is_some (R.find_job observed chosen));
     assert (Option.is_none (R.find_job observed unselected));
+    [%test_eq: int]
+      (List.length (O.Job_candidate.read_current run ~checkpoint:ignore |> ok))
+      1;
     let effects = ref 0 in
     let cancelled_job = ref None in
     let reason = Failure "cancel root after one effect" in
