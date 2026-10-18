@@ -69,6 +69,12 @@ These use offline providers, production hosts and retained E2E artifacts. The
 required framework CI runs this alias in its E2E tier alongside the separate
 forced normal-test tier.
 
+The ordinary `@test/agent_transport_stdio_client/runtest` suite runs a real
+Eio-owned child with separate stderr, checks bounded stderr retention and typed
+response correlation, and verifies concurrent close, partial-write cancellation,
+callback cancellation and exact-child reap. Socket and Developer-client suites
+retain the broader notification and installed-method wire matrix.
+
 Normal GitHub CI now divides the same suite into eight groups of nonrecursive
 Dune directory aliases, with two workers per runner. A source-derived inventory
 includes tests in `bin`, `lib` and `test`; the release gate requires every planned

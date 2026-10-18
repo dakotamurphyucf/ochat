@@ -14,6 +14,7 @@
   ochat.agent_client
   ochat.agent_session
   ochat.agent_server
+  ochat.agent_transport_ndjson
   ochat.agent_transport_stdio)
  (preprocess
   (pps ppx_jane)))

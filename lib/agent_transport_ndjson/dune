@@ -1,0 +1,7 @@
+(library
+ (name agent_transport_ndjson)
+ (public_name ochat.agent_transport_ndjson)
+ (modules client)
+ (libraries core eio ochat.agent_protocol ochat.agent_client ochat.agent_session)
+ (preprocess
+  (pps ppx_jane)))
