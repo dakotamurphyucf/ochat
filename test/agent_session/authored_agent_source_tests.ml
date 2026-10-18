@@ -470,7 +470,37 @@ let on_event ctx state event = Task.pure(state)</script>|}
       [%sexp
         ("moderator selected / literal" : string)
       , (outcome moderator_result : string)
-      , (outcome literal_moderator : string)]);
+      , (outcome literal_moderator : string)];
+    let metadata, metadata_parsed =
+      build
+        {|<shell_access id="direct" cwd="${workspace}">
+  <capabilities sandbox="direct_unsafe" network="false"
+      child_processes="false" arbitrary_code="false" privilege_change="false">
+    <read path="${workspace}"/>
+  </capabilities>
+  <backends merge="replace"><direct when="macos"/><direct when="linux"/></backends>
+  <policy default="allow"/>
+  <approvals provider="none" unavailable="deny" scopes="once"/>
+  <audit format="none"/>
+</shell_access>
+<moderator_runtime shell_runtime="direct"/>|}
+    in
+    print_s
+      [%sexp
+        ("moderator runtime selected / literal" : string)
+      , (outcome
+           (Preflight.admit_selected
+              ~revision:metadata
+              ~parsed:metadata_parsed
+              ~input:[]
+              ~checkpoint:ignore)
+         : string)
+      , (outcome
+           (Preflight.admit_literal
+              ~revision:metadata
+              ~parsed:metadata_parsed
+              ~checkpoint:ignore)
+         : string)]);
   [%expect
     {|
     ("read_file / text input" admitted admitted invalid_state)
@@ -478,5 +508,6 @@ let on_event ctx state event = Task.pure(state)</script>|}
     ("bounds / checkpoint" resource_limit resource_limit true)
     ("fork / foreign parser" invalid_request invalid_state)
     ("moderator selected / literal" admitted invalid_state)
+    ("moderator runtime selected / literal" admitted invalid_state)
     |}]
 ;;
