@@ -242,6 +242,62 @@ let%expect_test
     {| separate grants; original cwd/environment; revoked approval not saved; ancestor check retained |}]
 ;;
 
+let%test_unit "reviewer cancellation joins without becoming ordinary denial" =
+  Eio_main.run
+  @@ fun env ->
+  let entered, entered_u = Eio.Promise.create () in
+  let blocked, _blocked_u = Eio.Promise.create () in
+  let cancellation, cancellation_u = Eio.Promise.create () in
+  let finished, finished_u = Eio.Promise.create () in
+  let reviewer_exited = ref false in
+  let executed = ref false in
+  let ordinary_failure = ref false in
+  let reviewer _request =
+    if !ordinary_failure
+    then failwith "ordinary reviewer failure"
+    else
+      Exn.protect
+        ~finally:(fun () -> reviewer_exited := true)
+        ~f:(fun () ->
+          Eio.Promise.resolve entered_u ();
+          Eio.Promise.await blocked)
+  in
+  let backend =
+    fake_backend (fun _plan ~stdin:_ ->
+      executed := true;
+      Ok { status = `Exited 0; stdout = ""; stderr = "" })
+  in
+  let config = config ~reviewer env backend in
+  let request = invocation (S.Request.command (S.Command.create "/bin/echo" [])) in
+  let original = Failure "cancel pending shell review" in
+  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+    Eio.Switch.run (fun sw ->
+      Eio.Fiber.fork ~sw (fun () ->
+        let outcome =
+          match
+            Eio.Cancel.sub (fun cancel ->
+              Eio.Promise.resolve cancellation_u cancel;
+              S.Executor.run config request)
+          with
+          | result -> `Returned result
+          | exception Eio.Cancel.Cancelled reason -> `Cancelled reason
+        in
+        Eio.Promise.resolve finished_u outcome);
+      Eio.Promise.await entered;
+      Eio.Cancel.cancel (Eio.Promise.await cancellation) original;
+      match Eio.Promise.await finished with
+      | `Cancelled reason -> assert (phys_equal reason original)
+      | `Returned _ -> failwith "cancelled reviewer returned an ordinary result"));
+  assert !reviewer_exited;
+  assert (not !executed);
+  ordinary_failure := true;
+  (match S.Executor.run config request with
+   | Error (Denied message) ->
+     assert (String.is_substring message ~substring:"ordinary reviewer failure")
+   | Ok _ | Error _ -> failwith "ordinary reviewer exception was not denied");
+  assert (not !executed)
+;;
+
 let%expect_test "stdin is bounded and included in approval identity" =
   Eio_main.run
   @@ fun env ->

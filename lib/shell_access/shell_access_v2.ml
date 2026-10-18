@@ -2908,6 +2908,10 @@ module Executor = struct
                     Approval.{ response = reviewer request; metadata = None }
                   | None, None -> assert false
                 with
+                | Eio.Cancel.Cancelled _ as exn ->
+                  Exn.raise_with_original_backtrace
+                    exn
+                    (Stdlib.Printexc.get_raw_backtrace ())
                 | exn ->
                   Approval.
                     { response = Deny ("reviewer raised: " ^ Exn.to_string exn)
