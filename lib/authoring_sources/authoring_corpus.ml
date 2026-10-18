@@ -2275,7 +2275,7 @@ module Coverage = struct
   let runtime_control_mappings =
     List.concat_map
       [ ( "moderator_v1"
-        , "60883042ef1f87c20cc4a40a8d661223998d3b7275b7221f2a4594cbe3a8b9aa"
+        , "0d8a24607b79cbebf7d8d1f04a55f97e4bce640bd5a59cfeca0e712cf8e991f3"
         , [ ( "module/Runtime"
             , "6a03d3ede904c05bd4e6e423ca255efaff8116367688886a061f782e020c3ef2" )
           ; ( "module_export/Runtime.emit"
@@ -2304,7 +2304,7 @@ module Coverage = struct
             , "883ed8b59789ef2950d08c978b439005ba5546d52d64908cf9bff26af355233d" )
           ] )
       ; ( "delegated_moderator_v1"
-        , "38177c8e806fd8bbc08b83a019fc8b7c21c37b0ff757e62c7718405f9a708f5b"
+        , "20c4d086321e1718dce841522c58f89ddf59d7f2b7104eb083a31d039a00920c"
         , [ ( "module/Runtime"
             , "a7f003fdab4a960c0fe55073944b63aebe21775ba44e9be5fdf0412d3833715e" )
           ; ( "module_export/Runtime.emit"
@@ -3532,7 +3532,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "0afc20f2866592fe16b34fd7b268470947223270a54756cea0ba0eeb341f7205" ]
+                   [ "f0272e80b9aaebd8ad0957a3311c7c4adb386974bb0ebde2ccc9f94a220eaf15" ]
                ; evidence =
                    [ "lib/chatml/chatml_builtin_spec.ml"
                    ; "lib/chatml/chatml_extension_surface.ml"

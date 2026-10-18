@@ -374,16 +374,15 @@ let child_preparation_id parent source =
   Agent_protocol.Id.Prompt_revision.of_string ("prv_captured_" ^ digest)
 ;;
 
-let with_captured_child
+let with_captured_source
       policy
       ?startup
       ?tool_contract
       parent
-      ~reference
       ~invocation
-      ~content_limits
       ~env
       ~checkpoint
+      ~capture
       ~f
   =
   let compilation_limits = compilation policy in
@@ -396,11 +395,10 @@ let with_captured_child
     ~f:(fun startup ->
       let checkpoint () = Startup.checkpoint startup in
       let open Result.Let_syntax in
-      let%bind revision, programs =
+      let%bind revision, programs, input_bytes =
         Startup.within startup ~map_error:compilation_error ~f:(fun () ->
-          let%bind source =
-            Captured_child_source.capture ~parent ~reference ~content_limits ~checkpoint
-          in
+          let%bind source = capture ~checkpoint in
+          let input_bytes = Captured_child_source.selected_source_bytes source in
           let%bind revision_id = child_preparation_id parent source in
           let%bind revision =
             Captured_child_source.resource_revision
@@ -441,14 +439,75 @@ let with_captured_child
             in
             (match selected, programs with
              | Chat_response.Retained_selection.Legacy _, None | Selected _, Some _ ->
-               Ok (revision, programs)
+               Ok (revision, programs, input_bytes)
              | Legacy _, Some _ | Selected _, None ->
                Error
                  (failure
                     "captured child role restoration changed its admitted selection")))
       in
-      f startup ~revision ~compilation_limits ~programs)
+      f startup ~revision ~compilation_limits ~programs ~input_bytes)
     ()
+;;
+
+let with_captured_child
+      policy
+      ?startup
+      ?tool_contract
+      parent
+      ~reference
+      ~invocation
+      ~content_limits
+      ~env
+      ~checkpoint
+      ~f
+  =
+  with_captured_source
+    policy
+    ?startup
+    ?tool_contract
+    parent
+    ~invocation
+    ~env
+    ~checkpoint
+    ~capture:(fun ~checkpoint ->
+      Captured_child_source.capture ~parent ~reference ~content_limits ~checkpoint)
+    ~f:(fun startup ~revision ~compilation_limits ~programs ~input_bytes:_ ->
+      f startup ~revision ~compilation_limits ~programs)
+;;
+
+let with_captured_selected_member
+      policy
+      ?startup
+      ?tool_contract
+      parent
+      ~member
+      ~invocation
+      ~content_limits
+      ~max_input_bytes
+      ~max_work_steps
+      ~env
+      ~checkpoint
+      ~on_acquire
+      ~f
+  =
+  with_captured_source
+    policy
+    ?startup
+    ?tool_contract
+    parent
+    ~invocation
+    ~env
+    ~checkpoint
+    ~capture:(fun ~checkpoint ->
+      Captured_child_source.capture_selected_member
+        ~parent
+        ~member
+        ~content_limits
+        ~max_input_bytes
+        ~max_work_steps
+        ~checkpoint
+        ~on_acquire)
+    ~f
 ;;
 
 let inspect_shell t ?startup revision ~env ~invocation ~checkpoint =

@@ -79,6 +79,17 @@ module Child : sig
     -> (t -> ('a, Agent_protocol.Error.t) result)
     -> ('a, Agent_protocol.Error.t) result
 
+  (** The same child-only kernel for an authenticated Model-selected member.
+      Exact immediate Child selection/Root/Target and physical borrowed scope
+      are rechecked before issuer construction; a Model path is not a Content
+      occurrence and cannot inherit the saved Tool registry by default. *)
+  val with_model_target
+    :  parent:t
+    -> target:Agent_session.Captured_agent_runner.Selected_model_target.t
+    -> prepared:Developer_live_resources.Child_prepared.t
+    -> (t -> ('a, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
+
   (** Checked current projection for constructing this child's exact provider
       descriptors and Host_invocation fingerprint. It refreshes the same
       source/Root/Live admission used by [run], including descendant narrowing;

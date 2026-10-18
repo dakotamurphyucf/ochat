@@ -18,6 +18,11 @@
  (action
   (with-stdout-to %{targets}
    (run %{exe:embed_contracts.exe}
+    lib/agent_protocol/model_spawn_request.ml %{dep:../agent_protocol/model_spawn_request.ml}
+    lib/chat_response/ctx.ml %{dep:../chat_response/ctx.ml}
+    lib/chat_response/driver.ml %{dep:../chat_response/driver.ml}
+    lib/chat_response/model_executor.ml %{dep:../chat_response/model_executor.ml}
+    lib/chat_response/model_completion_drain.ml %{dep:../chat_response/model_completion_drain.ml}
     lib/chatml/chatml_lexer.mll %{dep:../chatml/chatml_lexer.mll}
     lib/chatml/chatml_parser.mly %{dep:../chatml/chatml_parser.mly}
     lib/chatml/chatml_syntax_sites.ml %{dep:../chatml/chatml_syntax_sites.ml}

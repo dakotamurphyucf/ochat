@@ -52,6 +52,38 @@ module Budget : sig
     -> declaration:Agent_session.Prompt_revision.t
     -> caller:Agent_session.Prompt_revision.t
     -> (unit, Agent_protocol.Error.t) result
+
+  module Executable_cost : sig
+    type t
+
+    (** Actual nonnegative ChatMD authored root/dependency bytes and charged
+        outer selection/capture checkpoints observed by the bounded lower
+        operation. The budget validates and debits these under its own gate.
+        ChatML program/project acquisition retains its existing independent
+        max_total_input_bytes, project_work_steps and compiler ceilings; it is
+        neither guessed from a selected member nor charged a second time as
+        ChatMD bytes in this ledger. Captured document accounting is debited
+        separately by [create]/[admit_revisions]. *)
+    val create : input_bytes:int -> work_steps:int -> t Or_error.t
+  end
+
+  (** Use this SAME child ledger for one Model executable-member selection.
+      Serialize allowance snapshot, ChatMD source acquisition and debit so parallel
+      Model.spawn children cannot both spend it. [on_acquire] is called once
+      immediately before any native/network read or partially allocating
+      capture. A proven denial before it leaves the budget usable; a later
+      error/cancellation conservatively marks only this child budget uncertain
+      or retains the spent reservation. No Scope, gate or mutable allowance
+      escapes to provider inference, nested Agent callbacks or job joins.
+      [f] must return observed lower-source costs, never a caller guess. *)
+  val with_executable_source_read
+    :  t
+    -> f:
+         (max_input_bytes:int
+          -> max_work_steps:int
+          -> on_acquire:(unit -> unit)
+          -> ('a * Executable_cost.t, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
 end
 
 type source =

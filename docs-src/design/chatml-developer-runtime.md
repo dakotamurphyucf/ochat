@@ -207,7 +207,70 @@ An ordinary Agent.run tool can attach a saved child artifact only through the se
 
 The captured runner can lend the exact restored saved target to a trusted selected-child callback; a missing callback keeps the strict literal child path. A nested selected invocation records its live physical selected-borrow ancestor. Root admission compares the saved parent against its original registered invocation and the nested child against its distinct, durably dispatched invocation object and current child action. The child's action may shadow the parent's fiber key, so the descendant check uses the parent's shared terminal state only after proving the child's entered terminal and exact Root. Direct parent completion still requires its own action key. The shared lexical Job kernel resolves the selected capabilities at each check; a failed current-selection lookup denies the effect, and completion repeats the terminal check after any yielding lookup. This source/terminal proof does not construct child tools or grant a child capability by itself; the hosted child resource owner must separately authorize and install those effects.
 
-For an installed hosted child, the [private child runner](../../lib/agent_server/developer_child_agent_runner.mli) uses the restored saved target and the same Live workspace, source, actor and Root owner. It prepares the selected child's own native and managed bindings before exposing function schemas to the provider. The first native entry receives the child's admitted registry; a managed handler keeps its own binding while nested calls use only its declared dependency ceiling. Each effect refreshes source and Root admission after yields, and completion checks the physical terminal before durable publication. Provider tool results use the same disclosed canonical outcome envelope as other native dispatchers. Document and image content uses the parser occurrence's declaring source, while invocation content keeps its separate caller source. Authenticated nested Agent content selects each descendant's own source and parser Port under the same Root and aggregate content budget, then prepares that descendant's source-owned native and managed bindings before provider exposure. Synchronous content recursion may share the entering native borrow; a distinct physical native descendant is proved only when a tool callback actually enters one. A missing or revoked File member cannot be replaced with ancestor or captured content, while a recorded Captured member retains its original bytes. Immediate Model and moderator execution under these content children remains a separate joined scope.
+For an installed hosted child, the [private child runner](../../lib/agent_server/developer_child_agent_runner.mli) uses the restored saved target and the same Live workspace, source, actor and Root owner. It prepares the selected child's own native and managed bindings before exposing function schemas to the provider. The first native entry receives the child's admitted registry; a managed handler keeps its own binding while nested calls use only its declared dependency ceiling. Each effect refreshes source and Root admission after yields, and completion checks the physical terminal before durable publication. Provider tool results use the same disclosed canonical outcome envelope as other native dispatchers. Document and image content uses the parser occurrence's declaring source, while invocation content keeps its separate caller source. Authenticated nested Agent content selects each descendant's own source and parser Port under the same Root and aggregate content budget, then prepares that descendant's source-owned native and managed bindings before provider exposure. Synchronous content recursion may share the entering native borrow; a distinct physical native descendant is proved only when a tool callback actually enters one. A missing or revoked File member cannot be replaced with ancestor or captured content, while a recorded Captured member retains its original bytes. Immediate Model and moderator execution uses a joined scope inside that selected child callback.
+
+The selected `agent_prompt_v1` recipe shares the ordinary decoder, target overrides,
+context derivation and result envelope. Its local `prompt` string selects a bounded
+member relative to the authenticated declaring source; the string itself grants no
+read access. `source_mode` defaults to `file`, which checks the original live source
+lease. Explicit `captured` requires a local member in the retained immutable inventory.
+Neither mode falls back to the other, and a conversation executor without selected
+captured custody rejects that request before fetching. Remote executable selection
+is denied before network I/O; a document/image read permission does not grant it.
+The selected member receives a distinct Model target, with its exact parent and
+expiring source port, rather than a fabricated parser Agent occurrence.
+
+The child restores its own retained programs under the configured script policy and
+borrowed startup budget. It cannot substitute its parent's programs. Saved, content
+and Model descendants retain the same aggregate content budget: executable source
+acquisition and its observed byte/work debit run under one short gate, which closes
+before runtime initialization, provider work or nested execution. A proven denial
+before acquisition leaves the allowance usable. Failure after acquisition has begun
+makes the budget unusable when the actual cost is uncertain; catching that failure
+does not refund it to a sibling. Existing separate ChatML project and compiler
+limits continue to apply. Source/Root checks run again after yielding preparation,
+at inference attempt entry and immediately before application submission.
+
+Saved and Content children select their Config through the Driver preparation.
+A Model child arrives with its Config already applied by the Model recipe and its
+inference session detached. Its Driver preparation retains that selected Context
+without applying the overrides again. The shared preparation still preserves the
+parsed document, input, child directory and inherited guards.
+
+The Root admits each selected child's model configuration through a lexical
+child scope. It independently reads Config from the authenticated revision, derives the expected
+Context from the current authorized parent, and compares the complete target with
+the selected preparation. Execution uses the Context returned by the Root. The
+original dispatch guard remains installed and checks that exact child target;
+ordinary workers outside a child scope retain the original target check. Nested
+and concurrent children have separate scopes, which expire on exit. Saved and
+Content children preserve the inherited inference session; Model children detach
+it, matching the existing Model recipe. Source, native ancestry, actor and provider
+checks still apply after waits and before effects, including when a real native
+child shadows its parent's callback. A copied target or expired scope grants no
+access, and a failed direct check cannot fall back to descendant admission.
+
+Inference tracking prepares and commits each admission under one short Root
+mutation lock. Source admission waits for an active writer, then validates a fresh
+Root snapshot; an uncertain retained write still denies admission. A child keeps
+its source admission and Root witness from the same completed refresh. Final
+checks compare the exact owner and selection revision without yielding; a sibling
+tracking write may advance the effect revision, but cannot renew an old witness.
+Provider calls and source, registry or user callbacks run outside that lock.
+
+The selected moderator uses the existing entry-based Session_start, foreground
+stream and bounded completion drain. Each drain has its existing policy limit;
+there is no new combined lifetime event counter. Startup can leave a bounded queue
+remainder for a later safe point without waiting for jobs that need the foreground
+turn. Local Model jobs belong to a nested switch that remains inside the selected
+child's lifetime. Early termination cancels and joins them before the source scope
+expires, then audits worker outcomes so an intentional stop cannot hide an unrelated
+failure. These immediate jobs do not replace the durable developer scheduler, and
+saved source bytes never reconstruct an expired mutable moderator.
+The immediate runner rejects requests to start another turn or compact mutable
+session state, and reports paused or UI-dependent execution instead of claiming
+completion. An early foreground stop retains assistant text already accepted by
+the in-memory stream; this observation does not imply a durable conversation write.
 
 The shared [Driver streaming entry](../../lib/chat_response/driver.mli) accepts
 an already selected inference Context, identity-bearing history and allocator,

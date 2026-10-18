@@ -177,6 +177,41 @@ val with_captured_child
         -> ('a, Agent_protocol.Error.t) Result.t)
   -> ('a, Agent_protocol.Error.t) Result.t
 
+(** The Model-request counterpart of [with_captured_child]. The selected
+    portable member came from an authenticated Content_source port, not a
+    parser Agent occurrence. Require it in the parent's complete immutable
+    authored inventory, retain its actual captured Root and program/content
+    custody, then use the same headless role selection and restoration. No
+    current-file read, invented Agent_reference or runtime activation occurs.
+    The result passes observed retained source bytes to [f]. The enclosing
+    Prompt_child_source counts all charged preparation/publication checkpoints
+    through its bounded callback, including those inside [f]. [f] may
+    publish/verify immutable artifact
+    custody, but must not initialize native/managed resources, start a provider
+    or run a child while the upper aggregate budget gate is held. [f] and the
+    borrowed startup expire with this call. *)
+val with_captured_selected_member
+  :  t
+  -> ?startup:Chat_response.Startup_compilation.t
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
+  -> Prompt_revision.t
+  -> member:Source.Portable_path.t
+  -> invocation:Invocation.t
+  -> content_limits:Chatmd_prompt_content.Limits.t option
+  -> max_input_bytes:int
+  -> max_work_steps:int
+  -> env:Eio_unix.Stdenv.base
+  -> checkpoint:(unit -> unit)
+  -> on_acquire:(unit -> unit)
+  -> f:
+       (Chat_response.Startup_compilation.t
+        -> revision:Prompt_revision.t
+        -> compilation_limits:Chatml_compilation.limits
+        -> programs:Chatml_prompt_programs.Restored.t option
+        -> input_bytes:int
+        -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
 (** Compile the exact retained revision through [with_revision] and the same shell
     preparation used at activation, without tools/native setup or initialization.
     Original Parsed owns declarations; its retained graph supplies dependencies.

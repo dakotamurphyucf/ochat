@@ -478,6 +478,8 @@ let installed_agent_source_with_contents
 ;;
 
 let installed_agent_fixture_with_contents
+      ?run_selected_target
+      ?with_deferred_context
       ~deferred
       ~child_contents
       ~on_run
@@ -485,6 +487,7 @@ let installed_agent_fixture_with_contents
       ~sw
       ~data_root
       ~observed
+      ()
   =
   let module Revision = Agent_session.Prompt_revision in
   let module Runner = Agent_session.Captured_agent_runner in
@@ -597,6 +600,7 @@ let installed_agent_fixture_with_contents
       in
       let prepared =
         Runner.Deferred_developer.prepare
+          ?run_selected_target
           binding
           ~script_preparation:policy
           ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
@@ -618,7 +622,11 @@ let installed_agent_fixture_with_contents
               (fun selected ->
                  Runner.Claimed_developer.Selected.check selected |> ok;
                  on_run ();
-                 Ok (f ctx))
+                 Ok
+                   (match with_deferred_context with
+                    | None -> f ctx
+                    | Some with_deferred_context ->
+                      with_deferred_context selected (fun () -> f ctx)))
             |> ok)
         |> ok
       in
@@ -677,6 +685,7 @@ let installed_agent_fixture ~on_run ~env ~sw ~data_root ~observed =
     ~sw
     ~data_root
     ~observed
+    ()
 ;;
 
 let stage_registered_agent_tool ?(name = "child") jobs =
@@ -755,6 +764,7 @@ let with_registered_agent
           ~sw
           ~data_root:(Option.value_exn !data_root)
           ~observed
+          ()
       in
       fixture := Some value;
       value.selected)

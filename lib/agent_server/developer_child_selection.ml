@@ -5,6 +5,7 @@ module N = Agent_session.Native_tool_invocation
 module D = Agent_session.Developer_invocation_owner.Selected
 module Saved = Agent_session.Captured_agent_runner.Claimed_developer.Selected
 module Content = Agent_session.Captured_agent_runner.Selected_content_target
+module Model = Agent_session.Captured_agent_runner.Selected_model_target
 module Prepared = Developer_live_resources.Child_prepared
 module C = Chat_response.Tool_capability
 
@@ -21,6 +22,7 @@ type t =
 and target =
   | Saved of Saved.Target.t
   | Content of Content.t
+  | Model of Model.t
 
 type selection = t
 
@@ -49,13 +51,21 @@ module Admission = struct
       then (
         match t.selection.target with
         | Saved target -> Saved.Target.check_descendant_now target ~child:current
-        | Content target -> Content.check_descendant_now target ~child:current)
+        | Content target -> Content.check_descendant_now target ~child:current
+        | Model target -> Model.check_descendant_now target ~child:current)
       else (
         match t.selection.target with
         | Saved target -> Saved.Target.check_now target
-        | Content target -> Content.check_now target)
+        | Content target -> Content.check_now target
+        | Model target -> Model.check_now target)
     in
     Prepared.Admission.check_now t.refreshed
+  ;;
+
+  let checked_root_now t =
+    let open Result.Let_syntax in
+    let%bind () = check_now t in
+    Prepared.Admission.checked_root_now t.refreshed
   ;;
 end
 
@@ -67,16 +77,19 @@ let refresh_proof ~root ~target ~saved_ancestor ~prepared ~parent =
     match target with
     | Saved target -> Saved.Target.check target
     | Content target -> Content.check target
+    | Model target -> Model.check target
   in
   let check_target_now () =
     match target with
     | Saved target -> Saved.Target.check_now target
     | Content target -> Content.check_now target
+    | Model target -> Model.check_now target
   in
   let check_descendant_now () =
     match target with
     | Saved target -> Saved.Target.check_descendant_now target ~child:borrowed
     | Content target -> Content.check_descendant_now target ~child:borrowed
+    | Model target -> Model.check_descendant_now target ~child:borrowed
   in
   let check_saved_root () =
     if Saved.matches_borrowed saved borrowed
@@ -90,12 +103,14 @@ let refresh_proof ~root ~target ~saved_ancestor ~prepared ~parent =
   if phys_equal borrowed parent
   then (
     let%bind () = check_target () in
+    let%bind _ = O.current_after_mutations root in
     let%bind () = check_saved_root () in
     let%bind refreshed = Prepared.refresh prepared in
     let%bind () = check_target_now () in
     let%map () = Prepared.Admission.check_now refreshed in
     borrowed, refreshed, false)
   else (
+    let%bind _ = O.current_after_mutations root in
     let%bind () = check_descendant_now () in
     let%bind () = check_saved_root () in
     let%bind refreshed = Prepared.refresh_descendant prepared ~child:borrowed in
@@ -145,22 +160,34 @@ let create ~root ~target ~prepared ~parent =
   }
 ;;
 
-let create_content ~root ~parent ~target ~prepared ~borrowed =
+let create_descendant ~root ~parent ~target ~prepared ~borrowed =
   let open Result.Let_syntax in
   let%bind () =
-    if phys_equal root parent.root && Prepared.matches_content_target prepared target
+    if
+      phys_equal root parent.root
+      &&
+      match target with
+      | Content target -> Prepared.matches_content_target prepared target
+      | Model target -> Prepared.matches_model_target prepared target
+      | Saved _ -> false
     then Ok ()
-    else Error (P.Error.invalid_request "content child belongs to another Root or target")
+    else
+      Error (P.Error.invalid_request "selected child belongs to another Root or target")
   in
   let expected_parent =
     match parent.target with
     | Saved target -> Content.Saved target
     | Content target -> Content.Content target
+    | Model target -> Content.Model target
   in
   let%bind () =
-    if Content.matches_parent target expected_parent
+    if
+      match target with
+      | Content target -> Content.matches_parent target expected_parent
+      | Model target -> Model.matches_parent target expected_parent
+      | Saved _ -> false
     then Ok ()
-    else Error (P.Error.invalid_request "content child has a foreign immediate parent")
+    else Error (P.Error.invalid_request "selected child has a foreign immediate parent")
   in
   let%bind _, parent_refreshed, _ =
     refresh_proof
@@ -175,12 +202,12 @@ let create_content ~root ~parent ~target ~prepared ~borrowed =
   let%bind () =
     if phys_equal current borrowed
     then Ok ()
-    else Error (P.Error.invalid_request "content child lost its physical native borrow")
+    else Error (P.Error.invalid_request "selected child lost its physical native borrow")
   in
   let%bind _, refreshed, descendant =
     refresh_proof
       ~root
-      ~target:(Content target)
+      ~target
       ~saved_ancestor:parent.saved_ancestor
       ~prepared
       ~parent:borrowed
@@ -190,7 +217,7 @@ let create_content ~root ~parent ~target ~prepared ~borrowed =
     then
       Error
         (P.Error.invalid_request
-           "content child begins outside its selected native borrow")
+           "selected child begins outside its selected native borrow")
     else Prepared.Admission.check_now refreshed
   in
   let capabilities = Prepared.selected_native prepared in
@@ -200,7 +227,7 @@ let create_content ~root ~parent ~target ~prepared ~borrowed =
     let%bind _, refreshed, _ =
       refresh_proof
         ~root
-        ~target:(Content target)
+        ~target
         ~saved_ancestor:parent.saved_ancestor
         ~prepared
         ~parent:borrowed
@@ -224,13 +251,21 @@ let create_content ~root ~parent ~target ~prepared ~borrowed =
       ~current_child
   in
   { root
-  ; target = Content target
+  ; target
   ; saved_ancestor = parent.saved_ancestor
   ; prepared
   ; parent = borrowed
   ; issuer
   ; capabilities
   }
+;;
+
+let create_content ~root ~parent ~target ~prepared ~borrowed =
+  create_descendant ~root ~parent ~target:(Content target) ~prepared ~borrowed
+;;
+
+let create_model ~root ~parent ~target ~prepared ~borrowed =
+  create_descendant ~root ~parent ~target:(Model target) ~prepared ~borrowed
 ;;
 
 let issuer t = t.issuer

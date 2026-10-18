@@ -22,6 +22,8 @@ let run_entries
       ~now_ms
       ~history
       ~available_tools
+      ?on_runtime_request
+      ()
   : (t, string) result
   =
   let max_events = moderator.runtime_policy.budget.max_internal_event_drain in
@@ -102,6 +104,8 @@ let run_entries
                 List.concat_map drained.outcomes ~f:(fun outcome ->
                   outcome.runtime_requests)
               in
+              Option.iter on_runtime_request ~f:(fun on_runtime_request ->
+                List.iter new_requests ~f:on_runtime_request);
               let runtime_requests_rev =
                 List.rev_append new_requests runtime_requests_rev
               in

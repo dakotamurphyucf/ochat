@@ -139,6 +139,7 @@ let of_env
 exception Inference_admission_rejected
 
 let with_inference t ~inference_context = { t with inference_context }
+let with_agent_prompt_v1_recipe t recipe = { t with agent_prompt_v1_recipe = Some recipe }
 
 let with_submission_guard t guard =
   { t with

@@ -17,13 +17,16 @@ val admit_literal
 (** Selected child preparation may admit inert text/config/reasoning and
     Builtin (except the driver-owned subagent), Read_file, Custom, Shell, MCP
     and Extension Tool declarations, plus non-moderator Shell_script,
-    Tool_script Extension_script and Shell_runtime metadata. Generic Script is
-    the converted moderator surface and rejects here.
+    Tool_script Extension_script and Shell_runtime metadata. The parser-owned
+    legacy Script constructor is admitted only for a selected child. Its
+    ID, language, kind, path and source text consume the finite scan allowance;
+    retained script compilation and moderator installation validate and run it
+    later.
     Actual child resources remain unavailable until the owning host proves
     and installs every selected implementation. Nested Agent, Persistent and
-    Inherited Tool declarations, authored call/response, moderator execution and
-    authoring effects reject before host
-    activation. Image/document Basic items pass only a finite structural
+    Inherited Tool declarations, authored call/response, standalone moderator
+    runtime metadata, unsupported script roles and authoring effects reject
+    before host activation. Image/document Basic items pass only a finite structural
     preflight; the selected source projector must subsequently authenticate
     each parser-owned occurrence and admit any read before Driver entry. This
     preflight grants no local or remote source access. Authored Agent content

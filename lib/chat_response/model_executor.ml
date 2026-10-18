@@ -20,6 +20,32 @@ type exec_context =
       -> (string * Eio.Fs.dir_ty Eio.Path.t option, string) result
   }
 
+module Selected_source = struct
+  type t =
+    { with_selected :
+        Model_spawn_request.t
+        -> f:
+             (config:CM.config
+              -> run:
+                   (ctx:Eio_unix.Stdenv.base Ctx.t
+                    -> input:CM.content_item list
+                    -> history_compaction:bool
+                    -> session_id:string
+                    -> (string, string) result)
+              -> (Moderation.Capabilities.model_call_result, string) result)
+        -> (Moderation.Capabilities.model_call_result, string) result
+    }
+
+  let create ~with_selected = { with_selected }
+end
+
+type execution =
+  | Ordinary of exec_context
+  | Selected of
+      { ctx : Eio_unix.Stdenv.base Ctx.t
+      ; source : Selected_source.t
+      }
+
 type job_terminal =
   | Succeeded of Jsonaf.t
   | Failed of string
@@ -48,7 +74,7 @@ type job =
 type t =
   { sw : Eio.Switch.t
   ; domain_id : int
-  ; exec_context : exec_context
+  ; execution : execution
   ; jobs : job String.Table.t
   ; next_job_id : int ref
   ; max_spawned_jobs : int
@@ -73,10 +99,10 @@ type job_state =
 
 let agent_prompt_v1_name = Model_spawn_request.recipe_name
 
-let create ~sw ~exec_context ?(max_spawned_jobs = 100) () =
+let create_with_execution ~sw ~execution ~max_spawned_jobs =
   { sw
   ; domain_id = (Stdlib.Domain.self () :> int)
-  ; exec_context
+  ; execution
   ; jobs = String.Table.create ()
   ; next_job_id = ref 1
   ; max_spawned_jobs
@@ -84,6 +110,14 @@ let create ~sw ~exec_context ?(max_spawned_jobs = 100) () =
   ; session_wakeups = String.Table.create ()
   ; changed = Eio.Condition.create ()
   }
+;;
+
+let create ~sw ~exec_context ?(max_spawned_jobs = 100) () =
+  create_with_execution ~sw ~execution:(Ordinary exec_context) ~max_spawned_jobs
+;;
+
+let create_selected ~sw ~ctx ~source ?(max_spawned_jobs = 100) () =
+  create_with_execution ~sw ~execution:(Selected { ctx; source }) ~max_spawned_jobs
 ;;
 
 let notify_session_wakeup (t : t) ~(session_id : string) : unit =
@@ -202,12 +236,14 @@ let agent_prompt_result_json
     ]
 ;;
 
-let call_agent_prompt_v1_strict
-      (exec_context : exec_context)
+let run_agent_prompt_v1_body
+      ~(ctx : Eio_unix.Stdenv.base Ctx.t)
       ~request
       ?inference_context
       ?before_inference_attempt
       ~capture_recipe_target
+      ~(config : CM.config)
+      ~run
       ()
   =
   let open Result.Let_syntax in
@@ -217,29 +253,20 @@ let call_agent_prompt_v1_strict
   let history_compaction_opt = Model_spawn_request.history_compaction request in
   let nested_session_id_opt = Model_spawn_request.nested_prompt_id request in
   let nested_session_id = Option.value nested_session_id_opt ~default:prompt in
-  let%bind prompt_xml, prompt_dir =
-    exec_context.fetch_prompt ~ctx:exec_context.ctx ~prompt ~is_local
-  in
   let ctx =
     match inference_context with
-    | None -> exec_context.ctx
-    | Some inference_context -> Ctx.with_inference exec_context.ctx ~inference_context
+    | None -> ctx
+    | Some inference_context -> Ctx.with_inference ctx ~inference_context
   in
   let ctx =
     match before_inference_attempt with
     | None -> ctx
     | Some before_attempt -> Ctx.with_inference_attempt_guard ctx ~before_attempt
   in
-  let elements =
-    CM.parse_chat_inputs
-      ~source:prompt
-      ~dir:(Option.value prompt_dir ~default:(Ctx.dir ctx))
-      prompt_xml
-  in
   let%bind target =
     Inference_config.apply_overrides
       (Inference_runtime.Context.target ctx.inference_context)
-      (Config.of_elements elements)
+      config
       ~limits:Transcript.Admission.default
     |> Result.map_error ~f:(fun error ->
       Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
@@ -262,22 +289,120 @@ let call_agent_prompt_v1_strict
     }
   in
   let history_compaction = Option.value history_compaction_opt ~default:false in
-  let final_text =
-    exec_context.run_agent
-      ~history_compaction
-      ?prompt_dir
-      ~session_id:nested_session_id
+  let%map final_text =
+    run
       ~ctx
-      prompt_xml
-      [ CM.Basic basic_item ]
+      ~input:[ CM.Basic basic_item ]
+      ~history_compaction
+      ~session_id:nested_session_id
   in
-  Ok
-    (Moderation.Capabilities.Model_ok
-       (agent_prompt_result_json
-          ~prompt
-          ~is_local
-          ~session_id:nested_session_id
-          ~final_text))
+  Moderation.Capabilities.Model_ok
+    (agent_prompt_result_json ~prompt ~is_local ~session_id:nested_session_id ~final_text)
+;;
+
+let call_agent_prompt_v1_strict
+      (exec_context : exec_context)
+      ~request
+      ?inference_context
+      ?before_inference_attempt
+      ~capture_recipe_target
+      ()
+  =
+  match Model_spawn_request.source_mode request with
+  | Model_spawn_request.Source_mode.Captured ->
+    Error "agent_prompt_v1: captured source requires selected source custody"
+  | Model_spawn_request.Source_mode.File ->
+    let open Result.Let_syntax in
+    let prompt = Model_spawn_request.prompt request in
+    let%bind prompt_xml, prompt_dir =
+      exec_context.fetch_prompt
+        ~ctx:exec_context.ctx
+        ~prompt
+        ~is_local:(Model_spawn_request.is_local request)
+    in
+    let elements =
+      CM.parse_chat_inputs
+        ~source:prompt
+        ~dir:(Option.value prompt_dir ~default:(Ctx.dir exec_context.ctx))
+        prompt_xml
+    in
+    run_agent_prompt_v1_body
+      ~ctx:exec_context.ctx
+      ~request
+      ?inference_context
+      ?before_inference_attempt
+      ~capture_recipe_target
+      ~config:(Config.of_elements elements)
+      ~run:(fun ~ctx ~input ~history_compaction ~session_id ->
+        Ok
+          (exec_context.run_agent
+             ~history_compaction
+             ?prompt_dir
+             ~session_id
+             ~ctx
+             prompt_xml
+             input))
+      ()
+;;
+
+let spawn_job (t : t) ~session_id ~call ~payload =
+  if Hashtbl.length t.jobs >= t.max_spawned_jobs
+  then Error "Model.spawn: exceeded maximum spawned job limit."
+  else (
+    let job_id =
+      let id = !(t.next_job_id) in
+      t.next_job_id := id + 1;
+      Printf.sprintf "model-job-%d" id
+    in
+    let job =
+      { session_id
+      ; recipe_name = agent_prompt_v1_name
+      ; payload
+      ; phase = Pending
+      ; delivery = Undelivered
+      ; worker = None
+      }
+    in
+    (* The immediate check and fork have no intervening yield. A refused
+       switch cannot leave a recorded job with no executing worker. *)
+    Eio.Switch.check t.sw;
+    Hashtbl.set t.jobs ~key:job_id ~data:job;
+    let worker () =
+      let terminal_result = ref None in
+      match
+        let terminal =
+          match call ~payload with
+          | Ok (Moderation.Capabilities.Model_ok json) -> Succeeded json
+          | Ok (Moderation.Capabilities.Model_refused msg)
+          | Ok (Moderation.Capabilities.Model_error msg)
+          | Error msg -> Failed msg
+        in
+        terminal_result := Some terminal;
+        job.phase <- Result_ready terminal;
+        ignore (deliver_if_possible t ~job_id job ~terminal : (unit, string) result);
+        Eio.Cancel.protect (fun () ->
+          job.phase <- Completed terminal;
+          Eio.Condition.broadcast t.changed)
+      with
+      | () -> ()
+      | exception exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        Eio.Cancel.protect (fun () ->
+          job.phase <- Escaped (!terminal_result, exn, backtrace);
+          Eio.Condition.broadcast t.changed);
+        Exn.raise_with_original_backtrace exn backtrace
+    in
+    (match
+       Execution_gate.without_context (fun () -> Eio.Fiber.fork_promise ~sw:t.sw worker)
+     with
+     | promise ->
+       job.worker <- Some promise;
+       Eio.Condition.broadcast t.changed
+     | exception exn ->
+       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+       Hashtbl.remove t.jobs job_id;
+       Exn.raise_with_original_backtrace exn backtrace);
+    Ok job_id)
 ;;
 
 let recipe_agent_prompt_v1
@@ -289,87 +414,65 @@ let recipe_agent_prompt_v1
       ()
   : Moderation.Capabilities.model_recipe
   =
-  let call ~payload =
-    let open Result.Let_syntax in
-    let%bind request = Model_spawn_request.decode payload in
-    try
-      match
-        call_agent_prompt_v1_strict
-          t.exec_context
-          ~request
-          ?inference_context
-          ?before_inference_attempt
-          ~capture_recipe_target
-          ()
+  let initial_ctx =
+    match t.execution with
+    | Ordinary exec_context -> exec_context.ctx
+    | Selected { ctx; source = _ } -> ctx
+  in
+  let rec recipe_for_ctx ~rebound current_ctx =
+    let call ~payload =
+      let open Result.Let_syntax in
+      let%bind request = Model_spawn_request.decode payload in
+      let inference_context = if rebound then None else inference_context in
+      let before_inference_attempt = if rebound then None else before_inference_attempt in
+      let run () =
+        match t.execution with
+        | Ordinary exec_context ->
+          call_agent_prompt_v1_strict
+            exec_context
+            ~request
+            ?inference_context
+            ?before_inference_attempt
+            ~capture_recipe_target
+            ()
+        | Selected { ctx = _; source } ->
+          source.with_selected request ~f:(fun ~config ~run ->
+            run_agent_prompt_v1_body
+              ~ctx:current_ctx
+              ~request
+              ?inference_context
+              ?before_inference_attempt
+              ~capture_recipe_target
+              ~config
+              ~run:(fun ~ctx ~input ~history_compaction ~session_id ->
+                let recipe = recipe_for_ctx ~rebound:true ctx in
+                run
+                  ~ctx:(Ctx.with_agent_prompt_v1_recipe ctx recipe)
+                  ~input
+                  ~history_compaction
+                  ~session_id)
+              ())
+      in
+      try
+        match run () with
+        | Ok r -> Ok r
+        | Error msg -> Ok (Moderation.Capabilities.Model_error msg)
       with
-      | Ok r -> Ok r
-      | Error msg -> Ok (Moderation.Capabilities.Model_error msg)
-    with
-    | Ctx.Inference_admission_rejected ->
-      Ok (Moderation.Capabilities.Model_error "model inference admission was revoked")
-    | Eio.Cancel.Cancelled _ as exn -> raise exn
-    | exn -> Ok (Moderation.Capabilities.Model_error (Exn.to_string exn))
+      | Ctx.Inference_admission_rejected ->
+        Ok (Moderation.Capabilities.Model_error "model inference admission was revoked")
+      | Eio.Cancel.Cancelled _ as exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        Exn.raise_with_original_backtrace exn backtrace
+      | exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        (match t.execution with
+         | Selected _ -> Exn.raise_with_original_backtrace exn backtrace
+         | Ordinary _ -> Ok (Moderation.Capabilities.Model_error (Exn.to_string exn)))
+    in
+    let spawn ~payload = spawn_job t ~session_id ~call ~payload in
+    { Moderation.Capabilities.call; spawn }
   in
-  let spawn ~payload =
-    if Hashtbl.length t.jobs >= t.max_spawned_jobs
-    then Error "Model.spawn: exceeded maximum spawned job limit."
-    else (
-      let job_id =
-        let id = !(t.next_job_id) in
-        t.next_job_id := id + 1;
-        Printf.sprintf "model-job-%d" id
-      in
-      let job =
-        { session_id
-        ; recipe_name = agent_prompt_v1_name
-        ; payload
-        ; phase = Pending
-        ; delivery = Undelivered
-        ; worker = None
-        }
-      in
-      (* The immediate check and fork have no intervening yield. A refused
-         switch cannot leave a recorded job with no executing worker. *)
-      Eio.Switch.check t.sw;
-      Hashtbl.set t.jobs ~key:job_id ~data:job;
-      let worker () =
-        let terminal_result = ref None in
-        match
-          let terminal =
-            match call ~payload with
-            | Ok (Moderation.Capabilities.Model_ok json) -> Succeeded json
-            | Ok (Moderation.Capabilities.Model_refused msg)
-            | Ok (Moderation.Capabilities.Model_error msg)
-            | Error msg -> Failed msg
-          in
-          terminal_result := Some terminal;
-          job.phase <- Result_ready terminal;
-          ignore (deliver_if_possible t ~job_id job ~terminal : (unit, string) result);
-          Eio.Cancel.protect (fun () ->
-            job.phase <- Completed terminal;
-            Eio.Condition.broadcast t.changed)
-        with
-        | () -> ()
-        | exception exn ->
-          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-          Eio.Cancel.protect (fun () ->
-            job.phase <- Escaped (!terminal_result, exn, backtrace);
-            Eio.Condition.broadcast t.changed);
-          Exn.raise_with_original_backtrace exn backtrace
-      in
-      (match
-         Execution_gate.without_context (fun () -> Eio.Fiber.fork_promise ~sw:t.sw worker)
-       with
-       | promise ->
-         job.worker <- Some promise;
-         Eio.Condition.broadcast t.changed
-       | exception exn ->
-         let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-         Hashtbl.remove t.jobs job_id;
-         Exn.raise_with_original_backtrace exn backtrace);
-      Ok job_id)
-  in
-  { Moderation.Capabilities.call; spawn }
+  recipe_for_ctx ~rebound:false initial_ctx
 ;;
 
 let await_job (t : t) ~(job_id : string) : (unit, string) result =
@@ -381,6 +484,46 @@ let await_job (t : t) ~(job_id : string) : (unit, string) result =
      | Some worker ->
        (try Ok (Eio.Promise.await_exn worker) with
         | exn -> Error (Exn.to_string exn)))
+;;
+
+let audit_joined_session (t : t) ~(session_id : string) ~(allowed_cancelled_reason : exn)
+  : (unit, string) result
+  =
+  if not (Int.equal t.domain_id (Stdlib.Domain.self () :> int))
+  then invalid_arg "Model_executor.audit_joined_session requires its owning domain";
+  let jobs =
+    Hashtbl.to_alist t.jobs
+    |> List.filter ~f:(fun (_, job) -> String.equal job.session_id session_id)
+  in
+  let unexpected =
+    List.find_map jobs ~f:(fun (_, job) ->
+      match job.phase with
+      | Escaped (_, Eio.Cancel.Cancelled reason, _)
+        when phys_equal reason allowed_cancelled_reason -> None
+      | Escaped (_, exn, backtrace) -> Some (exn, backtrace)
+      | Pending | Result_ready _ | Completed _ -> None)
+  in
+  match unexpected with
+  | Some (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+  | None ->
+    List.fold jobs ~init:(Ok ()) ~f:(fun result (job_id, job) ->
+      let open Result.Let_syntax in
+      let%bind () = result in
+      match job.phase, job.worker with
+      | Pending, _ | Result_ready _, _ ->
+        Error (Printf.sprintf "Model job %s is not terminal after switch join." job_id)
+      | (Completed _ | Escaped _), None ->
+        Error (Printf.sprintf "Model job %s has no worker after switch join." job_id)
+      | Completed _, Some worker ->
+        (match Eio.Promise.peek worker with
+         | Some (Ok ()) -> Ok ()
+         | None | Some (Error _) ->
+           Error (Printf.sprintf "Model job %s has an inconsistent worker." job_id))
+      | Escaped (_, escaped, _), Some worker ->
+        (match Eio.Promise.peek worker with
+         | Some (Error worker_error) when phys_equal escaped worker_error -> Ok ()
+         | None | Some (Ok () | Error _) ->
+           Error (Printf.sprintf "Model job %s has an inconsistent worker." job_id)))
 ;;
 
 let session_job_count (t : t) ~(session_id : string) =

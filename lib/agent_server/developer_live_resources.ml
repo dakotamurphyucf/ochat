@@ -13,6 +13,7 @@ module Root = Developer_root_owner
 module Saved = Agent_session.Captured_agent_runner.Claimed_developer.Selected
 module Target = Saved.Target
 module Content_target = Agent_session.Captured_agent_runner.Selected_content_target
+module Model_target = Agent_session.Captured_agent_runner.Selected_model_target
 module Source_binding = Agent_session.Captured_agent_runner.Source_binding
 
 module Owner = struct
@@ -719,6 +720,7 @@ let check_source_bound_now live ~root =
 type child_target =
   | Saved of Target.t
   | Content of Content_target.t
+  | Model of Model_target.t
 
 type child_prepared =
   { live : live
@@ -753,31 +755,40 @@ module Child_prepared = struct
   let matches_target t target =
     match t.target with
     | Saved actual -> phys_equal actual target
-    | Content _ -> false
+    | Content _ | Model _ -> false
   ;;
 
   let matches_content_target t target =
     match t.target with
     | Content actual -> phys_equal actual target
-    | Saved _ -> false
+    | Saved _ | Model _ -> false
+  ;;
+
+  let matches_model_target t target =
+    match t.target with
+    | Model actual -> phys_equal actual target
+    | Saved _ | Content _ -> false
   ;;
 
   let check_target t =
     match t.target with
     | Saved target -> Target.check target
     | Content target -> Content_target.check target
+    | Model target -> Model_target.check target
   ;;
 
   let check_target_now t =
     match t.target with
     | Saved target -> Target.check_now target
     | Content target -> Content_target.check_now target
+    | Model target -> Model_target.check_now target
   ;;
 
   let check_target_descendant_now t ~child =
     match t.target with
     | Saved target -> Target.check_descendant_now target ~child
     | Content target -> Content_target.check_descendant_now target ~child
+    | Model target -> Model_target.check_descendant_now target ~child
   ;;
 
   let revision t = t.revision
@@ -820,11 +831,12 @@ module Child_prepared = struct
         Root.Model_inference.check_saved_agent_source
           t.root
           ~selected:(Target.saved t.saved_ancestor)
-      else
+      else (
+        let%bind _ = Root.current_after_mutations t.root in
         Root.Model_inference.check_saved_agent_source_descendant_now
           t.root
           ~selected:(Target.saved t.saved_ancestor)
-          ~child:borrowed
+          ~child:borrowed)
     in
     check_source_full t
   ;;
@@ -832,6 +844,7 @@ module Child_prepared = struct
   let check_descendant_full t ~child =
     let open Result.Let_syntax in
     let%bind () = check_source_full t in
+    let%bind _ = Root.current_after_mutations t.root in
     let%bind () = check_target_descendant_now t ~child in
     Root.Model_inference.check_saved_agent_source_descendant_now
       t.root
@@ -856,8 +869,9 @@ module Child_prepared = struct
   let refresh_with t ~mode ~check_full =
     let open Result.Let_syntax in
     let%bind () = check_full () in
-    let%bind witness = Root.current t.root in
+    let%bind _ = Root.current_after_mutations t.root in
     let%bind () = check_full () in
+    let%bind witness = Root.current_after_mutations t.root in
     let admission : Admission_data.t = { prepared = t; witness; mode } in
     let%map () = check_admission_now admission in
     admission
@@ -876,6 +890,12 @@ module Child_prepared = struct
     type t = Admission_data.t
 
     let check_now = check_admission_now
+
+    let checked_root_now t =
+      let open Result.Let_syntax in
+      let%map () = check_now t in
+      t.witness
+    ;;
   end
 
   let content_source t =
@@ -890,6 +910,7 @@ module Child_prepared = struct
       match t.target with
       | Saved target -> Source_binding.selected_content_source source ~target
       | Content target -> Source_binding.selected_descendant_content_source source ~target
+      | Model target -> Source_binding.selected_model_content_source source ~target
     in
     let%bind current = refresh t in
     let%map () = Admission.check_now current in
@@ -906,6 +927,64 @@ module Child_prepared = struct
     let%bind after = refresh t in
     let%map () = Admission.check_now after in
     result
+  ;;
+
+  let with_selected_model_member t ~budget ~side ~reference ~mode ~checkpoint ~f =
+    let open Result.Let_syntax in
+    let%bind binding =
+      t.live.source_binding
+      |> Result.of_option ~error:(invalid "selected Model has no original source binding")
+    in
+    let%bind source = content_source t in
+    let%bind member =
+      Source_binding.Content_source.select_local_member
+        source
+        ~side
+        ~reference
+        ~mode
+        ~checkpoint
+    in
+    let%bind script_preparation =
+      t.live.host.script_preparation
+      |> Result.of_option
+           ~error:(invalid "selected Model script preparation is unavailable")
+    in
+    let%bind selected =
+      Developer_child_content_projection.Budget.with_executable_source_read
+        budget
+        ~f:(fun ~max_input_bytes ~max_work_steps ~on_acquire ->
+          let open Result.Let_syntax in
+          let%bind admission = refresh t in
+          let%bind () = Admission.check_now admission in
+          let%bind selected =
+            Source_binding.select_model_member
+              binding
+              ~source
+              ~member
+              ~script_preparation
+              ~env:t.live.host.env
+              ~max_input_bytes
+              ~max_work_steps
+              ~checkpoint
+              ~on_acquire
+          in
+          let%bind after = refresh t in
+          let%bind () = Admission.check_now after in
+          let%bind cost =
+            Developer_child_content_projection.Budget.Executable_cost.create
+              ~input_bytes:(Source_binding.Selected_model_source.input_bytes selected)
+              ~work_steps:(Source_binding.Selected_model_source.work_steps selected)
+            |> Result.map_error ~f:(fun _ ->
+              invalid "selected Model source reported invalid cost")
+          in
+          Ok (selected, cost))
+    in
+    Source_binding.Content_ports.with_selected_model_target
+      t.content_ports
+      ~source
+      ~member
+      ~selected
+      ~f
   ;;
 end
 
@@ -927,16 +1006,19 @@ let with_child
     match target with
     | Saved target -> Target.check target
     | Content target -> Content_target.check target
+    | Model target -> Model_target.check target
   in
   let check_target_now () =
     match target with
     | Saved target -> Target.check_now target
     | Content target -> Content_target.check_now target
+    | Model target -> Model_target.check_now target
   in
   let revision =
     match target with
     | Saved target -> Target.revision target
     | Content target -> Content_target.revision target
+    | Model target -> Model_target.revision target
   in
   let check_full () =
     let%bind () = check_source_bound_now live ~root in
@@ -946,11 +1028,12 @@ let with_child
       let%bind borrowed = Agent_session.Native_tool_invocation.borrow_selected () in
       if Saved.matches_borrowed saved borrowed
       then Root.Model_inference.check_saved_agent_source root ~selected:saved
-      else
+      else (
+        let%bind _ = Root.current_after_mutations root in
         Root.Model_inference.check_saved_agent_source_descendant_now
           root
           ~selected:saved
-          ~child:borrowed
+          ~child:borrowed)
     in
     check_current live
   in
@@ -1010,7 +1093,7 @@ let with_child
       let check_preparation_now () =
         let check () =
           let%bind () = check_full () in
-          let%bind witness = Root.current root in
+          let%bind witness = Root.current_after_mutations root in
           let%bind () = check_pair_now live in
           let%bind () =
             if Operator_authorization.is_current live.original_actor
@@ -1078,6 +1161,7 @@ let with_child
           match target with
           | Saved target -> Content_target.Saved target
           | Content target -> Content_target.Content target
+          | Model target -> Content_target.Model target
         in
         let%bind content_ports =
           Source_binding.bind_selected_child
@@ -1166,6 +1250,7 @@ let with_selected_content_child
     match parent.target with
     | Saved target -> Content_target.Saved target
     | Content target -> Content_target.Content target
+    | Model target -> Content_target.Model target
   in
   let%bind () =
     if Content_target.matches_parent target expected_parent
@@ -1186,6 +1271,51 @@ let with_selected_content_child
     ~programs
     ~input
     ~f
+;;
+
+let with_selected_model_child ~parent ~target ~startup ~input ~f =
+  let open Result.Let_syntax in
+  let expected_parent =
+    match parent.target with
+    | Saved target -> Content_target.Saved target
+    | Content target -> Content_target.Content target
+    | Model target -> Content_target.Model target
+  in
+  let%bind () =
+    if Model_target.matches_parent target expected_parent
+    then Ok ()
+    else Error (invalid "Model member belongs to another immediate child")
+  in
+  let%bind admission = Child_prepared.refresh parent in
+  let%bind () = Child_prepared.Admission.check_now admission in
+  let%bind () = Model_target.check target in
+  let%bind policy =
+    parent.live.host.script_preparation
+    |> Result.of_option ~error:(invalid "selected Model has no script preparation policy")
+  in
+  Scripts.with_revision
+    (Some policy)
+    ~startup
+    ~tool_contract:(Definition.tool_contract parent.live.definition)
+    (Model_target.revision target)
+    ~env:parent.live.host.env
+    ~invocation:Scripts.Invocation.Headless
+    ~checkpoint:(fun () -> Chat_response.Startup_compilation.checkpoint startup)
+    ~f:(fun startup ~compilation_limits ~programs ->
+      let%bind admission = Child_prepared.refresh parent in
+      let%bind () = Child_prepared.Admission.check_now admission in
+      let%bind () = Model_target.check target in
+      with_child
+        parent.live
+        ~root:parent.root
+        ~target:(Model target)
+        ~saved_ancestor:parent.saved_ancestor
+        ~daemon_sw:parent.switch
+        ~startup
+        ~compilation_limits
+        ~programs
+        ~input
+        ~f)
 ;;
 
 let bind_agent_sources

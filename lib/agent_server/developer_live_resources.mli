@@ -137,9 +137,10 @@ val bind_agent_sources
   -> (unit, P.Error.t) result
 
 module Child_prepared : sig
-  (** One joined child preparation. Its private target is a closed [Saved] or
-      [Content] case; a Content case retains its immediate physical parent and
-      the original saved ancestor. No revision equality can change the case. *)
+  (** One joined child preparation. Its private target is a closed [Saved],
+      [Content] or [Model] case; descendants retain their immediate physical
+      parent and the original saved ancestor. No revision equality can change
+      the case. *)
   type t
 
   module Admission : sig
@@ -155,6 +156,13 @@ module Child_prepared : sig
         pass before a revision changes, but each new effect attempt refreshes
         after its own waits and checks immediately before effect entry. *)
     val check_now : t -> (unit, P.Error.t) result
+
+    (** The SAME Root Current retained by this immutable attempt admission,
+        returned only after [check_now] succeeds. This is a nonyielding private
+        projection for the selected native executor's final comparison; it
+        neither mints a new witness nor rebases one after a sibling mutation.
+        Any subsequent yield requires a whole new [refresh]. *)
+    val checked_root_now : t -> (Developer_root_owner.Current.t, P.Error.t) result
   end
 
   (** Comparison only: this is the exact saved-Agent preparation lent by
@@ -170,6 +178,13 @@ module Child_prepared : sig
   val matches_content_target
     :  t
     -> Agent_session.Captured_agent_runner.Selected_content_target.t
+    -> bool
+
+  (** Comparison only; a Model member is a distinct selected child, not a
+      parser Agent occurrence or a cast of the saved Tool target. *)
+  val matches_model_target
+    :  t
+    -> Agent_session.Captured_agent_runner.Selected_model_target.t
     -> bool
 
   val revision : t -> Agent_session.Prompt_revision.t
@@ -188,8 +203,8 @@ module Child_prepared : sig
   val content_limits : t -> Chatmd_prompt_content.Limits.t option
 
   (** A selected callback-local source-read port for this preparation's exact
-      Saved or Content target, without a retained Scope. A Content preparation
-      never borrows through its saved ancestor's declaring parser. Every
+      Saved, Content or Model target, without a retained Scope. A Content or
+      Model preparation never borrows through its saved ancestor's declaring parser. Every
       dynamic operation opens and closes its own original-source Scope;
       captured/literal conversion needs no live source. The caller also passes
       [refresh]/[Admission.check_now] as the projector's Root/currentness check
@@ -215,6 +230,28 @@ module Child_prepared : sig
     -> ctx:Eio_unix.Stdenv.base Chat_response.Ctx.t
     -> (string, P.Error.t) result
 
+  (** Admit a local Model member under this exact active child and ONE shared
+      child Budget. The explicit File/Captured choice is fixed before source
+      acquisition; File uses the original retained lease and Captured the
+      immutable selected inventory, with no fallback. The Budget's short gate
+      covers bounded source acquisition and actual lower byte/work debit only.
+      It closes before [f], which receives a lexical Model target under this
+      child's physical declaring/caller Port and selected native borrow. The
+      target expires when [f] returns, including exceptions/cancellation. A
+      proven pre-acquisition denial preserves the Budget; uncertain partial
+      acquisition conservatively terminates that child Budget. *)
+  val with_selected_model_member
+    :  t
+    -> budget:Developer_child_content_projection.Budget.t
+    -> side:Agent_session.Captured_agent_runner.Source_binding.Content_source.side
+    -> reference:string
+    -> mode:Agent_protocol.Model_spawn_request.Source_mode.t
+    -> checkpoint:(unit -> unit)
+    -> f:
+         (Agent_session.Captured_agent_runner.Selected_model_target.t
+          -> ('a, P.Error.t) result)
+    -> ('a, P.Error.t) result
+
   val tool_contract : t -> Chatml_compilation.Tool_contract.t
 
   (** The exact Live-owned response directory already supplied to the saved
@@ -223,14 +260,14 @@ module Child_prepared : sig
       child is active; it is not a source or execution admission. *)
   val response_dir : t -> Eio.Fs.dir_ty Eio.Path.t
 
-  (** Refresh this exact Saved or Content preparation after yielding work. The
+  (** Refresh this exact Saved, Content or Model preparation after yielding work. The
       full immediate-parent, saved-ancestor, source/Workspace/Root checks may
       yield; obtain a fresh Root witness and repeat them before issuing an
       attempt-local [Admission.t]. *)
   val refresh : t -> (Admission.t, P.Error.t) result
 
   (** Refresh inside an actual child selected borrow after yielding work. The
-      lower check dispatches on this preparation's Saved or Content target,
+      lower check dispatches on this preparation's Saved, Content or Model target,
       proving every physical ancestor and this dispatched child terminal; no
       direct ancestor fiber binding is assumed. *)
   val refresh_descendant
@@ -286,6 +323,25 @@ val with_selected_content_child
   -> startup:Chat_response.Startup_compilation.t
   -> compilation_limits:Chatml_compilation.limits
   -> programs:Chatml_prompt_programs.Restored.t option
+  -> input:Prompt.Chat_markdown.content_item list
+  -> f:(Child_prepared.t -> (string, P.Error.t) result)
+  -> (string, P.Error.t) result
+
+(** Prepare a Model-selected member beneath the exact active Saved, Content or
+    Model child. The target was minted from a bounded selected source member,
+    installed/replayed child revision and actual parent Port. Restore that
+    immutable revision under the SAME borrowed [startup], live script policy
+    and tool contract; only that restoration lends the child's compilation
+    limits and programs to [with_child]. The caller cannot substitute its
+    parent's programs or re-read an ambient path. [with_child] repeats
+    Root/actor/provider/source checks, bounded preflight and native/managed
+    resource setup; it never relabels a Model path as a parser Agent
+    occurrence. The caller retains the one aggregate Budget across nesting
+    and runs within the parent's joined callback. *)
+val with_selected_model_child
+  :  parent:Child_prepared.t
+  -> target:Agent_session.Captured_agent_runner.Selected_model_target.t
+  -> startup:Chat_response.Startup_compilation.t
   -> input:Prompt.Chat_markdown.content_item list
   -> f:(Child_prepared.t -> (string, P.Error.t) result)
   -> (string, P.Error.t) result

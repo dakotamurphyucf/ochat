@@ -260,6 +260,7 @@ let with_fixture
       ?response_body
       ?(model_function_tools = false)
       ?(model_image_input = false)
+      ?(model_reasoning = false)
       ?(on_model_submit = ignore)
       ?(on_model_body = ignore)
       f
@@ -338,6 +339,12 @@ let with_fixture
                             @ (if model_image_input
                                then
                                  [ ( Openai.Responses_driver.Capability.Image_input
+                                   , Openai.Responses_driver.Capability.Supported )
+                                 ]
+                               else [])
+                            @ (if model_reasoning
+                               then
+                                 [ ( Openai.Responses_driver.Capability.Setting "reasoning"
                                    , Openai.Responses_driver.Capability.Supported )
                                  ]
                                else [])
@@ -523,9 +530,9 @@ let%expect_test
     {| pre-created port selected the real actor bridge; denied and closed issuers stayed denied |}]
 ;;
 
-let%test_unit "saved Agent source admits one selected provider attempt" =
+let%test_unit "saved Agent keeps baseline and derived child provider targets separate" =
   let model_requests = ref 0 in
-  with_fixture ~model_requests (fun env sw anchor create _ ->
+  with_fixture ~model_requests ~model_reasoning:true (fun env sw anchor create _ ->
     let runtime = create () in
     ignore (setup runtime : P.Method_result.t);
     let reads = ref 0 in
@@ -584,60 +591,198 @@ let%test_unit "saved Agent source admits one selected provider attempt" =
       |> fst
     in
     let root_ref = ref None in
-    let selected_ref = ref None in
+    let scope_ref = ref None in
+    let derived_prepared = ref None in
+    let expired_frame_rejected = ref None in
     let saved_attempts = ref 0 in
     let observed = ref [] in
+    let run_provider scope context sw =
+      let request =
+        Inference.Request.create
+          ~target:(Inference_runtime.Context.target context)
+          ~history:[]
+          ~tools:[]
+          ~assets:[]
+          ~limits:Document_schema.Limits.default
+        |> ok
+      in
+      ignore
+        (Inference_client.run
+           context
+           ~sw
+           ~identity:(Root.Model_inference.identity scope)
+           ~relation:Transcript.Scope.Root
+           ~request
+           ~before_dispatch:(Root.Model_inference.before_dispatch scope)
+           ~on_attempt:(Root.Model_inference.on_attempt scope)
+           ~on_completion:(Root.Model_inference.on_completion scope)
+           ~on_event:ignore
+           ~on_observation:(Root.Model_inference.on_observation scope)
+           ~submission_guard:(Root.Model_inference.submission_guard scope)
+         |> ok
+         : Inference_runtime.Receipt.t);
+      request
+    in
     let installed =
-      Native_fixture.installed_agent_fixture
+      Native_fixture.installed_agent_fixture_with_contents
+        ~deferred:true
+        ~child_contents:
+          {|<config model="synthetic" reasoning_effort="high"/>
+<developer>Original child instructions</developer>|}
         ~env
         ~sw
         ~data_root:(Agent_store.Data_root.path (Session_store.data_root session))
         ~observed
-        ~on_run:(fun () ->
-          incr saved_attempts;
-          let selected = Option.value_exn !selected_ref in
-          let binding = Capabilities.find selected ~name:"child" |> ok in
-          let implementation =
-            Capabilities.native_implementation binding |> Option.value_exn
+        ~on_run:(fun () -> incr saved_attempts)
+        ~with_deferred_context:(fun selected continue ->
+          let root = Option.value_exn !root_ref in
+          Root.Model_inference.with_claimed_agent root ~selected ~f:(fun scope ~sw ->
+            scope_ref := Some (scope, sw);
+            let original = Root.Model_inference.context scope in
+            assert (phys_equal original (Port.Model_selection.context selected_model |> ok));
+            ignore (run_provider scope original sw : Inference.Request.t);
+            let result = continue () in
+            assert (phys_equal (Root.Model_inference.context scope) original);
+            Option.iter !derived_prepared ~f:(fun prepared ->
+              assert (
+                Exn.does_raise (fun () ->
+                  Root.Model_inference.before_dispatch scope prepared)));
+            result)
+          |> ok)
+        ~run_selected_target:
+          (fun
+            ~target
+            ~startup:_
+            ~compilation_limits:_
+            ~programs:_
+            ~ctx:_
+            ~input:_
+            ~observer:_
+            ~source:_ ->
+          let module Saved =
+            Agent_session.Captured_agent_runner.Claimed_developer.Selected.Target
           in
-          let borrowed = Agent_session.Native_tool_invocation.borrow_selected () |> ok in
-          Agent_session.Captured_agent_runner.Claimed_developer.with_selected
-            ~borrowed
-            ~implementation
-            (fun selected ->
-               Root.Model_inference.with_claimed_agent
+          let scope, sw = Option.value_exn !scope_ref in
+          let original = Root.Model_inference.context scope in
+          let config =
+            Chat_response.Config.of_elements
+              (Agent_session.Prompt_revision.elements (Saved.revision target))
+          in
+          let selected_target =
+            Chat_response.Inference_config.apply_overrides
+              (Inference_runtime.Context.target original)
+              config
+              ~limits:Transcript.Admission.default
+            |> ok
+          in
+          assert (
+            not
+              (Inference.Request.Target.equal
+                 selected_target
+                 (Inference_runtime.Context.target original)));
+          let selected_context =
+            Inference_runtime.Context.derive_in_session original ~target:selected_target
+            |> ok
+          in
+          let source_target =
+            Agent_session.Captured_agent_runner.Selected_content_target.Saved target
+          in
+          assert (
+            Result.is_error
+              (Root.Model_inference.with_selected_child_target
                  (Option.value_exn !root_ref)
-                 ~selected
-                 ~f:(fun scope ~sw ->
-                   let context = Root.Model_inference.context scope in
-                   assert (
-                     phys_equal context (Port.Model_selection.context selected_model |> ok));
-                   let request =
-                     Inference.Request.create
-                       ~target:(Inference_runtime.Context.target context)
-                       ~history:[]
-                       ~tools:[]
-                       ~assets:[]
-                       ~limits:Document_schema.Limits.default
-                     |> ok
-                   in
-                   ignore
-                     (Inference_client.run
-                        context
-                        ~sw
-                        ~identity:(Root.Model_inference.identity scope)
-                        ~relation:Transcript.Scope.Root
-                        ~request
-                        ~before_dispatch:(Root.Model_inference.before_dispatch scope)
-                        ~on_attempt:(Root.Model_inference.on_attempt scope)
-                        ~on_completion:(Root.Model_inference.on_completion scope)
-                        ~on_event:ignore
-                        ~on_observation:(Root.Model_inference.on_observation scope)
-                        ~submission_guard:(Root.Model_inference.submission_guard scope)
-                      |> ok
-                      : Inference_runtime.Receipt.t)))
-          |> ok
-          |> ignore)
+                 ~target:source_target
+                 ~selected_context:original
+                 ~f:(fun _ -> failwith "mismatched child Context was admitted")));
+          let first_entered, first_entered_u = Eio.Promise.create () in
+          let second_entered, second_entered_u = Eio.Promise.create () in
+          let release_first, release_first_u = Eio.Promise.create () in
+          let release_second, release_second_u = Eio.Promise.create () in
+          let first_done, first_done_u = Eio.Promise.create () in
+          let second_done, second_done_u = Eio.Promise.create () in
+          Eio.Fiber.fork ~sw (fun () ->
+            Root.Model_inference.with_selected_child_target
+              (Option.value_exn !root_ref)
+              ~target:source_target
+              ~selected_context
+              ~f:(fun first_context ->
+                assert (phys_equal (Root.Model_inference.context scope) first_context);
+                Eio.Promise.resolve first_entered_u first_context;
+                Eio.Promise.await second_entered;
+                assert (phys_equal (Root.Model_inference.context scope) first_context);
+                Eio.Promise.await release_first;
+                Ok ())
+            |> ok;
+            Eio.Promise.resolve first_done_u ());
+          Eio.Fiber.fork ~sw (fun () ->
+            let first_context = Eio.Promise.await first_entered in
+            Root.Model_inference.with_selected_child_target
+              (Option.value_exn !root_ref)
+              ~target:source_target
+              ~selected_context
+              ~f:(fun second_context ->
+                assert (not (phys_equal first_context second_context));
+                assert (phys_equal (Root.Model_inference.context scope) second_context);
+                Eio.Promise.resolve second_entered_u ();
+                Eio.Promise.await first_done;
+                assert (phys_equal (Root.Model_inference.context scope) second_context);
+                Eio.Promise.await release_second;
+                Ok ())
+            |> ok;
+            Eio.Promise.resolve second_done_u ());
+          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+            Eio.Promise.await second_entered);
+          assert (phys_equal (Root.Model_inference.context scope) original);
+          Eio.Promise.resolve release_first_u ();
+          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+            Eio.Promise.await first_done);
+          assert (phys_equal (Root.Model_inference.context scope) original);
+          Eio.Promise.resolve release_second_u ();
+          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+            Eio.Promise.await second_done);
+          assert (phys_equal (Root.Model_inference.context scope) original);
+          let release, release_u = Eio.Promise.create () in
+          let ready, ready_u = Eio.Promise.create () in
+          let denied, denied_u = Eio.Promise.create () in
+          let result =
+            Root.Model_inference.with_selected_child_target
+              (Option.value_exn !root_ref)
+              ~target:source_target
+              ~selected_context
+              ~f:(fun root_context ->
+                Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve
+                    ready_u
+                    (phys_equal (Root.Model_inference.context scope) root_context);
+                  Eio.Promise.await release;
+                  let rejected =
+                    Exn.does_raise (fun () ->
+                      ignore (Root.Model_inference.context scope : RT.Context.t))
+                  in
+                  expired_frame_rejected := Some rejected;
+                  Eio.Promise.resolve denied_u rejected);
+                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                  assert (Eio.Promise.await ready));
+                assert (phys_equal (Root.Model_inference.context scope) root_context);
+                assert (
+                  Inference.Request.Target.equal
+                    (Inference_runtime.Context.target root_context)
+                    selected_target);
+                let request = run_provider scope root_context sw in
+                derived_prepared
+                := Some
+                     (Inference_runtime.Context.prepare
+                        root_context
+                        ~preparation_id:"expired-selected-child"
+                        request
+                      |> ok);
+                Ok "captured child result")
+          in
+          Eio.Promise.resolve release_u ();
+          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+            assert (Eio.Promise.await denied));
+          result)
+        ()
     in
     let blobs =
       Agent_store.Blob_store.create
@@ -693,7 +838,6 @@ let%test_unit "saved Agent source admits one selected provider attempt" =
       |> ok
     in
     root_ref := Some root;
-    selected_ref := Some installed.selected;
     let jobs =
       Jobs.create
         ~root
@@ -737,6 +881,7 @@ let%test_unit "saved Agent source admits one selected provider attempt" =
         |> Option.value_exn
       in
       assert (P.Id.Job.equal job (P.Developer_job.id completed));
+      assert (Option.value_exn !expired_frame_rejected);
       assert (
         match (P.Developer_job.state completed).status with
         | Succeeded -> true
@@ -748,7 +893,7 @@ let%test_unit "saved Agent source admits one selected provider attempt" =
         | Cancelled
         | Interrupted _ -> false));
     assert (Int.equal !saved_attempts 1);
-    assert (Int.equal !model_requests 1);
+    assert (Int.equal !model_requests 2);
     Root.close_and_wait root |> ok;
     Root.Registry.close_and_wait registry |> ok;
     Run_store.close_and_wait store |> ok;

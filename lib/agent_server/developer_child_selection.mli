@@ -1,6 +1,6 @@
 open! Core
 
-(** Private admitted selection for one exact saved-Agent target under an
+(** Private admitted selection for one exact Saved, Content or Model target under an
     already entered developer native callback. The owning Host obtains
     [prepared] from the same physical Live package and Target; this module
     admits no arbitrary registry, owner coordinates or copied artifact as
@@ -27,6 +27,14 @@ module Admission : sig
       before effect entry. It rejects a changed Root effect revision, actor,
       selected Target, source binding or child scope. *)
   val check_now : t -> (unit, Agent_protocol.Error.t) result
+
+  (** Check this exact physical child borrow, Target and Prepared admission
+      without yielding, then return the Root Current stored in that SAME
+      admission. The native executor compares capabilities and Root selection
+      from one refreshed attempt; this does not mint or rebase authority. *)
+  val checked_root_now
+    :  t
+    -> (Developer_root_owner.Current.t, Agent_protocol.Error.t) result
 end
 
 val create
@@ -57,8 +65,23 @@ val create_content
   -> borrowed:Agent_session.Native_tool_invocation.selected_borrowed
   -> (t, Agent_protocol.Error.t) result
 
-(** Exact restricted issuer and first-entry parent derived at [create] or
-    [create_content]. The caller may use them only together in the actual
+(** Select one Model member under the exact immediate Saved, Content or Model
+    child and the ACTUAL entered native borrow. The Model target is minted by
+    the checked member/Port bracket, not a parser Agent occurrence. Its own
+    authenticated source may introduce new source-owned declarations, while
+    inherited native authority still follows the physical borrowed ceiling.
+    This reuses [create_content]'s restricted Source_child issuer and final
+    Root/parent checks; it does not create an invocation by selecting a path. *)
+val create_model
+  :  root:Developer_root_owner.run
+  -> parent:t
+  -> target:Agent_session.Captured_agent_runner.Selected_model_target.t
+  -> prepared:Developer_live_resources.Child_prepared.t
+  -> borrowed:Agent_session.Native_tool_invocation.selected_borrowed
+  -> (t, Agent_protocol.Error.t) result
+
+(** Exact restricted issuer and first-entry parent derived at [create],
+    [create_content] or [create_model]. The caller may use them only together in the actual
     selected native callback. Logical nested Content selection can retain the
     same physical callback; later tool entries use the new issuer's own active. *)
 val issuer : t -> Agent_session.Developer_invocation_owner.Selected.t
@@ -85,7 +108,7 @@ val managed_definition : t -> Chat_response.Managed_tool_registry.t
 
 (** Borrow the actual selected scope and classify it by physical equality to
     this selection's retained entering borrow. The direct branch uses strict
-    Saved or Content target/Root proof; a different current borrow must prove
+    Saved, Content or Model target/Root proof; a different current borrow must prove
     an entered native descendant. Logical Content recursion can share one
     entering borrow while each selection still narrows capabilities. Missing,
     stale or foreign borrows reject without fallback.

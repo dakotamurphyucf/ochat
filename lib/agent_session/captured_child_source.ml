@@ -10,6 +10,7 @@ type t =
   ; parent_artifact : Store.Artifact.t
   ; root_chatmd : string
   ; sources : Store.Source.t list
+  ; selected_source_bytes : int
   ; programs : Chatml_prompt_programs.t option
   ; programs_sha256 : string option
   ; content : Chatmd_prompt_content.t option
@@ -20,6 +21,7 @@ type t =
   }
 
 let root_relative_path t = t.root_relative_path
+let selected_source_bytes t = t.selected_source_bytes
 let programs_sha256 t = t.programs_sha256
 let content_sha256 t = t.content_sha256
 let denied message = Error (P.Error.create Permission_denied ~message ~retryable:false ())
@@ -206,6 +208,11 @@ let capture_member ~parent ~relative_path ~content_limits ~checkpoint =
            ~retryable:false
            ())
   in
+  let selected_source_bytes =
+    List.fold sources ~init:(String.length selected.contents) ~f:(fun bytes source ->
+      checkpoint ();
+      bytes + String.length source.Store.Source.contents)
+  in
   Ok
     { parent_revision_id = parent_artifact.revision_id
     ; parent_manifest_sha256 = parent_artifact.manifest_sha256
@@ -213,6 +220,7 @@ let capture_member ~parent ~relative_path ~content_limits ~checkpoint =
     ; parent_artifact
     ; root_chatmd = selected.contents
     ; sources
+    ; selected_source_bytes
     ; programs
     ; programs_sha256
     ; content
@@ -404,6 +412,73 @@ let capture ~parent ~reference ~content_limits ~checkpoint =
       denied "owned child source requires matching retained parser/program custody"
   in
   capture_member ~parent ~relative_path:(Some relative_path) ~content_limits ~checkpoint
+;;
+
+let capture_selected_member
+      ~parent
+      ~member
+      ~content_limits
+      ~max_input_bytes
+      ~max_work_steps
+      ~checkpoint
+      ~on_acquire
+  =
+  let limit message =
+    Error (P.Error.create Resource_limit ~message ~retryable:false ())
+  in
+  if max_input_bytes <= 0 || max_work_steps <= 0
+  then limit "Captured Model source allowance exhausted"
+  else
+    let module Abort = struct
+      exception Work_limit
+      exception Byte_limit
+    end
+    in
+    let used = ref 0 in
+    let poll () =
+      if !used >= max_work_steps then raise Abort.Work_limit;
+      incr used;
+      checkpoint ()
+    in
+    try
+      let open Result.Let_syntax in
+      let artifact = Prompt_revision.artifact parent in
+      let selected = Source.Portable_path.to_string member in
+      let%bind () =
+        match Prompt_revision.programs parent, artifact.program_bundle with
+        | Some _, Some _ -> Ok ()
+        | None, _ | _, None ->
+          denied "Captured Model member requires complete retained parser/program custody"
+      in
+      let bytes = ref (String.length artifact.root_chatmd) in
+      if !bytes > max_input_bytes then raise Abort.Byte_limit;
+      let present = ref (String.equal artifact.root_relative_path selected) in
+      List.iter artifact.sources ~f:(fun source ->
+        poll ();
+        let length = String.length source.Store.Source.contents in
+        if length > max_input_bytes - !bytes then raise Abort.Byte_limit;
+        bytes := !bytes + length;
+        if String.equal source.relative_path selected then present := true);
+      let%bind () =
+        if !present
+        then Ok ()
+        else denied "Captured Model member is absent from retained authored inventory"
+      in
+      poll ();
+      on_acquire ();
+      let%bind source =
+        capture_member
+          ~parent
+          ~relative_path:(Some selected)
+          ~content_limits
+          ~checkpoint:poll
+      in
+      if Int.equal (selected_source_bytes source) !bytes
+      then Ok source
+      else denied "Captured Model source inventory changed during selection"
+    with
+    | Abort.Work_limit -> limit "Captured Model source work allowance exhausted"
+    | Abort.Byte_limit -> limit "Captured Model source bytes exceed remaining allowance"
 ;;
 
 let capture_legacy_tool ~parent ~declaration ~content_limits ~checkpoint =

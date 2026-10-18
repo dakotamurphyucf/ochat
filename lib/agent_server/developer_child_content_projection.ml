@@ -172,6 +172,54 @@ module Budget = struct
       t.contents <- List.rev_append fresh t.contents;
       Ok ())
   ;;
+
+  module Executable_cost = struct
+    type t =
+      { input_bytes : int
+      ; work_steps : int
+      }
+
+    let create ~input_bytes ~work_steps =
+      if input_bytes < 0 || work_steps < 0
+      then Or_error.error_string "selected executable source cost is negative"
+      else Ok { input_bytes; work_steps }
+    ;;
+  end
+
+  let with_executable_source_read t ~f =
+    with_exclusive t ~f:(fun () ->
+      if t.input_remaining <= 0 || t.work_remaining <= 0
+      then resource "child executable source budget exhausted"
+      else (
+        let acquired = ref false in
+        let returned = ref false in
+        Exn.protect
+          ~f:(fun () ->
+            let result =
+              f
+                ~max_input_bytes:t.input_remaining
+                ~max_work_steps:t.work_remaining
+                ~on_acquire:(fun () -> acquired := true)
+            in
+            returned := true;
+            match result with
+            | Error error ->
+              if !acquired then t.uncertain <- true;
+              Error error
+            | Ok (value, cost) ->
+              if
+                (not !acquired)
+                || cost.Executable_cost.input_bytes > t.input_remaining
+                || cost.work_steps > t.work_remaining
+              then (
+                t.uncertain <- true;
+                resource "selected executable source exceeded its admitted budget")
+              else (
+                t.input_remaining <- t.input_remaining - cost.input_bytes;
+                t.work_remaining <- t.work_remaining - cost.work_steps;
+                Ok value))
+          ~finally:(fun () -> if !acquired && not !returned then t.uncertain <- true)))
+  ;;
 end
 
 type source =

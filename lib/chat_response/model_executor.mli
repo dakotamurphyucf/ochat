@@ -35,6 +35,35 @@ module Session_settlement : sig
   [@@deriving sexp_of]
 end
 
+module Selected_source : sig
+  type t
+
+  (** Trusted host composition port, not a type-level provenance proof.
+      [with_selected] enters the authenticated member for this exact decoded
+      request and lends its retained Config and a consumed-once [run] closure.
+      The closure receives the Context after the shared override/target/derive
+      path, plus that path's exact synthesized input, history-compaction and
+      nested session values. It cannot fetch or reparse an ambient path. The
+      host must repeat physical Root/source/provider checks after yields;
+      cancellation and unexpected exceptions retain their identity. Expected
+      typed source denial is mapped to this existing recipe's string error
+      domain only at the adapter boundary. *)
+  val create
+    :  with_selected:
+         (Model_spawn_request.t
+          -> f:
+               (config:CM.config
+                -> run:
+                     (ctx:Eio_unix.Stdenv.base Ctx.t
+                      -> input:CM.content_item list
+                      -> history_compaction:bool
+                      -> session_id:string
+                      -> (string, string) result)
+                -> (Moderation.Capabilities.model_call_result, string) result)
+          -> (Moderation.Capabilities.model_call_result, string) result)
+    -> t
+end
+
 (** [create ~sw ~exec_context ?max_spawned_jobs ()] creates the model-executor
     capability used by moderator-driven async model work.
 
@@ -47,6 +76,22 @@ end
 val create
   :  sw:Eio.Switch.t
   -> exec_context:exec_context
+  -> ?max_spawned_jobs:int
+  -> unit
+  -> t
+
+(** Opt-in selected child recipe owner. The trusted Child_prepared assembly
+    supplies a joined local-job switch nested inside its active callback;
+    selected calls still recheck the
+    authenticated source and physical Root on every attempt. The same strict
+    body performs target overrides, capture, Context.derive, input/default
+    synthesis and result encoding. This mode has no Fetch or ordinary
+    run_agent fallback. Ordinary [create] rejects explicit Captured source mode
+    before any Fetch because it has no selected captured-source custody. *)
+val create_selected
+  :  sw:Eio.Switch.t
+  -> ctx:Eio_unix.Stdenv.base Ctx.t
+  -> source:Selected_source.t
   -> ?max_spawned_jobs:int
   -> unit
   -> t
@@ -75,7 +120,11 @@ val call_agent_prompt_v1_strict
 (** An optional host guard is composed before the existing attempt observer and
     inherited by derived/nested recipe inference. Ctx.Inference_admission_rejected
     becomes the safe Model_error "model inference admission was revoked";
-    cancellation is preserved. The guard does not grant target or tool authority. *)
+    cancellation is preserved. The guard does not grant target or tool authority.
+    For a selected executor, expected recipe/source denial becomes Model_error,
+    while unexpected exceptions and cancellation propagate to its joined
+    child owner with their original identity/backtrace. The selected recipe
+    is rebound on the shared body's derived Context before nested execution. *)
 val recipe_agent_prompt_v1
   :  t
   -> session_id:string
@@ -130,6 +179,22 @@ val await_job : t -> job_id:string -> (unit, string) result
     likewise propagates cancellation. The operation does not drain moderator
     events, and callers must not hold the manager or source execution gate. *)
 val settle_session : t -> session_id:string -> (Session_settlement.t, string) result
+
+(** Nonyielding failure audit after this executor's exact local-job switch has
+    joined following an intentional selected-child stop. Require every job for
+    [session_id] to have a terminal phase and resolved worker promise. Ignore
+    only [Eio.Cancel.Cancelled reason] whose [reason] is physically
+    [allowed_cancelled_reason]; scan every job and give any other escaped
+    worker exception priority over allowed cancellation, re-raising it with
+    its retained raw backtrace. A pending/result-ready/inconsistent job
+    returns [Error] rather than claiming a successful stop. This neither
+    delivers moderator events nor replays a recipe. The trusted host owns the
+    private stop reason and calls on the executor's creating Eio domain. *)
+val audit_joined_session
+  :  t
+  -> session_id:string
+  -> allowed_cancelled_reason:exn
+  -> (unit, string) result
 
 module Session_progress : sig
   type cursor

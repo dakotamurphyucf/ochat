@@ -22,6 +22,11 @@ module Capture : sig
   (** Raw dependencies, excluding the separately retained root authored input. *)
   val sources : t -> (string * string) list
 
+  (** Observed retained authored bytes for the root and distinct dependencies.
+      This is counted by the bounded capture walker, not recomputed from a
+      caller's selected path. *)
+  val source_bytes : t -> int
+
   val shell_manifest_sha256 : t -> string
 end
 
@@ -113,11 +118,17 @@ val reparse
   -> (Prompt_revision.t, Diagnostic.t list) result
 
 (** Same bounded parser/capture walker as [capture], supplied with an actual
-    original-root loader. [env] only supplies existing shell inspection; it never
-    becomes a fallback source root. No initializer/artifact publication. *)
+    original-root loader. Optional [max_total_source_bytes] only narrows the
+    existing 8 MiB aggregate bound: root and distinct dependency reads use its
+    remaining allowance before each read, and the reported [Capture.source_bytes]
+    is the actual admitted authored total. Effective transformed inputs retain
+    their existing separate bounded accounting. [env] only supplies existing
+    shell inspection; it never becomes a fallback source root. No
+    initializer/artifact publication. *)
 val capture_with_loader
   :  loader:Source_loader.t
   -> entry:Source.Portable_path.t
+  -> ?max_total_source_bytes:int
   -> env:Eio_unix.Stdenv.base
   -> preprocess:(string -> string)
   -> limits:Prompt.Chat_markdown.Limits.t

@@ -11,6 +11,20 @@ type t =
   ; reference : B.Agent_artifact.t
   }
 
+type child = t
+
+module Model_selection = struct
+  type t =
+    { source : child
+    ; input_bytes : int
+    ; work_steps : int
+    }
+
+  let source t = t.source
+  let input_bytes t = t.input_bytes
+  let work_steps t = t.work_steps
+end
+
 let revision t = t.revision
 let reference t = t.reference
 let unavailable message = P.Error.create Prompt_unavailable ~message ~retryable:false ()
@@ -86,9 +100,8 @@ let restore ~artifact_store ~definition ~content_limits reference ~checkpoint =
   admit revision ~checkpoint
 ;;
 
-let file
+let file_with_selection
       ~parent
-      ~reference
       ~source_lease
       ~artifact_store
       ~compilation
@@ -101,6 +114,8 @@ let file
       ~env
       ~created_at
       ~checkpoint
+      ~select_entry
+      ~capture_selected
   =
   if max_work_steps <= 0
   then
@@ -143,20 +158,16 @@ let file
             let open Result.Let_syntax in
             poll ();
             let%bind entry =
-              Prompt_source_entry.of_reference
-                ~parent
-                reference
-                ~max_work_steps:(max_work_steps - !used)
-                ~checkpoint:poll
+              select_entry ~remaining:(max_work_steps - !used) ~checkpoint:poll
               |> Result.map_error ~f:(fun error ->
                 unavailable (Error.to_string_hum error))
             in
             let%bind result =
               Prompt_source_lease.with_scope source_lease ~f:(fun scope ->
                 let%map capture =
-                  Owner.Scope.capture_entry
+                  capture_selected
                     scope
-                    ~entry
+                    entry
                     ~env
                     ~preprocess
                     ~limits:parser_limits
@@ -167,6 +178,7 @@ let file
                   ~finally:(fun () -> current_capture := None)
                   (fun () ->
                      let value = Owner.Capture.value capture in
+                     let input_bytes = Builder.Capture.source_bytes value in
                      let same_capture supplied =
                        if not (phys_equal supplied value)
                        then invalid_arg "Prompt_child_source: foreign Builder capture"
@@ -210,12 +222,14 @@ let file
                        ~transaction_id:(P.Id.Transaction.create ())
                        ~created_at
                        ()
-                     |> Result.map_error ~f:diagnostics))
+                     |> Result.map_error ~f:diagnostics
+                     |> Result.map ~f:(fun revision -> revision, input_bytes)))
               |> Result.map_error ~f:owner_error
             in
-            let%bind revision = result in
+            let%bind revision, input_bytes = result in
             poll ();
-            admit revision ~checkpoint:poll))
+            let%map source = admit revision ~checkpoint:poll in
+            source, input_bytes, !used))
         ()
     with
     | Abort.Source error -> Error (owner_error error)
@@ -226,6 +240,104 @@ let file
            ~message:"Child source work allowance exhausted"
            ~retryable:false
            ())
+;;
+
+let file
+      ~parent
+      ~reference
+      ~source_lease
+      ~artifact_store
+      ~compilation
+      ~tool_contract
+      ~parser_limits
+      ~content_limits
+      ~max_work_steps
+      ~preprocess
+      ~prepare_programs
+      ~env
+      ~created_at
+      ~checkpoint
+  =
+  file_with_selection
+    ~parent
+    ~source_lease
+    ~artifact_store
+    ~compilation
+    ~tool_contract
+    ~parser_limits
+    ~content_limits
+    ~max_work_steps
+    ~preprocess
+    ~prepare_programs
+    ~env
+    ~created_at
+    ~checkpoint
+    ~select_entry:(fun ~remaining ~checkpoint ->
+      Prompt_source_entry.of_reference
+        ~parent
+        reference
+        ~max_work_steps:remaining
+        ~checkpoint)
+    ~capture_selected:(fun scope entry ~env ~preprocess ~limits ~checkpoint ->
+      Owner.Scope.capture_entry scope ~entry ~env ~preprocess ~limits ~checkpoint)
+  |> Result.map ~f:(fun (source, _, _) -> source)
+;;
+
+let file_selected_member
+      ~parent
+      ~entry
+      ~source_lease
+      ~artifact_store
+      ~compilation
+      ~tool_contract
+      ~parser_limits
+      ~content_limits
+      ~max_work_steps
+      ~max_input_bytes
+      ~preprocess
+      ~prepare_programs
+      ~env
+      ~created_at
+      ~checkpoint
+      ~on_acquire
+  =
+  if not (Prompt_source_entry.matches_selected_parent entry parent)
+  then Error (unavailable "Selected Model entry has a foreign parent")
+  else
+    file_with_selection
+      ~parent
+      ~source_lease
+      ~artifact_store
+      ~compilation
+      ~tool_contract
+      ~parser_limits
+      ~content_limits
+      ~max_work_steps
+      ~preprocess
+      ~prepare_programs
+      ~env
+      ~created_at
+      ~checkpoint
+      ~select_entry:(fun ~remaining:_ ~checkpoint:_ -> Ok entry)
+      ~capture_selected:(fun scope entry ~env ~preprocess ~limits ~checkpoint ->
+        let open Result.Let_syntax in
+        let%bind content = Owner.Scope.bind_content_revision scope ~revision:parent in
+        Owner.Scope.capture_selected_member
+          scope
+          ~content
+          ~entry
+          ~env
+          ~preprocess
+          ~limits
+          ~max_input_bytes
+          ~checkpoint
+          ~on_acquire)
+    |> Result.map ~f:(fun (selected_child, selected_bytes, selected_work) ->
+      Model_selection.
+        { source = selected_child
+        ; input_bytes = selected_bytes
+        ; work_steps = selected_work
+        })
 ;;
 
 let captured
@@ -271,4 +383,87 @@ let captured
         ~content_limits
         reference
         ~checkpoint:poll)
+;;
+
+let captured_selected_member
+      ~parent
+      ~member
+      ~artifact_store
+      ~policy
+      ~tool_contract
+      ~invocation
+      ~content_limits
+      ~max_input_bytes
+      ~max_work_steps
+      ~env
+      ~checkpoint
+      ~on_acquire
+  =
+  if max_input_bytes <= 0 || max_work_steps <= 0
+  then
+    Error
+      (P.Error.create
+         Resource_limit
+         ~message:"Captured Model source allowance exhausted"
+         ~retryable:false
+         ())
+  else
+    let module Abort = struct
+      exception Work_limit
+    end
+    in
+    let used = ref 0 in
+    let poll () =
+      if !used >= max_work_steps then raise Abort.Work_limit;
+      incr used;
+      checkpoint ()
+    in
+    try
+      Runtime_script_preparation.with_captured_selected_member
+        policy
+        ~tool_contract
+        parent
+        ~member
+        ~invocation
+        ~content_limits
+        ~max_input_bytes
+        ~max_work_steps
+        ~env
+        ~checkpoint:poll
+        ~on_acquire
+        ~f:(fun startup ~revision ~compilation_limits:_ ~programs:_ ~input_bytes ->
+          let poll () = Startup.checkpoint startup in
+          let open Result.Let_syntax in
+          poll ();
+          let artifact = Prompt_revision.artifact revision in
+          let%bind retained =
+            Store.install_or_reuse
+              artifact_store
+              ~transaction_id:(P.Id.Transaction.create ())
+              artifact
+              ~checkpoint:poll
+            |> Result.map_error ~f:store_error
+          in
+          poll ();
+          let%bind reference = reference_of_artifact retained ~checkpoint:poll in
+          let%map source =
+            restore
+              ~artifact_store
+              ~definition:(Prompt_revision.definition parent)
+              ~content_limits
+              reference
+              ~checkpoint:poll
+          in
+          source, input_bytes)
+      |> Result.map ~f:(fun (selected_child, selected_bytes) ->
+        Model_selection.
+          { source = selected_child; input_bytes = selected_bytes; work_steps = !used })
+    with
+    | Abort.Work_limit ->
+      Error
+        (P.Error.create
+           Resource_limit
+           ~message:"Captured Model source work allowance exhausted"
+           ~retryable:false
+           ())
 ;;
