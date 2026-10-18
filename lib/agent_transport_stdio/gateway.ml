@@ -41,9 +41,74 @@ let publish connection outgoing envelope =
     false)
 ;;
 
-let response connection (request : Agent_protocol.Envelope.request) =
+let repl_framing_fits ~max_line_length ~id ~result_bytes =
+  let empty_error = Agent_protocol.Error.invalid_request "" in
+  let success_framing =
+    Agent_protocol.Envelope.success ~id `Null
+    |> Agent_protocol.Envelope.to_json
+    |> Jsonaf.to_string
+    |> String.length
+    |> fun length -> length - 4
+  in
+  let empty_error_bytes =
+    Agent_protocol.Error.to_json empty_error |> Jsonaf.to_string |> String.length
+  in
+  let error_framing =
+    Agent_protocol.Envelope.failure ~id empty_error
+    |> Agent_protocol.Envelope.to_json
+    |> Jsonaf.to_string
+    |> String.length
+    |> fun length -> length - empty_error_bytes
+  in
+  let error_bytes = Agent_client.Transport.Repl_response_bound.max_error_bytes in
+  success_framing <= max_line_length
+  && result_bytes <= max_line_length - success_framing
+  && error_framing <= max_line_length
+  && error_bytes <= max_line_length - error_framing
+;;
+
+let response connection ~max_line_length (request : Agent_protocol.Envelope.request) =
   let open Result.Let_syntax in
   if
+    List.mem
+      Agent_protocol.Developer_repl_wire.Request.supported_methods
+      request.method_
+      ~equal:String.equal
+  then (
+    let%bind capabilities = Agent_client.Connection.repl_capabilities connection in
+    let limits = Agent_protocol.Developer_repl_wire.Capabilities.limits capabilities in
+    let bound =
+      if String.equal request.method_ "developer.repl.capabilities"
+      then Agent_client.Transport.Repl_response_bound.Bootstrap
+      else Installed limits
+    in
+    let%bind () =
+      if
+        repl_framing_fits
+          ~max_line_length
+          ~id:request.id
+          ~result_bytes:
+            (Agent_client.Transport.Repl_response_bound.max_result_bytes bound)
+      then Ok ()
+      else Error (invalid "REPL response exceeds stdio line capacity")
+    in
+    let%bind () =
+      if
+        Agent_protocol.Developer_repl_wire.Capabilities.supports
+          capabilities
+          request.method_
+      then Ok ()
+      else Error (invalid "REPL method is not advertised")
+    in
+    let%bind typed =
+      Agent_protocol.Developer_repl_wire.Request.of_method_and_params
+        ~limits
+        ~method_:request.method_
+        ~params:request.params
+    in
+    let%bind result = Agent_client.Connection.request_repl connection ~limits typed in
+    Agent_protocol.Developer_repl_wire.Response.to_json result ~limits)
+  else if
     List.mem
       Agent_protocol.Developer_wire.Request.supported_methods
       request.method_
@@ -77,10 +142,10 @@ let response connection (request : Agent_protocol.Envelope.request) =
     Agent_protocol.Public.Result.to_json result)
 ;;
 
-let dispatch connection outgoing on_error = function
+let dispatch connection outgoing ~max_line_length on_error = function
   | Agent_protocol.Envelope.Request request ->
     let envelope =
-      match response connection request with
+      match response connection ~max_line_length request with
       | Ok result -> Agent_protocol.Envelope.success ~id:request.id result
       | Error failure -> Agent_protocol.Envelope.failure ~id:request.id failure
     in
@@ -103,7 +168,7 @@ let reader connection input outgoing ~max_line_length ~on_error =
     match Eio.Buf_read.line buffer with
     | line ->
       (match parse_line line with
-       | Ok envelope -> dispatch connection outgoing on_error envelope
+       | Ok envelope -> dispatch connection outgoing ~max_line_length on_error envelope
        | Error failure -> report_parse_failure connection outgoing on_error line failure);
       loop ()
     | exception End_of_file -> ()

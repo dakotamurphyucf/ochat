@@ -38,3 +38,21 @@ let create_with_developer ~request ~request_developer ~notifications ~close =
   in
   make ~transport ~notifications ~close
 ;;
+
+let create_with_developer_repl
+      ~request
+      ~request_developer
+      ~request_repl
+      ~notifications
+      ~close
+  =
+  let transport ~next_notification ~close =
+    Transport.create_with_developer_repl
+      ~request
+      ~request_developer
+      ~request_repl
+      ~next_notification
+      ~close
+  in
+  make ~transport ~notifications ~close
+;;

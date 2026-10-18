@@ -1,7 +1,9 @@
 open! Core
 module P = Agent_protocol
 module C = P.Developer_common
+module R = P.Developer_repl_wire
 module T = Developer_connection_tests
+module RT = Repl_transport_tests
 
 let consume_request reader =
   let rec headers length =
@@ -180,4 +182,169 @@ let%expect_test "Developer HTTP success and error responses have separate finite
           ~finally:(fun () -> Agent_client.Connection.close connection))));
   [%expect
     {| success overflow rejected; larger valid error accepted; error overflow retired connection |}]
+;;
+
+let%expect_test
+    "REPL HTTP enforces separate params, generated envelope, result, and error bounds"
+  =
+  Eio_main.run (fun env ->
+    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+      Eio.Switch.run (fun sw ->
+        let listener =
+          Eio.Net.listen
+            ~sw
+            ~backlog:8
+            (Eio.Stdenv.net env)
+            (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0))
+        in
+        let port =
+          match Eio.Net.listening_addr listener with
+          | `Tcp (_, port) -> port
+          | `Unix _ -> failwith "expected TCP listener"
+        in
+        let initialized = ref (T.initialization ~repl:true ()) in
+        let requests = ref 0 in
+        let response_mode = ref `Valid in
+        Eio.Fiber.fork_daemon ~sw (fun () ->
+          Eio.Net.run_server
+            listener
+            (fun flow _ ->
+               let reader = Eio.Buf_read.of_flow flow ~max_size:16384 in
+               match consume_request reader with
+               | None -> ()
+               | Some body ->
+                 let envelope =
+                   body |> Jsonaf.of_string |> P.Envelope.of_json |> T.must
+                 in
+                 (match envelope with
+                  | P.Envelope.Request request ->
+                    Int.incr requests;
+                    let response =
+                      match request.method_ with
+                      | "protocol.initialize" ->
+                        P.Envelope.success
+                          ~id:request.id
+                          (P.Public.Result.to_json (RT.public_initialized !initialized))
+                      | "developer.repl.capabilities" ->
+                        P.Envelope.success
+                          ~id:request.id
+                          (R.Capabilities.to_json RT.capabilities)
+                      | "developer.repl.observe" ->
+                        (match !response_mode with
+                         | `Valid ->
+                           P.Envelope.success ~id:request.id (`Object [ "found", `False ])
+                         | `Oversized_success ->
+                           P.Envelope.success
+                             ~id:request.id
+                             (`String (String.make 9000 'x'))
+                         | `Allowed_error ->
+                           P.Envelope.failure
+                             ~id:request.id
+                             (P.Error.invalid_request (String.make 5000 'e'))
+                         | `Oversized_error ->
+                           P.Envelope.failure
+                             ~id:request.id
+                             (P.Error.invalid_request (String.make 70_000 'e')))
+                      | _ -> failwith "unexpected HTTP method"
+                    in
+                    P.Envelope.to_json response
+                    |> Jsonaf.to_string
+                    |> reply
+                    |> Fn.flip Eio.Flow.copy_string flow
+                  | Notification _ | Response _ -> failwith "expected request"))
+            ~on_error:(function
+              | Eio.Io _ -> ()
+              | exn -> raise exn));
+        let connect () =
+          Agent_transport_http.Client.connect
+            ~sw
+            ~env
+            ~uri:(Uri.of_string (sprintf "http://127.0.0.1:%d" port))
+            ~bearer_token:None
+            ~notification_capacity:8
+          |> T.must
+        in
+        let observe connection =
+          let capabilities =
+            Agent_client.Connection.repl_capabilities connection |> T.must
+          in
+          Agent_client.Connection.request_repl
+            connection
+            ~limits:(R.Capabilities.limits capabilities)
+            (R.Request.Observe RT.lookup)
+        in
+        let first = connect () in
+        Exn.protect
+          ~f:(fun () ->
+            T.initialize ~repl:true first !initialized;
+            (match observe first with
+             | Ok (R.Response.Observe None) -> ()
+             | Ok _ | Error _ -> failwith "valid REPL HTTP response failed");
+            response_mode := `Oversized_success;
+            assert (Result.is_error (observe first));
+            assert (Int.equal !requests 4))
+          ~finally:(fun () -> Agent_client.Connection.close first);
+        let request_bytes method_ params id =
+          P.Envelope.request
+            ~id:(P.Envelope.Request_id.of_json (`Number (Int.to_string id)) |> T.must)
+            ~method_
+            ~params
+            ()
+          |> P.Envelope.to_json
+          |> Jsonaf.to_string
+          |> String.length
+        in
+        let capability_bytes =
+          request_bytes "developer.repl.capabilities" (`Object []) 2
+        in
+        let observe_bytes =
+          request_bytes
+            "developer.repl.observe"
+            (R.Request.params (R.Request.Observe RT.lookup))
+            3
+        in
+        assert (observe_bytes > capability_bytes);
+        initialized
+        := T.initialization ~repl:true ~max_request_bytes:(observe_bytes - 1) ();
+        let second = connect () in
+        Exn.protect
+          ~f:(fun () ->
+            T.initialize ~repl:true second !initialized;
+            assert (Result.is_error (observe second));
+            assert (Int.equal !requests 6))
+          ~finally:(fun () -> Agent_client.Connection.close second);
+        response_mode := `Valid;
+        initialized := T.initialization ~repl:true ~max_request_bytes:observe_bytes ();
+        let exact = connect () in
+        Exn.protect
+          ~f:(fun () ->
+            T.initialize ~repl:true exact !initialized;
+            (match observe exact with
+             | Ok (R.Response.Observe None) -> ()
+             | Ok _ -> failwith "exact REPL HTTP frame budget returned wrong result"
+             | Error failure ->
+               failwith ("exact REPL HTTP frame budget: " ^ failure.message));
+            assert (Int.equal !requests 9))
+          ~finally:(fun () -> Agent_client.Connection.close exact);
+        initialized := T.initialization ~repl:true ();
+        response_mode := `Allowed_error;
+        let third = connect () in
+        Exn.protect
+          ~f:(fun () ->
+            T.initialize ~repl:true third !initialized;
+            (match observe third with
+             | Error { code = Invalid_request; message; _ } ->
+               assert (String.length message = 5000)
+             | Error _ | Ok _ -> failwith "valid REPL error was not returned");
+            response_mode := `Oversized_error;
+            assert (Result.is_error (observe third));
+            assert (Int.equal !requests 13);
+            assert (Result.is_error (observe third));
+            assert (Int.equal !requests 13))
+          ~finally:(fun () -> Agent_client.Connection.close third);
+        print_endline
+          "REPL HTTP success overflow retired; generated frame budget enforced at exact \
+           boundary; valid error accepted; error overflow retired")));
+  [%expect
+    {| REPL HTTP success overflow retired; generated frame budget enforced at exact boundary; valid error accepted; error overflow retired |}]
 ;;

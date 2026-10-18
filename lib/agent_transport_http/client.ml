@@ -211,20 +211,44 @@ let start_event_reader t =
     Eio.Fiber.fork ~sw:t.sw (fun () -> event_loop t))
 ;;
 
-let request_locked t ~method_ ~params ~read_body ~validate_json ~decode =
+let request_locked
+      t
+      ~method_
+      ~params
+      ~max_payload_bytes
+      ~max_envelope_bytes
+      ~read_body
+      ~validate_json
+      ~decode
+  =
   let open Result.Let_syntax in
   if t.closed || t.failed
   then Error (interrupted "HTTP connection is closed")
   else (
     let%bind request_id = next_request_id t in
     let envelope = Agent_protocol.Envelope.request ~id:request_id ~method_ ~params () in
+    let encoded = Agent_protocol.Envelope.to_json envelope |> Jsonaf.to_string in
+    let%bind () =
+      match max_payload_bytes, max_envelope_bytes with
+      | None, None -> Ok ()
+      | Some payload_maximum, Some envelope_maximum ->
+        let payload_bytes = String.length (Jsonaf.to_string params) in
+        let envelope_bytes = String.length encoded in
+        if
+          payload_bytes > payload_maximum
+          || payload_bytes > envelope_bytes
+          || envelope_maximum < envelope_bytes - payload_bytes
+          || payload_bytes > envelope_maximum - (envelope_bytes - payload_bytes)
+        then Error (invalid_response "REPL HTTP request exceeds its envelope bound")
+        else Ok ()
+      | None, Some _ | Some _, None ->
+        Error (invalid_response "REPL HTTP request bounds are incomplete")
+    in
     match
       P.Client.post
         t.rpc_client
         ~headers:(rpc_headers t)
-        ~body:
-          (P.Body.of_string
-             (Agent_protocol.Envelope.to_json envelope |> Jsonaf.to_string))
+        ~body:(P.Body.of_string encoded)
         t.rpc_path
     with
     | Error failure ->
@@ -258,101 +282,132 @@ let request_command_locked t command =
     t
     ~method_:(Agent_protocol.Command.method_name command)
     ~params:(Agent_protocol.Command.params command)
+    ~max_payload_bytes:None
+    ~max_envelope_bytes:None
     ~read_body:(fun _ response -> read_body response)
     ~validate_json:(fun _ -> Ok ())
     ~decode:(response_result command)
 ;;
 
-let developer_response_result request_id envelope =
+let closed_response_result ~name ~error_within_bound request_id envelope =
   match envelope with
   | Agent_protocol.Envelope.Response response
     when Agent_protocol.Envelope.Request_id.compare response.id request_id = 0 ->
     (match response.outcome with
-     | Error failure
-       when not
-              (Agent_client.Transport.Developer_response_bound.error_within_bound failure)
-       -> Error (invalid_response "Developer HTTP error response exceeds its bound")
+     | Error failure when not (error_within_bound failure) ->
+       Error (invalid_response (name ^ " HTTP error response exceeds its bound"))
      | outcome -> outcome)
   | Response _ -> Error (invalid_response "HTTP response identifier does not match")
   | Notification _ | Request _ ->
     Error (invalid_response "HTTP RPC returned a non-response envelope")
 ;;
 
-let validate_developer_payload_json t ~bound = function
+let validate_closed_payload_json t ~name ~max_result_bytes ~max_error_bytes = function
   | `Object fields ->
     let result = List.Assoc.find fields "result" ~equal:String.equal in
     let error = List.Assoc.find fields "error" ~equal:String.equal in
     let too_large =
       match result, error with
-      | Some result, _ ->
-        String.length (Jsonaf.to_string result)
-        > Agent_client.Transport.Developer_response_bound.max_result_bytes bound
-      | None, Some error ->
-        String.length (Jsonaf.to_string error)
-        > Agent_client.Transport.Developer_response_bound.max_error_bytes
+      | Some result, _ -> String.length (Jsonaf.to_string result) > max_result_bytes
+      | None, Some error -> String.length (Jsonaf.to_string error) > max_error_bytes
       | None, None -> false
     in
     if too_large
     then (
       fail_connection t;
-      Error (invalid_response "Developer HTTP response payload exceeds its bound"))
+      Error (invalid_response (name ^ " HTTP response payload exceeds its bound")))
     else Ok ()
   | _ -> Ok ()
 ;;
 
-let request_developer_locked t ~bound request =
+let read_closed_body ~name ~max_result_bytes ~max_error_bytes id response =
   (* The actual generated request ID determines the response envelope framing.
      The body is counted while Piaf streams it, before JSON parsing. *)
-  let read_body id response =
-    let max_error_bytes =
-      Agent_client.Transport.Developer_response_bound.max_error_bytes
+  if
+    P.Status.to_code response.P.Response.status < 200
+    || P.Status.to_code response.P.Response.status >= 300
+  then read_body_bounded response ~max_bytes:max_error_bytes
+  else (
+    let success_framing =
+      Agent_protocol.Envelope.success ~id `Null
+      |> Agent_protocol.Envelope.to_json
+      |> Jsonaf.to_string
+      |> String.length
+      |> fun length -> length - 4
+    in
+    let empty_error = Agent_protocol.Error.invalid_request "" in
+    let error_json_bytes =
+      Agent_protocol.Error.to_json empty_error |> Jsonaf.to_string |> String.length
+    in
+    let error_framing =
+      Agent_protocol.Envelope.failure ~id empty_error
+      |> Agent_protocol.Envelope.to_json
+      |> Jsonaf.to_string
+      |> String.length
+      |> fun length -> length - error_json_bytes
     in
     if
-      P.Status.to_code response.P.Response.status < 200
-      || P.Status.to_code response.P.Response.status >= 300
-    then read_body_bounded response ~max_bytes:max_error_bytes
-    else (
-      let success_framing =
-        Agent_protocol.Envelope.success ~id `Null
-        |> Agent_protocol.Envelope.to_json
-        |> Jsonaf.to_string
-        |> String.length
-        |> fun length -> length - 4
-      in
-      let empty_error = Agent_protocol.Error.invalid_request "" in
-      let error_json_bytes =
-        Agent_protocol.Error.to_json empty_error |> Jsonaf.to_string |> String.length
-      in
-      let error_framing =
-        Agent_protocol.Envelope.failure ~id empty_error
-        |> Agent_protocol.Envelope.to_json
-        |> Jsonaf.to_string
-        |> String.length
-        |> fun length -> length - error_json_bytes
-      in
-      let max_result_bytes =
-        Agent_client.Transport.Developer_response_bound.max_result_bytes bound
-      in
-      if
-        max_result_bytes <= 0
-        || max_result_bytes > Int.max_value - success_framing
-        || max_error_bytes > Int.max_value - error_framing
-      then Error (invalid_response "Developer response bound is invalid")
-      else
-        read_body_bounded
-          response
-          ~max_bytes:
-            (Int.max
-               (max_result_bytes + success_framing)
-               (max_error_bytes + error_framing)))
+      max_result_bytes <= 0
+      || max_result_bytes > Int.max_value - success_framing
+      || max_error_bytes > Int.max_value - error_framing
+    then Error (invalid_response (name ^ " response bound is invalid"))
+    else
+      read_body_bounded
+        response
+        ~max_bytes:
+          (Int.max (max_result_bytes + success_framing) (max_error_bytes + error_framing)))
+;;
+
+let request_developer_locked t ~bound request =
+  let max_result_bytes =
+    Agent_client.Transport.Developer_response_bound.max_result_bytes bound
   in
+  let max_error_bytes = Agent_client.Transport.Developer_response_bound.max_error_bytes in
   request_locked
     t
     ~method_:(Agent_protocol.Developer_wire.Request.method_name request)
     ~params:(Agent_protocol.Developer_wire.Request.params request)
-    ~read_body
-    ~validate_json:(validate_developer_payload_json t ~bound)
-    ~decode:developer_response_result
+    ~max_payload_bytes:None
+    ~max_envelope_bytes:None
+    ~read_body:(read_closed_body ~name:"Developer" ~max_result_bytes ~max_error_bytes)
+    ~validate_json:
+      (validate_closed_payload_json
+         t
+         ~name:"Developer"
+         ~max_result_bytes
+         ~max_error_bytes)
+    ~decode:
+      (closed_response_result
+         ~name:"Developer"
+         ~error_within_bound:
+           Agent_client.Transport.Developer_response_bound.error_within_bound)
+;;
+
+let request_repl_locked t ~max_request_bytes ~bound request =
+  let max_payload_bytes =
+    match bound with
+    | Agent_client.Transport.Repl_response_bound.Bootstrap -> 64 * 1024
+    | Installed limits ->
+      Document_schema.Limits.max_bytes
+        (Agent_protocol.Developer_repl_wire.Limits.request limits)
+  in
+  let max_result_bytes =
+    Agent_client.Transport.Repl_response_bound.max_result_bytes bound
+  in
+  let max_error_bytes = Agent_client.Transport.Repl_response_bound.max_error_bytes in
+  request_locked
+    t
+    ~method_:(Agent_protocol.Developer_repl_wire.Request.method_name request)
+    ~params:(Agent_protocol.Developer_repl_wire.Request.params request)
+    ~max_payload_bytes:(Some max_payload_bytes)
+    ~max_envelope_bytes:(Some max_request_bytes)
+    ~read_body:(read_closed_body ~name:"REPL" ~max_result_bytes ~max_error_bytes)
+    ~validate_json:
+      (validate_closed_payload_json t ~name:"REPL" ~max_result_bytes ~max_error_bytes)
+    ~decode:
+      (closed_response_result
+         ~name:"REPL"
+         ~error_within_bound:Agent_client.Transport.Repl_response_bound.error_within_bound)
 ;;
 
 let next_notification t = Agent_session.Mailbox.pop t.notifications
@@ -385,10 +440,10 @@ let close_locked t =
 
 let close t = Eio.Cancel.protect (fun () -> close_locked t)
 
-let request t command =
+let with_request_lock t f =
   match
     Eio.Mutex.use_rw ~protect:false t.mutex (fun () ->
-      match request_command_locked t command with
+      match f () with
       | result -> Ok result
       | exception (Eio.Cancel.Cancelled _ as exn) ->
         let backtrace = Stdlib.Printexc.get_raw_backtrace () in
@@ -403,20 +458,14 @@ let request t command =
   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
+let request t command = with_request_lock t (fun () -> request_command_locked t command)
+
 let request_developer t ~bound request =
-  match
-    Eio.Mutex.use_rw ~protect:false t.mutex (fun () ->
-      match request_developer_locked t ~bound request with
-      | result -> Ok result
-      | exception (Eio.Cancel.Cancelled _ as exn) ->
-        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-        Eio.Cancel.protect (fun () ->
-          fail_connection t;
-          ignore (Result.try_with (fun () -> close_locked t) : (unit, exn) result));
-        Error (exn, backtrace))
-  with
-  | Ok result -> result
-  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+  with_request_lock t (fun () -> request_developer_locked t ~bound request)
+;;
+
+let request_repl t ~max_request_bytes ~bound request =
+  with_request_lock t (fun () -> request_repl_locked t ~max_request_bytes ~bound request)
 ;;
 
 let normalize_prefix uri =
@@ -450,9 +499,10 @@ let connect_owned lifetime ~env ~uri ~bearer_token ~notification_capacity =
       ; closed = false
       }
     in
-    Agent_client.Transport.create_with_developer
+    Agent_client.Transport.create_with_developer_repl
       ~request:(request t)
       ~request_developer:(request_developer t)
+      ~request_repl:(request_repl t)
       ~next_notification:(fun () -> next_notification t)
       ~close:(fun () -> close t)
     |> Agent_client.Connection.create

@@ -54,6 +54,13 @@ uses Watch followed by Observe, or a separately initialized control
 connection for concurrent cancellation. A change hint invites reobservation
 of its key; it carries no durable cursor.
 
+The first-party REPL transport has a separate typed request lane through the
+client, HTTP, Unix socket and framed stdio adapters: capabilities are cached
+for one physical Initialize, selected features and methods are checked, and
+REPL params and the full request envelope have distinct installed bounds.
+The client-side custody of uncertain Create, Submit, Task, Reset and Close
+requests, and the embedded REPL connector, remain separate delivery work.
+
 The shipped daemon has an explicit `server.developer` startup profile. Its
 bounded rows compare an admitted source origin, compiled target and authenticated
 principal; the rows do not create source or native permission. Startup reuses

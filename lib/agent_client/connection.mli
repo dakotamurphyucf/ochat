@@ -40,6 +40,26 @@ val request_developer
   -> Agent_protocol.Developer_wire.Request.t
   -> (Agent_protocol.Developer_wire.Response.t, Agent_protocol.Error.t) result
 
+(** Fixed-bound bootstrap for the actual installed REPL handler inventory.
+    Requires this physical Initialize to select [developer.repl]. The cached
+    Capabilities expire when that Initialize identity changes or on close. *)
+val repl_capabilities
+  :  t
+  -> (Agent_protocol.Developer_repl_wire.Capabilities.t, Agent_protocol.Error.t) result
+
+(** REPL requests share the serialized request lane and current Initialize with
+    ordinary Developer calls. Except for Capabilities, this revalidates the
+    closed request, selected feature, advertised method and exact installed
+    limits, then decodes a method-affine bounded response. It owns no mutation
+    recovery state: callers retain uncertain Create/Submit/Task/Reset/Close
+    requests before calling it. A blocking Task Await prevents a same-connection
+    Cancel from overtaking it. The caller owns the one notification lease. *)
+val request_repl
+  :  t
+  -> limits:Agent_protocol.Developer_repl_wire.Limits.t
+  -> Agent_protocol.Developer_repl_wire.Request.t
+  -> (Agent_protocol.Developer_repl_wire.Response.t, Agent_protocol.Error.t) result
+
 (** Exclusive asynchronous consumer, claimed before session admission. *)
 type notification_lease
 
