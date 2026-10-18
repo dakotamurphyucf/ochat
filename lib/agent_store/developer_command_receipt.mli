@@ -6,7 +6,10 @@ open! Core
     authorizes disclosure; persistence validates structure, not provenance. *)
 
 module Id : sig
-  type t [@@deriving compare, equal, sexp_of]
+  (** Exact shared protocol identity, with historical persisted bytes intact.
+      [of_string] adapts the pure validator's error to the existing Store
+      Document_schema channel; it does not apply a second validator. *)
+  type t = Agent_protocol.Developer_command_id.t [@@deriving compare, equal, sexp_of]
 
   (** Bounded comparison identity. The Store allocates it only after proving a
       new idempotency key; decoding one does not reserve or execute a command. *)

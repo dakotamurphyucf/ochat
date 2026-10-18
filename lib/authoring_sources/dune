@@ -98,6 +98,18 @@
     lib/chatml_trace/chatml_trace.ml %{dep:../chatml_trace/chatml_trace.ml}
     lib/agent_protocol/delivery.ml %{dep:../agent_protocol/delivery.ml}
     lib/agent_protocol/developer_agent_artifact.ml %{dep:../agent_protocol/developer_agent_artifact.ml}
+    lib/agent_protocol/developer_command_id.ml %{dep:../agent_protocol/developer_command_id.ml}
+    lib/agent_protocol/developer_codec.ml %{dep:../agent_protocol/developer_codec.ml}
+    lib/agent_protocol/developer_route.ml %{dep:../agent_protocol/developer_route.ml}
+    lib/agent_protocol/developer_fixture.ml %{dep:../agent_protocol/developer_fixture.ml}
+    lib/agent_protocol/developer_metadata.ml %{dep:../agent_protocol/developer_metadata.ml}
+    lib/agent_protocol/developer_request_data.ml %{dep:../agent_protocol/developer_request_data.ml}
+    lib/agent_protocol/developer_view.ml %{dep:../agent_protocol/developer_view.ml}
+    lib/agent_protocol/developer_receipt.ml %{dep:../agent_protocol/developer_receipt.ml}
+    lib/agent_protocol/developer_common.ml %{dep:../agent_protocol/developer_common.ml}
+    lib/agent_protocol/developer_approval.ml %{dep:../agent_protocol/developer_approval.ml}
+    lib/agent_protocol/developer_wire.ml %{dep:../agent_protocol/developer_wire.ml}
+    lib/agent_store/developer_command_receipt.ml %{dep:../agent_store/developer_command_receipt.ml}
     lib/agent_protocol/job.ml %{dep:../agent_protocol/job.ml}
     lib/agent_protocol/stored_completion.ml %{dep:../agent_protocol/stored_completion.ml}
     lib/agent_protocol/subscription.ml %{dep:../agent_protocol/subscription.ml}

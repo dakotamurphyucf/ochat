@@ -79,6 +79,26 @@ let shared_features =
     , "runtime.execution"
     , [ "test/chatml_execution_budget_test.ml"; "test/chatml_projection_budget_test.ml" ]
     )
+  ; ( "execution.developer_command_wire"
+    , "Pure bounded Developer command, receipt, approval and method-affine wire data; \
+       Host resolution and transport handlers require separate installation"
+    , [ "lib/agent_protocol/developer_command_id.ml"
+      ; "lib/agent_protocol/developer_codec.ml"
+      ; "lib/agent_protocol/developer_route.ml"
+      ; "lib/agent_protocol/developer_fixture.ml"
+      ; "lib/agent_protocol/developer_metadata.ml"
+      ; "lib/agent_protocol/developer_request_data.ml"
+      ; "lib/agent_protocol/developer_view.ml"
+      ; "lib/agent_protocol/developer_receipt.ml"
+      ; "lib/agent_protocol/developer_common.ml"
+      ; "lib/agent_protocol/developer_approval.ml"
+      ; "lib/agent_protocol/developer_wire.ml"
+      ; "lib/agent_store/developer_command_receipt.ml"
+      ]
+    , "runtime.execution"
+    , [ "test/developer_protocol/developer_protocol_tests.ml"
+      ; "docs-src/design/chatml-developer-runtime.md"
+      ] )
   ; ( "execution.developer_shell_approval"
     , "Bounded once-only developer Shell review under real command, native and claimed \
        execution ownership; selected checks survive approval waits and cancellation"
@@ -351,7 +371,31 @@ let moderator_features =
 ;;
 
 let implementation_sources =
-  [ ( "lib/shell_runtime/approval_broker.ml"
+  [ ( "lib/agent_protocol/developer_command_id.ml"
+    , "169796d1fcf9fd4003ab3c0985220b3c29e937a3e0893fbfde4736f378e0750e" )
+  ; ( "lib/agent_protocol/developer_codec.ml"
+    , "7b3ce2ecabdaeab666cd622b139e17e05d0aee107fd55bc8e39cf74568a48690" )
+  ; ( "lib/agent_protocol/developer_route.ml"
+    , "6b06658547f3114aefad22a8f7dd73f57e1ddb6c7e464d5370abe3020b6a78d9" )
+  ; ( "lib/agent_protocol/developer_fixture.ml"
+    , "5d731984676192165c6f317aaea60aea0fefcf700456870a26568d5ed2c64d3e" )
+  ; ( "lib/agent_protocol/developer_metadata.ml"
+    , "7bc746a560c6682d957e7a4b55c8ed752ae514e0ac8cd0907dfacee008cd5394" )
+  ; ( "lib/agent_protocol/developer_request_data.ml"
+    , "f470183b3cfa04fb9970a8dff0ffd3a88eba3768130c06319ce58b2cfea3b3df" )
+  ; ( "lib/agent_protocol/developer_view.ml"
+    , "b4ce96438f22d25730b016fdc940ae0c7e65ccc6166de834ceea7e4165490571" )
+  ; ( "lib/agent_protocol/developer_receipt.ml"
+    , "a6a6fa52f7a1805f0d3c0833c5c6fea9868add02a3b69ce1981fe13c1c79c1a3" )
+  ; ( "lib/agent_protocol/developer_common.ml"
+    , "5c3846d01b34cf7c514e8f5f4eb491ba7bb9a7578e928549479cd63d58710bdf" )
+  ; ( "lib/agent_protocol/developer_approval.ml"
+    , "53faaa0df245f4e1ca8194589e8abd190580ff81f433dcfc8fe1d039e94527a5" )
+  ; ( "lib/agent_protocol/developer_wire.ml"
+    , "856335626038230343a0f9736f3b47638a650919e8932002c2066c73256636a6" )
+  ; ( "lib/agent_store/developer_command_receipt.ml"
+    , "05f97e97742c0668b963350de76a00596d94a0ad6a39420e792319de7d82defd" )
+  ; ( "lib/shell_runtime/approval_broker.ml"
     , "e66598888f26cca06cdb4ae70078fd2b89aea5518adfa64d7ab5958fe8f540fc" )
   ; ( "lib/shell_runtime/call_context.ml"
     , "2a7f5fc4025ec16659aed443679e997d8828262475909815f5507a7276f06de8" )
