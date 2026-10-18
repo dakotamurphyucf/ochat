@@ -6,7 +6,21 @@ developer commands: `developer.check`, `developer.fixture.run`, and
 provider, result-disclosure and cancellation authority remains separate.
 Defining the scopes alone does not install the hosted command service.
 
-Status: M5 design v1, 2026-10-15. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission, durable developer run checkpoint foundation, selected-document transactions, physical job-claim worker, compiler-side REPL typing transaction and incremental module registry described below are implemented. The developer root staging owner, bounded root/native terminal coordinator, selected native policy and claimed job-parent effect-entry proof are implemented. The owner-neutral lexical script-job kernel and its physical developer adapter are implemented. Actor-bound provider selection, the shared Model.spawn recipe decoder, durable intent, physical call-boundary admission, selected compiled-script adapter and claimed model-job runner are implemented. User-facing run/REPL services and hosted callback assembly remain pending. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
+The pure [Developer wire types](../../lib/agent_protocol/developer.mli) now
+define closed request/result method pairs for command submission, observation,
+terminal waits, cancellation, approval comparison and bounded change hints.
+They preserve the existing Store command ID's exact 1–256 byte domain and
+separate a receipt's bound from the complete response bound, including method
+framing. Unknown or duplicate fields and explicit null for absent options are
+rejected. A response encoder checks the installed aggregate limit before
+returning JSON; approval snapshots reject overflow instead of truncating.
+These types carry selectors, owner coordinates and fingerprints as comparison
+data. No transport method, source resolver, approval responder or event
+publisher is installed merely by defining the DTOs. The eventual Host must
+advertise only its installed methods and reauthorize each decoded operation
+against its live physical owner and source after waits.
+
+Status: M5 design v1, 2026-10-15. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission, durable developer run checkpoint foundation, selected-document transactions, physical job-claim worker, compiler-side REPL typing transaction and incremental module registry described below are implemented. The developer root staging owner, bounded root/native terminal coordinator, selected native policy and claimed job-parent effect-entry proof are implemented. The owner-neutral lexical script-job kernel and its physical developer adapter are implemented. Actor-bound provider selection, the shared Model.spawn recipe decoder, durable intent, physical call-boundary admission, selected compiled-script adapter and claimed model-job runner are implemented. Hosted command, native, job and Model approval callbacks are implemented. User-facing transport clients and the REPL Task service remain pending. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
 
 The [authoring service design](chatml-authoring-services.md) owns source context,
 overlay and immutable upload contracts used here. Implementation and validation

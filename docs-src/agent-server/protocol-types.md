@@ -3834,6 +3834,34 @@ val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
+## developer
+
+[implementation](../../lib/agent_protocol/developer.ml) · [interface](../../lib/agent_protocol/developer.mli)
+
+```ocaml
+(** Public transport-neutral Developer DTO family. The physical Host remains
+    the only source/Store/execution/approval authority. *)
+
+module Command_id = Developer_command_id
+module Receipt = Developer_receipt
+module Common = Developer_common
+module Approval = Developer_approval
+module Wire = Developer_wire
+module Features = Developer_common.Features
+module Method = Developer_common.Method
+module Kind = Developer_common.Kind
+module Target = Developer_common.Target
+module Route = Developer_common.Route
+module Fixture = Developer_common.Fixture
+module Execution_limits = Developer_common.Execution_limits
+module Limits = Developer_common.Limits
+module Capabilities = Developer_common.Capabilities
+module Submit = Developer_common.Submit
+module Lookup = Developer_common.Lookup
+module Owner = Developer_common.Owner
+module View = Developer_common.View
+```
+
 ## developer_agent_artifact
 
 [implementation](../../lib/agent_protocol/developer_agent_artifact.ml) · [interface](../../lib/agent_protocol/developer_agent_artifact.mli)
@@ -3923,6 +3951,516 @@ module Saved_tool_request : sig
 
   val artifact : t -> artifact
   val selected_name : t -> string
+end
+```
+
+## developer_approval
+
+[implementation](../../lib/agent_protocol/developer_approval.ml) · [interface](../../lib/agent_protocol/developer_approval.mli)
+
+```ocaml
+(** Process-local approval comparison data. A decoded pending request or ID is
+    never a Shell approval, responder grant, Root scope or Worker capability.
+    The Host rechecks separate read/respond policy and the physical command or
+    claimed Job, source, attempt and origin when using these values. *)
+
+module Owner : sig
+  type t =
+    | Command of Developer_command_id.t
+    | Claimed_job of
+        { job_id : Id.Job.t
+        ; attempt : int
+        }
+end
+
+module Execution : sig
+  type t =
+    | Native_invocation of Id.Invocation.t
+    | Claimed_model_job of
+        { job_id : Id.Job.t
+        ; attempt : int
+        }
+end
+
+module Pending : sig
+  type t
+
+  (** The bounded display is already redacted by the installed owner. No raw
+      Shell request or unbounded stdout is represented. An expiration time is
+      informational; the real owner clock decides currentness. *)
+  val create
+    :  limits:Developer_common.Limits.t
+    -> id:Id.Permission.t
+    -> owner:Owner.t
+    -> execution:Execution.t
+    -> runtime_id:string
+    -> manifest_sha256:string
+    -> redacted_display:string
+    -> expires_at:Timestamp.t
+    -> (t, Error.t) result
+
+  val id : t -> Id.Permission.t
+  val owner : t -> Owner.t
+  val execution : t -> Execution.t
+  val runtime_id : t -> string
+  val manifest_sha256 : t -> string
+  val redacted_display : t -> string
+  val expires_at : t -> Timestamp.t
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Developer_common.Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Page : sig
+  type t
+
+  (** One finite process-local snapshot under the advertised page bound. The
+      complete JSON also fits [Limits.approval_page]'s bytes, fields, nodes
+      and depth. Overflow returns Resource_limit and no partial page; there is
+      no cursor or silent truncation. An installation advertises Approval_list
+      only when its finite page policy can represent its configured pending
+      set. The Host applies current disclosure policy before construction. *)
+  val create : limits:Developer_common.Limits.t -> Pending.t list -> (t, Error.t) result
+
+  val pending : t -> Pending.t list
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Developer_common.Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Decision : sig
+  type t =
+    | Approve_once
+    | Deny of string
+
+  (** [Deny] reason is bounded by the installed decision policy. Decoding a
+      decision cannot bypass the Host's separate response authorization. *)
+  val create_deny : max_reason_bytes:int -> string -> (t, Error.t) result
+end
+
+module Response : sig
+  type t = private
+    { run_id : Id.Developer_run.t
+    ; id : Id.Permission.t
+    ; decision : Decision.t
+    }
+
+  val create
+    :  max_reason_bytes:int
+    -> run_id:Id.Developer_run.t
+    -> id:Id.Permission.t
+    -> decision:Decision.t
+    -> (t, Error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : max_reason_bytes:int -> Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## developer_codec
+
+[implementation](../../lib/agent_protocol/developer_codec.ml) · [interface](../../lib/agent_protocol/developer_codec.mli)
+
+```ocaml
+(** Strict finite JSON primitives for the Developer wire family only. *)
+
+val invalid : string -> ('a, Error.t) result
+val limit : string -> ('a, Error.t) result
+val validate : limits:Document_schema.Limits.t -> Jsonaf.t -> (unit, Error.t) result
+val measure : limits:Document_schema.Limits.t -> Jsonaf.t -> (int, Error.t) result
+val fields : allowed:string list -> Jsonaf.t -> (Json_codec.fields, Error.t) result
+val required : Json_codec.fields -> string -> (Jsonaf.t, Error.t) result
+val optional : Json_codec.fields -> string -> (Jsonaf.t option, Error.t) result
+val string : max_bytes:int -> Jsonaf.t -> (string, Error.t) result
+val nonnegative : Jsonaf.t -> (int, Error.t) result
+val positive : Jsonaf.t -> (int, Error.t) result
+val finite_positive_float : Jsonaf.t -> (float, Error.t) result
+val boolean : Jsonaf.t -> (bool, Error.t) result
+
+val array
+  :  max_items:int
+  -> (Jsonaf.t -> ('a, Error.t) result)
+  -> Jsonaf.t
+  -> ('a list, Error.t) result
+
+val integer_json : int -> Jsonaf.t
+val optional_field : string -> 'a option -> ('a -> Jsonaf.t) -> (string * Jsonaf.t) list
+val digest : Jsonaf.t -> (Chatml_source.Digest.t, Error.t) result
+val digest_json : Chatml_source.Digest.t -> Jsonaf.t
+val source_id : Jsonaf.t -> (Chatml_source.Id.t, Error.t) result
+val source_id_json : Chatml_source.Id.t -> Jsonaf.t
+```
+
+## developer_command_id
+
+[implementation](../../lib/agent_protocol/developer_command_id.ml) · [interface](../../lib/agent_protocol/developer_command_id.mli)
+
+```ocaml
+(** Portable comparison identity for an existing persisted Developer command.
+    This preserves the Store receipt ID's historical wire format exactly:
+    any nonempty string of at most 256 bytes. It is deliberately not a
+    prefixed {!Id} value. Decoding an ID never creates or controls a command.
+
+    Agent_store.Developer_command_receipt.Id aliases this type and delegates
+    validation here, adapting only its existing Document_schema error channel.
+    Persisted bytes and equality remain unchanged. *)
+
+type t [@@deriving compare, equal, sexp_of]
+
+val of_string : string -> (t, Error.t) result
+val to_string : t -> string
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## developer_common
+
+[implementation](../../lib/agent_protocol/developer_common.ml) · [interface](../../lib/agent_protocol/developer_common.mli)
+
+```ocaml
+(** Versioned, transport-neutral Developer request, view and capability data.
+    All source selectors, fingerprints, IDs and owner coordinates are data, not
+    a source read, execution, approval or cancellation grant. Every method must
+    be reauthorized by the physical Host after decoding and after yields.
+    Unknown/duplicate fields and explicit null for absent options reject. *)
+
+module Features : sig
+  val run : string
+  val approvals : string
+  val events : string
+end
+
+module Method : sig
+  type t =
+    | Capabilities
+    | Submit
+    | Observe
+    | Await_terminal
+    | Cancel_and_wait
+    | Approval_list
+    | Approval_respond
+    | Approval_cancel
+    | Watch
+    | Unwatch
+  [@@deriving compare, equal, sexp_of]
+
+  val to_string : t -> string
+  val of_string : string -> (t, Error.t) result
+end
+
+module Kind = Developer_receipt.Kind
+
+module Target : sig
+  type t =
+    | One_off_v1
+    | Tool_v1
+    | Developer_tool_v1
+    | Moderator_v1
+    | Delegated_moderator_v1
+  [@@deriving compare, equal, sexp_of]
+
+  (** Closed pure counterpart of the existing compiler Target. The server
+      converts only after its actual captured compiler ABI is selected. *)
+  val to_string : t -> string
+
+  val of_string : string -> (t, Error.t) result
+end
+
+module Route : sig
+  type t = private
+    | Local_project of
+        { root_index : int
+        ; dependency_root_indices : int list
+        ; project : Source.Portable_path.t
+        ; selection : Chatml_project.Selection.request
+        }
+    | Local_source of
+        { root_index : int
+        ; member : Source.Portable_path.t
+        }
+    | Authoring_project of { expected : Authoring.Context.Expected.t }
+    | Document_script of
+        { expected : Authoring.Context.Expected.t
+        ; selector : Authoring.Analysis.Target.selector
+        }
+
+  (** Indices and Expected are stable requested selectors. A fresh Host
+      operation must borrow the actual configured roots or current Authoring
+      connection only after its authoritative historical key miss. *)
+  val local_project
+    :  limits:Document_schema.Limits.t
+    -> root_index:int
+    -> dependency_root_indices:int list
+    -> project:Source.Portable_path.t
+    -> selection:Chatml_project.Selection.request
+    -> (t, Error.t) result
+
+  val local_source
+    :  limits:Document_schema.Limits.t
+    -> root_index:int
+    -> member:Source.Portable_path.t
+    -> (t, Error.t) result
+
+  val authoring_project
+    :  limits:Document_schema.Limits.t
+    -> expected:Authoring.Context.Expected.t
+    -> (t, Error.t) result
+
+  val document_script
+    :  limits:Document_schema.Limits.t
+    -> expected:Authoring.Context.Expected.t
+    -> selector:Authoring.Analysis.Target.selector
+    -> (t, Error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Document_schema.Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Fixture : sig
+  module Response : sig
+    type t =
+      | Return of Jsonaf.t
+      | Fail of string
+  end
+
+  module Step : sig
+    type t
+
+    (** Pure finite JSON and scalar validation only. The Host later performs
+        the existing selected Tool schema/ChatML conversion checks. *)
+    val create
+      :  limits:Document_schema.Limits.t
+      -> tool_name:string
+      -> input_schema:Jsonaf.t
+      -> output_schema:Jsonaf.t
+      -> expected_input:Jsonaf.t
+      -> response:Response.t
+      -> (t, Error.t) result
+
+    val tool_name : t -> string
+    val input_schema : t -> Jsonaf.t
+    val output_schema : t -> Jsonaf.t
+    val expected_input : t -> Jsonaf.t
+    val response : t -> Response.t
+  end
+
+  type t
+
+  (** [max_steps] and [max_bytes] are finite effective host limits; empty
+      fixtures are valid. Aggregate admission includes every step and nested
+      JSON. Decoding applies the same checks. *)
+  val create
+    :  limits:Document_schema.Limits.t
+    -> max_steps:int
+    -> max_bytes:int
+    -> steps:Step.t list
+    -> (t, Error.t) result
+
+  val steps : t -> Step.t list
+  val to_json : t -> Jsonaf.t
+
+  val of_json
+    :  limits:Document_schema.Limits.t
+    -> max_steps:int
+    -> max_bytes:int
+    -> Jsonaf.t
+    -> (t, Error.t) result
+end
+
+module Execution_limits : sig
+  type t = private
+    { fuel : int
+    ; max_tasks : int
+    ; wall_seconds : float
+    ; max_value_bytes : int
+    ; max_array_items : int
+    ; max_depth : int
+    ; allocation_bytes : int
+    ; max_calls : int
+    ; max_invocation_depth : int
+    }
+
+  (** Pure counterpart of Chatml_execution.valid_limits within the portable
+      wire-integer domain; it does not grant execution or widen the Host's
+      installed budget. *)
+  val create
+    :  fuel:int
+    -> max_tasks:int
+    -> wall_seconds:float
+    -> max_value_bytes:int
+    -> max_array_items:int
+    -> max_depth:int
+    -> allocation_bytes:int
+    -> max_calls:int
+    -> max_invocation_depth:int
+    -> (t, Error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Limits : sig
+  type t
+
+  (** Effective installed finite ceilings. [request] and [receipt] include
+      complete nested JSON bytes/depth/fields/nodes; output is separately
+      bounded by the actual Host and may be lower than [receipt]. [response]
+      admits the complete method result/View framing around a receipt or an
+      approval page. The installed Host chooses adequate headroom; a result
+      exceeding it rejects before serialization, never truncates. *)
+  val create
+    :  request:Document_schema.Limits.t
+    -> receipt:Document_schema.Limits.t
+    -> response:Document_schema.Limits.t
+    -> approval_page:Document_schema.Limits.t
+    -> max_output_bytes:int
+    -> max_fixture_steps:int
+    -> max_fixture_bytes:int
+    -> max_approval_display_bytes:int
+    -> max_approval_decision_reason_bytes:int
+    -> max_approval_page:int
+    -> max_event_bytes:int
+    -> (t, Error.t) result
+
+  val request : t -> Document_schema.Limits.t
+  val receipt : t -> Document_schema.Limits.t
+  val response : t -> Document_schema.Limits.t
+  val approval_page : t -> Document_schema.Limits.t
+  val max_output_bytes : t -> int
+  val max_fixture_steps : t -> int
+  val max_fixture_bytes : t -> int
+  val max_approval_display_bytes : t -> int
+  val max_approval_decision_reason_bytes : t -> int
+  val max_approval_page : t -> int
+  val max_event_bytes : t -> int
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Capabilities : sig
+  type t
+
+  (** [format_version] is this DTO's supported schema version (currently 1),
+      separate from Initialize.selected_version. Methods are the actual
+      installed Host handlers for this authenticated connection, never the
+      codec inventory. The server must additionally enforce selected Features.
+      Construction is pure comparison data and does not install a handler.
+      [of_json] uses a fixed finite bootstrap Document_schema bound before
+      reading advertised limits; a peer cannot choose its own decode budget. *)
+  val create
+    :  format_version:int
+    -> methods:string list
+    -> limits:Limits.t
+    -> (t, Error.t) result
+
+  val format_version : t -> int
+  val supports : t -> Method.t -> bool
+  val limits : t -> Limits.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Submit : sig
+  type t
+
+  (** All fields enter the original action/payload fingerprint; source bytes
+      and a later capture fingerprint do not. Live requires Prompt and
+      Workspace IDs; Check/Fixture require both absent. The Host separately
+      validates the exact current source, compiler, schema and policies. *)
+  val create
+    :  limits:Limits.t
+    -> run_id:Id.Developer_run.t
+    -> key:Idempotency_key.t
+    -> kind:Kind.t
+    -> route:Route.t
+    -> target:Target.t
+    -> prompt:Id.Prompt_definition.t option
+    -> workspace:Id.Workspace_definition.t option
+    -> entrypoint:string
+    -> input:Jsonaf.t
+    -> fixtures:Fixture.t option
+    -> requested_execution:Execution_limits.t option
+    -> requested_max_output_bytes:int option
+    -> (t, Error.t) result
+
+  val run_id : t -> Id.Developer_run.t
+  val key : t -> Idempotency_key.t
+  val kind : t -> Kind.t
+  val route : t -> Route.t
+  val target : t -> Target.t
+  val prompt : t -> Id.Prompt_definition.t option
+  val workspace : t -> Id.Workspace_definition.t option
+  val entrypoint : t -> string
+  val input : t -> Jsonaf.t
+  val fixtures : t -> Fixture.t option
+  val requested_execution : t -> Execution_limits.t option
+  val requested_max_output_bytes : t -> int option
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Lookup : sig
+  type t = private
+    { run_id : Id.Developer_run.t
+    ; key : Idempotency_key.t
+    }
+
+  val create : run_id:Id.Developer_run.t -> key:Idempotency_key.t -> t
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Document_schema.Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Owner : sig
+  type t = Execution_owner.developer
+
+  (** Delegates to the existing Execution_owner.developer constructor and
+      validator. These comparison coordinates do not prove a live process. *)
+  val create
+    :  host_id:Id.Server.t
+    -> run_id:Id.Developer_run.t
+    -> epoch:int
+    -> principal_id:Id.Principal.t
+    -> (t, Error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module View : sig
+  type phase =
+    | Reserved
+    | Waiting_permission
+    | Execution_started
+    | Terminal of
+        { execution_started : bool
+        ; receipt : Developer_receipt.t
+        }
+
+  type t
+
+  (** A historical row proves its exact request and capture through distinct
+      canonical fingerprints, not recoverable raw input/environment bytes.
+      [Waiting_permission] is solely the pre-Start phase. A runtime shell
+      approval leaves the command [Execution_started]. Kind, phase and
+      receipt must agree as in the existing Store Row. *)
+  val create
+    :  limits:Limits.t
+    -> command_id:Developer_command_id.t
+    -> owner:Owner.t
+    -> key:Idempotency_key.t
+    -> kind:Kind.t
+    -> phase:phase
+    -> request_fingerprint:Chatml_source.Digest.t
+    -> capture_fingerprint:Chatml_source.Digest.t
+    -> (t, Error.t) result
+
+  val command_id : t -> Developer_command_id.t
+  val owner : t -> Owner.t
+  val key : t -> Idempotency_key.t
+  val kind : t -> Kind.t
+  val phase : t -> phase
+  val request_fingerprint : t -> Chatml_source.Digest.t
+  val capture_fingerprint : t -> Chatml_source.Digest.t
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
 end
 ```
 
@@ -4103,6 +4641,252 @@ val to_json : t -> Jsonaf.t
     version, unknown envelope member, duplicate key, malformed recipe or
     invalid Target rejects. *)
 val of_json : Jsonaf.t -> limits:Document_schema.Limits.t -> (t, Protocol_error.t) result
+```
+
+## developer_receipt
+
+[implementation](../../lib/agent_protocol/developer_receipt.ml) · [interface](../../lib/agent_protocol/developer_receipt.mli)
+
+```ocaml
+(** Pure bounded projections of the existing Developer Check, Fixture and Live
+    terminal receipts. No Store, runtime, source handle or disclosure grant is
+    retained. The server converts an already authorized Store receipt; a
+    decoded value alone is never evidence of execution. *)
+
+module Kind : sig
+  type t =
+    | Check
+    | Fixture_run
+    | Live_run
+  [@@deriving compare, equal, sexp_of]
+end
+
+module Diagnostic : sig
+  module Location : sig
+    type t = private
+      { source : Chatml_source.Id.t
+      ; digest : Chatml_source.Digest.t
+      ; source_bytes : int
+      ; start_byte : int
+      ; end_byte : int
+      }
+
+    (** Offsets are half-open byte coordinates in this exact source/digest.
+        The constructor validates ordering and bounds, not source ownership. *)
+    val create
+      :  source:Chatml_source.Id.t
+      -> digest:Chatml_source.Digest.t
+      -> source_bytes:int
+      -> start_byte:int
+      -> end_byte:int
+      -> (t, Error.t) result
+  end
+
+  type t = private
+    { code : string
+    ; message : string
+    ; location : Location.t option
+    }
+
+  (** Existing 1..256-byte code and at most 16-KiB message bounds. *)
+  val create
+    :  code:string
+    -> message:string
+    -> location:Location.t option
+    -> (t, Error.t) result
+end
+
+module Check : sig
+  type t =
+    | Ready
+    | Rejected of Diagnostic.t
+    | Interrupted
+    | Cancelled
+end
+
+module Fixture : sig
+  module Failure : sig
+    type t =
+      | Compile of Diagnostic.t
+      | Fixture_mismatch of
+          { expected_step : int
+          ; actual_tool : string
+          }
+      | Fixture_missing of { next_step : int }
+      | Unsupported_effect of { operation : string }
+      | Runtime of Diagnostic.t
+      | Invalid_result of Diagnostic.t
+      | Pending_without_owner
+      | Admission_revoked
+      | Output_limit
+  end
+
+  module Log : sig
+    type level =
+      | Debug
+      | Info
+      | Warn
+      | Error
+
+    type t = private
+      { level : level
+      ; message : string
+      }
+
+    val create : level:level -> message:string -> (t, Error.t) result
+  end
+
+  type outcome =
+    | Succeeded of Jsonaf.t
+    | Tool_failed of Invocation.tool_error
+    | Failed of Failure.t
+
+  type completed = private
+    { graph_fingerprint : Chatml_source.Digest.t
+    ; fixture_digest : Chatml_source.Digest.t
+    ; tool_selection_fingerprint : Chatml_source.Digest.t option
+    ; matched_steps : int
+    ; logs : Log.t list
+    ; outcome : outcome
+    }
+
+  (** The server supplies the authentic selected-ABI fingerprint for Tool_v1
+      and omits it for One_off_v1; this pure value alone cannot prove which
+      compiler target ran. Aggregate JSON admission is [create] below. *)
+  val completed
+    :  graph_fingerprint:Chatml_source.Digest.t
+    -> fixture_digest:Chatml_source.Digest.t
+    -> tool_selection_fingerprint:Chatml_source.Digest.t option
+    -> matched_steps:int
+    -> logs:Log.t list
+    -> outcome:outcome
+    -> (completed, Error.t) result
+
+  type t =
+    | Completed of completed
+    | Interrupted
+    | Cancelled
+end
+
+module Live : sig
+  type t =
+    | Succeeded of Jsonaf.t
+    | Failed of Error.t
+    | Limited of Error.t
+    | Interrupted
+    | Cancelled
+end
+
+type value =
+  | Check of Check.t
+  | Fixture of Fixture.t
+  | Live of Live.t
+
+type t
+
+(** Validate every scalar and the complete nested JSON under one existing
+    Document_schema limit before retaining/encoding. Unknown and duplicate
+    fields reject; omitted optional fields and explicit null are distinct.
+    No per-log allowance widens the aggregate receipt bound. *)
+val create : limits:Document_schema.Limits.t -> value -> (t, Error.t) result
+
+val value : t -> value
+val kind : t -> Kind.t
+val encoded_bytes : t -> int
+val equal : t -> t -> bool
+val to_json : t -> Jsonaf.t
+val of_json : limits:Document_schema.Limits.t -> Jsonaf.t -> (t, Error.t) result
+```
+
+## developer_wire
+
+[implementation](../../lib/agent_protocol/developer_wire.ml) · [interface](../../lib/agent_protocol/developer_wire.mli)
+
+```ocaml
+(** Exact method/result affinity for the portable Developer family. This is
+    codec inventory, not evidence that a Host installed or selected a handler.
+    A client additionally checks Initialize features, actual Capabilities and
+    response method identity; an authenticated server reauthorizes every call.
+    No source/effect/approval capability crosses this wire. *)
+
+module Request : sig
+  type t =
+    | Capabilities
+    | Submit of Developer_common.Submit.t
+    | Observe of Developer_common.Lookup.t
+    | Await_terminal of Developer_common.Lookup.t
+    | Cancel_and_wait of Developer_common.Lookup.t
+    | Approval_list of Id.Developer_run.t
+    | Approval_respond of Developer_approval.Response.t
+    | Approval_cancel of Id.Developer_run.t * Id.Permission.t
+    | Watch of Id.Developer_run.t
+    | Unwatch of Id.Developer_run.t
+
+  val method_name : t -> string
+  val params : t -> Jsonaf.t
+
+  val of_method_and_params
+    :  limits:Developer_common.Limits.t
+    -> method_:string
+    -> params:Jsonaf.t
+    -> (t, Error.t) result
+
+  val supported_methods : string list
+end
+
+module Response : sig
+  type t =
+    | Capabilities of Developer_common.Capabilities.t
+    | Submit of Developer_common.View.t
+    | Observe of Developer_common.View.t option
+    | Await_terminal of Developer_common.View.t
+    | Cancel_and_wait of Developer_common.View.t
+    | Approval_list of Developer_approval.Page.t
+    | Approval_respond
+    | Approval_cancel
+    | Watch
+    | Unwatch
+
+  (** Distinct constructors retain exact affinity even where several methods
+      return the same View shape or an empty acknowledgement. *)
+  val method_name : t -> string
+
+  (** Encode only after validating the complete method result, including
+      Observe framing, against the advertised aggregate response bound. *)
+  val to_json : t -> limits:Developer_common.Limits.t -> (Jsonaf.t, Error.t) result
+
+  val of_method_and_json
+    :  limits:Developer_common.Limits.t
+    -> method_:string
+    -> Jsonaf.t
+    -> (t, Error.t) result
+
+  val supported_methods : string list
+end
+
+module Change : sig
+  (** Pure bounded process-local invalidation notification. This codec
+      installs no publisher, watch, durable cursor or live stdout/progress
+      stream. After a hint or a missed connection, Observe/Approval_list
+      remain authoritative. *)
+  type kind =
+    | Command_changed of Idempotency_key.t
+    | Approval_changed
+
+  type t = private
+    { run_id : Id.Developer_run.t
+    ; kind : kind
+    }
+
+  val create
+    :  limits:Developer_common.Limits.t
+    -> run_id:Id.Developer_run.t
+    -> kind:kind
+    -> (t, Error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Developer_common.Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
 ```
 
 ## envelope

@@ -41,6 +41,18 @@
   developer_model_call
   developer_agent_artifact
   developer_job
+  developer_command_id
+  developer_codec
+  developer_receipt
+  developer_route
+  developer_fixture
+  developer_metadata
+  developer_view
+  developer_request_data
+  developer_common
+  developer_approval
+  developer_wire
+  developer
   host_job
   job_progress
   job_artifact
@@ -134,6 +146,12 @@
   inference_query)
  (private_modules
   protocol_error
+  developer_codec
+  developer_route
+  developer_fixture
+  developer_metadata
+  developer_view
+  developer_request_data
   extension_codec
   projection_codec
   authoring_codec

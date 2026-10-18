@@ -7,15 +7,16 @@ let invalid name reason = Error (D.Error.Invalid_field { path = [ name ]; reason
 let ( let* ) result f = Result.bind result ~f
 
 module Id = struct
-  type t = string [@@deriving compare, equal, sexp_of]
+  type t = P.Developer_command_id.t [@@deriving compare, equal, sexp_of]
 
   let of_string value =
-    if String.is_empty value || String.length value > 256
-    then invalid "id" "command receipt ID must be 1..256 bytes"
-    else Ok value
+    P.Developer_command_id.of_string value
+    |> Result.map_error ~f:(fun _ ->
+      D.Error.Invalid_field
+        { path = [ "id" ]; reason = "command receipt ID must be 1..256 bytes" })
   ;;
 
-  let to_string t = t
+  let to_string = P.Developer_command_id.to_string
 end
 
 module Kind = struct
