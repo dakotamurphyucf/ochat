@@ -19,14 +19,15 @@ val with_services
   -> (unit -> 'a)
   -> 'a
 
-(** Narrow an already active caller solely for a nested selected moderator
-    [Process.run]. There is no unbound fallback: a real parent [with_services]
-    must be live. Each inherited execution check uses the parent's exact
-    services and executor adapter, then obtains a fresh child admission with
-    [refresh], repeats the parent check after that possibly yielding refresh,
-    and ends with the returned nonyielding child check. A cached child
-    admission or a copied parent approval provider does not grant authority.
-    Both bindings expire at their respective lexical returns. *)
+(** Narrow the actual selected moderator [Process.run] caller. A parent
+    [with_services] keeps its exact session, Store, provider, and executor
+    adapter. Without parent services, the binding adds only a selected-child
+    execution check to the original Shell config; it cannot supply approval
+    services. A nested check-only binding retains its parent's check and
+    adapter. Every execution check refreshes child admission, repeats any
+    parent check after that possibly yielding refresh, and ends with the
+    returned nonyielding child check. An expired parent always denies. Both
+    bindings expire at their respective lexical returns. *)
 val with_narrowed_check
   :  refresh:(unit -> (unit -> (unit, string) result, string) result)
   -> (unit -> 'a)
@@ -52,6 +53,8 @@ val prepare_executor_for_call
     This is not suitable for delegated callers requiring another session identity. *)
 val without_services : (unit -> 'a) -> 'a
 
-(** [Ok None] means a legacy unbound caller. An expired or rejected scope returns
-    an error and must never fall back to registration-owner approvals. *)
+(** [Ok None] means either an unbound caller or a live check-only binding with
+    no approval services. The latter still checks its selected source and
+    installs its execution adapter through [prepare_executor_for_call]. An
+    expired or rejected binding returns an error. *)
 val current : unit -> (t option, string) result
