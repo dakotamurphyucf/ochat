@@ -104,6 +104,7 @@
     lib/agent_server/job_scheduler.ml %{dep:../agent_server/job_scheduler.ml}
     lib/agent_server/job_scheduler_developer.ml %{dep:../agent_server/job_scheduler_developer.ml}
     lib/agent_server/developer_root_owner.ml %{dep:../agent_server/developer_root_owner.ml}
+    lib/agent_server/developer_agent_source_runtime.ml %{dep:../agent_server/developer_agent_source_runtime.ml}
     lib/agent_server/schedule_scheduler.ml %{dep:../agent_server/schedule_scheduler.ml}
     lib/agent_session/background_execution.ml %{dep:../agent_session/background_execution.ml}
     lib/agent_session/captured_agent_runner.ml %{dep:../agent_session/captured_agent_runner.ml}

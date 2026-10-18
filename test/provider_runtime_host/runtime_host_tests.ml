@@ -218,38 +218,40 @@ let local_model_endpoint ?response_body env sw requests on_submit on_body =
           ~finally:(fun () -> Eio.Flow.close flow)
           ~f:(fun () ->
             let reader = Eio.Buf_read.of_flow flow ~max_size:2_000_000 in
-            ignore (Eio.Buf_read.line reader : string);
-            let rec headers length =
-              let line = Eio.Buf_read.line reader in
-              if String.is_empty line
-              then length
-              else (
-                let key, value = String.lsplit2 line ~on:':' |> Option.value_exn in
-                headers
-                  (if String.Caseless.equal key "content-length"
-                   then Int.of_string (String.strip value)
-                   else length))
-            in
-            let body_length = headers 0 in
-            let body = Eio.Buf_read.take body_length reader in
-            incr requests;
-            on_body body;
-            on_submit ();
-            let response =
-              Option.bind response_body ~f:(fun respond -> respond !requests body)
-              |> Option.value ~default:completed
-            in
-            Eio.Flow.copy_string
-              (sprintf
-                 "HTTP/1.1 200 OK\r\n\
-                  Content-Type: text/event-stream\r\n\
-                  Content-Length: %d\r\n\
-                  Connection: close\r\n\
-                  \r\n\
-                  %s"
-                 (String.length response)
-                 response)
-              flow);
+            match Eio.Buf_read.line reader with
+            | exception End_of_file -> ()
+            | _request_line ->
+              let rec headers length =
+                let line = Eio.Buf_read.line reader in
+                if String.is_empty line
+                then length
+                else (
+                  let key, value = String.lsplit2 line ~on:':' |> Option.value_exn in
+                  headers
+                    (if String.Caseless.equal key "content-length"
+                     then Int.of_string (String.strip value)
+                     else length))
+              in
+              let body_length = headers 0 in
+              let body = Eio.Buf_read.take body_length reader in
+              incr requests;
+              on_body body;
+              on_submit ();
+              let response =
+                Option.bind response_body ~f:(fun respond -> respond !requests body)
+                |> Option.value ~default:completed
+              in
+              Eio.Flow.copy_string
+                (sprintf
+                   "HTTP/1.1 200 OK\r\n\
+                    Content-Type: text/event-stream\r\n\
+                    Content-Length: %d\r\n\
+                    Connection: close\r\n\
+                    \r\n\
+                    %s"
+                   (String.length response)
+                   response)
+                flow);
         `Stop_daemon)
     done);
   sprintf "http://127.0.0.1:%d/v1/responses" port

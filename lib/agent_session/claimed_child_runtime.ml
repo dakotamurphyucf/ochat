@@ -64,6 +64,56 @@ let check t =
   check_now t
 ;;
 
+let admit_claimed_registrations
+      ~native
+      ~selected
+      ~registrations
+      ~max_native_bindings
+      ~checkpoint
+  =
+  let open Result.Let_syntax in
+  let%bind () =
+    if C.length selected <= max_native_bindings
+    then Ok ()
+    else Error (invalid "claimed child native binding limit exceeded")
+  in
+  let%bind () =
+    Runtime.admit_native_selection
+      native
+      ~selected
+      ~max_bindings:max_native_bindings
+      ~checkpoint
+  in
+  let references = C.references selected in
+  List.fold_result registrations ~init:() ~f:(fun () registration ->
+    let%bind () =
+      Runtime.admit_exact_saved_agent_registration
+        native
+        ~registration
+        ~max_registrations:max_native_bindings
+        ~checkpoint
+    in
+    let%bind matches =
+      List.fold_result references ~init:0 ~f:(fun matches reference ->
+        checkpoint ();
+        let%bind binding =
+          C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
+          |> Result.map_error ~f:(fun error -> invalid error.C.message)
+        in
+        Ok
+          (if
+             Option.value_map
+               (C.native_implementation binding)
+               ~default:false
+               ~f:(phys_equal registration.implementation)
+           then matches + 1
+           else matches))
+    in
+    if Int.equal matches 1
+    then Ok ()
+    else Error (invalid "claimed Agent registration is not uniquely selected"))
+;;
+
 let with_prepared
       ~source
       ~script_preparation
@@ -72,12 +122,19 @@ let with_prepared
       ~manifest_authorizer
       ~approval_provider
       ~approval_store
+      ~max_native_bindings
+      ~prepare_agent_registrations
       ~checkpoint
       ~check_current
       ~check_local_now
       f
   =
   let open Result.Let_syntax in
+  let%bind () =
+    if max_native_bindings > 0
+    then Ok ()
+    else Error (invalid "claimed child native binding limit is invalid")
+  in
   let%bind () = Source.check_now source in
   let%bind () = check_current () in
   let%bind () = check_local_now () in
@@ -94,6 +151,33 @@ let with_prepared
       ~f:(fun startup ~compilation_limits ~programs ->
         let%bind () = Source.check_now source in
         let%bind () = check_current () in
+        let%bind claimed_registration = prepare_agent_registrations ~source ~sw in
+        let%bind native_registrations =
+          Captured_agent_runner.Deferred_developer.Claimed.registrations
+            claimed_registration
+            ~source
+        in
+        let%bind parsed =
+          Prompt_revision.parser_context revision
+          |> Result.of_option
+               ~error:(invalid "claimed child has no retained parser context")
+        in
+        let ordinary_agent_tools =
+          if List.is_empty native_registrations
+          then Developer_child_preflight.Denied
+          else Registered
+        in
+        let%bind _needs_dynamic_source =
+          Developer_child_preflight.classify_selected
+            ~ordinary_agent_tools
+            ~revision
+            ~parsed
+            ~input:[]
+            ~checkpoint
+        in
+        let%bind () = Source.check_now source in
+        let%bind () = check_current () in
+        let%bind () = check_local_now () in
         let preparation_denial = ref None in
         let check_preparation_now () =
           match check_current () with
@@ -135,7 +219,7 @@ let with_prepared
             ?programs
             ~checkpoint
             ~check_preparation_now
-            ~native_registrations:[]
+            ~native_registrations
             ~sw
             ~host
             ~platform:(Runtime.platform ())
@@ -158,6 +242,14 @@ let with_prepared
         in
         let selected =
           Chat_response.Managed_tool_registry.capabilities resources.managed
+        in
+        let%bind () =
+          admit_claimed_registrations
+            ~native:resources.native
+            ~selected
+            ~registrations:native_registrations
+            ~max_native_bindings
+            ~checkpoint
         in
         let%bind pinned =
           B.selected_capabilities (Source.request source) ~capabilities:selected

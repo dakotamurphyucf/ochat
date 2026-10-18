@@ -122,13 +122,16 @@ val model_sources : live -> Developer_model_job_runner.Sources.t
     immutable captured bytes from this package's artifact store, then build
     native and managed resources under the selected revision through the
     common bounded Headless preparation, using the contract carried by that
-    authenticated source receipt. The existing selected-child preflight and
-    max_native_bindings bound remain in force before loan exposure. The v3
-    runtime digest is recomputed from this Live source binding's actual
+    authenticated source receipt. The claimed runtime's selected-child
+    preflight admits Agent Tools only from the physically prepared registered
+    functions; the max_native_bindings bound remains in force before loan
+    exposure. The v3 runtime digest is recomputed from this Live source binding's actual
     script/content policy and [runtime_policy], never accepted from the wire.
     No current File recapture, Root
-    native registry or optional Tool target is used. The opaque runtime loan
-    remains inside the Claim's child switch; a mismatch or revoked Live source
+    native registry or optional Tool target is used. The bound Live source
+    runtime lends its paired Agent callbacks to that Claim preparation; no
+    independent callback or caller-selected registry enters. The opaque runtime
+    loan remains inside the Claim's child switch; a mismatch or revoked Live source
     is final and has no Root fallback. The caller must also prove this Live and
     Root are the paired package and keep the Claim active. *)
 val with_claimed_issuer

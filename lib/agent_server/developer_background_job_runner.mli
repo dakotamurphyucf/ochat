@@ -31,7 +31,7 @@ end
     owned by the installed definition). The finite root job-policy array ceiling bounds this
     constructor comparison before selected-reference allocation. The separate
     registered-source traversal is bounded at dispatch under the same ceiling. A
-    missing runtime permits ordinary Tool/Script work, but a valid saved
+    missing runtime permits ordinary Tool/Script work, but a valid v2 saved
     Agent.run artifact remains installer-unavailable and unclaimed. A matching runtime is still
     only a borrowed comparison source: the entered Claim, selected binding,
     original/current actor and registered source are rechecked after waits at
@@ -73,10 +73,10 @@ val issued_by_root : t -> Developer_root_owner.run -> bool
     paired Job service has no installed Host issuer package. With one installed
     native/managed Tool and Script work is scheduling-runnable, but exact
     issuer restoration occurs only inside the physical Claim. A v3 Tool with a
-    distinct saved Agent target remains [Agent_artifact_installer_unavailable]
-    until its source-owned target installer exists; it cannot try the legacy
-    Root Agent runtime. Neither this classification nor a Root registry
-    fallback may claim it. Runnable
+    distinct saved Agent target is scheduling-runnable only with the paired
+    Host issuer service installed. The physical Claim then prepares the exact
+    issuer native runtime and admits the target against that same runtime;
+    it cannot try the legacy Root Agent runtime. Runnable
     classification grants no source authority: the entered Worker re-decodes
     its Claim, and the actual selected native callback restores the exact pin.
     A malformed saved Async_tool payload is [Malformed_supported]: the same
@@ -110,12 +110,12 @@ val availability
     that runtime before any handler effect. Restoration polls the same host
     budget for cancellation and deadline without consuming interpreter fuel;
     bounded compilation/custody work and later execution retain their own
-    accounting. A Tool's optional agent_artifact
-    is restored afterward as a distinct target under its existing exact
-    binding checks. The selected native executor is constructed from [root]
+    accounting. A Tool's optional agent_artifact is restored afterward as a
+    distinct target under its existing exact binding checks against the SAME
+    newly prepared claimed issuer runtime, never [agent_runtime] from [create].
+    The selected native executor is constructed from [root]
     inside this package and calls the restricted claimed child path with the
-    actual active proof. A Tool with a saved Agent target remains unclaimed
-    pending its separate source-owned target path. It performs
+    actual active proof. It performs
     durable Dispatching, selected policy/permission, final root/Claim/deadline
     checks and exact terminal submission. A completed native outcome becomes
     the matching Inline Completion in a proposed terminal job state; an owned

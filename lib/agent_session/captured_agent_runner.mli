@@ -416,11 +416,26 @@ type selected_tool_runner =
   -> source:string
   -> (string, Agent_protocol.Error.t) result
 
+(** Trusted upper callback for one physically selected saved Agent source.
+    The callback value does not create a Worker Claim or Root grant. *)
+type selected_saved_runner =
+  target:Claimed_developer.Selected.Target.t
+  -> startup:Chat_response.Startup_compilation.t
+  -> compilation_limits:Chatml_compilation.limits
+  -> programs:Chatml_prompt_programs.Restored.t option
+  -> ctx:Eio_unix.Stdenv.base Chat_response.Ctx.t
+  -> input:Prompt.Chat_markdown.content_item list
+  -> observer:Chat_response.Driver.agent_observer option
+  -> source:string
+  -> (string, Agent_protocol.Error.t) result
+
 module Source_binding : sig
   (** Immutable original-source template; borrows Store and source lease, without
       opening or claiming either. Bound ports belong to their actual resource
       switch. Join them before releasing the borrowed host owners. *)
   type t
+
+  type binding = t
 
   module Policy_identity : sig
     type t
@@ -451,6 +466,11 @@ module Source_binding : sig
     val request : t -> Chat_response.Background_request.t
     val issuer_source : t -> Chat_response.Background_request.Issuer_source.t
     val same_parent : t -> Developer_job_scope.Parent.t -> bool
+
+    (** Comparison only: this Claim was restored through the exact installed
+        source binding. A matching issuer digest cannot replace physical
+        binding identity. This does not lend the binding to the caller. *)
+    val issued_by : t -> binding -> bool
 
     (** Nonyielding local Claim/binding-lifetime check. The caller separately
         checks actual Root, actor and selected Prompt/Workspace after yields. *)
@@ -747,6 +767,23 @@ module Deferred_developer : sig
       registration producer, not an inference or child capability owner. *)
   type t
 
+  module Claimed : sig
+    (** Parser-owned ordinary Agent registrations from one entered Worker
+        Claim's issuing source. This retains the exact opaque source. *)
+    type t
+
+    (** Require the same live physical Claim source and still-open preparation
+        switch before lending immutable registrations. An equal revision or
+        artifact is insufficient; the underlying source Port cannot outlive
+        that switch. Reject use from another Eio domain. *)
+    val registrations
+      :  t
+      -> source:Source_binding.Claimed_source.t
+      -> ( Chat_response.Agent_runtime.native_registration list
+           , Agent_protocol.Error.t )
+           result
+  end
+
   (** Bind [source] to [revision] under its actual original source lease and
       bounded runtime policy. Scan the genuine Parsed agent references and
       require exactly one physical Tool reference for every emitted ordinary
@@ -805,6 +842,35 @@ module Deferred_developer : sig
           -> (Eio_unix.Stdenv.base Chat_response.Ctx.t -> string)
           -> string)
     -> (t, Agent_protocol.Error.t) result
+
+  (** Prepare registered ordinary Agent functions from [source]'s own retained
+      binding and revision inside the active Claim; neither can be supplied
+      separately. Reuse the selected-saved source runner, original File/Captured
+      lease, bounded parser membership scan and Source(Some) preparers of
+      [prepare]. The trusted callbacks come from one bound Host source runtime
+      and do not run during preparation. There is no literal fallback.
+      The result is tied to [source] and [sw], whose borrowers join before the
+      Claim exits. Reject foreign/expired source and invalid limits before
+      returning registrations. No Root, provider, scheduler or resource
+      initializer is created. *)
+  val prepare_claimed
+    :  Source_binding.Claimed_source.t
+    -> script_preparation:Runtime_script_preparation.t
+    -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+    -> approval_provider:Shell_runtime.Approval_broker.provider
+    -> response_dir:Eio.Fs.dir_ty Eio.Path.t
+    -> env:Eio_unix.Stdenv.base
+    -> sw:Eio.Switch.t
+    -> max_agents:int
+    -> max_work_steps:int
+    -> checkpoint:(unit -> unit)
+    -> with_context:
+         (implementation:Ochat_function.t
+          -> invocation:Ochat_function.Invocation.t
+          -> (Eio_unix.Stdenv.base Chat_response.Ctx.t -> string)
+          -> string)
+    -> run_selected_target:selected_saved_runner
+    -> (Claimed.t, Agent_protocol.Error.t) result
 
   (** Prepare ONLY parser-owned ordinary Agent Tool registrations for the
       exact selected child revision. [parent] is its currently entered genuine
