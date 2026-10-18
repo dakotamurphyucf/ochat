@@ -13,6 +13,18 @@ module M = Chat_response.Managed_tool_registry
 module H = P.Host_invocation
 module Runtime = Chatml_host_runtime
 module Value = Chatml.Chatml_value_codec
+module Claimed = Agent_session.Claimed_child_runtime
+module Deadline = Developer_claim_deadline
+
+module Claim_budget = struct
+  type t =
+    { deadline : P.Timestamp.t
+    ; control : Chatml.Chatml_lang.execution_control
+    }
+
+  let deadline t = t.deadline
+  let control t = t.control
+end
 
 type t =
   { root : O.run
@@ -42,10 +54,15 @@ and native_selection =
   ; mutable acknowledged : bool
   }
 
+and issuing_source =
+  | Root_source
+  | Foreground_child of Child.t
+  | Claimed_issuer of Claimed.t
+
 and scope =
   { service : t
   ; physical : physical
-  ; queued_child : Child.t option
+  ; issuing_source : issuing_source
   ; worker_parent : Agent_session.Developer_job_scope.Parent.t option
   ; mutable selected : C.t
   ; mutable selected_now : unit -> (C.t, P.Error.t) result
@@ -77,6 +94,7 @@ let create ~root ~store ~disclosure ~env ~current_actor ~queued_issuer ~prepare_
 ;;
 
 let issued_by_root t root = phys_equal t.root root
+let queued_issuer t = t.queued_issuer
 
 let current scope =
   let* witness = O.current scope.service.root in
@@ -125,6 +143,11 @@ let check_scope = check
 
 module Source_parent = struct
   type t = source_parent
+
+  type runtime_source =
+    | Root_runtime
+    | Selected_child_runtime of Child.t
+    | Claimed_runtime of Claimed.t
 
   let check t ~binding =
     let* () = check_scope t.scope in
@@ -175,7 +198,12 @@ module Source_parent = struct
     Chat_response.Source_launch.developer ~owner:(O.owner t.scope.service.root) ~parent
   ;;
 
-  let selected_child t = t.scope.queued_child
+  let runtime_source t =
+    match t.scope.issuing_source with
+    | Root_source -> Root_runtime
+    | Foreground_child child -> Selected_child_runtime child
+    | Claimed_issuer issuer -> Claimed_runtime issuer
+  ;;
 end
 
 let stage_physical scope ~checkpoint request =
@@ -186,14 +214,14 @@ let stage_physical scope ~checkpoint request =
   match scope.physical with
   | Root action -> O.Action.stage_background action ~request ~checkpoint
   | Native terminal ->
-    (match scope.queued_child with
-     | None ->
+    (match scope.issuing_source with
+     | Root_source ->
        O.Native_terminal.stage_background
          terminal
          ~request
          ~checkpoint
          ~check_parent_now:scope.check_parent_now
-     | Some child ->
+     | Foreground_child child ->
        let* borrowed = N.borrow_selected () in
        let check_selected_parent_now () =
          let* () = scope.check_parent_now () in
@@ -205,8 +233,29 @@ let stage_physical scope ~checkpoint request =
          ~borrowed
          ~request
          ~checkpoint
-         ~check_parent_now:check_selected_parent_now)
-  | Worker action -> O.Worker_action.stage_background action ~request ~checkpoint
+         ~check_parent_now:check_selected_parent_now
+     | Claimed_issuer issuer ->
+       let* borrowed = N.borrow_selected () in
+       let check_claimed_parent_now () =
+         let* () = scope.check_parent_now () in
+         Claimed.check_now issuer
+       in
+       O.Native_terminal.stage_background_from_selected_borrow
+         terminal
+         ~borrowed
+         ~request
+         ~checkpoint
+         ~check_parent_now:check_claimed_parent_now)
+  | Worker action ->
+    (match scope.issuing_source with
+     | Root_source -> O.Worker_action.stage_background action ~request ~checkpoint
+     | Claimed_issuer issuer ->
+       O.Worker_action.stage_background_from_claimed_issuer
+         action
+         ~issuer
+         ~request
+         ~checkpoint
+     | Foreground_child _ -> Error (invalid "foreground child cannot be a worker issuer"))
 ;;
 
 let rollback_physical (scope : scope) id =
@@ -231,12 +280,17 @@ let stage scope ~checkpoint request =
     else Ok ()
   in
   let* request =
-    match scope.queued_child, scope.service.queued_issuer with
-    | None, _ -> Ok request
-    | Some child, Some issuer ->
+    match scope.issuing_source, scope.service.queued_issuer with
+    | Root_source, _ -> Ok request
+    | Claimed_issuer issuer, _ ->
+      (match scope.physical with
+       | Worker _ -> Ok request
+       | Native _ | Root _ -> B.with_issuer_source request (Claimed.issuer_source issuer))
+    | Foreground_child child, Some issuer ->
       let* source = Developer_queued_issuer.capture_child issuer ~child ~checkpoint in
       B.with_issuer_source request source
-    | Some _, None -> Error (invalid "selected child queued issuer is unavailable")
+    | Foreground_child _, None ->
+      Error (invalid "selected child queued issuer is unavailable")
   in
   let* () = check scope in
   let* () = B.validate_capabilities request ~capabilities:scope.selected in
@@ -347,13 +401,16 @@ let handlers scope : Ops.handlers =
             ~selected:scope.selected
             ~policy:(O.job_policy scope.service.root)
             ~prepare_source:(fun ~binding ~request ~checkpoint ->
-              let parent = { scope } in
-              let* () = Source_parent.check parent ~binding in
-              let* artifact =
-                scope.service.prepare_source ~parent ~binding ~request ~checkpoint
-              in
-              let* () = Source_parent.check parent ~binding in
-              Ok artifact)
+              match C.implementation binding with
+              | Managed _ -> Ok None
+              | Native _ ->
+                let parent = { scope } in
+                let* () = Source_parent.check parent ~binding in
+                let* artifact =
+                  scope.service.prepare_source ~parent ~binding ~request ~checkpoint
+                in
+                let* () = Source_parent.check parent ~binding in
+                Ok artifact)
             ~name
             ~input
             ~checkpoint:(fun () -> K.checkpoint scope.kernel)
@@ -535,7 +592,7 @@ end
 let with_kernel
       service
       ~physical
-      ~queued_child
+      ~issuing_source
       ~selected
       ~selected_now
       ~current_capabilities
@@ -556,7 +613,7 @@ let with_kernel
        f
          { service
          ; physical
-         ; queued_child
+         ; issuing_source
          ; worker_parent = None
          ; selected
          ; selected_now
@@ -591,7 +648,7 @@ let with_root_action service ~phase f =
            let scope =
              { service
              ; physical = Root issued
-             ; queued_child = None
+             ; issuing_source = Root_source
              ; worker_parent = None
              ; selected
              ; selected_now = (fun () -> Ok (O.native_selected service.root))
@@ -613,17 +670,27 @@ let with_root_action service ~phase f =
        Ok (value, ordinary))
 ;;
 
-let with_claimed_worker service ~candidate ?on_capacity_decision ?select f =
+let with_claimed_worker service ~candidate ?on_capacity_decision ~expired_state ?select f =
   let* witness = O.claim_preflight service.root in
   let* saved =
     B.of_json
       ~policy:(O.job_policy service.root)
       (P.Developer_job.payload (O.Job_candidate.job candidate))
   in
-  let* selected =
-    B.selected_capabilities saved ~capabilities:(O.Claim_preflight.selected witness)
+  let claimed = Option.is_some (B.issuer_source saved) in
+  let* () =
+    if claimed && Option.is_none service.queued_issuer
+    then Error (invalid "claimed child issuer installer is unavailable")
+    else Ok ()
   in
-  let selected_now () =
+  let* selected =
+    if claimed
+    then
+      C.select (O.Claim_preflight.selected witness) ~names:[]
+      |> Result.map_error ~f:(fun error -> invalid error.C.message)
+    else B.selected_capabilities saved ~capabilities:(O.Claim_preflight.selected witness)
+  in
+  let root_selected_now () =
     B.selected_capabilities saved ~capabilities:(O.native_selected service.root)
   in
   let action = ref None in
@@ -649,35 +716,138 @@ let with_claimed_worker service ~candidate ?on_capacity_decision ?select f =
            ?select
            (fun ~active ~action:issued ~sw ->
               action := Some issued;
-              let* parent = O.job_parent service.root active in
-              let capture_fingerprint =
-                Chatml_developer_capture.fingerprint (O.capture service.root)
+              let run_scope ~selected ~selected_now ~current_capabilities ~issuer ~run =
+                let* parent = O.job_parent service.root active in
+                let capture_fingerprint =
+                  Chatml_developer_capture.fingerprint (O.capture service.root)
+                in
+                let check_parent_now () =
+                  let* () =
+                    Agent_session.Developer_job_scope.Parent.check_now
+                      parent
+                      ~owner:(O.owner service.root)
+                      ~capture_fingerprint
+                  in
+                  match issuer with
+                  | None -> Ok ()
+                  | Some issuer -> Claimed.check_now issuer
+                in
+                let scope =
+                  { service
+                  ; physical = Worker issued
+                  ; issuing_source =
+                      (match issuer with
+                       | None -> Root_source
+                       | Some issuer -> Claimed_issuer issuer)
+                  ; worker_parent = Some parent
+                  ; selected
+                  ; selected_now
+                  ; current_capabilities
+                  ; kernel
+                  ; check_parent_now
+                  ; managed_admitted = false
+                  ; frozen = None
+                  }
+                in
+                let* state, effects = run scope in
+                let* ids, _ordinary = Scope.split_starts scope effects in
+                let* selection = O.Worker_action.seal issued ~selected:ids in
+                let* acknowledge = kernel_result (K.mark_prepared kernel) in
+                acknowledgement := Some acknowledge;
+                Ok (state, selection)
               in
-              let scope =
-                { service
-                ; physical = Worker issued
-                ; queued_child = None
-                ; worker_parent = Some parent
-                ; selected
-                ; selected_now
-                ; current_capabilities = (fun () -> Ok (O.native_selected service.root))
-                ; kernel
-                ; check_parent_now =
-                    (fun () ->
-                      Agent_session.Developer_job_scope.Parent.check_now
-                        parent
-                        ~owner:(O.owner service.root)
-                        ~capture_fingerprint)
-                ; managed_admitted = false
-                ; frozen = None
-                }
-              in
-              let* state, effects = f ~active ~scope ~sw in
-              let* ids, _ordinary = Scope.split_starts scope effects in
-              let* selection = O.Worker_action.seal issued ~selected:ids in
-              let* acknowledge = kernel_result (K.mark_prepared kernel) in
-              acknowledgement := Some acknowledge;
-              Ok (state, selection))
+              if not claimed
+              then
+                run_scope
+                  ~selected
+                  ~selected_now:root_selected_now
+                  ~current_capabilities:(fun () -> Ok (O.native_selected service.root))
+                  ~issuer:None
+                  ~run:(fun scope -> f ~active ~scope ~issuer:None ~budget:None ~sw)
+              else
+                let* timing =
+                  Deadline.create
+                    ~now:(O.native_now service.root)
+                    ~job:(O.Job_candidate.job candidate)
+                    ~request:saved
+                in
+                match Deadline.disposition timing with
+                | Expired ->
+                  run_scope
+                    ~selected
+                    ~selected_now:(fun () -> Ok selected)
+                    ~current_capabilities:(fun () -> Ok (O.native_selected service.root))
+                    ~issuer:None
+                    ~run:(fun _scope ->
+                      Result.map (expired_state ~active) ~f:(fun state -> state, []))
+                | Active effective ->
+                  (match service.queued_issuer with
+                   | None ->
+                     Error (invalid "claimed child issuer installer is unavailable")
+                   | Some queued_issuer ->
+                     Chatml_execution.with_host_budget
+                       ~env:service.env
+                       ~policy:(Bounded effective)
+                       (fun control ->
+                          let* control =
+                            control
+                            |> Result.of_option
+                                 ~error:
+                                   (P.Error.invalid_request
+                                      "bounded claimed Script control is unavailable")
+                          in
+                          Developer_queued_issuer.with_claimed
+                            queued_issuer
+                            ~active
+                            ~request:saved
+                            ~checkpoint:(fun () ->
+                              Eio.Fiber.check ();
+                              control.diagnostic_checkpoint ())
+                            (fun issuer ->
+                               let selected = Claimed.pinned_capabilities issuer in
+                               let current_capabilities () =
+                                 let* () = Claimed.check issuer in
+                                 Ok (Claimed.selected issuer)
+                               in
+                               let selected_now () =
+                                 let* capabilities = current_capabilities () in
+                                 B.selected_capabilities saved ~capabilities
+                               in
+                               let* () =
+                                 K.rebind_selected
+                                   kernel
+                                   ~selected
+                                   ~current_capabilities:(fun () ->
+                                     Result.map_error
+                                       (current_capabilities ())
+                                       ~f:(fun error -> error.P.Error.message))
+                                 |> kernel_result
+                               in
+                               let* () = Claimed.check issuer in
+                               run_scope
+                                 ~selected
+                                 ~selected_now
+                                 ~current_capabilities
+                                 ~issuer:(Some issuer)
+                                 ~run:(fun scope ->
+                                   f
+                                     ~active
+                                     ~scope
+                                     ~issuer:(Some issuer)
+                                     ~budget:
+                                       (Some
+                                          { Claim_budget.deadline =
+                                              Deadline.deadline timing
+                                          ; control
+                                          })
+                                     ~sw)))
+                     |> Result.map_error ~f:(fun error ->
+                       P.Error.create
+                         Resource_limit
+                         ~message:error.message
+                         ~retryable:false
+                         ())
+                     |> Result.join))
        in
        match result, !acknowledgement with
        | None, None -> Ok None
@@ -703,6 +873,7 @@ module Capability_source = struct
     | Root
     | Worker of C.t
     | Admitted_child of Child.t
+    | Claimed_child of Claimed.t
 end
 
 let current_capabilities service = function
@@ -716,6 +887,9 @@ let current_capabilities service = function
     let* admission = Child.refresh child in
     let* () = Child.Admission.check_now admission in
     Ok (Child.Admission.capabilities admission)
+  | Claimed_child issuer ->
+    let* () = Claimed.check issuer in
+    Ok (Claimed.selected issuer)
 ;;
 
 let borrowed_selected service terminal borrowed capabilities =
@@ -729,9 +903,14 @@ let borrowed_selected service terminal borrowed capabilities =
     match context.parent_invocation, borrowed, capabilities with
     | None, None, Capability_source.Root -> current_capabilities service capabilities
     | None, None, Worker selected when Option.is_some context.parent_job -> Ok selected
+    | None, None, Claimed_child issuer when Option.is_some context.parent_job ->
+      let* () = Claimed.check issuer in
+      Ok (Claimed.pinned_capabilities issuer)
     | None, None, Worker _ ->
       Error (invalid "root native scope cannot borrow a claimed job ceiling")
-    | Some expected, Some borrowed, (Root | Admitted_child _) ->
+    | None, None, Claimed_child _ ->
+      Error (invalid "claimed child has no physical Worker parent")
+    | Some expected, Some borrowed, (Root | Admitted_child _ | Claimed_child _) ->
       let parent = H.context (N.selected_borrowed_invocation borrowed) in
       if
         (not (P.Id.Invocation.equal expected parent.id))
@@ -741,6 +920,7 @@ let borrowed_selected service terminal borrowed capabilities =
         match capabilities with
         | Root -> N.selected_borrowed_capabilities borrowed
         | Admitted_child child -> current_capabilities service (Admitted_child child)
+        | Claimed_child _ -> N.selected_borrowed_capabilities borrowed
         | Worker _ -> assert false)
     | None, None, Admitted_child _
     | None, Some _, _
@@ -807,17 +987,18 @@ let with_native_scope service ~terminal ~borrowed ~capabilities ~check_parent_no
           else Error (invalid "admitted child Job selection changed")
         in
         selected_now, current_source
-      | Root | Worker _ ->
+      | Root | Worker _ | Claimed_child _ ->
         ( (fun () -> borrowed_selected service terminal borrowed capabilities)
         , fun () -> current_capabilities service capabilities )
     in
     with_kernel
       service
       ~physical:(Native terminal)
-      ~queued_child:
-        (match capabilities, borrowed with
-         | Admitted_child child, Some _ -> Some child
-         | Root, _ | Worker _, _ | Admitted_child _, None -> None)
+      ~issuing_source:
+        (match capabilities with
+         | Admitted_child child -> Foreground_child child
+         | Claimed_child issuer -> Claimed_issuer issuer
+         | Root | Worker _ -> Root_source)
       ~selected
       ~selected_now
       ~current_capabilities:current_capabilities_now

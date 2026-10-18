@@ -133,6 +133,7 @@
   developer_root_owner
   developer_child_selection
   developer_queued_issuer
+  developer_claim_deadline
   developer_script_job_service
   developer_managed_tool_executor
   developer_native_executor

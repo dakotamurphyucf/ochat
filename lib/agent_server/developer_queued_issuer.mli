@@ -40,3 +40,20 @@ val capture_child
   -> child:Developer_child_selection.t
   -> checkpoint:(unit -> unit)
   -> (Chat_response.Background_request.Issuer_source.t, Agent_protocol.Error.t) result
+
+(** Enter only from the actual Root.Job_candidate Worker callback for this
+    service's physical Root. Re-decode and compare the current Claim payload,
+    require v3 issuer data, and restore its issuing revision and executable
+    resources through the paired Live package. The lower opaque runtime carries
+    the exact Claim Parent, source binding and internally prepared selected
+    registry. No artifact/claim pairing, Root-native fallback or current File
+    read is accepted. The callback and its native/managed/Job children join
+    before the source loan expires; the optional Tool agent_artifact is a
+    separate subsequent target. *)
+val with_claimed
+  :  t
+  -> active:Agent_session.Developer_job_scope.active
+  -> request:Chat_response.Background_request.t
+  -> checkpoint:(unit -> unit)
+  -> (Agent_session.Claimed_child_runtime.t -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result

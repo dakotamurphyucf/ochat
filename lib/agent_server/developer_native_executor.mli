@@ -136,6 +136,50 @@ val run_root
         -> (Jsonaf.t, Agent_protocol.Error.t) result)
   -> (Agent_protocol.Host_invocation.t, Agent_protocol.Error.t) result
 
+module Claimed : sig
+  type parent = t
+  type t
+
+  (** Join one selected native execution to the actual entered Worker Claim
+      and this Root's existing invocation ledger/Job service. [issuer] is the
+      opaque runtime prepared from the authenticated v3 source under that
+      Claim, never a caller-supplied registry/managed definition or expired
+      foreground Child_selection. Verify its exact Parent, Live/Root callback,
+      source and actor before constructing the restricted invocation issuer.
+      The borrowed execution and its managed children expire with [f]; no
+      second terminal writer or Store scheduler is created. *)
+  val with_issuer
+    :  parent:parent
+    -> active:Agent_session.Developer_job_scope.active
+    -> issuer:Agent_session.Claimed_child_runtime.t
+    -> (t -> ('a, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
+
+  (** Exact current selected child capability registry and managed definition
+      are obtained from [issuer] on every admission. Dispatch, permission,
+      stable pins, claimed Job ancestry and terminal save use the common
+      Native/managed policy kernel. A changed source has no Root fallback.
+      The runtime receipt's original Claim-request pins were rebound to its
+      internally prepared source registry before this execution was lent.
+      Recheck that subset at each boundary. The invocation's capability
+      fingerprint must match the pinned subset; for Script, the prepared
+      One_off_script selection must also match before Tool.call. Nested
+      Tool.call/Job.start retain the same selected issuer and narrower entered
+      dependency ceilings. *)
+  val run
+    :  t
+    -> reference:Chat_response.Tool_capability.reference
+    -> invocation:Agent_protocol.Host_invocation.t
+    -> authorize:
+         (Agent_protocol.Host_invocation.t
+          -> Chat_response.Tool_capability.binding
+          -> (unit, Agent_protocol.Error.t) result)
+    -> prepare_output:
+         (Openai.Responses.Tool_output.Output.t
+          -> (Jsonaf.t, Agent_protocol.Error.t) result)
+    -> (Agent_protocol.Host_invocation.t, Agent_protocol.Error.t) result
+end
+
 (** Direct child of the current selected native callback. Obtains the live
     physical parent proof from its expiring borrow, verifies this exact issuer,
     inherits any physical claimed-job ancestor, and narrows against that

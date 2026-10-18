@@ -87,6 +87,7 @@ type running_job =
 type t =
   { domain_id : int
   ; closed : bool Atomic.t
+  ; loop_wait_deadline : float option Atomic.t
   ; loop_done : unit Eio.Promise.t
   ; active_children : int ref
   ; children_idle : Eio.Condition.t
@@ -169,6 +170,12 @@ module For_testing = struct
   let developer_retry_pending t ~root =
     Option.value_map t.developer ~default:false ~f:(fun developer ->
       Developer.retry_pending developer ~root)
+  ;;
+
+  let loop_wait_deadline t =
+    if (not (on_domain t)) || Atomic.get t.closed
+    then None
+    else Atomic.get t.loop_wait_deadline
   ;;
 end
 
@@ -812,7 +819,11 @@ let rec run t sw clock registry =
   then (
     Option.iter t.developer ~f:Developer.poll;
     process t sw registry;
-    Eio.Time.sleep clock 0.05;
+    let deadline = Eio.Time.now clock +. 0.05 in
+    Atomic.set t.loop_wait_deadline (Some deadline);
+    Exn.protect
+      ~finally:(fun () -> Atomic.set t.loop_wait_deadline None)
+      ~f:(fun () -> Eio.Time.sleep_until clock deadline);
     run t sw clock registry)
 ;;
 
@@ -833,6 +844,7 @@ let start_controlled
   let t =
     { domain_id = (Stdlib.Domain.self () :> int)
     ; closed = Atomic.make (not enabled)
+    ; loop_wait_deadline = Atomic.make None
     ; loop_done
     ; active_children = ref 0
     ; children_idle = Eio.Condition.create ()

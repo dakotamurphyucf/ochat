@@ -90,15 +90,43 @@ a Script has no Agent target. The physical native terminal stages both kinds
 only while the selected Child, registered invocation, original Root effect
 witness and current borrowed native scope still agree, including a source
 refresh after yielding job preparation. The immutable v3 payload does not
-carry a source lease or execution grant. Until a Claim-bound issuer installer
-is available, these rows remain `Queued` with no Worker attempt; ordinary
-root-issued v1/v2 work continues through its existing path. The future Worker
-must restore and compare the issuer inside its actual Claim before any effect.
+carry a source lease or execution grant. A Worker with the installed paired
+Host service decodes the canonical request from its actual Claim, restores the
+captured issuing revision without rereading its original File, and rebuilds
+that revision's native and managed resources under the same Root, actor,
+source and runtime policy. A copied issuer cannot turn another Claim into
+that child. A missing or tampered captured artifact, or a changed installed
+source or runtime policy, denies without a Root-registry fallback; editing the
+original File does not invalidate the retained revision. A Worker without that
+installer leaves v3 rows queued; ordinary
+root-issued v1/v2 work retains its existing path. The optional Agent target
+artifact remains a distinct Tool target and does not authorize the issuer.
+
+The claimed Tool call uses only the original request's rebound capability
+pins. A selected managed handler validates its own binding in the restored
+source registry, while its nested Tool calls and Jobs remain within its
+declared dependency ceiling and the current physical native borrow. A bare
+Script uses the original pins and may stage children through its same claimed
+Worker action. Its outer Job kernel remains live through durable selection
+and acknowledgement; issuer restoration, execution and preparation happen
+inside the physical Claim. Already expired work settles without restoring
+resources. A live Tool or Script restores and executes within its effective
+deadline; a live Script uses one bounded execution scope across restoration,
+rebind, callback and preparation, with durable settlement outside that budget.
+Retained-source compilation and custody use their own work limits while polling
+that scope's cancellation and deadline without spending interpreter fuel;
+later ChatML interpreter execution still spends fuel.
+Restored child resources and their fibers join before the Claim loan closes.
+Native and managed Tool targets and Script targets are supported here.
+Ordinary Agent Tool targets declared inside a selected child still require a
+separate source-owned admission route; v3 issuer comparison never grants them
+by itself.
 
 A physically claimed developer Worker borrows the same lexical kernel through a
 [Worker action](../../lib/agent_server/developer_root_owner.mli). It derives the
-saved Script request's selected capability ceiling before effects and rebinds
-that exact subset after waits; a wider root registry cannot grant another tool.
+saved v1/v2 Script request's selected capability ceiling before effects. A v3
+Script rebinds that same immutable request subset only after its issuer is
+restored inside the Claim; a wider root registry cannot grant another tool.
 Child reservations stage under the live claim, and the returned ID subset is
 sealed. One [run document replacement](../../lib/agent_store/developer_run_store.mli)
 installs the claimed parent's terminal or `Waiting_completion` state together

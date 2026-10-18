@@ -717,6 +717,153 @@ let check_source_bound_now live ~root =
   Developer_agent_source_runtime.bound_to source_runtime ~root ~agent_runtime:live.runtime
 ;;
 
+let with_claimed_issuer live ~root ~active ~parent ~request ~runtime_policy ~checkpoint f =
+  let module B = Chat_response.Background_request in
+  let module Claimed = Agent_session.Claimed_child_runtime in
+  let open Result.Let_syntax in
+  let current_witness = ref None in
+  let check_local_now () =
+    Eio.Switch.check live.switch;
+    if live.closing || live.closed
+    then Error (invalid "developer claimed source has closed")
+    else if not (Operator_authorization.is_current live.original_actor)
+    then Error (invalid "developer actor is no longer current")
+    else (
+      let%bind () = check_pair_now live in
+      let%bind () = check_source_bound_now live ~root in
+      match !current_witness with
+      | None -> Error (invalid "developer claimed source has no Root witness")
+      | Some witness -> Root.check_effect_now root witness)
+  in
+  let check_full () =
+    let%bind () = check_current live in
+    let%bind () = check_source_bound_now live ~root in
+    let%bind witness = Root.current_after_mutations root in
+    current_witness := Some witness;
+    check_local_now ()
+  in
+  let%bind () = check_full () in
+  let%bind binding =
+    live.source_binding
+    |> Result.of_option ~error:(invalid "developer claimed source binding is unavailable")
+  in
+  let%bind script_preparation =
+    live.host.script_preparation
+    |> Result.of_option
+         ~error:(invalid "developer claimed script preparation is unavailable")
+  in
+  Source_binding.with_claimed_source
+    binding
+    ~active
+    ~parent
+    ~definition:live.definition
+    ~policy:(Root.job_policy root)
+    ~request
+    ~checkpoint
+    (fun source ->
+       let%bind () = check_full () in
+       let issuer = Source_binding.Claimed_source.issuer_source source in
+       let policy = Source_binding.policy_identity binding ~script_preparation in
+       let expected_runtime =
+         Claimed.runtime_policy_identity
+           ~base:(Source_binding.Policy_identity.runtime policy)
+           ~policy:runtime_policy
+       in
+       let%bind () =
+         if
+           P.Id.Workspace_definition.equal
+             (B.Issuer_source.workspace issuer)
+             live.workspace_definition.id
+           && P.Id.Prompt_definition.equal
+                (B.Issuer_source.prompt issuer)
+                live.definition.id
+           && Chatml_compilation.Tool_contract.equal
+                (B.Issuer_source.tool_contract issuer)
+                (Definition.tool_contract live.definition)
+           && Chatml_source.Digest.equal
+                (B.Issuer_source.source_policy issuer)
+                (Source_binding.Policy_identity.source policy)
+           && Chatml_source.Digest.equal
+                (B.Issuer_source.runtime_policy issuer)
+                expected_runtime
+         then Ok ()
+         else
+           Error (invalid "claimed child execution policy differs from the Live source")
+       in
+       let revision = Source_binding.Claimed_source.revision source in
+       let%bind parsed =
+         Revision.parser_context revision
+         |> Result.of_option
+              ~error:(invalid "claimed child has no retained parser context")
+       in
+       let%bind _needs_dynamic_source =
+         Agent_session.Developer_child_preflight.classify_selected
+           ~revision
+           ~parsed
+           ~input:[]
+           ~checkpoint
+       in
+       let%bind () = check_full () in
+       let%bind () =
+         Agent_store.Prompt_artifact_store.verify_tree_with_checkpoint
+           ~root:(Revision.materialized_tree revision)
+           (Revision.artifact revision)
+           ~checkpoint
+         |> Result.map_error ~f:(fun _ -> invalid "claimed child artifact changed")
+       in
+       let%bind () = check_full () in
+       let prompt_dir =
+         Eio.Path.(
+           Revision.materialized_tree revision
+           / Filename.dirname (Revision.root_relative_path revision))
+       in
+       let elements = Revision.elements revision in
+       let%bind host =
+         Runtime.host
+           ~env:live.host.env
+           ~workspace:live.paths.workspace
+           ~tool_dir:live.paths.tool_dir
+           ~prompt_dir
+           ~session_dir:live.paths.session_dir
+           ~cache_dir:live.paths.cache_dir
+           ~home:live.paths.home
+           ~session_id:live.shell_owner_id
+           ~prompt_elements:elements
+         |> Result.map_error ~f:diagnostic_error
+       in
+       let authorizer =
+         manifest_authorizer
+           live.host
+           ~definition:live.definition
+           ~workspace_definition:live.workspace_definition
+           ~revision
+           ~original_actor:live.original_actor
+       in
+       let%bind () = check_full () in
+       Claimed.with_prepared
+         ~source
+         ~script_preparation
+         ~env:live.host.env
+         ~host
+         ~manifest_authorizer:authorizer
+         ~approval_provider:live.approval_provider
+         ~approval_store:(approval_store ())
+         ~checkpoint
+         ~check_current:check_full
+         ~check_local_now
+         (fun claimed ->
+            let%bind () = check_full () in
+            let%bind () = Claimed.check_now claimed in
+            let%bind () =
+              if
+                Capabilities.length (Claimed.selected claimed)
+                <= live.host.max_native_bindings
+              then Ok ()
+              else Error (invalid "developer child native binding limit exceeded")
+            in
+            f claimed))
+;;
+
 type child_target =
   | Saved of Target.t
   | Content of Content_target.t

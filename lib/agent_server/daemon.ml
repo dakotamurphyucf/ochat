@@ -270,6 +270,13 @@ let status t = !(t.status_ref)
 let dispatcher t = t.dispatcher
 let registry t = t.registry
 let store t = t.store
+
+module For_testing = struct
+  let job_scheduler_wait_deadline t =
+    Job_scheduler.For_testing.loop_wait_deadline t.job_scheduler
+  ;;
+end
+
 let factory t = t.factory
 let blob_store t = t.blob_store
 let prompts t = t.prompts

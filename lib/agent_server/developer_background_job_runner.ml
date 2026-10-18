@@ -11,6 +11,8 @@ module Jobs = Developer_script_job_service
 module Script = Developer_script_job_execution
 module Runtime = Chat_response.Agent_runtime
 module Claim_scope = Agent_session.Developer_job_scope
+module Claimed = Agent_session.Claimed_child_runtime
+module Deadline = Developer_claim_deadline
 
 type t =
   { root : O.run
@@ -79,7 +81,14 @@ let decode t job =
 
 let classify t request =
   match B.issuer_source request with
-  | Some _ -> Availability.Issuer_source_installer_unavailable
+  | Some _ ->
+    (match B.target_kind request, B.agent_artifact request with
+     | B.Target_kind.Tool, Some _ -> Availability.Agent_artifact_installer_unavailable
+     | Tool, None | Script, None ->
+       if Option.is_some (Jobs.queued_issuer t.jobs)
+       then Availability.Runnable
+       else Issuer_source_installer_unavailable
+     | Script, Some _ -> Availability.Unsupported_kind)
   | None ->
     (match B.target_kind request, B.agent_artifact request with
      | B.Target_kind.Tool, None -> Availability.Runnable
@@ -100,22 +109,12 @@ let availability t candidate =
     | Error _ -> Ok Malformed_supported)
 ;;
 
-let deadline job request =
-  Result.try_with (fun () ->
-    Time_ns.add
-      (P.Timestamp.to_time_ns (P.Developer_job.created_at job))
-      (Time_ns.Span.of_sec (B.policy request).execution.wall_seconds)
-    |> P.Timestamp.of_time_ns)
-  |> Result.map_error ~f:(fun _ ->
-    P.Error.invalid_request "background deadline is outside the supported timestamp range")
-;;
-
-let selected_schema t capabilities reference =
+let selected_schema t ~managed_definition capabilities reference =
   let* binding =
     C.resolve capabilities ~id:reference.C.id ~fingerprint:reference.fingerprint
     |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
   in
-  match C.implementation binding, N.managed_definition t.native with
+  match C.implementation binding, managed_definition with
   | C.Native _, _ -> Ok (reference.implementation_revision, None)
   | Managed _, None -> invalid "managed Tool dispatcher is not installed"
   | Managed _, Some managed ->
@@ -184,13 +183,14 @@ let waiting_state claim ~invocation ~deadline ~policy ~completion_schema work =
   }
 ;;
 
-let execute_with_budget t active claim job request deadline effective control =
+let execute_with_budget t active claim job request deadline effective control ~issuer =
+  let current_capabilities () =
+    match issuer with
+    | None -> O.native_selected t.root
+    | Some issuer -> Claimed.selected issuer
+  in
   let* prepared =
-    B.prepare
-      ~env:t.env
-      ~policy:(O.job_policy t.root)
-      ~current_capabilities:(fun () -> O.native_selected t.root)
-      request
+    B.prepare ~env:t.env ~policy:(O.job_policy t.root) ~current_capabilities request
   in
   match prepared with
   | B.Script _ -> invalid "developer Script target has no installed executor"
@@ -199,7 +199,14 @@ let execute_with_budget t active claim job request deadline effective control =
       C.resolve capabilities ~id:reference.id ~fingerprint:reference.fingerprint
       |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
     in
-    let* revision, completion_schema = selected_schema t capabilities reference in
+    let managed_definition =
+      match issuer with
+      | None -> N.managed_definition t.native
+      | Some issuer -> Some (Claimed.managed_definition issuer)
+    in
+    let* revision, completion_schema =
+      selected_schema t ~managed_definition capabilities reference
+    in
     let context : H.context =
       { id = P.Id.Invocation.create ()
       ; owner = P.Execution_owner.Developer (O.owner t.root)
@@ -218,14 +225,24 @@ let execute_with_budget t active claim job request deadline effective control =
     Option.iter control ~f:(fun control ->
       control.Chatml.Chatml_lang.before_effect ~name:"Tool.call" ~spawned:false);
     let run_native () =
-      N.run_job_child
-        ~selected:capabilities
-        t.native
-        ~active
-        ~reference
-        ~invocation
-        ~authorize:t.authorize
-        ~prepare_output:t.prepare_output
+      match issuer with
+      | None ->
+        N.run_job_child
+          ~selected:capabilities
+          t.native
+          ~active
+          ~reference
+          ~invocation
+          ~authorize:t.authorize
+          ~prepare_output:t.prepare_output
+      | Some issuer ->
+        N.Claimed.with_issuer ~parent:t.native ~active ~issuer (fun selected ->
+          N.Claimed.run
+            selected
+            ~reference
+            ~invocation
+            ~authorize:t.authorize
+            ~prepare_output:t.prepare_output)
     in
     let* terminal =
       match B.agent_artifact request with
@@ -298,26 +315,18 @@ let execute_with_budget t active claim job request deadline effective control =
    budget. [expired] remains target-specific because Script must validate even
    an unevaluated Expired completion against its saved output envelope. *)
 let with_claim_budget t ~job ~request ~expired run =
-  let* deadline = deadline job request in
+  let* timing = Deadline.create ~now:(O.native_now t.root) ~job ~request in
   let stored = B.policy request in
-  let remaining =
-    Time_ns.diff
-      (P.Timestamp.to_time_ns deadline)
-      (P.Timestamp.to_time_ns (O.native_now t.root))
-    |> Time_ns.Span.to_sec
-    |> Float.min stored.execution.wall_seconds
-  in
-  if Float.(remaining <= 0.)
-  then expired stored
-  else (
-    let effective = { stored.execution with wall_seconds = remaining } in
+  match Deadline.disposition timing with
+  | Expired -> expired stored
+  | Active effective ->
     Chatml_execution.with_host_budget
       ~env:t.env
       ~policy:(Bounded effective)
-      (run ~deadline ~effective)
+      (run ~deadline:(Deadline.deadline timing) ~effective)
     |> Result.map_error ~f:(fun error ->
       P.Error.create Resource_limit ~message:error.message ~retryable:false ())
-    |> Result.join)
+    |> Result.join
 ;;
 
 let execute_claimed t active =
@@ -338,17 +347,44 @@ let execute_claimed t active =
     ~request
     ~expired:(fun _ -> Ok (completed_state t claim P.Completion.Expired))
     (fun ~deadline ~effective control ->
-       execute_with_budget t active claim job request deadline effective control)
+       let run ~issuer =
+         execute_with_budget t active claim job request deadline effective control ~issuer
+       in
+       match B.issuer_source request with
+       | None -> run ~issuer:None
+       | Some _ ->
+         let* service =
+           Jobs.queued_issuer t.jobs
+           |> Result.of_option
+                ~error:
+                  (P.Error.invalid_request
+                     "claimed child issuer installer is unavailable")
+         in
+         Developer_queued_issuer.with_claimed
+           service
+           ~active
+           ~request
+           ~checkpoint:(fun () ->
+             Eio.Fiber.check ();
+             Option.iter control ~f:(fun control -> control.diagnostic_checkpoint ()))
+           (fun issuer -> run ~issuer:(Some issuer)))
 ;;
 
-let call_script_tool t ~active ~claim ~deadline ~prepared ~name ~args =
+let call_script_tool t ~active ~claim ~deadline ~prepared ~issuer ~name ~args =
   let capabilities = Chat_response.One_off_script.capabilities prepared in
   let* binding =
     C.find capabilities ~name
     |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
   in
   let reference = C.reference binding in
-  let* revision, _completion_schema = selected_schema t capabilities reference in
+  let managed_definition =
+    match issuer with
+    | None -> N.managed_definition t.native
+    | Some issuer -> Some (Claimed.managed_definition issuer)
+  in
+  let* revision, _completion_schema =
+    selected_schema t ~managed_definition capabilities reference
+  in
   let context : H.context =
     { id = P.Id.Invocation.create ()
     ; owner = P.Execution_owner.Developer (O.owner t.root)
@@ -365,21 +401,31 @@ let call_script_tool t ~active ~claim ~deadline ~prepared ~name ~args =
   in
   let* invocation = H.create_developer context in
   let* terminal =
-    N.run_job_child
-      ~selected:capabilities
-      t.native
-      ~active
-      ~reference
-      ~invocation
-      ~authorize:t.authorize
-      ~prepare_output:t.prepare_output
+    match issuer with
+    | None ->
+      N.run_job_child
+        ~selected:capabilities
+        t.native
+        ~active
+        ~reference
+        ~invocation
+        ~authorize:t.authorize
+        ~prepare_output:t.prepare_output
+    | Some issuer ->
+      N.Claimed.with_issuer ~parent:t.native ~active ~issuer (fun selected ->
+        N.Claimed.run
+          selected
+          ~reference
+          ~invocation
+          ~authorize:t.authorize
+          ~prepare_output:t.prepare_output)
   in
   H.outcome terminal
   |> Result.of_option
        ~error:(P.Error.invalid_request "developer Script Tool.call did not resolve")
 ;;
 
-let execute_script_claimed t ~active ~scope =
+let script_claim t active =
   let claim = Agent_session.Developer_job_scope.claim active in
   let job = Store.Claim.job claim in
   let* request = decode t job in
@@ -389,40 +435,74 @@ let execute_script_claimed t ~active ~scope =
     | Script, Some _ | Tool, _ ->
       invalid "claimed developer Script target changed before execution"
   in
-  with_claim_budget
-    t
-    ~job
-    ~request
-    ~expired:(fun policy ->
-      let* executed = Script.expired ~policy in
-      Ok (completed_state t claim (Script.completion executed), []))
-    (fun ~deadline ~effective:_ control ->
-       Option.iter control ~f:(fun control -> control.checkpoint ());
-       let* prepared =
-         B.prepare
-           ~env:t.env
-           ~policy:(O.job_policy t.root)
-           ~current_capabilities:(fun () -> O.native_selected t.root)
-           request
-       in
-       Option.iter control ~f:(fun control -> control.checkpoint ());
-       match prepared with
-       | B.Tool _ -> invalid "claimed developer Script prepared as a Tool"
-       | Script { prepared; input; policy } ->
-         let* executed =
-           Script.run
-             ~env:t.env
-             ~scope
-             ~prepared
-             ~input
-             ~policy
-             ~deadline
-             ~now:(fun () -> O.native_now t.root)
-             ~call_tool:(call_script_tool t ~active ~claim ~deadline ~prepared)
-         in
-         Ok
-           ( completed_state t claim (Script.completion executed)
-           , Script.local_effects executed ))
+  Ok (claim, job, request)
+;;
+
+let expired_script_state t ~active =
+  let* claim, _job, request = script_claim t active in
+  let* executed = Script.expired ~policy:(B.policy request) in
+  Ok (completed_state t claim (Script.completion executed))
+;;
+
+let execute_script_in_budget
+      t
+      ~active
+      ~scope
+      ~issuer
+      ~deadline
+      ~(control : Chatml.Chatml_lang.execution_control option)
+  =
+  let* claim, _job, request = script_claim t active in
+  Option.iter control ~f:(fun control -> control.checkpoint ());
+  let* prepared =
+    B.prepare
+      ~env:t.env
+      ~policy:(O.job_policy t.root)
+      ~current_capabilities:(fun () ->
+        match issuer with
+        | None -> O.native_selected t.root
+        | Some issuer -> Claimed.selected issuer)
+      request
+  in
+  Option.iter control ~f:(fun control -> control.checkpoint ());
+  match prepared with
+  | B.Tool _ -> invalid "claimed developer Script prepared as a Tool"
+  | Script { prepared; input; policy } ->
+    let* executed =
+      Script.run
+        ~env:t.env
+        ~scope
+        ~prepared
+        ~input
+        ~policy
+        ~deadline
+        ~now:(fun () -> O.native_now t.root)
+        ~call_tool:(call_script_tool t ~active ~claim ~deadline ~prepared ~issuer)
+    in
+    Ok
+      (completed_state t claim (Script.completion executed), Script.local_effects executed)
+;;
+
+let execute_script_claimed t ~active ~scope ~issuer ~budget =
+  match budget with
+  | Some budget ->
+    execute_script_in_budget
+      t
+      ~active
+      ~scope
+      ~issuer
+      ~deadline:(Jobs.Claim_budget.deadline budget)
+      ~control:(Some (Jobs.Claim_budget.control budget))
+  | None ->
+    let* _claim, job, request = script_claim t active in
+    with_claim_budget
+      t
+      ~job
+      ~request
+      ~expired:(fun _ ->
+        Result.map (expired_script_state t ~active) ~f:(fun state -> state, []))
+      (fun ~deadline ~effective:_ control ->
+         execute_script_in_budget t ~active ~scope ~issuer ~deadline ~control)
 ;;
 
 let run_candidate t ?on_capacity_decision candidate =
@@ -466,6 +546,8 @@ let run_candidate t ?on_capacity_decision candidate =
                 t.jobs
                 ~candidate
                 ~on_capacity_decision:notify_once
+                ~expired_state:(expired_script_state t)
                 ~select:(O.Job_result.select t.results)
-                (fun ~active ~scope ~sw:_ -> execute_script_claimed t ~active ~scope))))
+                (fun ~active ~scope ~issuer ~budget ~sw:_ ->
+                   execute_script_claimed t ~active ~scope ~issuer ~budget))))
 ;;

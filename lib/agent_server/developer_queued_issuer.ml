@@ -23,12 +23,20 @@ let create ~live ~root ~runtime_policy =
 let issued_by_root t root = phys_equal t.root root
 
 let runtime_policy_identity ~base ~policy =
-  [%sexp
-    ("queued-selected-issuer.v3" : string)
-  , (Chatml_source.Digest.to_hex base : string)
-  , (policy : Chat_response.Runtime_semantics.policy)]
-  |> Sexp.to_string_mach
-  |> fun contents -> Chatml_source.Digest.of_contents contents ~checkpoint:Eio.Fiber.check
+  Agent_session.Claimed_child_runtime.runtime_policy_identity ~base ~policy
+;;
+
+let with_claimed t ~active ~request ~checkpoint f =
+  let* parent = Root.job_parent t.root active in
+  Live.with_claimed_issuer
+    t.live
+    ~root:t.root
+    ~active
+    ~parent
+    ~request
+    ~runtime_policy:t.runtime_policy
+    ~checkpoint
+    f
 ;;
 
 let capture_child t ~child ~checkpoint =

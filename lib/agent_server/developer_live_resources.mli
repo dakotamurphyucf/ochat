@@ -114,6 +114,33 @@ val selected_native : live -> Chat_response.Tool_capability.t
 val managed_definition : live -> Chat_response.Managed_tool_registry.t
 val model_sources : live -> Developer_model_job_runner.Sources.t
 
+(** Restore a queued issuing child only while the exact physical Worker Claim
+    is entered. Compare every serialized issuer coordinate with this Live
+    package's current Prompt/Workspace, source binding, tool contract and
+    installed script/content plus selected moderator runtime policy. Restore
+    immutable captured bytes from this package's artifact store, then build
+    native and managed resources under the selected revision through the
+    common bounded Headless preparation, using the contract carried by that
+    authenticated source receipt. The existing selected-child preflight and
+    max_native_bindings bound remain in force before loan exposure. The v3
+    runtime digest is recomputed from this Live source binding's actual
+    script/content policy and [runtime_policy], never accepted from the wire.
+    No current File recapture, Root
+    native registry or optional Tool target is used. The opaque runtime loan
+    remains inside the Claim's child switch; a mismatch or revoked Live source
+    is final and has no Root fallback. The caller must also prove this Live and
+    Root are the paired package and keep the Claim active. *)
+val with_claimed_issuer
+  :  live
+  -> root:Developer_root_owner.run
+  -> active:Agent_session.Developer_job_scope.active
+  -> parent:Agent_session.Developer_job_scope.Parent.t
+  -> request:Chat_response.Background_request.t
+  -> runtime_policy:Chat_response.Runtime_semantics.policy
+  -> checkpoint:(unit -> unit)
+  -> (Agent_session.Claimed_child_runtime.t -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
 (** Bind only the saved-Agent registrations prepared inside this Live owner to
     its exact admitted Root, native runtime and selected Model package. The
     trusted host supplies one runner constructed from this same Live owner and

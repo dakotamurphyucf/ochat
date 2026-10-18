@@ -188,6 +188,8 @@
   runtime_script_preparation
   developer_child_preflight
   captured_agent_runner
+  developer_claimed_resource_owner
+  claimed_child_runtime
   runtime_builder
   runtime_activity
   queued_moderator_event

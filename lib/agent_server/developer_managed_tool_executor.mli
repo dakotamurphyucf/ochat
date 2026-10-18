@@ -27,6 +27,20 @@ val create_child
   -> env:Eio_unix.Stdenv.base
   -> (t, Agent_protocol.Error.t) result
 
+(** Claim-bound child variant. Its selected registry and managed definition
+    both come from the same internally prepared restored issuer receipt, not
+    a raw definition paired with a copied request. The actual Worker Parent,
+    current source/actor/Root and claimed native terminal are still checked by
+    [bind] and the common managed policy at each effect boundary. No expired
+    foreground Child_selection or Root definition is substituted on denial. *)
+val create_claimed
+  :  root:Developer_root_owner.run
+  -> jobs:Developer_script_job_service.t
+  -> active:Agent_session.Developer_job_scope.active
+  -> issuer:Agent_session.Claimed_child_runtime.t
+  -> env:Eio_unix.Stdenv.base
+  -> (t, Agent_protocol.Error.t) result
+
 val issued_by_root : t -> Developer_root_owner.run -> bool
 
 (** Comparison-only prepared definition retained from the trusted live package.

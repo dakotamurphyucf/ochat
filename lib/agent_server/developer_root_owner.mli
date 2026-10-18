@@ -363,6 +363,31 @@ module Worker_action : sig
     -> checkpoint:(unit -> unit)
     -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result
 
+  (** Selected-source counterpart for a Worker that restored a v3 issuing
+      child inside THIS physical Claim. [issuer] is the opaque runtime receipt
+      constructed internally from the Claim's saved artifact and source
+      binding; no registry or issuer JSON is accepted as a grant. Require its
+      exact Parent to be this action's entered Worker Parent. Attach the same
+      immutable issuer to an unadorned nested Tool/Script request. The opaque
+      runtime has already rebound the original Claim request's pins against
+      its selected registry; recheck that same pinned subset and admit the
+      nested request within it. This Worker_action path is the bare claimed
+      Script scope; managed Tool callbacks stage through their separate
+      Native_terminal and owned dependency scope. No caller registry can add a
+      binding or substitute a Root registry. Retain
+      this Root's actor,
+      original selection revision, Run_root parent job/attempt/depth, capacity
+      and atomic Store handoff. After yielding admission, refresh the issuer
+      and Root/Parent, then perform the final nonyielding source and Root
+      witness check before reserving. A denied or expired issuer never falls
+      back to [stage_background] or releases a published reservation. *)
+  val stage_background_from_claimed_issuer
+    :  t
+    -> issuer:Agent_session.Claimed_child_runtime.t
+    -> request:Chat_response.Background_request.t
+    -> checkpoint:(unit -> unit)
+    -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result
+
   val rollback_staged
     :  t
     -> Agent_protocol.Id.Job.t

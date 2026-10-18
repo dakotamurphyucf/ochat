@@ -9,6 +9,7 @@ module Job_scope = Agent_session.Developer_job_scope
 module Jobs = Developer_script_job_service
 module Managed_tool = Developer_managed_tool_executor
 module Child_selection = Developer_child_selection
+module Claimed_runtime = Agent_session.Claimed_child_runtime
 
 type t =
   { root : O.t
@@ -26,10 +27,15 @@ type execution =
   { base : t
   ; issuer : D.t
   ; managed : Managed_tool.t option
-  ; child : Child_selection.t option
+  ; source : execution_source
   ; selected_current : unit -> (C.t, P.Error.t) result
   ; selected_for_witness : O.Current.t -> (C.t, P.Error.t) result
   }
+
+and execution_source =
+  | Root_source
+  | Foreground_child of Child_selection.t
+  | Claimed_issuer of Claimed_runtime.t
 
 let issued_by_root t root = phys_equal t.root root
 let invalid message = Error (P.Error.invalid_request message)
@@ -82,7 +88,7 @@ let root_execution (t : t) =
   { base = t
   ; issuer = t.issuer
   ; managed = t.managed
-  ; child = None
+  ; source = Root_source
   ; selected_current = (fun () -> Ok (O.native_selected t.root))
   ; selected_for_witness = (fun witness -> Ok (O.Current.selected witness))
   }
@@ -105,9 +111,9 @@ let reselect_current (t : t) ceiling =
 ;;
 
 let narrowed_registry execution parent =
-  match execution.child with
-  | Some _ -> execution.selected_current ()
-  | None ->
+  match execution.source with
+  | Foreground_child _ -> execution.selected_current ()
+  | Root_source | Claimed_issuer _ ->
     let* ceiling = N.selected_borrowed_capabilities parent in
     let* current = execution.selected_current () in
     reselect current ceiling
@@ -227,14 +233,14 @@ let rec run
   =
   let t = execution.base in
   let* admitted_child =
-    match execution.child with
-    | None -> Ok None
-    | Some _ -> Result.map (registry ()) ~f:Option.some
+    match execution.source with
+    | Root_source | Claimed_issuer _ -> Ok None
+    | Foreground_child _ -> Result.map (registry ()) ~f:Option.some
   in
   let registry_now () =
-    match execution.child, admitted_child with
-    | None, None -> registry ()
-    | Some child, Some admitted ->
+    match execution.source, admitted_child with
+    | (Root_source | Claimed_issuer _), None -> registry ()
+    | Foreground_child child, Some admitted ->
       let* () =
         match borrowed with
         | None -> invalid "child native invocation has no borrowed parent"
@@ -246,14 +252,17 @@ let rec run
       if String.equal (C.fingerprint current) (C.fingerprint admitted)
       then Ok current
       else invalid "child native admission changed after its parent borrow"
-    | None, Some _ | Some _, None -> invalid "child native admission is inconsistent"
+    | (Root_source | Claimed_issuer _), Some _ | Foreground_child _, None ->
+      invalid "child native admission is inconsistent"
   in
   let* capabilities =
-    match execution.child, ceiling with
-    | Some child, None -> Ok (Jobs.Capability_source.Admitted_child child)
-    | None, Some selected -> Ok (Worker selected)
-    | None, None -> Ok Root
-    | Some _, Some _ -> invalid "child native selection cannot borrow a worker ceiling"
+    match execution.source, ceiling with
+    | Foreground_child child, None -> Ok (Jobs.Capability_source.Admitted_child child)
+    | Claimed_issuer issuer, None -> Ok (Claimed_child issuer)
+    | Root_source, Some selected -> Ok (Worker selected)
+    | Root_source, None -> Ok Root
+    | (Foreground_child _ | Claimed_issuer _), Some _ ->
+      invalid "selected native selection cannot borrow a worker ceiling"
   in
   let* entered =
     O.with_native_registration t.root ?job_parent ~invocation (fun ~scope ->
@@ -316,8 +325,8 @@ let rec run
                 "selected native implementation changed before final effect admission"
           in
           let* final_witness, final_selected =
-            match execution.child with
-            | None ->
+            match execution.source with
+            | Root_source ->
               let* fresh = O.current_after_mutations t.root in
               let* () =
                 if O.Current.same_selection witness fresh
@@ -326,7 +335,7 @@ let rec run
               in
               let* selected = execution.selected_for_witness fresh in
               Ok (fresh, selected)
-            | Some child ->
+            | Foreground_child child ->
               let* admission = Child_selection.refresh child in
               let* fresh = Child_selection.Admission.checked_root_now admission in
               let* () =
@@ -340,6 +349,16 @@ let rec run
                  use this SAME admission's source registry for the final
                  handler comparison, not for selecting nested Tool.call. *)
               Ok (fresh, Child_selection.Admission.source_capabilities admission)
+            | Claimed_issuer issuer ->
+              let* () = Claimed_runtime.check issuer in
+              let* fresh = O.current_after_mutations t.root in
+              let* () =
+                if O.Current.same_selection witness fresh
+                then Ok ()
+                else invalid "claimed native Root selection changed before effect"
+              in
+              let* () = Claimed_runtime.check_now issuer in
+              Ok (fresh, Claimed_runtime.selected issuer)
           in
           let* final_binding =
             C.resolve final_selected ~id:reference.id ~fingerprint:reference.fingerprint
@@ -566,6 +585,121 @@ let run_job_child ?selected t ~active ~reference ~invocation ~authorize ~prepare
     ~prepare_output
 ;;
 
+module Claimed = struct
+  type parent = t
+
+  type t =
+    { execution : execution
+    ; issuer : Claimed_runtime.t
+    ; job_parent : Job_scope.Parent.t
+    ; live : bool ref
+    }
+
+  let with_issuer ~parent ~active ~issuer f =
+    let* job_parent = O.job_parent parent.root active in
+    let* () =
+      if Claimed_runtime.same_parent issuer job_parent
+      then Ok ()
+      else invalid "claimed native issuer belongs to another Worker Claim"
+    in
+    let* () = Claimed_runtime.check issuer in
+    let* () = Result.map (O.current_after_mutations parent.root) ~f:ignore in
+    let owner = O.owner parent.root in
+    let capture_fingerprint =
+      Chatml_developer_capture.fingerprint (O.capture parent.root)
+    in
+    let live = ref true in
+    let check_live () =
+      if !live
+      then Claimed_runtime.check issuer
+      else invalid "claimed native execution expired"
+    in
+    let* empty_after_expiry =
+      C.select (Claimed_runtime.selected issuer) ~names:[]
+      |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
+    in
+    let current ~owner:claimed_owner ~capture_fingerprint:claimed_fingerprint =
+      if
+        (not (P.Execution_owner.equal_developer owner claimed_owner))
+        || not (Chatml_source.Digest.equal capture_fingerprint claimed_fingerprint)
+      then invalid "claimed native issuer differs from its physical Root"
+      else
+        let* () = check_live () in
+        Result.map (O.current_after_mutations parent.root) ~f:ignore
+    in
+    let* invocation_issuer =
+      D.create
+        ~owner
+        ~capture_fingerprint
+        ~ceiling:(Claimed_runtime.selected issuer)
+        ~selected:(fun () ->
+          if !live then Claimed_runtime.selected issuer else empty_after_expiry)
+        ~current
+        ~now:(fun () -> O.native_now parent.root)
+    in
+    let* managed =
+      match parent.jobs, parent.managed_env with
+      | Some jobs, Some env ->
+        Managed_tool.create_claimed ~root:parent.root ~jobs ~active ~issuer ~env
+        |> Result.map ~f:Option.some
+      | None, None -> Ok None
+      | Some _, None | None, Some _ ->
+        invalid "claimed native execution has incomplete physical Job resources"
+    in
+    let execution =
+      { base = parent
+      ; issuer = invocation_issuer
+      ; managed
+      ; source = Claimed_issuer issuer
+      ; selected_current =
+          (fun () ->
+            let* () = check_live () in
+            Ok (Claimed_runtime.selected issuer))
+      ; selected_for_witness =
+          (fun _ ->
+            let* () = check_live () in
+            Ok (Claimed_runtime.selected issuer))
+      }
+    in
+    let* () = Claimed_runtime.check_now issuer in
+    let result =
+      Exn.protect
+        ~f:(fun () -> f { execution; issuer; job_parent; live })
+        ~finally:(fun () -> live := false)
+    in
+    let* value = result in
+    let* () = Claimed_runtime.check issuer in
+    Ok value
+  ;;
+
+  let run t ~(reference : C.reference) ~invocation ~authorize ~prepare_output =
+    let* () = if !(t.live) then Ok () else invalid "claimed native execution expired" in
+    let* () = Claimed_runtime.check t.issuer in
+    let pinned = Claimed_runtime.pinned_capabilities t.issuer in
+    let* _binding =
+      C.resolve pinned ~id:reference.id ~fingerprint:reference.fingerprint
+      |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
+    in
+    let* () =
+      if String.equal (H.context invocation).capability_fingerprint (C.fingerprint pinned)
+      then Ok ()
+      else invalid "claimed native invocation differs from its pinned request"
+    in
+    run
+      t.execution
+      ~parent:(D.Job_child t.job_parent)
+      ~job_parent:(Some t.job_parent)
+      ~borrowed:None
+      ~registry:(fun () ->
+        let* () = t.execution.selected_current () |> Result.map ~f:ignore in
+        Ok (Claimed_runtime.pinned_capabilities t.issuer))
+      ~reference
+      ~invocation
+      ~authorize
+      ~prepare_output
+  ;;
+end
+
 module Child = struct
   type parent = t
 
@@ -593,7 +727,7 @@ module Child = struct
       { base = parent
       ; issuer = Child_selection.issuer selection
       ; managed
-      ; child = Some selection
+      ; source = Foreground_child selection
       ; selected_current
       ; selected_for_witness = (fun _ -> Child_selection.source_current selection)
       }

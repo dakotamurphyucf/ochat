@@ -42,6 +42,14 @@ module For_testing : sig
       offer retained against this physical Root. Correctness must be asserted
       from actual handler/capacity/durable state. *)
   val developer_retry_pending : t -> root:Developer_root_owner.run -> bool
+
+  (** The pending absolute deadline, in seconds on this scheduler's injected
+      wall clock, of this exact dispatcher loop.
+      [None] means that the loop is not in its post-process wait, is closed, or
+      is observed from another Eio domain.
+      This is a read-only synchronization observation for controlled-clock
+      tests; it does not pause polling or expose candidates. *)
+  val loop_wait_deadline : t -> float option
 end
 
 (** Recover complete private result preparations before durably interrupting the
