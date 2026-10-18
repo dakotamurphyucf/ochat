@@ -249,6 +249,118 @@ let%expect_test "Unix REPL lane bounds a raw result and keeps request correlatio
     {| Unix REPL constructor exercised; oversized raw result rejected; next response correlated |}]
 ;;
 
+let%expect_test "Unix Developer bootstrap fits its exact physical line boundary" =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root =
+      Filename.concat
+        "/tmp"
+        ("ochat-developer-bootstrap-"
+         ^ (P.Id.Transaction.create () |> P.Id.Transaction.to_string))
+    in
+    let path = Eio.Path.(Eio.Stdenv.fs env / root) in
+    Eio.Path.mkdir ~perm:0o700 path;
+    Exn.protect
+      ~finally:(fun () -> Eio.Path.rmtree ~missing_ok:true path)
+      ~f:(fun () ->
+        Eio.Switch.run (fun sw ->
+          let socket_path = Filename.concat root "bootstrap.sock" in
+          let listener =
+            Eio.Net.listen ~sw ~backlog:2 (Eio.Stdenv.net env) (`Unix socket_path)
+          in
+          let id = P.Envelope.Request_id.of_json (`Number "2") |> T.must in
+          let success_framing =
+            P.Envelope.success ~id `Null
+            |> P.Envelope.to_json
+            |> Jsonaf.to_string
+            |> String.length
+            |> fun length -> length - 4
+          in
+          let empty_error = P.Error.invalid_request "" in
+          let error_bytes =
+            P.Error.to_json empty_error |> Jsonaf.to_string |> String.length
+          in
+          let error_framing =
+            P.Envelope.failure ~id empty_error
+            |> P.Envelope.to_json
+            |> Jsonaf.to_string
+            |> String.length
+            |> fun length -> length - error_bytes
+          in
+          let module Bound = Agent_client.Transport.Developer_response_bound in
+          let line_length =
+            Int.max
+              (Bound.max_result_bytes Bootstrap + success_framing)
+              (Bound.max_error_bytes + error_framing)
+          in
+          let initialized = T.initialization () in
+          let first_done, first_done_resolver = Eio.Promise.create () in
+          let capabilities_seen = ref 0 in
+          Eio.Fiber.fork ~sw (fun () ->
+            List.iter [ false; true ] ~f:(fun expect_capabilities ->
+              let flow, _ = Eio.Net.accept ~sw listener in
+              let reader = Eio.Buf_read.of_flow flow ~max_size:line_length in
+              let read expected_method result =
+                match
+                  Eio.Buf_read.line reader
+                  |> Jsonaf.of_string
+                  |> P.Envelope.of_json
+                  |> T.must
+                with
+                | P.Envelope.Request request ->
+                  assert (String.equal request.method_ expected_method);
+                  if String.equal expected_method "developer.capabilities"
+                  then Int.incr capabilities_seen;
+                  P.Envelope.success ~id:request.id result
+                  |> P.Envelope.to_json
+                  |> Jsonaf.to_string
+                  |> fun line -> Eio.Flow.copy_string (line ^ "\n") flow
+                | Notification _ | Response _ -> failwith "expected socket request"
+              in
+              read
+                "protocol.initialize"
+                (P.Public.Result.to_json (public_initialized initialized));
+              if expect_capabilities
+              then
+                read
+                  "developer.capabilities"
+                  (P.Developer_common.Capabilities.to_json T.capabilities)
+              else Eio.Promise.await first_done;
+              Eio.Flow.close flow));
+          let connect max_line_length =
+            Agent_transport_socket.Client.connect
+              ~sw
+              ~net:(Eio.Stdenv.net env)
+              ~socket_path
+              ~max_line_length
+              ~notification_capacity:8
+          in
+          let first = connect (line_length - 1) in
+          T.initialize first initialized;
+          (match Agent_client.Connection.developer_capabilities first with
+           | Error error ->
+             assert (
+               String.is_substring
+                 error.message
+                 ~substring:"closed response exceeds socket line limit")
+           | Ok _ -> failwith "undersized socket line admitted bootstrap");
+          Eio.Promise.resolve first_done_resolver ();
+          Agent_client.Connection.close first;
+          let second = connect line_length in
+          T.initialize second initialized;
+          let installed =
+            Agent_client.Connection.developer_capabilities second |> T.must
+          in
+          assert (
+            P.Developer_common.Capabilities.supports
+              installed
+              P.Developer_common.Method.Observe);
+          assert (Int.equal !capabilities_seen 1);
+          Agent_client.Connection.close second;
+          print_endline "Developer bootstrap rejects N-1 and roundtrips at N")));
+  [%expect {| Developer bootstrap rejects N-1 and roundtrips at N |}]
+;;
+
 let%expect_test "framed stdio gateway dispatches the closed REPL family" =
   Eio_main.run (fun _ ->
     Eio.Switch.run (fun sw ->

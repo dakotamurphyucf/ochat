@@ -1418,6 +1418,7 @@ let run ctx input =
                           ~key:denied_key
                           ~original:phase.original
                           ~request_current:(fun () -> !request_live)
+                          ~validate_capture:(fun _ -> Ok ())
                           ~resolve_fresh:(fun () ->
                             incr denied_resolutions;
                             request_live := false;
@@ -1437,6 +1438,37 @@ let run ctx input =
                              ~key:denied_key
                            |> required "stale request observation"));
                       request_live := true;
+                      let incompatible_key =
+                        P.Idempotency_key.of_string "source-not-wire-compatible"
+                        |> required "incompatible source key"
+                      in
+                      let native_before = !grand_native_attempts in
+                      (match
+                         Developer_host.Command.submit_resolving
+                           phase.host
+                           ~actor:phase.shared.actor
+                           ~run_id
+                           ~key:incompatible_key
+                           ~original:phase.original
+                           ~request_current:(fun () -> !request_live)
+                           ~validate_capture:(fun _ ->
+                             Error
+                               (P.Error.invalid_request
+                                  "captured source ID exceeds the portable wire bound"))
+                           ~resolve_fresh:(fun () -> Ok (fresh_source ()))
+                       with
+                       | Error error ->
+                         [%test_eq: P.Error.code] error.code Invalid_request
+                       | Ok _ -> failwith "incompatible capture reserved a command");
+                      assert (
+                        Option.is_none
+                          (Developer_host.Command.observe
+                             phase.host
+                             ~actor:phase.shared.actor
+                             ~run_id
+                             ~key:incompatible_key
+                           |> required "incompatible capture observation"));
+                      [%test_eq: int] !grand_native_attempts native_before;
                       let resolutions = ref 0 in
                       let initial =
                         Developer_host.Command.submit_resolving
@@ -1446,6 +1478,9 @@ let run ctx input =
                           ~key
                           ~original:phase.original
                           ~request_current:(fun () -> !request_live)
+                          ~validate_capture:(fun capture ->
+                            Developer_command_wire_receipt.validate_prepared
+                              (Chatml_developer_capture.prepared capture))
                           ~resolve_fresh:(fun () ->
                             incr resolutions;
                             Ok (fresh_source ()))
@@ -1464,6 +1499,8 @@ let run ctx input =
                           ~key
                           ~original:phase.original
                           ~request_current:(fun () -> !request_live)
+                          ~validate_capture:(fun _ ->
+                            failwith "historical key revalidated its capture")
                           ~resolve_fresh:(fun () ->
                             failwith "historical key recaptured source")
                         |> required "live replay"

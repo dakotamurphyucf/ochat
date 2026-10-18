@@ -1011,6 +1011,7 @@ let submit_fresh
       ~original
       ~resolve_fresh
       ~request_current
+      ~validate_capture
       ~kind
       ~run
   =
@@ -1079,6 +1080,7 @@ let submit_fresh
           ~checkpoint:t.checkpoint
       in
       let capture = Capture.Candidate.capture candidate in
+      let%bind () = validate_capture capture in
       let capture_fingerprint = Chatml_developer_capture.fingerprint capture in
       let%bind budgets = Budgets.for_original t.budgets original in
       let%bind () = check_request () in
@@ -1172,7 +1174,17 @@ let submit_fresh
             run t ~actor ~candidate ~admitted ~capture ~budgets ~id ~active ~sw ~admit)))
 ;;
 
-let submit_pure t ~actor ~run_id ~key ~original ~resolve_fresh ~request_current ~kind =
+let submit_pure
+      t
+      ~actor
+      ~run_id
+      ~key
+      ~original
+      ~resolve_fresh
+      ~request_current
+      ~validate_capture
+      ~kind
+  =
   submit_fresh
     t
     ~actor
@@ -1181,6 +1193,7 @@ let submit_pure t ~actor ~run_id ~key ~original ~resolve_fresh ~request_current 
     ~original
     ~resolve_fresh
     ~request_current
+    ~validate_capture
     ~kind
     ~run:
       (fun
@@ -1938,11 +1951,21 @@ let submit_resolving_command
       ~original
       ~resolve_fresh
       ~request_current
+      ~validate_capture
   =
   let kind = Original.kind original in
   (match kind with
    | Receipt.Kind.Check | Fixture_run ->
-     submit_pure t ~actor ~run_id ~key ~original ~resolve_fresh ~request_current ~kind
+     submit_pure
+       t
+       ~actor
+       ~run_id
+       ~key
+       ~original
+       ~resolve_fresh
+       ~request_current
+       ~validate_capture
+       ~kind
    | Live_run ->
      submit_fresh
        t
@@ -1952,6 +1975,7 @@ let submit_resolving_command
        ~original
        ~resolve_fresh
        ~request_current
+       ~validate_capture
        ~kind
        ~run:(run_live ~original)
    | Repl_task_run ->
@@ -1967,6 +1991,7 @@ let submit_command t ~actor ~run_id ~key ~original ~fresh_source =
     ~key
     ~original
     ~request_current:(fun () -> true)
+    ~validate_capture:(fun _ -> Ok ())
     ~resolve_fresh:(fun () ->
       fresh_source
       |> Result.of_option

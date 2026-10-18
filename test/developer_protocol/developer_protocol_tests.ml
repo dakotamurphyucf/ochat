@@ -452,6 +452,58 @@ let%test_unit "request methods and capabilities are closed and bounded" =
     Result.is_error
       (Dev.Capabilities.create ~format_version:1 ~methods:[ "developer.unknown" ] ~limits));
   let maximum = 9_007_199_254_740_991 in
+  let largest_json =
+    must
+      (D.Limits.create
+         ~max_bytes:maximum
+         ~max_depth:256
+         ~max_fields:maximum
+         ~max_nodes:maximum)
+  in
+  let largest_limits =
+    must
+      (Dev.Limits.create
+         ~request:largest_json
+         ~receipt:largest_json
+         ~response:largest_json
+         ~approval_page:largest_json
+         ~max_output_bytes:maximum
+         ~max_fixture_steps:maximum
+         ~max_fixture_bytes:maximum
+         ~max_approval_display_bytes:maximum
+         ~max_approval_decision_reason_bytes:maximum
+         ~max_approval_page:maximum
+         ~max_event_bytes:maximum)
+  in
+  let largest_caps =
+    must
+      (Dev.Capabilities.create
+         ~format_version:1
+         ~methods:Dev.Wire.Request.supported_methods
+         ~limits:largest_limits)
+  in
+  let largest_caps_json = Dev.Capabilities.to_json largest_caps in
+  assert (
+    String.length (Jsonaf.to_string largest_caps_json) <= Dev.Capabilities.max_json_bytes);
+  ignore (Dev.Capabilities.of_json largest_caps_json |> must : Dev.Capabilities.t);
+  let fields =
+    match largest_caps_json with
+    | `Object fields -> fields
+    | _ -> failwith "Capabilities should encode an object"
+  in
+  (match
+     Dev.Capabilities.of_json
+       (`Object (("padding", `String (String.make (64 * 1024) 'x')) :: fields))
+   with
+   | Error { code = P.Error.Resource_limit; _ } -> ()
+   | Ok _ | Error _ -> failwith "Capabilities byte bound was not enforced first");
+  let deep =
+    List.init 9 ~f:Fn.id
+    |> List.fold ~init:(`Null : Jsonaf.t) ~f:(fun x _ -> `Array [ x ])
+  in
+  (match Dev.Capabilities.of_json (`Object (("deep", deep) :: fields)) with
+   | Error { code = P.Error.Resource_limit; _ } -> ()
+   | Ok _ | Error _ -> failwith "Capabilities depth bound was not enforced first");
   List.iter
     [ 0; 1; maximum; maximum + 1; Int.max_value ]
     ~f:(fun nodes ->
@@ -537,6 +589,28 @@ let%test_unit "routes and submissions roundtrip under the effective request poli
       ~relative_path:"source.chatmd"
     |> Or_error.ok_exn
   in
+  let maximal_source_id =
+    Chatml_source.Id.create
+      ~package_namespace:(String.make 1024 'n')
+      ~relative_path:(String.make 1024 'm')
+    |> Or_error.ok_exn
+  in
+  must (P.Authoring_codec.validate_source_id maximal_source_id);
+  assert (
+    Chatml_source.Id.equal
+      maximal_source_id
+      (must
+         (P.Authoring_codec.source_id
+            (P.Authoring_codec.source_id_json maximal_source_id))));
+  let oversized_namespace =
+    Chatml_source.Id.create
+      ~package_namespace:(String.make 1025 'n')
+      ~relative_path:"source.chatmd"
+    |> Or_error.ok_exn
+  in
+  assert (Result.is_error (P.Authoring_codec.validate_source_id oversized_namespace));
+  assert (
+    Result.is_error (P.Authoring_codec.portable_member_string (String.make 1025 'm')));
   let contents = "<developer>example</developer>" in
   let source =
     must

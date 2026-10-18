@@ -109,6 +109,7 @@ let shared_features =
        authoritative reobservation"
     , [ "lib/agent_protocol/developer_wire.ml"
       ; "lib/agent_protocol/developer_repl_wire.ml"
+      ; "lib/agent_server/developer_command_wire_receipt.ml"
       ; "lib/agent_server/developer_endpoint.ml"
       ; "lib/agent_server/developer_repl_registry.ml"
       ; "lib/agent_server/developer_portable_admission.ml"
@@ -506,7 +507,7 @@ let implementation_sources =
   [ ( "lib/agent_server/developer_startup_configuration.ml"
     , "a213477bdb26122195bf04d4dd2824656365f990f005a960ed21dbcb6aac3460" )
   ; ( "lib/agent_server/developer_startup_limits.ml"
-    , "55335353dd895e8f49ccae4085adedb1cc1b184f0e8f7094f6c0c54b0e33a654" )
+    , "3737ab8802f1b867cac184334136761ddf90aaa2786d9d3e5a609629be1a28be" )
   ; ( "lib/agent_server/developer_startup_policy.ml"
     , "9b344871a5abc8f9177b946b2f8fad9ff4a4507a90a472548c9d0c6fede68c29" )
   ; ( "lib/agent_server/config_validator.ml"
@@ -530,7 +531,7 @@ let implementation_sources =
   ; ( "lib/agent_protocol/developer_fixture.ml"
     , "5d731984676192165c6f317aaea60aea0fefcf700456870a26568d5ed2c64d3e" )
   ; ( "lib/agent_protocol/developer_metadata.ml"
-    , "7bc746a560c6682d957e7a4b55c8ed752ae514e0ac8cd0907dfacee008cd5394" )
+    , "3c1dc02a49191c8bc22f3690fac56064b8a8d02b5bcddf373a8f27444e0ef8f3" )
   ; ( "lib/agent_protocol/developer_request_data.ml"
     , "f470183b3cfa04fb9970a8dff0ffd3a88eba3768130c06319ce58b2cfea3b3df" )
   ; ( "lib/agent_protocol/developer_view.ml"
@@ -551,12 +552,14 @@ let implementation_sources =
     , "d0cf80397174e6b8487b1b139c7e116640bcb331d8f176bf0979c621a2bbcf7c" )
   ; ( "lib/agent_protocol/developer_repl_wire.ml"
     , "2926bde94430e0348d63ff0b11918080077163ea5646688f76bc8b81894d1f94" )
+  ; ( "lib/agent_server/developer_command_wire_receipt.ml"
+    , "d4488c83e4dafaf47c7ecc296ffbc88b629b8175ed7158883db786b99091d320" )
   ; ( "lib/agent_server/developer_endpoint.ml"
-    , "d7733d2dcb9a490b7097f4cb7ad55186d09d3c6fdbdd73dfc0b70b63e4e6a51c" )
+    , "2cce8ed23cd788997caae37d94eba3a34ad86615cdc76d9472afa46bf5f34161" )
   ; ( "lib/agent_server/developer_repl_registry.ml"
     , "98b4d64dfb527512faa03099a2971a8f0bac733f7eb9eb6d6c704e335673e6f0" )
   ; ( "lib/agent_server/developer_portable_admission.ml"
-    , "023e4e5aaafe786a168089b9c156e77dcd808776441675a9084820ee6f752ea7" )
+    , "936a43c1247f8d6b93e54c13adf87f73ab1a79dbebe078c84c979d05ba121362" )
   ; ( "lib/agent_server/developer_change_hub.ml"
     , "c55785240bc6028fb86a9be3d0b0e15ce8322c15b293bb175e953b6faf0a0d12" )
   ; ( "lib/agent_server/dispatcher.ml"
@@ -684,7 +687,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_script_job_service.ml"
     , "79ab45f6fd273e4f55060607c7635b52e19e724b8ff0bf0356d4c328024db6d6" )
   ; ( "lib/agent_server/developer_host.ml"
-    , "4c8912950041c01e63e99c0ad7ca279da30ab1681de37aa15f58d7ecb1f84736" )
+    , "2e3dd268d35839331c547618887ad9ecf09b3ca7806e7e912b48229b027eb1a3" )
   ; ( "lib/agent_server/schedule_scheduler.ml"
     , "37cf371632d8ad86693c162e0593d56866f76df577dceb06ddd2ac5fe5bfdae9" )
   ; ( "lib/agent_session/background_execution.ml"

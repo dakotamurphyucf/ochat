@@ -239,6 +239,14 @@ module Capabilities = struct
     ; limits : Limits.t
     }
 
+  let max_json_bytes = 64 * 1024
+
+  let bootstrap_limits =
+    D.Limits.create ~max_bytes:max_json_bytes ~max_depth:8 ~max_fields:128 ~max_nodes:256
+    |> Result.map_error ~f:(fun _ -> "invalid fixed Developer bootstrap limits")
+    |> Result.ok_or_failwith
+  ;;
+
   let rec create ~format_version ~methods ~limits =
     if
       format_version <> 1
@@ -254,7 +262,7 @@ module Capabilities = struct
         Result.all (List.map methods ~f:Method.of_string) |> Result.map ~f:ignore
       in
       let t = { format_version; methods; limits } in
-      let* () = C.validate ~limits:D.Limits.default (to_json t) in
+      let* () = C.validate ~limits:bootstrap_limits (to_json t) in
       Ok t
 
   and to_json t =
@@ -274,7 +282,7 @@ module Capabilities = struct
   let limits t = t.limits
 
   let of_json json =
-    let* () = C.validate ~limits:D.Limits.default json in
+    let* () = C.validate ~limits:bootstrap_limits json in
     let* fields = C.fields ~allowed:[ "format_version"; "methods"; "limits" ] json in
     let* format_version = get fields "format_version" C.positive in
     let* methods =

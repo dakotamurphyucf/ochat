@@ -60,7 +60,9 @@ val array : ('a -> Jsonaf.t) -> 'a list -> Jsonaf.t
 val optional_field : string -> 'a option -> ('a -> Jsonaf.t) -> (string * Jsonaf.t) list
 
 (** Source IDs encode the arbitrary-byte package namespace as bounded base64;
-    the portable relative member remains a UTF-8 JSON string. *)
+    the portable relative member remains a UTF-8 JSON string. Constructor and
+    decoder validation both require each source-ID component to fit 1,024
+    bytes, so an admitted ID can round-trip through this wire codec. *)
 val source_id : Jsonaf.t -> (Chatml_source.Id.t, Error.t) result
 
 val validate_source_id : Chatml_source.Id.t -> (unit, Error.t) result

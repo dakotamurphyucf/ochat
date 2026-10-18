@@ -310,7 +310,12 @@ let repl_wire_preset (repl : Dev.Repl.t) ~task_receipt initialize =
   else Ok limits
 ;;
 
-let portable_preset (capacity : Config.Capacity.t) initialize_limits ~pending =
+let portable_preset
+      (capacity : Config.Capacity.t)
+      initialize_limits
+      ~pending
+      ~stored_receipt
+  =
   let open Result.Let_syntax in
   let request_bytes =
     Int.min initialize_limits.P.Initialize.Limits.max_request_bytes (1024 * 1024)
@@ -324,15 +329,21 @@ let portable_preset (capacity : Config.Capacity.t) initialize_limits ~pending =
   let%bind response_page_bytes = bounded_product 1 page_bytes 512 in
   let%bind response_page_nodes = bounded_product 1 page_nodes 8 in
   let%bind response_page_fields = bounded_product 1 page_fields 8 in
+  let%bind receipt =
+    Developer_command_wire_receipt.required_limits ~stored:stored_receipt
+  in
+  let%bind response_receipt_bytes = bounded_product 1 (D.Limits.max_bytes receipt) 4096 in
+  let%bind response_receipt_nodes = bounded_product 1 (D.Limits.max_nodes receipt) 32 in
+  let%bind response_receipt_fields = bounded_product 1 (D.Limits.max_fields receipt) 32 in
+  let%bind response_receipt_depth = bounded_product 1 (D.Limits.max_depth receipt) 3 in
   let%bind request = json ~bytes:request_bytes ~depth:24 ~fields:2048 ~nodes:4096 in
-  let%bind receipt = json ~bytes:65536 ~depth:16 ~fields:1024 ~nodes:2048 in
   let%bind page = json ~bytes:page_bytes ~depth:8 ~fields:page_fields ~nodes:page_nodes in
   let%bind response =
     json
-      ~bytes:(Int.max (65536 + 4096) response_page_bytes)
-      ~depth:24
-      ~fields:(Int.max (1024 + 32) response_page_fields)
-      ~nodes:(Int.max (2048 + 32) response_page_nodes)
+      ~bytes:(Int.max response_receipt_bytes response_page_bytes)
+      ~depth:(Int.max response_receipt_depth 24)
+      ~fields:(Int.max response_receipt_fields response_page_fields)
+      ~nodes:(Int.max response_receipt_nodes response_page_nodes)
   in
   let%bind wire_limits =
     P.Developer_common.Limits.create
@@ -392,6 +403,7 @@ let create
         capacity
         initialize_limits
         ~pending:(if Option.is_some approvals then capacity.max_pending_approvals else 1)
+        ~stored_receipt:receipt
       |> Result.map ~f:Option.some
     else Ok None
   in

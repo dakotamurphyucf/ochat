@@ -207,6 +207,11 @@ let check ~policy ~(initialize : P.Initialize.Limits.t) ~budgets ~approval ~repl
   let limits = Developer_endpoint.Policy.wire_limits policy in
   let request = L.request limits in
   let receipt = L.receipt limits in
+  let open Result.Let_syntax in
+  let%bind required_receipt =
+    Developer_command_wire_receipt.required_limits
+      ~stored:(Developer_command_budgets.Configuration.receipt budgets)
+  in
   if D.Limits.max_bytes request > initialize.max_request_bytes
   then invalid "Developer request exceeds Initialize capacity"
   else if
@@ -215,18 +220,17 @@ let check ~policy ~(initialize : P.Initialize.Limits.t) ~budgets ~approval ~repl
          (L.max_output_bytes limits)
          (Developer_command_budgets.Configuration.max_output_bytes budgets))
   then invalid "Developer output ceiling differs from installed Host budget"
-  else if not (covers receipt (Developer_command_budgets.Configuration.receipt budgets))
+  else if not (covers receipt required_receipt)
   then invalid "Developer receipt cannot represent installed Host results"
   else if not (response_covers_nested limits)
   then invalid "Developer response lacks View or approval-page framing capacity"
   else if Option.exists approval ~f:(fun broker -> not (page_covers_broker limits broker))
   then invalid "Developer approval policy cannot represent the installed broker"
-  else
-    let open Result.Let_syntax in
+  else (
     let%bind () = check_capabilities limits in
     match Developer_endpoint.Policy.repl_wire_limits policy, repl with
     | None, _ -> Ok ()
     | Some _, None -> invalid "REPL wire requires the installed REPL Host"
     | Some wire, Some configuration ->
-      check_repl ~wire ~configuration ~budgets ~initialize
+      check_repl ~wire ~configuration ~budgets ~initialize)
 ;;
