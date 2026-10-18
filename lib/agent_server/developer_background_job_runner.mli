@@ -64,6 +64,14 @@ val create
     retained Root instance. It grants no claim or dispatch authority. *)
 val issued_by_root : t -> Developer_root_owner.run -> bool
 
+(** Pair one process-local approval owner with this same physical Root. The
+    entered Tool or Script Worker lends its actual Claim only during the
+    callback; the owner cannot be invoked from a candidate or saved payload. *)
+val with_approval_owner
+  :  t
+  -> Developer_approval_owner.t
+  -> (t, Agent_protocol.Error.t) result
+
 (** Scheduling classification only, not execution authority. Decode the
     bounded saved payload from the authentic candidate. Tool and Script are
     runnable, including Tools with saved v2 Agent.run references when the

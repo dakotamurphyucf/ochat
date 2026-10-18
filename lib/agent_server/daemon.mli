@@ -21,6 +21,37 @@ type startup_mode =
 module Developer_configuration : sig
   type t
 
+  module Shell_approvals : sig
+    type t
+
+    module Limits : sig
+      type t
+
+      val create
+        :  max_pending:int
+        -> max_request_bytes:int
+        -> max_display_bytes:int
+        -> max_decision_reason_bytes:int
+        -> wait_seconds:float
+        -> (t, Agent_protocol.Error.t) result
+    end
+
+    (** Opt-in process-local Once approvals for this Developer host.
+        Command policies come from the same configuration's existing
+        receipt_read/command_control decisions. Job policies are separate
+        trusted daemon decisions on a fresh Root-current Job snapshot; a
+        pending item or command receipt does not authorize its response. *)
+    val create
+      :  limits:Limits.t
+      -> job_read:(Operator_authorization.t -> Agent_protocol.Developer_job.t -> bool)
+      -> job_respond:(Operator_authorization.t -> Agent_protocol.Developer_job.t -> bool)
+      -> t
+  end
+
+  (** Disabled by default. This configures an owner, not a supplied broker,
+      Session grant or Assume_approved provider. *)
+  val with_shell_approvals : t -> Shell_approvals.t -> t
+
   module Remote_content : sig
     type t
 
@@ -215,6 +246,37 @@ end
 
 module Developer : sig
   module Configuration = Developer_configuration
+
+  module Approval : sig
+    module Pending = Developer_approval_owner.Pending
+
+    type decision = Developer_approval_owner.decision =
+      | Approve_once
+      | Deny of string
+
+    (** Read only current process-local pending approvals. On restart, ended
+        epoch or foreign run the list cannot resurrect an effect. *)
+    val pending
+      :  t
+      -> actor:Operator_authorization.t
+      -> run_id:Agent_protocol.Id.Developer_run.t
+      -> (Pending.t list, Agent_protocol.Error.t) result
+
+    val respond
+      :  t
+      -> actor:Operator_authorization.t
+      -> run_id:Agent_protocol.Id.Developer_run.t
+      -> id:Agent_protocol.Id.Permission.t
+      -> decision
+      -> (unit, Agent_protocol.Error.t) result
+
+    val cancel
+      :  t
+      -> actor:Operator_authorization.t
+      -> run_id:Agent_protocol.Id.Developer_run.t
+      -> id:Agent_protocol.Id.Permission.t
+      -> (unit, Agent_protocol.Error.t) result
+  end
 
   module Request : sig
     type t

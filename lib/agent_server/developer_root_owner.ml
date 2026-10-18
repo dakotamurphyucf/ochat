@@ -3047,6 +3047,23 @@ module Model_inference = struct
 
   let check_current t = require (check t)
 
+  let check_claimed_approval issuer ~scope ~active =
+    if
+      (not (phys_equal issuer scope.inference_issuer))
+      || (not (phys_equal active scope.inference_active_worker))
+      || not
+           (Option.value_map
+              (Eio.Fiber.get inference_scope_key)
+              ~default:false
+              ~f:(phys_equal scope))
+    then invalid "developer Model approval has another physical Claim or Root scope"
+    else (
+      match scope.inference_origin with
+      | Claimed_model_job -> check scope
+      | Claimed_saved_agent _ ->
+        invalid "developer Model approval requires a claimed Model_call")
+  ;;
+
   let route t =
     match Eio.Fiber.get inference_route_key with
     | Some route when phys_equal route.inference_scope t -> route

@@ -663,6 +663,14 @@ module Active = struct
   module Preparing = struct
     type nonrec t = preparing
 
+    let issued_started (t : t) (started : Started.t) =
+      active_current t.active
+      && phys_equal t.active started.active
+      && phys_equal t.generation started.generation
+      && t.binding_attempted
+      && Started.issued_by_root started started.root
+    ;;
+
     let bind_root t ~root =
       if t.binding_attempted
       then Error (busy ())
@@ -688,6 +696,17 @@ module Active = struct
   end
 
   let view (t : t) = t.view
+
+  let check_started_now (active : t) ~(started : Started.t) ~root ~actor =
+    if
+      active_current active
+      && phys_equal active started.active
+      && Started.issued_by_root started root
+      && phys_equal actor (Root.original_actor root)
+      && Operator_authorization.is_current actor
+    then Ok ()
+    else Error (stale ())
+  ;;
 
   let start_preparation t ~actor ~admit =
     let open Result.Let_syntax in

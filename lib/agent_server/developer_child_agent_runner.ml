@@ -193,6 +193,20 @@ let run_selected_moderator run ~stop_reason ~stop_result =
       ~recipe
       Chat_response.Moderation.Capabilities.default
   in
+  let on_process_run =
+    Chat_response.Agent_runtime.moderator_process_handler runtime
+    |> Option.map ~f:(fun handler session ~command ~args ->
+      let refresh () =
+        Live.Child_prepared.refresh_current_borrow prepared
+        |> Result.map_error ~f:(fun error -> error.P.Error.message)
+        |> Result.map ~f:(fun admission () ->
+          Live.Child_prepared.Admission.check_now admission
+          |> Result.map_error ~f:(fun error -> error.P.Error.message))
+      in
+      Shell_runtime.Call_context.with_narrowed_check ~refresh (fun () ->
+        handler session ~command ~args)
+      |> Result.join)
+  in
   let started =
     Driver.create_selected_moderator_entries
       ~env:(Chat_response.Ctx.env ctx)
@@ -203,7 +217,7 @@ let run_selected_moderator run ~stop_reason ~stop_result =
       ~available_tools:tools
       ~capabilities
       ~runtime_policy
-      ?on_process_run:(Chat_response.Agent_runtime.moderator_process_handler runtime)
+      ?on_process_run
       ()
   in
   let moderator =

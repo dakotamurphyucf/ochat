@@ -184,6 +184,10 @@
     lib/agent_server/managed_output_cursor.ml %{dep:../agent_server/managed_output_cursor.ml}
     lib/agent_server/managed_output_page.ml %{dep:../agent_server/managed_output_page.ml}
     lib/agent_server/session_factory.ml %{dep:../agent_server/session_factory.ml}
+    lib/shell_runtime/approval_broker.ml %{dep:../shell_runtime/approval_broker.ml}
+    lib/shell_runtime/call_context.ml %{dep:../shell_runtime/call_context.ml}
+    lib/agent_server/developer_approval_owner.ml %{dep:../agent_server/developer_approval_owner.ml}
+    lib/agent_server/developer_command_lifecycle.ml %{dep:../agent_server/developer_command_lifecycle.ml}
     lib/agent_server/developer_background_job_runner.ml %{dep:../agent_server/developer_background_job_runner.ml}
     lib/agent_server/developer_child_agent_runner.ml %{dep:../agent_server/developer_child_agent_runner.ml}
     lib/agent_server/developer_child_content_projection.ml %{dep:../agent_server/developer_child_content_projection.ml}
@@ -192,9 +196,11 @@
     lib/agent_server/developer_live_resources.ml %{dep:../agent_server/developer_live_resources.ml}
     lib/agent_server/developer_managed_tool_executor.ml %{dep:../agent_server/developer_managed_tool_executor.ml}
     lib/agent_server/developer_native_executor.ml %{dep:../agent_server/developer_native_executor.ml}
+    lib/agent_server/developer_model_job_runner.ml %{dep:../agent_server/developer_model_job_runner.ml}
     lib/agent_server/developer_script_job_execution.ml %{dep:../agent_server/developer_script_job_execution.ml}
     lib/agent_server/developer_script_job_service.ml %{dep:../agent_server/developer_script_job_service.ml}
     lib/agent_server/developer_host.ml %{dep:../agent_server/developer_host.ml}
+    lib/agent_server/daemon.ml %{dep:../agent_server/daemon.ml}
     lib/agent_session/authoring_context_tool.ml %{dep:../agent_session/authoring_context_tool.ml}
     lib/agent_session/authoring_reference_scope.ml %{dep:../agent_session/authoring_reference_scope.ml}
     lib/agent_session/authoring_services.ml %{dep:../agent_session/authoring_services.ml}

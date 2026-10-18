@@ -1114,6 +1114,20 @@ module Model_inference : sig
       uses the composed [submission_guard]. *)
   val check_current : t -> unit
 
+  (** Comparison-only approval admission for this Root's already entered
+      [with_claimed] Model_call scope. Require [scope] and [active] to be the
+      exact physical Root/Worker pair and [scope] to be the current fiber's
+      live Claimed_model_job origin. Then perform the existing yielding scope,
+      Parent, actor, selection and Root check with its final nonyielding
+      currentness suffix. No saved Agent/Native callback, copied Job ID or
+      matching coordinates can construct or enter this approval origin.
+      An HTTP response fiber must not call this Worker-local check. *)
+  val check_claimed_approval
+    :  run
+    -> scope:t
+    -> active:Agent_session.Developer_job_scope.active
+    -> (unit, Agent_protocol.Error.t) result
+
   (** Admit an external Model_call child at the current application call
       boundary. A claimed Model_call uses its exact parent job/attempt. A
       claimed saved Agent uses the physically checked direct or descendant

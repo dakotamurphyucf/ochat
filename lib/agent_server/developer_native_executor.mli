@@ -13,6 +13,20 @@ val issued_by_root : t -> Developer_root_owner.run -> bool
 
 val create : root:Developer_root_owner.t -> (t, Agent_protocol.Error.t) result
 
+(** Bind the Host's one process-local approval owner after it has paired with
+    this exact physical Root. It configures no Shell scope at construction.
+    Each genuine Root.with_native_callback later installs Call_context services
+    whose getter re-runs this executor's existing effect_entry selected-binding
+    check, including Root/child/claimed source, physical implementation,
+    current borrowed dispatched invocation and parent suffix. Shell_access
+    calls it after reviewer waits and before shell effects. Child and nested
+    invocations retain this same owner; a different Root or second owner
+    cannot replace it. *)
+val with_approval_owner
+  :  t
+  -> Developer_approval_owner.t
+  -> (t, Agent_protocol.Error.t) result
+
 (** Compose one physically issued developer Script Job service with this same
     selected executor; the ordinary no-Job caller keeps the original path.
     Reattaching that exact physical service is idempotent, including after a

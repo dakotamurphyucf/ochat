@@ -10,6 +10,8 @@ module Jobs = Developer_script_job_service
 module Managed_tool = Developer_managed_tool_executor
 module Child_selection = Developer_child_selection
 module Claimed_runtime = Agent_session.Claimed_child_runtime
+module Approval_owner = Developer_approval_owner
+module Call_context = Shell_runtime.Call_context
 
 type t =
   { root : O.t
@@ -17,6 +19,7 @@ type t =
   ; jobs : Jobs.t option
   ; managed : Managed_tool.t option
   ; managed_env : Eio_unix.Stdenv.base option
+  ; approval_owner : Approval_owner.t option
   }
 
 (* One private execution selection is carried through native dispatch, lexical
@@ -60,7 +63,24 @@ let create ~root =
       ~current
       ~now:(fun () -> O.native_now root)
   in
-  Ok { root; issuer; jobs = None; managed = None; managed_env = None }
+  Ok
+    { root
+    ; issuer
+    ; jobs = None
+    ; managed = None
+    ; managed_env = None
+    ; approval_owner = None
+    }
+;;
+
+let with_approval_owner t owner =
+  if not (Approval_owner.issued_by_root owner t.root)
+  then invalid "developer approval owner belongs to another physical root"
+  else (
+    match t.approval_owner with
+    | None -> Ok { t with approval_owner = Some owner }
+    | Some existing when phys_equal existing owner -> Ok t
+    | Some _ -> invalid "developer native executor already owns another approval owner")
 ;;
 
 let with_job_service t jobs =
@@ -226,7 +246,7 @@ let rec run
           ~job_parent
           ~borrowed
           ~registry
-          ~reference
+          ~(reference : C.reference)
           ~invocation
           ~authorize
           ~prepare_output
@@ -468,7 +488,49 @@ let rec run
                   ~f:(fun (outcome, selection) ->
                     outcome, Jobs.Native_selection.physical selection))
             ~enter_callback:(fun ~dispatched f ->
-              O.with_native_callback scope ~dispatched (fun ~sw:_ -> f ()))
+              O.with_native_callback scope ~dispatched (fun ~sw:_ ->
+                match t.approval_owner with
+                | None -> f ()
+                | Some owner ->
+                  Approval_owner.with_native_invocation
+                    owner
+                    ~terminal:scope
+                    ~dispatched
+                    (fun () ->
+                       let check () =
+                         let result =
+                           let* borrowed = N.borrow_selected () in
+                           let* () =
+                             if
+                               phys_equal
+                                 (N.selected_borrowed_invocation borrowed)
+                                 dispatched
+                             then Ok ()
+                             else invalid "developer approval borrowed another invocation"
+                           in
+                           let* selected = registry_now () in
+                           let* binding =
+                             C.resolve
+                               selected
+                               ~id:reference.id
+                               ~fingerprint:reference.fingerprint
+                             |> Result.map_error ~f:(fun error ->
+                               P.Error.invalid_request error.message)
+                           in
+                           effect_entry binding
+                         in
+                         Result.map_error result ~f:(fun error -> error.P.Error.message)
+                       in
+                       Call_context.with_services
+                         (fun () ->
+                            Result.map (check ()) ~f:(fun () ->
+                              Call_context.
+                                { session_id = Approval_owner.shell_owner_label owner
+                                ; approval_store = Approval_owner.approval_store owner
+                                ; approval_provider = Approval_owner.provider owner
+                                ; check
+                                }))
+                         f)))
             ~managed
             ~registry:registry_now
             ~reference

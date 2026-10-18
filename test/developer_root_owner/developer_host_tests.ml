@@ -21,6 +21,8 @@ let developer_configuration
         fun _ _ -> Error (P.Error.invalid_request "no native tool selected"))
       ?(prepare_output =
         fun _ -> Error (P.Error.invalid_request "no native output selected"))
+      ?(receipt_read = fun _ _ -> true)
+      ?(command_control = fun _ _ -> true)
       ()
   =
   let target =
@@ -139,8 +141,8 @@ let developer_configuration
     ~limits
     ~result_disclosure:
       (S.Developer_result_disclosure.Policy.create ~authorize:(fun _ _ -> true))
-    ~receipt_read:(fun _ _ -> true)
-    ~command_control:(fun _ _ -> true)
+    ~receipt_read
+    ~command_control
     ~publisher_limits:
       (Agent_store.Developer_result_publisher.Limits.create
          ~inline_bytes:1024

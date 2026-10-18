@@ -15,9 +15,12 @@ module Sources : sig
       reading a source or sending a model request. Unlike the conversation
       Runtime_builder's exec_context, it contains no service-principal Session
       or callback that can replace the physical Root identity. The runner uses
-      these services with Chat_response.Fetch and Driver under its live Claim,
-      rechecking that Claim and current actor/provider after yielding source or
-      approval work and again at application submission. The
+      these services with Chat_response.Fetch and Driver under its live Claim.
+      A fresh local File target is parsed once through the bounded authored
+      parser and passed as a prepared Driver input, preserving declaration
+      ranges in the retained Shell manifest; a nonlocal target retains the
+      existing raw Driver path. The Claim and current actor/provider are
+      rechecked after yielding source or approval work and at submission. The
       authorizer and approval provider are required, never silent defaults. *)
   val create
     :  env:Eio_unix.Stdenv.base
@@ -55,6 +58,19 @@ val create
 (** Comparison only: this package was issued for exactly this live Root object.
     An equal run ID or copied candidate cannot attach it elsewhere. *)
 val issued_by_root : t -> Developer_root_owner.run -> bool
+
+(** Attach only the process-local approval owner already paired with this
+    runner's physical Root. During a claimed Model_call, [run_candidate]
+    enters the existing Worker/Root inference scope first, then lends that
+    exact scope to the owner's lexical Shell services for the strict recipe.
+    This creates no Native invocation, new Claim or approval grant. Reattaching
+    the same physical owner is idempotent; a different owner is rejected even
+    if it was paired with this Root. A runner without this attachment retains
+    its existing no-owner behavior. *)
+val with_approval_owner
+  :  t
+  -> Developer_approval_owner.t
+  -> (t, Agent_protocol.Error.t) result
 
 (** Lend the same strict provider Context and recipe used by [run_candidate],
     now under OCH398's physically entered saved-Agent source/native proof. The

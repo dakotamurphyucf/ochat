@@ -1661,6 +1661,7 @@ let%test_unit
     let admitted_nested_calls = ref 0 in
     let nested_effects = ref 0 in
     let escaped_scope = ref None in
+    let escaped_model_active = ref None in
     let escaped_prepared = ref None in
     let claimed_children = ref [] in
     let expected = Run_store.observe handle |> ok in
@@ -1677,6 +1678,18 @@ let%test_unit
                   ~active
                   ~f:(fun scope ~sw ->
                     escaped_scope := Some scope;
+                    escaped_model_active := Some active;
+                    Root.Model_inference.check_claimed_approval
+                      after_actor_revoke
+                      ~scope
+                      ~active
+                    |> ok;
+                    assert (
+                      Result.is_error
+                        (Root.Model_inference.check_claimed_approval
+                           original
+                           ~scope
+                           ~active));
                     let context = Root.Model_inference.context scope in
                     assert (
                       phys_equal
@@ -2169,6 +2182,12 @@ let%test_unit
       with
       | _ -> true
     in
+    assert (
+      Result.is_error
+        (Root.Model_inference.check_claimed_approval
+           after_actor_revoke
+           ~scope:(Option.value_exn !escaped_scope)
+           ~active:(Option.value_exn !escaped_model_active)));
     assert (retained_unknown && !sync_blocked);
     assert (Result.is_error (Root.close_and_wait after_actor_revoke));
     assert (Result.is_error (admit actor selected_model));

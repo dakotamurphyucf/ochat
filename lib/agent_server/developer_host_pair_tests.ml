@@ -911,7 +911,7 @@ let%test_module "retained Developer Host policy" =
           ~tool_dir:Eio.Path.(Eio.Stdenv.fs shared.env / shared.root)
           ~home:Eio.Path.(Eio.Stdenv.fs shared.env / shared.root)
           ~cache:(Chat_response.Cache.create ~max_size:8 ())
-          ~approval_broker:None
+          ~approval:None
           ~max_native_bindings:8
           ~child_sources:shared.child_sources
           ~content_limits:Daemon.default_options.content_limits

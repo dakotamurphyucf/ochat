@@ -13,6 +13,7 @@ module Runtime = Chat_response.Agent_runtime
 module Claim_scope = Agent_session.Developer_job_scope
 module Claimed = Agent_session.Claimed_child_runtime
 module Deadline = Developer_claim_deadline
+module Approval_owner = Developer_approval_owner
 
 type t =
   { root : O.run
@@ -23,6 +24,7 @@ type t =
   ; jobs : Jobs.t
   ; authorize : H.t -> C.binding -> (unit, P.Error.t) result
   ; prepare_output : Openai.Responses.Tool_output.Output.t -> (Jsonaf.t, P.Error.t) result
+  ; approval_owner : Approval_owner.t option
   }
 
 module Availability = struct
@@ -68,10 +70,38 @@ let create
       | None -> Ok native
       | Some definition -> N.with_managed_definition native ~definition ~env
     in
-    Ok { root; native; results; env; agent_runtime; jobs; authorize; prepare_output }
+    Ok
+      { root
+      ; native
+      ; results
+      ; env
+      ; agent_runtime
+      ; jobs
+      ; authorize
+      ; prepare_output
+      ; approval_owner = None
+      }
 ;;
 
 let issued_by_root t root = phys_equal t.root root
+
+let with_approval_owner t owner =
+  if not (Approval_owner.issued_by_root owner t.root)
+  then invalid "developer background approval owner belongs to another root"
+  else (
+    match t.approval_owner with
+    | None ->
+      let* native = N.with_approval_owner t.native owner in
+      Ok { t with native; approval_owner = Some owner }
+    | Some existing when phys_equal existing owner -> Ok t
+    | Some _ -> invalid "developer background runner already owns another approval owner")
+;;
+
+let with_claimed_approval t active f =
+  match t.approval_owner with
+  | None -> f ()
+  | Some owner -> Approval_owner.with_claimed_job owner ~active f
+;;
 
 let decode t job =
   if not (P.Job.equal_kind (P.Developer_job.kind job) P.Job.Async_tool)
@@ -531,7 +561,8 @@ let run_candidate t ?on_capacity_decision candidate =
           candidate
           ~on_capacity_decision:notify_once
           ~select:(O.Job_result.select t.results)
-          (fun ~active ~sw:_ -> execute_claimed t active)
+          (fun ~active ~sw:_ ->
+             with_claimed_approval t active (fun () -> execute_claimed t active))
       | Runnable ->
         (match decode t (O.Job_candidate.job candidate) with
          | Error _ -> invalid "developer background target changed after availability"
@@ -543,7 +574,8 @@ let run_candidate t ?on_capacity_decision candidate =
                 candidate
                 ~on_capacity_decision:notify_once
                 ~select:(O.Job_result.select t.results)
-                (fun ~active ~sw:_ -> execute_claimed t active)
+                (fun ~active ~sw:_ ->
+                   with_claimed_approval t active (fun () -> execute_claimed t active))
             | Script ->
               Jobs.with_claimed_worker
                 t.jobs
@@ -552,5 +584,6 @@ let run_candidate t ?on_capacity_decision candidate =
                 ~expired_state:(expired_script_state t)
                 ~select:(O.Job_result.select t.results)
                 (fun ~active ~scope ~issuer ~budget ~sw:_ ->
-                   execute_script_claimed t ~active ~scope ~issuer ~budget))))
+                   with_claimed_approval t active (fun () ->
+                     execute_script_claimed t ~active ~scope ~issuer ~budget)))))
 ;;
