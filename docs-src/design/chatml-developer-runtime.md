@@ -112,7 +112,7 @@ uses its own installed upload and rebind policy. No Developer row substitutes
 for any of those source grants. Omit the `developer` field to leave the
 Developer service unavailable.
 
-Status: M5 design v1, 2026-10-15. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission, durable developer run checkpoint foundation, selected-document transactions, physical job-claim worker, compiler-side REPL typing transaction and incremental module registry described below are implemented. The developer root staging owner, bounded root/native terminal coordinator, selected native policy and claimed job-parent effect-entry proof are implemented. The owner-neutral lexical script-job kernel and its physical developer adapter are implemented. Actor-bound provider selection, the shared Model.spawn recipe decoder, durable intent, physical call-boundary admission, selected compiled-script adapter and claimed model-job runner are implemented. Hosted command, native, job and Model approval callbacks and the portable Developer transport client are implemented. The hosted library REPL Task service retains exact Task references, starts work durably on explicit request, and joins cancellation and reset. User-facing REPL Task transport remains pending. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
+Status: M5 design v1, 2026-10-15. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission, durable developer run checkpoint foundation, selected-document transactions, physical job-claim worker, compiler-side REPL typing transaction and incremental module registry described below are implemented. The developer root staging owner, bounded root/native terminal coordinator, selected native policy and claimed job-parent effect-entry proof are implemented. The owner-neutral lexical script-job kernel and its physical developer adapter are implemented. Actor-bound provider selection, the shared Model.spawn recipe decoder, durable intent, physical call-boundary admission, selected compiled-script adapter and claimed model-job runner are implemented. Hosted command, native, job and Model approval callbacks and the portable Developer transport client are implemented. The hosted library REPL Task service retains exact Task references, starts work durably on explicit request, and joins cancellation and reset. The portable server REPL endpoint is implemented; the first-party REPL client remains pending. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
 
 The [authoring service design](chatml-authoring-services.md) owns source context,
 overlay and immutable upload contracts used here. Implementation and validation
@@ -504,8 +504,22 @@ source location exceeds the response cap; only that public location is
 omitted. Exact-key reference pages and on-demand type rendering repeat live
 actor, source and epoch checks, and type rendering uses roots from the
 original immutable snapshot. These projections neither rerun a statement nor
-convey effect authority. The portable service and first-party client still
-belong to the later REPL client work.
+convey effect authority. The portable server endpoint projects these bounded
+results; the first-party REPL client remains separate work.
+
+An accepted REPL transfers the exact selected Prepared graph and compiler
+contract to a run-owned source selection before publishing its instance. The
+authoring editor's connection and context can close or change without
+reinterpreting that graph. Host project and document selections use a separate
+readless source owner that continues to consume the configured Source Host
+context capacity until joined REPL close. Uploaded selections keep their
+genuine Store pin; local selections keep their genuine physical Root check;
+supplied documents retain their original and current policy checks. A full
+currentness check may yield for uploaded Store verification and ends in an
+immediate nonyielding owner/actor/policy suffix. Reset of the same captured
+instance keeps this source owner. Failed Create, joined close and shutdown
+release it; an expired actor, revoked root or policy, or expired upload pin
+still denies new effects.
 
 A REPL has a separate opaque ID, principal/workspace owner, project/environment, pinned source graph, reset epoch and monotone state revision. It is not an agent conversation or a durable background job. One actor serializes access to its mutable runtime and inference state. Creation carries a unique request ID bound to principal and graph/environment payload, so a lost response cannot create two sessions. Creation records the session and is inert: it does not evaluate module initializers.
 

@@ -5,6 +5,7 @@ module Policy = struct
   type t =
     { wire_limits : P.Developer_common.Limits.t
     ; change_limits : Developer_change_hub.Limits.t
+    ; repl_wire_limits : P.Developer_repl_wire.Limits.t option
     }
 
   let create
@@ -17,24 +18,35 @@ module Policy = struct
       ~max_connections
       ~max_watches_per_connection
       ~max_pending_hints_per_connection
-    |> Result.map ~f:(fun change_limits -> { wire_limits; change_limits })
+    |> Result.map ~f:(fun change_limits ->
+      { wire_limits; change_limits; repl_wire_limits = None })
   ;;
 
   let wire_limits t = t.wire_limits
   let change_limits t = t.change_limits
+
+  let with_repl_wire t repl_wire_limits =
+    Ok { t with repl_wire_limits = Some repl_wire_limits }
+  ;;
+
+  let repl_wire_limits t = t.repl_wire_limits
 end
 
 module Common = P.Developer_common
 module Wire = P.Developer_wire
+module Repl_wire = P.Developer_repl_wire
 module Approval = P.Developer_approval
 module Original = Developer_command_original
 module Store = Agent_store
+module Task_row = Agent_store.Developer_command_row
+module Task_receipt = Agent_store.Developer_command_receipt
 
 type t =
   { host : Developer_host.t
   ; authoring : Authoring_installation.t
   ; changes : Developer_change_hub.t
   ; policy : Policy.t
+  ; repl_registry : Developer_repl_registry.t option
   ; mutable closed : bool
   }
 
@@ -44,7 +56,15 @@ let limits t = Policy.wire_limits t.policy
 let create ~host ~authoring ~changes ~policy =
   if not (Developer_host.uses_authoring host authoring)
   then Error (error Invalid_request "developer endpoint has a different authoring owner")
-  else Ok { host; authoring; changes; policy; closed = false }
+  else (
+    let repl_registry =
+      match Policy.repl_wire_limits policy with
+      | None -> Ok None
+      | Some limits ->
+        Developer_repl_registry.create ~host ~limits |> Result.map ~f:Option.some
+    in
+    Result.map repl_registry ~f:(fun repl_registry ->
+      { host; authoring; changes; policy; repl_registry; closed = false }))
 ;;
 
 let available_features t =
@@ -52,6 +72,9 @@ let available_features t =
   then []
   else
     [ Common.Features.run; Common.Features.events ]
+    @ (if Option.is_some t.repl_registry
+       then [ Repl_wire.Features.repl; Repl_wire.Features.events ]
+       else [])
     @
     if Developer_host.approval_installed t.host then [ Common.Features.approvals ] else []
 ;;
@@ -77,9 +100,18 @@ let methods_for_lease t lease =
          ; "developer.approval.cancel"
          ]
        else [])
+    @ (if selected Common.Features.run && selected Common.Features.events
+       then [ "developer.watch"; "developer.unwatch" ]
+       else [])
     @
-    if selected Common.Features.run && selected Common.Features.events
-    then [ "developer.watch"; "developer.unwatch" ]
+    if Option.is_some t.repl_registry && selected Repl_wire.Features.repl
+    then
+      List.filter Repl_wire.Request.supported_methods ~f:(fun method_ ->
+        if
+          String.equal method_ "developer.repl.watch"
+          || String.equal method_ "developer.repl.unwatch"
+        then selected Repl_wire.Features.events
+        else true)
     else [])
 ;;
 
@@ -204,9 +236,9 @@ let source_root roots index =
        ~error:(error Permission_denied "developer source root is not selected")
 ;;
 
-let fresh_source t ~connection ~actor original =
+let fresh_source_route t ~connection ~actor (route : Original.Route.t) =
   let open Result.Let_syntax in
-  match Original.route original with
+  match route with
   | Local_project { root_index; dependency_root_indices; _ } ->
     let%bind roots =
       Authoring_installation.developer_roots
@@ -230,6 +262,10 @@ let fresh_source t ~connection ~actor original =
     Original.Fresh_source.Local_source { root }
   | Authoring_project _ -> Ok (Original.Fresh_source.Authoring_project { connection })
   | Document_script _ -> Ok (Original.Fresh_source.Document_script { connection })
+;;
+
+let fresh_source t ~connection ~actor original =
+  fresh_source_route t ~connection ~actor (Original.route original)
 ;;
 
 let wire_kind = function
@@ -290,6 +326,70 @@ let wire_pending ~limits pending =
     ~manifest_sha256:(Developer_approval_owner.Pending.manifest_sha256 pending)
     ~redacted_display:(Developer_approval_owner.Pending.redacted_display pending)
     ~expires_at:(Developer_approval_owner.Pending.expires_at pending)
+;;
+
+let wire_task_diagnostic ~limits (diagnostic : Task_receipt.Diagnostic.t) =
+  let open Result.Let_syntax in
+  let%bind location =
+    Option.value_map diagnostic.location ~default:(Ok None) ~f:(fun location ->
+      let%map location =
+        Repl_wire.Submission.Location.create
+          ~limits
+          ~source:location.source
+          ~digest:location.digest
+          ~start_byte:location.start_byte
+          ~end_byte:location.end_byte
+      in
+      Some location)
+  in
+  Repl_wire.Task_view.Diagnostic.create
+    ~limits
+    ~code:diagnostic.code
+    ~message:diagnostic.message
+    ~location
+;;
+
+let wire_task_outcome ~limits = function
+  | Task_receipt.Task.Succeeded { value_preview } ->
+    Ok (Repl_wire.Task_view.Succeeded value_preview)
+  | Failed { error; diagnostic } ->
+    Result.map
+      (Option.value_map diagnostic ~default:(Ok None) ~f:(fun diagnostic ->
+         Result.map (wire_task_diagnostic ~limits diagnostic) ~f:Option.some))
+      ~f:(fun diagnostic -> Repl_wire.Task_view.Failed { error; diagnostic })
+  | Limited { error; diagnostic } ->
+    Result.map
+      (Option.value_map diagnostic ~default:(Ok None) ~f:(fun diagnostic ->
+         Result.map (wire_task_diagnostic ~limits diagnostic) ~f:Option.some))
+      ~f:(fun diagnostic -> Repl_wire.Task_view.Limited { error; diagnostic })
+  | Interrupted -> Ok Repl_wire.Task_view.Interrupted
+  | Cancelled -> Ok Repl_wire.Task_view.Cancelled
+;;
+
+let wire_task_view ~limits view =
+  let open Result.Let_syntax in
+  let row = Developer_host.Repl.Task.row view in
+  let%bind phase =
+    match Task_row.phase row with
+    | Reserved -> Ok Repl_wire.Task_view.Reserved
+    | Waiting_permission -> Ok Waiting_permission
+    | Execution_started -> Ok Execution_started
+    | Terminal { execution_started; receipt } ->
+      (match Task_receipt.value receipt with
+       | Task outcome ->
+         let%map outcome = wire_task_outcome ~limits outcome in
+         Repl_wire.Task_view.Terminal { execution_started; outcome }
+       | Check _ | Fixture _ | Live _ ->
+         Error (error Invalid_state "REPL Task row has another receipt kind"))
+  in
+  Repl_wire.Task_view.create
+    ~limits
+    ~command_id:(Task_row.id row)
+    ~owner:(Task_row.owner row)
+    ~key:(Task_row.key row)
+    ~phase
+    ~request_fingerprint:(Task_row.request_fingerprint row)
+    ~capture_fingerprint:(Task_row.capture_fingerprint row)
 ;;
 
 let request_current_now t ~connection ~lease ~actor ~method_ =
@@ -487,6 +587,379 @@ let handle t ?actor ~connection request =
 ;;
 
 let encode_response t response = Wire.Response.to_json response ~limits:(limits t)
+
+let repl_installation t =
+  match t.repl_registry, Policy.repl_wire_limits t.policy with
+  | Some registry, Some limits -> Ok (registry, limits)
+  | None, None | Some _, None | None, Some _ ->
+    Error (error Invalid_state "REPL wire is not installed")
+;;
+
+let repl_limits t = Result.map (repl_installation t) ~f:snd
+let repl_instance registry wire = Developer_repl_registry.resolve_instance registry wire
+
+let repl_current registry current =
+  let open Result.Let_syntax in
+  let%bind instance = repl_instance registry (Repl_wire.Current_epoch.instance current) in
+  let%map epoch =
+    Developer_repl_registry.resolve_epoch
+      registry
+      ~instance
+      (Repl_wire.Current_epoch.epoch current)
+  in
+  instance, epoch
+;;
+
+let authorize_repl_watch t ~connection ~lease ~actor key =
+  let open Result.Let_syntax in
+  let%bind () =
+    current_request t ~connection ~lease ~actor ~method_:"developer.repl.watch"
+  in
+  let%bind registry, _ = repl_installation t in
+  let%bind () =
+    match key with
+    | Repl_wire.Watch_key.Repl lookup ->
+      let%bind instance = repl_instance registry (Repl_wire.Lookup.instance lookup) in
+      let%bind observed =
+        Developer_host.Repl.observe
+          t.host
+          ~actor
+          ~instance
+          ~key:(Repl_wire.Lookup.key lookup)
+      in
+      if Option.is_some observed
+      then Ok ()
+      else Error (error Permission_denied "REPL watch key is not disclosed")
+    | Task lookup ->
+      let%bind observed =
+        Developer_host.Repl.Task.observe
+          t.host
+          ~actor
+          ~run_id:lookup.run_id
+          ~key:lookup.key
+      in
+      if Option.is_some observed
+      then Ok ()
+      else Error (error Permission_denied "Task watch key is not disclosed")
+  in
+  current_request t ~connection ~lease ~actor ~method_:"developer.repl.watch"
+;;
+
+let handle_repl t ?actor ~connection request =
+  let open Result.Let_syntax in
+  let%bind registry, limits = repl_installation t in
+  let%bind actor = Connection_context.request_actor connection actor in
+  let%bind request =
+    Repl_wire.Request.of_method_and_params
+      ~limits
+      ~method_:(Repl_wire.Request.method_name request)
+      ~params:(Repl_wire.Request.params request)
+  in
+  let method_ = Repl_wire.Request.method_name request in
+  let%bind lease =
+    Connection_context.authoring_negotiation connection
+    |> Result.of_option ~error:(error Permission_denied "REPL method is not negotiated")
+  in
+  let%bind () = current_request t ~connection ~lease ~actor ~method_ in
+  let%bind response =
+    match request with
+    | Capabilities ->
+      Repl_wire.Capabilities.create
+        ~methods:
+          (List.filter (available_methods t ~connection) ~f:(fun method_ ->
+             String.is_prefix method_ ~prefix:"developer.repl."))
+        ~limits
+      |> Result.map ~f:(fun value -> Repl_wire.Response.Capabilities value)
+    | Create create ->
+      let selected_route = route (Repl_wire.Create.route create) in
+      let%bind original =
+        Developer_host.Repl.Original.create
+          ~route:selected_route
+          ~target:(target (Repl_wire.Create.target create))
+          ~prompt:(Repl_wire.Create.prompt create)
+          ~workspace:(Repl_wire.Create.workspace create)
+          ~requested_execution:
+            (Option.map (Repl_wire.Create.requested_execution create) ~f:execution)
+          ~requested_max_output_bytes:(Repl_wire.Create.requested_max_output_bytes create)
+          ~checkpoint:Eio.Fiber.yield
+      in
+      let%bind view =
+        Developer_host.Repl.create_resolving
+          t.host
+          ~actor
+          ~run_id:(Repl_wire.Create.run_id create)
+          ~key:(Repl_wire.Create.key create)
+          ~original
+          ~request_current:(fun () ->
+            request_current_now t ~connection ~lease ~actor ~method_)
+          ~resolve_fresh:(fun () ->
+            let%bind () = current_request t ~connection ~lease ~actor ~method_ in
+            let%bind source = fresh_source_route t ~connection ~actor selected_route in
+            let%map () = current_request t ~connection ~lease ~actor ~method_ in
+            source)
+      in
+      Developer_repl_registry.project_view registry view
+      |> Result.map ~f:(fun value -> Repl_wire.Response.Create value)
+    | Submit submit ->
+      let%bind instance = repl_instance registry (Repl_wire.Submit.instance submit) in
+      let%bind epoch =
+        Developer_repl_registry.resolve_epoch
+          registry
+          ~instance
+          (Repl_wire.Submit.epoch submit)
+      in
+      let%bind expected_revision =
+        Developer_repl_registry.resolve_revision
+          registry
+          ~instance
+          ~epoch
+          (Repl_wire.Submit.expected_revision submit)
+      in
+      let%bind submission =
+        Developer_host.Repl.submit_with_request
+          ~request_current:(fun () ->
+            request_current_now t ~connection ~lease ~actor ~method_)
+          t.host
+          ~actor
+          ~instance
+          ~epoch
+          ~expected_revision
+          ~key:(Repl_wire.Submit.key submit)
+          ~source:(Repl_wire.Submit.source submit)
+      in
+      Developer_repl_registry.project_submission registry ~instance submission
+      |> Result.map ~f:(fun value -> Repl_wire.Response.Submit value)
+    | Observe lookup ->
+      let%bind instance = repl_instance registry (Repl_wire.Lookup.instance lookup) in
+      let%bind submission =
+        Developer_host.Repl.observe
+          t.host
+          ~actor
+          ~instance
+          ~key:(Repl_wire.Lookup.key lookup)
+      in
+      let%map submission =
+        Option.value_map submission ~default:(Ok None) ~f:(fun submission ->
+          Result.map
+            (Developer_repl_registry.project_submission registry ~instance submission)
+            ~f:Option.some)
+      in
+      Repl_wire.Response.Observe submission
+    | Cancel_submission lookup ->
+      let%bind instance = repl_instance registry (Repl_wire.Lookup.instance lookup) in
+      let%bind submission =
+        Developer_host.Repl.cancel_and_wait_with_request
+          ~request_current:(fun () ->
+            request_current_now t ~connection ~lease ~actor ~method_)
+          t.host
+          ~actor
+          ~instance
+          ~key:(Repl_wire.Lookup.key lookup)
+      in
+      Developer_repl_registry.project_submission registry ~instance submission
+      |> Result.map ~f:(fun value -> Repl_wire.Response.Cancel_submission value)
+    | Inspect_type inspect ->
+      let current = Repl_wire.Inspect.current inspect in
+      let%bind instance, epoch = repl_current registry current in
+      let selector =
+        match Repl_wire.Inspect.selector inspect with
+        | Repl_wire.Type_selector.Expression ->
+          Developer_host.Repl.Type_selector.Expression
+        | Binding_index index -> Binding_index index
+      in
+      let%bind inspection =
+        Developer_host.Repl.inspect_type
+          t.host
+          ~actor
+          ~instance
+          ~epoch
+          ~key:(Repl_wire.Current_epoch.key current)
+          ~statement_index:(Repl_wire.Inspect.statement_index inspect)
+          ~selector
+          ~max_bytes:(Repl_wire.Inspect.max_bytes inspect)
+      in
+      Developer_repl_registry.project_type_inspection registry ~instance ~epoch inspection
+      |> Result.map ~f:(fun value -> Repl_wire.Response.Inspect_type value)
+    | Task_references_page requested ->
+      let current = Repl_wire.Reference_page_request.current requested in
+      let%bind instance, epoch = repl_current registry current in
+      let%bind after =
+        Option.value_map
+          (Repl_wire.Reference_page_request.after requested)
+          ~default:(Ok None)
+          ~f:(fun value ->
+            Result.map Developer_host.Repl.Task_reference.(of_string value) ~f:Option.some)
+      in
+      let%bind page =
+        Developer_host.Repl.task_references_page
+          t.host
+          ~actor
+          ~instance
+          ~epoch
+          ~key:(Repl_wire.Current_epoch.key current)
+          ~after
+          ~limit:(Repl_wire.Reference_page_request.limit requested)
+      in
+      Developer_repl_registry.project_reference_page registry page
+      |> Result.map ~f:(fun value -> Repl_wire.Response.Task_references_page value)
+    | Task_submit requested ->
+      let%bind reference =
+        Developer_host.Repl.Task_reference.of_string
+          (Repl_wire.Task_submit.reference requested)
+      in
+      let%bind original =
+        Developer_host.Repl.Task.Original.create
+          ~reference
+          ~requested_execution:
+            (Option.map
+               (Repl_wire.Task_submit.requested_execution requested)
+               ~f:execution)
+          ~requested_max_output_bytes:
+            (Repl_wire.Task_submit.requested_max_output_bytes requested)
+          ~checkpoint:Eio.Fiber.yield
+      in
+      let%bind view =
+        Developer_host.Repl.Task.submit_resolving
+          t.host
+          ~actor
+          ~key:(Repl_wire.Task_submit.key requested)
+          ~original
+          ~request_current:(fun () ->
+            request_current_now t ~connection ~lease ~actor ~method_)
+          ~resolve_fresh_epoch:(fun () ->
+            let%bind () = current_request t ~connection ~lease ~actor ~method_ in
+            let%bind wire_instance, wire_epoch =
+              Repl_wire.Task_submit.fresh_epoch requested
+              |> Result.of_option
+                   ~error:(error Lease_stale "fresh Task epoch is required")
+            in
+            let%bind instance = repl_instance registry wire_instance in
+            let%map epoch =
+              Developer_repl_registry.resolve_epoch registry ~instance wire_epoch
+            in
+            instance, epoch)
+      in
+      wire_task_view ~limits view
+      |> Result.map ~f:(fun value -> Repl_wire.Response.Task_submit value)
+    | Task_observe lookup ->
+      let%bind view =
+        Developer_host.Repl.Task.observe
+          t.host
+          ~actor
+          ~run_id:lookup.run_id
+          ~key:lookup.key
+      in
+      let%map view =
+        Option.value_map view ~default:(Ok None) ~f:(fun view ->
+          Result.map (wire_task_view ~limits view) ~f:Option.some)
+      in
+      Repl_wire.Response.Task_observe view
+    | Task_await_terminal lookup ->
+      let%bind view =
+        Developer_host.Repl.Task.await_terminal
+          t.host
+          ~actor
+          ~run_id:lookup.run_id
+          ~key:lookup.key
+      in
+      wire_task_view ~limits view
+      |> Result.map ~f:(fun value -> Repl_wire.Response.Task_await_terminal value)
+    | Task_cancel_and_wait lookup ->
+      let%bind view =
+        Developer_host.Repl.Task.cancel_and_wait_with_request
+          ~request_current:(fun () ->
+            request_current_now t ~connection ~lease ~actor ~method_)
+          t.host
+          ~actor
+          ~run_id:lookup.run_id
+          ~key:lookup.key
+      in
+      wire_task_view ~limits view
+      |> Result.map ~f:(fun value -> Repl_wire.Response.Task_cancel_and_wait value)
+    | Reset_and_wait current ->
+      let%bind instance, expected_epoch = repl_current registry current in
+      let%bind view =
+        Developer_host.Repl.reset_and_wait_with_request
+          ~request_current:(fun () ->
+            request_current_now t ~connection ~lease ~actor ~method_)
+          t.host
+          ~actor
+          ~instance
+          ~expected_epoch
+          ~key:(Repl_wire.Current_epoch.key current)
+      in
+      Developer_repl_registry.project_view registry view
+      |> Result.map ~f:(fun value -> Repl_wire.Response.Reset_and_wait value)
+    | Close_and_wait lookup ->
+      let%bind instance = repl_instance registry (Repl_wire.Lookup.instance lookup) in
+      let%map () =
+        Developer_host.Repl.close_and_wait_with_request
+          ~request_current:(fun () ->
+            request_current_now t ~connection ~lease ~actor ~method_)
+          t.host
+          ~actor
+          ~instance
+          ~key:(Repl_wire.Lookup.key lookup)
+      in
+      Repl_wire.Response.Close_and_wait
+    | Watch watched ->
+      let authorize_key () = authorize_repl_watch t ~connection ~lease ~actor watched in
+      let authorize_change change =
+        authorize_repl_watch t ~connection ~lease ~actor (Repl_wire.Change.key change)
+      in
+      let%map () =
+        match watched with
+        | Repl lookup ->
+          let%bind instance = repl_instance registry (Repl_wire.Lookup.instance lookup) in
+          Developer_change_hub.watch_repl
+            t.changes
+            ~connection
+            ~actor
+            ~instance
+            ~wire_instance:(Repl_wire.Lookup.instance lookup)
+            ~key:(Repl_wire.Lookup.key lookup)
+            ~authorize_key
+            ~authorize_change
+        | Task lookup ->
+          Developer_change_hub.watch_task
+            t.changes
+            ~connection
+            ~actor
+            ~run_id:lookup.run_id
+            ~key:lookup.key
+            ~authorize_key
+            ~authorize_change
+      in
+      Repl_wire.Response.Watch
+    | Unwatch watched ->
+      let%map () =
+        match watched with
+        | Repl lookup ->
+          Developer_change_hub.unwatch_repl
+            t.changes
+            ~connection
+            ~wire_instance:(Repl_wire.Lookup.instance lookup)
+            ~key:(Repl_wire.Lookup.key lookup)
+        | Task lookup ->
+          Developer_change_hub.unwatch_task
+            t.changes
+            ~connection
+            ~run_id:lookup.run_id
+            ~key:lookup.key
+      in
+      Repl_wire.Response.Unwatch
+  in
+  let%bind () = current_request t ~connection ~lease ~actor ~method_ in
+  if String.equal (Repl_wire.Response.method_name response) method_
+  then Ok response
+  else Error (error Invalid_state "REPL response method changed")
+;;
+
+let encode_repl_response t response =
+  let open Result.Let_syntax in
+  let%bind _, limits = repl_installation t in
+  Repl_wire.Response.to_json response ~limits
+;;
 
 let close_connection_and_wait t connection =
   Developer_change_hub.close_connection_and_wait t.changes connection

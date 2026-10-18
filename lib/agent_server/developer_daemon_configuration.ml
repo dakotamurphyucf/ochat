@@ -4,6 +4,7 @@ module Portable = struct
   type t = Developer_endpoint.Policy.t
 
   let create = Developer_endpoint.Policy.create
+  let with_repl_wire = Developer_endpoint.Policy.with_repl_wire
 end
 
 module Remote_content = struct

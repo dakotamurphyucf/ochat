@@ -279,6 +279,18 @@ type t =
 
 let registry t = t.roots
 let approval_installed t = Option.is_some t.approval
+
+let repl_registry_required_entries t =
+  if t.closed
+  then Error (error P.Error.Invalid_state "developer host is closed" ~retryable:false)
+  else (
+    match t.repl with
+    | None ->
+      Error
+        (error P.Error.Invalid_state "developer REPL is not installed" ~retryable:false)
+    | Some repl -> Repl_epoch.registry_required_entries repl)
+;;
+
 let uses_authoring t authoring = phys_equal t.authoring authoring
 
 let install_scheduler t scheduler =
@@ -1405,6 +1417,23 @@ let run_live_locked
       Developer_command_execution.Live.run execution ~started)
 ;;
 
+let with_live_gate gate f =
+  (* Callers finish provisional-owner cleanup in their own [Exn.protect]
+     before cancellation reaches this boundary. Retained Root custody still
+     checks and reconciles independently; expected cancellation alone does not
+     corrupt the serialization gate for a later command. *)
+  let outcome =
+    Eio.Mutex.use_rw ~protect:false gate (fun () ->
+      match f () with
+      | value -> `Returned value
+      | exception (Eio.Cancel.Cancelled _ as exn) ->
+        `Cancelled (exn, Stdlib.Printexc.get_raw_backtrace ()))
+  in
+  match outcome with
+  | `Returned value -> value
+  | `Cancelled (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+;;
+
 let run_live
       t
       ~original
@@ -1418,7 +1447,7 @@ let run_live
       ~sw
       ~admit
   =
-  Eio.Mutex.use_rw ~protect:false admitted.live_gate (fun () ->
+  with_live_gate admitted.live_gate (fun () ->
     Exn.protect
       ~finally:(fun () ->
         match admitted.live_owner with
@@ -1609,7 +1638,7 @@ let run_repl_task
       ~origin
       ~admit
   =
-  Eio.Mutex.use_rw ~protect:false admitted.live_gate (fun () ->
+  with_live_gate admitted.live_gate (fun () ->
     Exn.protect
       ~finally:(fun () ->
         match admitted.live_owner with
@@ -1630,7 +1659,14 @@ let run_repl_task
           ~admit))
 ;;
 
-let submit_repl_task t ~actor ~key ~original ~fresh_epoch =
+let submit_repl_task_resolving
+      t
+      ~actor
+      ~key
+      ~original
+      ~resolve_fresh_epoch
+      ~request_current
+  =
   let open Result.Let_syntax in
   let kind = Receipt.Kind.Repl_task_run in
   let reference = Developer_repl_task_original.reference original in
@@ -1653,7 +1689,10 @@ let submit_repl_task t ~actor ~key ~original ~fresh_epoch =
       | None -> Ok None)
   in
   match existing with
-  | Some view -> Ok view
+  | Some view ->
+    if request_current ()
+    then Ok view
+    else Error (error P.Error.Lease_stale "REPL request lease expired" ~retryable:false)
   | None ->
     let%bind budgets =
       Budgets.for_repl_task
@@ -1662,11 +1701,12 @@ let submit_repl_task t ~actor ~key ~original ~fresh_epoch =
         ~requested_max_output_bytes:
           (Developer_repl_task_original.requested_max_output_bytes original)
     in
-    let%bind instance, epoch =
-      fresh_epoch
-      |> Result.of_option
-           ~error:(P.Error.invalid_request "developer REPL Task instance is unavailable")
+    let%bind () =
+      if request_current ()
+      then Ok ()
+      else Error (error P.Error.Lease_stale "REPL request lease expired" ~retryable:false)
     in
+    let%bind instance, epoch = resolve_fresh_epoch () in
     let%bind repl =
       t.repl
       |> Result.of_option
@@ -1710,7 +1750,7 @@ let submit_repl_task t ~actor ~key ~original ~fresh_epoch =
               let%bind () =
                 Capture.Source_selection.Shared.check_now selection ~checked ~actor
               in
-              if Operator_authorization.is_current actor
+              if Operator_authorization.is_current actor && request_current ()
               then Ok ()
               else
                 Error
@@ -1742,6 +1782,7 @@ let submit_repl_task t ~actor ~key ~original ~fresh_epoch =
               && Result.is_ok
                    (Capture.Source_selection.Shared.check_now selection ~checked ~actor)
             in
+            let admit_reserve () = request_current () && admit () in
             let%bind reserved =
               Lifecycle.reserve
                 t.lifecycle
@@ -1750,7 +1791,7 @@ let submit_repl_task t ~actor ~key ~original ~fresh_epoch =
                 ~key
                 ~kind
                 ~request_fingerprint
-                ~admit
+                ~admit:admit_reserve
             in
             let%bind () = Repl_epoch.Task_action.mark_launching action in
             launched := true;
@@ -1874,6 +1915,19 @@ let submit_repl_task t ~actor ~key ~original ~fresh_epoch =
                    P.Error.Persistence_error
                    "developer REPL Task terminal identity changed"
                    ~retryable:true)))
+;;
+
+let submit_repl_task t ~actor ~key ~original ~fresh_epoch =
+  submit_repl_task_resolving
+    t
+    ~actor
+    ~key
+    ~original
+    ~resolve_fresh_epoch:(fun () ->
+      fresh_epoch
+      |> Result.of_option
+           ~error:(P.Error.invalid_request "developer REPL Task instance is unavailable"))
+    ~request_current:(fun () -> true)
 ;;
 
 let submit_resolving_command
@@ -2327,6 +2381,8 @@ let create
       ~repl
       ~trace
       ?on_change
+      ?on_repl_change
+      ?on_task_change
       ~now
       ~checkpoint
       ()
@@ -2421,7 +2477,9 @@ let create
             ~run_id:(Row.owner row).run_id
             ~key:(Row.key row)
             ~kind:Change.Command_changed)
-      | Repl_task_run -> ()
+      | Repl_task_run ->
+        Option.iter on_task_change ~f:(fun notify ->
+          notify ~run_id:(Row.owner row).run_id ~key:(Row.key row))
     in
     let trace_owner =
       Option.map trace ~f:(fun configuration ->
@@ -2465,7 +2523,9 @@ let create
           ~env
           ~clock:(Eio.Stdenv.mono_clock env)
           ~configuration
-          ~checkpoint)
+          ?on_change:on_repl_change
+          ~checkpoint
+          ())
     in
     acquired_repl := repl;
     let host =
@@ -2635,6 +2695,40 @@ module Repl = struct
       Repl_epoch.create repl ~actor ~run_id ~key ~original ~fresh_source)
   ;;
 
+  let create_resolving t ~actor ~run_id ~key ~original ~resolve_fresh ~request_current =
+    with_owner t ~f:(fun repl ->
+      Repl_epoch.create_resolving
+        repl
+        ~actor
+        ~run_id
+        ~key
+        ~original
+        ~resolve_fresh
+        ~request_current)
+  ;;
+
+  let submit_with_request
+        t
+        ~actor
+        ~instance
+        ~epoch
+        ~expected_revision
+        ~key
+        ~source
+        ~request_current
+    =
+    with_owner t ~f:(fun repl ->
+      Repl_epoch.submit_with_request
+        repl
+        ~actor
+        ~instance
+        ~epoch
+        ~expected_revision
+        ~key
+        ~source
+        ~request_current)
+  ;;
+
   let submit t ~actor ~instance ~epoch ~expected_revision ~key ~source =
     with_owner t ~f:(fun repl ->
       Repl_epoch.submit repl ~actor ~instance ~epoch ~expected_revision ~key ~source)
@@ -2662,13 +2756,35 @@ module Repl = struct
       Repl_epoch.task_references_page repl ~actor ~instance ~epoch ~key ~after ~limit)
   ;;
 
+  let cancel_and_wait_with_request t ~actor ~instance ~key ~request_current =
+    with_owner t ~f:(fun repl ->
+      Repl_epoch.cancel_and_wait_with_request repl ~actor ~instance ~key ~request_current)
+  ;;
+
   let cancel_and_wait t ~actor ~instance ~key =
     with_owner t ~f:(fun repl -> Repl_epoch.cancel_and_wait repl ~actor ~instance ~key)
+  ;;
+
+  let reset_and_wait_with_request t ~actor ~instance ~expected_epoch ~key ~request_current
+    =
+    with_owner t ~f:(fun repl ->
+      Repl_epoch.reset_and_wait_with_request
+        repl
+        ~actor
+        ~instance
+        ~expected_epoch
+        ~key
+        ~request_current)
   ;;
 
   let reset_and_wait t ~actor ~instance ~expected_epoch ~key =
     with_owner t ~f:(fun repl ->
       Repl_epoch.reset_and_wait repl ~actor ~instance ~expected_epoch ~key)
+  ;;
+
+  let close_and_wait_with_request t ~actor ~instance ~key ~request_current =
+    with_owner t ~f:(fun repl ->
+      Repl_epoch.close_and_wait_with_request repl ~actor ~instance ~key ~request_current)
   ;;
 
   let close_and_wait t ~actor ~instance ~key =
@@ -2693,6 +2809,17 @@ module Repl = struct
 
     let submit t ~actor ~key ~original ~fresh_epoch =
       submit_repl_task t ~actor ~key ~original ~fresh_epoch |> Result.map ~f:of_lifecycle
+    ;;
+
+    let submit_resolving t ~actor ~key ~original ~resolve_fresh_epoch ~request_current =
+      submit_repl_task_resolving
+        t
+        ~actor
+        ~key
+        ~original
+        ~resolve_fresh_epoch
+        ~request_current
+      |> Result.map ~f:of_lifecycle
     ;;
 
     let receipt value =
@@ -2774,7 +2901,7 @@ module Repl = struct
       of_lifecycle view
     ;;
 
-    let cancel_and_wait t ~actor ~run_id ~key =
+    let cancel_and_wait_with_request t ~actor ~run_id ~key ~request_current =
       let open Result.Let_syntax in
       let%bind prior = observe t ~actor ~run_id ~key in
       match prior with
@@ -2783,9 +2910,20 @@ module Repl = struct
         (match Row.phase view.row with
          | Row.Phase.Terminal _ -> Ok view
          | Reserved | Waiting_permission | Execution_started ->
+           let%bind () =
+             if request_current ()
+             then Ok ()
+             else
+               Error
+                 (error P.Error.Lease_stale "Task request lease expired" ~retryable:false)
+           in
            let%bind settled = Lifecycle.cancel_and_wait t.lifecycle ~actor ~run_id ~key in
            let%map () = check_row t ~actor (Lifecycle.View.row settled) in
            of_lifecycle settled)
+    ;;
+
+    let cancel_and_wait t ~actor ~run_id ~key =
+      cancel_and_wait_with_request t ~actor ~run_id ~key ~request_current:(fun () -> true)
     ;;
   end
 end

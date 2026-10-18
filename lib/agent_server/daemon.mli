@@ -35,6 +35,15 @@ module Developer_configuration : sig
       -> max_watches_per_connection:int
       -> max_pending_hints_per_connection:int
       -> (t, Agent_protocol.Error.t) result
+
+    (** Add closed REPL/Task methods to the same installed Developer endpoint
+        and notification hub. Daemon admission compares these bounds with
+        the actual REPL Host, Initialize and transport envelopes before any
+        method is advertised. *)
+    val with_repl_wire
+      :  t
+      -> Agent_protocol.Developer_repl_wire.Limits.t
+      -> (t, Agent_protocol.Error.t) result
   end
 
   (** Without this copy, a Developer Host remains callable in-process but

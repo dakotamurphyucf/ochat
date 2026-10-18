@@ -32,6 +32,13 @@ let developer_method method_ =
     ~equal:String.equal
 ;;
 
+let developer_repl_method method_ =
+  List.mem
+    Agent_protocol.Developer_repl_wire.Request.supported_methods
+    method_
+    ~equal:String.equal
+;;
+
 let developer t =
   Result.of_option
     t.developer
@@ -48,6 +55,13 @@ let dispatch_developer t ?actor ~context request =
   let%bind installed = developer t in
   let%bind () = installed.admit () in
   Developer_endpoint.handle installed.endpoint ?actor ~connection:context request
+;;
+
+let dispatch_developer_repl t ?actor ~context request =
+  let open Result.Let_syntax in
+  let%bind installed = developer t in
+  let%bind () = installed.admit () in
+  Developer_endpoint.handle_repl installed.endpoint ?actor ~connection:context request
 ;;
 
 let dispatch_command t ?actor ~context command =
@@ -67,7 +81,47 @@ let inference_method method_ =
 ;;
 
 let request t ?actor context (request : Agent_protocol.Envelope.request) =
-  if developer_method request.method_
+  if developer_repl_method request.method_
+  then (
+    let outcome =
+      let open Result.Let_syntax in
+      let%bind installed = developer t in
+      let%bind () = installed.admit () in
+      let%bind limits = Developer_endpoint.repl_limits installed.endpoint in
+      let%bind decoded =
+        Agent_protocol.Developer_repl_wire.Request.of_method_and_params
+          ~limits
+          ~method_:request.method_
+          ~params:request.params
+      in
+      let%bind response =
+        Developer_endpoint.handle_repl
+          installed.endpoint
+          ?actor
+          ~connection:context
+          decoded
+      in
+      if
+        not
+          (String.equal
+             request.method_
+             (Agent_protocol.Developer_repl_wire.Response.method_name response))
+      then
+        Error
+          (Agent_protocol.Error.create
+             Invalid_state
+             ~message:"REPL result has a different method"
+             ~retryable:false
+             ())
+      else Developer_endpoint.encode_repl_response installed.endpoint response
+    in
+    let response =
+      match outcome with
+      | Ok result -> Agent_protocol.Envelope.success ~id:request.id result
+      | Error error -> Agent_protocol.Envelope.failure ~id:request.id error
+    in
+    Ok (Some response))
+  else if developer_method request.method_
   then (
     let outcome =
       let open Result.Let_syntax in
@@ -138,7 +192,7 @@ let notification_safe = function
 ;;
 
 let notification t ?actor context (notification : Agent_protocol.Envelope.notification) =
-  if developer_method notification.method_
+  if developer_method notification.method_ || developer_repl_method notification.method_
   then
     Error
       (Agent_protocol.Error.create

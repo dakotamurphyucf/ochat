@@ -57,6 +57,21 @@ module Repl : sig
     -> fresh_source:Developer_command_original.Fresh_source.t option
     -> (View.t, P.Error.t) result
 
+  (** Same keyed Create owner as [create]. Only a true new-key action calls
+      [resolve_fresh]; a historical retry compares its canonical Original
+      before any source read. The nonyielding request lease is checked again
+      after that possibly yielding resolution and before admission. *)
+  val create_resolving
+    :  t
+    -> actor:Operator_authorization.t
+    -> run_id:P.Id.Developer_run.t
+    -> key:P.Idempotency_key.t
+    -> original:Original.t
+    -> resolve_fresh:
+         (unit -> (Developer_command_original.Fresh_source.t, P.Error.t) result)
+    -> request_current:(unit -> bool)
+    -> (View.t, P.Error.t) result
+
   val submit
     :  t
     -> actor:Operator_authorization.t
@@ -65,6 +80,17 @@ module Repl : sig
     -> expected_revision:Revision.t
     -> key:P.Idempotency_key.t
     -> source:string
+    -> (Submission.t, P.Error.t) result
+
+  val submit_with_request
+    :  t
+    -> actor:Operator_authorization.t
+    -> instance:Instance.t
+    -> epoch:Epoch.t
+    -> expected_revision:Revision.t
+    -> key:P.Idempotency_key.t
+    -> source:string
+    -> request_current:(unit -> bool)
     -> (Submission.t, P.Error.t) result
 
   val observe
@@ -102,6 +128,14 @@ module Repl : sig
     -> key:P.Idempotency_key.t
     -> (Submission.t, P.Error.t) result
 
+  val cancel_and_wait_with_request
+    :  t
+    -> actor:Operator_authorization.t
+    -> instance:Instance.t
+    -> key:P.Idempotency_key.t
+    -> request_current:(unit -> bool)
+    -> (Submission.t, P.Error.t) result
+
   val reset_and_wait
     :  t
     -> actor:Operator_authorization.t
@@ -110,11 +144,28 @@ module Repl : sig
     -> key:P.Idempotency_key.t
     -> (View.t, P.Error.t) result
 
+  val reset_and_wait_with_request
+    :  t
+    -> actor:Operator_authorization.t
+    -> instance:Instance.t
+    -> expected_epoch:Epoch.t
+    -> key:P.Idempotency_key.t
+    -> request_current:(unit -> bool)
+    -> (View.t, P.Error.t) result
+
   val close_and_wait
     :  t
     -> actor:Operator_authorization.t
     -> instance:Instance.t
     -> key:P.Idempotency_key.t
+    -> (unit, P.Error.t) result
+
+  val close_and_wait_with_request
+    :  t
+    -> actor:Operator_authorization.t
+    -> instance:Instance.t
+    -> key:P.Idempotency_key.t
+    -> request_current:(unit -> bool)
     -> (unit, P.Error.t) result
 
   val with_current
@@ -168,6 +219,21 @@ module Repl : sig
       -> fresh_epoch:(Instance.t * Epoch.t) option
       -> (view, P.Error.t) result
 
+    (** Durable run/key/Original history is resolved before this callback.
+        Only the authoritative true miss may resolve wire comparison IDs to
+        the exact current physical instance/epoch. A historical retry works
+        after reset or daemon restart without a process-local token. The
+        request lease governs Reserve admission, not a daemon-owned callback
+        already durably handed off. *)
+    val submit_resolving
+      :  t
+      -> actor:Operator_authorization.t
+      -> key:P.Idempotency_key.t
+      -> original:Original.t
+      -> resolve_fresh_epoch:(unit -> (Instance.t * Epoch.t, P.Error.t) result)
+      -> request_current:(unit -> bool)
+      -> (view, P.Error.t) result
+
     (** Current disclosure of an actual persisted Task row, including after
         process restart. A row is comparison data, never a fresh handle. *)
     val observe
@@ -192,6 +258,14 @@ module Repl : sig
       -> actor:Operator_authorization.t
       -> run_id:P.Id.Developer_run.t
       -> key:P.Idempotency_key.t
+      -> (view, P.Error.t) result
+
+    val cancel_and_wait_with_request
+      :  t
+      -> actor:Operator_authorization.t
+      -> run_id:P.Id.Developer_run.t
+      -> key:P.Idempotency_key.t
+      -> request_current:(unit -> bool)
       -> (view, P.Error.t) result
   end
 end
@@ -514,13 +588,24 @@ val create
         -> key:P.Idempotency_key.t
         -> kind:Change.kind
         -> unit)
+  -> ?on_repl_change:(Developer_repl_epoch.Change.t -> unit)
+  -> ?on_task_change:(run_id:P.Id.Developer_run.t -> key:P.Idempotency_key.t -> unit)
   -> now:(unit -> P.Timestamp.t)
   -> checkpoint:(unit -> unit)
   -> unit
   -> (t, P.Error.t) result
 
+(** The optional change callbacks above are trusted, same-domain,
+    nonyielding and nonraising bounded Hub enqueues. They run only after the
+    corresponding owner transition has committed, outside lifecycle/REPL
+    mutation gates; a notification cannot decide durable execution. *)
+
 (** Comparison-only installation facts; neither accessor grants admission. *)
 val approval_installed : t -> bool
+
+(** Checked comparison-only capacity from the installed REPL policy. It
+    does not expose or construct an Instance, Epoch or Revision. *)
+val repl_registry_required_entries : t -> (int, P.Error.t) result
 
 val uses_authoring : t -> Authoring_installation.t -> bool
 

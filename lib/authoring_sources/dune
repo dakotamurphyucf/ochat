@@ -109,7 +109,12 @@
     lib/agent_protocol/developer_common.ml %{dep:../agent_protocol/developer_common.ml}
     lib/agent_protocol/developer_approval.ml %{dep:../agent_protocol/developer_approval.ml}
     lib/agent_protocol/developer_wire.ml %{dep:../agent_protocol/developer_wire.ml}
+    lib/agent_protocol/developer_repl_wire_common.ml %{dep:../agent_protocol/developer_repl_wire_common.ml}
+    lib/agent_protocol/developer_repl_wire_result.ml %{dep:../agent_protocol/developer_repl_wire_result.ml}
+    lib/agent_protocol/developer_repl_wire_task.ml %{dep:../agent_protocol/developer_repl_wire_task.ml}
+    lib/agent_protocol/developer_repl_wire.ml %{dep:../agent_protocol/developer_repl_wire.ml}
     lib/agent_server/developer_endpoint.ml %{dep:../agent_server/developer_endpoint.ml}
+    lib/agent_server/developer_repl_registry.ml %{dep:../agent_server/developer_repl_registry.ml}
     lib/agent_server/developer_portable_admission.ml %{dep:../agent_server/developer_portable_admission.ml}
     lib/agent_server/developer_change_hub.ml %{dep:../agent_server/developer_change_hub.ml}
     lib/agent_server/dispatcher.ml %{dep:../agent_server/dispatcher.ml}
@@ -131,6 +136,8 @@
     lib/agent_server/job_scheduler.ml %{dep:../agent_server/job_scheduler.ml}
     lib/agent_server/job_scheduler_developer.ml %{dep:../agent_server/job_scheduler_developer.ml}
     lib/agent_server/developer_root_owner.ml %{dep:../agent_server/developer_root_owner.ml}
+    lib/agent_server/authoring_source_host.ml %{dep:../agent_server/authoring_source_host.ml}
+    lib/agent_server/authoring_context_owner.ml %{dep:../agent_server/authoring_context_owner.ml}
     lib/agent_server/developer_capture_host.ml %{dep:../agent_server/developer_capture_host.ml}
     lib/agent_server/developer_root_source.ml %{dep:../agent_server/developer_root_source.ml}
     lib/agent_server/developer_repl_epoch.ml %{dep:../agent_server/developer_repl_epoch.ml}

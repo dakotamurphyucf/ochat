@@ -1,6 +1,23 @@
 open! Core
 module P = Agent_protocol
 module Change = P.Developer_wire.Change
+module Repl_change = P.Developer_repl_wire.Change
+
+type topic =
+  | Command of P.Id.Developer_run.t * P.Idempotency_key.t
+  | Repl of
+      Developer_repl_epoch.Instance.t
+      * P.Developer_repl_wire.Wire_id.Instance.t
+      * P.Idempotency_key.t
+  | Task of P.Id.Developer_run.t * P.Idempotency_key.t
+
+type change =
+  | Command_change of Change.t
+  | Repl_change of Repl_change.t
+
+type hint_kind =
+  | Command_hint of Change.kind
+  | Repl_hint of Repl_change.kind
 
 let error code message = P.Error.create code ~message ~retryable:false ()
 
@@ -32,10 +49,9 @@ module Limits = struct
 end
 
 type watch =
-  { run_id : P.Id.Developer_run.t
-  ; key : P.Idempotency_key.t
+  { topic : topic
   ; mutable actor : Operator_authorization.t
-  ; mutable authorize_change : Change.t -> (unit, P.Error.t) result
+  ; mutable authorize_change : change -> (unit, P.Error.t) result
   ; mutable generation : int
   ; mutable live : bool
   ; mutable dirty : bool
@@ -47,7 +63,7 @@ type hint =
   { watch : watch
   ; generation : int
   ; dirty_revision : int
-  ; kind : Change.kind
+  ; kind : hint_kind
   }
 
 type outcome = (unit, exn * Stdlib.Printexc.raw_backtrace) result
@@ -83,6 +99,7 @@ type t =
   { sw : Eio.Switch.t
   ; limits : Limits.t
   ; wire_limits : P.Developer_common.Limits.t
+  ; repl_wire_limits : P.Developer_repl_wire.Limits.t option
   ; domain : int
   ; mutable connections : connection list
   ; mutable closed : bool
@@ -93,33 +110,67 @@ exception Stop
 let pump_key : connection Eio.Fiber.key = Eio.Fiber.create_key ()
 let same_domain t = Int.equal t.domain (Stdlib.Domain.self () :> int)
 
-let create ~sw ~limits ~wire_limits =
+let create ~sw ~limits ~wire_limits ~repl_wire_limits =
   let open Result.Let_syntax in
   let%bind run_id = P.Id.Developer_run.of_string ("dvr_" ^ String.make 92 'x') in
   let%bind key = P.Idempotency_key.of_string (String.make 256 'x') in
-  let%map () =
+  let%bind () =
     List.fold_result
       [ Change.Command_changed; Change.Approval_changed; Change.Resync_required ]
       ~init:()
       ~f:(fun () kind ->
         Change.create ~limits:wire_limits ~run_id ~key ~kind |> Result.map ~f:ignore)
   in
+  let%map () =
+    match repl_wire_limits with
+    | None -> Ok ()
+    | Some limits ->
+      let%bind wire_instance =
+        P.Developer_repl_wire.Wire_id.Instance.of_string ("ri_" ^ String.make 93 'x')
+      in
+      let keys =
+        [ P.Developer_repl_wire.Watch_key.Repl
+            (P.Developer_repl_wire.Lookup.create ~instance:wire_instance ~key)
+        ; P.Developer_repl_wire.Watch_key.Task
+            (P.Developer_common.Lookup.create ~run_id ~key)
+        ]
+      in
+      List.fold_result keys ~init:() ~f:(fun () key ->
+        let%bind _ = Repl_change.create ~limits ~key ~kind:Changed in
+        Repl_change.create ~limits ~key ~kind:Resync_required |> Result.map ~f:ignore)
+  in
   { sw
   ; limits
   ; wire_limits
+  ; repl_wire_limits
   ; domain = (Stdlib.Domain.self () :> int)
   ; connections = []
   ; closed = false
   }
 ;;
 
-let same_watch watch ~run_id ~key =
-  P.Id.Developer_run.equal watch.run_id run_id && P.Idempotency_key.equal watch.key key
+let same_topic left right =
+  match left, right with
+  | Command (left_run, left_key), Command (right_run, right_key)
+  | Task (left_run, left_key), Task (right_run, right_key) ->
+    P.Id.Developer_run.equal left_run right_run
+    && P.Idempotency_key.equal left_key right_key
+  | Repl (left_instance, left_wire, left_key), Repl (right_instance, right_wire, right_key)
+    ->
+    Developer_repl_epoch.Instance.equal left_instance right_instance
+    && P.Developer_repl_wire.Wire_id.Instance.equal left_wire right_wire
+    && P.Idempotency_key.equal left_key right_key
+  | Command _, (Repl _ | Task _)
+  | Repl _, (Command _ | Task _)
+  | Task _, (Command _ | Repl _) -> false
 ;;
 
+let same_watch watch topic = same_topic watch.topic topic
+
 let is_resync = function
-  | Change.Resync_required -> true
-  | Change.Command_changed | Change.Approval_changed -> false
+  | Command_hint Change.Resync_required | Repl_hint Repl_change.Resync_required -> true
+  | Command_hint (Change.Command_changed | Change.Approval_changed)
+  | Repl_hint Repl_change.Changed -> false
 ;;
 
 let find_connection t physical =
@@ -128,7 +179,17 @@ let find_connection t physical =
 
 let current_lease entry =
   Connection_context.current_authoring_negotiation entry.physical entry.lease
-  && Connection_context.Authoring_negotiation.selected entry.lease "developer.events"
+;;
+
+let watch_feature = function
+  | Command _ -> "developer.events"
+  | Repl _ | Task _ -> P.Developer_repl_wire.Features.events
+;;
+
+let selected_for_watch entry watch =
+  Connection_context.Authoring_negotiation.selected
+    entry.lease
+    (watch_feature watch.topic)
 ;;
 
 let actor_current entry actor =
@@ -148,6 +209,7 @@ let live_hint (t : t) (entry : connection) watch ~generation =
   && watch.live
   && Int.equal watch.generation generation
   && current_lease entry
+  && selected_for_watch entry watch
   && actor_current entry watch.actor
 ;;
 
@@ -180,14 +242,14 @@ let mark_dirty (entry : connection) (watch : watch) =
     Queue.enqueue entry.dirty watch)
 ;;
 
-let enqueue t ~run_id ~key ~kind =
+let enqueue_matching t ~matches ~kind =
   if same_domain t && not t.closed
   then
     List.iter t.connections ~f:(fun entry ->
       if open_entry entry
       then
         List.iter entry.watches ~f:(fun watch ->
-          if watch.live && same_watch watch ~run_id ~key
+          if watch.live && matches watch.topic
           then (
             if
               watch.dirty
@@ -204,6 +266,60 @@ let enqueue t ~run_id ~key ~kind =
             Eio.Condition.broadcast entry.wake)))
 ;;
 
+let enqueue t ~run_id ~key ~kind =
+  enqueue_matching
+    t
+    ~matches:(function
+      | Command (watched_run, watched_key) ->
+        P.Id.Developer_run.equal run_id watched_run
+        && P.Idempotency_key.equal key watched_key
+      | Repl _ | Task _ -> false)
+    ~kind:(Command_hint kind)
+;;
+
+let enqueue_repl_submission t ~instance ~key =
+  enqueue_matching
+    t
+    ~matches:(function
+      | Repl (watched_instance, _, watched_key) ->
+        Developer_repl_epoch.Instance.equal instance watched_instance
+        && P.Idempotency_key.equal key watched_key
+      | Command _ | Task _ -> false)
+    ~kind:(Repl_hint Repl_change.Changed)
+;;
+
+let invalidate_repl_instance t ~instance =
+  if same_domain t && not t.closed
+  then
+    List.iter t.connections ~f:(fun entry ->
+      if open_entry entry
+      then
+        List.iter entry.watches ~f:(fun watch ->
+          match watch.topic with
+          | Repl (watched, _, _)
+            when watch.live && Developer_repl_epoch.Instance.equal instance watched ->
+            mark_dirty entry watch;
+            Eio.Condition.broadcast entry.wake
+          | Command _ | Repl _ | Task _ -> ()))
+;;
+
+let enqueue_task t ~run_id ~key =
+  enqueue_matching
+    t
+    ~matches:(function
+      | Task (watched_run, watched_key) ->
+        P.Id.Developer_run.equal run_id watched_run
+        && P.Idempotency_key.equal key watched_key
+      | Command _ | Repl _ -> false)
+    ~kind:(Repl_hint Repl_change.Changed)
+;;
+
+let resync_kind watch =
+  match watch.topic with
+  | Command _ -> Command_hint Change.Resync_required
+  | Repl _ | Task _ -> Repl_hint Repl_change.Resync_required
+;;
+
 let rec next_hint entry =
   if not (open_entry entry)
   then None
@@ -217,7 +333,7 @@ let rec next_hint entry =
           { watch
           ; generation = watch.generation
           ; dirty_revision = watch.dirty_revision
-          ; kind = Change.Resync_required
+          ; kind = resync_kind watch
           }
     in
     let chosen =
@@ -240,6 +356,38 @@ let rec next_hint entry =
       next_hint entry)
 ;;
 
+let bounded_change t watch kind =
+  match watch.topic, kind with
+  | Command (run_id, key), Command_hint kind ->
+    Change.create ~limits:t.wire_limits ~run_id ~key ~kind
+    |> Result.map ~f:(fun change ->
+      Command_change change, Change.method_name, Change.to_json change)
+  | Repl (_, wire_instance, key), Repl_hint kind ->
+    (match t.repl_wire_limits with
+     | None -> Error (error Invalid_state "REPL wire is not installed")
+     | Some limits ->
+       let key =
+         P.Developer_repl_wire.Watch_key.Repl
+           (P.Developer_repl_wire.Lookup.create ~instance:wire_instance ~key)
+       in
+       Repl_change.create ~limits ~key ~kind
+       |> Result.map ~f:(fun change ->
+         Repl_change change, Repl_change.method_name, Repl_change.to_json change))
+  | Task (run_id, key), Repl_hint kind ->
+    (match t.repl_wire_limits with
+     | None -> Error (error Invalid_state "REPL wire is not installed")
+     | Some limits ->
+       let key =
+         P.Developer_repl_wire.Watch_key.Task
+           (P.Developer_common.Lookup.create ~run_id ~key)
+       in
+       Repl_change.create ~limits ~key ~kind
+       |> Result.map ~f:(fun change ->
+         Repl_change change, Repl_change.method_name, Repl_change.to_json change))
+  | Command _, Repl_hint _ | (Repl _ | Task _), Command_hint _ ->
+    Error (error Invalid_state "watch hint family changed")
+;;
+
 let rec pump t entry =
   match next_hint entry with
   | None -> ()
@@ -253,17 +401,11 @@ let rec pump t entry =
           && ((not watch.dirty) || is_resync kind)
           && (is_resync kind || Int.equal dirty_revision watch.dirty_revision)
         then (
-          match
-            Change.create
-              ~limits:t.wire_limits
-              ~run_id:watch.run_id
-              ~key:watch.key
-              ~kind:hint.kind
-          with
+          match bounded_change t watch hint.kind with
           | Error _ ->
             if watch.live && Int.equal watch.generation generation
             then revoke_watch entry watch
-          | Ok change ->
+          | Ok (change, method_, params) ->
             (match watch.authorize_change change with
              | Error _ ->
                if watch.live && Int.equal watch.generation generation
@@ -273,10 +415,7 @@ let rec pump t entry =
                then (
                  Connection_context.publish_notification
                    entry.physical
-                   (P.Envelope.notification
-                      ~method_:Change.method_name
-                      ~params:(Change.to_json change)
-                      ());
+                   (P.Envelope.notification ~method_ ~params ());
                  if is_resync kind && Int.equal dirty_revision watch.dirty_revision
                  then watch.dirty <- false))));
     pump t entry
@@ -507,7 +646,7 @@ let close_and_wait t =
         Stdlib.Printexc.raise_with_backtrace exn backtrace)
 ;;
 
-let rec watch t ~connection ~actor ~run_id ~key ~authorize_key ~authorize_change =
+let rec watch_topic t ~connection ~actor ~topic ~authorize_key ~authorize_change =
   let open Result.Let_syntax in
   if t.closed || not (same_domain t)
   then Error (error Server_shutting_down "watch hub is unavailable")
@@ -518,7 +657,8 @@ let rec watch t ~connection ~actor ~run_id ~key ~authorize_key ~authorize_change
            ~error:(error Permission_denied "developer events are not negotiated")
     in
     if
-      (not (Connection_context.Authoring_negotiation.selected lease "developer.events"))
+      (not
+         (Connection_context.Authoring_negotiation.selected lease (watch_feature topic)))
       || (not (Operator_authorization.is_current actor))
       || Result.is_error (Connection_context.request_actor connection (Some actor))
     then Error (error Permission_denied "developer watch is not current")
@@ -534,13 +674,13 @@ let rec watch t ~connection ~actor ~run_id ~key ~authorize_key ~authorize_change
         match find_connection t connection with
         | Some { phase = Restarting completion; _ } ->
           let%bind () = await_outcome completion.done_ in
-          watch t ~connection ~actor ~run_id ~key ~authorize_key ~authorize_change
+          watch_topic t ~connection ~actor ~topic ~authorize_key ~authorize_change
         | Some { phase = Retiring completion; _ } ->
           let%bind () = await_outcome completion.done_ in
-          watch t ~connection ~actor ~run_id ~key ~authorize_key ~authorize_change
+          watch_topic t ~connection ~actor ~topic ~authorize_key ~authorize_change
         | Some entry when (not (open_entry entry)) || not (current_lease entry) ->
           let%bind () = retire_entry t entry in
-          watch t ~connection ~actor ~run_id ~key ~authorize_key ~authorize_change
+          watch_topic t ~connection ~actor ~topic ~authorize_key ~authorize_change
         | Some entry ->
           if
             t.closed
@@ -549,9 +689,7 @@ let rec watch t ~connection ~actor ~run_id ~key ~authorize_key ~authorize_change
             || Result.is_error (Connection_context.request_actor connection (Some actor))
           then Error (error Permission_denied "developer watch changed during admission")
           else (
-            match
-              List.find entry.watches ~f:(fun watch -> same_watch watch ~run_id ~key)
-            with
+            match List.find entry.watches ~f:(fun watch -> same_watch watch topic) with
             | Some existing ->
               existing.generation <- existing.generation + 1;
               existing.actor <- actor;
@@ -565,8 +703,7 @@ let rec watch t ~connection ~actor ~run_id ~key ~authorize_key ~authorize_change
               then Error (error Resource_limit "developer watch limit")
               else (
                 let watch =
-                  { run_id
-                  ; key
+                  { topic
                   ; actor
                   ; authorize_change
                   ; generation = 0
@@ -593,8 +730,7 @@ let rec watch t ~connection ~actor ~run_id ~key ~authorize_key ~authorize_change
               { physical = connection
               ; lease
               ; watches =
-                  [ { run_id
-                    ; key
+                  [ { topic
                     ; actor
                     ; authorize_change
                     ; generation = 0
@@ -634,7 +770,7 @@ let rec watch t ~connection ~actor ~run_id ~key ~authorize_key ~authorize_change
             else Ok ()))))
 ;;
 
-let rec unwatch t ~connection ~run_id ~key =
+let rec unwatch_topic t ~connection ~matches =
   if t.closed || not (same_domain t)
   then Error (error Server_shutting_down "watch hub is unavailable")
   else (
@@ -647,12 +783,10 @@ let rec unwatch t ~connection ~run_id ~key =
         match entry.phase with
         | Restarting completion | Retiring completion ->
           Result.bind (await_outcome completion.done_) ~f:(fun () ->
-            unwatch t ~connection ~run_id ~key)
+            unwatch_topic t ~connection ~matches)
         | Closed -> retire_entry t entry
         | Open ->
-          (match
-             List.find entry.watches ~f:(fun watch -> same_watch watch ~run_id ~key)
-           with
+          (match List.find entry.watches ~f:(fun watch -> matches watch.topic) with
            | None -> Ok ()
            | Some watch ->
              let in_flight =
@@ -665,4 +799,73 @@ let rec unwatch t ~connection ~run_id ~key =
              else if in_flight
              then restart_pump t entry
              else Ok ())))
+;;
+
+let watch t ~connection ~actor ~run_id ~key ~authorize_key ~authorize_change =
+  watch_topic
+    t
+    ~connection
+    ~actor
+    ~topic:(Command (run_id, key))
+    ~authorize_key
+    ~authorize_change:(function
+      | Command_change change -> authorize_change change
+      | Repl_change _ -> Error (error Invalid_state "watch family changed"))
+;;
+
+let watch_repl
+      t
+      ~connection
+      ~actor
+      ~instance
+      ~wire_instance
+      ~key
+      ~authorize_key
+      ~authorize_change
+  =
+  watch_topic
+    t
+    ~connection
+    ~actor
+    ~topic:(Repl (instance, wire_instance, key))
+    ~authorize_key
+    ~authorize_change:(function
+      | Repl_change change -> authorize_change change
+      | Command_change _ -> Error (error Invalid_state "watch family changed"))
+;;
+
+let watch_task t ~connection ~actor ~run_id ~key ~authorize_key ~authorize_change =
+  watch_topic
+    t
+    ~connection
+    ~actor
+    ~topic:(Task (run_id, key))
+    ~authorize_key
+    ~authorize_change:(function
+      | Repl_change change -> authorize_change change
+      | Command_change _ -> Error (error Invalid_state "watch family changed"))
+;;
+
+let unwatch t ~connection ~run_id ~key =
+  unwatch_topic t ~connection ~matches:(function
+    | Command (watched_run, watched_key) ->
+      P.Id.Developer_run.equal run_id watched_run
+      && P.Idempotency_key.equal key watched_key
+    | Repl _ | Task _ -> false)
+;;
+
+let unwatch_repl t ~connection ~wire_instance ~key =
+  unwatch_topic t ~connection ~matches:(function
+    | Repl (_, watched_wire, watched_key) ->
+      P.Developer_repl_wire.Wire_id.Instance.equal wire_instance watched_wire
+      && P.Idempotency_key.equal key watched_key
+    | Command _ | Task _ -> false)
+;;
+
+let unwatch_task t ~connection ~run_id ~key =
+  unwatch_topic t ~connection ~matches:(function
+    | Task (watched_run, watched_key) ->
+      P.Id.Developer_run.equal run_id watched_run
+      && P.Idempotency_key.equal key watched_key
+    | Command _ | Repl _ -> false)
 ;;

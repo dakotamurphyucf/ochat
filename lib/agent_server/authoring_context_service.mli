@@ -622,6 +622,10 @@ module Developer : sig
         -> actor:Operator_authorization.t
         -> (unit, P.Error.t) result
     end
+
+    (** The private REPL owner receives the exact checked transfer API; a
+        command Candidate continues using its connection-bound selection. *)
+    module Retained = Developer_capture_host.Source_selection.Retained
   end
 
   module Candidate : sig

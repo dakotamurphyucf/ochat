@@ -401,6 +401,22 @@ let make_context host ~actor ~grant =
     Ok context)
 ;;
 
+module Retained_owner = struct
+  type t = { common : context }
+
+  let check_current t ~actor = check_all t.common actor
+  let close_and_wait t = close_context_and_wait t.common
+end
+
+let retain_owner context ~actor =
+  let open Result.Let_syntax in
+  let%bind () = check_all context actor in
+  let%map common =
+    make_context context.host ~actor:context.original_actor ~grant:context.grant
+  in
+  { Retained_owner.common }
+;;
+
 exception Revoked of Error.t
 
 let with_operation context ~actor f =
@@ -600,6 +616,7 @@ module Context = struct
   let root (t : t) = t.root
   let contract (t : t) = t.contract
   let check_current (t : t) ~actor = check_all t.common actor
+  let retain_owner (t : t) ~actor = retain_owner t.common ~actor
 
   let open_root host ~actor ~root ~dependency_roots ~project ~selection ~contract =
     let open Result.Let_syntax in
@@ -1418,6 +1435,7 @@ module Document_context = struct
   let root t = t.root
   let source_id t = t.source_id
   let check_current t ~actor = check_all t.common actor
+  let retain_owner t ~actor = retain_owner t.common ~actor
 
   let mint_source_id member =
     let nonce = Agent_protocol.Id.Transaction.(create () |> to_string) in

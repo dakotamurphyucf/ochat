@@ -2,6 +2,17 @@ open! Core
 open Authoring_context_service_core
 open Authoring_context_activity
 
+exception Cleanup_invariant of exn * exn
+
+let reraise_after_cleanup original backtrace ~cleanup =
+  match cleanup () with
+  | () -> Stdlib.Printexc.raise_with_backtrace original backtrace
+  | exception cleanup_failure ->
+    Stdlib.Printexc.raise_with_backtrace
+      (Cleanup_invariant (original, cleanup_failure))
+      backtrace
+;;
+
 let source_host_error = function
   | Sources.Error.Unauthorized -> Error.Unauthorized
   | Expired_actor -> Error.Expired_actor
@@ -59,15 +70,14 @@ let selected_contract_fingerprint contract ~checkpoint =
   | Contract_limit -> Error Error.Resource_limit
 ;;
 
-let check_document_static ?ledger t context ~actor ~checkpoint =
-  let open Result.Let_syntax in
-  let ledger =
-    Option.value ledger ~default:(Project.Project_cache.contexts t.project_cache)
-  in
-  let%bind view =
-    Ledger.find_document ledger ~identity:context.identity
-    |> Result.of_option ~error:Error.Stale_context
-  in
+let check_document_static_view
+      t
+      ~(origin : P.Authoring.Context.origin)
+      ~original_actor
+      ~view
+      ~actor
+      ~checkpoint
+  =
   match
     ( Ledger.Document.View.selected_environment view
     , Ledger.Document.View.compiler_contract view
@@ -76,13 +86,13 @@ let check_document_static ?ledger t context ~actor ~checkpoint =
   | None, None, None -> Ok ()
   | Some environment, Some contract, Some graph ->
     let requested_environment =
-      match context.origin with
+      match origin with
       | Host_document { default_environment; _ }
       | Supplied_document { default_environment; _ } -> default_environment
       | Host_project _ | Uploaded_project _ -> None
     in
     (match
-       ( t.selection_policy.document_static context.original_actor ~requested_environment
+       ( t.selection_policy.document_static original_actor ~requested_environment
        , t.selection_policy.document_static actor ~requested_environment )
      with
      | Some original, Some current ->
@@ -104,6 +114,57 @@ let check_document_static ?ledger t context ~actor ~checkpoint =
     Error Error.Stale_context
 ;;
 
+let check_document_static ?ledger t context ~actor ~checkpoint =
+  let open Result.Let_syntax in
+  let ledger =
+    Option.value ledger ~default:(Project.Project_cache.contexts t.project_cache)
+  in
+  let%bind view =
+    Ledger.find_document ledger ~identity:context.identity
+    |> Result.of_option ~error:Error.Stale_context
+  in
+  check_document_static_view
+    t
+    ~origin:context.origin
+    ~original_actor:context.original_actor
+    ~view
+    ~actor
+    ~checkpoint
+;;
+
+let check_project_static_view
+      t
+      ~(origin : P.Authoring.Context.origin)
+      ~original_actor
+      ~root
+      ~view
+      ~actor
+      ~checkpoint
+  =
+  let open Result.Let_syntax in
+  match origin with
+  | Host_project { project_member; selection; _ } ->
+    let%bind project =
+      Source.Portable_path.create project_member
+      |> Result.map_error ~f:(fun _ -> Error.Invalid_request)
+    in
+    (match
+       ( t.selection_policy.project_contract original_actor ~root ~project ~selection
+       , t.selection_policy.project_contract actor ~root ~project ~selection )
+     with
+     | Some original, Some current ->
+       let%bind original = selected_contract_fingerprint original ~checkpoint in
+       let%bind current = selected_contract_fingerprint current ~checkpoint in
+       if
+         Captured.Digest.equal original (Ledger.View.compiler_contract view)
+         && Captured.Digest.equal current original
+       then Ok ()
+       else Error Error.Stale_context
+     | Some _, None | None, Some _ | None, None -> Error Error.Selection_unavailable)
+  | Uploaded_project _ | Host_document _ | Supplied_document _ ->
+    Error Error.Stale_context
+;;
+
 let check_context_owner ?ledger t context ~actor ~checkpoint =
   let open Result.Let_syntax in
   let%bind () = check_actor_context context.original_actor actor in
@@ -112,35 +173,21 @@ let check_context_owner ?ledger t context ~actor ~checkpoint =
     let%bind () =
       Sources.Context.check_current owner ~actor |> Result.map_error ~f:source_host_error
     in
-    (match context.origin with
-     | Host_project { project_member; selection; _ } ->
-       let%bind project =
-         Source.Portable_path.create project_member
-         |> Result.map_error ~f:(fun _ -> Error.Invalid_request)
-       in
-       let root = Sources.Context.root owner in
-       (match
-          ( t.selection_policy.project_contract
-              context.original_actor
-              ~root
-              ~project
-              ~selection
-          , t.selection_policy.project_contract actor ~root ~project ~selection )
-        with
-        | Some original, Some current ->
-          let%bind original = selected_contract_fingerprint original ~checkpoint in
-          let%bind current = selected_contract_fingerprint current ~checkpoint in
-          let ledger =
-            Option.value ledger ~default:(Project.Project_cache.contexts t.project_cache)
-          in
-          (match Ledger.find ledger ~identity:context.identity with
-           | Some view
-             when Captured.Digest.equal original (Ledger.View.compiler_contract view)
-                  && Captured.Digest.equal current original -> Ok ()
-           | Some _ | None -> Error Error.Stale_context)
-        | Some _, None | None, Some _ | None, None -> Error Error.Selection_unavailable)
-     | Uploaded_project _ | Host_document _ | Supplied_document _ ->
-       Error Error.Stale_context)
+    let ledger =
+      Option.value ledger ~default:(Project.Project_cache.contexts t.project_cache)
+    in
+    let%bind view =
+      Ledger.find ledger ~identity:context.identity
+      |> Result.of_option ~error:Error.Stale_context
+    in
+    check_project_static_view
+      t
+      ~origin:context.origin
+      ~original_actor:context.original_actor
+      ~root:(Sources.Context.root owner)
+      ~view
+      ~actor
+      ~checkpoint
   | Host_document owner ->
     let%bind () =
       Sources.Document_context.check_current owner ~actor
@@ -275,6 +322,180 @@ module Candidate_pin = struct
         | Some _ | None -> Error Error.Stale_negotiation)
     in
     check_context_selection_now t.owner t.context ~actor
+  ;;
+end
+
+module Retained_selection = struct
+  type snapshot =
+    | Project of
+        { source : Sources.Retained_owner.t
+        ; root : Sources.Root.t
+        ; origin : P.Authoring.Context.origin
+        ; view : Ledger.View.t
+        }
+    | Document of
+        { source : Sources.Retained_owner.t
+        ; origin : P.Authoring.Context.origin
+        ; view : Ledger.Document.View.t
+        }
+    | Uploaded of Upload.Context_capture.t
+    | Supplied of
+        { origin : P.Authoring.Context.origin
+        ; view : Ledger.Document.View.t
+        }
+
+  type t =
+    { core : Authoring_context_service_core.t
+    ; original_actor : Operator_authorization.t
+    ; snapshot : snapshot
+    ; domain : int
+    ; mutable closed : bool
+    }
+
+  let close_and_wait t =
+    if not t.closed
+    then (
+      Eio.Cancel.protect (fun () ->
+        match t.snapshot with
+        | Project { source; _ } | Document { source; _ } ->
+          Sources.Retained_owner.close_and_wait source
+        | Uploaded _ | Supplied _ -> ());
+      t.closed <- true)
+  ;;
+
+  type upload_check =
+    | Full
+    | Final
+
+  let check_owner t ~actor ~checkpoint ~upload_check =
+    let open Result.Let_syntax in
+    let%bind () = check_domain t.core in
+    let%bind () = if t.core.closed || t.closed then Error Error.Closed else Ok () in
+    let%bind () = check_actor_context t.original_actor actor in
+    match t.snapshot with
+    | Project { source; root; origin; view } ->
+      let%bind () =
+        Sources.Retained_owner.check_current source ~actor
+        |> Result.map_error ~f:source_host_error
+      in
+      check_project_static_view
+        t.core
+        ~origin
+        ~original_actor:t.original_actor
+        ~root
+        ~view
+        ~actor
+        ~checkpoint
+    | Document { source; origin; view } ->
+      let%bind () =
+        Sources.Retained_owner.check_current source ~actor
+        |> Result.map_error ~f:source_host_error
+      in
+      check_document_static_view
+        t.core
+        ~origin
+        ~original_actor:t.original_actor
+        ~view
+        ~actor
+        ~checkpoint
+    | Uploaded capture ->
+      (match t.core.upload with
+       | None -> Error Error.Uninstalled
+       | Some upload ->
+         (match upload_check with
+          | Full -> Upload.check_context_current upload ~actor capture ~checkpoint
+          | Final -> Upload.check_context_selection_now upload ~actor capture)
+         |> Result.map_error ~f:upload_host_error)
+    | Supplied { origin; view } ->
+      (match t.core.supplied_document with
+       | None -> Error Error.Uninstalled
+       | Some policy ->
+         if
+           policy.Supplied_document_policy.authorize t.original_actor
+           && policy.authorize actor
+         then
+           check_document_static_view
+             t.core
+             ~origin
+             ~original_actor:t.original_actor
+             ~view
+             ~actor
+             ~checkpoint
+         else Error Error.Unauthorized)
+  ;;
+
+  let check_now t ~actor =
+    if not (Int.equal t.domain (Stdlib.Domain.self () :> int))
+    then Error Error.Stale_context
+    else check_owner t ~actor ~checkpoint:Fn.id ~upload_check:Final
+  ;;
+
+  let check_current t ~actor ~checkpoint =
+    let open Result.Let_syntax in
+    let%bind () = check_owner t ~actor ~checkpoint ~upload_check:Full in
+    check_now t ~actor
+  ;;
+
+  let acquire pin ~actor ~checkpoint =
+    let open Result.Let_syntax in
+    let%bind () = Candidate_pin.check_now pin ~actor in
+    let core = pin.Candidate_pin.owner in
+    let context = pin.context in
+    let ledger = Project.Project_cache.contexts core.project_cache in
+    let%bind snapshot =
+      match context.owner with
+      | Host_project owner ->
+        let%bind view =
+          Ledger.find ledger ~identity:context.identity
+          |> Result.of_option ~error:Error.Stale_context
+        in
+        let%map source =
+          Sources.Context.retain_owner owner ~actor
+          |> Result.map_error ~f:source_host_error
+        in
+        Project
+          { source; root = Sources.Context.root owner; origin = context.origin; view }
+      | Host_document owner ->
+        let%bind view =
+          Ledger.find_document ledger ~identity:context.identity
+          |> Result.of_option ~error:Error.Stale_context
+        in
+        let%map source =
+          Sources.Document_context.retain_owner owner ~actor
+          |> Result.map_error ~f:source_host_error
+        in
+        Document { source; origin = context.origin; view }
+      | Uploaded_project capture -> Ok (Uploaded capture)
+      | Supplied_document _ ->
+        let%map view =
+          Ledger.find_document ledger ~identity:context.identity
+          |> Result.of_option ~error:Error.Stale_context
+        in
+        Supplied { origin = context.origin; view }
+    in
+    let retained =
+      { core
+      ; original_actor = context.original_actor
+      ; snapshot
+      ; domain = (Stdlib.Domain.self () :> int)
+      ; closed = false
+      }
+    in
+    let outcome =
+      try
+        let%bind () = check_current retained ~actor ~checkpoint in
+        let%map () = Candidate_pin.check_now pin ~actor in
+        retained
+      with
+      | exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        reraise_after_cleanup exn backtrace ~cleanup:(fun () -> close_and_wait retained)
+    in
+    match outcome with
+    | Ok _ as success -> success
+    | Error _ as error ->
+      close_and_wait retained;
+      error
   ;;
 end
 

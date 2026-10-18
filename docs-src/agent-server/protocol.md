@@ -201,6 +201,23 @@ bind the authenticated principal, scopes and accounting revision; changes requir
 a fresh query. See [inference observations](../lib/inference-observations.md) for
 retention, response limits, disclosure and the OCaml client contract.
 
+The opt-in portable REPL family has its own closed
+[`Developer_repl_wire`](../../lib/agent_protocol/developer_repl_wire.mli) contract.
+`developer.repl.capabilities` reports the installed finite request, result,
+reference-page, response and event limits. `developer.repl.create` and
+`developer.repl.submit` use exact keyed Host history; a same-key retry is
+resolved before consulting a changed editor selection or source. An instance,
+epoch or revision wire ID is comparison data for this process only. Reset
+issues new IDs while retaining authorized historical keyed observations.
+`developer.repl.inspect_type` and `developer.repl.task_references_page` expose
+bounded projections, never the retained type graph or a runnable Task handle.
+`developer.repl.task.submit` explicitly starts a retained Task under the
+durable Task owner; its observe, await and cancel methods use the Task row's
+run/key and remain separate from Developer command receipts. REPL and Task
+watch/unwatch methods share the existing connection notification pump. A watch
+acknowledges future hints; observe the exact key for a baseline and after a
+resync hint. The first-party client for this family is separate work.
+
 ## Requests and results
 
 ### Registered external data

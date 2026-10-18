@@ -1541,11 +1541,13 @@ let compose
              ~budgets:configuration.limits.budgets
              ~approval:
                (Option.map configuration.shell_approvals ~f:(fun shell -> shell.limits))
+             ~repl:configuration.repl
          in
          Developer_change_hub.create
            ~sw
            ~limits:(Developer_endpoint.Policy.change_limits policy)
            ~wire_limits:(Developer_endpoint.Policy.wire_limits policy)
+           ~repl_wire_limits:(Developer_endpoint.Policy.repl_wire_limits policy)
          |> Result.map ~f:Option.some)
   in
   Option.iter developer_changes ~f:(fun changes ->
@@ -1560,6 +1562,18 @@ let compose
         | Approval_changed -> Agent_protocol.Developer_wire.Change.Approval_changed
       in
       Developer_change_hub.enqueue changes ~run_id ~key ~kind)
+  in
+  let on_repl_change =
+    Option.map developer_changes ~f:(fun changes change ->
+      match change with
+      | Developer_repl_epoch.Change.Submission (instance, key) ->
+        Developer_change_hub.enqueue_repl_submission changes ~instance ~key
+      | Instance_invalidated instance ->
+        Developer_change_hub.invalidate_repl_instance changes ~instance)
+  in
+  let on_task_change =
+    Option.map developer_changes ~f:(fun changes ~run_id ~key ->
+      Developer_change_hub.enqueue_task changes ~run_id ~key)
   in
   let%bind developer =
     match options.developer, authoring, home with
@@ -1656,6 +1670,8 @@ let compose
         ~repl:configuration.repl
         ~trace:None
         ?on_change:on_developer_change
+        ?on_repl_change
+        ?on_task_change
         ~now:(fun () -> timestamp env)
         ~checkpoint:Eio.Fiber.check
         ()

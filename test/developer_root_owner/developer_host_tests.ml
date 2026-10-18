@@ -215,6 +215,46 @@ let portable_wire_limits
   |> ok
 ;;
 
+let portable_repl_limits
+      ?(max_page_items = 8)
+      ?(page_bytes = 16 * 1024)
+      ?(max_receipt_bytes = 8192)
+      ()
+  =
+  let bound ~bytes ~depth ~fields ~nodes =
+    Document_schema.Limits.create
+      ~max_bytes:bytes
+      ~max_depth:depth
+      ~max_fields:fields
+      ~max_nodes:nodes
+    |> checked
+  in
+  let summaries = max_receipt_bytes / 64 in
+  let result_bytes =
+    Int.max (2 * 1024 * 1024) ((6 * max_receipt_bytes) + (max_page_items * 384) + 2048)
+  in
+  let result_nodes = Int.max 8192 ((summaries * 32) + (max_page_items * 2) + 64) in
+  let result_fields = Int.max 8192 ((summaries * 24) + max_page_items + 64) in
+  P.Developer_repl_wire.Limits.create
+    ~request:(bound ~bytes:(128 * 1024) ~depth:24 ~fields:1024 ~nodes:2048)
+    ~result:
+      (bound ~bytes:result_bytes ~depth:20 ~fields:result_fields ~nodes:result_nodes)
+    ~page:(bound ~bytes:page_bytes ~depth:8 ~fields:128 ~nodes:128)
+    ~response:
+      (bound
+         ~bytes:(result_bytes + (1024 * 1024))
+         ~depth:24
+         ~fields:(result_fields + 100)
+         ~nodes:(result_nodes + 100))
+    ~max_source_bytes:4096
+    ~max_reference_bytes:384
+    ~max_output_bytes:(Int.max 8192 max_receipt_bytes)
+    ~max_page_items
+    ~max_event_bytes:4096
+    ~max_registry_entries:64
+  |> ok
+;;
+
 let open_portable_client
       ?(features =
         [ P.Developer_common.Features.run; P.Developer_common.Features.approvals ])
@@ -422,6 +462,7 @@ let with_daemon
       ?reviewer_resolver
       ?(repl = false)
       ?(portable = false)
+      ?(portable_repl = false)
       ?(approvals = false)
       ?(repl_receipt_bytes = 8192)
       ?(repl_keys_per_instance = 4)
@@ -527,6 +568,24 @@ let with_daemon
                    ~max_connections:4
                    ~max_watches_per_connection:4
                    ~max_pending_hints_per_connection:4
+                 |> ok)
+            else developer
+          in
+          let developer =
+            if portable_repl
+            then
+              S.Daemon.Developer_configuration.with_portable_wire
+                developer
+                (S.Daemon.Developer_configuration.Portable.create
+                   ~wire_limits:(portable_wire_limits ())
+                   ~max_connections:4
+                   ~max_watches_per_connection:4
+                   ~max_pending_hints_per_connection:4
+                 |> ok
+                 |> fun portable ->
+                 S.Daemon.Developer_configuration.Portable.with_repl_wire
+                   portable
+                   (portable_repl_limits ~max_receipt_bytes:repl_receipt_bytes ())
                  |> ok)
             else developer
           in
@@ -2059,6 +2118,437 @@ let%expect_test "hosted REPL retains partial work and closes at key saturation" 
     {| same_instance=true foreign_denied=true first_finished=true second_stopped=true truthful_limited=true completed=1 first_observed=true reset_changed_epoch=true old_key_replay=true changed_old_key_conflicts=true fresh_denied=true close_ok=true |}]
 ;;
 
+let%expect_test "portable REPL uses the installed Host and retained comparison IDs" =
+  let repl_resync, signal_repl_resync = Eio.Promise.create () in
+  let task_changed, signal_task_changed = Eio.Promise.create () in
+  let watched_repl = ref None in
+  let watched_task : P.Developer_common.Lookup.t option ref = ref None in
+  let installed_limits = ref None in
+  let publish_notification = function
+    | P.Envelope.Notification { method_; params }
+      when String.equal method_ P.Developer_repl_wire.Change.method_name ->
+      let limits = Option.value_exn !installed_limits in
+      let change = P.Developer_repl_wire.Change.of_json ~limits params |> ok in
+      (match !watched_repl, P.Developer_repl_wire.Change.key change with
+       | Some expected, P.Developer_repl_wire.Watch_key.Repl actual
+         when P.Developer_repl_wire.Wire_id.Instance.equal
+                (P.Developer_repl_wire.Lookup.instance expected)
+                (P.Developer_repl_wire.Lookup.instance actual)
+              && P.Idempotency_key.equal
+                   (P.Developer_repl_wire.Lookup.key expected)
+                   (P.Developer_repl_wire.Lookup.key actual)
+              && P.Developer_repl_wire.Change.equal_kind
+                   (P.Developer_repl_wire.Change.kind change)
+                   P.Developer_repl_wire.Change.Resync_required
+              && not (Eio.Promise.is_resolved repl_resync) ->
+         Eio.Promise.resolve signal_repl_resync ()
+       | _ ->
+         (match !watched_task, P.Developer_repl_wire.Change.key change with
+          | Some expected, P.Developer_repl_wire.Watch_key.Task actual
+            when P.Id.Developer_run.equal expected.run_id actual.run_id
+                 && P.Idempotency_key.equal expected.key actual.key
+                 && P.Developer_repl_wire.Change.equal_kind
+                      (P.Developer_repl_wire.Change.kind change)
+                      P.Developer_repl_wire.Change.Changed
+                 && not (Eio.Promise.is_resolved task_changed) ->
+            Eio.Promise.resolve signal_task_changed ()
+          | _ -> ()))
+    | P.Envelope.Notification _ | Request _ | Response _ -> ()
+  in
+  let native_entered, signal_native_entered = Eio.Promise.create () in
+  let native_release, signal_native_release = Eio.Promise.create () in
+  let native_calls = ref 0 in
+  let native_outputs = ref 0 in
+  with_daemon
+    ~repl:true
+    ~portable_repl:true
+    ~repl_receipt_bytes:(512 * 1024)
+    ~repl_keys_per_instance:8
+    ~timeout_seconds:15.
+    ~native_sample:true
+    ~prompt_source:
+      "<developer>Portable REPL fixture.</developer>\n<tool name=\"read_file\"/>"
+    ~authorize_native:(fun _ binding ->
+      [%test_eq: string]
+        (Chat_response.Tool_capability.reference binding).name
+        "read_file";
+      incr native_calls;
+      Eio.Promise.resolve signal_native_entered ();
+      Eio.Promise.await native_release;
+      Ok ())
+    ~prepare_output:(function
+      | Openai.Responses.Tool_output.Output.Text value ->
+        incr native_outputs;
+        Ok (`String value)
+      | _ -> Error (P.Error.invalid_request "unexpected native output"))
+    (fun daemon ->
+       let module W = P.Developer_repl_wire in
+       let module C = P.Developer_common in
+       let scopes =
+         Set.add
+           (Set.add Agent_server_test_support.scopes Developer_repl)
+           Developer_live_run
+       in
+       let actor =
+         Agent_server_test_support.principal_with_scopes "pri_portable_repl" scopes
+         |> Operator_authorization.trusted_local
+       in
+       let connection, _transport, expected =
+         open_document
+           ~features:
+             [ P.Authoring.Features.core
+             ; P.Authoring.Features.semantic
+             ; W.Features.repl
+             ; W.Features.events
+             ]
+           ~publish_notification
+           daemon
+           actor
+       in
+       let dispatch request =
+         S.Dispatcher.dispatch_developer_repl
+           (S.Daemon.dispatcher daemon)
+           ~context:connection
+           request
+         |> ok
+       in
+       let limits =
+         match dispatch W.Request.Capabilities with
+         | W.Response.Capabilities capabilities -> W.Capabilities.limits capabilities
+         | _ -> failwith "expected installed REPL capabilities"
+       in
+       installed_limits := Some limits;
+       let key value = P.Idempotency_key.of_string value |> checked in
+       let run_id = P.Id.Developer_run.create () in
+       let route =
+         C.Route.document_script
+           ~limits:(W.Limits.request limits)
+           ~expected
+           ~selector:(P.Authoring.Analysis.Target.selected_script "s" |> ok)
+         |> ok
+       in
+       let create =
+         W.Create.create
+           ~limits
+           ~run_id
+           ~key:(key "portable-repl-create")
+           ~route
+           ~target:One_off_v1
+           ~prompt:(S.Catalog_identity.prompt_definition "restart.prompt")
+           ~workspace:(S.Catalog_identity.workspace_definition "restart.workspace")
+           ~requested_execution:None
+           ~requested_max_output_bytes:None
+         |> ok
+       in
+       let view =
+         match dispatch (W.Request.Create create) with
+         | W.Response.Create view -> view
+         | _ -> failwith "expected REPL view"
+       in
+       let submit =
+         W.Submit.create
+           ~limits
+           ~instance:(W.View.instance view)
+           ~epoch:(W.View.epoch view)
+           ~expected_revision:(W.View.revision view)
+           ~key:(key "portable-repl-submit")
+           ~source:"Task.pure(8)"
+         |> ok
+       in
+       let submitted =
+         match dispatch (W.Request.Submit submit) with
+         | W.Response.Submit submission -> submission
+         | _ -> failwith "expected REPL submission"
+       in
+       let observed =
+         match
+           dispatch
+             (W.Request.Observe
+                (W.Lookup.create
+                   ~instance:(W.View.instance view)
+                   ~key:(key "portable-repl-submit")))
+         with
+         | W.Response.Observe (Some submission) -> submission
+         | _ -> failwith "expected retained REPL submission"
+       in
+       assert (
+         W.Wire_id.Revision.equal
+           (W.Submission.revision submitted)
+           (W.Submission.revision observed));
+       let reference = W.Submission.task_references submitted |> List.hd_exn in
+       let task =
+         W.Task_submit.create
+           ~limits
+           ~key:(key "portable-repl-task")
+           ~reference
+           ~requested_execution:None
+           ~requested_max_output_bytes:None
+           ~fresh_epoch:(Some (W.View.instance view, W.View.epoch view))
+         |> ok
+       in
+       let started =
+         match dispatch (W.Request.Task_submit task) with
+         | W.Response.Task_submit view -> view
+         | _ -> failwith "expected REPL Task view"
+       in
+       let terminal =
+         match
+           dispatch
+             (W.Request.Task_await_terminal
+                (C.Lookup.create
+                   ~run_id:(W.View.run_id view)
+                   ~key:(key "portable-repl-task")))
+         with
+         | W.Response.Task_await_terminal view -> view
+         | _ -> failwith "expected terminal REPL Task view"
+       in
+       assert (
+         P.Developer_command_id.equal
+           (W.Task_view.command_id started)
+           (W.Task_view.command_id terminal));
+       let terminal_succeeded =
+         match W.Task_view.phase terminal with
+         | Terminal { execution_started = true; outcome = Succeeded _ } -> true
+         | _ -> false
+       in
+       let watched =
+         W.Lookup.create
+           ~instance:(W.View.instance view)
+           ~key:(key "portable-repl-submit")
+       in
+       (match dispatch (W.Request.Watch (W.Watch_key.Repl watched)) with
+        | W.Response.Watch -> watched_repl := Some watched
+        | _ -> failwith "expected REPL watch acknowledgement");
+       let after_reset =
+         match
+           dispatch
+             (W.Request.Reset_and_wait
+                (W.Current_epoch.create
+                   ~instance:(W.View.instance view)
+                   ~epoch:(W.View.epoch view)
+                   ~key:(key "portable-repl-reset")))
+         with
+         | W.Response.Reset_and_wait view -> view
+         | _ -> failwith "expected reset REPL view"
+       in
+       Eio.Promise.await repl_resync;
+       assert (not (W.Wire_id.Epoch.equal (W.View.epoch view) (W.View.epoch after_reset)));
+       let old_submission =
+         match
+           dispatch
+             (W.Request.Observe
+                (W.Lookup.create
+                   ~instance:(W.View.instance view)
+                   ~key:(key "portable-repl-submit")))
+         with
+         | W.Response.Observe (Some submission) -> submission
+         | _ -> failwith "expected old REPL submission after reset"
+       in
+       assert (
+         W.Wire_id.Epoch.equal (W.Submission.epoch old_submission) (W.View.epoch view));
+       let old_submit_replay =
+         match dispatch (W.Request.Submit submit) with
+         | W.Response.Submit submission -> submission
+         | _ -> failwith "expected old Submit replay after reset"
+       in
+       assert (
+         W.Wire_id.Revision.equal
+           (W.Submission.revision old_submission)
+           (W.Submission.revision old_submit_replay));
+       (match dispatch (W.Request.Unwatch (W.Watch_key.Repl watched)) with
+        | W.Response.Unwatch -> ()
+        | _ -> failwith "expected REPL Unwatch acknowledgement");
+       let replay =
+         let retry =
+           W.Task_submit.create
+             ~limits
+             ~key:(key "portable-repl-task")
+             ~reference
+             ~requested_execution:None
+             ~requested_max_output_bytes:None
+             ~fresh_epoch:None
+           |> ok
+         in
+         match dispatch (W.Request.Task_submit retry) with
+         | W.Response.Task_submit view -> view
+         | _ -> failwith "expected historical Task view"
+       in
+       assert (
+         P.Developer_command_id.equal
+           (W.Task_view.command_id terminal)
+           (W.Task_view.command_id replay));
+       let observed_task =
+         let request =
+           W.Request.Task_observe
+             (C.Lookup.create
+                ~run_id:(W.View.run_id view)
+                ~key:(key "portable-repl-task"))
+         in
+         let id = P.Envelope.Request_id.of_json (`Number "430") |> ok in
+         match
+           S.Dispatcher.dispatch_envelope
+             (S.Daemon.dispatcher daemon)
+             ~context:connection
+             (P.Envelope.request
+                ~id
+                ~method_:(W.Request.method_name request)
+                ~params:(W.Request.params request)
+                ())
+         with
+         | Ok (Some (P.Envelope.Response { outcome = Ok json; _ })) ->
+           (match
+              W.Response.of_method_and_json
+                ~limits
+                ~method_:(W.Request.method_name request)
+                json
+              |> ok
+            with
+            | Task_observe (Some view) -> view
+            | _ -> failwith "expected portable Task envelope observation")
+         | _ -> failwith "expected portable Task response envelope"
+       in
+       assert (
+         P.Developer_command_id.equal
+           (W.Task_view.command_id terminal)
+           (W.Task_view.command_id observed_task));
+       let native_submission =
+         let request =
+           W.Submit.create
+             ~limits
+             ~instance:(W.View.instance after_reset)
+             ~epoch:(W.View.epoch after_reset)
+             ~expected_revision:(W.View.revision after_reset)
+             ~key:(key "portable-repl-native-expression")
+             ~source:
+               {|Tool.call("read_file", `Object([{key="file"; value=`String("sample.txt")}]))|}
+           |> ok
+         in
+         match dispatch (W.Request.Submit request) with
+         | W.Response.Submit submission -> submission
+         | _ -> failwith "expected native REPL submission"
+       in
+       let native_key = key "portable-repl-native-task" in
+       let accepted =
+         let request =
+           W.Task_submit.create
+             ~limits
+             ~key:native_key
+             ~reference:(W.Submission.task_references native_submission |> List.hd_exn)
+             ~requested_execution:None
+             ~requested_max_output_bytes:None
+             ~fresh_epoch:(Some (W.View.instance after_reset, W.View.epoch after_reset))
+           |> ok
+         in
+         match dispatch (W.Request.Task_submit request) with
+         | W.Response.Task_submit view -> view
+         | _ -> failwith "expected accepted native Task"
+       in
+       Eio.Promise.await native_entered;
+       let dispatch_on context request =
+         S.Dispatcher.dispatch_developer_repl
+           (S.Daemon.dispatcher daemon)
+           ~context
+           request
+         |> ok
+       in
+       let stale_code, observer, task_lookup =
+         Exn.protect
+           ~finally:(fun () ->
+             if not (Eio.Promise.is_resolved native_release)
+             then Eio.Promise.resolve signal_native_release ())
+           ~f:(fun () ->
+             let observer, _transport, _expected =
+               open_document
+                 ~features:
+                   [ P.Authoring.Features.core
+                   ; P.Authoring.Features.semantic
+                   ; W.Features.repl
+                   ; W.Features.events
+                   ]
+                 ~publish_notification
+                 daemon
+                 actor
+             in
+             let task_lookup =
+               C.Lookup.create ~run_id:(W.View.run_id view) ~key:native_key
+             in
+             (match
+                dispatch_on observer (W.Request.Watch (W.Watch_key.Task task_lookup))
+              with
+              | W.Response.Watch -> watched_task := Some task_lookup
+              | _ -> failwith "expected native Task watch acknowledgement");
+             (match dispatch_on observer (W.Request.Task_observe task_lookup) with
+              | W.Response.Task_observe (Some current) ->
+                (match W.Task_view.phase current with
+                 | Terminal _ -> failwith "native Task completed before release"
+                 | Reserved | Waiting_permission | Execution_started -> ())
+              | _ -> failwith "expected held native Task observation");
+             assert (not (Eio.Promise.is_resolved task_changed));
+             S.Daemon.close_connection daemon connection;
+             let stale =
+               W.Submit.create
+                 ~limits
+                 ~instance:(W.View.instance after_reset)
+                 ~epoch:(W.View.epoch after_reset)
+                 ~expected_revision:(W.Submission.revision native_submission)
+                 ~key:(key "portable-repl-stale-submit")
+                 ~source:"Task.pure(9)"
+               |> ok
+             in
+             let stale_code =
+               match
+                 S.Dispatcher.dispatch_developer_repl
+                   (S.Daemon.dispatcher daemon)
+                   ~context:connection
+                   (W.Request.Submit stale)
+               with
+               | Error error -> P.Error.code_to_string error.code
+               | Ok _ -> "ok"
+             in
+             stale_code, observer, task_lookup)
+       in
+       Eio.Promise.await task_changed;
+       let reconnected_terminal =
+         match dispatch_on observer (W.Request.Task_observe task_lookup) with
+         | W.Response.Task_observe (Some view) -> view
+         | _ -> failwith "expected native Task observation after reconnect"
+       in
+       let accepted_finished =
+         P.Developer_command_id.equal
+           (W.Task_view.command_id accepted)
+           (W.Task_view.command_id reconnected_terminal)
+         &&
+         match W.Task_view.phase reconnected_terminal with
+         | Terminal { execution_started = true; outcome = Succeeded _ } -> true
+         | _ -> false
+       in
+       let accepted_outcome =
+         match W.Task_view.phase reconnected_terminal with
+         | Terminal { outcome = Succeeded _; _ } -> "succeeded"
+         | Terminal { outcome = Failed { error; _ }; _ } ->
+           P.Error.code_to_string error.code
+         | Terminal { outcome = Limited { error; _ }; _ } ->
+           "limited:" ^ P.Error.code_to_string error.code
+         | Terminal { outcome = Interrupted; _ } -> "interrupted"
+         | Terminal { outcome = Cancelled; _ } -> "cancelled"
+         | Reserved | Waiting_permission | Execution_started -> "nonterminal"
+       in
+       printf
+         "portable REPL terminal=%b historical submission and Task retained \
+          repl_resync=%b task_changed=%b stale_code=%s accepted_finished=%b outcome=%s \
+          native_calls=%d native_outputs=%d\n"
+         terminal_succeeded
+         (Eio.Promise.is_resolved repl_resync)
+         (Eio.Promise.is_resolved task_changed)
+         stale_code
+         accepted_finished
+         accepted_outcome
+         !native_calls
+         !native_outputs);
+  [%expect
+    {| portable REPL terminal=true historical submission and Task retained repl_resync=true task_changed=true stale_code=permission_denied accepted_finished=true outcome=succeeded native_calls=1 native_outputs=1 |}]
+;;
+
 let%expect_test "hosted REPL Task persists one terminal and joins before reset" =
   (* The retained expression's type graph has a conservative charged bound
      near 430 KiB; keep its bounded receipt visible for the issued reference. *)
@@ -2069,7 +2559,7 @@ let%expect_test "hosted REPL Task persists one terminal and joins before reset" 
   with_daemon
     ~repl:true
     ~repl_receipt_bytes:(512 * 1024)
-    ~repl_keys_per_instance:8
+    ~repl_keys_per_instance:12
     ~timeout_seconds:15.
     ~prompt_source:
       "<developer>Developer REPL Task fixture.</developer>\n<tool name=\"read_file\"/>"
@@ -2327,6 +2817,55 @@ let%expect_test "hosted REPL Task persists one terminal and joins before reset" 
             | R.Check _ | R.Fixture _ | R.Live _ -> false)
          | None -> false
        in
+       let third_expression =
+         Repl.submit
+           daemon
+           ~actor
+           ~instance
+           ~epoch
+           ~expected_revision:(Repl.Submission.revision cancellation_task)
+           ~key:(key "task-after-cancel-expression")
+           ~source:
+             {|Tool.call("read_file", `Object([{key="file"; value=`String("sample.txt")}]))|}
+         |> ok
+       in
+       let third_original =
+         Repl.Task.Original.create
+           ~reference:(Repl.Submission.task_references third_expression |> List.hd_exn)
+           ~requested_execution:None
+           ~requested_max_output_bytes:None
+           ~checkpoint:ignore
+         |> ok
+       in
+       let _third =
+         Repl.Task.submit
+           daemon
+           ~actor
+           ~key:(key "task-after-cancel-run")
+           ~original:third_original
+           ~fresh_epoch:(Some (instance, epoch))
+         |> ok
+       in
+       let after_cancel =
+         Repl.Task.await_terminal daemon ~actor ~run_id ~key:(key "task-after-cancel-run")
+         |> ok
+       in
+       let resumed_same_root =
+         match Repl.Task.receipt after_cancel with
+         | Some receipt ->
+           (match R.value receipt with
+            | R.Task (R.Task.Succeeded { value_preview = Some preview }) ->
+              String.is_substring preview ~substring:"Ok"
+              && String.is_substring preview ~substring:"developer host native sample"
+            | R.Task (R.Task.Succeeded { value_preview = None })
+            | R.Task
+                ( R.Task.Failed _
+                | R.Task.Limited _
+                | R.Task.Cancelled
+                | R.Task.Interrupted )
+            | R.Check _ | R.Fixture _ | R.Live _ -> false)
+         | None -> false
+       in
        let reset =
          Repl.reset_and_wait
            daemon
@@ -2338,18 +2877,175 @@ let%expect_test "hosted REPL Task persists one terminal and joins before reset" 
        in
        printf
          "task_succeeded=%b same_row=%b native_succeeded=%b native_same_row=%b \
-          native_calls=%d cancel_terminal=%b cancel_without_effect=%b \
-          reset_changed_epoch=%b\n"
+          native_calls=%d native_outputs=%d cancel_terminal=%b cancel_without_effect=%b \
+          resumed_same_root=%b reset_changed_epoch=%b\n"
          succeeded
          same_row
          native_succeeded
          native_same_row
          !native_calls
+         !native_outputs
          cancelled_terminal
          cancelled_without_effect
+         resumed_same_root
          (not (Repl.Epoch.equal epoch (Repl.View.epoch reset))));
   [%expect
-    {| task_succeeded=true same_row=true native_succeeded=true native_same_row=true native_calls=2 cancel_terminal=true cancel_without_effect=true reset_changed_epoch=true |}]
+    {| task_succeeded=true same_row=true native_succeeded=true native_same_row=true native_calls=3 native_outputs=2 cancel_terminal=true cancel_without_effect=true resumed_same_root=true reset_changed_epoch=true |}]
+;;
+
+let%expect_test "hosted REPL reset joins an active native Task" =
+  let native_calls = ref 0 in
+  let native_outputs = ref 0 in
+  let entered, signal_entered = Eio.Promise.create () in
+  let release, signal_release = Eio.Promise.create () in
+  with_daemon
+    ~repl:true
+    ~repl_receipt_bytes:(512 * 1024)
+    ~repl_keys_per_instance:8
+    ~timeout_seconds:10.
+    ~prompt_source:
+      "<developer>Developer REPL reset fixture.</developer>\n<tool name=\"read_file\"/>"
+    ~native_sample:true
+    ~authorize_native:(fun _ binding ->
+      [%test_eq: string]
+        (Chat_response.Tool_capability.reference binding).name
+        "read_file";
+      incr native_calls;
+      Eio.Promise.resolve signal_entered ();
+      Eio.Promise.await release;
+      Ok ())
+    ~prepare_output:(function
+      | Openai.Responses.Tool_output.Output.Text value ->
+        incr native_outputs;
+        Ok (`String value)
+      | _ -> Error (P.Error.invalid_request "unexpected native output"))
+    (fun daemon ->
+       let module Repl = S.Daemon.Developer.Repl in
+       let scopes =
+         Set.add
+           (Set.add Agent_server_test_support.scopes Developer_repl)
+           Developer_live_run
+       in
+       let principal =
+         Agent_server_test_support.principal_with_scopes "pri_repl_active_reset" scopes
+       in
+       let actor = Operator_authorization.trusted_local principal in
+       let connection, _transport, expected = open_document daemon actor in
+       let route =
+         S.Daemon.Developer.Request.Route.Document_script
+           { expected; selector = P.Authoring.Analysis.Target.selected_script "s" |> ok }
+       in
+       let original =
+         Repl.Original.create
+           ~route
+           ~target:Chatml.Chatml_compiler_contract.Target.One_off_v1
+           ~prompt:(S.Catalog_identity.prompt_definition "restart.prompt")
+           ~workspace:(S.Catalog_identity.workspace_definition "restart.workspace")
+           ~requested_execution:None
+           ~requested_max_output_bytes:None
+           ~checkpoint:ignore
+         |> ok
+       in
+       let run_id = P.Id.Developer_run.create () in
+       let key value = P.Idempotency_key.of_string value |> checked in
+       let view =
+         Repl.create
+           daemon
+           ~actor
+           ~run_id
+           ~key:(key "active-reset-create")
+           ~original
+           ~fresh_source:
+             (Some
+                (S.Daemon.Developer.Request.Fresh_source.Document_script { connection }))
+         |> ok
+       in
+       let instance = Repl.View.instance view in
+       let epoch = Repl.View.epoch view in
+       let submitted =
+         Repl.submit
+           daemon
+           ~actor
+           ~instance
+           ~epoch
+           ~expected_revision:(Repl.View.revision view)
+           ~key:(key "active-reset-expression")
+           ~source:
+             {|Tool.call("read_file", `Object([{key="file"; value=`String("sample.txt")}]))|}
+         |> ok
+       in
+       let task_original =
+         Repl.Task.Original.create
+           ~reference:(Repl.Submission.task_references submitted |> List.hd_exn)
+           ~requested_execution:None
+           ~requested_max_output_bytes:None
+           ~checkpoint:ignore
+         |> ok
+       in
+       let _initial =
+         Repl.Task.submit
+           daemon
+           ~actor
+           ~key:(key "active-reset-task")
+           ~original:task_original
+           ~fresh_epoch:(Some (instance, epoch))
+         |> ok
+       in
+       Eio.Promise.await entered;
+       let reset =
+         Exn.protect
+           ~finally:(fun () ->
+             if not (Eio.Promise.is_resolved release)
+             then Eio.Promise.resolve signal_release ())
+           ~f:(fun () ->
+             Repl.reset_and_wait
+               daemon
+               ~actor
+               ~instance
+               ~expected_epoch:epoch
+               ~key:(key "active-reset-control")
+             |> ok)
+       in
+       let task =
+         Repl.Task.await_terminal daemon ~actor ~run_id ~key:(key "active-reset-task")
+         |> ok
+       in
+       let after_reset =
+         Repl.submit
+           daemon
+           ~actor
+           ~instance
+           ~epoch:(Repl.View.epoch reset)
+           ~expected_revision:(Repl.View.revision reset)
+           ~key:(key "active-reset-new-expression")
+           ~source:"Task.pure(9)"
+         |> ok
+       in
+       let cancelled =
+         match Repl.Task.receipt task with
+         | Some receipt ->
+           (match R.value receipt with
+            | R.Task R.Task.Cancelled -> true
+            | R.Task
+                ( R.Task.Interrupted
+                | R.Task.Limited _
+                | R.Task.Failed _
+                | R.Task.Succeeded _ )
+            | R.Check _ | R.Fixture _ | R.Live _ -> false)
+         | None -> false
+       in
+       printf
+         "reset_changed_epoch=%b task_cancelled=%b post_reset_finished=%b \
+          native_calls=%d native_outputs=%d\n"
+         (not (Repl.Epoch.equal epoch (Repl.View.epoch reset)))
+         cancelled
+         (match Repl.Submission.status after_reset with
+          | Finished -> true
+          | Need_more _ | Rejected _ | Stopped _ -> false)
+         !native_calls
+         !native_outputs);
+  [%expect
+    {| reset_changed_epoch=true task_cancelled=true post_reset_finished=true native_calls=1 native_outputs=0 |}]
 ;;
 
 let%expect_test

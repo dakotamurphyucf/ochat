@@ -1086,8 +1086,8 @@ let%test_unit
       in
       let developer_request =
         Context_service.Developer.Request.create
-          ~entrypoint:"main"
           ~target:One_off_v1
+          ~entrypoint:"main"
           ~input:`Null
           ~fixtures:None
           ~json_bounds:
@@ -1110,6 +1110,25 @@ let%test_unit
         |> developer_ok
       in
       let captured = Context_service.Developer.Candidate.capture candidate in
+      let source_selection =
+        Context_service.Developer.prepare_authoring_project_selection
+          developer
+          ~actor
+          ~connection
+          ~expected:(P.Authoring.Context.Expected.of_view context)
+          ~checkpoint:Fn.id
+        |> developer_ok
+      in
+      let module Selected = Context_service.Developer.Source_selection in
+      let retained =
+        Selected.Retained.acquire source_selection ~actor ~checkpoint:Fn.id
+        |> developer_ok
+      in
+      let retained_selection = Selected.Retained.selection retained in
+      let retained_current () =
+        Result.is_ok
+          (Selected.Shared.check_current retained_selection ~actor ~checkpoint:Fn.id)
+      in
       let admit () =
         Context_service.Developer.Candidate.final_admission
           candidate
@@ -1125,16 +1144,19 @@ let%test_unit
       check
         "developer capture repeats the current uploaded read grant"
         (Result.is_error (admit ()));
+      check "retained upload repeats the read grant" (not (retained_current ()));
       read_allowed := true;
       selected := selected_stale;
       check
         "developer capture repeats the current uploaded selection"
         (Result.is_error (admit ()));
+      check "retained upload repeats the selected target" (not (retained_current ()));
       selected := selected_current;
       developer_allowed := false;
       check
         "developer target policy remains current after upload capture"
         (Result.is_error (admit ()));
+      check "retained upload repeats the developer policy" (not (retained_current ()));
       developer_allowed := true;
       let prepared =
         Build.prepared (Chatml_authoring_bundle_project.Validated.build validated)
@@ -1170,9 +1192,8 @@ let%test_unit
          | Error Context_service.Error.Stale_context -> true
          | Ok _ | Error _ -> false);
       selected := selected_current;
-      (match Context_service.close_and_wait context_service with
-       | Ok () -> ()
-       | Error _ -> failwith "upload-only authoring close failed");
+      Context_service.close_connection_and_wait context_service connection |> developer_ok;
+      check "retained upload survives editor disconnect" (retained_current ());
       check "successful rebind checked selected target" (!selection_calls > 1);
       check "successful rebind rechecked read grant" (final_read_check > 2);
       rebind_allowed := false;
@@ -1208,16 +1229,27 @@ let%test_unit
         (match Host.rebind host ~actor ~bundle_id ~checkpoint:Fn.id with
          | Error Host.Error.Unauthorized -> true
          | Ok _ | Error _ -> false);
+      read_allowed := true;
+      selected := selected_current;
+      check "retained upload is current before Store expiry" (retained_current ());
+      ignore
+        (Store.prune
+           reopened
+           ~now:(fun () -> Fixture.later 121000)
+           ~protected_uploads:[]
+           ~checkpoint:Fn.id
+         |> upload_ok
+         : int);
+      check
+        "expired Store pin denies the live retained upload"
+        (not (retained_current ()));
+      Selected.Retained.close_and_wait retained;
+      check "released upload selection is denied" (not (retained_current ()));
+      (match Context_service.close_and_wait context_service with
+       | Ok () -> ()
+       | Error _ -> failwith "upload-only authoring close failed");
       Host.close_and_wait host |> host_ok);
     let reopened = open_store large_limits |> upload_ok in
-    ignore
-      (Store.prune
-         reopened
-         ~now:(fun () -> Fixture.later 121000)
-         ~protected_uploads:[]
-         ~checkpoint:Fn.id
-       |> upload_ok
-       : int);
     check
       "expiry tombstones graph and installed files together"
       (match

@@ -46,7 +46,7 @@ let%test_module "bounded Developer change ownership" =
                    ~max_watches_per_connection:2
                    ~max_pending_hints_per_connection:1)
             in
-            let hub = must (Hub.create ~sw ~limits ~wire_limits) in
+            let hub = must (Hub.create ~sw ~limits ~wire_limits ~repl_wire_limits:None) in
             let principal =
               must
                 (P.Principal.create
@@ -188,7 +188,7 @@ let%test_module "bounded Developer change ownership" =
                    ~max_watches_per_connection:1
                    ~max_pending_hints_per_connection:1)
             in
-            let hub = must (Hub.create ~sw ~limits ~wire_limits) in
+            let hub = must (Hub.create ~sw ~limits ~wire_limits ~repl_wire_limits:None) in
             let principal =
               must
                 (P.Principal.create
@@ -292,7 +292,7 @@ let%test_module "bounded Developer change ownership" =
                    ~max_watches_per_connection:2
                    ~max_pending_hints_per_connection:1)
             in
-            let hub = must (Hub.create ~sw ~limits ~wire_limits) in
+            let hub = must (Hub.create ~sw ~limits ~wire_limits ~repl_wire_limits:None) in
             let principal =
               must
                 (P.Principal.create

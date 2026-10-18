@@ -120,6 +120,12 @@ module Instance = struct
   let equal left right = phys_equal left.token right.token
 end
 
+module Change = struct
+  type t =
+    | Submission of Instance.t * P.Idempotency_key.t
+    | Instance_invalidated of Instance.t
+end
+
 module Task_reference = struct
   type t =
     { encoded : string
@@ -128,6 +134,7 @@ module Task_reference = struct
 
   let version = "developer_repl_task_v1"
   let max_bytes = 384
+  let max_encoded_bytes = max_bytes
   let to_string t = t.encoded
   let run_id t = t.run_id
   let equal left right = String.equal left.encoded right.encoded
@@ -207,6 +214,22 @@ module Limits = struct
     ; max_task_origins : int
     ; max_reference_page_bytes : int
     }
+
+  let registry_required_entries t =
+    let ceiling = P.Authoring.Limits.maximum_wire_integer in
+    if t.max_keys_per_instance > (ceiling - 1) / 2
+    then Error (limit "REPL registry capacity exceeds wire integer bound")
+    else (
+      let per_instance = (2 * t.max_keys_per_instance) + 1 in
+      if t.max_instances > ceiling / per_instance
+      then Error (limit "REPL registry capacity exceeds wire integer bound")
+      else Ok (t.max_instances * per_instance))
+  ;;
+
+  let max_source_bytes t = t.max_source_bytes
+  let max_receipt_bytes t = t.max_receipt_bytes
+  let max_reference_page_bytes t = t.max_reference_page_bytes
+  let max_task_origins t = t.max_task_origins
 
   let create
         ~max_instances
@@ -289,6 +312,8 @@ module Configuration = struct
         ; limits
         }
   ;;
+
+  let limits t = t.limits
 end
 
 module View = struct
@@ -335,6 +360,7 @@ module Submission = struct
     ; details : details
     ; completed_statements : int
     ; statement_count : int
+    ; origin_epoch : Epoch.t
     ; revision : Revision.t
     ; summaries : Statement_summary.t list
     ; presentation_bytes : int
@@ -348,6 +374,7 @@ module Submission = struct
   let details t = t.details
   let completed_statements t = t.completed_statements
   let statement_count t = t.statement_count
+  let origin_epoch t = t.origin_epoch
   let revision t = t.revision
   let summaries t = t.summaries
   let statements t = t.statements
@@ -451,6 +478,7 @@ and instance_state =
   ; original_actor : Operator_authorization.t
   ; limits : Limits.t
   ; selection : Capture_host.Source_selection.t
+  ; retained_source : Capture_host.Source_selection.Retained.t
   ; mutable typing : Typing.t
   ; mutable evaluator : Evaluator.t
   ; gate : Eio.Mutex.t
@@ -512,6 +540,7 @@ type t =
   ; clock : Eio.Time.Mono.ty Eio.Time.Mono.t
   ; configuration : Configuration.t
   ; checkpoint : unit -> unit
+  ; on_change : (Change.t -> unit) option
   ; domain : int
   ; gate : Eio.Mutex.t
   ; mutable instances : instance_state list
@@ -617,13 +646,15 @@ let narrowed_execution policy requested =
       }
 ;;
 
-let install ~sw ~capture_host ~traces ~env ~clock ~configuration ~checkpoint =
+let install ~sw ~capture_host ~traces ~env ~clock ~configuration ?on_change ~checkpoint ()
+  =
   { sw
   ; capture_host
   ; env
   ; clock
   ; configuration
   ; checkpoint
+  ; on_change
   ; domain = (Stdlib.Domain.self () :> int)
   ; gate = Eio.Mutex.create ()
   ; instances = []
@@ -750,9 +781,9 @@ let initial_trace_provenance t ~selection ~original ~actor =
     |> Result.ok)
 ;;
 
-let create_state t ~run_id ~original ~fresh_source ~actor =
+let create_state t ~run_id ~original ~fresh_source ~actor ~request_current =
   let open Result.Let_syntax in
-  let%bind selection =
+  let%bind candidate_selection =
     Source.prepare_selection
       t.capture_host
       ~route:original.Original.route
@@ -761,9 +792,25 @@ let create_state t ~run_id ~original ~fresh_source ~actor =
       ~clock:t.clock
       ~checkpoint:t.checkpoint
   in
-  let%bind typing, evaluator = make_epoch_resources t ~selection ~original in
-  let admission =
+  let%bind retained_source =
+    Capture_host.Source_selection.Retained.acquire
+      candidate_selection
+      ~actor
+      ~checkpoint:t.checkpoint
+  in
+  let selection = Capture_host.Source_selection.Retained.selection retained_source in
+  let unpublished_evaluator = ref None in
+  let cleanup () =
+    Eio.Cancel.protect (fun () ->
+      Exn.protect
+        ~f:(fun () -> Option.iter !unpublished_evaluator ~f:discard_unpublished_evaluator)
+        ~finally:(fun () ->
+          Capture_host.Source_selection.Retained.close_and_wait retained_source))
+  in
+  let outcome =
     try
+      let%bind typing, evaluator = make_epoch_resources t ~selection ~original in
+      unpublished_evaluator := Some evaluator;
       let%bind checked =
         Capture_host.Source_selection.Shared.check_current
           selection
@@ -774,57 +821,63 @@ let create_state t ~run_id ~original ~fresh_source ~actor =
       let%bind () =
         Capture_host.Source_selection.Shared.check_now selection ~checked ~actor
       in
-      check_host t
+      let%bind () =
+        if request_current ()
+        then Ok ()
+        else Error (stale "developer REPL request lease expired")
+      in
+      let%bind () = check_host t in
+      let id = { Instance.token = ref () } in
+      let epoch = { Epoch.token = ref (); serial = 0 } in
+      let revision = { Revision.token = ref (); serial = 0 } in
+      let trace_provenance = initial_trace_provenance t ~selection ~original ~actor in
+      let state =
+        { id
+        ; instance_nonce = P.Id.Transaction.create ()
+        ; host_state = t.owner_state
+        ; run_id
+        ; original
+        ; original_actor = actor
+        ; limits = t.configuration.limits
+        ; selection
+        ; retained_source
+        ; typing
+        ; evaluator
+        ; gate = Eio.Mutex.create ()
+        ; epoch
+        ; revision
+        ; submission_count = 0
+        ; pending_source = ""
+        ; keys = []
+        ; task_keys = []
+        ; reset_keys = []
+        ; close_keys = []
+        ; task_origins = []
+        ; task_ordinal = 0
+        ; retained_bytes = 0
+        ; retained_type_detail_bytes = 0
+        ; active = None
+        ; closed = false
+        ; borrowed = 0
+        ; control = None
+        ; trace_provenance
+        }
+      in
+      unpublished_evaluator := None;
+      Ok state
     with
     | exn ->
       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-      reraise_after_cleanup exn backtrace ~cleanup:(fun () ->
-        discard_unpublished_evaluator evaluator)
+      reraise_after_cleanup exn backtrace ~cleanup
   in
-  let%bind () =
-    match admission with
-    | Ok () -> Ok ()
-    | Error _ as error ->
-      discard_unpublished_evaluator evaluator;
-      error
-  in
-  let id = { Instance.token = ref () } in
-  let epoch = { Epoch.token = ref (); serial = 0 } in
-  let revision = { Revision.token = ref (); serial = 0 } in
-  let trace_provenance = initial_trace_provenance t ~selection ~original ~actor in
-  Ok
-    { id
-    ; instance_nonce = P.Id.Transaction.create ()
-    ; host_state = t.owner_state
-    ; run_id
-    ; original
-    ; original_actor = actor
-    ; limits = t.configuration.limits
-    ; selection
-    ; typing
-    ; evaluator
-    ; gate = Eio.Mutex.create ()
-    ; epoch
-    ; revision
-    ; submission_count = 0
-    ; pending_source = ""
-    ; keys = []
-    ; task_keys = []
-    ; reset_keys = []
-    ; close_keys = []
-    ; task_origins = []
-    ; task_ordinal = 0
-    ; retained_bytes = 0
-    ; retained_type_detail_bytes = 0
-    ; active = None
-    ; closed = false
-    ; borrowed = 0
-    ; control = None
-    ; trace_provenance
-    }
+  match outcome with
+  | Ok _ as success -> success
+  | Error _ as error ->
+    cleanup ();
+    error
 ;;
 
-let create t ~actor ~run_id ~key ~original ~fresh_source =
+let create_resolving t ~actor ~run_id ~key ~original ~resolve_fresh ~request_current =
   let open Result.Let_syntax in
   let%bind () = check_host t in
   let%bind () = check_method ~original:actor ~current:actor in
@@ -842,22 +895,47 @@ let create t ~actor ~run_id ~key ~original ~fresh_source =
           |> Result.of_option ~error:(stale "developer REPL instance expired")
         in
         let%bind () = check_instance t state ~actor in
-        let%map () = check_selection state ~actor ~checkpoint:t.checkpoint in
+        let%bind () = check_selection state ~actor ~checkpoint:t.checkpoint in
+        let%map () =
+          if request_current ()
+          then Ok ()
+          else Error (stale "developer REPL request lease expired")
+        in
         prior_view)
       else Error (busy "developer REPL create key changed payload")
     | None ->
       if List.length t.instances >= t.configuration.limits.max_instances
       then Error (limit "developer REPL instance limit reached")
       else (
-        match fresh_source with
-        | None -> Error (invalid "fresh developer REPL source required")
-        | Some fresh_source ->
-          let%bind state = create_state t ~run_id ~original ~fresh_source ~actor in
-          let created = view state in
-          t.instances <- state :: t.instances;
-          t.create_keys
-          <- (run_id, key, Original.fingerprint original, created) :: t.create_keys;
-          Ok created))
+        let%bind fresh_source = resolve_fresh () in
+        let%bind () =
+          if request_current ()
+          then Ok ()
+          else Error (stale "developer REPL request lease expired")
+        in
+        let%bind state =
+          create_state t ~run_id ~original ~fresh_source ~actor ~request_current
+        in
+        let created = view state in
+        t.instances <- state :: t.instances;
+        t.create_keys
+        <- (run_id, key, Original.fingerprint original, created) :: t.create_keys;
+        Ok created))
+;;
+
+let create t ~actor ~run_id ~key ~original ~fresh_source =
+  create_resolving
+    t
+    ~actor
+    ~run_id
+    ~key
+    ~original
+    ~resolve_fresh:(fun () ->
+      Option.value_map
+        fresh_source
+        ~default:(Error (invalid "fresh developer REPL source required"))
+        ~f:Result.return)
+    ~request_current:(fun () -> true)
 ;;
 
 let bounded_text max_bytes text =
@@ -1122,6 +1200,7 @@ let compact_submission
       (if status_limited || presentation_limited then Output_limited else Available)
   ; completed_statements
   ; statement_count = List.length statements
+  ; origin_epoch = state.epoch
   ; revision
   ; summaries
   ; presentation_bytes
@@ -1480,6 +1559,7 @@ let launch_submission t state entry ~actor ~source =
              ; details = Available
              ; completed_statements = 0
              ; statement_count = 0
+             ; origin_epoch = state.epoch
              ; revision = state.revision
              ; summaries = []
              ; presentation_bytes = 0
@@ -1520,6 +1600,8 @@ let launch_submission t state entry ~actor ~source =
              | Ok terminal -> Developer_trace_retention.finish traces trace_entry terminal))
        with
        | _ -> ());
+      Option.iter t.on_change ~f:(fun notify ->
+        notify (Change.Submission (state.id, entry.key)));
       Eio.Promise.resolve finish ())
   in
   match Eio.Fiber.fork ~sw:t.sw worker with
@@ -1537,11 +1619,28 @@ let launch_submission t state entry ~actor ~source =
             ~message:"developer REPL callback could not start"
             ~retryable:false
             ()));
+    Option.iter t.on_change ~f:(fun notify ->
+      notify (Change.Submission (state.id, entry.key)));
     Eio.Promise.resolve finish ();
     Stdlib.Printexc.raise_with_backtrace exn backtrace
 ;;
 
-let submit t ~actor ~instance ~epoch ~expected_revision ~key ~source =
+let check_request_current request_current =
+  if request_current ()
+  then Ok ()
+  else Error (stale "developer REPL request lease expired before admission")
+;;
+
+let submit_with_request
+      t
+      ~actor
+      ~instance
+      ~epoch
+      ~expected_revision
+      ~key
+      ~source
+      ~request_current
+  =
   let open Result.Let_syntax in
   let%bind () = check_host t in
   let%bind state =
@@ -1633,6 +1732,7 @@ let submit t ~actor ~instance ~epoch ~expected_revision ~key ~source =
         | None when state.submission_count >= state.limits.max_submissions_per_epoch ->
           Error (limit "developer REPL submission limit reached")
         | None ->
+          let%bind () = check_request_current request_current in
           Eio.Switch.check t.sw;
           let entry =
             { key
@@ -1656,6 +1756,18 @@ let submit t ~actor ~instance ~epoch ~expected_revision ~key ~source =
           (match active.private_failure with
            | Some (exn, backtrace) -> Stdlib.Printexc.raise_with_backtrace exn backtrace
            | None -> key_result entry)))
+;;
+
+let submit t ~actor ~instance ~epoch ~expected_revision ~key ~source =
+  submit_with_request
+    t
+    ~actor
+    ~instance
+    ~epoch
+    ~expected_revision
+    ~key
+    ~source
+    ~request_current:(fun () -> true)
 ;;
 
 let observe t ~actor ~instance ~key =
@@ -1833,7 +1945,7 @@ let task_references_page t ~actor ~instance ~epoch ~key ~after ~limit:requested_
             }))
 ;;
 
-let cancel_and_wait t ~actor ~instance ~key =
+let cancel_and_wait_with_request t ~actor ~instance ~key ~request_current =
   let open Result.Let_syntax in
   let%bind () = check_host t in
   let%bind state =
@@ -1846,15 +1958,23 @@ let cancel_and_wait t ~actor ~instance ~key =
     List.find state.keys ~f:(fun entry -> P.Idempotency_key.equal entry.key key)
     |> Result.of_option ~error:(stale "developer REPL submission key not found")
   in
-  (match state.active with
-   | Some active when P.Idempotency_key.equal active.key key ->
-     Eio.Cancel.protect (fun () ->
-       request_cancel active;
-       Eio.Promise.await active.finished)
-   | Some _ | None -> ());
+  let%bind () =
+    match state.active with
+    | Some active when P.Idempotency_key.equal active.key key ->
+      Eio.Cancel.protect (fun () ->
+        let%bind () = check_request_current request_current in
+        request_cancel active;
+        Eio.Promise.await active.finished;
+        Ok ())
+    | Some _ | None -> Ok ()
+  in
   let%bind () = check_instance t state ~actor in
   let%bind () = check_selection state ~actor ~checkpoint:t.checkpoint in
   key_result entry
+;;
+
+let cancel_and_wait t ~actor ~instance ~key =
+  cancel_and_wait_with_request t ~actor ~instance ~key ~request_current:(fun () -> true)
 ;;
 
 type borrowed =
@@ -2223,12 +2343,15 @@ module Task_action = struct
       let outcome =
         try
           `Returned
-            (Eio.Cancel.sub (fun cancel ->
-               active.cancel <- Some cancel;
-               if active.cancel_requested
-               then Eio.Cancel.cancel cancel Cancelled_statement;
-               Eio.Fiber.with_binding owner_key active (fun () ->
-                 f active ~publish_initial)))
+            (Exn.protect
+               ~finally:(fun () -> active.cancel <- None)
+               ~f:(fun () ->
+                 Eio.Cancel.sub (fun cancel ->
+                   active.cancel <- Some cancel;
+                   if active.cancel_requested
+                   then Eio.Cancel.cancel cancel Cancelled_statement;
+                   Eio.Fiber.with_binding owner_key active (fun () ->
+                     f active ~publish_initial))))
         with
         | exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
       in
@@ -2278,6 +2401,12 @@ module Task_action = struct
 end
 
 type owner = t
+
+let registry_required_entries t =
+  if not (on_domain t)
+  then Error (stale "developer REPL owner used from another domain")
+  else Limits.registry_required_entries t.configuration.limits
+;;
 
 let instance_run_id t instance =
   if not (on_domain t)
@@ -2459,7 +2588,7 @@ let join_active state =
       Eio.Promise.await active.finished)
 ;;
 
-let reset_and_wait t ~actor ~instance ~expected_epoch ~key =
+let reset_and_wait_with_request t ~actor ~instance ~expected_epoch ~key ~request_current =
   let open Result.Let_syntax in
   let%bind () = check_host t in
   let%bind state =
@@ -2479,6 +2608,7 @@ let reset_and_wait t ~actor ~instance ~expected_epoch ~key =
     else if key_count state >= state.limits.max_keys_per_instance - 1
     then Error (limit "developer REPL key ledger full")
     else (
+      let%bind () = check_request_current request_current in
       let%bind control = begin_control state ~kind:Reset_action ~key in
       match control with
       | Control_follower control ->
@@ -2594,6 +2724,10 @@ let reset_and_wait t ~actor ~instance ~expected_epoch ~key =
              control
              ~outcome:(Reset_done result)
              ~retry_cleanup:(!old_close_started && Result.is_error result);
+           if Result.is_ok result
+           then
+             Option.iter t.on_change ~f:(fun notify ->
+               notify (Change.Instance_invalidated state.id));
            result
          | exception exn ->
            let backtrace = Stdlib.Printexc.get_raw_backtrace () in
@@ -2605,7 +2739,17 @@ let reset_and_wait t ~actor ~instance ~expected_epoch ~key =
            Stdlib.Printexc.raise_with_backtrace exn backtrace))
 ;;
 
-let close_and_wait t ~actor ~instance ~key =
+let reset_and_wait t ~actor ~instance ~expected_epoch ~key =
+  reset_and_wait_with_request
+    t
+    ~actor
+    ~instance
+    ~expected_epoch
+    ~key
+    ~request_current:(fun () -> true)
+;;
+
+let close_and_wait_with_request t ~actor ~instance ~key ~request_current =
   let open Result.Let_syntax in
   let%bind () = check_host t in
   let%bind state =
@@ -2622,6 +2766,7 @@ let close_and_wait t ~actor ~instance ~key =
   then Error (limit "developer REPL key ledger full")
   else (
     let%bind () = authorize_retirement t ~actor ~instance in
+    let%bind () = check_request_current request_current in
     let%bind control = begin_control state ~kind:Close_action ~key in
     match control with
     | Control_follower control ->
@@ -2658,6 +2803,8 @@ let close_and_wait t ~actor ~instance ~key =
                   Evaluator.close state.evaluator
                   |> Result.map_error ~f:(fun _ -> busy "developer REPL evaluator busy")
                 in
+                Capture_host.Source_selection.Retained.close_and_wait
+                  state.retained_source;
                 state.closed <- true;
                 state.pending_source <- "";
                 state.trace_provenance <- None;
@@ -2673,6 +2820,10 @@ let close_and_wait t ~actor ~instance ~key =
            control
            ~outcome:(Close_done result)
            ~retry_cleanup:(!evaluator_close_started && Result.is_error result);
+         if Result.is_ok result
+         then
+           Option.iter t.on_change ~f:(fun notify ->
+             notify (Change.Instance_invalidated state.id));
          result
        | exception exn ->
          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
@@ -2682,6 +2833,10 @@ let close_and_wait t ~actor ~instance ~key =
            ~outcome:(Control_raised (exn, backtrace))
            ~retry_cleanup:!evaluator_close_started;
          Stdlib.Printexc.raise_with_backtrace exn backtrace))
+;;
+
+let close_and_wait t ~actor ~instance ~key =
+  close_and_wait_with_request t ~actor ~instance ~key ~request_current:(fun () -> true)
 ;;
 
 let shutdown_and_wait t =
@@ -2709,7 +2864,10 @@ let shutdown_and_wait t =
             else
               Evaluator.close state.evaluator
               |> Result.map_error ~f:(fun _ -> busy "developer REPL evaluator busy")
-              |> Result.map ~f:(fun () -> state.closed <- true)))
+              |> Result.map ~f:(fun () ->
+                Capture_host.Source_selection.Retained.close_and_wait
+                  state.retained_source;
+                state.closed <- true)))
       in
       t.owner_state := Owner_closed;
       Ok ()))

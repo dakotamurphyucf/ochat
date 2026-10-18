@@ -25,6 +25,7 @@ val create
   :  sw:Eio.Switch.t
   -> limits:Limits.t
   -> wire_limits:P.Developer_common.Limits.t
+  -> repl_wire_limits:P.Developer_repl_wire.Limits.t option
   -> (t, P.Error.t) result
 
 (** Nonyielding same-domain post-transition enqueue. Both command and
@@ -75,6 +76,57 @@ val watch
   -> (unit, P.Error.t) result
 
 val unwatch
+  :  t
+  -> connection:Connection_context.t
+  -> run_id:P.Id.Developer_run.t
+  -> key:P.Idempotency_key.t
+  -> (unit, P.Error.t) result
+
+(** Same physical connection entry, queue, dirty slots, pump and join as
+    command watches. All three families count against the one per-connection
+    bound. Each watch carries its own selected feature lease and disclosure
+    callback; the current command-only `developer.events` predicate cannot
+    authorize a REPL or Task hint. Epoch and Lifecycle only enqueue bounded
+    invalidation after a committed transition, never publish under their
+    mutation gates. *)
+val enqueue_repl_submission
+  :  t
+  -> instance:Developer_repl_epoch.Instance.t
+  -> key:P.Idempotency_key.t
+  -> unit
+
+val invalidate_repl_instance : t -> instance:Developer_repl_epoch.Instance.t -> unit
+val enqueue_task : t -> run_id:P.Id.Developer_run.t -> key:P.Idempotency_key.t -> unit
+
+val watch_repl
+  :  t
+  -> connection:Connection_context.t
+  -> actor:Operator_authorization.t
+  -> instance:Developer_repl_epoch.Instance.t
+  -> wire_instance:P.Developer_repl_wire.Wire_id.Instance.t
+  -> key:P.Idempotency_key.t
+  -> authorize_key:(unit -> (unit, P.Error.t) result)
+  -> authorize_change:(P.Developer_repl_wire.Change.t -> (unit, P.Error.t) result)
+  -> (unit, P.Error.t) result
+
+val watch_task
+  :  t
+  -> connection:Connection_context.t
+  -> actor:Operator_authorization.t
+  -> run_id:P.Id.Developer_run.t
+  -> key:P.Idempotency_key.t
+  -> authorize_key:(unit -> (unit, P.Error.t) result)
+  -> authorize_change:(P.Developer_repl_wire.Change.t -> (unit, P.Error.t) result)
+  -> (unit, P.Error.t) result
+
+val unwatch_repl
+  :  t
+  -> connection:Connection_context.t
+  -> wire_instance:P.Developer_repl_wire.Wire_id.Instance.t
+  -> key:P.Idempotency_key.t
+  -> (unit, P.Error.t) result
+
+val unwatch_task
   :  t
   -> connection:Connection_context.t
   -> run_id:P.Id.Developer_run.t
