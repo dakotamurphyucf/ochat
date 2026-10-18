@@ -72,6 +72,32 @@ val prepare
     and selected Root passed to [bind]. This getter grants no dispatch. *)
 val registrations : t -> Chat_response.Agent_runtime.native_registration list
 
+(** Prepare ordinary Agent registrations for a physically entered Worker's
+    restored issuing revision. Require this runtime still Bound to the exact
+    [root] and installed [agent_runtime], in Bound_runner mode, and require
+    [source] issued by this runtime's physically retained Source_binding. Use the same
+    state-reading Context and selected-target callbacks as foreground Agent
+    functions; no independent callback pair or raw binding/revision is
+    accepted. Repeat Bound/binding/Claim currentness after yielding preparation. The
+    lower preparer derives both from [source] and retains that exact source in
+    its sealed result. This does not expose a new execution
+    path, Root grant or native registration by itself. *)
+val prepare_claimed
+  :  t
+  -> root:Developer_root_owner.run
+  -> agent_runtime:Chat_response.Agent_runtime.t
+  -> source:Agent_session.Captured_agent_runner.Source_binding.Claimed_source.t
+  -> script_preparation:Agent_session.Runtime_script_preparation.t
+  -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> approval_provider:Shell_runtime.Approval_broker.provider
+  -> response_dir:Eio.Fs.dir_ty Eio.Path.t
+  -> env:Eio_unix.Stdenv.base
+  -> sw:Eio.Switch.t
+  -> checkpoint:(unit -> unit)
+  -> ( Agent_session.Captured_agent_runner.Deferred_developer.Claimed.t
+       , Agent_protocol.Error.t )
+       result
+
 (** One-time physical bind after the native runtime and selected Root exist, but
     before the host exposes the executor. Require [models] issued by [root] and
     the actual [agent_runtime] to retain every registration's same function and

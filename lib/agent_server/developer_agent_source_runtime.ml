@@ -54,6 +54,7 @@ type state =
 type t =
   { domain_id : int
   ; deferred : Agent_session.Captured_agent_runner.Deferred_developer.t
+  ; source_binding : Agent_session.Captured_agent_runner.Source_binding.t
   ; limits : Limits.t
   ; selected_target : Selected_target.mode
   ; state : state ref
@@ -152,6 +153,7 @@ let prepare
   |> Result.map ~f:(fun deferred ->
     { domain_id = (Stdlib.Domain.self () :> int)
     ; deferred
+    ; source_binding = source
     ; limits
     ; selected_target
     ; state
@@ -235,6 +237,59 @@ let bound_to t ~root ~agent_runtime =
       Ok ()
     | Unbound | Revoked | Bound _ ->
       invalid "deferred Agent source is not bound to this Root/runtime")
+;;
+
+let prepare_claimed
+      t
+      ~root
+      ~agent_runtime
+      ~source
+      ~script_preparation
+      ~manifest_authorizer
+      ~approval_provider
+      ~response_dir
+      ~env
+      ~sw
+      ~checkpoint
+  =
+  let open Result.Let_syntax in
+  let check () =
+    let%bind () = bound_to t ~root ~agent_runtime in
+    let%bind () =
+      if
+        Agent_session.Captured_agent_runner.Source_binding.Claimed_source.issued_by
+          source
+          t.source_binding
+      then Ok ()
+      else invalid "claimed Agent source belongs to another bound source runtime"
+    in
+    Agent_session.Captured_agent_runner.Source_binding.Claimed_source.check_now source
+  in
+  let%bind () = check () in
+  let%bind () =
+    match t.selected_target, !(t.state) with
+    | Selected_target.Bound_runner, Bound { run_selected_target = Some _; _ } -> Ok ()
+    | Literal_only, (Unbound | Bound _ | Revoked)
+    | Bound_runner, (Unbound | Bound _ | Revoked) ->
+      invalid "claimed Agent selected child runner is unavailable"
+  in
+  let%bind claimed =
+    Agent_session.Captured_agent_runner.Deferred_developer.prepare_claimed
+      source
+      ~script_preparation
+      ~manifest_authorizer
+      ~approval_provider
+      ~response_dir
+      ~env
+      ~sw
+      ~max_agents:t.limits.max_agents
+      ~max_work_steps:t.limits.max_work_steps
+      ~checkpoint
+      ~with_context:(with_context t.state)
+      ~run_selected_target:(with_selected_target t.state)
+  in
+  let%map () = check () in
+  claimed
 ;;
 
 let revoke t =

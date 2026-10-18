@@ -16,6 +16,9 @@ let developer_configuration
       ?(max_invocations_per_run = 5)
       ?(max_selected_per_commit = 2)
       ?(max_job_payload_bytes = 4096)
+      ?(max_runs = 6)
+      ?max_store_document_fields
+      ?max_store_document_nodes
       ?(claimed_issuer = false)
       ?(on_native = fun () -> ())
       ?max_active_agent_calls
@@ -75,7 +78,7 @@ let developer_configuration
   in
   let store =
     Developer_root_owner_test_suite.Root_owner_tests.store_limits
-      ~max_runs:6
+      ~max_runs
       ~max_job_payload_bytes
       ~max_jobs_per_run:8
       ~max_invocations_per_run
@@ -83,6 +86,8 @@ let developer_configuration
       ~max_inference_bytes_per_run:65536
       ~max_document_bytes:(1024 * 1024)
       ~max_work_steps:100_000
+      ?max_document_fields:max_store_document_fields
+      ?max_document_nodes:max_store_document_nodes
       ()
   in
   let roots =
@@ -2847,7 +2852,16 @@ let%test_unit "selected ordinary Agent Tool runs through its registered child so
       (P.Developer_agent_artifact.root_relative_path target
        |> Source.Portable_path.to_string)
       "grand.chatmd";
-    Chat_response.Background_request.Issuer_source.runtime_policy issuer
+    assert (
+      not
+        (P.Id.Prompt_revision.equal
+           (P.Developer_agent_artifact.revision_id
+              (Chat_response.Background_request.Issuer_source.artifact issuer))
+           (P.Developer_agent_artifact.revision_id target)));
+    ( P.Developer_job.id job
+    , Chat_response.Background_request.Issuer_source.runtime_policy issuer
+    , Chat_response.Background_request.Issuer_source.artifact issuer
+    , target )
   in
   RH.with_fixture
     ~model_requests:requests
@@ -2985,6 +2999,9 @@ let run ctx input =
            ; developer =
                Some
                  (developer_configuration
+                    ~max_runs:7
+                    ~max_store_document_fields:4096
+                    ~max_store_document_nodes:8192
                     ~observe_native_attempt:
                       (record_grand_revision default_grand_revisions)
                     target)
@@ -3020,6 +3037,17 @@ let run ctx input =
              |> Result.map_error ~f:(fun error ->
                Sexp.to_string_hum [%sexp (error : P.Protocol_error.t)])
              |> Result.ok_or_failwith)
+         in
+         let artifacts daemon =
+           let module Artifacts = Agent_store.Prompt_artifact_store in
+           Artifacts.open_existing
+             ~env
+             ~root:
+               (Agent_store.Data_root.prompt_artifacts_path
+                  (S.Daemon.store daemon |> Agent_store.Session_store.data_root))
+           |> function
+           | Ok store -> store
+           | Error error -> raise_s [%sexp (error : Agent_store.Store_error.t)]
          in
          let daemon =
            S.Daemon.start
@@ -3118,7 +3146,7 @@ let run ctx input =
                     | Cancelled | Interrupted _ ->
                       failwith "selected ordinary Agent Tool Job stopped"
                     | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
-                      Eio.Fiber.yield ();
+                      Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
                       await ()
                   in
                   await ())
@@ -3241,25 +3269,151 @@ let run ctx input =
               [%test_eq: string option]
                 !foreign_grand_denial
                 (Some "saved Agent source callback is no longer selected");
-              default_issuer_runtime
-              := Some (queued_grand ~parent_job:captured_job (jobs daemon captured_run));
-              resume_clock ();
+              let queued_grand_job, issuer_runtime, _, _ =
+                queued_grand ~parent_job:captured_job (jobs daemon captured_run)
+              in
+              default_issuer_runtime := Some issuer_runtime;
+              let previous_bodies = List.length !bodies in
               Eio.Path.save
                 ~create:(`Or_truncate 0o600)
                 Eio.Path.(Eio.Stdenv.fs env / child)
-                {|<developer>OCH421 parent marker</developer>
-<tool name="grand" agent="grand.chatmd" local source_mode="file"/>|};
+                "<developer>OCH422 edited issuer marker</developer>";
               Eio.Path.save
                 ~create:(`Or_truncate 0o600)
                 Eio.Path.(Eio.Stdenv.fs env / grand)
-                "<developer>OCH421 grand marker</developer>";
-              before_tool_call := ignore;
-              stage_queued := false;
+                "<developer>OCH422 edited target marker</developer>";
+              resume_clock ();
+              await_job captured_run queued_grand_job;
+              let claimed_bodies =
+                List.take !bodies (List.length !bodies - previous_bodies)
+              in
+              assert (
+                List.exists claimed_bodies ~f:(fun body ->
+                  String.is_substring body ~substring:"OCH421 Captured original marker"));
+              assert (
+                not
+                  (List.exists claimed_bodies ~f:(fun body ->
+                     String.is_substring body ~substring:"OCH422 edited issuer marker"
+                     || String.is_substring body ~substring:"OCH422 edited target marker")));
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / child)
+                queued_child;
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / grand)
+                "<developer>OCH422 target-corrupt original marker</developer>";
+              (before_tool_call
+               := fun () -> pause_at_scheduler_wait daemon clock pause_clock);
               sent_tool_call := false;
-              hold_grand_response := true;
-              let cancelling_run, cancelling_job =
+              stage_queued := true;
+              let corrupt_run, corrupt_parent =
+                submit_job "ordinary-agent-tool-target-corrupt"
+              in
+              await_job corrupt_run corrupt_parent;
+              let corrupt_job, _, issuer_artifact, target_artifact =
+                queued_grand ~parent_job:corrupt_parent (jobs daemon corrupt_run)
+              in
+              let module Artifacts = Agent_store.Prompt_artifact_store in
+              let store = artifacts daemon in
+              let issuer_revision =
+                P.Developer_agent_artifact.revision_id issuer_artifact
+              in
+              let target_revision =
+                P.Developer_agent_artifact.revision_id target_artifact
+              in
+              let artifact_ok = function
+                | Ok value -> value
+                | Error error -> raise_s [%sexp (error : Agent_store.Store_error.t)]
+              in
+              let issuer_installed =
+                Artifacts.load store issuer_revision |> artifact_ok
+              in
+              let target_installed =
+                Artifacts.load store target_revision |> artifact_ok
+              in
+              [%test_eq: string] issuer_installed.root_relative_path "child.chatmd";
+              [%test_eq: string] target_installed.root_relative_path "grand.chatmd";
+              assert (
+                not
+                  (String.equal
+                     (Eio.Path.native_exn
+                        (Artifacts.materialized_tree store issuer_revision))
+                     (Eio.Path.native_exn
+                        (Artifacts.materialized_tree store target_revision))));
+              let target_root =
+                Eio.Path.(
+                  Artifacts.materialized_tree store target_revision
+                  / target_installed.root_relative_path)
+              in
+              Eio.Path.unlink target_root;
+              Eio.Path.save
+                ~create:(`Exclusive 0o600)
+                target_root
+                "<developer>OCH422 corrupt target tree</developer>";
+              ignore
+                (Artifacts.load store issuer_revision |> artifact_ok
+                 : Artifacts.Artifact.t);
+              assert (Result.is_error (Artifacts.load store target_revision));
+              let provider_before_corrupt_claim = !requests in
+              let native_before_corrupt_claim = List.length !default_grand_revisions in
+              resume_clock ();
+              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 25. (fun () ->
+                let rec await_failed () =
+                  let state = job_state corrupt_run corrupt_job () in
+                  match state.status with
+                  | Failed error ->
+                    [%test_eq: P.Error.code] error.code P.Error.Invalid_state;
+                    (match state.result with
+                     | Some
+                         (P.Developer_job.Result_value.Inline (P.Completion.Failed error))
+                       ->
+                       [%test_eq: string] error.code "invocation.handler_failed";
+                       [%test_eq: string] error.message "Tool execution failed.";
+                       assert (not error.retryable)
+                     | _ ->
+                       failwith "corrupt distinct Agent target lost its failure receipt");
+                    [%test_eq: int] state.attempt 1
+                  | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
+                    Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                    await_failed ()
+                  | Succeeded | Cancelled | Interrupted _ ->
+                    failwith "corrupt distinct Agent target did not fail at Claim"
+                in
+                await_failed ());
+              [%test_eq: int] !requests provider_before_corrupt_claim;
+              (* Native authorization observes the selected grand binding before
+                 loading its separate saved Agent target. The corrupt target
+                 cannot reach its provider or publish a successful result. *)
+              [%test_eq: int]
+                (List.length !default_grand_revisions)
+                (native_before_corrupt_claim + 1);
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / child)
+                queued_child;
+              Eio.Path.save
+                ~create:(`Or_truncate 0o600)
+                Eio.Path.(Eio.Stdenv.fs env / grand)
+                "<developer>OCH421 grand marker OCH422 held target</developer>";
+              (before_tool_call
+               := fun () -> pause_at_scheduler_wait daemon clock pause_clock);
+              stage_queued := true;
+              sent_tool_call := false;
+              let cancelling_run, cancelling_parent =
                 submit_job "ordinary-agent-tool-shutdown"
               in
+              await_job cancelling_run cancelling_parent;
+              let cancelling_job, _, _, held_target =
+                queued_grand ~parent_job:cancelling_parent (jobs daemon cancelling_run)
+              in
+              assert (
+                not
+                  (P.Id.Prompt_revision.equal
+                     target_revision
+                     (P.Developer_agent_artifact.revision_id held_target)));
+              hold_grand_response := true;
+              resume_clock ();
               Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
                 Eio.Promise.await grand_entered);
               let interrupted_grand = Option.value_exn !held_grand in
@@ -3296,7 +3450,7 @@ let run ctx input =
               let provider_calls = !requests in
               denied_retained_grand
                 interrupted_grand
-                ~expected:"selected developer native invocation scope is not active";
+                ~expected:"deferred Agent Root has been revoked";
               [%test_eq: int] !requests provider_calls;
               hold_grand_response := false;
               release_requested := true;
@@ -3346,6 +3500,9 @@ let run ctx input =
              developer =
                Some
                  (developer_configuration
+                    ~max_runs:7
+                    ~max_store_document_fields:4096
+                    ~max_store_document_nodes:8192
                     ~max_active_agent_calls:1
                     ~observe_native_attempt:
                       (record_grand_revision limited_grand_revisions)
@@ -3516,7 +3673,7 @@ let run ctx input =
                     await ()
                 in
                 await ());
-              let limited_issuer_runtime =
+              let _queued_grand_job, limited_issuer_runtime, _, _ =
                 queued_grand ~parent_job:queued_parent (jobs limited_daemon queued_run)
               in
               assert (

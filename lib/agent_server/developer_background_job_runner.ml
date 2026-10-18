@@ -83,8 +83,7 @@ let classify t request =
   match B.issuer_source request with
   | Some _ ->
     (match B.target_kind request, B.agent_artifact request with
-     | B.Target_kind.Tool, Some _ -> Availability.Agent_artifact_installer_unavailable
-     | Tool, None | Script, None ->
+     | B.Target_kind.Tool, (Some _ | None) | Script, None ->
        if Option.is_some (Jobs.queued_issuer t.jobs)
        then Availability.Runnable
        else Issuer_source_installer_unavailable
@@ -249,9 +248,13 @@ let execute_with_budget t active claim job request deadline effective control ~i
       | None -> run_native ()
       | Some _ ->
         let* agent_runtime =
-          t.agent_runtime
-          |> Result.of_option
-               ~error:(P.Error.invalid_request "saved Agent.run runtime is not installed")
+          match issuer with
+          | Some issuer -> Ok (Claimed.native_runtime issuer)
+          | None ->
+            t.agent_runtime
+            |> Result.of_option
+                 ~error:
+                   (P.Error.invalid_request "saved Agent.run runtime is not installed")
         in
         let* parent = O.job_parent t.root active in
         Agent_session.Captured_agent_runner.Claimed_developer.with_saved_artifact

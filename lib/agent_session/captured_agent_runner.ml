@@ -1544,6 +1544,8 @@ module Source_binding = struct
     ; source_lease : Prompt_source_lease.t
     }
 
+  type binding = t
+
   let create
         ~source
         ~tool_contract
@@ -1629,6 +1631,7 @@ module Source_binding = struct
     let request t = t.request
     let issuer_source t = t.issuer_source
     let same_parent t parent = Developer_job_scope.Parent.same_claim t.parent parent
+    let issued_by t binding = phys_equal t.binding binding
 
     let check_now t =
       if
@@ -2429,6 +2432,30 @@ module Deferred_developer = struct
     ; port : Port.t
     }
 
+  module Claimed = struct
+    type t =
+      { source : Source_binding.Claimed_source.t
+      ; prepared : Chat_response.Agent_runtime.native_registration list
+      ; switch : Eio.Switch.t
+      ; domain_id : int
+      ; live : bool Atomic.t
+      }
+
+    let registrations t ~source =
+      let open Result.Let_syntax in
+      if
+        (not (Int.equal t.domain_id (Stdlib.Domain.self () :> int)))
+        || (not (Atomic.get t.live))
+        || not (phys_equal t.source source)
+      then
+        Error (Agent_protocol.Error.invalid_request "claimed Agent preparation expired")
+      else (
+        Eio.Switch.check t.switch;
+        let%map () = Source_binding.Claimed_source.check_now source in
+        t.prepared)
+    ;;
+  end
+
   let registrations t = t.registrations
 
   let check_limits ~max_agents ~max_work_steps =
@@ -2617,6 +2644,68 @@ module Deferred_developer = struct
       ~strict_child_tools:false
       ~context_for:(fun ~port:_ ~declaration:_ ~reference:_ ~expected_implementation:_ ->
         with_context)
+  ;;
+
+  let prepare_claimed
+        (claimed : Source_binding.Claimed_source.t)
+        ~script_preparation
+        ~manifest_authorizer
+        ~approval_provider
+        ~response_dir
+        ~env
+        ~sw
+        ~max_agents
+        ~max_work_steps
+        ~checkpoint
+        ~with_context
+        ~run_selected_target
+    =
+    let open Result.Let_syntax in
+    let%bind () = check_limits ~max_agents ~max_work_steps in
+    let%bind () = Source_binding.Claimed_source.check_now claimed in
+    let source = claimed.Source_binding.Claimed_source.binding in
+    let revision = Source_binding.Claimed_source.revision claimed in
+    let%bind port =
+      Source_binding.bind_developer_literal
+        ~run_selected_target
+        source
+        ~script_preparation
+        ~manifest_authorizer
+        ~approval_provider
+        ~response_dir
+        ~env
+        ~revision
+        ~sw
+    in
+    let%bind () = Source_binding.Claimed_source.check_now claimed in
+    let%bind prepared =
+      prepare_registered
+        source
+        ~script_preparation
+        ~manifest_authorizer
+        ~approval_provider
+        ~response_dir
+        ~revision
+        ~port
+        ~max_agents
+        ~max_work_steps
+        ~checkpoint
+        ~strict_child_tools:true
+        ~context_for:
+          (fun
+            ~port:_ ~declaration:_ ~reference:_ ~expected_implementation:_ ->
+          with_context)
+    in
+    let%map () = Source_binding.Claimed_source.check_now claimed in
+    let live = Atomic.make true in
+    Eio.Switch.on_release sw (fun () -> Atomic.set live false);
+    Claimed.
+      { source = claimed
+      ; prepared = prepared.registrations
+      ; switch = sw
+      ; domain_id = (Stdlib.Domain.self () :> int)
+      ; live
+      }
   ;;
 
   let prepare_selected_child

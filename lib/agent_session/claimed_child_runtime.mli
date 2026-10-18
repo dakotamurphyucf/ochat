@@ -19,10 +19,21 @@ val runtime_policy_identity
 
 (** Compile and restore the exact saved Headless program bundle and child
     declarations under the installed tool contract and current manifest
-    policy. Use the same bounded native-only preparation as selected children,
-    with no current File read or inherited Root registrations. The given host,
+    policy. Use the same bounded selected-child preparation, including exact
+    claimed ordinary Agent registrations, with no current File read or
+    inherited Root registrations. The given host,
     authorizer and approval provider come from the retained Live package;
     their Root/actor/pair affinity is checked by its enclosing Claim service.
+    [prepare_agent_registrations] borrows one bound Host source runtime and
+    prepares parser-owned ordinary Agent registrations from THIS opaque Claim
+    source inside the joined switch, before extension initialization. Require
+    the sealed result to match [source]. Preflight admits ordinary Agent Tools
+    only when actual matching registrations exist; Persistent/Inherited remain
+    denied. Empty registrations do not prove Agent Tool support. Require
+    positive [max_native_bindings], enforce that ceiling on the selected
+    runtime, and compare each prepared function, source preparer and revision
+    with the installed runtime before exposing the Claim scope. The selected
+    traversal is bounded and checkpointed; equal names are insufficient.
     [check_current] is the Live owner's yielding Root/actor/source check;
     [check_local_now] is its nonyielding exact Live switch/pair/actor check
     after the last yield. Neither callback supplies a registry. Before lending
@@ -40,6 +51,13 @@ val with_prepared
   -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
   -> approval_provider:Shell_runtime.Approval_broker.provider
   -> approval_store:Shell_access.Approval.store
+  -> max_native_bindings:int
+  -> prepare_agent_registrations:
+       (source:Captured_agent_runner.Source_binding.Claimed_source.t
+        -> sw:Eio.Switch.t
+        -> ( Captured_agent_runner.Deferred_developer.Claimed.t
+             , Agent_protocol.Error.t )
+             result)
   -> checkpoint:(unit -> unit)
   -> check_current:(unit -> (unit, Agent_protocol.Error.t) result)
   -> check_local_now:(unit -> (unit, Agent_protocol.Error.t) result)

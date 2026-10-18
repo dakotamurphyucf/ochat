@@ -854,18 +854,10 @@ let with_claimed_issuer live ~root ~active ~parent ~request ~runtime_policy ~che
            Error (invalid "claimed child execution policy differs from the Live source")
        in
        let revision = Source_binding.Claimed_source.revision source in
-       let%bind parsed =
-         Revision.parser_context revision
+       let%bind source_runtime =
+         live.agent_source_runtime
          |> Result.of_option
-              ~error:(invalid "claimed child has no retained parser context")
-       in
-       let%bind _needs_dynamic_source =
-         Agent_session.Developer_child_preflight.classify_selected
-           ~ordinary_agent_tools:Denied
-           ~revision
-           ~parsed
-           ~input:[]
-           ~checkpoint
+              ~error:(invalid "claimed child has no bound Agent source runtime")
        in
        let%bind () = check_full () in
        let%bind () =
@@ -912,19 +904,31 @@ let with_claimed_issuer live ~root ~active ~parent ~request ~runtime_policy ~che
          ~manifest_authorizer:authorizer
          ~approval_provider:live.approval_provider
          ~approval_store:(approval_store ())
+         ~max_native_bindings:live.host.max_native_bindings
+         ~prepare_agent_registrations:(fun ~source ~sw ->
+           let%bind () = check_full () in
+           let%bind prepared =
+             Developer_agent_source_runtime.prepare_claimed
+               source_runtime
+               ~root
+               ~agent_runtime:live.runtime
+               ~source
+               ~script_preparation
+               ~manifest_authorizer:authorizer
+               ~approval_provider:live.approval_provider
+               ~response_dir:live.response_dir
+               ~env:live.host.env
+               ~sw
+               ~checkpoint
+           in
+           let%map () = check_full () in
+           prepared)
          ~checkpoint
          ~check_current:check_full
          ~check_local_now
          (fun claimed ->
             let%bind () = check_full () in
             let%bind () = Claimed.check_now claimed in
-            let%bind () =
-              if
-                Capabilities.length (Claimed.selected claimed)
-                <= live.host.max_native_bindings
-              then Ok ()
-              else Error (invalid "developer child native binding limit exceeded")
-            in
             f claimed))
 ;;
 
