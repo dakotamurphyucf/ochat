@@ -286,9 +286,11 @@ let%expect_test "Unix Developer bootstrap fits its exact physical line boundary"
           in
           let module Bound = Agent_client.Transport.Developer_response_bound in
           let line_length =
-            Int.max
-              (Bound.max_result_bytes Bootstrap + success_framing)
-              (Bound.max_error_bytes + error_framing)
+            (* The physical NDJSON line includes its newline terminator. *)
+            1
+            + Int.max
+                (Bound.max_result_bytes Bootstrap + success_framing)
+                (Bound.max_error_bytes + error_framing)
           in
           let initialized = T.initialization () in
           let first_done, first_done_resolver = Eio.Promise.create () in
