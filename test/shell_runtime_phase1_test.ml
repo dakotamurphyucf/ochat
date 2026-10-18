@@ -392,7 +392,7 @@ let%expect_test "approval cleanup cannot remove a reused pending ID" =
     |}]
 ;;
 
-let%expect_test "nested shell approval check requires and expires with its real parent" =
+let%expect_test "nested shell checks retain real services or guard an unbound caller" =
   Eio_main.run
   @@ fun _env ->
   let module Context = Shell_runtime.Call_context in
@@ -404,9 +404,89 @@ let%expect_test "nested shell approval check requires and expires with its real 
     if !rotate_services then label := "after-refresh";
     Ok (fun () -> Ok ())
   in
+  let unbound =
+    Context.with_narrowed_check ~refresh (fun () ->
+      match Context.current () with
+      | Ok None -> true
+      | Ok (Some _) | Error _ -> false)
+  in
   printf
-    "unbound=%b\n"
-    (Result.is_error (Context.with_narrowed_check ~refresh (fun () -> ())));
+    "unbound-check-only=%b\n"
+    (match unbound with
+     | Ok true -> true
+     | Ok false | Error _ -> false);
+  let check_parent = ref true in
+  let inherited =
+    Context.with_narrowed_check
+      ~refresh:(fun () ->
+        Ok (fun () -> if !check_parent then Ok () else Error "selected parent revoked"))
+      (fun () ->
+         Context.with_narrowed_check ~refresh (fun () ->
+           check_parent := false;
+           Result.is_error (Context.current ())))
+  in
+  printf
+    "check-only-parent-revoked=%b\n"
+    (match inherited with
+     | Ok (Ok true) -> true
+     | Ok (Ok false) | Ok (Error _) | Error _ -> false);
+  let expired_during_refresh =
+    Eio.Switch.run
+    @@ fun sw ->
+    let refreshing, signal_refreshing = Eio.Promise.create () in
+    let released, release = Eio.Promise.create () in
+    let block = ref false in
+    let refresh () =
+      if !block
+      then (
+        Eio.Promise.resolve signal_refreshing ();
+        Eio.Promise.await released);
+      Ok (fun () -> Ok ())
+    in
+    let escaped =
+      Context.with_narrowed_check ~refresh (fun () ->
+        block := true;
+        let escaped = Eio.Fiber.fork_promise ~sw Context.current in
+        Eio.Promise.await refreshing;
+        escaped)
+      |> Result.ok_or_failwith
+    in
+    Eio.Promise.resolve release ();
+    match Eio.Promise.await_exn escaped with
+    | Error "shell invocation services have expired" -> true
+    | Ok _ | Error _ -> false
+  in
+  printf "check-only-expired-during-refresh=%b\n" expired_during_refresh;
+  let expired_during_service_check =
+    Eio.Switch.run
+    @@ fun sw ->
+    let checking, signal_checking = Eio.Promise.create () in
+    let released, release = Eio.Promise.create () in
+    let escaped =
+      Context.with_services
+        (fun () ->
+           Ok
+             Context.
+               { session_id = "expiring-service"
+               ; approval_store = A.create_store ()
+               ; approval_provider = B.Auto_deny
+               ; check =
+                   (fun () ->
+                     Eio.Promise.resolve signal_checking ();
+                     Eio.Promise.await released;
+                     Ok ())
+               })
+        (fun () ->
+           let escaped = Eio.Fiber.fork_promise ~sw Context.current in
+           Eio.Promise.await checking;
+           escaped)
+    in
+    Eio.Promise.resolve release ();
+    match Eio.Promise.await_exn escaped with
+    | Error "shell invocation services have expired" -> true
+    | Ok _ | Error _ -> false
+  in
+  printf "services-expired-during-check=%b\n" expired_during_service_check;
   let retained = ref None in
   Context.with_services
     (fun () ->
@@ -441,7 +521,10 @@ let%expect_test "nested shell approval check requires and expires with its real 
        printf "revoked-before-effect=%b\n" (Result.is_error denied && not !invoked));
   [%expect
     {|
-    unbound=true
+    unbound-check-only=true
+    check-only-parent-revoked=true
+    check-only-expired-during-refresh=true
+    services-expired-during-check=true
     selected-parent=after-refresh
     entered=true
     expired=true
@@ -593,6 +676,26 @@ let%expect_test "registered runtime redacts output and expires delegated callers
     | Ok result -> result
     | Error error -> failwith (Shell_access.Executor.error_to_string error)
   in
+  let selected_revoked = ref false in
+  let no_approval_effect_denied =
+    Shell_runtime.Call_context.with_narrowed_check
+      ~refresh:(fun () ->
+        Ok
+          (fun () -> if !selected_revoked then Error "selected caller revoked" else Ok ()))
+      (fun () ->
+         let config =
+           Shell_runtime.Runtime.executor_config_for_call runtime |> Result.ok_or_failwith
+         in
+         selected_revoked := true;
+         match
+           Shell_access.Executor.run
+             config
+             { request; input = Empty; rationale = None; origin = Host "selected" }
+         with
+         | Error (Denied "selected caller revoked") -> true
+         | Ok _ | Error _ -> false)
+    |> Result.ok_or_failwith
+  in
   let released, release = Eio.Promise.create () in
   let escaped, retained =
     Shell_runtime.Call_context.with_services
@@ -628,16 +731,18 @@ let%expect_test "registered runtime redacts output and expires delegated callers
    | _ -> failwith "escaped fiber reused registration-owner approvals");
   let audit = Eio.Path.load audit_path in
   printf
-    "runtimes=%d tools=%d backend=%s output=%saudit-finished=%b audit-secret=%b\n"
+    "runtimes=%d tools=%d backend=%s output=%saudit-finished=%b audit-secret=%b \
+     selected-denied=%b\n"
     (List.length (Shell_runtime.Registry.runtimes registry))
     (List.length (Shell_runtime.Registry.tools registry))
     result.backend
     result.stdout
     (String.is_substring audit ~substring:"\"event\":\"finished\"")
-    (String.is_substring audit ~substring:"super-private-value");
+    (String.is_substring audit ~substring:"super-private-value")
+    no_approval_effect_denied;
   [%expect
     {|
     runtimes=1 tools=1 backend=direct-unsafe output=[REDACTED]
-    audit-finished=true audit-secret=false
+    audit-finished=true audit-secret=false selected-denied=true
     |}]
 ;;
