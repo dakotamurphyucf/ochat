@@ -142,6 +142,7 @@
  (libraries
   core
   eio
+  eio.mock
   eio_main
   chatmd
   ochat.shell_access

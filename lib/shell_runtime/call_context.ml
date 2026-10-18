@@ -43,6 +43,41 @@ let current () =
        Some { services with check })
 ;;
 
+let with_narrowed_check ~refresh f =
+  let open Result.Let_syntax in
+  match Option.join (Eio.Fiber.get key) with
+  | None -> Error "shell selected caller has no active parent services"
+  | Some parent ->
+    let parent_live () =
+      if Atomic.get parent.active
+      then Ok ()
+      else Error "shell parent invocation services have expired"
+    in
+    let checked_services () =
+      let%bind () = parent_live () in
+      let%bind parent_services = parent.services () in
+      let%bind () = parent_services.check () in
+      let%bind child_check_now = refresh () in
+      let%bind () = parent_live () in
+      let%bind final_services = parent.services () in
+      let%bind () = final_services.check () in
+      let%bind () = child_check_now () in
+      let%map () = parent_live () in
+      final_services
+    in
+    let check () = Result.map (checked_services ()) ~f:ignore in
+    let services () =
+      let%map parent_services = checked_services () in
+      { parent_services with check }
+    in
+    let prepare_executor config =
+      let%bind () = parent_live () in
+      parent.prepare_executor config
+    in
+    let%map () = check () in
+    with_services ~prepare_executor services f
+;;
+
 let prepare_executor config =
   let open Result.Let_syntax in
   let%bind context = current () in
