@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import AxeBuilder from '@axe-core/playwright';
+import { analyzeFramelessPage } from './frameless-accessibility';
 
 test('hosting tutorials share local setup and lead to configuration and transport contracts', async ({
   page,
@@ -82,9 +82,9 @@ test.describe('dense protocol accessibility', () => {
     test(`dense protocol references reflow, scroll, and pass accessibility in ${theme}`, async ({
       page,
     }) => {
-      // The reference grew from ~35,000 to ~57,000 elements. Full-page audits
-      // that complete take 138–144 seconds; Firefox/WebKit still exceed 150
-      // seconds sequentially. Keep both themes/all rules with a finite 300s bound.
+      // Keep all rules and failure/manual-review detail. This frameless page
+      // can use direct reporting to avoid constructing every passing-node
+      // selector; the helper rejects frames rather than omitting their audit.
       test.setTimeout(300_000);
       await page.setViewportSize({ width: 320, height: 800 });
       await page.emulateMedia({ colorScheme: theme });
@@ -105,9 +105,7 @@ test.describe('dense protocol accessibility', () => {
       await expect
         .poll(() => block.evaluate((element) => element.scrollLeft))
         .toBeGreaterThan(before);
-      const result = await new AxeBuilder({ page })
-        .withTags(['wcag2a', 'wcag2aa', 'wcag21aa'])
-        .analyze();
+      const result = await analyzeFramelessPage(page);
       expect(result.violations).toEqual([]);
     });
   }
