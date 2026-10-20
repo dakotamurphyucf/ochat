@@ -137,6 +137,8 @@ let check_project_static_view
       ~(origin : P.Authoring.Context.origin)
       ~original_actor
       ~root
+      ~admitted_contract
+      ~verified
       ~view
       ~actor
       ~checkpoint
@@ -153,13 +155,35 @@ let check_project_static_view
        , t.selection_policy.project_contract actor ~root ~project ~selection )
      with
      | Some original, Some current ->
-       let%bind original = selected_contract_fingerprint original ~checkpoint in
-       let%bind current = selected_contract_fingerprint current ~checkpoint in
-       if
-         Captured.Digest.equal original (Ledger.View.compiler_contract view)
-         && Captured.Digest.equal current original
-       then Ok ()
-       else Error Error.Stale_context
+       let ledger_fingerprint = Ledger.View.compiler_contract view in
+       (match verified with
+        | Some proof
+          when phys_equal proof.contract admitted_contract
+               && phys_equal original admitted_contract
+               && phys_equal current admitted_contract
+               && Captured.Digest.equal proof.fingerprint ledger_fingerprint -> Ok proof
+        | Some _ | None ->
+          let%bind original_fingerprint =
+            selected_contract_fingerprint original ~checkpoint
+          in
+          let%bind current_fingerprint =
+            if phys_equal current original
+            then Ok original_fingerprint
+            else selected_contract_fingerprint current ~checkpoint
+          in
+          let%bind admitted_fingerprint =
+            if phys_equal admitted_contract original
+            then Ok original_fingerprint
+            else if phys_equal admitted_contract current
+            then Ok current_fingerprint
+            else selected_contract_fingerprint admitted_contract ~checkpoint
+          in
+          if
+            Captured.Digest.equal original_fingerprint ledger_fingerprint
+            && Captured.Digest.equal current_fingerprint original_fingerprint
+            && Captured.Digest.equal admitted_fingerprint ledger_fingerprint
+          then Ok { contract = admitted_contract; fingerprint = admitted_fingerprint }
+          else Error Error.Stale_context)
      | Some _, None | None, Some _ | None, None -> Error Error.Selection_unavailable)
   | Uploaded_project _ | Host_document _ | Supplied_document _ ->
     Error Error.Stale_context
@@ -170,6 +194,8 @@ let check_context_owner ?ledger t context ~actor ~checkpoint =
   let%bind () = check_actor_context context.original_actor actor in
   match context.owner with
   | Host_project owner ->
+    let context_view = context.view in
+    let verified_before = context.verified_project_contract in
     let%bind () =
       Sources.Context.check_current owner ~actor |> Result.map_error ~f:source_host_error
     in
@@ -180,14 +206,27 @@ let check_context_owner ?ledger t context ~actor ~checkpoint =
       Ledger.find ledger ~identity:context.identity
       |> Result.of_option ~error:Error.Stale_context
     in
-    check_project_static_view
-      t
-      ~origin:context.origin
-      ~original_actor:context.original_actor
-      ~root:(Sources.Context.root owner)
-      ~view
-      ~actor
-      ~checkpoint
+    let%bind proof =
+      check_project_static_view
+        t
+        ~origin:context.origin
+        ~original_actor:context.original_actor
+        ~root:(Sources.Context.root owner)
+        ~admitted_contract:(Sources.Context.contract owner)
+        ~verified:verified_before
+        ~view
+        ~actor
+        ~checkpoint
+    in
+    if
+      (not (phys_equal context.view context_view))
+      || not (Option.equal phys_equal verified_before context.verified_project_contract)
+    then Error Error.Stale_context
+    else (
+      (match verified_before with
+       | Some _ -> ()
+       | None -> context.verified_project_contract <- Some proof);
+      Ok ())
   | Host_document owner ->
     let%bind () =
       Sources.Document_context.check_current owner ~actor
@@ -333,6 +372,8 @@ module Retained_selection = struct
         { source : Sources.Retained_owner.t
         ; root : Sources.Root.t
         ; origin : P.Authoring.Context.origin
+        ; admitted_contract : Chatml.Chatml_compiler_contract.t
+        ; verified : verified_project_contract option
         ; view : Ledger.View.t
         }
     | Document of
@@ -375,7 +416,7 @@ module Retained_selection = struct
     let%bind () = if t.core.closed || t.closed then Error Error.Closed else Ok () in
     let%bind () = check_actor_context t.original_actor actor in
     match t.snapshot with
-    | Project { source; root; origin; view } ->
+    | Project { source; root; origin; admitted_contract; verified; view } ->
       let%bind () =
         Sources.Retained_owner.check_current source ~actor
         |> Result.map_error ~f:source_host_error
@@ -385,9 +426,12 @@ module Retained_selection = struct
         ~origin
         ~original_actor:t.original_actor
         ~root
+        ~admitted_contract
+        ~verified
         ~view
         ~actor
         ~checkpoint
+      |> Result.map ~f:(fun _ -> ())
     | Document { source; origin; view } ->
       let%bind () =
         Sources.Retained_owner.check_current source ~actor
@@ -456,7 +500,13 @@ module Retained_selection = struct
           |> Result.map_error ~f:source_host_error
         in
         Project
-          { source; root = Sources.Context.root owner; origin = context.origin; view }
+          { source
+          ; root = Sources.Context.root owner
+          ; origin = context.origin
+          ; admitted_contract = Sources.Context.contract owner
+          ; verified = context.verified_project_contract
+          ; view
+          }
       | Host_document owner ->
         let%bind view =
           Ledger.find_document ledger ~identity:context.identity

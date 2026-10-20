@@ -15,6 +15,15 @@ type context_owner =
   | Uploaded_project of Upload.Context_capture.t
   | Supplied_document of Operator_authorization.t
 
+(** A Host Project contract that passed the full bounded compiler-contract
+    fingerprint comparison against its initial captured Ledger view. This is
+    immutable comparison evidence for one physical source Context; it grants
+    neither a root read nor current actor or selection authority. *)
+type verified_project_contract =
+  { contract : Chatml.Chatml_compiler_contract.t
+  ; fingerprint : Chatml_source.Digest.t
+  }
+
 type context_entry =
   { id : P.Id.Authoring_context.t
   ; identity : Ledger.Identity.t
@@ -22,6 +31,7 @@ type context_entry =
   ; origin : P.Authoring.Context.origin
   ; owner : context_owner
   ; mutable view : P.Authoring.Context.t
+  ; mutable verified_project_contract : verified_project_contract option
   }
 
 type connection_entry =
