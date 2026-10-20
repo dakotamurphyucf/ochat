@@ -558,7 +558,12 @@ let observe t lookup =
 ;;
 
 let cancel_submission t lookup =
-  read t (R.Request.Cancel_submission lookup) ~decode:(function
+  Connection.request_repl_control
+    t.connection
+    ~initialized_as:t.initialization
+    ~limits:(R.Capabilities.limits t.capabilities)
+    (Connection.Repl_control.Cancel_submission lookup)
+  |> Result.bind ~f:(function
     | R.Response.Cancel_submission value -> Ok value
     | _ -> Error (incompatible "REPL Cancel response changed method"))
 ;;
@@ -588,7 +593,12 @@ let task_await_terminal t lookup =
 ;;
 
 let task_cancel_and_wait t lookup =
-  read t (R.Request.Task_cancel_and_wait lookup) ~decode:(function
+  Connection.request_repl_control
+    t.connection
+    ~initialized_as:t.initialization
+    ~limits:(R.Capabilities.limits t.capabilities)
+    (Connection.Repl_control.Task_cancel_and_wait lookup)
+  |> Result.bind ~f:(function
     | R.Response.Task_cancel_and_wait value -> Ok value
     | _ -> Error (incompatible "REPL Task Cancel response changed method"))
 ;;

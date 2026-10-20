@@ -264,3 +264,42 @@ let dispatch_envelope t ?actor ~context = function
          ~retryable:false
          ())
 ;;
+
+type dispatch_schedule =
+  | Immediate
+  | Repl_wait
+  | Repl_cancel
+
+let dispatch_schedule t = function
+  | Agent_protocol.Envelope.Request request ->
+    (match t.developer with
+     | None -> Immediate
+     | Some installed ->
+       let module R = Agent_protocol.Developer_repl_wire in
+       (match Developer_endpoint.repl_limits installed.endpoint with
+        | Error _ -> Immediate
+        | Ok limits ->
+          let open R.Request in
+          (match
+             R.Request.of_method_and_params
+               ~limits
+               ~method_:request.method_
+               ~params:request.params
+           with
+           | Ok (Cancel_submission _ | Task_cancel_and_wait _) -> Repl_cancel
+           | Ok (Submit _ | Task_await_terminal _) -> Repl_wait
+           | Ok
+               ( Capabilities
+               | Create _
+               | Observe _
+               | Inspect_type _
+               | Task_references_page _
+               | Task_submit _
+               | Task_observe _
+               | Reset_and_wait _
+               | Close_and_wait _
+               | Watch _
+               | Unwatch _ )
+           | Error _ -> Immediate)))
+  | Notification _ | Response _ -> Immediate
+;;

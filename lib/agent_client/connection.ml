@@ -143,9 +143,10 @@ let same_admission first second =
 type t =
   { transport : Transport.t
   ; mutex : Eio.Mutex.t
+  ; control_mutex : Eio.Mutex.t
   ; notification_mutex : Eio.Mutex.t
   ; closed : bool Atomic.t
-  ; mutable initialization : P.Initialize.Response.t option
+  ; initialization : P.Initialize.Response.t option Atomic.t
   ; mutable developer_capabilities :
       (P.Initialize.Response.t * P.Developer_common.Capabilities.t) option
   ; mutable repl_capabilities :
@@ -158,9 +159,10 @@ type t =
 let create transport =
   { transport
   ; mutex = Eio.Mutex.create ()
+  ; control_mutex = Eio.Mutex.create ()
   ; notification_mutex = Eio.Mutex.create ()
   ; closed = Atomic.make false
-  ; initialization = None
+  ; initialization = Atomic.make None
   ; developer_capabilities = None
   ; repl_capabilities = None
   ; notification_owner = None
@@ -251,143 +253,149 @@ let with_request_lock t f =
   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
-let request t command =
-  with_request_lock t (fun () ->
-    let open Result.Let_syntax in
-    if Atomic.get t.closed
-    then Error (closed_error ())
-    else if
-      has_command_receipt command
-      && List.exists t.pending ~f:(fun pending -> same_admission pending.command command)
-    then
-      Error
-        (P.Error.create
-           Interrupted
-           ~message:
-             "an equivalent earlier command remains unresolved; reconcile its receipt \
-              before another admission"
-           ~retryable:false
-           ())
-    else (
-      let%bind intent =
-        if not (has_command_receipt command)
-        then Ok None
-        else (
-          let params = P.Command.params command in
-          let%bind () = P.Command_receipt.Request.validate_original_params params in
-          let%bind encoded = P.Json_codec.canonical_string params in
-          let byte_count = String.length encoded in
-          if not (pending_capacity t.pending byte_count)
-          then
-            Error
-              (P.Error.create
-                 Resource_limit
-                 ~message:
-                   "unresolved command retention budget exhausted; reconcile before \
-                    submitting"
-                 ~retryable:false
-                 ())
-          else
-            Ok
-              (Some
-                 { command
-                 ; byte_count
-                 ; identity = t.initialization
-                 ; recovery_identity = Pending_identity.of_original command params
-                 }))
-      in
-      Option.iter intent ~f:(fun item -> t.pending <- item :: t.pending);
-      let retire () =
-        Option.iter intent ~f:(fun item ->
-          t.pending
-          <- List.filter t.pending ~f:(fun pending -> not (phys_equal pending item)))
-      in
-      let result =
-        match Transport.request t.transport command with
-        | Error _ as result -> result
-        | Ok value ->
-          let dependency_affinity =
-            match command, value with
-            | ( P.Command.Prompt_dependencies_update request
-              , P.Public.Result.Non_history public ) ->
-              (match P.Public.Result.Non_history.value public with
-               | P.Method_result.Prompt_dependencies_update result ->
-                 P.Prompt_dependency_selection.Update_result.matches_request
-                   result
-                   request
-               | _ -> false)
-            | _, _ -> true
-          in
-          if not dependency_affinity
-          then
-            Error
-              (P.Error.create
-                 Interrupted
-                 ~message:"dependency update response does not match its original request"
-                 ~retryable:false
-                 ())
-          else if
-            not
-              (String.equal
-                 (P.Command.method_name command)
-                 (P.Public.Result.method_name value))
-          then
-            Error
-              (P.Error.create
-                 Interrupted
-                 ~message:"successful response method does not match the admitted command"
-                 ~retryable:false
-                 ())
-          else
-            P.Public.Result.validate value
-            |> Result.map_error ~f:(fun failure ->
-              P.Error.create
-                Interrupted
-                ~message:
-                  ("successful response failed validation: " ^ failure.P.Error.message)
-                ~retryable:false
-                ())
-            |> Result.map ~f:(fun () -> value)
-      in
-      (match result with
-       | Ok _ -> retire ()
-       | Error failure -> if not (unknown_outcome failure.P.Error.code) then retire ());
-      match command, result with
-      | P.Command.Protocol_initialize request, Ok (P.Public.Result.Non_history value) ->
-        (match P.Public.Result.Non_history.value value with
-         | Protocol_initialize response ->
-           let%bind () = P.Public.Result.validate (P.Public.Result.Non_history value) in
-           let%bind response = admit_initialization request response in
-           let%bind () =
-             match t.initialization with
-             | None -> Ok ()
-             | Some previous
-               when P.Id.Server.equal previous.server_id response.server_id
-                    && P.Id.Principal.equal previous.principal.id response.principal.id ->
-               Ok ()
-             | Some _ ->
-               Error
-                 (P.Error.create
-                    Permission_denied
-                    ~message:"transport initialization changed host or principal identity"
-                    ~retryable:false
-                    ())
-           in
-           t.initialization <- Some response;
-           t.developer_capabilities <- None;
-           t.repl_capabilities <- None;
-           result
-         | _ -> result)
-      | _, _ -> result))
+let request_locked t command =
+  let open Result.Let_syntax in
+  if Atomic.get t.closed
+  then Error (closed_error ())
+  else if
+    has_command_receipt command
+    && List.exists t.pending ~f:(fun pending -> same_admission pending.command command)
+  then
+    Error
+      (P.Error.create
+         Interrupted
+         ~message:
+           "an equivalent earlier command remains unresolved; reconcile its receipt \
+            before another admission"
+         ~retryable:false
+         ())
+  else (
+    let%bind intent =
+      if not (has_command_receipt command)
+      then Ok None
+      else (
+        let params = P.Command.params command in
+        let%bind () = P.Command_receipt.Request.validate_original_params params in
+        let%bind encoded = P.Json_codec.canonical_string params in
+        let byte_count = String.length encoded in
+        if not (pending_capacity t.pending byte_count)
+        then
+          Error
+            (P.Error.create
+               Resource_limit
+               ~message:
+                 "unresolved command retention budget exhausted; reconcile before \
+                  submitting"
+               ~retryable:false
+               ())
+        else
+          Ok
+            (Some
+               { command
+               ; byte_count
+               ; identity = Atomic.get t.initialization
+               ; recovery_identity = Pending_identity.of_original command params
+               }))
+    in
+    Option.iter intent ~f:(fun item -> t.pending <- item :: t.pending);
+    let retire () =
+      Option.iter intent ~f:(fun item ->
+        t.pending
+        <- List.filter t.pending ~f:(fun pending -> not (phys_equal pending item)))
+    in
+    let result =
+      match Transport.request t.transport command with
+      | Error _ as result -> result
+      | Ok value ->
+        let dependency_affinity =
+          match command, value with
+          | ( P.Command.Prompt_dependencies_update request
+            , P.Public.Result.Non_history public ) ->
+            (match P.Public.Result.Non_history.value public with
+             | P.Method_result.Prompt_dependencies_update result ->
+               P.Prompt_dependency_selection.Update_result.matches_request result request
+             | _ -> false)
+          | _, _ -> true
+        in
+        if not dependency_affinity
+        then
+          Error
+            (P.Error.create
+               Interrupted
+               ~message:"dependency update response does not match its original request"
+               ~retryable:false
+               ())
+        else if
+          not
+            (String.equal
+               (P.Command.method_name command)
+               (P.Public.Result.method_name value))
+        then
+          Error
+            (P.Error.create
+               Interrupted
+               ~message:"successful response method does not match the admitted command"
+               ~retryable:false
+               ())
+        else
+          P.Public.Result.validate value
+          |> Result.map_error ~f:(fun failure ->
+            P.Error.create
+              Interrupted
+              ~message:
+                ("successful response failed validation: " ^ failure.P.Error.message)
+              ~retryable:false
+              ())
+          |> Result.map ~f:(fun () -> value)
+    in
+    (match result with
+     | Ok _ -> retire ()
+     | Error failure -> if not (unknown_outcome failure.P.Error.code) then retire ());
+    match command, result with
+    | P.Command.Protocol_initialize request, Ok (P.Public.Result.Non_history value) ->
+      (match P.Public.Result.Non_history.value value with
+       | Protocol_initialize response ->
+         let%bind () = P.Public.Result.validate (P.Public.Result.Non_history value) in
+         let%bind response = admit_initialization request response in
+         let%bind () =
+           match Atomic.get t.initialization with
+           | None -> Ok ()
+           | Some previous
+             when P.Id.Server.equal previous.server_id response.server_id
+                  && P.Id.Principal.equal previous.principal.id response.principal.id ->
+             Ok ()
+           | Some _ ->
+             Error
+               (P.Error.create
+                  Permission_denied
+                  ~message:"transport initialization changed host or principal identity"
+                  ~retryable:false
+                  ())
+         in
+         Atomic.set t.initialization (Some response);
+         t.developer_capabilities <- None;
+         t.repl_capabilities <- None;
+         result
+       | _ -> result)
+    | _, _ -> result)
 ;;
 
-let initialization t =
-  if Atomic.get t.closed
-  then None
-  else
-    Eio.Mutex.use_ro t.mutex (fun () ->
-      if Atomic.get t.closed then None else t.initialization)
+let request t command =
+  with_request_lock t (fun () ->
+    match command with
+    | P.Command.Protocol_initialize _ ->
+      Eio.Mutex.use_rw ~protect:false t.control_mutex (fun () ->
+        match request_locked t command with
+        | value -> Ok value
+        | exception (Eio.Cancel.Cancelled _ as exn) ->
+          Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+      |> (function
+       | Ok value -> value
+       | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace)
+    | _ -> request_locked t command)
 ;;
+
+let initialization t = if Atomic.get t.closed then None else Atomic.get t.initialization
 
 let developer_error message =
   P.Error.create Incompatible_protocol ~message ~retryable:false ()
@@ -401,7 +409,7 @@ let request_developer_transport t ~bound request =
 ;;
 
 let developer_initialization t =
-  match t.initialization with
+  match Atomic.get t.initialization with
   | Some initialization when not (Atomic.get t.closed) -> Ok initialization
   | Some _ | None -> Error (developer_error "Developer requires initialization")
 ;;
@@ -437,7 +445,7 @@ let developer_capabilities t =
         Atomic.get t.closed
         || not
              (Option.value_map
-                t.initialization
+                (Atomic.get t.initialization)
                 ~default:false
                 ~f:(phys_equal initialization))
       then Error (developer_error "Developer initialization changed")
@@ -523,7 +531,7 @@ let request_developer t ~limits request =
           Atomic.get t.closed
           || (not
                 (Option.value_map
-                   t.initialization
+                   (Atomic.get t.initialization)
                    ~default:false
                    ~f:(phys_equal initialization)))
           || not (developer_view_matches initialization request response)
@@ -569,7 +577,7 @@ let repl_capabilities t =
         Atomic.get t.closed
         || not
              (Option.value_map
-                t.initialization
+                (Atomic.get t.initialization)
                 ~default:false
                 ~f:(phys_equal initialization))
       then Error (developer_error "REPL initialization changed")
@@ -696,12 +704,95 @@ let request_repl t ~limits request =
           Atomic.get t.closed
           || (not
                 (Option.value_map
-                   t.initialization
+                   (Atomic.get t.initialization)
                    ~default:false
                    ~f:(phys_equal initialization)))
           || not (repl_response_matches initialization request response)
         then Error (developer_error "REPL response changed request identity")
         else Ok response))
+;;
+
+module Repl_control = struct
+  type t =
+    | Cancel_submission of P.Developer_repl_wire.Lookup.t
+    | Task_cancel_and_wait of P.Developer_common.Lookup.t
+end
+
+let request_repl_control t ~initialized_as ~limits control =
+  let module R = P.Developer_repl_wire in
+  let request =
+    match control with
+    | Repl_control.Cancel_submission lookup -> R.Request.Cancel_submission lookup
+    | Task_cancel_and_wait lookup -> R.Request.Task_cancel_and_wait lookup
+  in
+  if not (Eio.Mutex.try_lock t.control_mutex)
+  then
+    Error
+      (P.Error.create
+         Resource_limit
+         ~message:"REPL cancellation control lane is busy"
+         ~retryable:true
+         ())
+  else
+    Exn.protect
+      ~finally:(fun () -> Eio.Mutex.unlock t.control_mutex)
+      ~f:(fun () ->
+        let open Result.Let_syntax in
+        let current () =
+          if
+            Atomic.get t.closed
+            || not
+                 (Option.value_map
+                    (Atomic.get t.initialization)
+                    ~default:false
+                    ~f:(phys_equal initialized_as))
+          then Error (developer_error "REPL initialization changed")
+          else Ok ()
+        in
+        let%bind () = current () in
+        let%bind () = require_developer_feature initialized_as R.Features.repl in
+        let%bind capabilities =
+          match t.repl_capabilities with
+          | Some (source, capabilities) when phys_equal source initialized_as ->
+            Ok capabilities
+          | None | Some _ -> Error (developer_error "REPL capabilities are absent")
+        in
+        if not (phys_equal limits (R.Capabilities.limits capabilities))
+        then Error (developer_error "REPL response limits changed")
+        else (
+          let method_ = R.Request.method_name request in
+          let%bind () =
+            if R.Capabilities.supports capabilities method_
+            then Ok ()
+            else Error (developer_error "REPL method is not advertised")
+          in
+          let%bind request =
+            R.Request.of_method_and_params
+              ~limits
+              ~method_
+              ~params:(R.Request.params request)
+          in
+          let%bind json =
+            request_repl_transport
+              t
+              ~initialization:initialized_as
+              ~bound:(Transport.Repl_response_bound.Installed limits)
+              request
+          in
+          let%bind response = R.Response.of_method_and_json ~limits ~method_ json in
+          let%bind () = current () in
+          if
+            Option.value_map
+              t.repl_capabilities
+              ~default:false
+              ~f:(fun (source, installed) ->
+                phys_equal source initialized_as
+                && phys_equal installed capabilities
+                && phys_equal (R.Capabilities.limits installed) limits
+                && R.Capabilities.supports installed method_)
+            && repl_response_matches initialized_as request response
+          then Ok response
+          else Error (developer_error "REPL response changed request identity")))
 ;;
 
 type notification_lease =
@@ -825,7 +916,7 @@ let pending_commands t = Eio.Mutex.use_ro t.mutex (fun () -> t.pending)
 let adopt_pending t pending =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     let same_identity item =
-      match item.identity, t.initialization with
+      match item.identity, Atomic.get t.initialization with
       | Some original, Some current ->
         P.Id.Server.equal original.server_id current.server_id
         && P.Id.Principal.equal original.principal.id current.principal.id

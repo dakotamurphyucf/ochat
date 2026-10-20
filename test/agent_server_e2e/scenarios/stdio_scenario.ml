@@ -1031,6 +1031,53 @@ let test_local_typed_repl env environment =
         (match R.Task_view.phase terminal with
          | Terminal { execution_started = true; outcome = Succeeded (Some "8") } -> ()
          | _ -> fail "typed stdio Task was not successful");
+        let held_key = key "typed-stdio-repl-held-submit" in
+        let held_lookup =
+          R.Lookup.create ~instance:(R.View.instance created) ~key:held_key
+        in
+        let held_request =
+          R.Submit.create
+            ~limits:repl_limits
+            ~instance:(R.View.instance created)
+            ~epoch:(R.View.epoch created)
+            ~expected_revision:(R.Submission.revision submitted)
+            ~key:held_key
+            ~source:"let rec loop x = loop(x)\nlet never = loop(0)"
+          |> protocol_ok
+        in
+        let held_result = ref None in
+        let cancelled_result = ref None in
+        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+          Eio.Fiber.both
+            (fun () ->
+               held_result
+               := Some (Agent_client.Developer_repl_connection.submit repl held_request))
+            (fun () ->
+               let rec cancel_exact () =
+                 match
+                   Agent_client.Developer_repl_connection.cancel_submission
+                     repl
+                     held_lookup
+                 with
+                 | Error { code = P.Error.Lease_stale; _ } ->
+                   Eio.Fiber.yield ();
+                   cancel_exact ()
+                 | result -> cancelled_result := Some result
+               in
+               cancel_exact ()));
+        let held = Option.value_exn !held_result |> protocol_ok in
+        let cancelled = Option.value_exn !cancelled_result |> protocol_ok in
+        require
+          (R.Wire_id.Revision.equal
+             (R.Submission.revision held)
+             (R.Submission.revision cancelled))
+          "typed stdio control changed the held submission identity";
+        (match R.Submission.status held with
+         | Stopped (Some diagnostic)
+           when String.is_substring
+                  (R.Submission.Diagnostic.message diagnostic)
+                  ~substring:"cancelled" -> ()
+         | _ -> fail "typed stdio held submission was not cancelled");
         let reset =
           Agent_client.Developer_repl_connection.reset_and_wait
             repl

@@ -663,6 +663,142 @@ let qualify_configured_repl client =
     ~finally:client.close
 ;;
 
+let qualify_typed_repl_cancel connection =
+  Exn.protect
+    ~finally:(fun () -> Agent_client.Connection.close connection)
+    ~f:(fun () ->
+      let implementation =
+        P.Initialize.Implementation.create ~name:"repl-control-e2e" ~version:"1" |> ok
+      in
+      let request =
+        P.Initialize.Request.create
+          ~implementation
+          ~protocol_min:P.Version.current
+          ~protocol_max:P.Version.current
+          ~features:
+            [ P.Authoring.Features.core
+            ; P.Authoring.Features.semantic
+            ; D.Features.run
+            ; R.Features.repl
+            ; R.Features.events
+            ]
+          ~event_encodings:[ Json ]
+          ~max_inbound_event_bytes:(2 * 1024 * 1024)
+          ()
+        |> ok
+      in
+      (match
+         Agent_client.Connection.request_without_history
+           connection
+           (Protocol_initialize request)
+         |> ok
+       with
+       | Protocol_initialize initialized ->
+         require
+           (List.mem initialized.enabled_features R.Features.repl ~equal:String.equal)
+           "typed control connection did not select REPL"
+       | _ -> fail "typed control Initialize changed method");
+      let repl = Agent_client.Developer_repl_connection.create connection |> ok in
+      let limits =
+        Agent_client.Developer_repl_connection.capabilities repl |> R.Capabilities.limits
+      in
+      let opened =
+        P.Authoring.Context.Open_request.create_supplied_document
+          ~member:"draft.chatmd"
+          ~default_environment:None
+          ~contents:
+            {|<script id="s" language="chatml" kind="tool">let main input = Task.pure(input)</script>|}
+        |> ok
+      in
+      let expected =
+        match
+          Agent_client.Connection.request_without_history
+            connection
+            (Authoring (Context_open opened))
+          |> ok
+        with
+        | Authoring (Context_open context) -> P.Authoring.Context.Expected.of_view context
+        | _ -> fail "typed control context open changed method"
+      in
+      let selector = P.Authoring.Analysis.Target.selected_script "s" |> ok in
+      let analyze =
+        P.Authoring.Analysis.Analyze.Request.create ~context:expected ~target:selector
+        |> ok
+      in
+      (match
+         Agent_client.Connection.request_without_history
+           connection
+           (Authoring (Analyze analyze))
+         |> ok
+       with
+       | Authoring (Analyze _) -> ()
+       | _ -> fail "typed control analyze changed method");
+      let route =
+        D.Route.document_script ~limits:(R.Limits.request limits) ~expected ~selector
+        |> ok
+      in
+      let key name = P.Idempotency_key.of_string name |> ok in
+      let created =
+        R.Create.create
+          ~limits
+          ~run_id:(P.Id.Developer_run.create ())
+          ~key:(key "typed-control-create")
+          ~route
+          ~target:One_off_v1
+          ~prompt:(S.Catalog_identity.prompt_definition "smoke")
+          ~workspace:(S.Catalog_identity.workspace_definition "physical")
+          ~requested_execution:None
+          ~requested_max_output_bytes:None
+        |> ok
+        |> Agent_client.Developer_repl_connection.create_instance repl
+        |> ok
+      in
+      let held_key = key "typed-control-held-submit" in
+      let held_lookup =
+        R.Lookup.create ~instance:(R.View.instance created) ~key:held_key
+      in
+      let held_request =
+        R.Submit.create
+          ~limits
+          ~instance:(R.View.instance created)
+          ~epoch:(R.View.epoch created)
+          ~expected_revision:(R.View.revision created)
+          ~key:held_key
+          ~source:"let rec loop x = loop(x)\nlet never = loop(0)"
+        |> ok
+      in
+      let submitted = ref None in
+      let cancelled = ref None in
+      Eio.Fiber.both
+        (fun () ->
+           submitted
+           := Some (Agent_client.Developer_repl_connection.submit repl held_request))
+        (fun () ->
+           let rec cancel_exact () =
+             match
+               Agent_client.Developer_repl_connection.cancel_submission repl held_lookup
+             with
+             | Error { code = P.Error.Lease_stale; _ } ->
+               Eio.Fiber.yield ();
+               cancel_exact ()
+             | result -> cancelled := Some result
+           in
+           cancel_exact ());
+      let submitted = Option.value_exn !submitted |> ok in
+      let cancelled = Option.value_exn !cancelled |> ok in
+      require
+        (R.Wire_id.Revision.equal
+           (R.Submission.revision submitted)
+           (R.Submission.revision cancelled))
+        "typed control returned another submission identity";
+      match R.Submission.status submitted with
+      | Stopped (Some diagnostic)
+        when String.is_substring
+               (R.Submission.Diagnostic.message diagnostic)
+               ~substring:"cancelled" -> ()
+      | _ -> fail "typed control did not cancel held Submit")
+;;
+
 let qualify_unselected_principal client =
   Exn.protect
     ~f:(fun () ->
@@ -911,6 +1047,250 @@ let unix_client ~sw env fixture =
         read_unix_response raw (Eio.Stdenv.clock env) 4)
   ; close = (fun () -> Support.Unix_driver.close_raw raw)
   }
+;;
+
+let qualify_unix_repl_saturation ~sw env fixture =
+  let raw =
+    Support.Unix_driver.connect_raw
+      ~sw
+      ~env
+      ~socket_path:(Support.Config_fixture.unix_socket fixture)
+      ~max_response_bytes:(2 * 1024 * 1024)
+  in
+  Exn.protect
+    ~finally:(fun () -> Support.Unix_driver.close_raw raw)
+    ~f:(fun () ->
+      let clock = Eio.Stdenv.clock env in
+      let client =
+        { next_id = 1
+        ; send =
+            (fun request ->
+              Support.Unix_driver.send_line
+                raw
+                (P.Envelope.to_json request |> Jsonaf.to_string);
+              read_unix_response raw clock 4)
+        ; close = Fn.id
+        }
+      in
+      let initialized = initialize_response ~repl:true client in
+      require
+        (List.mem initialized.enabled_features R.Features.repl ~equal:String.equal)
+        "saturation connection did not select REPL";
+      let caps =
+        match
+          call_repl
+            client
+            ~limits:(configured_repl_decoder_limits ())
+            R.Request.Capabilities
+        with
+        | R.Response.Capabilities caps -> caps
+        | _ -> fail "saturation capabilities changed method"
+      in
+      let limits = R.Capabilities.limits caps in
+      let expected, selector = open_and_analyze client in
+      let route =
+        D.Route.document_script ~limits:(R.Limits.request limits) ~expected ~selector
+        |> ok
+      in
+      let key name = P.Idempotency_key.of_string name |> ok in
+      let created =
+        let request =
+          R.Create.create
+            ~limits
+            ~run_id:(P.Id.Developer_run.create ())
+            ~key:(key "saturation-create")
+            ~route
+            ~target:One_off_v1
+            ~prompt:(S.Catalog_identity.prompt_definition "smoke")
+            ~workspace:(S.Catalog_identity.workspace_definition "physical")
+            ~requested_execution:None
+            ~requested_max_output_bytes:None
+          |> ok
+        in
+        match call_repl client ~limits (R.Request.Create request) with
+        | R.Response.Create view -> view
+        | _ -> fail "saturation Create changed method"
+      in
+      let key = key "saturation-held" in
+      let lookup = R.Lookup.create ~instance:(R.View.instance created) ~key in
+      let request =
+        R.Submit.create
+          ~limits
+          ~instance:(R.View.instance created)
+          ~epoch:(R.View.epoch created)
+          ~expected_revision:(R.View.revision created)
+          ~key
+          ~source:"let rec loop x = loop(x)\nlet never = loop(0)"
+        |> ok
+      in
+      let send_unread id request =
+        let id = P.Envelope.Request_id.of_json (`Number (Int.to_string id)) |> ok in
+        let envelope =
+          P.Envelope.request
+            ~id
+            ~method_:(R.Request.method_name request)
+            ~params:(R.Request.params request)
+            ()
+        in
+        Support.Unix_driver.send_line raw (P.Envelope.to_json envelope |> Jsonaf.to_string);
+        id
+      in
+      let submit_id = send_unread 100 (R.Request.Submit request) in
+      let observer =
+        Agent_transport_socket.Client.connect
+          ~sw
+          ~net:(Eio.Stdenv.net env)
+          ~socket_path:(Support.Config_fixture.unix_socket fixture)
+          ~max_line_length:(16 * 1024 * 1024)
+          ~notification_capacity:8
+      in
+      Exn.protect
+        ~finally:(fun () -> Agent_client.Connection.close observer)
+        ~f:(fun () ->
+          let implementation =
+            P.Initialize.Implementation.create ~name:"saturation-observer" ~version:"1"
+            |> ok
+          in
+          let initialize =
+            P.Initialize.Request.create
+              ~implementation
+              ~protocol_min:P.Version.current
+              ~protocol_max:P.Version.current
+              ~features:[ D.Features.run; R.Features.repl ]
+              ~event_encodings:[ Json ]
+              ~max_inbound_event_bytes:(2 * 1024 * 1024)
+              ()
+            |> ok
+          in
+          (match
+             Agent_client.Connection.request_without_history
+               observer
+               (Protocol_initialize initialize)
+             |> ok
+           with
+           | Protocol_initialize _ -> ()
+           | _ -> fail "saturation observer Initialize changed method");
+          let observer_repl =
+            Agent_client.Developer_repl_connection.create observer |> ok
+          in
+          Eio.Time.with_timeout_exn clock 5. (fun () ->
+            let rec await_active () =
+              match
+                Agent_client.Developer_repl_connection.observe observer_repl lookup
+              with
+              | Error { code = P.Error.Conflict; _ } -> ()
+              | Ok None ->
+                Eio.Fiber.yield ();
+                await_active ()
+              | Ok (Some _) | Error _ -> fail "held Submit was not active"
+            in
+            await_active ());
+          let ping_id =
+            let id = P.Envelope.Request_id.of_json (`Number "101") |> ok in
+            let envelope =
+              P.Envelope.request ~id ~method_:"protocol.ping" ~params:(`Object []) ()
+            in
+            Support.Unix_driver.send_line
+              raw
+              (P.Envelope.to_json envelope |> Jsonaf.to_string);
+            id
+          in
+          let cancel_id = send_unread 102 (R.Request.Cancel_submission lookup) in
+          let responses : P.Envelope.response list ref = ref [] in
+          let rec collect remaining =
+            if remaining > 0
+            then (
+              match Support.Unix_driver.read_envelope raw ~clock ~timeout_seconds:5. with
+              | Support.Unix_driver.Envelope (P.Envelope.Response response) ->
+                responses := response :: !responses;
+                collect (remaining - 1)
+              | Support.Unix_driver.Envelope (P.Envelope.Notification _) ->
+                collect remaining
+              | Support.Unix_driver.Envelope (P.Envelope.Request _)
+              | Support.Unix_driver.End_of_file
+              | Support.Unix_driver.Timeout
+              | Support.Unix_driver.Invalid_response _ ->
+                fail "saturation response was unavailable")
+          in
+          collect 3;
+          let outcome id =
+            List.find_exn !responses ~f:(fun (response : P.Envelope.response) ->
+              P.Envelope.Request_id.compare response.id id = 0)
+            |> fun (response : P.Envelope.response) -> response.outcome
+          in
+          (match outcome ping_id with
+           | Error { code = P.Error.Resource_limit; _ } -> ()
+           | _ -> fail "busy ordinary request was not rejected with Resource_limit");
+          let decode id method_ =
+            outcome id |> ok |> R.Response.of_method_and_json ~limits ~method_ |> ok
+          in
+          let submitted =
+            match decode submit_id (R.Request.method_name (R.Request.Submit request)) with
+            | R.Response.Submit value -> value
+            | _ -> fail "held Submit changed method"
+          in
+          let cancelled =
+            match
+              decode
+                cancel_id
+                (R.Request.method_name (R.Request.Cancel_submission lookup))
+            with
+            | R.Response.Cancel_submission value -> value
+            | _ -> fail "held Cancel changed method"
+          in
+          require
+            (R.Wire_id.Revision.equal
+               (R.Submission.revision submitted)
+               (R.Submission.revision cancelled))
+            "saturated control changed submission identity";
+          (match R.Submission.status cancelled with
+           | Stopped (Some diagnostic)
+             when String.is_substring
+                    (R.Submission.Diagnostic.message diagnostic)
+                    ~substring:"cancelled" -> ()
+           | _ -> fail "saturated control did not cancel held Submit");
+          let eof_key = P.Idempotency_key.of_string "saturation-held-eof" |> ok in
+          let eof_lookup =
+            R.Lookup.create ~instance:(R.View.instance created) ~key:eof_key
+          in
+          let eof_request =
+            R.Submit.create
+              ~limits
+              ~instance:(R.View.instance created)
+              ~epoch:(R.View.epoch created)
+              ~expected_revision:(R.Submission.revision cancelled)
+              ~key:eof_key
+              ~source:"let rec eof_loop x = eof_loop(x)\nlet eof_never = eof_loop(0)"
+            |> ok
+          in
+          let eof_id = send_unread 103 (R.Request.Submit eof_request) in
+          Eio.Time.with_timeout_exn clock 5. (fun () ->
+            let rec await_active () =
+              match
+                Agent_client.Developer_repl_connection.observe observer_repl eof_lookup
+              with
+              | Error { code = P.Error.Conflict; _ } -> ()
+              | Ok None ->
+                Eio.Fiber.yield ();
+                await_active ()
+              | Ok (Some _) | Error _ -> fail "EOF Submit was not active"
+            in
+            await_active ());
+          Support.Unix_driver.shutdown_write raw;
+          Eio.Time.with_timeout_exn clock 5. (fun () ->
+            let rec await_eof () =
+              match Support.Unix_driver.read_envelope raw ~clock ~timeout_seconds:5. with
+              | Support.Unix_driver.End_of_file -> ()
+              | Support.Unix_driver.Envelope (P.Envelope.Response response)
+                when P.Envelope.Request_id.compare response.id eof_id = 0 ->
+                fail "held Submit published a response after input EOF"
+              | Support.Unix_driver.Envelope
+                  (P.Envelope.Response _ | P.Envelope.Notification _) -> await_eof ()
+              | Support.Unix_driver.Envelope (P.Envelope.Request _)
+              | Support.Unix_driver.Timeout | Support.Unix_driver.Invalid_response _ ->
+                fail "held Submit EOF did not close cleanly"
+            in
+            await_eof ())))
 ;;
 
 let absolute env path =
@@ -1188,6 +1568,18 @@ let run_configured env =
                 ~after_check:(qualify_own_control_without_approval_scope daemon fixture)
                 (http_client ~sw env fixture);
               qualify_configured_repl (http_client ~sw env fixture);
+              qualify_typed_repl_cancel
+                (Agent_transport_http.Client.connect
+                   ~sw
+                   ~env
+                   ~uri:
+                     (Uri.of_string
+                        (sprintf
+                           "http://127.0.0.1:%d"
+                           (Support.Config_fixture.http_port fixture)))
+                   ~bearer_token:(Some (Support.Config_fixture.public_token fixture))
+                   ~notification_capacity:64
+                 |> ok);
               qualify_unselected_principal
                 (http_client
                    ~token:(Support.Config_fixture.admin_token fixture)
@@ -1197,7 +1589,15 @@ let run_configured env =
               qualify_client
                 ~expected_wire_limits:(configured_wire_limits ())
                 (unix_client ~sw env fixture);
-              qualify_configured_repl (unix_client ~sw env fixture))));
+              qualify_configured_repl (unix_client ~sw env fixture);
+              qualify_typed_repl_cancel
+                (Agent_transport_socket.Client.connect
+                   ~sw
+                   ~net:(Eio.Stdenv.net env)
+                   ~socket_path:(Support.Config_fixture.unix_socket fixture)
+                   ~max_line_length:(16 * 1024 * 1024)
+                   ~notification_capacity:64);
+              qualify_unix_repl_saturation ~sw env fixture)));
   Eio.Flow.copy_string
     "configured Developer HTTP and Unix passed\n"
     (Eio.Stdenv.stdout env)
