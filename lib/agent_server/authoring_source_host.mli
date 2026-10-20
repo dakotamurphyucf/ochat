@@ -129,6 +129,37 @@ end
 type t
 type host = t
 
+module Historical_roots : sig
+  type t
+
+  (** Copy only this Source_host's physical issuer and bounded distinct root
+      indices from actual Root selections after checking their original/current
+      actor and source-read admission. The count cannot exceed the configured
+      external-root ceiling. No Root object or actor token survives; an
+      invalid/foreign root fails this observational issuance without widening
+      the enclosing capture. *)
+  val issue
+    :  host
+    -> actor:Operator_authorization.t
+    -> roots:Root.t list
+    -> (t, Error.t) result
+
+  (** Nonyielding current source-host/actor/read-policy comparison for every
+      admitted index. Editor context closure or ordinary file edit is not a
+      revocation. Closed/foreign host, revoked actor or read grant denies.
+      This is not a filesystem read or execution grant. *)
+  val check_read_now
+    :  host
+    -> actor:Operator_authorization.t
+    -> t
+    -> (unit, Error.t) result
+
+  (** Checked conservative retained-byte charge for the physical issuer and
+      bounded selected indices. No Root representation or mutable host state
+      is exposed. [None] means the requested finite cap cannot contain it. *)
+  val charge : t -> max_bytes:int -> int option
+end
+
 (** Bind the original daemon-owned Project_source_host and a mandatory trusted
     operator read policy. [sources] and its Eio switch outlive this owner. There
     is no filesystem path or root-opening constructor here. All methods remain
@@ -191,6 +222,11 @@ module Context : sig
   type t
 
   val root : t -> Root.t
+
+  (** Exact bounded root and dependency selections already admitted by this
+      Context, for observational historical-origin issuance only. A caller
+      must still pass them to [Historical_roots.issue] under current policy. *)
+  val selected_roots : t -> Root.t list
 
   (** The exact contract admitted with this source context. Comparison data
       for recomposing its current overlay; callers still reauthorize the

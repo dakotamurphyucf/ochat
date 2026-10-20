@@ -56,9 +56,19 @@ module Selection_policy : sig
 end
 
 module Supplied_document_policy : sig
-  type t = { authorize : Operator_authorization.t -> bool }
+  module Identity : sig
+    type t
+
+    (** Physical policy incarnation, never derived from a context label or
+        caller-supplied document. It is comparison data, not a read grant. *)
+    val equal : t -> t -> bool
+  end
+
+  type t
 
   val create : authorize:(Operator_authorization.t -> bool) -> t
+  val identity : t -> Identity.t
+  val read_admitted : t -> Operator_authorization.t -> bool
 end
 
 module Selected_feature : sig

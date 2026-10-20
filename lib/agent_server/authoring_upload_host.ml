@@ -233,6 +233,46 @@ let check_read t actor policy =
   else Ok ()
 ;;
 
+let check_historical_read t actor =
+  let open Result.Let_syntax in
+  let%bind () = check_host t in
+  if not (Actor.is_current actor)
+  then Error Error.Expired_actor
+  else (
+    match t.rebind with
+    | None -> Error Error.Selection_unavailable
+    | Some config ->
+      if Rebind_policy.authorize_read config.policy actor
+      then Ok ()
+      else Error Error.Unauthorized)
+;;
+
+let check_historical_pin_now t ~actor pin =
+  let open Result.Let_syntax in
+  let%bind () = check_historical_read t actor in
+  Store.check_published_pin_now
+    t.store
+    ~principal:(Actor.principal actor).id
+    pin
+    ~now:t.now
+  |> Result.map_error ~f:Error.of_store
+;;
+
+let check_historical_pin t ~actor pin ~checkpoint =
+  let open Result.Let_syntax in
+  let%bind () = check_historical_read t actor in
+  let%bind () =
+    Store.check_published_pin
+      t.store
+      ~principal:(Actor.principal actor).id
+      pin
+      ~now:t.now
+      ~checkpoint
+    |> Result.map_error ~f:Error.of_store
+  in
+  check_historical_pin_now t ~actor pin
+;;
+
 let check_or_raise check =
   match check () with
   | Ok () -> ()

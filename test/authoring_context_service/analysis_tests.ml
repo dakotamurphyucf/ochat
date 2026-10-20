@@ -696,7 +696,9 @@ let%test_unit
               |> Or_error.ok_exn)
          |> Or_error.ok_exn
        in
-       let developer = Core_owner.Developer.create ~owner ~policy ~limits in
+       let developer =
+         Core_owner.Developer.create ~owner ~policy ~limits ~historical_recording:None
+       in
        let analyze =
          A.Analyze.Request.create
            ~context:expected

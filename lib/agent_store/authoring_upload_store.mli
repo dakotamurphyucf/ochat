@@ -33,6 +33,12 @@ module Published_pin : sig
   (** Comparison evidence minted only while this Store verifies a published
       capture. It is bound to the Store instance, principal, upload, bundle,
       original deadline and durable publication; it grants no read itself. *)
+
+  (** Checked conservative charge for retaining this opaque pin, including its
+      variable-size receipt. Traverses typed receipt fields with early cap
+      checks; it neither serializes/copies the receipt nor grants publication
+      or read authority. [None] means it cannot fit [max_bytes]. *)
+  val retained_charge : t -> max_bytes:int -> int option
 end
 
 module Published_capture : sig

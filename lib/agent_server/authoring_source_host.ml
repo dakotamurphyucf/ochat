@@ -234,6 +234,52 @@ let check_root_current host ~actor root =
   check_root host ~actor root
 ;;
 
+module Historical_roots = struct
+  type t =
+    { issuer : unit ref
+    ; indices : int list
+    }
+
+  let issue host ~actor ~roots =
+    let open Result.Let_syntax in
+    let%bind () = check_host host in
+    if List.length roots > Project_source_configuration.maximum_external_roots
+    then Error Error.Context_limit
+    else (
+      let%map () = Result.all_unit (List.map roots ~f:(check_root host ~actor)) in
+      { issuer = host.identity
+      ; indices = List.map roots ~f:Root.index |> List.dedup_and_sort ~compare:Int.compare
+      })
+  ;;
+
+  let check_read_now host ~actor t =
+    let open Result.Let_syntax in
+    let%bind () = check_host host in
+    if not (phys_equal host.identity t.issuer)
+    then Error Error.Foreign_root
+    else if not (Actor.is_current actor)
+    then Error Error.Expired_actor
+    else if
+      List.exists t.indices ~f:(fun index ->
+        not (host.read_policy.authorize actor ~root_index:index))
+    then Error Error.Unauthorized
+    else Ok ()
+  ;;
+
+  let charge t ~max_bytes =
+    let fixed = 128 in
+    (* A retained index is a boxed list cell as well as an integer. *)
+    let per_index = 32 in
+    if max_bytes < fixed
+    then None
+    else (
+      let count = List.length t.indices in
+      if count > (max_bytes - fixed) / per_index
+      then None
+      else Some (fixed + (count * per_index)))
+  ;;
+end
+
 let remove_context host context =
   host.contexts
   <- List.filter host.contexts ~f:(fun current -> not (phys_equal current context))
@@ -614,6 +660,7 @@ module Context = struct
   type t = project_context
 
   let root (t : t) = t.root
+  let selected_roots (t : t) = t.root :: t.dependency_roots
   let contract (t : t) = t.contract
   let check_current (t : t) ~actor = check_all t.common actor
   let retain_owner (t : t) ~actor = retain_owner t.common ~actor

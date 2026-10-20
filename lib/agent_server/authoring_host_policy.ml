@@ -317,6 +317,12 @@ let with_configured_upload t ~upload =
   else Ok { t with upload = Some upload }
 ;;
 
+let with_supplied_document t ~supplied_document =
+  if not t.core
+  then invalid "supplied document policy requires authoring core"
+  else Ok { t with supplied_document = Some supplied_document }
+;;
+
 let with_semantic t ~semantic =
   if
     (not t.core)

@@ -67,6 +67,13 @@ module Host_policy : sig
       selected Build exists; it never manufactures compiler facts. *)
   val basic_supplied : initialize_limits:P.Initialize.Limits.t -> (t, P.Error.t) result
 
+  (** Setup-only immutable supplied-document policy replacement. Requires
+      Core and preserves other validated settings and physical policy identity. *)
+  val with_supplied_document
+    :  t
+    -> supplied_document:Service.Supplied_document_policy.t
+    -> (t, P.Error.t) result
+
   (** Finite upload-only composition with no context or source-read family.
       The explicit upload grant remains the sole authority for publication;
       selecting [authoring.bundle.v1] grants no project read or compiler access. *)
@@ -198,9 +205,27 @@ val available_features : t -> string list
     widen its admitted source grants. *)
 val developer_capture
   :  t
+  -> historical_recording:Developer_historical_source.Recording.t option
   -> policy:Service.Developer.Target_policy.t
   -> limits:Service.Developer.Limits.t
   -> (Service.Developer.t, P.Error.t) result
+
+(** Historical trace metadata-read checks through this installation's SAME
+    joined Service and physical source/upload owners. They do not lend the
+    Service, recapture source, or restore a closed editor Context. The full
+    check may yield for a published Store pin; the final check never yields. *)
+val check_historical_origin
+  :  t
+  -> actor:Operator_authorization.t
+  -> Developer_historical_source.Origin.t
+  -> checkpoint:(unit -> unit)
+  -> (unit, P.Error.t) result
+
+val check_historical_origin_now
+  :  t
+  -> actor:Operator_authorization.t
+  -> Developer_historical_source.Origin.t
+  -> (unit, P.Error.t) result
 
 (** Select opaque current Roots only through this installed Source_host's
     existing joined root enumeration and original/current actor read policy.

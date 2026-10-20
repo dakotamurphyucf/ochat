@@ -128,6 +128,15 @@ val with_configured_projects
 
 val with_configured_upload : t -> upload:Upload.t -> (t, P.Error.t) result
 
+(** Setup-only immutable replacement of the supplied-document read policy.
+    Requires Core and preserves all other validated host settings; an already
+    installed Service is never mutated. The policy itself mints its own physical
+    incarnation, so a later trace cannot pair an old identity with a new grant. *)
+val with_supplied_document
+  :  t
+  -> supplied_document:Service.Supplied_document_policy.t
+  -> (t, P.Error.t) result
+
 (** Add one real semantic sibling to an already admitted core/source policy.
     Reject a second semantic installation or a policy without both core and a
     usable source or supplied-document origin. The

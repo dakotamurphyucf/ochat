@@ -75,6 +75,8 @@ end
 module Supplied_document_policy : sig
   type t
 
+  module Identity = Authoring_context_service_core.Supplied_document_policy.Identity
+
   (** Independent host/operator grant for caller-supplied exact bytes. It
       conveys no native source root or project authority. The callback is a
       bounded non-yielding read of current host policy and is checked for the
@@ -83,6 +85,12 @@ module Supplied_document_policy : sig
       reparses, normalizes UTF-8 or writes a host file. [None] at create means
       this origin is uninstalled even if an upload owner exists. *)
   val create : authorize:(Operator_authorization.t -> bool) -> t
+
+  (** Comparison-only identity and current nonyielding decision for the
+      installed policy. No supplied source bytes or editor lease survive. *)
+  val identity : t -> Identity.t
+
+  val read_admitted : t -> Operator_authorization.t -> bool
 end
 
 module Error : sig
@@ -144,6 +152,34 @@ val create
   -> protocol_limits:P.Authoring.Limits.t
   -> limits:Limits.t
   -> t
+
+(** Comparison-only identity of the policy actually installed on this service.
+    Capture may use it only after observing the genuine Supplied_document
+    owner branch. No policy callback or old editor Context is lent. *)
+val historical_supplied_identity : t -> Supplied_document_policy.Identity.t option
+
+(** Current historical metadata-read admission for a charged captured origin.
+    These use this service's already installed Source_host, Upload_host and
+    supplied-document policy; no alternate policy callback is supplied by a
+    trace request. Roots check physical issuer and every admitted index.
+    Published_upload checks Bundle_read and this upload Store's exact pin;
+    only [check_historical_origin] may yield for durable Store verification.
+    Supplied_document compares the installed physical policy identity and
+    current read grant. Neither operation recaptures source bytes, restores a
+    graph, or requires the old editor Context/generation to remain open. The
+    final _now check follows a full check for the SAME read attempt. *)
+val check_historical_origin
+  :  t
+  -> actor:Operator_authorization.t
+  -> Developer_historical_source.Origin.t
+  -> checkpoint:(unit -> unit)
+  -> (unit, Error.t) result
+
+val check_historical_origin_now
+  :  t
+  -> actor:Operator_authorization.t
+  -> Developer_historical_source.Origin.t
+  -> (unit, Error.t) result
 
 (** The only mutable context ledger is [Project_cache.contexts]. The owner
     atomically applies every authorized Ledger transition to Project_cache
@@ -591,6 +627,7 @@ module Developer : sig
     val entry_source : t -> Chatml_source.t
     val selected_contract : t -> Selected_contract.t
     val repl_root_fingerprint : t -> Chatml_source.Digest.t
+    val historical_origin : t -> Developer_historical_source.Origin.t option
 
     val check_current
       :  t
@@ -633,6 +670,7 @@ module Developer : sig
 
     val capture : t -> Chatml_developer_capture.t
     val selected_contract : t -> Selected_contract.t
+    val historical_origin : t -> Developer_historical_source.Origin.t option
 
     (** The same closure survives a provisional Root recovery, but each
         attempt's yielding full check mints a fresh final comparison. Root
@@ -685,7 +723,12 @@ module Developer : sig
     -> checkpoint:(unit -> unit)
     -> (Candidate.t, P.Error.t) result
 
-  val create : owner:owner -> policy:Target_policy.t -> limits:Limits.t -> t
+  val create
+    :  historical_recording:Developer_historical_source.Recording.t option
+    -> owner:owner
+    -> policy:Target_policy.t
+    -> limits:Limits.t
+    -> t
 
   val prepare_local_project
     :  t

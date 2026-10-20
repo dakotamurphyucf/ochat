@@ -204,7 +204,9 @@ let check_context_owner ?ledger t context ~actor ~checkpoint =
     (match t.supplied_document with
      | None -> Error Error.Uninstalled
      | Some policy ->
-       if policy.Supplied_document_policy.authorize original && policy.authorize actor
+       if
+         Supplied_document_policy.read_admitted policy original
+         && Supplied_document_policy.read_admitted policy actor
        then check_document_static ?ledger t context ~actor ~checkpoint
        else Error Error.Unauthorized)
 ;;
@@ -411,8 +413,8 @@ module Retained_selection = struct
        | None -> Error Error.Uninstalled
        | Some policy ->
          if
-           policy.Supplied_document_policy.authorize t.original_actor
-           && policy.authorize actor
+           Supplied_document_policy.read_admitted policy t.original_actor
+           && Supplied_document_policy.read_admitted policy actor
          then
            check_document_static_view
              t.core

@@ -457,9 +457,26 @@ let%test_unit "host root read is fresh while project context remains captured" =
              |> Operator_authorization.trusted_local
            in
            let principal = Operator_authorization.principal actor in
+           let dependency_dir = Eio.Path.(directory / "dependency") in
+           Eio.Path.mkdir ~perm:0o700 dependency_dir;
+           Eio.Path.save
+             ~create:(`Or_truncate 0o600)
+             Eio.Path.(directory / "dependent.project.json")
+             {|{"schema_version":1,"namespace":"primary","dependencies":{"dep":{"source":{"kind":"local","path":"./dependency"},"project":"chatml.project.json"}},"default_environment":"default","environments":{"default":{"modules":{"Dep":"dep.Util"}}},"entries":{"main":{"source":"main.chatml","target":"one_off_v1"}}}|};
+           Eio.Path.save
+             ~create:(`Or_truncate 0o600)
+             Eio.Path.(dependency_dir / "chatml.project.json")
+             {|{"schema_version":1,"namespace":"dep","modules":{"Util":{"implementation":"util.chatml"}}}|};
+           Eio.Path.save
+             ~create:(`Or_truncate 0o600)
+             Eio.Path.(dependency_dir / "util.chatml")
+             "let value = 1\n";
            let source_owner =
              Agent_server.Project_source_host.open_owned
-               { external_roots = [ Eio.Path.native_exn directory ]; git = None }
+               { external_roots =
+                   [ Eio.Path.native_exn directory; Eio.Path.native_exn dependency_dir ]
+               ; git = None
+               }
                ~sw
                ~fs:env#fs
                ~data_root
@@ -468,13 +485,17 @@ let%test_unit "host root read is fresh while project context remains captured" =
                ()
              |> ok
            in
+           let historical_read_allowed = ref true in
+           let dependency_read_allowed = ref true in
            let source_host =
              Agent_server.Authoring_source_host.create
                source_owner
                ~sw
                ~read_policy:
                  (Agent_server.Authoring_source_host.Read_policy.create
-                    ~authorize:(fun _ ~root_index -> Int.equal root_index 0))
+                    ~authorize:(fun _ ~root_index ->
+                      (Int.equal root_index 0 && !historical_read_allowed)
+                      || (Int.equal root_index 1 && !dependency_read_allowed)))
                ~document_policy:
                  Agent_server.Authoring_source_host.Document_policy.deny_all
                ~limits:
@@ -492,6 +513,11 @@ let%test_unit "host root read is fresh while project context remains captured" =
              |> ok
              |> List.hd_exn
            in
+           let dependency_root =
+             Agent_server.Authoring_source_host.roots source_host ~actor ~checkpoint:Fn.id
+             |> ok
+             |> fun roots -> List.nth_exn roots 1
+           in
            let static_owner =
              Agent_server.Authoring_source_host.Context.open_root
                source_host
@@ -505,6 +531,25 @@ let%test_unit "host root read is fresh while project context remains captured" =
                  (Chatml.Chatml_compiler_contract.for_target One_off_v1 ~checkpoint:Fn.id)
              |> ok
            in
+           let historical_roots =
+             Agent_server.Authoring_source_host.Historical_roots.issue
+               source_host
+               ~actor
+               ~roots:
+                 (Agent_server.Authoring_source_host.Context.selected_roots static_owner)
+             |> ok
+           in
+           let historical_charge =
+             Agent_server.Authoring_source_host.Historical_roots.charge
+               historical_roots
+               ~max_bytes:Int.max_value
+             |> Option.value_exn
+           in
+           assert (
+             Option.is_none
+               (Agent_server.Authoring_source_host.Historical_roots.charge
+                  historical_roots
+                  ~max_bytes:(historical_charge - 1)));
            let static_build =
              Agent_server.Authoring_source_host.Context.capture
                static_owner
@@ -515,6 +560,71 @@ let%test_unit "host root read is fresh while project context remains captured" =
              |> Agent_server.Authoring_source_host.Capture.build
            in
            Agent_server.Authoring_source_host.Context.close_and_wait static_owner;
+           let dependent_owner =
+             Agent_server.Authoring_source_host.Context.open_root
+               source_host
+               ~actor
+               ~root:static_root
+               ~dependency_roots:[ dependency_root ]
+               ~project:(Source.Portable_path.create "dependent.project.json" |> ok)
+               ~selection:
+                 (Chatml_project.Selection.Entry { name = "main"; environment = None })
+               ~contract:
+                 (Chatml.Chatml_compiler_contract.for_target One_off_v1 ~checkpoint:Fn.id)
+             |> ok
+           in
+           let dependent_build =
+             Agent_server.Authoring_source_host.Context.capture
+               dependent_owner
+               ~actor
+               ~clock:env#mono_clock
+               ~checkpoint:Fn.id
+             |> ok
+             |> Agent_server.Authoring_source_host.Capture.build
+           in
+           assert (
+             List.length
+               (Chatml_prepared_program.sources
+                  (Chatml_project_build.prepared dependent_build))
+             >= 2);
+           let complete_historical_roots =
+             Agent_server.Authoring_source_host.Historical_roots.issue
+               source_host
+               ~actor
+               ~roots:
+                 (Agent_server.Authoring_source_host.Context.selected_roots
+                    dependent_owner)
+             |> ok
+           in
+           Agent_server.Authoring_source_host.Context.close_and_wait dependent_owner;
+           assert (
+             Result.is_ok
+               (Agent_server.Authoring_source_host.Historical_roots.check_read_now
+                  source_host
+                  ~actor
+                  complete_historical_roots));
+           dependency_read_allowed := false;
+           assert (
+             Result.is_error
+               (Agent_server.Authoring_source_host.Historical_roots.check_read_now
+                  source_host
+                  ~actor
+                  complete_historical_roots));
+           dependency_read_allowed := true;
+           assert (
+             Result.is_ok
+               (Agent_server.Authoring_source_host.Historical_roots.check_read_now
+                  source_host
+                  ~actor
+                  historical_roots));
+           historical_read_allowed := false;
+           assert (
+             Result.is_error
+               (Agent_server.Authoring_source_host.Historical_roots.check_read_now
+                  source_host
+                  ~actor
+                  historical_roots));
+           historical_read_allowed := true;
            let second_owner =
              Agent_server.Authoring_source_host.Context.open_root
                source_host
@@ -664,6 +774,7 @@ let%test_unit "host root read is fresh while project context remains captured" =
            let developer =
              S.Developer.create
                ~owner:service
+               ~historical_recording:None
                ~policy:
                  (S.Developer.Target_policy.create
                     ~local_project:(fun _ ~root:_ ~project:_ ~selection:_ -> None)

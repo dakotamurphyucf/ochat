@@ -407,6 +407,26 @@ val check_context_selection_now
   -> Context_capture.t
   -> (unit, Error.t) result
 
+(** Historical metadata-only read for the authentic published Store pin.
+    These operations require the CURRENT independent Bundle_read grant but
+    neither Rebind, an old Context_capture nor a selected compiler. The full
+    check may yield during Store publication/expiry/prune verification; the
+    final check is nonyielding, compares the same physical Store pin and fresh
+    trusted time, and must follow a full check for this read attempt. Neither
+    operation reads installed source bytes or restores a saved graph. *)
+val check_historical_pin
+  :  t
+  -> actor:Operator_authorization.t
+  -> Store.Published_pin.t
+  -> checkpoint:(unit -> unit)
+  -> (unit, Error.t) result
+
+val check_historical_pin_now
+  :  t
+  -> actor:Operator_authorization.t
+  -> Store.Published_pin.t
+  -> (unit, Error.t) result
+
 (** This returns the Store's exact Open/Ready/Validating/Published/Rejected/
     Expired state. The facade never manufactures a receipt. *)
 val status
