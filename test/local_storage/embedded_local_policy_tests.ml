@@ -257,7 +257,427 @@ let%test_module "bounded embedded local Developer policy" =
           assert (not (P.Principal.has_scope principal P.Scope.Developer_fixture_run));
           assert (not (P.Principal.has_scope principal P.Scope.Developer_live_run));
           assert (not (P.Principal.has_scope principal P.Scope.Developer_repl));
+          assert (
+            Result.is_error
+              (Agent_client.Developer_repl_connection.create
+                 (Agent_server.Embedded.host_connection host)));
           Agent_server.Embedded.close_host host))
+    ;;
+
+    let%test_unit "embedded default host does not install Developer or REPL" =
+      with_policy_file (policy ()) (fun env path ->
+        let root = Filename.dirname path in
+        let workspace = Filename.concat root "workspace" in
+        Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
+        let prompt = Filename.concat root "agent.chatmd" in
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / prompt)
+          "<developer>Unconfigured local fixture.</developer>";
+        let options : Agent_server.Embedded.options =
+          { prompt_file = prompt
+          ; workspace
+          ; tool_dir = root
+          ; home = Some root
+          ; storage = Agent_server.Local_storage.Transient
+          ; start_immediately = false
+          ; permission_profile = Agent_server.Embedded.default_permission_profile
+          ; attachment_mode = Read_write
+          ; event_capacity = 32
+          }
+        in
+        Eio.Switch.run (fun sw ->
+          let host =
+            Agent_server.Embedded.open_local_host ~sw ~env options
+            |> Result.map_error ~f:(fun error ->
+              Sexp.to_string_hum ([%sexp_of: P.Error.t] error))
+            |> Result.ok_or_failwith
+          in
+          Exn.protect
+            ~f:(fun () ->
+              let connection = Agent_server.Embedded.host_connection host in
+              let initialized =
+                Agent_client.Connection.initialization connection |> Option.value_exn
+              in
+              assert (
+                not
+                  (List.mem
+                     initialized.enabled_features
+                     P.Developer_common.Features.run
+                     ~equal:String.equal));
+              assert (
+                not
+                  (List.mem
+                     initialized.enabled_features
+                     P.Developer_repl_wire.Features.repl
+                     ~equal:String.equal));
+              assert (
+                Result.is_error (Agent_client.Developer_connection.create connection));
+              assert (
+                Result.is_error (Agent_client.Developer_repl_connection.create connection)))
+            ~finally:(fun () -> Agent_server.Embedded.close_host host)))
+    ;;
+
+    let%test_unit
+        "embedded connections select installed Developer and REPL per Initialize"
+      =
+      let module C = P.Developer_common in
+      let module R = P.Developer_repl_wire in
+      let module W = P.Developer_wire in
+      let protocol_ok = function
+        | Ok value -> value
+        | Error error -> raise_s [%sexp "embedded protocol failed", (error : P.Error.t)]
+      in
+      let key name = P.Idempotency_key.of_string name |> protocol_ok in
+      let policy root =
+        let root_atom = Sexp.to_string_mach (Sexp.Atom root) in
+        let capacity =
+          Agent_server.Developer_startup_configuration.Capacity.standard_v1
+          |> Agent_server.Developer_startup_configuration.Capacity.sexp_of_t
+          |> Sexp.to_string_mach
+        in
+        sprintf
+          {|(project_sources ((external_roots (%s))))
+            (authoring_project_access
+             ((read_grants (((root %s) (principal_id Embedded_operator)
+                             (authentication_kind embedded.local))))
+              (selections (((root %s) (project check.chatml)
+                            (request (entry ((name main)))) (target one_off_v1))))))
+            (developer
+             ((selections
+               (((source (Local_source (root %s) (member check.chatml)))
+                 (target One_off_v1)
+                 (principals (((principal_id Embedded_operator)
+                               (authentication_kind embedded.local)))))
+                ((source (Local_source (root %s) (member fixture.chatml)))
+                 (target
+                   (Tool_v1 (tool_name fixture) (input_schema_json "{}")
+                            (output_schema_json "{}")))
+                 (principals (((principal_id Embedded_operator)
+                               (authentication_kind embedded.local)))))))
+              (capacity %s) (model Disabled) (approvals Disabled)
+              (repl Standard_v1) (portable true)))
+            (developer_scopes
+              (developer.check developer.fixture.run developer.live.run developer.repl))|}
+          root_atom
+          root_atom
+          root_atom
+          root_atom
+          root_atom
+          capacity
+      in
+      with_policy_file_at_root policy (fun env path ->
+        let root = Filename.dirname path in
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / Filename.concat root "check.chatml")
+          "let main input = Task.pure(input)";
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / Filename.concat root "fixture.chatml")
+          {|let run ctx input =
+  let* result = Tool.call("fixture", input) in
+  match result with
+  | `Ok(value) -> Task.pure(`Complete(value))
+  | `Error(message) -> Task.fail(message)|};
+        let workspace = Filename.concat root "workspace" in
+        Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
+        let prompt = Filename.concat root "agent.chatmd" in
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / prompt)
+          "<developer>Embedded typed REPL fixture.</developer>";
+        let options : Agent_server.Embedded.options =
+          { prompt_file = prompt
+          ; workspace
+          ; tool_dir = root
+          ; home = Some root
+          ; storage = Agent_server.Local_storage.Transient
+          ; start_immediately = false
+          ; permission_profile = Agent_server.Embedded.default_permission_profile
+          ; attachment_mode = Read_write
+          ; event_capacity = 32
+          }
+        in
+        let local_policy = V.load ~env ~path |> ok in
+        Eio.Switch.run (fun sw ->
+          let host =
+            Agent_server.Embedded.open_local_host ~sw ~env ~local_policy options
+            |> protocol_ok
+          in
+          Exn.protect
+            ~f:(fun () ->
+              let connection = Agent_server.Embedded.host_connection host in
+              let initialized =
+                Agent_client.Connection.initialization connection |> Option.value_exn
+              in
+              assert (
+                List.mem initialized.enabled_features C.Features.run ~equal:String.equal);
+              assert (
+                List.mem initialized.enabled_features R.Features.repl ~equal:String.equal);
+              let developer =
+                Agent_client.Developer_connection.create connection |> protocol_ok
+              in
+              let repl =
+                Agent_client.Developer_repl_connection.create connection |> protocol_ok
+              in
+              let limits =
+                Agent_client.Developer_connection.capabilities developer
+                |> C.Capabilities.limits
+              in
+              let member =
+                Source.Portable_path.create "check.chatml" |> Or_error.ok_exn
+              in
+              let route =
+                C.Route.local_source
+                  ~limits:(C.Limits.request limits)
+                  ~root_index:0
+                  ~member
+                |> protocol_ok
+              in
+              let run_id = P.Id.Developer_run.create () in
+              let check_key = key "embedded-typed-check" in
+              let check =
+                C.Submit.create
+                  ~limits
+                  ~run_id
+                  ~key:check_key
+                  ~kind:Check
+                  ~route
+                  ~target:One_off_v1
+                  ~prompt:None
+                  ~workspace:None
+                  ~entrypoint:"main"
+                  ~input:`Null
+                  ~fixtures:None
+                  ~requested_execution:None
+                  ~requested_max_output_bytes:None
+                |> protocol_ok
+              in
+              (match
+                 Agent_client.Developer_connection.send developer (W.Request.Submit check)
+                 |> protocol_ok
+               with
+               | W.Response.Submit _ -> ()
+               | _ -> failwith "embedded Check response changed method");
+              (match
+                 Agent_client.Developer_connection.send
+                   developer
+                   (W.Request.Await_terminal (C.Lookup.create ~run_id ~key:check_key))
+                 |> protocol_ok
+               with
+               | W.Response.Await_terminal view ->
+                 (match C.View.phase view with
+                  | Terminal { receipt; execution_started = false } ->
+                    (match P.Developer_receipt.value receipt with
+                     | Check Ready -> ()
+                     | _ -> failwith "embedded Check was not ready")
+                  | _ -> failwith "embedded Check did not settle before execution")
+               | _ -> failwith "embedded Check await changed method");
+              let live_key = key "embedded-typed-live" in
+              let live =
+                C.Submit.create
+                  ~limits
+                  ~run_id
+                  ~key:live_key
+                  ~kind:Live_run
+                  ~route
+                  ~target:One_off_v1
+                  ~prompt:
+                    (Some
+                       (Agent_server.Catalog_identity.prompt_definition "embedded.prompt"))
+                  ~workspace:
+                    (Some
+                       (Agent_server.Catalog_identity.workspace_definition
+                          "embedded.workspace"))
+                  ~entrypoint:"main"
+                  ~input:(`String "live")
+                  ~fixtures:None
+                  ~requested_execution:None
+                  ~requested_max_output_bytes:None
+                |> protocol_ok
+              in
+              (match
+                 Agent_client.Developer_connection.send developer (W.Request.Submit live)
+                 |> protocol_ok
+               with
+               | W.Response.Submit _ -> ()
+               | _ -> failwith "embedded Live response changed method");
+              (match
+                 Agent_client.Developer_connection.send
+                   developer
+                   (W.Request.Await_terminal (C.Lookup.create ~run_id ~key:live_key))
+                 |> protocol_ok
+               with
+               | W.Response.Await_terminal view ->
+                 (match C.View.phase view with
+                  | Terminal { receipt; execution_started = true } ->
+                    (match P.Developer_receipt.value receipt with
+                     | Live (Succeeded (`String "live")) -> ()
+                     | _ -> failwith "embedded Live did not return its input")
+                  | _ -> failwith "embedded Live did not execute")
+               | _ -> failwith "embedded Live await changed method");
+              let fixture_route =
+                C.Route.local_source
+                  ~limits:(C.Limits.request limits)
+                  ~root_index:0
+                  ~member:(Source.Portable_path.create "fixture.chatml" |> Or_error.ok_exn)
+                |> protocol_ok
+              in
+              let step =
+                C.Fixture.Step.create
+                  ~limits:(C.Limits.request limits)
+                  ~tool_name:"fixture"
+                  ~input_schema:(`Object [])
+                  ~output_schema:(`Object [])
+                  ~expected_input:`Null
+                  ~response:(Return (`String "fixture-result"))
+                |> protocol_ok
+              in
+              let fixtures =
+                C.Fixture.create
+                  ~limits:(C.Limits.request limits)
+                  ~max_steps:(C.Limits.max_fixture_steps limits)
+                  ~max_bytes:(C.Limits.max_fixture_bytes limits)
+                  ~steps:[ step ]
+                |> protocol_ok
+              in
+              let fixture_run_id = P.Id.Developer_run.create () in
+              let fixture_key = key "embedded-typed-fixture" in
+              let fixture =
+                C.Submit.create
+                  ~limits
+                  ~run_id:fixture_run_id
+                  ~key:fixture_key
+                  ~kind:Fixture_run
+                  ~route:fixture_route
+                  ~target:Tool_v1
+                  ~prompt:None
+                  ~workspace:None
+                  ~entrypoint:"run"
+                  ~input:`Null
+                  ~fixtures:(Some fixtures)
+                  ~requested_execution:None
+                  ~requested_max_output_bytes:None
+                |> protocol_ok
+              in
+              (match
+                 Agent_client.Developer_connection.send
+                   developer
+                   (W.Request.Submit fixture)
+                 |> protocol_ok
+               with
+               | W.Response.Submit _ -> ()
+               | _ -> failwith "embedded Fixture response changed method");
+              (match
+                 Agent_client.Developer_connection.send
+                   developer
+                   (W.Request.Await_terminal
+                      (C.Lookup.create ~run_id:fixture_run_id ~key:fixture_key))
+                 |> protocol_ok
+               with
+               | W.Response.Await_terminal view ->
+                 (match C.View.phase view with
+                  | Terminal { receipt; execution_started = _ } ->
+                    (match P.Developer_receipt.value receipt with
+                     | Fixture
+                         (Completed
+                            { outcome = Succeeded (`String "fixture-result")
+                            ; matched_steps = 1
+                            ; _
+                            }) -> ()
+                     | _ ->
+                       raise_s
+                         [%sexp
+                           "embedded Fixture did not match its one step"
+                         , (P.Developer_receipt.to_json receipt : Jsonaf.t)])
+                  | Reserved | Waiting_permission | Execution_started ->
+                    failwith "embedded Fixture did not settle")
+               | _ -> failwith "embedded Fixture await changed method");
+              let repl_limits =
+                Agent_client.Developer_repl_connection.capabilities repl
+                |> R.Capabilities.limits
+              in
+              let repl_route =
+                C.Route.local_source
+                  ~limits:(R.Limits.request repl_limits)
+                  ~root_index:0
+                  ~member
+                |> protocol_ok
+              in
+              let created =
+                R.Create.create
+                  ~limits:repl_limits
+                  ~run_id:(P.Id.Developer_run.create ())
+                  ~key:(key "embedded-repl-create")
+                  ~route:repl_route
+                  ~target:One_off_v1
+                  ~prompt:
+                    (Agent_server.Catalog_identity.prompt_definition "embedded.prompt")
+                  ~workspace:
+                    (Agent_server.Catalog_identity.workspace_definition
+                       "embedded.workspace")
+                  ~requested_execution:None
+                  ~requested_max_output_bytes:None
+                |> protocol_ok
+                |> Agent_client.Developer_repl_connection.create_instance repl
+                |> protocol_ok
+              in
+              let submitted =
+                R.Submit.create
+                  ~limits:repl_limits
+                  ~instance:(R.View.instance created)
+                  ~epoch:(R.View.epoch created)
+                  ~expected_revision:(R.View.revision created)
+                  ~key:(key "embedded-repl-submit")
+                  ~source:"Task.pure(8)"
+                |> protocol_ok
+                |> Agent_client.Developer_repl_connection.submit repl
+                |> protocol_ok
+              in
+              assert (Int.equal (List.length (R.Submission.task_references submitted)) 1);
+              let separate = Agent_server.Embedded.connect_host host |> protocol_ok in
+              Exn.protect
+                ~f:(fun () ->
+                  assert (
+                    Result.is_error
+                      (Agent_client.Developer_repl_connection.create separate));
+                  let implementation =
+                    P.Initialize.Implementation.create
+                      ~name:"embedded-selected-check-only"
+                      ~version:"1"
+                    |> protocol_ok
+                  in
+                  let request =
+                    P.Initialize.Request.create
+                      ~implementation
+                      ~protocol_min:P.Version.current
+                      ~protocol_max:P.Version.current
+                      ~features:[ C.Features.run ]
+                      ~event_encodings:[ Json ]
+                      ~max_inbound_event_bytes:(2 * 1024 * 1024)
+                      ()
+                    |> protocol_ok
+                  in
+                  (match
+                     Agent_client.Connection.request_without_history
+                       separate
+                       (Protocol_initialize request)
+                     |> protocol_ok
+                   with
+                   | Protocol_initialize response ->
+                     assert (
+                       not
+                         (List.mem
+                            response.enabled_features
+                            R.Features.repl
+                            ~equal:String.equal))
+                   | _ -> failwith "separate Initialize changed method");
+                  assert (
+                    Result.is_error
+                      (Agent_client.Developer_repl_connection.create separate)))
+                ~finally:(fun () -> Agent_client.Connection.close separate))
+            ~finally:(fun () -> Agent_server.Embedded.close_host host)))
     ;;
 
     let%test_unit

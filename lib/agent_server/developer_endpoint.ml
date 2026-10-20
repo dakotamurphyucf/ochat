@@ -476,7 +476,9 @@ let handle t ?actor ~connection request =
       | Wire.Request.Capabilities ->
         Common.Capabilities.create
           ~format_version:1
-          ~methods:(available_methods t ~connection)
+          ~methods:
+            (List.filter (available_methods t ~connection) ~f:(fun method_ ->
+               List.mem Wire.Request.supported_methods method_ ~equal:String.equal))
           ~limits
         |> Result.map ~f:(fun value -> Wire.Response.Capabilities value)
       | Submit submit ->

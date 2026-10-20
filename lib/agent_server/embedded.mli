@@ -136,6 +136,10 @@ val with_local_host
   -> f:(host -> ('a, Agent_protocol.Error.t) Result.t)
   -> ('a, Agent_protocol.Error.t) Result.t
 
+(** Borrow the host-owned, already initialized local connection on its owning
+    Eio domain. Developer and REPL methods are usable only when installed and
+    selected by this physical Initialize. Claim at most one notification lease;
+    host cleanup closes this connection before releasing daemon and Store. *)
 val host_connection : host -> Agent_client.Connection.t
 
 (** Trusted local composition currently grants the same compiled local scopes
@@ -194,7 +198,13 @@ val complete_script_activation
   -> checkpoint:(unit -> unit)
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) Result.t
 
+(** Open a distinct, uninitialized caller-owned connection on this host's
+    owning Eio domain. The caller must Initialize it, close it, and own its sole
+    notification lease. Closing this connection does not close the host's other
+    connections. Typed Developer/REPL methods require installed and selected
+    features on its own physical Initialize. *)
 val connect_host : host -> (Agent_client.Connection.t, Agent_protocol.Error.t) result
+
 val close_host : host -> unit
 val connection : t -> Agent_client.Connection.t
 val session_id : t -> Agent_protocol.Id.Session.t
@@ -208,12 +218,13 @@ val connect : t -> Agent_client.Connection.t
 val close_connection : t -> Connection_context.t -> unit
 val close : t -> unit
 
-(** Open a distinct connection owned by this embedded host. The caller borrows
-    it until host close, may install one notification consumer, and must not
-    independently close or escape it. Acquire and close on the host owning Eio
-    domain. Acquisition/adoption do not yield on that domain, so closed admission
-    rejects acquisition before constructing a client. Existing [connect] retains its
-    caller-owned contract. All owned connection cleanup precedes daemon/store
+(** Open a distinct, uninitialized connection owned by this embedded host. The
+    caller borrows it until host close, must Initialize it before typed
+    Developer/REPL use, and may claim its sole notification lease. Do not close
+    or escape it independently. Acquire and close on the host owning Eio domain.
+    Acquisition/adoption do not yield on that domain, so closed admission rejects
+    acquisition before constructing a client. Existing [connect] retains its
+    caller-owned contract. All host-owned connection cleanup precedes daemon/Store
     release and preserves original failure plus cleanup diagnostics. *)
 val connect_owned : t -> (Agent_client.Connection.t, Agent_protocol.Error.t) result
 

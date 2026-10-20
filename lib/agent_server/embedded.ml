@@ -205,6 +205,149 @@ let principal ?(developer_scopes = Agent_protocol.Scope.Set.empty) id =
     ~attributes:[]
 ;;
 
+let embedded_repl_request_id =
+  Agent_protocol.Envelope.Request_id.of_json (`Number "1")
+  |> Result.map_error ~f:(fun _ -> "invalid fixed embedded REPL request id")
+  |> Result.ok_or_failwith
+;;
+
+let embedded_repl_request_within_bound ~max_request_bytes request =
+  let module Repl = Agent_protocol.Developer_repl_wire in
+  let envelope =
+    Agent_protocol.Envelope.request
+      ~id:embedded_repl_request_id
+      ~method_:(Repl.Request.method_name request)
+      ~params:(Repl.Request.params request)
+      ()
+  in
+  let bytes =
+    Agent_protocol.Envelope.to_json envelope |> Jsonaf.to_string |> String.length
+  in
+  if max_request_bytes > 0 && bytes <= max_request_bytes
+  then Ok ()
+  else
+    Error
+      (Agent_protocol.Error.create
+         Resource_limit
+         ~message:"embedded REPL request exceeds its full envelope bound"
+         ~retryable:false
+         ())
+;;
+
+let%test_unit "embedded REPL full-envelope boundary precedes dispatch" =
+  let module P = Agent_protocol in
+  let request = P.Developer_repl_wire.Request.Capabilities in
+  let envelope =
+    P.Envelope.request
+      ~id:embedded_repl_request_id
+      ~method_:(P.Developer_repl_wire.Request.method_name request)
+      ~params:(P.Developer_repl_wire.Request.params request)
+      ()
+  in
+  let bytes = P.Envelope.to_json envelope |> Jsonaf.to_string |> String.length in
+  assert (
+    Result.is_ok (embedded_repl_request_within_bound ~max_request_bytes:bytes request));
+  match embedded_repl_request_within_bound ~max_request_bytes:(bytes - 1) request with
+  | Error error -> assert (P.Error.equal_code error.code Resource_limit)
+  | Ok () -> failwith "N-1 embedded REPL envelope was admitted"
+;;
+
+let embedded_developer_request dispatcher ~context ~bound request =
+  let module Wire = Agent_protocol.Developer_wire in
+  let module Bound = Agent_client.Transport.Developer_response_bound in
+  let open Result.Let_syntax in
+  let is_capabilities =
+    match request with
+    | Wire.Request.Capabilities -> true
+    | Submit _
+    | Observe _
+    | Await_terminal _
+    | Cancel_and_wait _
+    | Approval_list _
+    | Approval_respond _
+    | Approval_cancel _
+    | Watch _
+    | Unwatch _ -> false
+  in
+  let%bind () =
+    match bound, is_capabilities with
+    | Bound.Bootstrap, true | Installed _, false -> Ok ()
+    | Bootstrap, false | Installed _, true ->
+      Error (Agent_protocol.Error.invalid_request "Developer bootstrap bound mismatch")
+  in
+  let%bind response = Dispatcher.dispatch_developer dispatcher ~context request in
+  let%bind limits =
+    match bound, response with
+    | Bound.Bootstrap, Wire.Response.Capabilities capabilities ->
+      Ok (Agent_protocol.Developer_common.Capabilities.limits capabilities)
+    | Installed _, Capabilities _ | Bootstrap, _ ->
+      Error (Agent_protocol.Error.invalid_request "Developer response bound mismatch")
+    | Installed limits, _ -> Ok limits
+  in
+  let%bind json = Wire.Response.to_json response ~limits in
+  if String.length (Jsonaf.to_string json) <= Bound.max_result_bytes bound
+  then Ok json
+  else
+    Error
+      (Agent_protocol.Error.create
+         Resource_limit
+         ~message:"embedded Developer response exceeds its bound"
+         ~retryable:false
+         ())
+;;
+
+let embedded_repl_request dispatcher ~context ~max_request_bytes ~bound request =
+  let module Wire = Agent_protocol.Developer_repl_wire in
+  let module Bound = Agent_client.Transport.Repl_response_bound in
+  let open Result.Let_syntax in
+  let is_capabilities =
+    match request with
+    | Wire.Request.Capabilities -> true
+    | Create _
+    | Submit _
+    | Observe _
+    | Cancel_submission _
+    | Inspect_type _
+    | Task_references_page _
+    | Task_submit _
+    | Task_observe _
+    | Task_await_terminal _
+    | Task_cancel_and_wait _
+    | Reset_and_wait _
+    | Close_and_wait _
+    | Watch _
+    | Unwatch _ -> false
+  in
+  let%bind () =
+    match bound, is_capabilities with
+    | Bound.Bootstrap, true | Installed _, false -> Ok ()
+    | Bootstrap, false | Installed _, true ->
+      Error (Agent_protocol.Error.invalid_request "REPL bootstrap bound mismatch")
+  in
+  (* In-memory calls have no physical request id. Number 1 is this adapter's
+     fixed equivalent for counting the complete serialized JSON-RPC envelope. *)
+  let%bind () = embedded_repl_request_within_bound ~max_request_bytes request in
+  let%bind response = Dispatcher.dispatch_developer_repl dispatcher ~context request in
+  let%bind limits =
+    match bound, response with
+    | Bound.Bootstrap, Wire.Response.Capabilities capabilities ->
+      Ok (Wire.Capabilities.limits capabilities)
+    | Installed _, Capabilities _ | Bootstrap, _ ->
+      Error (Agent_protocol.Error.invalid_request "REPL response bound mismatch")
+    | Installed limits, _ -> Ok limits
+  in
+  let%bind json = Wire.Response.to_json response ~limits in
+  if String.length (Jsonaf.to_string json) <= Bound.max_result_bytes bound
+  then Ok json
+  else
+    Error
+      (Agent_protocol.Error.create
+         Resource_limit
+         ~message:"embedded REPL response exceeds its bound"
+         ~retryable:false
+         ())
+;;
+
 let make_connection_owner daemon principal event_capacity ~max_attachments =
   let notifications = Eio.Stream.create event_capacity in
   let closed, close_resolver = Eio.Promise.create () in
@@ -237,9 +380,11 @@ let make_connection_owner daemon principal event_capacity ~max_attachments =
           detached := true)))
   in
   let connection =
-    Agent_client.In_memory.create
-      ~request:(fun command ->
-        Dispatcher.dispatch_command (Daemon.dispatcher daemon) ~context command)
+    let dispatcher = Daemon.dispatcher daemon in
+    Agent_client.In_memory.create_with_developer_repl
+      ~request:(fun command -> Dispatcher.dispatch_command dispatcher ~context command)
+      ~request_developer:(embedded_developer_request dispatcher ~context)
+      ~request_repl:(embedded_repl_request dispatcher ~context)
       ~notifications
       ~close:(fun () ->
         ignore (Eio.Promise.try_resolve close_resolver ());
@@ -265,7 +410,13 @@ let initialize connection =
       ~implementation
       ~protocol_min:Agent_protocol.Version.current
       ~protocol_max:Agent_protocol.Version.current
-      ~features:[]
+      ~features:
+        [ Agent_protocol.Developer_common.Features.run
+        ; Agent_protocol.Developer_common.Features.approvals
+        ; Agent_protocol.Developer_common.Features.events
+        ; Agent_protocol.Developer_repl_wire.Features.repl
+        ; Agent_protocol.Developer_repl_wire.Features.events
+        ]
       ~event_encodings:[ Json ]
       ~max_inbound_event_bytes:(16 * 1024 * 1024)
       ()
