@@ -525,9 +525,9 @@ let implementation_sources =
   ; ( "lib/agent_server/embedded_local_template.ml"
     , "93691f37b0b11d3b5ef3303d2d6f35d7bdffe2ea2eb360db9d007ab841210e3e" )
   ; ( "lib/agent_server/embedded.ml"
-    , "1ef3d8c3c1e4785472a8732d0b892b349c4db3f48398d69eb312f8922db2eb9e" )
+    , "a9b3ee7ed708726e2a31255234ed6a42b7c283b0f4bb47bb48fa7857b68a7c2c" )
   ; ( "bin/ochat_agent_stdio.ml"
-    , "07c51d608d6360d942ba00ec5301bffb0d432ebfaf6de4c97b52748874e028a6" )
+    , "8d134cd11c7df2a60e6b4b77a5ff7f9ea0c28a8a2674a3dd9f573adaa7623902" )
   ; ( "lib/agent_server/session_factory.ml"
     , "6d91a79fe221939cafec72f63e21a5ab8a81476defb7a63999a4fc97012a90ac" )
   ; ( "bin/inference_composition.ml"

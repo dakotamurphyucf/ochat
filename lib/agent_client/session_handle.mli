@@ -14,6 +14,17 @@ val initialize
   -> implementation_version:string
   -> (Agent_protocol.Initialize.Response.t, Agent_protocol.Error.t) result
 
+(** Send one physical Initialize with explicit requested features. The
+    response remains the authority for actually selected features; callers
+    must check it before using a feature-specific client. The ordinary
+    [initialize] retains its inference feature set. *)
+val initialize_with_features
+  :  Connection.t
+  -> implementation_name:string
+  -> implementation_version:string
+  -> features:string list
+  -> (Agent_protocol.Initialize.Response.t, Agent_protocol.Error.t) result
+
 val attach
   :  sw:Eio.Switch.t
   -> clock:_ Eio.Time.clock

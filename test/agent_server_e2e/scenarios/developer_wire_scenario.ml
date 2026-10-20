@@ -1398,6 +1398,43 @@ let start_socket_listener ~sw env fixture daemon =
   await_socket 250
 ;;
 
+let qualify_terminal_remote_profile env fixture =
+  let connect expected_server =
+    let profile =
+      Agent_transport_client.Connection_profile.create
+        ~home:None
+        ~name:"configured Developer REPL Unix"
+        ~endpoint:("unix://" ^ Support.Config_fixture.unix_socket fixture)
+        ~expected_server
+        ~daemon_credential_file:None
+      |> ok
+    in
+    Chatml_repl_terminal.Client_adapter.with_connection
+      ~env
+      ~target:(Remote profile)
+      ~notification_capacity:16
+      ~f:(fun session ->
+        let limits =
+          Agent_client.Developer_repl_connection.capabilities
+            (Chatml_repl_terminal.Client_adapter.client session)
+          |> P.Developer_repl_wire.Capabilities.limits
+        in
+        if P.Developer_repl_wire.Limits.max_source_bytes limits <= 0
+        then fail "explicit-feature remote terminal profile did not select REPL";
+        let initialized =
+          Agent_client.Connection.initialization
+            (Chatml_repl_terminal.Client_adapter.connection session)
+          |> Option.value_exn
+        in
+        Ok initialized.server_id)
+    |> ok
+  in
+  let actual_server = connect None in
+  let pinned_server = connect (Some actual_server) in
+  if not (P.Id.Server.equal actual_server pinned_server)
+  then fail "pinned terminal profile changed physical Developer host"
+;;
+
 let configured_developer fixture =
   let http_principal =
     Support.Config_fixture.public_principal fixture |> P.Id.Principal.to_string
@@ -1580,6 +1617,7 @@ let run_configured env =
                    ~bearer_token:(Some (Support.Config_fixture.public_token fixture))
                    ~notification_capacity:64
                  |> ok);
+              qualify_terminal_remote_profile env fixture;
               qualify_unselected_principal
                 (http_client
                    ~token:(Support.Config_fixture.admin_token fixture)

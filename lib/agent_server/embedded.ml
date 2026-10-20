@@ -632,6 +632,7 @@ let close_host host = Embedded_host_cleanup.close host.cleanup
 let host_connection host = host.connection
 let host_principal host = host.principal
 let host_dispatcher host = Daemon.dispatcher host.daemon
+let host_close_connection host = Daemon.close_connection host.daemon
 
 module Script_selection = struct
   type t =

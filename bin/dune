@@ -5,6 +5,17 @@
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))
 
+(executable
+ (package ochat)
+ (public_name chatml-repl)
+ (name chatml_repl)
+ (modules chatml_repl)
+ (libraries core core_unix.command_unix eio eio.unix eio_main mirage-crypto-rng.unix
+  ochat.agent_protocol ochat.agent_client ochat.agent_transport_client
+  ochat.agent_server ochat.chatml_project ochat.chatml_repl_terminal
+  ochat.notty_eio)
+ (preprocess (pps ppx_jane)))
+
 (library
  (name shell_inspection_cli)
  (modules shell_inspection_cli)

@@ -25,6 +25,18 @@ val connect
   -> notification_capacity:int
   -> (Agent_client.Connection.t, Agent_protocol.Error.t) result
 
+(** One initialized connection with explicit requested features and the same
+    pinned-host comparison as [connect]. The profile's endpoint and credential
+    reference are unchanged; no second Initialize or new authority is minted.
+    The caller must check the selected feature through its typed client. *)
+val connect_with_features
+  :  t
+  -> sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
+  -> notification_capacity:int
+  -> features:string list
+  -> (Agent_client.Connection.t, Agent_protocol.Error.t) result
+
 (** Versioned nonsecret profile document. Required-null optional fields retain
     absence/null distinctions at admission; unknown fields are preserved by
     callers retaining the original document. Unsupported kinds/versions fail. *)

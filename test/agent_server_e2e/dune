@@ -157,6 +157,8 @@
   ochat.agent_client
   ochat.agent_protocol
   ochat.agent_server
+  ochat.agent_transport_client
+  ochat.chatml_repl_terminal
   ochat.chat_response
   ochat.chat_tui
   ochat.openai
