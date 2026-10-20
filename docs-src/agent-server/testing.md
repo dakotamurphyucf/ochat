@@ -143,6 +143,7 @@ These run under `@agent-docs-check`, without provider requests.
 | Explicit selection | Purpose |
 |---|---|
 | `@agent-e2e-transports` | Local/gateway/HTTP/Unix protocol workflows. |
+| `@agent-e2e-developer-trace-client` | Authenticated two-root Developer trace pages over embedded, HTTP, Unix and first-party stdio; exact revocation and reconnect. Included in transports. |
 | `@agent-e2e-permissions`, `@agent-e2e-security` | Approval, authorization, projection and boundary cases. |
 | `@agent-e2e-persistence`, `@agent-e2e-crash`, `@agent-e2e-recovery` | Store and interruption/recovery behavior. |
 | `@agent-e2e-tui-auto` | Deterministic automated TUI traces. |

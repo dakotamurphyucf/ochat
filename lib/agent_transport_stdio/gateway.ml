@@ -41,7 +41,7 @@ let publish connection outgoing envelope =
     false)
 ;;
 
-let repl_framing_fits ~max_line_length ~id ~result_bytes =
+let closed_framing_fits ~max_line_length ~id ~result_bytes ~error_bytes =
   let empty_error = Agent_protocol.Error.invalid_request "" in
   let success_framing =
     Agent_protocol.Envelope.success ~id `Null
@@ -60,7 +60,6 @@ let repl_framing_fits ~max_line_length ~id ~result_bytes =
     |> String.length
     |> fun length -> length - empty_error_bytes
   in
-  let error_bytes = Agent_client.Transport.Repl_response_bound.max_error_bytes in
   success_framing <= max_line_length
   && result_bytes <= max_line_length - success_framing
   && error_framing <= max_line_length
@@ -70,6 +69,51 @@ let repl_framing_fits ~max_line_length ~id ~result_bytes =
 let response connection ~max_line_length (request : Agent_protocol.Envelope.request) =
   let open Result.Let_syntax in
   if
+    List.mem
+      Agent_protocol.Developer_trace_wire.Request.supported_methods
+      request.method_
+      ~equal:String.equal
+  then
+    let module Trace = Agent_protocol.Developer_trace_wire in
+    let module Bound = Agent_client.Transport.Trace_response_bound in
+    let%bind capabilities = Agent_client.Connection.trace_capabilities connection in
+    let limits = Trace.Capabilities.limits capabilities in
+    let bound =
+      if
+        String.equal
+          request.method_
+          (Trace.Request.method_name Trace.Request.Capabilities)
+      then Bound.Bootstrap
+      else Bound.Installed limits
+    in
+    let%bind () =
+      if
+        closed_framing_fits
+          ~max_line_length
+          ~id:request.id
+          ~result_bytes:(Bound.max_result_bytes bound)
+          ~error_bytes:Bound.max_error_bytes
+      then Ok ()
+      else Error (invalid "trace response exceeds stdio line capacity")
+    in
+    let%bind () =
+      if
+        List.mem
+          (Trace.Capabilities.methods capabilities)
+          request.method_
+          ~equal:String.equal
+      then Ok ()
+      else Error (invalid "trace method is not advertised")
+    in
+    let%bind typed =
+      Trace.Request.of_method_and_params
+        ~limits
+        ~method_:request.method_
+        ~params:request.params
+    in
+    let%bind result = Agent_client.Connection.request_trace connection ~limits typed in
+    Trace.Response.to_json result ~limits
+  else if
     List.mem
       Agent_protocol.Developer_repl_wire.Request.supported_methods
       request.method_
@@ -84,11 +128,12 @@ let response connection ~max_line_length (request : Agent_protocol.Envelope.requ
     in
     let%bind () =
       if
-        repl_framing_fits
+        closed_framing_fits
           ~max_line_length
           ~id:request.id
           ~result_bytes:
             (Agent_client.Transport.Repl_response_bound.max_result_bytes bound)
+          ~error_bytes:Agent_client.Transport.Repl_response_bound.max_error_bytes
       then Ok ()
       else Error (invalid "REPL response exceeds stdio line capacity")
     in

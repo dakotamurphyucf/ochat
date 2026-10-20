@@ -115,6 +115,13 @@
     lib/agent_protocol/developer_repl_wire_task.ml %{dep:../agent_protocol/developer_repl_wire_task.ml}
     lib/agent_protocol/developer_repl_wire.ml %{dep:../agent_protocol/developer_repl_wire.ml}
     lib/agent_protocol/developer_trace_wire.ml %{dep:../agent_protocol/developer_trace_wire.ml}
+    lib/agent_client/developer_trace_connection.ml %{dep:../agent_client/developer_trace_connection.ml}
+    lib/agent_client/connection.ml %{dep:../agent_client/connection.ml}
+    lib/agent_client/transport.ml %{dep:../agent_client/transport.ml}
+    lib/agent_client/in_memory.ml %{dep:../agent_client/in_memory.ml}
+    lib/agent_transport_http/client.ml %{dep:../agent_transport_http/client.ml}
+    lib/agent_transport_ndjson/client.ml %{dep:../agent_transport_ndjson/client.ml}
+    lib/agent_transport_stdio/gateway.ml %{dep:../agent_transport_stdio/gateway.ml}
     lib/agent_server/developer_command_wire_receipt.ml %{dep:../agent_server/developer_command_wire_receipt.ml}
     lib/agent_server/developer_endpoint.ml %{dep:../agent_server/developer_endpoint.ml}
     lib/agent_server/developer_trace_page.ml %{dep:../agent_server/developer_trace_page.ml}

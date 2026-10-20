@@ -151,6 +151,8 @@ type t =
       (P.Initialize.Response.t * P.Developer_common.Capabilities.t) option
   ; mutable repl_capabilities :
       (P.Initialize.Response.t * P.Developer_repl_wire.Capabilities.t) option
+  ; mutable trace_capabilities :
+      (P.Initialize.Response.t * P.Developer_trace_wire.Capabilities.t) option
   ; mutable notification_owner : int option
   ; mutable next_notification_owner : int
   ; mutable pending : pending_command list
@@ -165,6 +167,7 @@ let create transport =
   ; initialization = Atomic.make None
   ; developer_capabilities = None
   ; repl_capabilities = None
+  ; trace_capabilities = None
   ; notification_owner = None
   ; next_notification_owner = 0
   ; pending = []
@@ -375,6 +378,7 @@ let request_locked t command =
          Atomic.set t.initialization (Some response);
          t.developer_capabilities <- None;
          t.repl_capabilities <- None;
+         t.trace_capabilities <- None;
          result
        | _ -> result)
     | _, _ -> result)
@@ -710,6 +714,107 @@ let request_repl t ~limits request =
           || not (repl_response_matches initialization request response)
         then Error (developer_error "REPL response changed request identity")
         else Ok response))
+;;
+
+let request_trace_transport t ~initialization ~bound request =
+  let module T = Transport.Trace_response_bound in
+  match
+    Transport.request_trace
+      t.transport
+      ~max_request_bytes:initialization.P.Initialize.Response.limits.max_request_bytes
+      ~bound
+      request
+  with
+  | Ok json when String.length (Jsonaf.to_string json) > T.max_result_bytes bound ->
+    Error (developer_error "trace success response exceeds its bound")
+  | Error failure when not (T.error_within_bound failure) ->
+    Error (developer_error "trace error response exceeds its bound")
+  | result -> result
+;;
+
+let trace_capabilities t =
+  with_request_lock t (fun () ->
+    let module T = P.Developer_trace_wire in
+    let open Result.Let_syntax in
+    let%bind initialization = developer_initialization t in
+    let%bind () = require_developer_feature initialization T.Features.trace in
+    match t.trace_capabilities with
+    | Some (source, capabilities) when phys_equal source initialization -> Ok capabilities
+    | None | Some _ ->
+      let%bind json =
+        request_trace_transport
+          t
+          ~initialization
+          ~bound:Transport.Trace_response_bound.Bootstrap
+          T.Request.Capabilities
+      in
+      let%bind capabilities = T.Capabilities.of_json json in
+      let installed method_ =
+        List.mem (T.Capabilities.methods capabilities) method_ ~equal:String.equal
+      in
+      if
+        Atomic.get t.closed
+        || not
+             (Option.value_map
+                (Atomic.get t.initialization)
+                ~default:false
+                ~f:(phys_equal initialization))
+      then Error (developer_error "trace initialization changed")
+      else if
+        not
+          (installed (T.Request.method_name T.Request.Capabilities)
+           && List.for_all T.Request.supported_methods ~f:installed)
+      then Error (developer_error "trace Capabilities/Page methods are not installed")
+      else (
+        t.trace_capabilities <- Some (initialization, capabilities);
+        Ok capabilities))
+;;
+
+let request_trace t ~limits request =
+  with_request_lock t (fun () ->
+    let module T = P.Developer_trace_wire in
+    let open Result.Let_syntax in
+    let%bind initialization = developer_initialization t in
+    let%bind () = require_developer_feature initialization T.Features.trace in
+    let%bind capabilities =
+      match t.trace_capabilities with
+      | Some (source, capabilities) when phys_equal source initialization ->
+        Ok capabilities
+      | None | Some _ -> Error (developer_error "trace capabilities are absent")
+    in
+    if not (phys_equal limits (T.Capabilities.limits capabilities))
+    then Error (developer_error "trace response limits changed")
+    else (
+      let method_ = T.Request.method_name request in
+      if not (List.mem (T.Capabilities.methods capabilities) method_ ~equal:String.equal)
+      then Error (developer_error "trace method is not advertised")
+      else (
+        match request with
+        | T.Request.Capabilities -> Ok (T.Response.Capabilities capabilities)
+        | T.Request.Page _ ->
+          let%bind request =
+            T.Request.of_method_and_params
+              ~limits
+              ~method_
+              ~params:(T.Request.params request)
+          in
+          let%bind json =
+            request_trace_transport
+              t
+              ~initialization
+              ~bound:(Transport.Trace_response_bound.Installed limits)
+              request
+          in
+          let%bind response = T.Response.of_method_and_json ~limits ~method_ json in
+          if
+            Atomic.get t.closed
+            || not
+                 (Option.value_map
+                    (Atomic.get t.initialization)
+                    ~default:false
+                    ~f:(phys_equal initialization))
+          then Error (developer_error "trace initialization changed during page")
+          else Ok response)))
 ;;
 
 module Repl_control = struct

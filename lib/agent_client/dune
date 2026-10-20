@@ -18,6 +18,7 @@
   authoring_bundle
   developer_connection
   developer_repl_connection
+  developer_trace_connection
   activity_views
   run_views
   conversation_search
@@ -26,7 +27,7 @@
   completion_view
   canonical_export
   reconnect)
- (libraries core eio base64 digestif ochat.agent_protocol ochat.transcript ochat.document_schema)
+ (libraries core eio base64 digestif ochat.agent_protocol ochat.transcript ochat.document_schema ochat.chatml_source)
  (private_modules authoring_connection)
  (preprocess
   (pps ppx_jane)))

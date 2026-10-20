@@ -234,6 +234,29 @@ let embedded_repl_request_within_bound ~max_request_bytes request =
          ())
 ;;
 
+let embedded_trace_request_within_bound ~max_request_bytes request =
+  let module Trace = Agent_protocol.Developer_trace_wire in
+  let envelope =
+    Agent_protocol.Envelope.request
+      ~id:embedded_repl_request_id
+      ~method_:(Trace.Request.method_name request)
+      ~params:(Trace.Request.params request)
+      ()
+  in
+  let bytes =
+    Agent_protocol.Envelope.to_json envelope |> Jsonaf.to_string |> String.length
+  in
+  if max_request_bytes > 0 && bytes <= max_request_bytes
+  then Ok ()
+  else
+    Error
+      (Agent_protocol.Error.create
+         Resource_limit
+         ~message:"embedded trace request exceeds its full envelope bound"
+         ~retryable:false
+         ())
+;;
+
 let%test_unit "embedded REPL full-envelope boundary precedes dispatch" =
   let module P = Agent_protocol in
   let request = P.Developer_repl_wire.Request.Capabilities in
@@ -348,6 +371,38 @@ let embedded_repl_request dispatcher ~context ~max_request_bytes ~bound request 
          ())
 ;;
 
+let embedded_trace_request dispatcher ~context ~max_request_bytes ~bound request =
+  let module Wire = Agent_protocol.Developer_trace_wire in
+  let module Bound = Agent_client.Transport.Trace_response_bound in
+  let open Result.Let_syntax in
+  let%bind () =
+    match bound, request with
+    | Bound.Bootstrap, Wire.Request.Capabilities | Installed _, Page _ -> Ok ()
+    | Bootstrap, Page _ | Installed _, Capabilities ->
+      Error (Agent_protocol.Error.invalid_request "trace bootstrap bound mismatch")
+  in
+  let%bind () = embedded_trace_request_within_bound ~max_request_bytes request in
+  let%bind response = Dispatcher.dispatch_developer_trace dispatcher ~context request in
+  let%bind limits =
+    match bound, response with
+    | Bound.Bootstrap, Wire.Response.Capabilities capabilities ->
+      Ok (Wire.Capabilities.limits capabilities)
+    | Installed _, Capabilities _ | Bootstrap, _ ->
+      Error (Agent_protocol.Error.invalid_request "trace response bound mismatch")
+    | Installed limits, _ -> Ok limits
+  in
+  let%bind json = Wire.Response.to_json response ~limits in
+  if String.length (Jsonaf.to_string json) <= Bound.max_result_bytes bound
+  then Ok json
+  else
+    Error
+      (Agent_protocol.Error.create
+         Resource_limit
+         ~message:"embedded trace response exceeds its bound"
+         ~retryable:false
+         ())
+;;
+
 let make_connection_owner daemon principal event_capacity ~max_attachments =
   let notifications = Eio.Stream.create event_capacity in
   let closed, close_resolver = Eio.Promise.create () in
@@ -381,10 +436,11 @@ let make_connection_owner daemon principal event_capacity ~max_attachments =
   in
   let connection =
     let dispatcher = Daemon.dispatcher daemon in
-    Agent_client.In_memory.create_with_developer_repl
+    Agent_client.In_memory.create_with_developer_repl_trace
       ~request:(fun command -> Dispatcher.dispatch_command dispatcher ~context command)
       ~request_developer:(embedded_developer_request dispatcher ~context)
       ~request_repl:(embedded_repl_request dispatcher ~context)
+      ~request_trace:(embedded_trace_request dispatcher ~context)
       ~notifications
       ~close:(fun () ->
         ignore (Eio.Promise.try_resolve close_resolver ());
@@ -416,6 +472,7 @@ let initialize connection =
         ; Agent_protocol.Developer_common.Features.events
         ; Agent_protocol.Developer_repl_wire.Features.repl
         ; Agent_protocol.Developer_repl_wire.Features.events
+        ; Agent_protocol.Developer_trace_wire.Features.trace
         ]
       ~event_encodings:[ Json ]
       ~max_inbound_event_bytes:(16 * 1024 * 1024)

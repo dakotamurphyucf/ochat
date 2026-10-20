@@ -19,20 +19,28 @@ type pending =
       { bound : Agent_client.Transport.Repl_response_bound.t
       ; resolver : (Jsonaf.t, Agent_protocol.Error.t) result Eio.Promise.u
       }
+  | Trace of
+      { bound : Agent_client.Transport.Trace_response_bound.t
+      ; resolver : (Jsonaf.t, Agent_protocol.Error.t) result Eio.Promise.u
+      }
 
 type response_bound =
   | Developer_bound of Agent_client.Transport.Developer_response_bound.t
   | Repl_bound of Agent_client.Transport.Repl_response_bound.t
+  | Trace_bound of Agent_client.Transport.Trace_response_bound.t
 
 let max_result_bytes = function
   | Developer_bound bound ->
     Agent_client.Transport.Developer_response_bound.max_result_bytes bound
   | Repl_bound bound -> Agent_client.Transport.Repl_response_bound.max_result_bytes bound
+  | Trace_bound bound ->
+    Agent_client.Transport.Trace_response_bound.max_result_bytes bound
 ;;
 
 let max_error_bytes = function
   | Developer_bound _ -> Agent_client.Transport.Developer_response_bound.max_error_bytes
   | Repl_bound _ -> Agent_client.Transport.Repl_response_bound.max_error_bytes
+  | Trace_bound _ -> Agent_client.Transport.Trace_response_bound.max_error_bytes
 ;;
 
 let error_within_bound bound failure =
@@ -40,6 +48,8 @@ let error_within_bound bound failure =
   | Developer_bound _ ->
     Agent_client.Transport.Developer_response_bound.error_within_bound failure
   | Repl_bound _ -> Agent_client.Transport.Repl_response_bound.error_within_bound failure
+  | Trace_bound _ ->
+    Agent_client.Transport.Trace_response_bound.error_within_bound failure
 ;;
 
 type state =
@@ -89,7 +99,8 @@ let resolve_all t failure =
   List.iter pending ~f:(function
     | Command pending -> Eio.Promise.resolve pending.resolver (Error failure)
     | Developer pending -> Eio.Promise.resolve pending.resolver (Error failure)
-    | Repl pending -> Eio.Promise.resolve pending.resolver (Error failure));
+    | Repl pending -> Eio.Promise.resolve pending.resolver (Error failure)
+    | Trace pending -> Eio.Promise.resolve pending.resolver (Error failure));
   Agent_session.Mailbox.close t.notifications
 ;;
 
@@ -160,6 +171,17 @@ let handle_response t response ~raw_result_bytes ~raw_error_bytes =
           ~transport_name:t.transport_name
           ~name:"REPL"
           ~bound:(Repl_bound pending.bound)
+          ~raw_result_bytes
+          ~raw_error_bytes
+          response.outcome
+      in
+      Eio.Promise.resolve pending.resolver outcome
+    | Trace pending ->
+      let outcome =
+        bounded_outcome
+          ~transport_name:t.transport_name
+          ~name:"trace"
+          ~bound:(Trace_bound pending.bound)
           ~raw_result_bytes
           ~raw_error_bytes
           response.outcome
@@ -312,6 +334,12 @@ let request_envelope t ~method_ ~params ~pending ~response ~bound ~max_request_b
           Some
             (Document_schema.Limits.max_bytes
                (Agent_protocol.Developer_repl_wire.Limits.request limits))
+        | Trace_bound Agent_client.Transport.Trace_response_bound.Bootstrap ->
+          Some Agent_protocol.Developer_trace_wire.Capabilities.max_json_bytes
+        | Trace_bound (Installed limits) ->
+          Some
+            (Document_schema.Limits.max_bytes
+               (Agent_protocol.Developer_trace_wire.Limits.request limits))
       in
       (match repl_payload_limit, max_request_bytes with
        | None, None -> Ok ()
@@ -381,13 +409,26 @@ let request_repl t ~max_request_bytes ~bound request =
     ~max_request_bytes:(Some max_request_bytes)
 ;;
 
+let request_trace t ~max_request_bytes ~bound request =
+  let response, resolver = Eio.Promise.create () in
+  request_envelope
+    t
+    ~method_:(Agent_protocol.Developer_trace_wire.Request.method_name request)
+    ~params:(Agent_protocol.Developer_trace_wire.Request.params request)
+    ~pending:(Trace { bound; resolver })
+    ~response
+    ~bound:(Some (Trace_bound bound))
+    ~max_request_bytes:(Some max_request_bytes)
+;;
+
 let next_notification t = Agent_session.Mailbox.pop t.notifications
 
 let transport t =
-  Agent_client.Transport.create_with_developer_repl
+  Agent_client.Transport.create_with_developer_repl_trace
     ~request:(request t)
     ~request_developer:(request_developer t)
     ~request_repl:(request_repl t)
+    ~request_trace:(request_trace t)
     ~next_notification:(fun () -> next_notification t)
     ~close:(fun () -> close_internal t)
 ;;

@@ -4,7 +4,11 @@ open! Core
     scenarios. The source policy selects only the authored document script; it
     does not grant native, provider, or transport authority. *)
 
-val developer_configuration : unit -> Agent_server.Daemon.Developer_configuration.t
+val developer_configuration
+  :  ?capture_policy:Agent_server.Authoring_context_service.Developer.Target_policy.t
+  -> ?max_runs:int
+  -> unit
+  -> Agent_server.Daemon.Developer_configuration.t
 
 val semantic_authoring_policy
   :  Eio_unix.Stdenv.base
