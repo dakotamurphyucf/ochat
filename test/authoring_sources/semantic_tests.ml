@@ -30,6 +30,7 @@ let%expect_test
             (List.mem
                [ "lib/chatml/chatml_host_runtime.ml"
                ; "lib/chatml/chatml_compilation.ml"
+               ; "lib/chatml/chatml_compilation_checkpoint.ml"
                ; "lib/chatml/chatml_execution.ml"
                ; "lib/chatml/chatml_builtin_modules.ml"
                ; "lib/chatml/chatml_task_array.ml"

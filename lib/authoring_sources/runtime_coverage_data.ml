@@ -48,6 +48,7 @@ let shared_features =
     , "No-effect compiler domains, captured revisions, explicit policy and cooperative \
        cancellation"
     , [ "lib/chatml/chatml_compilation.ml"
+      ; "lib/chatml/chatml_compilation_checkpoint.ml"
       ; "lib/chat_response/startup_compilation.ml"
       ; "lib/agent_session/runtime_script_preparation.ml"
       ; "lib/chat_response/script_contract_plan.ml"
@@ -55,6 +56,7 @@ let shared_features =
       ]
     , "runtime.execution"
     , [ "test/chatml_compilation_test.ml"
+      ; "lib/chatml/chatml_compilation_checkpoint_tests.ml"
       ; "test/chatml_captured_compilation/domain_tests.ml"
       ; "test/chatml_script_routing/startup_budget_tests.ml"
       ; "test/chatml_source_owner/runtime_preparation_tests.ml"
@@ -653,7 +655,9 @@ let implementation_sources =
   ; ( "lib/agent_server/delegation_lifecycle.ml"
     , "5bfed8ecc3cd3f7976457adbab4a5e875f8b56bd08f4856d18149c694303ad49" )
   ; ( "lib/chatml/chatml_compilation.ml"
-    , "0d7f4e3d5069816b32e481b7bb7a5b82efd2df85a1b66b530599787213dbf0b9" )
+    , "a8179fdcf91abed22840028394cadf7032162c45f76f686c11e6ed6a12edb721" )
+  ; ( "lib/chatml/chatml_compilation_checkpoint.ml"
+    , "14e7da378d7d2cab859bf8d2c7357f88521d11cdec8851cc83df37cd2bee6224" )
   ; ( "lib/chatml/chatml_execution.ml"
     , "7a69997aff6b6b2e15ead628049febc51fe95a36ac2e5b63b8e5f5277f27e4cb" )
   ; ( "lib/chatml/chatml_value_codec.ml"

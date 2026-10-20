@@ -638,6 +638,14 @@ The Store rereads under its writer lease, writes and syncs a temporary file, the
 
 ## 2. Captured input, check and run
 
+Compilation keeps one elapsed-time budget across metadata preparation and its
+joined worker domain. Every compiler checkpoint checks caller cancellation and
+the configured deadline. Scheduler yields use a separate bounded checkpoint
+cadence, followed by another cancellation/deadline check before work resumes.
+This avoids entering the scheduler for every encoded metadata field while
+remaining cooperative: work between checkpoints must still finish, and the
+caller joins the domain before returning. This is not a hard real-time deadline.
+
 A developer capture is an admitted, immutable snapshot of the selected graph and exact input. Its provenance is either a saved local editor revision or an unsaved editor snapshot with an editor revision and editor connection identity. Those editor coordinates are provenance outside the graph fingerprint: equal bytes can come from different editor revisions. A remote client uploads an exact source closure through the authoring bundle service and receives a principal-bound immutable bundle ID/graph receipt. Admission pins that bundle ID, graph/contract/environment/source digests and provenance under the developer host owner; it does not borrow a live editor buffer, lease or connection resource. The capture therefore outlives closing the editor analysis context. It also fixes the entrypoint, project/environment, compiler contract, input, mode and, for test mode, fixture set. Use a separate capture digest over these selections. A later editor edit, save, graph refresh or capability-registry change cannot rewrite the capture.
 
 An unsaved capture is executable as an explicitly labeled isolated input. An explicit immutable bundle upload gives a valid edit/upload/run path without claiming it saved local files or changed a running agent. Local editor saves are local file operations; the developer host treats its selected source roots as read-only and does not promise atomic compare-and-swap with external filesystem writers. A saved capture must be made from the bytes the source owner actually admitted. The authoring bundle upload has its own principal-bound custody and quota, including HTTP and stdio access; a message-input blob with temporary lifetime cannot stand in for it. Repeating a run uses a new request ID, creates a new run ID and never reuses a prior effectful evaluation. A transport retry with the same request ID and capture digest returns the original receipt; reuse of that ID with different captured input rejects before execution.
