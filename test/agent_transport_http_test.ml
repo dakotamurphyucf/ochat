@@ -60,7 +60,7 @@ let event_fixture ~sw env event_response requests =
       listener
       (event_fixture_handler requests event_response)
       ~on_error:(function
-      | Eio.Io _ -> ()
+      | End_of_file | Eio.Io _ -> ()
       | exn -> raise exn));
   port
 ;;
@@ -170,7 +170,7 @@ let with_held_events env f =
     in
     Eio.Fiber.fork_daemon ~sw:server_sw (fun () ->
       Eio.Net.run_server listener (held_event_handler gate) ~on_error:(function
-        | Eio.Io _ -> ()
+        | End_of_file | Eio.Io _ -> ()
         | exn -> raise exn));
     f port)
 ;;
@@ -267,7 +267,7 @@ let%expect_test "HTTP cancelled mutation retires transport and retains uncertain
         in
         Eio.Fiber.fork_daemon ~sw:server_sw (fun () ->
           Eio.Net.run_server listener handler ~on_error:(function
-            | Eio.Io _ -> ()
+            | End_of_file | Eio.Io _ -> ()
             | exn -> raise exn));
         Eio.Switch.run (fun sw ->
           let module C = Agent_client.Connection in

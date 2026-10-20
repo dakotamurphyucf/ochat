@@ -239,6 +239,76 @@ let%expect_test "post-handoff malformed result and cancellation retain custody" 
   [%expect {| malformed and cancelled post-handoff results retained separate intents |}]
 ;;
 
+let%expect_test "same physical REPL control cancels a held Submit before its reply" =
+  Eio_main.run (fun _ ->
+    Eio.Switch.run (fun sw ->
+      let initialized = T.initialization ~events:true ~repl:true () in
+      let entered, signal_entered = Eio.Promise.create () in
+      let released, release = Eio.Promise.create () in
+      let submitted, signal_submitted = Eio.Promise.create () in
+      let sends = ref 0 in
+      let cancels = ref 0 in
+      let terminal =
+        R.Submission.create
+          ~limits
+          ~status:(Stopped None)
+          ~details:Available
+          ~completed_statements:0
+          ~statement_count:0
+          ~epoch
+          ~revision
+          ~summaries:[]
+          ~task_reference_count:0
+          ~task_references:[]
+        |> T.must
+      in
+      let reply response = R.Response.to_json response ~limits |> T.must in
+      let physical =
+        Agent_client.In_memory.create_with_developer_repl
+          ~request:(function
+            | P.Command.Protocol_initialize _ -> Ok (RT.public_initialized initialized)
+            | _ -> Error (P.Error.invalid_request "unexpected command"))
+          ~request_developer:(fun ~bound:_ _ ->
+            Error (P.Error.invalid_request "unexpected Developer request"))
+          ~request_repl:(fun ~max_request_bytes:_ ~bound:_ request ->
+            match request with
+            | R.Request.Capabilities -> Ok (R.Capabilities.to_json capabilities)
+            | Submit _ ->
+              Int.incr sends;
+              Eio.Promise.resolve signal_entered ();
+              Eio.Promise.await released;
+              Ok (reply (R.Response.Submit terminal))
+            | Cancel_submission _ ->
+              Int.incr cancels;
+              Eio.Promise.resolve release ();
+              Ok (reply (R.Response.Cancel_submission terminal))
+            | _ -> Error (P.Error.invalid_request "unexpected REPL request"))
+          ~notifications:(Eio.Stream.create 8)
+          ~close:Fn.id
+      in
+      T.initialize ~events:true ~repl:true physical initialized;
+      let client = Client.create physical |> T.must in
+      let _, request, _, _, _ = requests () in
+      let lookup = R.Lookup.create ~instance ~key:(R.Submit.key request) in
+      Eio.Fiber.fork ~sw (fun () ->
+        Eio.Promise.resolve signal_submitted (Client.submit client request));
+      Eio.Promise.await entered;
+      let cancelled = Client.cancel_submission client lookup |> T.must in
+      let original = Eio.Promise.await submitted |> T.must in
+      assert (Int.equal !sends 1);
+      assert (Int.equal !cancels 1);
+      assert (
+        R.Wire_id.Revision.equal
+          (R.Submission.revision cancelled)
+          (R.Submission.revision original));
+      assert (List.is_empty (Client.pending client).submits);
+      Agent_client.Connection.close physical;
+      print_endline
+        "same physical control overtook held Submit; matching terminal retired custody"));
+  [%expect
+    {| same physical control overtook held Submit; matching terminal retired custody |}]
+;;
+
 let%expect_test "fixed local custody count rejects before transport handoff" =
   Eio_main.run (fun _ ->
     let sends = ref 0 in

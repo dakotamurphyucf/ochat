@@ -47,17 +47,37 @@ val repl_capabilities
   :  t
   -> (Agent_protocol.Developer_repl_wire.Capabilities.t, Agent_protocol.Error.t) result
 
-(** REPL requests share the serialized request lane and current Initialize with
+(** Ordinary REPL requests share the serialized request lane and current Initialize with
     ordinary Developer calls. Except for Capabilities, this revalidates the
     closed request, selected feature, advertised method and exact installed
     limits, then decodes a method-affine bounded response. It owns no mutation
     recovery state: callers retain uncertain Create/Submit/Task/Reset/Close
-    requests before calling it. A blocking Task Await prevents a same-connection
-    Cancel from overtaking it. The caller owns the one notification lease. *)
+    requests before calling it. The caller owns the one notification lease. *)
 val request_repl
   :  t
   -> limits:Agent_protocol.Developer_repl_wire.Limits.t
   -> Agent_protocol.Developer_repl_wire.Request.t
+  -> (Agent_protocol.Developer_repl_wire.Response.t, Agent_protocol.Error.t) result
+
+module Repl_control : sig
+  (** The only REPL operations permitted to overtake a blocked ordinary request.
+      Neither carries a new idempotency key or grants authority. *)
+  type t =
+    | Cancel_submission of Agent_protocol.Developer_repl_wire.Lookup.t
+    | Task_cancel_and_wait of Agent_protocol.Developer_common.Lookup.t
+end
+
+(** Bounded same-connection control lane. [initialized_as] must be the exact
+    successful physical Initialize captured by the upper client. Before and
+    after a yield, check that generation, selected feature, advertised method,
+    installed limits and close state. Response decoding remains method-affine
+    and bounded; the server still performs current actor/lease authorization.
+    A busy control lane fails with Resource_limit without queueing a waiter. *)
+val request_repl_control
+  :  t
+  -> initialized_as:Agent_protocol.Initialize.Response.t
+  -> limits:Agent_protocol.Developer_repl_wire.Limits.t
+  -> Repl_control.t
   -> (Agent_protocol.Developer_repl_wire.Response.t, Agent_protocol.Error.t) result
 
 (** Exclusive asynchronous consumer, claimed before session admission. *)

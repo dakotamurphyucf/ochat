@@ -13,7 +13,11 @@ open! Core
     owned fibers and rethrows the original cancellation. Its uncertain command
     intent remains available to the shared receipt reconciliation owner.
     Each connection owns a child switch; close cancels and joins its reader,
-    response monitors and transport fibers without cancelling the caller's switch. *)
+    response monitors and transport fibers without cancelling the caller's switch.
+    A separately owned HTTP RPC transport connection permits one closed REPL
+    cancel POST to overlap a blocked ordinary POST under the same logical Ochat
+    connection ID, physical Initialize identity and single event reader. It
+    cannot initialize or establish a second logical connection. *)
 val connect
   :  sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base

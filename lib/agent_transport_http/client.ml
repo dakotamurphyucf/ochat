@@ -6,6 +6,7 @@ type t =
   ; lifetime : Client_lifetime.t
   ; env : Eio_unix.Stdenv.base
   ; rpc_client : P.Client.t
+  ; control_rpc_client : P.Client.t
   ; event_client : P.Client.t
   ; rpc_path : string
   ; event_path : string
@@ -13,6 +14,7 @@ type t =
   ; bearer_token : string option
   ; notifications : Agent_protocol.Envelope.t Agent_session.Mailbox.t
   ; mutex : Eio.Mutex.t
+  ; control_mutex : Eio.Mutex.t
   ; mutable connection_id : string option
   ; mutable next_request_id : int64
   ; mutable event_reader_started : bool
@@ -98,6 +100,13 @@ let capture_connection_id t response =
      | Some _ -> Error (invalid_response "HTTP connection ID changed unexpectedly"))
 ;;
 
+let validate_control_connection_id t response =
+  match t.connection_id, P.Headers.get response.P.Response.headers connection_header with
+  | Some expected, Some actual when String.equal expected actual -> Ok false
+  | Some _, Some _ | Some _, None | None, _ ->
+    Error (invalid_response "REPL control changed logical HTTP connection identity")
+;;
+
 let next_request_id t =
   if Int64.equal t.next_request_id Int64.max_value
   then Error (interrupted "HTTP request identifier space is exhausted")
@@ -127,6 +136,13 @@ let response_result command request_id envelope =
 let fail_connection t =
   t.failed <- true;
   Agent_session.Mailbox.close t.notifications
+;;
+
+let retire_connection t =
+  Eio.Cancel.protect (fun () ->
+    fail_connection t;
+    t.closed <- true;
+    Client_lifetime.close t.lifetime)
 ;;
 
 let push_notification t envelope =
@@ -213,6 +229,8 @@ let start_event_reader t =
 
 let request_locked
       t
+      ~rpc_client
+      ~control
       ~method_
       ~params
       ~max_payload_bytes
@@ -224,6 +242,8 @@ let request_locked
   let open Result.Let_syntax in
   if t.closed || t.failed
   then Error (interrupted "HTTP connection is closed")
+  else if control && Option.is_none t.connection_id
+  then Error (invalid_response "REPL control requires an initialized HTTP connection")
   else (
     let%bind request_id = next_request_id t in
     let envelope = Agent_protocol.Envelope.request ~id:request_id ~method_ ~params () in
@@ -246,7 +266,7 @@ let request_locked
     in
     match
       P.Client.post
-        t.rpc_client
+        rpc_client
         ~headers:(rpc_headers t)
         ~body:(P.Body.of_string encoded)
         t.rpc_path
@@ -255,7 +275,16 @@ let request_locked
       fail_connection t;
       Error (interrupted (P.Error.to_string failure))
     | Ok response ->
-      let%bind newly_connected = capture_connection_id t response in
+      let%bind newly_connected =
+        if control
+        then (
+          match validate_control_connection_id t response with
+          | Ok value -> Ok value
+          | Error failure ->
+            retire_connection t;
+            Error failure)
+        else capture_connection_id t response
+      in
       let%bind body =
         match read_body request_id response with
         | Ok body -> Ok body
@@ -280,6 +309,8 @@ let request_locked
 let request_command_locked t command =
   request_locked
     t
+    ~rpc_client:t.rpc_client
+    ~control:false
     ~method_:(Agent_protocol.Command.method_name command)
     ~params:(Agent_protocol.Command.params command)
     ~max_payload_bytes:None
@@ -365,6 +396,8 @@ let request_developer_locked t ~bound request =
   let max_error_bytes = Agent_client.Transport.Developer_response_bound.max_error_bytes in
   request_locked
     t
+    ~rpc_client:t.rpc_client
+    ~control:false
     ~method_:(Agent_protocol.Developer_wire.Request.method_name request)
     ~params:(Agent_protocol.Developer_wire.Request.params request)
     ~max_payload_bytes:None
@@ -383,7 +416,7 @@ let request_developer_locked t ~bound request =
            Agent_client.Transport.Developer_response_bound.error_within_bound)
 ;;
 
-let request_repl_locked t ~max_request_bytes ~bound request =
+let request_repl_locked t ~rpc_client ~control ~max_request_bytes ~bound request =
   let max_payload_bytes =
     match bound with
     | Agent_client.Transport.Repl_response_bound.Bootstrap -> 64 * 1024
@@ -397,6 +430,8 @@ let request_repl_locked t ~max_request_bytes ~bound request =
   let max_error_bytes = Agent_client.Transport.Repl_response_bound.max_error_bytes in
   request_locked
     t
+    ~rpc_client
+    ~control
     ~method_:(Agent_protocol.Developer_repl_wire.Request.method_name request)
     ~params:(Agent_protocol.Developer_repl_wire.Request.params request)
     ~max_payload_bytes:(Some max_payload_bytes)
@@ -425,16 +460,17 @@ let close_locked t =
           Option.iter t.connection_id ~f:(fun _ ->
             ignore
               (Eio.Time.with_timeout (Eio.Stdenv.clock t.env) 1. (fun () ->
-                 match
-                   P.Client.delete
-                     t.rpc_client
-                     ~headers:(connection_headers t)
-                     t.close_path
-                 with
-                 | Ok response ->
-                   ignore (P.Body.drain response.body : (unit, P.Error.t) result);
-                   Ok ()
-                 | Error _ -> Ok ())
+                 Eio.Mutex.use_rw ~protect:false t.control_mutex (fun () ->
+                   match
+                     P.Client.delete
+                       t.control_rpc_client
+                       ~headers:(connection_headers t)
+                       t.close_path
+                   with
+                   | Ok response ->
+                     ignore (P.Body.drain response.body : (unit, P.Error.t) result)
+                   | Error _ -> ());
+                 Ok ())
                : (unit, [ `Timeout ]) result))))
 ;;
 
@@ -465,7 +501,44 @@ let request_developer t ~bound request =
 ;;
 
 let request_repl t ~max_request_bytes ~bound request =
-  with_request_lock t (fun () -> request_repl_locked t ~max_request_bytes ~bound request)
+  match request with
+  | Agent_protocol.Developer_repl_wire.Request.Cancel_submission _
+  | Agent_protocol.Developer_repl_wire.Request.Task_cancel_and_wait _ ->
+    if not (Eio.Mutex.try_lock t.control_mutex)
+    then
+      Error
+        (Agent_protocol.Error.create
+           Resource_limit
+           ~message:"HTTP REPL control lane is busy"
+           ~retryable:true
+           ())
+    else
+      Exn.protect
+        ~finally:(fun () -> Eio.Mutex.unlock t.control_mutex)
+        ~f:(fun () ->
+          match
+            request_repl_locked
+              t
+              ~rpc_client:t.control_rpc_client
+              ~control:true
+              ~max_request_bytes
+              ~bound
+              request
+          with
+          | value -> value
+          | exception (Eio.Cancel.Cancelled _ as exn) ->
+            let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+            ignore (Result.try_with (fun () -> retire_connection t) : (unit, exn) result);
+            Exn.raise_with_original_backtrace exn backtrace)
+  | _ ->
+    with_request_lock t (fun () ->
+      request_repl_locked
+        t
+        ~rpc_client:t.rpc_client
+        ~control:false
+        ~max_request_bytes
+        ~bound
+        request)
 ;;
 
 let normalize_prefix uri =
@@ -476,15 +549,21 @@ let normalize_prefix uri =
 let connect_owned lifetime ~env ~uri ~bearer_token ~notification_capacity =
   let sw = Client_lifetime.switch lifetime in
   let base_uri = Uri.with_path uri "" |> Fn.flip Uri.with_query [] in
-  match P.Client.create ~sw env base_uri, P.Client.create ~sw env base_uri with
-  | Error failure, _ | _, Error failure -> Error (interrupted (P.Error.to_string failure))
-  | Ok rpc_client, Ok event_client ->
+  match
+    ( P.Client.create ~sw env base_uri
+    , P.Client.create ~sw env base_uri
+    , P.Client.create ~sw env base_uri )
+  with
+  | Error failure, _, _ | _, Error failure, _ | _, _, Error failure ->
+    Error (interrupted (P.Error.to_string failure))
+  | Ok rpc_client, Ok control_rpc_client, Ok event_client ->
     let prefix = normalize_prefix uri in
     let t =
       { sw
       ; lifetime
       ; env
       ; rpc_client
+      ; control_rpc_client
       ; event_client
       ; rpc_path = prefix ^ "/v1/rpc"
       ; event_path = prefix ^ "/v1/events"
@@ -492,6 +571,7 @@ let connect_owned lifetime ~env ~uri ~bearer_token ~notification_capacity =
       ; bearer_token
       ; notifications = Agent_session.Mailbox.create ~capacity:notification_capacity
       ; mutex = Eio.Mutex.create ()
+      ; control_mutex = Eio.Mutex.create ()
       ; connection_id = None
       ; next_request_id = 1L
       ; event_reader_started = false

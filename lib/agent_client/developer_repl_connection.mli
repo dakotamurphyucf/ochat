@@ -165,8 +165,10 @@ val abandon_reset : t -> Pending_reset.t -> (unit, Agent_protocol.Error.t) resul
 val abandon_close : t -> Pending_close.t -> (unit, Agent_protocol.Error.t) result
 
 (** Closed non-keyed reads and targeted controls; no generic Request.t escape.
-    Cancel operations are reconciled through their exact Observe/Task_observe
-    lookup and do not create a new idempotency key. *)
+    Cancel operations use the bounded control lane on this same physical
+    connection, so they can overtake a blocked Submit or Task Await. They are
+    reconciled through their exact Observe/Task_observe lookup and do not create
+    a new idempotency key or retire uncertain pending custody by themselves. *)
 val observe
   :  t
   -> Agent_protocol.Developer_repl_wire.Lookup.t
@@ -196,8 +198,8 @@ val task_observe
        , Agent_protocol.Error.t )
        result
 
-(** Await occupies this connection's serialized request lane. Use a separately
-    initialized control connection to cancel concurrently with a blocked Await. *)
+(** Await occupies the ordinary request lane; a targeted Task cancel can run on
+    this client's bounded control lane while Await is blocked. *)
 val task_await_terminal
   :  t
   -> Agent_protocol.Developer_common.Lookup.t

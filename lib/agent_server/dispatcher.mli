@@ -62,6 +62,18 @@ val dispatch_envelope
   -> Agent_protocol.Envelope.t
   -> (Agent_protocol.Envelope.t option, Agent_protocol.Error.t) result
 
+(** Admission scheduling hint only. Fully decoded REPL Submit and Task Await
+    may wait for host work, and the two closed cancellation methods may overtake
+    them. All others retain ordinary ordering. This grants no authority and
+    never substitutes for [dispatch_envelope]'s ordinary checks. Malformed and
+    unknown methods have no priority. *)
+type dispatch_schedule =
+  | Immediate
+  | Repl_wait
+  | Repl_cancel
+
+val dispatch_schedule : t -> Agent_protocol.Envelope.t -> dispatch_schedule
+
 (** Join Developer watch pumps before the existing Authoring/attachment
     connection closes, retaining cleanup custody on a failed join. *)
 val close_connection_and_wait

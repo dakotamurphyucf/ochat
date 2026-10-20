@@ -55,3 +55,6 @@ val read_envelope : raw -> clock:_ Eio.Time.clock -> timeout_seconds:float -> ra
 
 (** [close_raw raw] closes the socket immediately. *)
 val close_raw : raw -> unit
+
+(** Half-close test input while retaining the response reader for EOF checks. *)
+val shutdown_write : raw -> unit

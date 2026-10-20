@@ -5,7 +5,13 @@ open! Core
     Cancellation propagates unchanged with its original backtrace and never calls
     [on_error]. Connection/outgoing cleanup joins before returning or raising;
     the caller retains ownership of both flows. Malformed input/framing and other
-    input failures retain the existing [on_error] reporting contract. *)
+    input failures retain the existing [on_error] reporting contract. At most
+    one validated REPL Submit or Task Await and one closed REPL cancellation
+    dispatch may run concurrently per physical connection. Other ordinary
+    requests retain synchronous input order. Excess ordinary requests receive a
+    correlated Resource_limit response without blocking the reader or a later
+    cancellation. Control still passes through Dispatcher authorization and
+    lease checks. No unbounded worker or reply queue is created. *)
 
 val run
   :  sw:Eio.Switch.t

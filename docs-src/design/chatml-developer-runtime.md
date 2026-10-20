@@ -88,7 +88,21 @@ features; each additional physical connection selects its own subset. The
 in-memory REPL adapter checks the complete serialized request envelope
 against the negotiated ceiling before dispatch, alongside the DTO params
 bound. The first-party local stdio process uses the same typed client over its
-owned child transport.
+owned child transport. Closed REPL Cancel_submission and Task_cancel_and_wait
+use a bounded control lane on that same initialized logical connection, so
+they can overtake a held Submit or Task Await. The stdio and Unix reader admit
+at most one such waiting ordinary request and one control request; a further
+ordinary request gets a correlated Resource_limit response. Other ordinary
+methods retain input order, and EOF cancels and joins admitted request waiters
+before draining completed replies. HTTP/1.1 uses one additional owned RPC
+transport connection for the control POST under the same logical connection
+ID, principal and event reader. The endpoint still performs its usual current
+actor, source and lease checks. An early control may report a missing key
+before the original submission is admitted; the client retains that exact
+lookup and never infers cancellation or starts a new key from that error.
+Cancelling an in-flight HTTP control POST retires its physical owner; the
+control outcome remains uncertain until the exact lookup is reconciled on a
+new authenticated connection.
 
 The shipped daemon has an explicit `server.developer` startup profile. Its
 bounded rows compare an admitted source origin, compiled target and authenticated
