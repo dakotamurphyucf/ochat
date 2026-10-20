@@ -420,10 +420,27 @@ let publish_initialize_and_wait (t : t) ~connection ~response =
     |> Result.map_error ~f:Service.Error.to_protocol
 ;;
 
-let developer_capture (t : t) ~policy ~limits =
+let developer_capture (t : t) ~historical_recording ~policy ~limits =
   if t.closed
   then Error (error Server_shutting_down "authoring is closed" ~retryable:true)
-  else Ok (Service.Developer.create ~owner:t.service ~policy ~limits)
+  else
+    Ok (Service.Developer.create ~historical_recording ~owner:t.service ~policy ~limits)
+;;
+
+let check_historical_origin t ~actor origin ~checkpoint =
+  if t.closed
+  then Error (error Server_shutting_down "authoring is closed" ~retryable:true)
+  else
+    Service.check_historical_origin t.service ~actor origin ~checkpoint
+    |> Result.map_error ~f:Service.Error.to_protocol
+;;
+
+let check_historical_origin_now t ~actor origin =
+  if t.closed
+  then Error (error Server_shutting_down "authoring is closed" ~retryable:true)
+  else
+    Service.check_historical_origin_now t.service ~actor origin
+    |> Result.map_error ~f:Service.Error.to_protocol
 ;;
 
 let issued_by_source_host (t : t) source_host = phys_equal t.source_host source_host

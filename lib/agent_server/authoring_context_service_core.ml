@@ -63,9 +63,20 @@ module Selection_policy = struct
 end
 
 module Supplied_document_policy = struct
-  type t = { authorize : Operator_authorization.t -> bool }
+  module Identity = struct
+    type t = unit ref
 
-  let create ~authorize = { authorize }
+    let equal = phys_equal
+  end
+
+  type t =
+    { identity : Identity.t
+    ; authorize : Operator_authorization.t -> bool
+    }
+
+  let create ~authorize = { identity = ref (); authorize }
+  let identity t = t.identity
+  let read_admitted t actor = t.authorize actor
 end
 
 module Selected_feature = struct

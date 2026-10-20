@@ -303,6 +303,7 @@ let%test_module "retained Developer Host policy" =
       ; workspace_leases : A.Workspace_lease.t
       ; child_sources : Session_factory.Child_source_policy.t option
       ; active_phase : (unit -> unit) option ref
+      ; independent_document : bool
       }
 
     type phase =
@@ -337,7 +338,7 @@ let%test_module "retained Developer Host policy" =
       |> required "selected contract"
     ;;
 
-    let capture_policy target =
+    let capture_policy ?(independent_document = false) target =
       let selected = selected_contract target in
       Authoring_context_service.Developer.Target_policy.create
         ~local_project:(fun _ ~root:_ ~project:_ ~selection:_ -> None)
@@ -352,11 +353,11 @@ let%test_module "retained Developer Host policy" =
             ~parsed:_
             ~declaration:_
             ~build:_
-            ~metadata:_ -> None)
+            ~metadata:_ -> if independent_document then Some selected else None)
         ~document_source:
           (fun
             _ ~origin:_ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~script:_ ->
-          Some selected)
+          if independent_document then None else Some selected)
     ;;
 
     let capture_limits () =
@@ -458,7 +459,7 @@ let%test_module "retained Developer Host policy" =
         }
     ;;
 
-    let semantic_authoring_policy env =
+    let semantic_authoring_policy env ~script_selection =
       let module Service = Authoring_context_service in
       let module Policy = Authoring_installation.Host_policy in
       let base =
@@ -489,7 +490,7 @@ let%test_module "retained Developer Host policy" =
         base
         ~semantic:
           (Policy.Semantic.create
-             ~script_selection:None
+             ~script_selection
              ~project_metadata:None
              ~project_build_limits:
                (Chatml_project_build.Limits.create
@@ -524,6 +525,107 @@ let%test_module "retained Developer Host policy" =
       |> required "semantic authoring policy"
     ;;
 
+    let independent_script_selection ~env ~sw ~root ~actor ~script_source =
+      let write member contents =
+        Eio.Path.save
+          ~create:(`Or_truncate 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / root / member)
+          contents
+      in
+      write
+        "selected.project.json"
+        {|{"schema_version":1,"namespace":"independent","modules":{"Extra":{"implementation":"extra.chatml"}},"default_environment":"default","environments":{"default":{"modules":{"Extra":"self.Extra"}}},"entries":{"main":{"source":"selected.chatml","target":"one_off_v1"}}}|};
+      write "selected.chatml" script_source;
+      write "extra.chatml" "let marker = 1\n";
+      let data_root =
+        Store.Data_root.create ~env ~path:(Filename.concat root "selected-data")
+        |> required "selected data root"
+      in
+      let project_sources =
+        Project_source_host.open_owned
+          { external_roots = [ root ]; git = None }
+          ~sw
+          ~fs:(Eio.Stdenv.fs env)
+          ~data_root
+          ~clock:(Eio.Stdenv.mono_clock env)
+          ~checkpoint:Eio.Fiber.check
+          ()
+        |> required "selected project source"
+      in
+      let source_host =
+        Authoring_source_host.create
+          project_sources
+          ~sw
+          ~read_policy:
+            (Authoring_source_host.Read_policy.create ~authorize:(fun _ ~root_index:_ ->
+               true))
+          ~document_policy:Authoring_source_host.Document_policy.deny_all
+          ~limits:
+            (Authoring_source_host.Limits.create
+               ~max_contexts:1
+               ~max_context_requests:8
+               ~max_manifest_entries:8
+               ~max_browse_entries:8
+               ~max_read_bytes:4096
+               ~max_context_read_bytes:8192
+             |> Or_error.ok_exn)
+      in
+      let selected_root =
+        Authoring_source_host.roots source_host ~actor ~checkpoint:Eio.Fiber.check
+        |> required "selected root"
+        |> List.hd_exn
+      in
+      let context =
+        Authoring_source_host.Context.open_root
+          source_host
+          ~actor
+          ~root:selected_root
+          ~dependency_roots:[]
+          ~project:(Source.Portable_path.create "selected.project.json" |> Or_error.ok_exn)
+          ~selection:
+            (Chatml_project.Selection.Entry { name = "main"; environment = None })
+          ~contract:
+            (Chatml.Chatml_compiler_contract.for_target
+               One_off_v1
+               ~checkpoint:Eio.Fiber.check)
+        |> required "selected source context"
+      in
+      let build =
+        Authoring_source_host.Context.capture
+          context
+          ~actor
+          ~clock:(Eio.Stdenv.mono_clock env)
+          ~checkpoint:Eio.Fiber.check
+        |> required "selected source capture"
+        |> Authoring_source_host.Capture.build
+      in
+      assert (
+        List.length
+          (Chatml_prepared_program.sources (Chatml_project_build.prepared build))
+        >= 2);
+      Authoring_source_host.Context.close_and_wait context;
+      let selected =
+        Authoring_context_service.Semantic.Script_selection.Selected.admit
+          ~build
+          ~contract:
+            (Chatml.Chatml_compiler_contract.for_target
+               One_off_v1
+               ~checkpoint:Eio.Fiber.check)
+          ~limits:
+            (Authoring_context_service.Semantic.Script_selection.Limits.create
+               ~max_identity_bytes:(4 * 1024 * 1024)
+               ~max_work_steps:100_000
+             |> Or_error.ok_exn)
+          ~checkpoint:Eio.Fiber.check
+        |> required "independent selected build"
+      in
+      Authoring_context_service.Semantic.Script_selection.Policy.create
+        ~select_script:
+          (fun
+            ~original_actor:_ ~actor:_ ~current:_ ~parsed:_ ~declaration:_ ~metadata:_ ->
+          Some selected)
+    ;;
+
     let store_limits () =
       let document =
         Document_schema.Limits.create
@@ -552,6 +654,9 @@ let%test_module "retained Developer Host policy" =
     ;;
 
     let with_shared
+          ~script_selection
+          ~independent_document
+          ~historical_read_allowed
           ~manifest_grants
           ~data_dir
           ~env
@@ -572,7 +677,9 @@ let%test_module "retained Developer Host policy" =
           ?host:options.authoring_validation_host
           ~policy:Chat_response.One_off_request.default_policy
           ()
-        |> required "authoring validation host"
+        |> function
+        | Ok host -> host
+        | Error message -> failwith ("authoring validation host: " ^ message)
       in
       let data_dir = config.server.data_dir in
       let store =
@@ -719,13 +826,26 @@ let%test_module "retained Developer Host policy" =
       in
       let catalogs = Session_factory.developer_catalog factory in
       let authoring =
+        let policy = semantic_authoring_policy env ~script_selection in
+        let policy =
+          match historical_read_allowed with
+          | None -> policy
+          | Some allowed ->
+            Authoring_installation.Host_policy.with_supplied_document
+              policy
+              ~supplied_document:
+                (Authoring_context_service.Supplied_document_policy.create
+                   ~authorize:(fun actor ->
+                     !allowed && Operator_authorization.is_current actor))
+            |> required "historical supplied read policy"
+        in
         Authoring_installation.create
           ~env
           ~sw
           ~clock:(Eio.Stdenv.mono_clock env)
           ~project_sources
           ~store
-          ~policy:(semantic_authoring_policy env)
+          ~policy
           ~initialize_limits:options.protocol_limits
           ~checkpoint:Eio.Fiber.check
         |> required "authoring installation"
@@ -769,7 +889,11 @@ let%test_module "retained Developer Host policy" =
             ~member:"draft.chatmd"
             ~default_environment:None
             ~contents:
-              ("<script id=\"s\" language=\"chatml\" kind=\"tool\">"
+              ("<script id=\"s\" language=\"chatml\" kind=\"tool\""
+               ^ (if independent_document
+                  then " project=\"./selected.project.json\""
+                  else "")
+               ^ ">"
                ^ script_source
                ^ "</script>")
           |> required "document request"
@@ -812,6 +936,7 @@ let%test_module "retained Developer Host policy" =
         ; workspace_leases
         ; child_sources
         ; active_phase = ref None
+        ; independent_document
         }
       in
       let cleanup () =
@@ -938,7 +1063,7 @@ let%test_module "retained Developer Host policy" =
       |> Or_error.ok_exn
     ;;
 
-    let trace_configuration ~read_allowed =
+    let trace_configuration authoring =
       let recorder =
         Chatml_trace.Recorder.Limits.create
           ~max_events:128
@@ -961,9 +1086,7 @@ let%test_module "retained Developer Host policy" =
       Developer_trace_retention.Configuration.create
         ~mode:Chatml_trace.Recorder.Mode.Full
         ~limits
-        ~read_policy:
-          (Developer_trace_retention.Read_policy.create ~authorize:(fun actor _ ->
-             !read_allowed && Operator_authorization.is_current actor))
+        ~read_policy:(Developer_trace_retention.Read_policy.of_authoring authoring)
     ;;
 
     let start_phase
@@ -1022,7 +1145,9 @@ let%test_module "retained Developer Host policy" =
           ~max_work_steps:100_000
         |> Or_error.ok_exn
       in
-      let capture_policy = capture_policy selected_target in
+      let capture_policy =
+        capture_policy ~independent_document:shared.independent_document selected_target
+      in
       let capture_limits = capture_limits () in
       let publisher_limits =
         Store.Developer_result_publisher.Limits.create
@@ -1365,6 +1490,9 @@ let run ctx input =
                   let endpoint = local_model_endpoint env sw requests respond in
                   let actor = fixture_actor () in
                   with_shared
+                    ~script_selection:None
+                    ~independent_document:false
+                    ~historical_read_allowed:None
                     ~manifest_grants:[]
                     ~data_dir:(Filename.concat root "data")
                     ~env
@@ -1744,6 +1872,9 @@ let run ctx input =
               let source_sha256, manifest_sha256 =
                 Eio.Switch.run (fun bootstrap_sw ->
                   with_shared
+                    ~script_selection:None
+                    ~independent_document:false
+                    ~historical_read_allowed:None
                     ~manifest_grants:[]
                     ~data_dir:(Filename.concat root "bootstrap-data")
                     ~env
@@ -1813,7 +1944,11 @@ let run ctx input =
                 in
                 let endpoint = local_model_endpoint env sw requests respond in
                 let approval_attempts = ref 0 in
+                let trace_read_allowed = ref true in
                 with_shared
+                  ~script_selection:None
+                  ~independent_document:false
+                  ~historical_read_allowed:(Some trace_read_allowed)
                   ~manifest_grants:[ grant ]
                   ~data_dir:(Filename.concat root "data")
                   ~env
@@ -1856,14 +1991,13 @@ let run ctx input =
                         ~job_read:(fun _ _ -> false)
                         ~job_respond:(fun _ _ -> false)
                     in
-                    let trace_read_allowed = ref true in
                     let phase =
                       start_phase
                         ~repl:true
                         ~selected_target:
                           Chatml.Chatml_compiler_contract.Target.Developer_tool_v1
                         ~approval
-                        ~trace:(trace_configuration ~read_allowed:trace_read_allowed)
+                        ~trace:(trace_configuration shared.authoring)
                         shared
                         ~clock:wall_clock
                         ~max_active_agent_calls:2
@@ -2378,6 +2512,50 @@ let run ctx input =
                       has_prior_snippet_site
                         ~statement:statement_trace
                         (complete_trace task_lookup));
+                    let original_principal =
+                      Operator_authorization.principal shared.actor
+                    in
+                    let foreign_actor =
+                      Operator_authorization.trusted_local
+                        { original_principal with
+                          id =
+                            P.Id.Principal.of_string "pri_foreign_trace"
+                            |> required "foreign trace principal"
+                        }
+                    in
+                    (match
+                       Trace.snapshot phase.host ~actor:foreign_actor ~lookup:task_lookup
+                     with
+                     | Error _ -> ()
+                     | Ok _ -> failwith "foreign principal read a retained Task trace");
+                    let expired_actor =
+                      Operator_authorization.guarded
+                        ~principal:original_principal
+                        ~is_current:(fun () -> false)
+                    in
+                    (match
+                       Trace.snapshot phase.host ~actor:expired_actor ~lookup:task_lookup
+                     with
+                     | Error _ -> ()
+                     | Ok _ -> failwith "expired current actor read a retained Task trace");
+                    let replacement_policy =
+                      Authoring_context_service.Supplied_document_policy.create
+                        ~authorize:(fun _ -> true)
+                    in
+                    let replacement_origin =
+                      Developer_historical_source.Origin.supplied_document
+                        (Authoring_context_service.Supplied_document_policy.identity
+                           replacement_policy)
+                    in
+                    (match
+                       Authoring_installation.check_historical_origin_now
+                         shared.authoring
+                         ~actor:shared.actor
+                         replacement_origin
+                     with
+                     | Error { code = Permission_denied; _ } -> ()
+                     | Ok () | Error _ ->
+                       failwith "foreign supplied-policy incarnation was accepted");
                     trace_read_allowed := false;
                     (match
                        Trace.snapshot phase.host ~actor:shared.actor ~lookup:task_lookup
@@ -2404,6 +2582,85 @@ let run ctx input =
                             "Task child Job did not succeed", (status : P.Job.status)]);
                     print_endline "Task Job and Model completed after durable staging")))));
       [%expect {| Task Job and Model completed after durable staging |}]
+    ;;
+
+    let%expect_test "independent document Build cannot borrow document-only trace proof" =
+      Mirage_crypto_rng_unix.use_default ();
+      Eio_main.run (fun env ->
+        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. (fun () ->
+          let root =
+            Filename.concat
+              "/tmp"
+              ("ochat-independent-trace-" ^ P.Id.Transaction.(create () |> to_string))
+          in
+          let root_path = Eio.Path.(Eio.Stdenv.fs env / root) in
+          Eio.Path.mkdir ~perm:0o700 root_path;
+          Exn.protect
+            ~finally:(fun () -> Eio.Path.rmtree ~missing_ok:true root_path)
+            ~f:(fun () ->
+              Eio.Path.save
+                ~create:(`Exclusive 0o600)
+                Eio.Path.(root_path / "prompt.chatmd")
+                "<developer>Independent Build trace fixture</developer>";
+              Eio.Switch.run (fun sw ->
+                let actor = fixture_actor () in
+                let script_source = "let main input = Task.pure(input)\n" in
+                let script_selection =
+                  independent_script_selection ~env ~sw ~root ~actor ~script_source
+                in
+                with_shared
+                  ~script_selection:(Some script_selection)
+                  ~independent_document:true
+                  ~historical_read_allowed:None
+                  ~manifest_grants:[]
+                  ~data_dir:(Filename.concat root "data")
+                  ~env
+                  ~sw
+                  ~root
+                  ~prompt_file:(Filename.concat root "prompt.chatmd")
+                  ~actor
+                  ~script_source
+                  ~provider_factory:(fun ~sw:_ ~server_id:_ -> None, None)
+                  ~authorize_native:(fun _ _ -> Ok ())
+                  ~prepare_output:(fun _ -> Ok `Null)
+                  ~f:(fun shared ->
+                    let phase =
+                      start_phase
+                        ~trace:(trace_configuration shared.authoring)
+                        shared
+                        ~clock:(Eio.Stdenv.clock env)
+                        ~max_active_agent_calls:2
+                    in
+                    let run_id = P.Id.Developer_run.create () in
+                    let key =
+                      P.Idempotency_key.of_string "independent-trace"
+                      |> required "independent key"
+                    in
+                    submit_live phase ~run_id ~key
+                    |> required "independent submit"
+                    |> ignore;
+                    let view =
+                      await_terminal phase ~run_id ~key |> required "independent terminal"
+                    in
+                    (match
+                       Option.map
+                         (Developer_host.Command.receipt view)
+                         ~f:Store.Developer_command_receipt.value
+                     with
+                     | Some (Live (Succeeded _)) -> ()
+                     | _ -> failwith "independently selected Build did not execute");
+                    match
+                      Developer_host.Trace.snapshot
+                        phase.host
+                        ~actor
+                        ~lookup:(Developer_host.Trace.Command { run_id; key })
+                      |> required "independent trace lookup"
+                    with
+                    | Developer_trace_retention.Availability.Unavailable -> ()
+                    | Expired | Retained _ ->
+                      failwith "document-only policy disclosed independent Build")))));
+      print_endline "independent Build executed without borrowed trace authority";
+      [%expect {| independent Build executed without borrowed trace authority |}]
     ;;
   end)
 ;;

@@ -273,6 +273,97 @@ module Published_pin = struct
     ; marker_intent_digest : Chatml_source.Digest.t
     ; marker_inventory_digest : Chatml_source.Digest.t
     }
+
+  let add charge amount ~max_bytes =
+    if charge < 0 || amount < 0 || charge > max_bytes || amount > max_bytes - charge
+    then None
+    else Some (charge + amount)
+  ;;
+
+  let source_id_charge charge id ~max_bytes =
+    let open Option.Let_syntax in
+    let%bind charge = add charge 96 ~max_bytes in
+    let%bind charge =
+      add charge (String.length (Chatml_source.Id.package_namespace id)) ~max_bytes
+    in
+    add charge (String.length (Chatml_source.Id.relative_path id)) ~max_bytes
+  ;;
+
+  let project_charge charge project ~max_bytes =
+    let open Option.Let_syntax in
+    (* Project record, lock identity and fixed digest/object headers. *)
+    let%bind charge = add charge 384 ~max_bytes in
+    let%bind charge =
+      source_id_charge charge (B.Receipt.Project.root_source project) ~max_bytes
+    in
+    let%bind charge =
+      source_id_charge charge (B.Receipt.Project.entry_source project) ~max_bytes
+    in
+    let%bind charge =
+      source_id_charge charge (B.Receipt.Project.selected_lock project) ~max_bytes
+    in
+    add charge (String.length (B.Receipt.Project.environment project)) ~max_bytes
+  ;;
+
+  let script_charge charge script ~max_bytes =
+    let open Option.Let_syntax in
+    let selector =
+      match script with
+      | B.Receipt.Script.Source_only { selector; _ }
+      | B.Receipt.Script.Selected_project { selector; _ } -> selector
+    in
+    (* List cell, result variant, selector record, and two independently
+       retained body-digest strings and their headers. *)
+    let%bind charge = add charge 512 ~max_bytes in
+    let%bind charge =
+      source_id_charge
+        charge
+        (B.Manifest.Script.Selector.registration_source selector)
+        ~max_bytes
+    in
+    let%bind charge =
+      source_id_charge
+        charge
+        (B.Manifest.Script.Selector.declaration_source selector)
+        ~max_bytes
+    in
+    let%bind charge =
+      add
+        charge
+        (String.length (B.Manifest.Script.Selector.script_id selector))
+        ~max_bytes
+    in
+    match script with
+    | B.Receipt.Script.Source_only _ -> Some charge
+    | B.Receipt.Script.Selected_project { project; _ } ->
+      project_charge charge project ~max_bytes
+  ;;
+
+  let retained_charge t ~max_bytes =
+    let open Option.Let_syntax in
+    (* Pin record, opaque Store token, IDs, four digests and deadline; variable
+       receipt strings are charged below. This is conservative retention
+       accounting, not an exact heap-size measurement. *)
+    let%bind charge = add 0 768 ~max_bytes in
+    match B.Receipt.basis t.receipt with
+    | B.Receipt.Project project -> project_charge charge project ~max_bytes
+    | B.Receipt.Chatmd_document document ->
+      let%bind charge = add charge 192 ~max_bytes in
+      let%bind charge =
+        source_id_charge
+          charge
+          (B.Receipt.Chatmd_document.root_source document)
+          ~max_bytes
+      in
+      let rec charge_scripts charge = function
+        | [] -> Some charge
+        | script :: rest ->
+          (match script_charge charge script ~max_bytes with
+           | None -> None
+           | Some charge -> charge_scripts charge rest)
+      in
+      charge_scripts charge (B.Receipt.Chatmd_document.scripts document)
+  ;;
 end
 
 module Published_capture = struct

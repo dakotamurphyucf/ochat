@@ -9,6 +9,7 @@ module Prepared = Chatml_prepared_program
 module Captured = Chatml_source
 module Owner = Authoring_context_service_core
 module Scope = Authoring_context_owner
+module Historical = Developer_historical_source
 
 exception Cleanup_invariant of exn * exn
 
@@ -320,10 +321,30 @@ type t =
   ; authoring : Owner.t
   ; policy : Target_policy.t
   ; limits : Limits.t
+  ; historical_recording : Historical.Recording.t option
   }
 
-let create ~authoring ~policy ~limits =
-  { sources = authoring.Owner.sources; authoring; policy; limits }
+let create ~historical_recording ~authoring ~policy ~limits =
+  { sources = authoring.Owner.sources; authoring; policy; limits; historical_recording }
+;;
+
+let admitted_historical_origin t origin =
+  Option.bind t.historical_recording ~f:(fun recording ->
+    Option.map
+      (Historical.Origin.charge
+         origin
+         ~max_bytes:(Historical.Recording.max_origin_bytes recording))
+      ~f:(fun _ -> origin))
+;;
+
+let historical_roots t source ~actor roots =
+  match t.historical_recording with
+  | None -> None
+  | Some _ ->
+    Sources.Historical_roots.issue source ~actor ~roots
+    |> Result.ok
+    |> Option.bind ~f:(fun roots ->
+      admitted_historical_origin t (Historical.Origin.roots roots))
 ;;
 
 let same_actor original actor =
@@ -359,6 +380,7 @@ module Source_selection = struct
   type t =
     { prepared : Prepared.t
     ; origin : Capture.Origin.t
+    ; historical_origin : Historical.Origin.t option
     ; selected : Selected_contract.t
     ; original_actor : Operator_authorization.t
     ; request_actor : Operator_authorization.t
@@ -391,6 +413,7 @@ module Source_selection = struct
   ;;
 
   let selected_contract t = t.selected
+  let historical_origin t = t.historical_origin
   let repl_root_fingerprint t = t.repl_root_fingerprint
 
   let check_domain t =
@@ -548,6 +571,7 @@ end
 let make_source_selection
       ~prepared
       ~origin
+      ~historical_origin
       ~original_actor
       ~request_actor
       ~selected
@@ -566,6 +590,7 @@ let make_source_selection
   in
   ({ Source_selection.prepared
    ; origin
+   ; historical_origin
    ; original_actor
    ; request_actor
    ; selected
@@ -619,6 +644,7 @@ module Candidate = struct
 
   let capture t = t.capture
   let selected_contract t = Source_selection.selected_contract t.source
+  let historical_origin t = Source_selection.historical_origin t.source
 
   let check_current t ~actor ~checkpoint =
     Source_selection.check_current t.source ~actor ~checkpoint
@@ -741,10 +767,12 @@ let prepare_local_project_selection
   in
   let%bind () = owner_now ~actor in
   let%bind () = selected_for_pair ~original_actor ~actor ~selected select in
+  let historical_origin = historical_roots t sources ~actor roots in
   Ok
     (make_source_selection
        ~prepared
        ~origin
+       ~historical_origin
        ~original_actor
        ~request_actor:actor
        ~selected
@@ -824,10 +852,12 @@ let prepare_local_source_selection
   in
   let%bind () = owner_now ~actor in
   let%bind () = selected_for_pair ~original_actor ~actor ~selected select in
+  let historical_origin = historical_roots t sources ~actor [ source.root ] in
   Ok
     (make_source_selection
        ~prepared
        ~origin
+       ~historical_origin
        ~original_actor
        ~request_actor:actor
        ~selected
@@ -1010,10 +1040,26 @@ let prepare_authoring_project_selection t ~actor ~connection ~expected ~checkpoi
         in
         let%bind () = owner_now ~actor in
         let%bind () = selected_for_pair ~original_actor ~actor ~selected select in
+        let historical_origin =
+          match t.historical_recording, current.context.owner with
+          | None, _ -> None
+          | Some _, Owner.Host_project source ->
+            (match t.sources with
+             | None -> None
+             | Some sources ->
+               historical_roots t sources ~actor (Sources.Context.selected_roots source))
+          | Some _, Owner.Uploaded_project capture ->
+            admitted_historical_origin
+              t
+              (Historical.Origin.published_upload
+                 (Authoring_upload_host.Context_capture.published_pin capture))
+          | Some _, (Owner.Host_document _ | Owner.Supplied_document _) -> None
+        in
         Ok
           (make_source_selection
              ~prepared
              ~origin
+             ~historical_origin
              ~original_actor
              ~request_actor:actor
              ~selected
@@ -1302,10 +1348,37 @@ let prepare_document_script_selection
       in
       let%bind () = owner_now ~actor in
       let%bind () = selected_for_pair ~original_actor ~actor ~selected select in
+      (* A selected Build supplied by a policy is admitted for execution, but
+         its dependency sources were not issued by this document's owner. *)
+      let historical_build_owned =
+        match selected_row with
+        | None -> true
+        | Some (row, _) ->
+          (match Authoring_document_selection_rows.Row.status row with
+           | Host_prepared _ -> true
+           | Independently_selected _ | No_validated_build _ -> false)
+      in
+      let historical_origin =
+        match t.historical_recording, historical_build_owned, current.context.owner with
+        | None, _, _ -> None
+        | Some _, false, _ -> None
+        | Some _, true, Owner.Host_document document ->
+          (match t.sources, Sources.Document_context.root document with
+           | Some sources, Some root -> historical_roots t sources ~actor [ root ]
+           | None, _ | _, None -> None)
+        | Some _, true, Owner.Supplied_document _ ->
+          Option.bind t.authoring.supplied_document ~f:(fun policy ->
+            admitted_historical_origin
+              t
+              (Historical.Origin.supplied_document
+                 (Owner.Supplied_document_policy.identity policy)))
+        | Some _, true, (Owner.Host_project _ | Owner.Uploaded_project _) -> None
+      in
       Ok
         (make_source_selection
            ~prepared
            ~origin
+           ~historical_origin
            ~original_actor
            ~request_actor:actor
            ~selected

@@ -40,7 +40,8 @@ module Provenance : sig
     | Repl_statement
 
   (** A historical source lineage: original principal ID and authentication
-      kind, exact admitted route and selected graph/contract fingerprint, and
+    kind, exact admitted route, authenticated historical source origin and
+    selected graph/contract fingerprint, and
       bounded native source ID/digest/byte-length summaries. It retains no
       actor token, source bytes, mutable editor context, old Root, or execution
       grant. Current scopes/attributes are deliberately absent. *)
@@ -48,6 +49,7 @@ module Provenance : sig
     :  action:action
     -> original_actor:Operator_authorization.t
     -> route:Developer_command_original.Route.t
+    -> historical_origin:Developer_historical_source.Origin.t
     -> capture_fingerprint:Chatml_source.Digest.t option
     -> selection_fingerprint:Chatml_source.Digest.t
     -> prepared:Chatml_prepared_program.t
@@ -133,7 +135,8 @@ end
 (** Comparison-only lookup in the owner's bounded charged table for an actual
     persisted Command/Task row. It scans at most [max_traces] entries and
     compares full immutable association fields. It cannot restore an evicted
-    recording or authorize a read; the caller still uses begin_read/snapshot
+    recording or authorize a read; the caller still uses with_read and the
+    checked snapshot
     after its own row disclosure check. Active entries remain present until
     joined terminal notification. REPL statement keys retain their own
     independently bounded Entry handles. *)
@@ -149,24 +152,30 @@ end
 module Read_policy : sig
   type t
 
-  (** A distinct, trusted historical metadata/source-read decision. The
-      callback examines the CURRENT authenticated actor and immutable source
-      lineage; it may consult current configured root/project/bundle read
-      grants, but must not recapture bytes or demand that the old execution's
-      selected generation, Root or REPL epoch still be executable. An edited
-      file does not reinterpret an old site. A revoked principal/source read
-      grant denies it. Generic receipt scope or a row ID alone grants nothing.
-      The callback is bounded, nonyielding and nonraising. *)
-  val create : authorize:(Operator_authorization.t -> Provenance.t -> bool) -> t
+  (** Bind the actual daemon-owned Authoring service, not a caller-supplied
+      policy callback. Local/hosted roots use its physical Source_host and
+      current read policy; published uploads use its real Upload_host Store
+      and current Bundle_read; supplied documents use the physically installed
+      policy incarnation. The object remains only in Configuration, never in
+      charged per-trace provenance. Ordinary editor edit/disconnect/reset
+      does not require old execution admission. *)
+  val of_authoring : Authoring_installation.t -> t
 
   val deny_all : t
 end
 
 module Read_request : sig
-  (** One Host read operation's original current actor and entry token, not
-      retained provenance or a snapshot. It cannot pin an evicted recorder and
-      must be reauthorized after the Host's yielding membership lookup. *)
+  (** One lexical Host read's current actor and exact Entry. Eviction remains
+      free to drop the Recorder; a shared provenance-only loan transfers its
+      charge from table to bounded borrowed accounting. Release drops the
+      actor/provenance even if the caller escapes this opaque value. It is not
+      a bearer source grant. *)
   type t
+
+  (** Proof of one yielding historical-source verification tied physically to
+      this request and Entry. It must be followed by current Host membership
+      and a final nonyielding source/actor/Entry check before snapshot copy. *)
+  type checked
 end
 
 module Configuration : sig
@@ -179,6 +188,11 @@ module Configuration : sig
     -> limits:Limits.t
     -> read_policy:Read_policy.t
     -> t
+
+  (** The finite origin budget installed with this recorder. The Host passes
+      [Some] of this value only for configured tracing and [None] otherwise;
+      source capture itself remains independent of trace retention. *)
+  val historical_recording : t -> Developer_historical_source.Recording.t
 end
 
 (** The daemon's original clock and switch own eviction/close; no background
@@ -239,28 +253,47 @@ val within : t -> Entry.t option -> (unit -> 'a) -> 'a
     later exact reconciliation can call it again without replaying work. *)
 val finish : t -> Entry.t -> Chatml_trace.Terminal.t -> unit
 
-(** Authenticate a retained physical entry for one read request. The actor is
-    the ORIGINAL actor of this new read, not the old execution token. A fresh
-    actor can therefore read a historical completed trace after reconnect,
-    subject to same principal/authentication kind and current read policy. *)
-val begin_read
+(** Reserve a bounded in-flight read slot BEFORE a published-upload Store
+    check can yield. While an Entry is retained, its table charge covers a
+    shared provenance-only loan. On eviction the provenance charge transfers
+    atomically to borrowed accounting under the SAME aggregate cap; the
+    Recorder is never pinned by a read. The last reader releases that charge.
+    Success, error, cancellation and exception release the lexical references
+    without masking the original failure. Close invalidates and clears them;
+    saturation is a typed bounded error. Slot capacity is at most
+    [min max_traces (max_retained_bytes / max_provenance_bytes_per_trace)].
+    The actor is the original actor of this NEW read, not an old execution
+    token. *)
+val with_read
   :  t
   -> actor:Operator_authorization.t
   -> Entry.t
-  -> (Read_request.t, P.Error.t) result
+  -> f:(Read_request.t -> ('a, P.Error.t) result)
+  -> ('a, P.Error.t) result
 
-(** After the Host's yielding exact Row or REPL-key observation, check the same
-    physical entry, original/current read actors, current historical source
-    policy and trusted nonyielding exact-membership suffix before copying a
-    bounded immutable snapshot. This never treats a coordinate/cursor as a
-    grant. An Expired tombstone keeps finite, charged provenance long enough
-    for the same read policy; it has no Recorder or source bytes. Once the
-    tombstone itself is evicted, Unavailable exposes no trace metadata and the
-    Host still requires its ordinary row/epoch read permission. A request
-    begun before eviction/close cannot pin old data or bypass reauthorization. *)
-val snapshot
+(** Full current actor/physical origin check for the exact retained Entry.
+    Uploaded publication verification may yield in the existing Store; Roots
+    and supplied policy comparisons do not. It does not read source bytes or
+    make an old editor Context/current execution lease live again. *)
+val check_read_current
   :  t
   -> Read_request.t
+  -> current_actor:Operator_authorization.t
+  -> checkpoint:(unit -> unit)
+  -> (Read_request.checked, P.Error.t) result
+
+(** Host first repeats its authenticated exact Row or historical REPL-key
+    lookup after the full check's yield. This final suffix then re-finds the
+    SAME physical Entry, original/current actors and exact membership, repeats
+    nonyielding current source-policy/Store-pin checks, and copies one bounded
+    snapshot without yielding. An evicted/closed Entry cannot be restored.
+    Expired tombstones retain only charged provenance; fully removed entries
+    are Unavailable after the Host still proves normal disclosure. Revocation
+    denies rather than returning Unavailable. *)
+val snapshot_checked
+  :  t
+  -> Read_request.t
+  -> checked:Read_request.checked
   -> current_actor:Operator_authorization.t
   -> exact_membership:(Association.t -> bool)
   -> (Availability.t, P.Error.t) result

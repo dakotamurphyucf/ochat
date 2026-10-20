@@ -1137,7 +1137,9 @@ let submit_fresh
       let id = Lifecycle.View.row reserved |> Row.id in
       Lifecycle.launch t.lifecycle slot ~handle ~reserved ~f:(fun active ~sw ->
         let trace_entry =
-          Option.bind t.trace ~f:(fun traces ->
+          match t.trace, Capture.Candidate.historical_origin candidate with
+          | None, _ | _, None -> None
+          | Some traces, Some historical_origin ->
             let row = Lifecycle.Active.view active |> Lifecycle.View.row in
             let prepared = Chatml_developer_capture.prepared capture in
             let provenance =
@@ -1145,6 +1147,7 @@ let submit_fresh
                 ~action:(Command kind)
                 ~original_actor:actor
                 ~route:(Original.route original)
+                ~historical_origin
                 ~capture_fingerprint:(Some capture_fingerprint)
                 ~selection_fingerprint:
                   (Chatml_developer_capture.graph_fingerprint capture)
@@ -1152,19 +1155,19 @@ let submit_fresh
                 ~limits:(Developer_trace_retention.limits traces)
             in
             let association = Developer_trace_retention.Association.of_reserved_row row in
-            match provenance, association with
-            | Ok provenance, Ok association ->
-              let entry =
-                Developer_trace_retention.begin_prepared
-                  traces
-                  ~association
-                  ~provenance
-                  ~submission_fingerprint:(Original.fingerprint original)
-                  ~prepared
-                  ~checkpoint:Eio.Fiber.check
-              in
-              entry
-            | Error _, _ | _, Error _ -> None)
+            (match provenance, association with
+             | Ok provenance, Ok association ->
+               let entry =
+                 Developer_trace_retention.begin_prepared
+                   traces
+                   ~association
+                   ~provenance
+                   ~submission_fingerprint:(Original.fingerprint original)
+                   ~prepared
+                   ~checkpoint:Eio.Fiber.check
+               in
+               entry
+             | Error _, _ | _, Error _ -> None)
         in
         match t.trace with
         | None ->
@@ -2416,6 +2419,8 @@ let create
   let%bind capture =
     Authoring_installation.developer_capture
       authoring
+      ~historical_recording:
+        (Option.map trace ~f:Developer_trace_retention.Configuration.historical_recording)
       ~policy:capture_policy
       ~limits:capture_limits
   in
@@ -2977,14 +2982,34 @@ module Trace = struct
        | None -> Ok Developer_trace_retention.Availability.Unavailable
        | Some entry ->
          let open Result.Let_syntax in
-         let%bind request = Developer_trace_retention.begin_read traces ~actor entry in
-         Developer_trace_retention.snapshot
-           traces
-           request
-           ~current_actor:actor
-           ~exact_membership:(fun association ->
-             Operator_authorization.is_current actor
-             && Developer_trace_retention.Association.matches_row association row))
+         Developer_trace_retention.with_read traces ~actor entry ~f:(fun request ->
+           let%bind checked =
+             Developer_trace_retention.check_read_current
+               traces
+               request
+               ~current_actor:actor
+               ~checkpoint:t.checkpoint
+           in
+           let run_id = (Row.owner row).run_id in
+           let key = Row.key row in
+           let%bind current =
+             match Row.kind row with
+             | Receipt.Kind.Repl_task_run ->
+               let%map view = Repl.Task.observe t ~actor ~run_id ~key in
+               Option.map view ~f:Repl.Task.row
+             | Check | Fixture_run | Live_run ->
+               let%map view = Command.observe t ~actor ~run_id ~key in
+               Option.map view ~f:Command.row
+           in
+           Developer_trace_retention.snapshot_checked
+             traces
+             request
+             ~checked
+             ~current_actor:actor
+             ~exact_membership:(fun association ->
+               Operator_authorization.is_current actor
+               && Option.value_map current ~default:false ~f:(fun row ->
+                 Developer_trace_retention.Association.matches_row association row))))
   ;;
 
   let snapshot t ~actor ~lookup =
@@ -3008,14 +3033,27 @@ module Trace = struct
          (match t.trace, entry with
           | None, _ | _, None -> Ok Developer_trace_retention.Availability.Unavailable
           | Some traces, Some entry ->
-            let%bind request = Developer_trace_retention.begin_read traces ~actor entry in
-            Developer_trace_retention.snapshot
-              traces
-              request
-              ~current_actor:actor
-              ~exact_membership:(fun _ ->
-                match Repl_epoch.historical_trace repl ~actor ~instance ~epoch ~key with
-                | Ok (Some current) -> phys_equal current entry
-                | Ok None | Error _ -> false)))
+            Developer_trace_retention.with_read traces ~actor entry ~f:(fun request ->
+              let%bind checked =
+                Developer_trace_retention.check_read_current
+                  traces
+                  request
+                  ~current_actor:actor
+                  ~checkpoint:t.checkpoint
+              in
+              let%bind current =
+                Repl_epoch.historical_trace repl ~actor ~instance ~epoch ~key
+              in
+              Developer_trace_retention.snapshot_checked
+                traces
+                request
+                ~checked
+                ~current_actor:actor
+                ~exact_membership:(fun _ ->
+                  Option.exists current ~f:(phys_equal entry)
+                  &&
+                  match Repl_epoch.historical_trace repl ~actor ~instance ~epoch ~key with
+                  | Ok (Some current) -> phys_equal current entry
+                  | Ok None | Error _ -> false))))
   ;;
 end

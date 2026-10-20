@@ -237,6 +237,12 @@
     lib/agent_server/developer_command_lifecycle.ml %{dep:../agent_server/developer_command_lifecycle.ml}
     lib/agent_server/developer_native_permission.ml %{dep:../agent_server/developer_native_permission.ml}
     lib/agent_server/developer_trace_retention.ml %{dep:../agent_server/developer_trace_retention.ml}
+    lib/agent_server/developer_historical_source.ml %{dep:../agent_server/developer_historical_source.ml}
+    lib/agent_server/authoring_context_service_core.ml %{dep:../agent_server/authoring_context_service_core.ml}
+    lib/agent_server/authoring_context_service.ml %{dep:../agent_server/authoring_context_service.ml}
+    lib/agent_server/authoring_host_policy.ml %{dep:../agent_server/authoring_host_policy.ml}
+    lib/agent_server/authoring_upload_host.ml %{dep:../agent_server/authoring_upload_host.ml}
+    lib/agent_store/authoring_upload_store.ml %{dep:../agent_store/authoring_upload_store.ml}
     lib/agent_server/developer_background_job_runner.ml %{dep:../agent_server/developer_background_job_runner.ml}
     lib/agent_server/developer_child_agent_runner.ml %{dep:../agent_server/developer_child_agent_runner.ml}
     lib/agent_server/developer_child_content_projection.ml %{dep:../agent_server/developer_child_content_projection.ml}

@@ -768,17 +768,20 @@ let discard_unpublished_evaluator evaluator =
 ;;
 
 let initial_trace_provenance t ~selection ~original ~actor =
-  Option.bind t.traces ~f:(fun traces ->
+  match t.traces, Capture_host.Source_selection.historical_origin selection with
+  | None, _ | _, None -> None
+  | Some traces, Some historical_origin ->
     Developer_trace_retention.Provenance.of_prepared
       ~action:Repl_statement
       ~original_actor:actor
       ~route:(Original.route original)
+      ~historical_origin
       ~capture_fingerprint:None
       ~selection_fingerprint:
         (Capture_host.Source_selection.repl_root_fingerprint selection)
       ~prepared:(Capture_host.Source_selection.prepared selection)
       ~limits:(Developer_trace_retention.limits traces)
-    |> Result.ok)
+    |> Result.ok
 ;;
 
 let create_state t ~run_id ~original ~fresh_source ~actor ~request_current =

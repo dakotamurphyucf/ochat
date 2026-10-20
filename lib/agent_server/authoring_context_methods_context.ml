@@ -135,7 +135,7 @@ let prepare_open t entry ~actor ~id ~checkpoint request =
           })
   | Supplied_document { member; default_environment; contents } ->
     let%bind policy = t.supplied_document |> Result.of_option ~error:Error.Uninstalled in
-    if not (policy.Supplied_document_policy.authorize actor)
+    if not (Supplied_document_policy.read_admitted policy actor)
     then Error Error.Unauthorized
     else (
       let%bind _ = portable_member member in

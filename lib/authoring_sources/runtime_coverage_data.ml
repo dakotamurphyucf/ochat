@@ -258,6 +258,15 @@ let shared_features =
     , "Bounded source-owned recording for Developer commands and retained REPL work; \
        joined terminal custody and authenticated historical source projection"
     , [ "lib/agent_server/developer_trace_retention.ml"
+      ; "lib/agent_server/developer_historical_source.ml"
+      ; "lib/agent_server/authoring_source_host.ml"
+      ; "lib/agent_server/authoring_context_service_core.ml"
+      ; "lib/agent_server/authoring_context_service.ml"
+      ; "lib/agent_server/authoring_host_policy.ml"
+      ; "lib/agent_server/authoring_upload_host.ml"
+      ; "lib/agent_server/authoring_installation.ml"
+      ; "lib/agent_server/developer_capture_host.ml"
+      ; "lib/agent_store/authoring_upload_store.ml"
       ; "lib/agent_server/developer_command_lifecycle.ml"
       ; "lib/agent_server/developer_repl_epoch.ml"
       ; "lib/agent_server/developer_host.ml"
@@ -566,7 +575,7 @@ let implementation_sources =
   ; ( "lib/agent_server/dispatcher.ml"
     , "a5a46fc6c3ef8c58f545b5a8c270d576d4de7f85e9144cfb6b6830a3aaee986e" )
   ; ( "lib/agent_server/authoring_installation.ml"
-    , "ad9958019b5e5df1937281e63cca36cea6d74bbe92c75baf58cdab9d9f2c2336" )
+    , "cffa9affee87aae27b9b0f1d308194fcb45ab84d0da74bf0af5482c61a2ca784" )
   ; ( "lib/agent_server/connection_context.ml"
     , "6efbe0038e4d033c7fd06b441e88e0f37194f444a8a79cf54c8c78def67c1584" )
   ; ( "lib/agent_server/startup_cleanup.ml"
@@ -582,7 +591,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_approval_owner.ml"
     , "b35fec39738beb88b66c4f7cd50e1fb4e432f8188b72b58057a683f17c81d657" )
   ; ( "lib/agent_server/developer_trace_retention.ml"
-    , "66795ac4a19b011885cde1b4814c3d0382314e64d024d7b43384e35f15a11ce4" )
+    , "7818ec9f7ea628198d1fc913536b859fbb5c276ef2c141ad9438ea3334f21246" )
   ; ( "lib/agent_server/developer_command_lifecycle.ml"
     , "f7e3e0c7e6302aef645a4c230cebced0ab7b8269f907c5e980a2874e8b236257" )
   ; ( "lib/agent_server/developer_daemon_configuration.ml"
@@ -688,7 +697,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_script_job_service.ml"
     , "79ab45f6fd273e4f55060607c7635b52e19e724b8ff0bf0356d4c328024db6d6" )
   ; ( "lib/agent_server/developer_host.ml"
-    , "2e3dd268d35839331c547618887ad9ecf09b3ca7806e7e912b48229b027eb1a3" )
+    , "0932a7b17b43834b09fa12df2f06624b965fea4d11806da6ece4891f0283031b" )
   ; ( "lib/agent_server/schedule_scheduler.ml"
     , "37cf371632d8ad86693c162e0593d56866f76df577dceb06ddd2ac5fe5bfdae9" )
   ; ( "lib/agent_session/background_execution.ml"
@@ -708,15 +717,15 @@ let implementation_sources =
   ; ( "lib/agent_store/developer_command_row.ml"
     , "c7fe85fb222c80450fdc512732c9ad9fc2fd8ab8e12e65eeb64302e4904a5809" )
   ; ( "lib/agent_server/authoring_source_host.ml"
-    , "ab50e23db585ec2027d5fa2006d663e62d6ff1de754c1c0fe8c1d4813b4f5295" )
+    , "eb5183c8659d25c59a480875548ef2e1b038126786266b58b5ad88b241e86035" )
   ; ( "lib/agent_server/authoring_context_owner.ml"
-    , "c90a02b0b9b85ed1339d9f9e27ed3177c658795eeff8746c23a56e5601a196c6" )
+    , "f1c74b20f51d473d2b783b37c5c860ce67e68e901cbc88345f57b09d7f283bca" )
   ; ( "lib/agent_server/developer_capture_host.ml"
-    , "75ddb011cc0fa32708ed16034900d502872a12e5d3957362654f45abe25442e6" )
+    , "7212e5fb9fd8025df3fda921a2e1ba28c266ffbe53c614b8bf6a873847b7c0f6" )
   ; ( "lib/agent_server/developer_root_source.ml"
     , "052785a90fef793261bdcdabcf5f5067269ae321d65e1fb5169952d4974fd16a" )
   ; ( "lib/agent_server/developer_repl_epoch.ml"
-    , "e4347706402e17168b35c4a1d3e0d553fab96feb29cc0afc4bad2bcae8cb0bde" )
+    , "c15bc93776420d6a965e159dab3014f962dbf396eb3ca37f48b079e3786efb2f" )
   ; ( "lib/agent_server/developer_repl_projection.ml"
     , "d8240d92b432b2d40c4401e08c53b1c16c3445cbadd0f005a1cf59ae2da2657b" )
   ; ( "lib/agent_server/developer_repl_task_original.ml"
@@ -797,6 +806,18 @@ let implementation_sources =
     , "05eccbbde26eb960d6d6b6ce89a3a5b4cad786e3734c7ff9526c25fb9d059dcd" )
   ; ( "lib/chat_response/restored_programs.ml"
     , "329f2747454cc915a6ac3713fbffadc46d2d71b925167a3be68c0aefa9617fdb" )
+  ; ( "lib/agent_server/developer_historical_source.ml"
+    , "57397ec74cd606e528c2c5954fe150decc65834cee02504bd3e3b67e3ccce0c5" )
+  ; ( "lib/agent_server/authoring_context_service_core.ml"
+    , "7c58f58bdcd48344d17a1209a0431d7d80616c4688db6f9ec42411b6d7bc9061" )
+  ; ( "lib/agent_server/authoring_context_service.ml"
+    , "514a11a719d6156fcda7bb5c71348a17b45c3863ab5f966baa5053c93d29213c" )
+  ; ( "lib/agent_server/authoring_host_policy.ml"
+    , "b48f6f6c86b47207bf134b535edf388a44fa4d9a7bbf59953b4b91a7f1bde30c" )
+  ; ( "lib/agent_server/authoring_upload_host.ml"
+    , "8774074a3192360392904b79b9e9101d05a6f1da03a63653be7bb8aeefa61a57" )
+  ; ( "lib/agent_store/authoring_upload_store.ml"
+    , "c71ff246dcfcc411df0419b86de3b127599a80e20397a9915fbce54b97f6fa4b" )
   ]
 ;;
 

@@ -206,6 +206,19 @@ module Source_selection : sig
   val entry_source : t -> Chatml_source.t
   val selected_contract : t -> Selected_contract.t
 
+  (** Observational comparison data issued only from the actual captured
+      Local/Host/Uploaded/Supplied owner branch when this Capture facade was
+      created with an installed finite historical-recording budget. None means
+      tracing is disabled or its
+      bounded origin could not be issued; it never changes source admission.
+      A policy-supplied independently selected document Build has no proof
+      that all dependency sources belong to the document owner, so that route
+      has no trace origin. Raw document scripts and host-prepared selected
+      builds retain their authentic document-source owner.
+      The retained REPL selection keeps this same small immutable value across
+      a same-capture reset, not an old editor Context/Root/actor token. *)
+  val historical_origin : t -> Developer_historical_source.Origin.t option
+
   (** Versioned, domain-separated REPL Root identity over the exact selected
       Prepared graph and Selected_contract fingerprint. Stored once with this
       physical selection; unlike a command capture it contains no synthetic
@@ -341,6 +354,10 @@ module Candidate : sig
 
   val capture : t -> Capture.t
 
+  (** Exact same historical origin as this Candidate's authenticated source
+      selection. Comparison-only; absence omits trace attachment, not work. *)
+  val historical_origin : t -> Developer_historical_source.Origin.t option
+
   (** Original selected contract and optional Tool_v1 schema comparison data.
       The host may inspect these only after the Candidate's full currentness
       check and must repeat its final check before a durable result write. *)
@@ -402,9 +419,15 @@ val capture_selection
   -> (Candidate.t, P.Error.t) result
 
 (** Borrows the SAME Source_host and Authoring_context_service/Core owner used
-    by installed authoring methods; no new opener, ledger, resolver or Store. *)
+    by installed authoring methods; no new opener, ledger, resolver or Store.
+    [historical_recording=None] leaves source preparation on its existing path
+    without historical-origin issuance, retention checks or extra trace-specific
+    limits. A finite installed recording budget enables best-effort issuance;
+    an unavailable origin may omit a trace but cannot reject otherwise admitted
+    source/capture work. Cancellation and invariant failures are not hidden. *)
 val create
-  :  authoring:Authoring_context_service_core.t
+  :  historical_recording:Developer_historical_source.Recording.t option
+  -> authoring:Authoring_context_service_core.t
   -> policy:Target_policy.t
   -> limits:Limits.t
   -> t

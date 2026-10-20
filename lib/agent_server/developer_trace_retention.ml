@@ -3,6 +3,7 @@ module P = Agent_protocol
 module Store = Agent_store.Developer_run_store
 module Captured = Chatml_source
 module Trace = Chatml_trace
+module Historical = Developer_historical_source
 
 let denied () =
   P.Error.create
@@ -22,9 +23,12 @@ let add_bounded current amount ~limit =
 ;;
 
 (* Validated command IDs and keys are at most 256 bytes, typed owner IDs at
-   most 96, digests exactly 64, and execution IDs at most 128. Reserve space
-   for one maximal association even when every recorder limit is selected. *)
-let association_fixed_charge = 128
+   most 96, digests exactly 64, and execution IDs at most 128. The fixed
+   association charge includes its variant/record, owner record, string
+   headers and option cells. Reserve one maximal association even when every
+   recorder limit is selected; these are conservative retention charges, not
+   exact heap-size measurements. *)
+let association_fixed_charge = 384
 let expired_fixed_charge = 128
 
 let max_association_and_token_charge =
@@ -121,6 +125,7 @@ module Provenance = struct
     ; original_principal_id : P.Id.Principal.t
     ; original_authentication_kind : string
     ; route : Developer_command_original.Route.t
+    ; historical_origin : Historical.Origin.t
     ; capture_fingerprint : Captured.Digest.t option
     ; selection_fingerprint : Captured.Digest.t
     ; sources : source_ref list
@@ -134,7 +139,9 @@ module Provenance = struct
   let action t = t.action
 
   let charge_source source ~limit =
-    add_bounded 96 (String.length (Captured.Id.package_namespace source.id)) ~limit
+    (* Source-ref/list cells, ID record and string headers, and the retained
+       64-character digest precede the variable namespace/path bytes. *)
+    add_bounded 256 (String.length (Captured.Id.package_namespace source.id)) ~limit
     |> Option.bind ~f:(fun charge ->
       add_bounded charge (String.length (Captured.Id.relative_path source.id)) ~limit)
   ;;
@@ -172,9 +179,10 @@ module Provenance = struct
   let for_retained_task t ~capture_fingerprint ~limits =
     match t.action, t.capture_fingerprint with
     | Repl_statement, None ->
+      (* Charge the added option/digest header as well as its hex bytes. *)
       add_bounded
         t.charge
-        (String.length (Captured.Digest.to_hex capture_fingerprint))
+        (128 + String.length (Captured.Digest.to_hex capture_fingerprint))
         ~limit:limits.Limits.max_provenance_bytes_per_trace
       |> Option.map ~f:(fun charge ->
         { t with
@@ -189,6 +197,7 @@ module Provenance = struct
         ~action
         ~original_actor
         ~route
+        ~historical_origin
         ~capture_fingerprint
         ~selection_fingerprint
         ~prepared
@@ -200,9 +209,11 @@ module Provenance = struct
       |> Jsonaf.to_string
       |> String.length
     in
+    (* Record, route object, option cells and both digest/string headers are
+       charged here; variable actor/route/origin/source bytes follow. *)
     let base =
       add_bounded
-        192
+        512
         (String.length (P.Id.Principal.to_string principal.id))
         ~limit:limits.Limits.max_provenance_bytes_per_trace
       |> Option.bind ~f:(fun charge ->
@@ -212,6 +223,12 @@ module Provenance = struct
           ~limit:limits.max_provenance_bytes_per_trace)
       |> Option.bind ~f:(fun charge ->
         add_bounded charge route_bytes ~limit:limits.max_provenance_bytes_per_trace)
+      |> Option.bind ~f:(fun charge ->
+        Historical.Origin.charge
+          historical_origin
+          ~max_bytes:(limits.max_provenance_bytes_per_trace - charge)
+        |> Option.bind ~f:(fun origin_charge ->
+          add_bounded charge origin_charge ~limit:limits.max_provenance_bytes_per_trace))
     in
     if
       Option.is_none base
@@ -229,6 +246,7 @@ module Provenance = struct
           ; original_principal_id = principal.id
           ; original_authentication_kind = principal.authentication_kind
           ; route
+          ; historical_origin
           ; capture_fingerprint
           ; selection_fingerprint
           ; sources = []
@@ -352,18 +370,66 @@ module Availability = struct
 end
 
 module Read_policy = struct
-  type t = { authorize : Operator_authorization.t -> Provenance.t -> bool }
+  type t =
+    | Authoring of Authoring_installation.t
+    | Deny_all
 
-  let create ~authorize = { authorize }
-  let deny_all = { authorize = (fun _ _ -> false) }
+  let of_authoring authoring = Authoring authoring
+  let deny_all = Deny_all
+
+  let check_full t ~actor provenance ~checkpoint =
+    match t with
+    | Deny_all -> Error (denied ())
+    | Authoring owner ->
+      Authoring_installation.check_historical_origin
+        owner
+        ~actor
+        provenance.Provenance.historical_origin
+        ~checkpoint
+  ;;
+
+  let check_now t ~actor provenance =
+    match t with
+    | Deny_all -> Error (denied ())
+    | Authoring owner ->
+      Authoring_installation.check_historical_origin_now
+        owner
+        ~actor
+        provenance.Provenance.historical_origin
+  ;;
 end
 
 module Read_request = struct
+  type loan =
+    { entry : Entry.t
+    ; mutable provenance : Provenance.t option
+    ; mutable readers : int
+    ; mutable detached : bool
+    }
+
+  type active =
+    { actor : Operator_authorization.t
+    ; loan : loan option
+    ; mutable checked_actor : Operator_authorization.t option
+    ; mutable proof : unit ref option
+    }
+
+  type state =
+    | Active of active
+    | Released
+
   type t =
     { owner : unit ref
-    ; actor : Operator_authorization.t
     ; entry : Entry.t
+    ; mutable state : state
     }
+
+  type checked =
+    { request : t
+    ; proof : unit ref
+    }
+
+  let provenance active = Option.bind active.loan ~f:(fun loan -> loan.provenance)
 end
 
 module Configuration = struct
@@ -371,9 +437,19 @@ module Configuration = struct
     { mode : Trace.Recorder.Mode.t
     ; limits : Limits.t
     ; read_policy : Read_policy.t
+    ; historical_recording : Historical.Recording.t
     }
 
-  let create ~mode ~limits ~read_policy = { mode; limits; read_policy }
+  let create ~mode ~limits ~read_policy =
+    let historical_recording =
+      Historical.Recording.create
+        ~max_origin_bytes:limits.Limits.max_provenance_bytes_per_trace
+      |> Or_error.ok_exn
+    in
+    { mode; limits; read_policy; historical_recording }
+  ;;
+
+  let historical_recording t = t.historical_recording
 end
 
 type retained =
@@ -395,6 +471,9 @@ type t =
   ; mutable retained_bytes : int
   ; mutable expired_count : int
   ; mutable next_ordinal : int
+  ; mutable active_reads : int
+  ; mutable borrowed_bytes : int
+  ; mutable loans : Read_request.loan list
   ; mutable closed : bool
   ; mutable release_hook : Eio.Switch.hook
   }
@@ -413,7 +492,17 @@ let release_recording t retained =
 ;;
 
 let remove_retained t retained =
+  List.iter t.loans ~f:(fun loan ->
+    if phys_equal loan.Read_request.entry retained.entry && not loan.detached
+    then (
+      Option.iter loan.provenance ~f:(fun provenance ->
+        t.borrowed_bytes <- t.borrowed_bytes + provenance.Provenance.charge);
+      loan.detached <- true));
   t.retained_bytes <- t.retained_bytes - retained.charge;
+  assert (
+    t.borrowed_bytes >= 0
+    && t.retained_bytes >= 0
+    && t.borrowed_bytes <= t.configuration.limits.max_retained_bytes - t.retained_bytes);
   if Option.is_none retained.recorder then t.expired_count <- t.expired_count - 1;
   Hashtbl.remove t.entries (token retained.entry)
 ;;
@@ -459,7 +548,10 @@ let close t =
     t.closed <- true;
     ignore (Eio.Switch.try_remove_hook t.release_hook : bool);
     Hashtbl.clear t.entries;
+    List.iter t.loans ~f:(fun loan -> loan.provenance <- None);
+    t.loans <- [];
     t.retained_bytes <- 0;
+    t.borrowed_bytes <- 0;
     t.expired_count <- 0)
 ;;
 
@@ -472,6 +564,9 @@ let create ~sw ~clock ~configuration =
     ; retained_bytes = 0
     ; expired_count = 0
     ; next_ordinal = 0
+    ; active_reads = 0
+    ; borrowed_bytes = 0
+    ; loans = []
     ; closed = false
     ; release_hook = Eio.Switch.null_hook
     }
@@ -562,7 +657,7 @@ let make_entry t association provenance ~submission_fingerprint ~header =
     let rec make_room charge =
       if
         Hashtbl.length t.entries < limits.max_traces
-        && charge <= limits.max_retained_bytes - t.retained_bytes
+        && charge <= limits.max_retained_bytes - t.retained_bytes - t.borrowed_bytes
       then true
       else (
         match oldest t ~filter:(fun value -> Option.is_none value.recorder) with
@@ -717,58 +812,413 @@ let finish t entry terminal =
   sweep t
 ;;
 
-let begin_read t ~actor entry =
-  if
-    t.closed
-    || (not (phys_equal t.owner entry.Entry.owner))
-    || not (Operator_authorization.is_current actor)
-  then Error (denied ())
-  else Ok { Read_request.owner = t.owner; actor; entry }
-;;
-
 let same_actor principal actor =
   let current = Operator_authorization.principal actor in
   P.Id.Principal.equal current.id principal.P.Principal.id
   && String.equal current.authentication_kind principal.authentication_kind
 ;;
 
-let snapshot t request ~current_actor ~exact_membership =
+open Read_request
+
+let request_current t request ~current_actor =
+  (not t.closed)
+  && phys_equal t.owner request.Read_request.owner
+  && phys_equal t.owner request.entry.Entry.owner
+  &&
+  match request.state with
+  | Released -> false
+  | Active active ->
+    Operator_authorization.is_current active.actor
+    && Operator_authorization.is_current current_actor
+    && same_actor (Operator_authorization.principal active.actor) current_actor
+    && Option.value_map
+         (Read_request.provenance active)
+         ~default:true
+         ~f:(fun provenance ->
+           let principal = Operator_authorization.principal current_actor in
+           P.Id.Principal.equal provenance.Provenance.original_principal_id principal.id
+           && String.equal
+                provenance.original_authentication_kind
+                principal.authentication_kind)
+;;
+
+let with_read t ~actor entry ~f =
+  let limits = t.configuration.limits in
+  let max_reads =
+    Int.min
+      limits.max_traces
+      (limits.max_retained_bytes / limits.max_provenance_bytes_per_trace)
+  in
   if
     t.closed
-    || (not (phys_equal t.owner request.Read_request.owner))
-    || (not (Operator_authorization.is_current request.actor))
-    || (not (Operator_authorization.is_current current_actor))
-    || (not (same_actor (Operator_authorization.principal request.actor) current_actor))
+    || (not (phys_equal t.owner entry.Entry.owner))
+    || not (Operator_authorization.is_current actor)
+  then Error (denied ())
+  else if t.active_reads >= max_reads
+  then Error (limited "trace read capacity reached")
+  else (
+    sweep t;
+    let retained = find t entry in
+    let loan =
+      Option.map retained ~f:(fun value ->
+        match
+          List.find t.loans ~f:(fun loan -> phys_equal loan.Read_request.entry entry)
+        with
+        | Some loan ->
+          loan.readers <- loan.readers + 1;
+          loan
+        | None ->
+          let loan =
+            { Read_request.entry
+            ; provenance = Some value.provenance
+            ; readers = 1
+            ; detached = false
+            }
+          in
+          t.loans <- loan :: t.loans;
+          loan)
+    in
+    let request =
+      { Read_request.owner = t.owner
+      ; entry
+      ; state = Active { actor; loan; checked_actor = None; proof = None }
+      }
+    in
+    t.active_reads <- t.active_reads + 1;
+    Exn.protect
+      ~f:(fun () -> f request)
+      ~finally:(fun () ->
+        request.state <- Released;
+        Option.iter loan ~f:(fun loan ->
+          loan.readers <- loan.readers - 1;
+          if Int.equal loan.readers 0
+          then (
+            if loan.detached && not t.closed
+            then
+              Option.iter loan.provenance ~f:(fun provenance ->
+                t.borrowed_bytes <- t.borrowed_bytes - provenance.Provenance.charge);
+            loan.provenance <- None;
+            t.loans <- List.filter t.loans ~f:(fun other -> not (phys_equal other loan))));
+        t.active_reads <- t.active_reads - 1))
+;;
+
+let check_read_current t request ~current_actor ~checkpoint =
+  let open Result.Let_syntax in
+  if not (request_current t request ~current_actor)
+  then Error (denied ())
+  else (
+    let%bind () =
+      match request.state with
+      | Released -> Error (denied ())
+      | Active active ->
+        (match Read_request.provenance active with
+         | None -> Ok ()
+         | Some provenance ->
+           Read_policy.check_full
+             t.configuration.read_policy
+             ~actor:current_actor
+             provenance
+             ~checkpoint)
+    in
+    if not (request_current t request ~current_actor)
+    then Error (denied ())
+    else (
+      let%bind () =
+        match request.state with
+        | Released -> Error (denied ())
+        | Active active ->
+          (match Read_request.provenance active with
+           | None -> Ok ()
+           | Some provenance ->
+             Read_policy.check_now
+               t.configuration.read_policy
+               ~actor:current_actor
+               provenance)
+      in
+      match request.state with
+      | Released -> Error (denied ())
+      | Active active ->
+        let proof = ref () in
+        active.checked_actor <- Some current_actor;
+        active.proof <- Some proof;
+        Ok { Read_request.request; proof }))
+;;
+
+let snapshot_checked t request ~checked ~current_actor ~exact_membership =
+  let proof_current =
+    match request.Read_request.state with
+    | Released -> false
+    | Active active ->
+      Option.value_map active.proof ~default:false ~f:(phys_equal checked.proof)
+      && Option.value_map
+           active.checked_actor
+           ~default:false
+           ~f:(phys_equal current_actor)
+  in
+  if
+    (not (request_current t request ~current_actor))
+    || (not (phys_equal checked.Read_request.request request))
+    || (not proof_current)
     || not (exact_membership (Entry.association request.entry))
   then Error (denied ())
   else (
-    sweep t;
-    match find t request.entry with
-    | None -> Ok Availability.Unavailable
-    | Some retained ->
-      let provenance = retained.provenance in
+    let source_current =
+      match request.state with
+      | Released -> Error (denied ())
+      | Active active ->
+        (match Read_request.provenance active with
+         | None -> Ok ()
+         | Some provenance ->
+           Read_policy.check_now
+             t.configuration.read_policy
+             ~actor:current_actor
+             provenance)
+    in
+    match source_current with
+    | Error _ as error -> error
+    | Ok () ->
       if
-        (not
-           (P.Id.Principal.equal
-              (Provenance.original_principal_id provenance)
-              (Operator_authorization.principal current_actor).id))
-        || (not
-              (String.equal
-                 (Provenance.original_authentication_kind provenance)
-                 (Operator_authorization.principal current_actor).authentication_kind))
-        || (not (t.configuration.read_policy.authorize current_actor provenance))
-        || (not (Operator_authorization.is_current request.actor))
-        || (not (Operator_authorization.is_current current_actor))
+        (not (request_current t request ~current_actor))
         || not (exact_membership (Entry.association request.entry))
       then Error (denied ())
       else (
-        match retained.recorder with
-        | None -> Ok Availability.Expired
-        | Some recorder ->
-          let snapshot = Trace.Recorder.snapshot recorder in
-          Ok
-            (Availability.Retained
-               (Trace.Recorder.Snapshot.with_authorized_sites
-                  snapshot
-                  ~authorize:(Provenance.contains_site provenance)))))
+        sweep t;
+        match find t request.entry with
+        | None -> Ok Availability.Unavailable
+        | Some retained ->
+          let provenance = retained.provenance in
+          if
+            not
+              (match request.state with
+               | Released -> false
+               | Active active ->
+                 Option.value_map
+                   (Read_request.provenance active)
+                   ~default:false
+                   ~f:(phys_equal provenance))
+          then Error (denied ())
+          else (
+            match retained.recorder with
+            | None -> Ok Availability.Expired
+            | Some recorder ->
+              let snapshot = Trace.Recorder.snapshot recorder in
+              Ok
+                (Availability.Retained
+                   (Trace.Recorder.Snapshot.with_authorized_sites
+                      snapshot
+                      ~authorize:(Provenance.contains_site provenance))))))
+;;
+
+let%expect_test "bounded historical read loan releases on cancellation and lexical exit" =
+  let must = function
+    | Ok value -> value
+    | Error _ -> failwith "trace read fixture setup failed"
+  in
+  let recorder =
+    Trace.Recorder.Limits.create
+      ~max_events:4
+      ~max_normal_bytes:256
+      ~max_terminal_bytes:128
+    |> Or_error.ok_exn
+  in
+  let limits =
+    Limits.create
+      ~max_traces:2
+      ~max_retained_bytes:
+        (Trace.Recorder.Limits.max_normal_bytes recorder
+         + Trace.Recorder.Limits.max_terminal_bytes recorder
+         + 512
+         + 1024
+         + max_association_and_token_charge)
+      ~max_source_refs_per_trace:1
+      ~max_provenance_bytes_per_trace:1024
+      ~max_expired_tombstones:1
+      ~max_age_seconds:60.
+      ~max_header_bytes:512
+      ~recorder
+    |> Or_error.ok_exn
+  in
+  let actor =
+    P.Principal.create
+      ~id:(P.Id.Principal.of_string "pri_trace_loan" |> must)
+      ~authentication_kind:"local.test"
+      ~scopes:P.Scope.Set.empty
+      ~attributes:[]
+    |> must
+    |> Operator_authorization.trusted_local
+  in
+  Eio_main.run (fun env ->
+    Eio.Switch.run (fun sw ->
+      let t =
+        create
+          ~sw
+          ~clock:(Eio.Stdenv.mono_clock env)
+          ~configuration:
+            (Configuration.create
+               ~mode:Trace.Recorder.Mode.Summary
+               ~limits
+               ~read_policy:Read_policy.deny_all)
+      in
+      (* The entry is deliberately absent: this case tests only the finite loan
+       owner, not historical source admission or recorder publication. *)
+      let entry =
+        { Entry.owner = t.owner
+        ; execution_id = Trace.Execution_id.of_opaque_string "trace-loan" |> must
+        ; association =
+            Association.repl_statement
+              ~run_id:(P.Id.Developer_run.of_string "dvr_trace_loan" |> must)
+              ~instance_nonce:(P.Id.Transaction.of_string "txn_trace_loan" |> must)
+              ~epoch_serial:0
+              ~key:(P.Idempotency_key.of_string "trace-loan" |> must)
+              ~selection_fingerprint:
+                (Captured.Digest.of_contents "selection" ~checkpoint:Fn.id)
+            |> must
+        }
+      in
+      let reason = Failure "cancel trace read" in
+      let cancelled =
+        match
+          Eio.Cancel.sub (fun cancel ->
+            with_read t ~actor entry ~f:(fun _ ->
+              with_read t ~actor entry ~f:(fun _ ->
+                (match with_read t ~actor entry ~f:(fun _ -> Ok ()) with
+                 | Error { code = Resource_limit; _ } -> ()
+                 | Ok () | Error _ -> failwith "read slot was not bounded");
+                Ok ())
+              |> must;
+              Eio.Cancel.cancel cancel reason;
+              Eio.Fiber.check ();
+              Ok ()))
+        with
+        | exception Eio.Cancel.Cancelled caught -> phys_equal caught reason
+        | Ok _ | Error _ -> false
+      in
+      assert cancelled;
+      let escaped = ref None in
+      let recovered =
+        with_read t ~actor entry ~f:(fun request ->
+          let checked =
+            check_read_current t request ~current_actor:actor ~checkpoint:Fn.id |> must
+          in
+          escaped := Some (request, checked);
+          Ok ())
+      in
+      assert (Result.is_ok recovered);
+      let request, checked = Option.value_exn !escaped in
+      assert (
+        Result.is_error
+          (snapshot_checked
+             t
+             request
+             ~checked
+             ~current_actor:actor
+             ~exact_membership:(fun _ -> true)));
+      let source_id =
+        Captured.Id.create ~package_namespace:"trace-loan" ~relative_path:"entry.chatml"
+        |> Or_error.ok_exn
+      in
+      let source =
+        Captured.create
+          source_id
+          ~contents:"let main = 1\n"
+          ~expected_digest:None
+          ~max_bytes:None
+          ~checkpoint:Fn.id
+        |> Or_error.ok_exn
+      in
+      let selected = Captured.digest source in
+      let policy =
+        Authoring_context_service_core.Supplied_document_policy.create
+          ~authorize:(fun _ -> true)
+      in
+      let provenance =
+        { Provenance.action = Repl_statement
+        ; original_principal_id = (Operator_authorization.principal actor).id
+        ; original_authentication_kind = "local.test"
+        ; route =
+            Developer_command_original.Route.Local_source
+              { root_index = 0
+              ; member = Source.Portable_path.create "entry.chatml" |> Or_error.ok_exn
+              }
+        ; historical_origin =
+            Historical.Origin.supplied_document
+              (Authoring_context_service_core.Supplied_document_policy.identity policy)
+        ; capture_fingerprint = None
+        ; selection_fingerprint = selected
+        ; sources =
+            [ { Provenance.id = Captured.id source
+              ; digest = Captured.digest source
+              ; byte_length = Captured.byte_length source
+              }
+            ]
+        ; charge = 1024
+        }
+      in
+      let association key =
+        Association.repl_statement
+          ~run_id:(P.Id.Developer_run.of_string "dvr_trace_loan" |> must)
+          ~instance_nonce:(P.Id.Transaction.of_string "txn_trace_loan" |> must)
+          ~epoch_serial:0
+          ~key:(P.Idempotency_key.of_string key |> must)
+          ~selection_fingerprint:selected
+        |> must
+      in
+      let admitted key execution =
+        let header =
+          Trace.Header.of_submitted_capture
+            ~execution_id:(Trace.Execution_id.of_opaque_string execution |> must)
+            ~submission_fingerprint:selected
+            ~sources:[ source ]
+            ~selection_fingerprint:selected
+            ~max_inventory_entries:1
+            ~max_header_bytes:512
+            ~checkpoint:Fn.id
+          |> must
+        in
+        make_entry t (association key) provenance ~submission_fingerprint:selected ~header
+      in
+      let retained_entry =
+        admitted "trace-loan-first" "trace-loan-first" |> Option.value_exn
+      in
+      finish
+        t
+        retained_entry
+        (Trace.Terminal.create ~receipt_version:1 ~disposition:Succeeded |> must);
+      let escaped_retained = ref None in
+      with_read t ~actor retained_entry ~f:(fun request ->
+        escaped_retained := Some request;
+        assert (Option.is_some (find t retained_entry));
+        with_read t ~actor retained_entry ~f:(fun _ ->
+          assert (Option.is_none (admitted "trace-loan-next" "trace-loan-next"));
+          assert (Option.is_none (find t retained_entry));
+          assert (Int.equal t.borrowed_bytes provenance.charge);
+          Ok ())
+        |> must;
+        (* The second reader has exited, but the first still owns the one
+           detached provenance charge. A table-only admission would fit. *)
+        assert (Option.is_none (find t retained_entry));
+        assert (Int.equal t.borrowed_bytes provenance.charge);
+        (match request.state with
+         | Active active -> assert (Option.is_some (Read_request.provenance active))
+         | Released -> failwith "active read loan expired during eviction");
+        Ok ())
+      |> must;
+      let escaped_retained = Option.value_exn !escaped_retained in
+      (match escaped_retained.state with
+       | Released -> ()
+       | Active _ -> failwith "escaped retained loan kept provenance");
+      assert (Int.equal t.borrowed_bytes 0);
+      assert (Option.is_none (find t retained_entry));
+      let next_entry = admitted "trace-loan-next" "trace-loan-next" |> Option.value_exn in
+      with_read t ~actor next_entry ~f:(fun request ->
+        close t;
+        (match request.state with
+         | Active active -> assert (Option.is_none (Read_request.provenance active))
+         | Released -> failwith "close altered lexical read state");
+        Ok ())
+      |> must;
+      close t;
+      assert (Result.is_error (with_read t ~actor entry ~f:(fun _ -> Ok ())))));
+  print_endline "finite read loan released and escaped proof expired";
+  [%expect {| finite read loan released and escaped proof expired |}]
 ;;

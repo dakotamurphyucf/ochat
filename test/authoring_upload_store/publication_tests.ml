@@ -937,6 +937,49 @@ let%test_unit
                ~authorize_parent:None)
       in
       let rebound = Host.rebind host ~actor ~bundle_id ~checkpoint:Fn.id |> host_ok in
+      let final_read_check = !read_checks in
+      let historical_pin =
+        Host.capture_for_context host ~actor ~bundle_id ~checkpoint:Fn.id
+        |> host_ok
+        |> Host.Context_capture.published_pin
+      in
+      let historical_charge =
+        Store.Published_pin.retained_charge historical_pin ~max_bytes:Int.max_value
+        |> Option.value_exn
+      in
+      check
+        "historical pin charge rejects a byte below its admitted bound"
+        (Option.is_none
+           (Store.Published_pin.retained_charge
+              historical_pin
+              ~max_bytes:(historical_charge - 1)));
+      rebind_allowed := false;
+      check
+        "historical metadata read needs Bundle_read but not Rebind"
+        (Result.is_ok
+           (Host.check_historical_pin host ~actor historical_pin ~checkpoint:Fn.id));
+      let entered, entered_resolver = Eio.Promise.create () in
+      let resumed, resumed_resolver = Eio.Promise.create () in
+      Eio.Fiber.fork ~sw:host_sw (fun () ->
+        Eio.Promise.await entered;
+        read_allowed := false;
+        Eio.Promise.resolve resumed_resolver ());
+      let first_checkpoint = ref true in
+      let during_store_read =
+        Host.check_historical_pin host ~actor historical_pin ~checkpoint:(fun () ->
+          if !first_checkpoint
+          then (
+            first_checkpoint := false;
+            Eio.Promise.resolve entered_resolver ();
+            Eio.Promise.await resumed))
+      in
+      check
+        "revocation during yielding Store proof denies final historical read"
+        (match during_store_read with
+         | Error Host.Error.Unauthorized -> true
+         | Ok () | Error _ -> false);
+      read_allowed := true;
+      rebind_allowed := true;
       check
         "host restores the authentic selected Project under independent read grant"
         (B.Receipt.equal receipt (Host.Rebound.receipt rebound)
@@ -947,7 +990,6 @@ let%test_unit
              (Chatml_authoring_bundle_project.Validated.input_fingerprint project)
              (Chatml_authoring_bundle_project.Validated.input_fingerprint validated)
          | Chatmd_document _ -> false);
-      let final_read_check = !read_checks in
       let connection =
         Agent_server.Connection_context.create_authenticated
           ~actor
@@ -1083,6 +1125,7 @@ let%test_unit
           ~owner:context_service
           ~policy:developer_policy
           ~limits:developer_limits
+          ~historical_recording:None
       in
       let developer_request =
         Context_service.Developer.Request.create
@@ -1141,6 +1184,11 @@ let%test_unit
         "published upload can prepare its exact captured developer graph"
         (Result.is_ok (admit ()));
       read_allowed := false;
+      check
+        "historical metadata read repeats the independent Bundle_read grant"
+        (match Host.check_historical_pin_now host ~actor historical_pin with
+         | Error Host.Error.Unauthorized -> true
+         | Ok () | Error _ -> false);
       check
         "developer capture repeats the current uploaded read grant"
         (Result.is_error (admit ()));
@@ -1243,6 +1291,10 @@ let%test_unit
       check
         "expired Store pin denies the live retained upload"
         (not (retained_current ()));
+      check
+        "expired Store publication denies the still-open historical pin"
+        (Result.is_error
+           (Host.check_historical_pin host ~actor historical_pin ~checkpoint:Fn.id));
       Selected.Retained.close_and_wait retained;
       check "released upload selection is denied" (not (retained_current ()));
       (match Context_service.close_and_wait context_service with
