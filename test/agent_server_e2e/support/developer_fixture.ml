@@ -17,7 +17,7 @@ let require condition message =
   then raise_s [%sexp "developer E2E fixture assertion failed", (message : string)]
 ;;
 
-let developer_configuration () =
+let developer_configuration ?capture_policy ?(max_runs = 3) () =
   let target = Chatml.Chatml_compiler_contract.Target.One_off_v1 in
   let contracts =
     S.Authoring_standard_contracts.create
@@ -33,7 +33,7 @@ let developer_configuration () =
     |> S.Authoring_context_service.Developer.Selected_contract.of_standard_entry
     |> ok
   in
-  let capture_policy =
+  let default_capture_policy =
     S.Authoring_context_service.Developer.Target_policy.create
       ~local_project:(fun _ ~root:_ ~project:_ ~selection:_ -> None)
       ~local_source:(fun _ ~root:_ ~member:_ -> None)
@@ -53,6 +53,7 @@ let developer_configuration () =
           _ ~origin:_ ~context:_ ~current:_ ~parsed:_ ~declaration:_ ~script:_ ->
         Some selected)
   in
+  let capture_policy = Option.value capture_policy ~default:default_capture_policy in
   let document =
     Document_schema.Limits.create
       ~max_bytes:(1024 * 1024)
@@ -77,7 +78,7 @@ let developer_configuration () =
   let commands = Agent_store.Developer_command_limits.default ~document in
   let store =
     Agent_store.Developer_run_store.Limits.create
-      ~max_runs:3
+      ~max_runs
       ~max_epochs_per_run:3
       ~max_jobs_per_run:4
       ~max_invocations_per_run:5

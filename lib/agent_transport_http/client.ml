@@ -445,6 +445,31 @@ let request_repl_locked t ~rpc_client ~control ~max_request_bytes ~bound request
          ~error_within_bound:Agent_client.Transport.Repl_response_bound.error_within_bound)
 ;;
 
+let request_trace_locked t ~max_request_bytes ~bound request =
+  let module B = Agent_client.Transport.Trace_response_bound in
+  let module T = Agent_protocol.Developer_trace_wire in
+  let max_payload_bytes =
+    match bound with
+    | B.Bootstrap -> T.Capabilities.max_json_bytes
+    | B.Installed limits -> Document_schema.Limits.max_bytes (T.Limits.request limits)
+  in
+  let max_result_bytes = B.max_result_bytes bound in
+  let max_error_bytes = B.max_error_bytes in
+  request_locked
+    t
+    ~rpc_client:t.rpc_client
+    ~control:false
+    ~method_:(T.Request.method_name request)
+    ~params:(T.Request.params request)
+    ~max_payload_bytes:(Some max_payload_bytes)
+    ~max_envelope_bytes:(Some max_request_bytes)
+    ~read_body:(read_closed_body ~name:"trace" ~max_result_bytes ~max_error_bytes)
+    ~validate_json:
+      (validate_closed_payload_json t ~name:"trace" ~max_result_bytes ~max_error_bytes)
+    ~decode:
+      (closed_response_result ~name:"trace" ~error_within_bound:B.error_within_bound)
+;;
+
 let next_notification t = Agent_session.Mailbox.pop t.notifications
 
 let close_locked t =
@@ -541,6 +566,10 @@ let request_repl t ~max_request_bytes ~bound request =
         request)
 ;;
 
+let request_trace t ~max_request_bytes ~bound request =
+  with_request_lock t (fun () -> request_trace_locked t ~max_request_bytes ~bound request)
+;;
+
 let normalize_prefix uri =
   let path = Uri.path uri |> String.rstrip ~drop:(Char.equal '/') in
   if String.equal path "/" then "" else path
@@ -579,10 +608,11 @@ let connect_owned lifetime ~env ~uri ~bearer_token ~notification_capacity =
       ; closed = false
       }
     in
-    Agent_client.Transport.create_with_developer_repl
+    Agent_client.Transport.create_with_developer_repl_trace
       ~request:(request t)
       ~request_developer:(request_developer t)
       ~request_repl:(request_repl t)
+      ~request_trace:(request_trace t)
       ~next_notification:(fun () -> next_notification t)
       ~close:(fun () -> close t)
     |> Agent_client.Connection.create

@@ -299,6 +299,22 @@ let shared_features =
       ; "lib/agent_server/developer_portable_admission_tests.ml"
       ; "test/agent_server_e2e/scenarios/developer_wire_scenario.ml"
       ] )
+  ; ( "execution.developer_trace_client"
+    , "Closed first-party trace reads on one initialized connection across embedded, \
+       HTTP, Unix and stdio; exact page affinity and current Host authorization"
+    , [ "lib/agent_client/developer_trace_connection.ml"
+      ; "lib/agent_client/connection.ml"
+      ; "lib/agent_client/transport.ml"
+      ; "lib/agent_client/in_memory.ml"
+      ; "lib/agent_transport_http/client.ml"
+      ; "lib/agent_transport_ndjson/client.ml"
+      ; "lib/agent_transport_stdio/gateway.ml"
+      ; "lib/agent_server/embedded.ml"
+      ]
+    , "runtime.execution"
+    , [ "test/agent_client_trace/trace_connection_tests.ml"
+      ; "test/agent_server_e2e/scenarios/developer_trace_client_scenario.ml"
+      ] )
   ; ( "execution.configured_modules"
     , "Contract and invocation preflight before effects, canonical once-only value \
        dependencies, execution-local state and shared controls"
@@ -536,7 +552,21 @@ let moderator_features =
 ;;
 
 let implementation_sources =
-  [ ( "lib/agent_server/developer_startup_configuration.ml"
+  [ ( "lib/agent_client/developer_trace_connection.ml"
+    , "a737c2bc921e42546ae3ae8165eae078a409861563acbb61782db870dcf4adf6" )
+  ; ( "lib/agent_client/connection.ml"
+    , "7971ebae32e686004739e1a6c0217509f2729cc8df9a5ce3232b3c5f226c8aa0" )
+  ; ( "lib/agent_client/transport.ml"
+    , "d39a1097e48c06192980ded2c44f4d268d7f93d333a3fe2227f30fb8ac0c6ab6" )
+  ; ( "lib/agent_client/in_memory.ml"
+    , "c2729b79245910c4b772535bb5bc71028380b9ce01f57181b8078283e9e4f204" )
+  ; ( "lib/agent_transport_http/client.ml"
+    , "663a0a0be532725d433ef1828e71b01928dcb9c37843b96d4938ab82082956c9" )
+  ; ( "lib/agent_transport_ndjson/client.ml"
+    , "d0455e5ec03f882f1dc249eee5d571df3cef7f916b0c6dfbb8447e825c2db0a4" )
+  ; ( "lib/agent_transport_stdio/gateway.ml"
+    , "552d07ffc9ddd233166ac927be974e6193bd8bd76f7e2928d2911b5481ce1029" )
+  ; ( "lib/agent_server/developer_startup_configuration.ml"
     , "87e0f93fd9b82f319d26b1612407ce3543a0f0913d258b42f6739a09af2441f5" )
   ; ( "lib/agent_server/developer_startup_limits.ml"
     , "f3c3dc3b7bcb74a0eec7cde6455e7f950b97f8e84176a4ac7f5b9f2741d14f88" )
@@ -547,7 +577,7 @@ let implementation_sources =
   ; ( "lib/agent_server/embedded_local_template.ml"
     , "93691f37b0b11d3b5ef3303d2d6f35d7bdffe2ea2eb360db9d007ab841210e3e" )
   ; ( "lib/agent_server/embedded.ml"
-    , "a9b3ee7ed708726e2a31255234ed6a42b7c283b0f4bb47bb48fa7857b68a7c2c" )
+    , "f37e10701440a427900545871dd8433933ebaa12edd9d61e2b5c464de835f6d6" )
   ; ( "bin/ochat_agent_stdio.ml"
     , "8d134cd11c7df2a60e6b4b77a5ff7f9ea0c28a8a2674a3dd9f573adaa7623902" )
   ; ( "lib/agent_server/session_factory.ml"

@@ -56,3 +56,23 @@ let create_with_developer_repl
   in
   make ~transport ~notifications ~close
 ;;
+
+let create_with_developer_repl_trace
+      ~request
+      ~request_developer
+      ~request_repl
+      ~request_trace
+      ~notifications
+      ~close
+  =
+  let transport ~next_notification ~close =
+    Transport.create_with_developer_repl_trace
+      ~request
+      ~request_developer
+      ~request_repl
+      ~request_trace
+      ~next_notification
+      ~close
+  in
+  make ~transport ~notifications ~close
+;;

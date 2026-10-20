@@ -31,6 +31,7 @@ let run_scenario env ~case = function
   | "administration-idempotency" -> Admin_scenario.run env ~case
   | "cross-transport-conformance" -> Conformance_scenario.run env ~case
   | "developer-wire-transport" -> Scenarios.Developer_wire_scenario.run env ~case
+  | "developer-trace-client" -> Scenarios.Developer_trace_client_scenario.run env
   | "workspace-cleanup" -> Cleanup_scenario.run env ~case
   | "crash-matrix" -> Crash_scenario.run env ~case
   | "harness-isolation" -> Harness_scenario.run env ~case

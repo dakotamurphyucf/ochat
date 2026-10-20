@@ -59,6 +59,23 @@ val request_repl
   -> Agent_protocol.Developer_repl_wire.Request.t
   -> (Agent_protocol.Developer_repl_wire.Response.t, Agent_protocol.Error.t) result
 
+(** Fixed-bound bootstrap for installed trace handlers on this physical
+    Initialize. The cache expires at reinitialize or close. The selected trace
+    feature and advertised Capabilities/Page methods are required. *)
+val trace_capabilities
+  :  t
+  -> (Agent_protocol.Developer_trace_wire.Capabilities.t, Agent_protocol.Error.t) result
+
+(** Closed read-only trace request on the ordinary serialized lane. Rechecks
+    this physical Initialize generation, selected feature, advertised method,
+    and exact installed limits before handoff and after response. Params and
+    method-affine response are decoded under negotiated finite bounds. *)
+val request_trace
+  :  t
+  -> limits:Agent_protocol.Developer_trace_wire.Limits.t
+  -> Agent_protocol.Developer_trace_wire.Request.t
+  -> (Agent_protocol.Developer_trace_wire.Response.t, Agent_protocol.Error.t) result
+
 module Repl_control : sig
   (** The only REPL operations permitted to overtake a blocked ordinary request.
       Neither carries a new idempotency key or grants authority. *)

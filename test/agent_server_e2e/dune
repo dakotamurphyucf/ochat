@@ -232,7 +232,15 @@
  (name agent-e2e-transports)
  (deps
   (alias agent-e2e-developer-wire)
-  (alias agent-e2e-developer-configured)))
+  (alias agent-e2e-developer-configured)
+  (alias agent-e2e-developer-trace-client)))
+
+(rule
+ (alias agent-e2e-developer-trace-client)
+ (action
+  (setenv OCHAT_E2E_ARTIFACT_ROOT %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv OCHAT_E2E_STDIO_EXE %{exe:../../bin/ochat_agent_stdio.exe}
+    (run %{exe:agent_server_e2e.exe} --scenario developer-trace-client)))))
 
 (rule
  (alias agent-e2e-embedded-repl)

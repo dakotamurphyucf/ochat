@@ -222,6 +222,21 @@ It adopts unresolved requests only across the same host, principal and
 authentication kind, and retries a lost reply only by explicit choice with
 the original key; a missing Observe result is never proof of nonexecution.
 
+The opt-in read-only Developer trace family has closed
+[`Developer_trace_wire`](../../lib/agent_protocol/developer_trace_wire.mli)
+Capabilities and Page methods. Its typed
+[first-party client](../../lib/agent_client/developer_trace_connection.mli)
+uses the existing initialized connection and its single response/notification
+reader over embedded, HTTP, Unix or first-party stdio transport. Each page
+request names one exact Command, REPL statement or REPL Task, a finite item
+limit and an optional cursor. The client validates returned locator, requested
+cursor and count; the host checks current read and provenance authority again
+for every page. Reconnect requires the same server, principal and
+authentication kind but neither stores nor replays a cursor. A retained page
+contains bounded sites and summaries, never authored source bytes or a runnable
+effect handle. An incomplete page's resume cursor is the next poll position,
+including when no ordinary next-page cursor exists.
+
 ## Requests and results
 
 ### Registered external data

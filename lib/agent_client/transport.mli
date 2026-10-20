@@ -34,6 +34,21 @@ module Repl_response_bound : sig
   val error_within_bound : Agent_protocol.Error.t -> bool
 end
 
+module Trace_response_bound : sig
+  type t =
+    | Bootstrap
+    | Installed of Agent_protocol.Developer_trace_wire.Limits.t
+
+  (** Complete raw method result bound. Bootstrap uses the protocol's fixed
+      Capabilities bound; Installed uses the response bound from this physical
+      Initialize. Socket/HTTP add exact JSON-RPC success/error framing and
+      enforce their physical line/body limits before parsing. *)
+  val max_result_bytes : t -> int
+
+  val max_error_bytes : int
+  val error_within_bound : Agent_protocol.Error.t -> bool
+end
+
 val create
   :  request:
        (Agent_protocol.Command.t
@@ -83,6 +98,32 @@ val create_with_developer_repl
   -> close:(unit -> unit)
   -> t
 
+(** Add the independent closed read-only trace family to an existing physical
+    transport. The callback receives the full request-envelope ceiling from
+    the same Initialize; Trace Limits.request separately bounds params JSON.
+    No method is routed through generic Command or a second event reader. *)
+val create_with_developer_repl_trace
+  :  request:
+       (Agent_protocol.Command.t
+        -> (Agent_protocol.Public.Result.t, Agent_protocol.Error.t) result)
+  -> request_developer:
+       (bound:Developer_response_bound.t
+        -> Agent_protocol.Developer_wire.Request.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> request_repl:
+       (max_request_bytes:int
+        -> bound:Repl_response_bound.t
+        -> Agent_protocol.Developer_repl_wire.Request.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> request_trace:
+       (max_request_bytes:int
+        -> bound:Trace_response_bound.t
+        -> Agent_protocol.Developer_trace_wire.Request.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> next_notification:(unit -> Agent_protocol.Envelope.t option)
+  -> close:(unit -> unit)
+  -> t
+
 val request
   :  t
   -> Agent_protocol.Command.t
@@ -99,6 +140,13 @@ val request_repl
   -> max_request_bytes:int
   -> bound:Repl_response_bound.t
   -> Agent_protocol.Developer_repl_wire.Request.t
+  -> (Jsonaf.t, Agent_protocol.Error.t) result
+
+val request_trace
+  :  t
+  -> max_request_bytes:int
+  -> bound:Trace_response_bound.t
+  -> Agent_protocol.Developer_trace_wire.Request.t
   -> (Jsonaf.t, Agent_protocol.Error.t) result
 
 val next_notification : t -> Agent_protocol.Envelope.t option
