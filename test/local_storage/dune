@@ -1,5 +1,5 @@
 (library
  (name local_storage_tests)
- (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_client ochat.agent_server ochat.agent_session ochat.agent_store ochat.agent_protocol)
+ (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_client ochat.agent_server ochat.agent_session ochat.agent_store ochat.agent_protocol ochat.chatmd_shell_spec)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))

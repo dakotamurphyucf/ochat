@@ -690,7 +690,7 @@ let test_local_developer_check ?(transient = false) env environment =
   let policy_path =
     Filename.concat
       (Temporary_environment.roots environment).config
-      "developer-local.sexp"
+      (if transient then "developer-local-transient.sexp" else "developer-local.sexp")
   in
   Eio.Path.save
     ~create:(`Exclusive 0o600)
@@ -850,6 +850,251 @@ let test_local_developer_check ?(transient = false) env environment =
       "transient Developer stdio retained its private root"
 ;;
 
+let test_local_typed_repl env environment =
+  let module P = Agent_protocol in
+  let module D = P.Developer_common in
+  let module R = P.Developer_repl_wire in
+  let module Client = Agent_transport_stdio.Client in
+  let fixture = fixture env environment "stdio-local-typed-repl" in
+  let root = Filename.dirname (Config_fixture.prompt_path fixture) in
+  let member_name = "check.chatml" in
+  Eio.Path.save
+    ~create:(`Exclusive 0o600)
+    Eio.Path.(Eio.Stdenv.fs env / Filename.concat root member_name)
+    "let main input = Task.pure(input)";
+  let root_atom = Sexp.to_string_mach (Sexp.Atom root) in
+  let capacity =
+    Agent_server.Developer_startup_configuration.Capacity.standard_v1
+    |> Agent_server.Developer_startup_configuration.Capacity.sexp_of_t
+    |> Sexp.to_string_mach
+  in
+  let policy =
+    sprintf
+      {|(project_sources ((external_roots (%s))))
+        (authoring_project_access
+         ((read_grants (((root %s) (principal_id Embedded_operator)
+                         (authentication_kind embedded.local))))
+          (selections (((root %s) (project %s)
+                        (request (entry ((name main)))) (target one_off_v1))))))
+        (developer
+         ((selections
+           (((source (Local_source (root %s) (member %s)))
+             (target One_off_v1)
+             (principals (((principal_id Embedded_operator)
+                           (authentication_kind embedded.local)))))))
+          (capacity %s) (model Disabled) (approvals Disabled)
+          (repl Standard_v1) (portable true)))
+        (developer_scopes (developer.check developer.live.run developer.repl))|}
+      root_atom
+      root_atom
+      root_atom
+      member_name
+      root_atom
+      member_name
+      capacity
+  in
+  let policy_path =
+    Filename.concat (Temporary_environment.roots environment).config "typed-repl.sexp"
+  in
+  Eio.Path.save
+    ~create:(`Exclusive 0o600)
+    Eio.Path.(Eio.Stdenv.fs env / policy_path)
+    policy;
+  let limits =
+    Client.Limits.create
+      ~max_line_length:(16 * 1024 * 1024)
+      ~notification_capacity:64
+      ~max_stderr_bytes:4096
+      ~shutdown_grace_seconds:1.
+    |> protocol_ok
+  in
+  Support.Provider_fixture.provision ~env fixture;
+  let argv =
+    [ "/usr/bin/env"; "-i" ]
+    @ Array.to_list (child_environment fixture)
+    @ (executable env :: local_arguments fixture)
+    @ [ "--developer-policy"; policy_path ]
+  in
+  let key name = P.Idempotency_key.of_string name |> protocol_ok in
+  Client.with_spawned ~env ~argv ~limits ~f:(fun child ->
+    let connection = Client.connection child in
+    let implementation =
+      P.Initialize.Implementation.create ~name:"typed-local-stdio-repl" ~version:"1"
+      |> protocol_ok
+    in
+    let request =
+      P.Initialize.Request.create
+        ~implementation
+        ~protocol_min:P.Version.current
+        ~protocol_max:P.Version.current
+        ~features:[ D.Features.run; R.Features.repl; R.Features.events ]
+        ~event_encodings:[ Json ]
+        ~max_inbound_event_bytes:(2 * 1024 * 1024)
+        ()
+      |> protocol_ok
+    in
+    let initialized =
+      match
+        Agent_client.Connection.request_without_history
+          connection
+          (Protocol_initialize request)
+      with
+      | Ok (Protocol_initialize response) -> response
+      | Ok _ -> fail "typed local Initialize changed method"
+      | Error error ->
+        raise_s
+          [%sexp
+            "typed local Initialize failed"
+          , (error : P.Error.t)
+          , (Client.stderr_tail child : string)]
+    in
+    require
+      (List.mem initialized.enabled_features R.Features.repl ~equal:String.equal)
+      "typed local REPL feature was not selected";
+    let repl = Agent_client.Developer_repl_connection.create connection |> protocol_ok in
+    let repl_limits =
+      Agent_client.Developer_repl_connection.capabilities repl |> R.Capabilities.limits
+    in
+    let member = Source.Portable_path.create member_name |> Or_error.ok_exn in
+    let route =
+      D.Route.local_source ~limits:(R.Limits.request repl_limits) ~root_index:0 ~member
+      |> protocol_ok
+    in
+    let created =
+      R.Create.create
+        ~limits:repl_limits
+        ~run_id:(P.Id.Developer_run.create ())
+        ~key:(key "typed-stdio-repl-create")
+        ~route
+        ~target:One_off_v1
+        ~prompt:(Agent_server.Catalog_identity.prompt_definition "embedded.prompt")
+        ~workspace:
+          (Agent_server.Catalog_identity.workspace_definition "embedded.workspace")
+        ~requested_execution:None
+        ~requested_max_output_bytes:None
+      |> protocol_ok
+      |> Agent_client.Developer_repl_connection.create_instance repl
+      |> protocol_ok
+    in
+    let submit_key = key "typed-stdio-repl-submit" in
+    let lookup = R.Lookup.create ~instance:(R.View.instance created) ~key:submit_key in
+    let lease = Agent_client.Connection.claim_notifications connection |> protocol_ok in
+    Exn.protect
+      ~f:(fun () ->
+        let submitted =
+          R.Submit.create
+            ~limits:repl_limits
+            ~instance:(R.View.instance created)
+            ~epoch:(R.View.epoch created)
+            ~expected_revision:(R.View.revision created)
+            ~key:submit_key
+            ~source:"Task.pure(8)"
+          |> protocol_ok
+          |> Agent_client.Developer_repl_connection.submit repl
+          |> protocol_ok
+        in
+        let baseline =
+          Agent_client.Developer_repl_connection.watch_and_observe_repl repl lookup
+          |> protocol_ok
+          |> Option.value_exn
+        in
+        require
+          (R.Wire_id.Revision.equal
+             (R.Submission.revision submitted)
+             (R.Submission.revision baseline))
+          "typed stdio REPL Watch/Observe changed its baseline";
+        let reference = R.Submission.task_references submitted |> List.hd_exn in
+        let task_key = key "typed-stdio-repl-task" in
+        let task =
+          R.Task_submit.create
+            ~limits:repl_limits
+            ~key:task_key
+            ~reference
+            ~requested_execution:None
+            ~requested_max_output_bytes:None
+            ~fresh_epoch:(Some (R.View.instance created, R.View.epoch created))
+          |> protocol_ok
+          |> Agent_client.Developer_repl_connection.task_submit repl ~view:created
+          |> protocol_ok
+        in
+        let terminal =
+          Agent_client.Developer_repl_connection.task_await_terminal
+            repl
+            (D.Lookup.create ~run_id:(R.View.run_id created) ~key:task_key)
+          |> protocol_ok
+        in
+        require
+          (P.Developer_command_id.equal
+             (R.Task_view.command_id task)
+             (R.Task_view.command_id terminal))
+          "typed stdio Task command identity changed";
+        (match R.Task_view.phase terminal with
+         | Terminal { execution_started = true; outcome = Succeeded (Some "8") } -> ()
+         | _ -> fail "typed stdio Task was not successful");
+        let reset =
+          Agent_client.Developer_repl_connection.reset_and_wait
+            repl
+            (R.Current_epoch.create
+               ~instance:(R.View.instance created)
+               ~epoch:(R.View.epoch created)
+               ~key:(key "typed-stdio-repl-reset"))
+          |> protocol_ok
+        in
+        require
+          (not (R.Wire_id.Epoch.equal (R.View.epoch created) (R.View.epoch reset)))
+          "typed stdio Reset did not replace its epoch";
+        let rec await_hint remaining =
+          if remaining = 0 then fail "typed stdio REPL changed hint was absent";
+          let envelope =
+            Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+              Agent_client.Connection.next_owned_notification lease |> protocol_ok)
+          in
+          match envelope with
+          | None -> fail "typed stdio notification lane closed early"
+          | Some envelope ->
+            (match
+               Agent_client.Developer_repl_connection.change_of_notification repl envelope
+               |> protocol_ok
+             with
+             | Some change ->
+               (match R.Change.key change with
+                | R.Watch_key.Repl changed
+                  when R.Wire_id.Instance.equal
+                         (R.Lookup.instance changed)
+                         (R.Lookup.instance lookup)
+                       && P.Idempotency_key.equal
+                            (R.Lookup.key changed)
+                            (R.Lookup.key lookup) -> ()
+                | _ -> await_hint (remaining - 1))
+             | None -> await_hint (remaining - 1))
+        in
+        await_hint 16;
+        let observed =
+          Agent_client.Developer_repl_connection.observe repl lookup
+          |> protocol_ok
+          |> Option.value_exn
+        in
+        require
+          (R.Wire_id.Revision.equal
+             (R.Submission.revision submitted)
+             (R.Submission.revision observed))
+          "typed stdio REPL hint changed the exact submission";
+        let exit_status = Client.close_and_wait child |> protocol_ok in
+        (match exit_status with
+         | `Exited 0 -> ()
+         | _ -> fail "typed local stdio did not exit cleanly on EOF");
+        require
+          (Result.is_error
+             (Agent_client.Connection.request_repl
+                connection
+                ~limits:repl_limits
+                (R.Request.Observe lookup)))
+          "typed local stdio published after its joined close";
+        Ok ())
+      ~finally:(fun () -> Agent_client.Connection.release_notifications lease))
+  |> protocol_ok
+;;
+
 let cases =
   [ "stdio.local-initialize", test_local_initialize
   ; "stdio.local-transient-bootstrap", test_local_transient_bootstrap
@@ -865,6 +1110,7 @@ let cases =
     , fun env environment -> test_local_developer_check env environment )
   ; ( "stdio.local-transient-developer-check"
     , fun env environment -> test_local_developer_check ~transient:true env environment )
+  ; "stdio.local-typed-repl", test_local_typed_repl
   ]
 ;;
 

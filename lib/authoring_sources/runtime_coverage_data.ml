@@ -191,6 +191,7 @@ let shared_features =
       ]
     , "runtime.execution"
     , [ "test/local_storage/embedded_local_policy_tests.ml"
+      ; "test/local_storage/embedded_repl_shell_tests.ml"
       ; "test/agent_server_e2e/scenarios/stdio_scenario.ml"
       ; "docs-src/design/chatml-developer-runtime.md"
       ] )
@@ -515,7 +516,7 @@ let implementation_sources =
   ; ( "lib/agent_server/embedded_local_template.ml"
     , "93691f37b0b11d3b5ef3303d2d6f35d7bdffe2ea2eb360db9d007ab841210e3e" )
   ; ( "lib/agent_server/embedded.ml"
-    , "acd3c5c59f9ad39f9edc52910f3756ac76f9b78ea286df74fc9ea85aa36af2ce" )
+    , "1ef3d8c3c1e4785472a8732d0b892b349c4db3f48398d69eb312f8922db2eb9e" )
   ; ( "bin/ochat_agent_stdio.ml"
     , "07c51d608d6360d942ba00ec5301bffb0d432ebfaf6de4c97b52748874e028a6" )
   ; ( "lib/agent_server/session_factory.ml"
@@ -555,7 +556,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_command_wire_receipt.ml"
     , "5d30a8c37696290d8b1a1201855f763fdd39a7506a265232c11089179d625c1b" )
   ; ( "lib/agent_server/developer_endpoint.ml"
-    , "2cce8ed23cd788997caae37d94eba3a34ad86615cdc76d9472afa46bf5f34161" )
+    , "334e0d687e37118bca3b9f9592b444debd006c6b18212944fa3d0ee4a256da6f" )
   ; ( "lib/agent_server/developer_repl_registry.ml"
     , "98b4d64dfb527512faa03099a2971a8f0bac733f7eb9eb6d6c704e335673e6f0" )
   ; ( "lib/agent_server/developer_portable_admission.ml"

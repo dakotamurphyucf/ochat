@@ -81,7 +81,14 @@ missing Observe never resolves uncertainty, and retry explicitly resends the
 original key and request. A fresh Task submission takes its recovery run from a
 Create/Reset View obtained on that host and principal, and checks the request's
 instance and epoch against that View before handoff; the host still authorizes
-the opaque Task reference. The embedded REPL connector remains separate work.
+the opaque Task reference. Embedded local connections route closed Developer
+and REPL calls through their existing authenticated dispatcher/context and
+single notification owner. Their private Initialize requests the available
+features; each additional physical connection selects its own subset. The
+in-memory REPL adapter checks the complete serialized request envelope
+against the negotiated ceiling before dispatch, alongside the DTO params
+bound. The first-party local stdio process uses the same typed client over its
+owned child transport.
 
 The shipped daemon has an explicit `server.developer` startup profile. Its
 bounded rows compare an admitted source origin, compiled target and authenticated
@@ -189,7 +196,7 @@ principal list is rejected. The policy accepts only the documented sections,
 bounded input and exact local authentication kind. It cannot silently override
 a separately configured project-source or Developer policy.
 
-Status: M5 design v1, 2026-10-15. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission, durable developer run checkpoint foundation, selected-document transactions, physical job-claim worker, compiler-side REPL typing transaction and incremental module registry described below are implemented. The developer root staging owner, bounded root/native terminal coordinator, selected native policy and claimed job-parent effect-entry proof are implemented. The owner-neutral lexical script-job kernel and its physical developer adapter are implemented. Actor-bound provider selection, the shared Model.spawn recipe decoder, durable intent, physical call-boundary admission, selected compiled-script adapter and claimed model-job runner are implemented. Hosted command, native, job and Model approval callbacks and the portable Developer transport client are implemented. The hosted library REPL Task service retains exact Task references, starts work durably on explicit request, and joins cancellation and reset. The portable server REPL endpoint and typed first-party REPL client are implemented; terminal and embedded connectors remain pending. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
+Status: M5 design v1, 2026-10-15. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission, durable developer run checkpoint foundation, selected-document transactions, physical job-claim worker, compiler-side REPL typing transaction and incremental module registry described below are implemented. The developer root staging owner, bounded root/native terminal coordinator, selected native policy and claimed job-parent effect-entry proof are implemented. The owner-neutral lexical script-job kernel and its physical developer adapter are implemented. Actor-bound provider selection, the shared Model.spawn recipe decoder, durable intent, physical call-boundary admission, selected compiled-script adapter and claimed model-job runner are implemented. Hosted command, native, job and Model approval callbacks and the portable Developer transport client are implemented. The hosted library REPL Task service retains exact Task references, starts work durably on explicit request, and joins cancellation and reset. The portable server REPL endpoint, typed first-party REPL client, first-party local stdio process and embedded connector are implemented; the terminal client remains pending. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
 
 The [authoring service design](chatml-authoring-services.md) owns source context,
 overlay and immutable upload contracts used here. Implementation and validation
@@ -582,7 +589,7 @@ omitted. Exact-key reference pages and on-demand type rendering repeat live
 actor, source and epoch checks, and type rendering uses roots from the
 original immutable snapshot. These projections neither rerun a statement nor
 convey effect authority. The portable server endpoint projects these bounded
-results; the typed first-party client adds bounded mutation custody and explicit same-key recovery, while terminal and embedded connectors remain separate work.
+results; the typed first-party client adds bounded mutation custody and explicit same-key recovery. The embedded connector retains the existing local Host and connection owner; the terminal client remains separate work.
 
 An accepted REPL transfers the exact selected Prepared graph and compiler
 contract to a run-owned source selection before publishing its instance. The
