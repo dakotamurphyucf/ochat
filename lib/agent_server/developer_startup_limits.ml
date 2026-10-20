@@ -11,6 +11,7 @@ type t =
   ; publisher : Agent_store.Developer_result_publisher.Limits.t
   ; approvals : Developer_approval_owner.Limits.t option
   ; repl : Dev.Repl.t option
+  ; traces : Dev.Traces.t option
   ; portable : Dev.Portable.t option
   }
 
@@ -19,6 +20,7 @@ let host t = t.host
 let publisher t = t.publisher
 let approvals t = t.approvals
 let repl t = t.repl
+let traces t = t.traces
 let portable t = t.portable
 let invalid () = P.Error.invalid_request "invalid developer startup capacity"
 let admitted result = Result.map_error result ~f:(fun _ -> invalid ())
@@ -369,11 +371,57 @@ let portable_preset
   Ok policy
 ;;
 
+(* Observational tracing has its own finite retention and output budgets. It
+   does not reserve an execution slot for every configured command: when the
+   table is full, execution proceeds without a recording. *)
+let trace_preset_mode mode =
+  let open Result.Let_syntax in
+  let%bind recorder =
+    Chatml_trace.Recorder.Limits.create
+      ~max_events:256
+      ~max_normal_bytes:65_536
+      ~max_terminal_bytes:1_024
+    |> admitted
+  in
+  let%map limits =
+    Dev.Traces.Limits.create
+      ~max_traces:16
+      ~max_retained_bytes:(2 * 1024 * 1024)
+      ~max_source_refs_per_trace:8
+      ~max_provenance_bytes_per_trace:4_096
+      ~max_expired_tombstones:16
+      ~max_age_seconds:60.
+      ~max_header_bytes:4_096
+      ~recorder
+  in
+  Some (Dev.Traces.create ~mode ~limits)
+;;
+
+let trace_preset = function
+  | Config.No_traces -> Ok None
+  | Trace_summary -> trace_preset_mode Chatml_trace.Recorder.Mode.Summary
+  | Trace_full -> trace_preset_mode Chatml_trace.Recorder.Mode.Full
+;;
+
+let trace_wire_preset () =
+  let open Result.Let_syntax in
+  let%bind request = json ~bytes:4_096 ~depth:12 ~fields:128 ~nodes:256 in
+  let%bind page = json ~bytes:80_000 ~depth:12 ~fields:256 ~nodes:256 in
+  let%bind response = json ~bytes:96_000 ~depth:16 ~fields:300 ~nodes:300 in
+  P.Developer_trace_wire.Limits.create
+    ~request
+    ~page
+    ~response
+    ~max_page_items:16
+    ~max_cursor_bytes:2_048
+;;
+
 let create
       ~capacity
       ~(approvals : Config.approvals)
       ~(repl : Config.repl)
       ~portable
+      ~traces
       ~initialize_limits
   =
   let open Result.Let_syntax in
@@ -396,6 +444,7 @@ let create
     | Config.Disabled -> Ok None
     | Standard_v1 -> repl_preset capacity |> Result.map ~f:Option.some
   in
+  let%bind traces = trace_preset traces in
   let%bind portable =
     if portable
     then
@@ -407,12 +456,19 @@ let create
       |> Result.map ~f:Option.some
     else Ok None
   in
-  let%map portable =
+  let%bind portable =
     match portable, repl with
     | Some policy, Some repl ->
       let%bind wire = repl_wire_preset repl ~task_receipt:receipt initialize_limits in
       Dev.Portable.with_repl_wire policy wire |> Result.map ~f:Option.some
     | Some _, None | None, Some _ | None, None -> Ok portable
   in
-  { capture; host; publisher; approvals; repl; portable }
+  let%map portable =
+    match portable, traces with
+    | Some policy, Some _ ->
+      let%bind wire = trace_wire_preset () in
+      Dev.Portable.with_trace_wire policy wire |> Result.map ~f:Option.some
+    | Some _, None | None, Some _ | None, None -> Ok portable
+  in
+  { capture; host; publisher; approvals; repl; traces; portable }
 ;;

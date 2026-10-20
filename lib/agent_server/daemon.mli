@@ -44,6 +44,15 @@ module Developer_configuration : sig
       :  t
       -> Agent_protocol.Developer_repl_wire.Limits.t
       -> (t, Agent_protocol.Error.t) result
+
+    (** Add a separately bounded read-only trace page family. This is valid
+        only with an actually installed [with_traces] owner on the same Host;
+        Daemon startup rejects a mismatch before method advertisement. The
+        base portable/REPL methods remain independently selectable. *)
+    val with_trace_wire
+      :  t
+      -> Agent_protocol.Developer_trace_wire.Limits.t
+      -> (t, Agent_protocol.Error.t) result
   end
 
   (** Without this copy, a Developer Host remains callable in-process but
@@ -132,6 +141,35 @@ module Developer_configuration : sig
   (** Opt in one process-local REPL actor under the same installed Developer
       host and capture owner. The base configuration leaves REPL disabled. *)
   val with_repl : t -> Repl.t -> t
+
+  module Traces : sig
+    type t
+
+    module Limits : sig
+      type t
+
+      val create
+        :  max_traces:int
+        -> max_retained_bytes:int
+        -> max_source_refs_per_trace:int
+        -> max_provenance_bytes_per_trace:int
+        -> max_expired_tombstones:int
+        -> max_age_seconds:float
+        -> max_header_bytes:int
+        -> recorder:Chatml_trace.Recorder.Limits.t
+        -> (t, Agent_protocol.Error.t) result
+    end
+
+    (** Only mode and finite retention bounds are configured externally.
+        Daemon startup binds historical reads to its already installed
+        Authoring owner; callers cannot supply a read callback, Root, Source
+        or retained Entry. Summary and Full are explicit opt-ins. *)
+    val create : mode:Chatml_trace.Recorder.Mode.t -> limits:Limits.t -> t
+  end
+
+  (** Host-only trace retention remains private without portable wire opt-in.
+      Absence takes the existing disabled path with no recorder/origin cost. *)
+  val with_traces : t -> Traces.t -> t
 
   module Limits : sig
     type t

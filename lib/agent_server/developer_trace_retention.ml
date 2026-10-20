@@ -107,6 +107,10 @@ module Limits = struct
         ; recorder
         }
   ;;
+
+  let max_source_refs_per_trace t = t.max_source_refs_per_trace
+  let max_header_bytes t = t.max_header_bytes
+  let recorder t = t.recorder
 end
 
 module Provenance = struct
@@ -450,6 +454,7 @@ module Configuration = struct
   ;;
 
   let historical_recording t = t.historical_recording
+  let limits t = t.limits
 end
 
 type retained =

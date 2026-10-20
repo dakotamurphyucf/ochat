@@ -6,6 +6,7 @@ module Policy = struct
     { wire_limits : P.Developer_common.Limits.t
     ; change_limits : Developer_change_hub.Limits.t
     ; repl_wire_limits : P.Developer_repl_wire.Limits.t option
+    ; trace_wire_limits : P.Developer_trace_wire.Limits.t option
     }
 
   let create
@@ -19,7 +20,7 @@ module Policy = struct
       ~max_watches_per_connection
       ~max_pending_hints_per_connection
     |> Result.map ~f:(fun change_limits ->
-      { wire_limits; change_limits; repl_wire_limits = None })
+      { wire_limits; change_limits; repl_wire_limits = None; trace_wire_limits = None })
   ;;
 
   let wire_limits t = t.wire_limits
@@ -30,11 +31,18 @@ module Policy = struct
   ;;
 
   let repl_wire_limits t = t.repl_wire_limits
+
+  let with_trace_wire t trace_wire_limits =
+    Ok { t with trace_wire_limits = Some trace_wire_limits }
+  ;;
+
+  let trace_wire_limits t = t.trace_wire_limits
 end
 
 module Common = P.Developer_common
 module Wire = P.Developer_wire
 module Repl_wire = P.Developer_repl_wire
+module Trace_wire = P.Developer_trace_wire
 module Approval = P.Developer_approval
 module Original = Developer_command_original
 module Store = Agent_store
@@ -61,6 +69,10 @@ let validate_portable_capture capture =
 let create ~host ~authoring ~changes ~policy =
   if not (Developer_host.uses_authoring host authoring)
   then Error (error Invalid_request "developer endpoint has a different authoring owner")
+  else if
+    Option.is_some (Policy.trace_wire_limits policy)
+    && not (Developer_host.trace_installed host)
+  then Error (error Invalid_request "trace wire has no installed retention owner")
   else (
     let repl_registry =
       match Policy.repl_wire_limits policy with
@@ -79,6 +91,9 @@ let available_features t =
     [ Common.Features.run; Common.Features.events ]
     @ (if Option.is_some t.repl_registry
        then [ Repl_wire.Features.repl; Repl_wire.Features.events ]
+       else [])
+    @ (if Option.is_some (Policy.trace_wire_limits t.policy)
+       then [ Trace_wire.Features.trace ]
        else [])
     @
     if Developer_host.approval_installed t.host then [ Common.Features.approvals ] else []
@@ -108,15 +123,20 @@ let methods_for_lease t lease =
     @ (if selected Common.Features.run && selected Common.Features.events
        then [ "developer.watch"; "developer.unwatch" ]
        else [])
+    @ (if Option.is_some t.repl_registry && selected Repl_wire.Features.repl
+       then
+         List.filter Repl_wire.Request.supported_methods ~f:(fun method_ ->
+           if
+             String.equal method_ "developer.repl.watch"
+             || String.equal method_ "developer.repl.unwatch"
+           then selected Repl_wire.Features.events
+           else true)
+       else [])
     @
-    if Option.is_some t.repl_registry && selected Repl_wire.Features.repl
-    then
-      List.filter Repl_wire.Request.supported_methods ~f:(fun method_ ->
-        if
-          String.equal method_ "developer.repl.watch"
-          || String.equal method_ "developer.repl.unwatch"
-        then selected Repl_wire.Features.events
-        else true)
+    if
+      Option.is_some (Policy.trace_wire_limits t.policy)
+      && selected Trace_wire.Features.trace
+    then Trace_wire.Request.supported_methods
     else [])
 ;;
 
@@ -965,6 +985,70 @@ let encode_repl_response t response =
   let open Result.Let_syntax in
   let%bind _, limits = repl_installation t in
   Repl_wire.Response.to_json response ~limits
+;;
+
+let trace_limits t =
+  match Policy.trace_wire_limits t.policy with
+  | Some limits when Developer_host.trace_installed t.host -> Ok limits
+  | Some _ | None -> Error (error Invalid_state "trace wire is not installed")
+;;
+
+let trace_lookup t locator =
+  let open Result.Let_syntax in
+  match locator with
+  | Trace_wire.Locator.Command lookup ->
+    Ok (Developer_host.Trace.Command { run_id = lookup.run_id; key = lookup.key })
+  | Repl_task lookup ->
+    Ok (Developer_host.Trace.Repl_task { run_id = lookup.run_id; key = lookup.key })
+  | Repl_statement { instance = wire_instance; epoch = wire_epoch; key } ->
+    let%bind registry, _ = repl_installation t in
+    let%bind instance = Developer_repl_registry.resolve_instance registry wire_instance in
+    let%map epoch = Developer_repl_registry.resolve_epoch registry ~instance wire_epoch in
+    Developer_host.Trace.Repl_statement { instance; epoch; key }
+;;
+
+let handle_trace t ?actor ~connection request =
+  let open Result.Let_syntax in
+  let%bind limits = trace_limits t in
+  let%bind actor = Connection_context.request_actor connection actor in
+  let%bind request =
+    Trace_wire.Request.of_method_and_params
+      ~limits
+      ~method_:(Trace_wire.Request.method_name request)
+      ~params:(Trace_wire.Request.params request)
+  in
+  let method_ = Trace_wire.Request.method_name request in
+  let%bind lease =
+    Connection_context.authoring_negotiation connection
+    |> Result.of_option ~error:(error Permission_denied "trace method is not negotiated")
+  in
+  let%bind () = current_request t ~connection ~lease ~actor ~method_ in
+  let%bind response =
+    match request with
+    | Capabilities ->
+      Trace_wire.Capabilities.create
+        ~methods:
+          (List.filter (available_methods t ~connection) ~f:(fun selected ->
+             List.mem Trace_wire.Request.supported_methods selected ~equal:String.equal))
+        ~limits
+      |> Result.map ~f:(fun value -> Trace_wire.Response.Capabilities value)
+    | Page request ->
+      let%bind lookup = trace_lookup t (Trace_wire.Page_request.locator request) in
+      let%bind availability = Developer_host.Trace.snapshot t.host ~actor ~lookup in
+      let%bind () = current_request t ~connection ~lease ~actor ~method_ in
+      let%map page = Developer_trace_page.project ~limits ~request ~availability in
+      Trace_wire.Response.Page page
+  in
+  let%bind () = current_request t ~connection ~lease ~actor ~method_ in
+  if String.equal (Trace_wire.Response.method_name response) method_
+  then Ok response
+  else Error (error Invalid_state "trace response method changed")
+;;
+
+let encode_trace_response t response =
+  let open Result.Let_syntax in
+  let%bind limits = trace_limits t in
+  Trace_wire.Response.to_json response ~limits
 ;;
 
 let close_connection_and_wait t connection =

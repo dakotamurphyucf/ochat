@@ -279,6 +279,7 @@ type t =
 
 let registry t = t.roots
 let approval_installed t = Option.is_some t.approval
+let trace_installed t = Option.is_some t.trace
 
 let repl_registry_required_entries t =
   if t.closed

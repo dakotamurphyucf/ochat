@@ -608,6 +608,12 @@ val create
 (** Comparison-only installation facts; neither accessor grants admission. *)
 val approval_installed : t -> bool
 
+(** Comparison-only fact about this exact Host's retention owner. No Entry,
+    recorder, provenance or source-read policy escapes. Portable trace method
+    installation still requires an independently validated wire policy and
+    current connection negotiation. *)
+val trace_installed : t -> bool
+
 (** Checked comparison-only capacity from the installed REPL policy. It
     does not expose or construct an Instance, Epoch or Revision. *)
 val repl_registry_required_entries : t -> (int, P.Error.t) result

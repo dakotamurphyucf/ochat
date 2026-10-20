@@ -34,6 +34,14 @@ module Policy : sig
   val with_repl_wire : t -> P.Developer_repl_wire.Limits.t -> (t, P.Error.t) result
 
   val repl_wire_limits : t -> P.Developer_repl_wire.Limits.t option
+
+  (** Independently opt in the read-only trace family on this SAME Host and
+      Authoring owner. Endpoint.create rejects this option unless the Host
+      physically installed retention; Daemon admission first checks wire and
+      Initialize bounds. No trace owner is constructed here. *)
+  val with_trace_wire : t -> P.Developer_trace_wire.Limits.t -> (t, P.Error.t) result
+
+  val trace_wire_limits : t -> P.Developer_trace_wire.Limits.t option
 end
 
 (** [wire_limits] are the effective installed ceilings, admitted against the
@@ -53,6 +61,10 @@ val limits : t -> P.Developer_common.Limits.t
 (** Installed REPL bounds for transport-neutral request decoding. Absent
     REPL installation rejects before any source or Host operation. *)
 val repl_limits : t -> (P.Developer_repl_wire.Limits.t, P.Error.t) result
+
+(** Installed trace bounds for transport-neutral decode. Absent tracing
+    rejects before any Host/retention lookup. *)
+val trace_limits : t -> (P.Developer_trace_wire.Limits.t, P.Error.t) result
 
 (** Actual installed families, filtered again by the physical connection's
     current negotiated features. Codec-supported methods alone are never
@@ -116,6 +128,26 @@ val handle_repl
 val encode_repl_response
   :  t
   -> P.Developer_repl_wire.Response.t
+  -> (Jsonaf.t, P.Error.t) result
+
+(** An authenticated page request resolves the locator through the existing
+    Host Command/REPL/Task owners. A REPL wire instance/epoch is resolved via
+    this endpoint's process-local registry. Host.Trace.snapshot performs
+    current actor, row, source-read and physical membership checks, including
+    after Store yields, before pure cursor comparison or page projection.
+    The connection's exact request lease is checked again after those yields
+    and before returning; a disconnected caller cannot receive metadata.
+    Neither cursor nor persisted receipt coordinates grant disclosure. *)
+val handle_trace
+  :  t
+  -> ?actor:Operator_authorization.t
+  -> connection:Connection_context.t
+  -> P.Developer_trace_wire.Request.t
+  -> (P.Developer_trace_wire.Response.t, P.Error.t) result
+
+val encode_trace_response
+  :  t
+  -> P.Developer_trace_wire.Response.t
   -> (Jsonaf.t, P.Error.t) result
 
 val close_connection_and_wait : t -> Connection_context.t -> (unit, P.Error.t) result

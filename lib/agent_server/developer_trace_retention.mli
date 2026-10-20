@@ -30,6 +30,13 @@ module Limits : sig
     -> max_header_bytes:int
     -> recorder:Chatml_trace.Recorder.Limits.t
     -> t Or_error.t
+
+  (** Comparison-only installed capacities for portable startup admission.
+      These expose no retained source, Entry or read policy. *)
+  val max_source_refs_per_trace : t -> int
+
+  val max_header_bytes : t -> int
+  val recorder : t -> Chatml_trace.Recorder.Limits.t
 end
 
 module Provenance : sig
@@ -188,6 +195,8 @@ module Configuration : sig
     -> limits:Limits.t
     -> read_policy:Read_policy.t
     -> t
+
+  val limits : t -> Limits.t
 
   (** The finite origin budget installed with this recorder. The Host passes
       [Some] of this value only for configured tracing and [None] otherwise;

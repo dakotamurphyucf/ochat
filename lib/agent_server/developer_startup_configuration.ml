@@ -143,6 +143,12 @@ type repl =
   | Standard_v1
 [@@deriving compare, equal, sexp]
 
+type traces =
+  | No_traces
+  | Trace_summary
+  | Trace_full
+[@@deriving compare, equal, sexp]
+
 type t =
   { selections : Selection.t list
   ; capacity : Capacity.t
@@ -150,6 +156,7 @@ type t =
   ; approvals : approvals
   ; repl : repl
   ; portable : bool
+  ; traces : traces [@sexp.default No_traces]
   }
 [@@deriving compare, equal, sexp]
 

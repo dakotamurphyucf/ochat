@@ -5,6 +5,7 @@ module Portable = struct
 
   let create = Developer_endpoint.Policy.create
   let with_repl_wire = Developer_endpoint.Policy.with_repl_wire
+  let with_trace_wire = Developer_endpoint.Policy.with_trace_wire
 end
 
 module Remote_content = struct
@@ -77,6 +78,42 @@ module Repl = struct
     |> Result.map_error ~f:(fun error ->
       Agent_protocol.Error.invalid_request (Error.to_string_hum error))
   ;;
+end
+
+module Traces = struct
+  module Limits = struct
+    type t = Developer_trace_retention.Limits.t
+
+    let create
+          ~max_traces
+          ~max_retained_bytes
+          ~max_source_refs_per_trace
+          ~max_provenance_bytes_per_trace
+          ~max_expired_tombstones
+          ~max_age_seconds
+          ~max_header_bytes
+          ~recorder
+      =
+      Developer_trace_retention.Limits.create
+        ~max_traces
+        ~max_retained_bytes
+        ~max_source_refs_per_trace
+        ~max_provenance_bytes_per_trace
+        ~max_expired_tombstones
+        ~max_age_seconds
+        ~max_header_bytes
+        ~recorder
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request (Error.to_string_hum error))
+    ;;
+  end
+
+  type t =
+    { mode : Chatml_trace.Recorder.Mode.t
+    ; limits : Limits.t
+    }
+
+  let create ~mode ~limits = { mode; limits }
 end
 
 module Limits = struct
@@ -167,6 +204,7 @@ type t =
   ; model_target : Inference.Request.Target.t option
   ; remote_content : Remote_content.t option
   ; repl : Repl.t option
+  ; traces : Traces.t option
   ; shell_approvals : Shell_approvals.t option
   ; portable_wire : Portable.t option
   ; native_permission : Developer_native_permission.Mode.t
@@ -199,6 +237,7 @@ let create_with_mode
     ; model_target
     ; remote_content = None
     ; repl = None
+    ; traces = None
     ; shell_approvals = None
     ; portable_wire = None
     ; native_permission
@@ -262,6 +301,7 @@ let create_with_selected_prompt_profile
 
 let with_remote_content t remote_content = { t with remote_content = Some remote_content }
 let with_repl t repl = { t with repl = Some repl }
+let with_traces t traces = { t with traces = Some traces }
 
 let with_shell_approvals t shell_approvals =
   { t with shell_approvals = Some shell_approvals }

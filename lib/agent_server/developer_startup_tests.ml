@@ -32,6 +32,7 @@ let%test_module "declarative Developer startup admission" =
       ; approvals = Config.Disabled
       ; repl = Config.Disabled
       ; portable = true
+      ; traces = Config.No_traces
       }
     ;;
 
@@ -62,6 +63,7 @@ let%test_module "declarative Developer startup admission" =
              ~approvals:Config.Disabled
              ~repl:Config.Disabled
              ~portable:true
+             ~traces:Config.No_traces
              ~initialize_limits:Daemon.default_options.protocol_limits));
       assert (Result.is_error (Config.Capacity.validate { capacity with max_runs = 4097 }))
     ;;
@@ -73,6 +75,7 @@ let%test_module "declarative Developer startup admission" =
           ~approvals:Config.Disabled
           ~repl
           ~portable
+          ~traces:Config.No_traces
           ~initialize_limits:Daemon.default_options.protocol_limits
       in
       let standard = Config.Capacity.standard_v1 in
@@ -99,6 +102,7 @@ let%test_module "declarative Developer startup admission" =
              ~initialize:Daemon.default_options.protocol_limits
              ~budgets:(Developer_startup_limits.host preset).budgets
              ~approval:None
+             ~trace:None
              ~repl:(Some owner)));
       let custom =
         { standard with
@@ -145,6 +149,7 @@ let%test_module "declarative Developer startup admission" =
              ~approvals:Config.Disabled
              ~repl:Config.Standard_v1
              ~portable:true
+             ~traces:Config.No_traces
              ~initialize_limits:narrow_initialize));
       assert (
         Result.is_error
@@ -158,6 +163,53 @@ let%test_module "declarative Developer startup admission" =
              ~capacity:{ standard with max_repl_instances = Int.max_value }
              ~repl:Config.Standard_v1
              ~portable:true))
+    ;;
+
+    let%test_unit "trace preset is explicit and portable disclosure needs its owner" =
+      let initial = config valid_selector in
+      let prior_record =
+        match Config.sexp_of_t initial with
+        | Sexp.List fields ->
+          Sexp.List
+            (List.filter fields ~f:(function
+               | Sexp.List [ Sexp.Atom "traces"; _ ] -> false
+               | _ -> true))
+        | Sexp.Atom _ -> failwith "expected Developer record"
+      in
+      let decoded = Config.t_of_sexp prior_record in
+      assert (Config.equal_traces decoded.traces Config.No_traces);
+      assert (Config.equal decoded initial);
+      let preset ~traces ~portable =
+        Developer_startup_limits.create
+          ~capacity:initial.capacity
+          ~approvals:initial.approvals
+          ~repl:initial.repl
+          ~portable
+          ~traces
+          ~initialize_limits:Daemon.default_options.protocol_limits
+        |> must
+      in
+      let disabled = preset ~traces:Config.No_traces ~portable:true in
+      assert (Option.is_none (Developer_startup_limits.traces disabled));
+      assert (
+        Option.is_none
+          (Developer_endpoint.Policy.trace_wire_limits
+             (Developer_startup_limits.portable disabled |> Option.value_exn)));
+      let private_summary = preset ~traces:Config.Trace_summary ~portable:false in
+      assert (Option.is_some (Developer_startup_limits.traces private_summary));
+      assert (Option.is_none (Developer_startup_limits.portable private_summary));
+      let installed = preset ~traces:Config.Trace_full ~portable:true in
+      assert (Option.is_some (Developer_startup_limits.traces installed));
+      assert (
+        Option.is_some
+          (Developer_endpoint.Policy.trace_wire_limits
+             (Developer_startup_limits.portable installed |> Option.value_exn)));
+      assert (
+        Config.equal_traces
+          (Config.t_of_sexp
+             (Config.sexp_of_t { initial with traces = Config.Trace_full }))
+            .traces
+          Config.Trace_full)
     ;;
   end)
 ;;

@@ -17,6 +17,8 @@ let%test_module "bounded embedded local Developer policy" =
           ?(principal = "Embedded_operator")
           ?(authentication_kind = "embedded.local")
           ?(scopes = "developer.check")
+          ?(portable = true)
+          ?(traces = "")
           ()
       =
       let capacity =
@@ -35,11 +37,14 @@ let%test_module "bounded embedded local Developer policy" =
             (model Disabled)
             (approvals Disabled)
             (repl Disabled)
-            (portable true)))
+            (portable %b)
+            %s))
           (developer_scopes (%s))|}
         principal
         authentication_kind
         capacity
+        portable
+        traces
         scopes
     ;;
 
@@ -196,6 +201,7 @@ let%test_module "bounded embedded local Developer policy" =
     let%test_unit "local policy bytes, syntax and sections are bounded" =
       let invalid_sources =
         [ "unsupported scope", policy ~scopes:"developer.check diagnostics.read" ()
+        ; "unsupported trace mode", policy ~traces:"(traces Unknown)" ()
         ; "unknown section", policy () ^ "(unknown_section ())"
         ; "duplicate section", policy () ^ "(developer ())"
         ; "excess depth", String.make 65 '(' ^ String.make 65 ')'
@@ -208,7 +214,9 @@ let%test_module "bounded embedded local Developer policy" =
       in
       List.iter invalid_sources ~f:(fun (label, source) ->
         with_policy_file source (fun env path ->
-          if String.equal label "unsupported scope"
+          if
+            String.equal label "unsupported scope"
+            || String.equal label "unsupported trace mode"
           then (
             let loaded = V.load ~env ~path |> ok in
             assert (
@@ -222,7 +230,7 @@ let%test_module "bounded embedded local Developer policy" =
 
     let%test_unit "embedded host binds the Store identity and only requested method scope"
       =
-      with_policy_file (policy ()) (fun env path ->
+      with_policy_file (policy ~traces:"(traces Trace_full)" ()) (fun env path ->
         let local_policy = V.load ~env ~path |> ok in
         let root = Filename.dirname path in
         let workspace = Filename.concat root "workspace" in

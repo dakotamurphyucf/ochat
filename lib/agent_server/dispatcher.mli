@@ -44,6 +44,15 @@ val dispatch_developer_repl
   -> Agent_protocol.Developer_repl_wire.Request.t
   -> (Agent_protocol.Developer_repl_wire.Response.t, Agent_protocol.Error.t) result
 
+(** Authenticated typed local trace read through the same installed Host,
+    negotiated connection and finite retained read owner as the wire path. *)
+val dispatch_developer_trace
+  :  t
+  -> ?actor:Operator_authorization.t
+  -> context:Connection_context.t
+  -> Agent_protocol.Developer_trace_wire.Request.t
+  -> (Agent_protocol.Developer_trace_wire.Response.t, Agent_protocol.Error.t) result
+
 val dispatch_command
   :  t
   -> ?actor:Operator_authorization.t

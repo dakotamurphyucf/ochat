@@ -980,3 +980,161 @@ let%test_unit "REPL Task codec preserves all phases and current nested bounds" =
          ~requested_max_output_bytes:None
          ~fresh_epoch:None))
 ;;
+
+let%expect_test "trace page source and encoded progress boundaries" =
+  let module W = P.Developer_trace_wire in
+  let digest = Chatml_source.Digest.of_contents "trace" ~checkpoint:Fn.id in
+  let run_id = P.Id.Developer_run.create_with deterministic in
+  let key = must (P.Idempotency_key.of_string "trace-key") in
+  let locator = W.Locator.Command (P.Developer_common.Lookup.create ~run_id ~key) in
+  let limits =
+    must
+      (W.Limits.create
+         ~request:(bound 4096)
+         ~page:(bound 16384)
+         ~response:(bound 32768)
+         ~max_page_items:4
+         ~max_cursor_bytes:2048)
+  in
+  let header =
+    must
+      (W.Header.create
+         ~execution_id:"trace-one"
+         ~admission:Submitted_capture
+         ~submission_fingerprint:digest
+         ~selection_fingerprint:digest
+         ~graph_fingerprint:None
+         ~contract_fingerprint:None
+         ~environment_fingerprint:None
+         ~sources:[])
+  in
+  let cursor sequence =
+    must
+      (W.Cursor.create
+         ~limits
+         ~locator
+         ~execution_id:"trace-one"
+         ~submission_fingerprint:digest
+         ~selection_fingerprint:digest
+         ~after_sequence:sequence)
+  in
+  let earlier_source =
+    Chatml_source.Id.create
+      ~package_namespace:"earlier-epoch"
+      ~relative_path:"closure.chatml"
+    |> Or_error.ok_exn
+  in
+  let site =
+    must
+      (W.Location.create
+         ~source:earlier_source
+         ~digest
+         ~start_byte:0
+         ~end_byte:1
+         ~start_line:1
+         ~start_column:0
+         ~end_line:1
+         ~end_column:1)
+  in
+  let event sequence =
+    must
+      (W.Event.create
+         ~sequence
+         ~kind:Statement_entered
+         ~site:(Some site)
+         ~correlation:None)
+  in
+  let page ~after ~events ~last_sequence ~resume ~next =
+    W.Page.create
+      ~limits
+      ~locator
+      ~after
+      ~header
+      ~events
+      ~last_sequence
+      ~omitted_after_prefix:None
+      ~last_retained_site_context:(Some site)
+      ~omitted_site_count:0
+      ~state:Incomplete
+      ~resume
+      ~next
+  in
+  let first =
+    must
+      (page
+         ~after:None
+         ~events:[ event 1L ]
+         ~last_sequence:2L
+         ~resume:(Some (cursor 1L))
+         ~next:(Some (cursor 1L)))
+  in
+  let response = W.Response.Page (Retained first) in
+  let json = must (W.Response.to_json response ~limits) in
+  ignore
+    (must (W.Response.of_method_and_json ~limits ~method_:"developer.trace.page" json));
+  assert (
+    Result.is_error
+      (page
+         ~after:(Some (cursor 1L))
+         ~events:[]
+         ~last_sequence:2L
+         ~resume:(Some (cursor 1L))
+         ~next:None));
+  assert (
+    Result.is_error
+      (page
+         ~after:None
+         ~events:[ event 2L ]
+         ~last_sequence:2L
+         ~resume:(Some (cursor 2L))
+         ~next:None));
+  assert (
+    Result.is_error
+      (page
+         ~after:None
+         ~events:[ event 1L ]
+         ~last_sequence:1L
+         ~resume:(Some (cursor 1L))
+         ~next:(Some (cursor 1L))));
+  ignore (must (page ~after:None ~events:[] ~last_sequence:0L ~resume:None ~next:None));
+  let encoded_bytes = must (D.Json.validate_and_measure ~limits:(bound 32768) json) in
+  let too_short =
+    must
+      (W.Limits.create
+         ~request:(bound 4096)
+         ~page:(bound 16384)
+         ~response:(bound (encoded_bytes - 1))
+         ~max_page_items:4
+         ~max_cursor_bytes:2048)
+  in
+  assert (Result.is_error (W.Response.to_json response ~limits:too_short));
+  let small_cursor =
+    must
+      (W.Limits.create
+         ~request:(bound 4096)
+         ~page:(bound 16384)
+         ~response:(bound 32768)
+         ~max_page_items:4
+         ~max_cursor_bytes:64)
+  in
+  assert (
+    Result.is_error
+      (W.Page_request.create
+         ~limits:small_cursor
+         ~locator
+         ~after:(Some (cursor 1L))
+         ~limit:1));
+  assert (
+    Result.is_error
+      (W.Location.create
+         ~source:earlier_source
+         ~digest
+         ~start_byte:0
+         ~end_byte:0
+         ~start_line:1
+         ~start_column:0
+         ~end_line:1
+         ~end_column:1));
+  print_endline "trace wire boundaries verified";
+  [%expect {| trace wire boundaries verified |}]
+;;

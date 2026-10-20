@@ -39,6 +39,72 @@ let developer_repl_method method_ =
     ~equal:String.equal
 ;;
 
+let developer_trace_method method_ =
+  List.mem
+    Agent_protocol.Developer_trace_wire.Request.supported_methods
+    method_
+    ~equal:String.equal
+;;
+
+let trace_envelope_limits inner =
+  let module D = Document_schema in
+  let add left right =
+    if left > Int.max_value - right then None else Some (left + right)
+  in
+  let open Option.Let_syntax in
+  let%bind max_bytes = add (D.Limits.max_bytes inner) 512 in
+  let%bind max_nodes = add (D.Limits.max_nodes inner) 8 in
+  let%bind max_fields = add (D.Limits.max_fields inner) 8 in
+  let%bind max_depth = add (D.Limits.max_depth inner) 2 in
+  D.Limits.create ~max_bytes ~max_nodes ~max_fields ~max_depth |> Result.ok
+;;
+
+let trace_envelope ~limits envelope =
+  let error =
+    Agent_protocol.Error.create
+      Resource_limit
+      ~message:"trace JSON-RPC envelope exceeds installed bound"
+      ~retryable:false
+      ()
+  in
+  match trace_envelope_limits limits with
+  | None -> Error error
+  | Some limits ->
+    Document_schema.Json.validate_and_measure
+      ~limits
+      (Agent_protocol.Envelope.to_json envelope)
+    |> Result.map ~f:ignore
+    |> Result.map_error ~f:(fun _ -> error)
+;;
+
+let trace_request_id request_id =
+  let error =
+    Agent_protocol.Error.create
+      Resource_limit
+      ~message:"trace request ID exceeds installed bound"
+      ~retryable:false
+      ()
+  in
+  let open Result.Let_syntax in
+  let%bind limits =
+    Document_schema.Limits.create ~max_bytes:256 ~max_depth:2 ~max_fields:1 ~max_nodes:2
+    |> Result.map_error ~f:(fun _ -> error)
+  in
+  Document_schema.Json.validate_and_measure
+    ~limits
+    (Agent_protocol.Envelope.Request_id.to_json request_id)
+  |> Result.map ~f:ignore
+  |> Result.map_error ~f:(fun _ -> error)
+;;
+
+let trace_uninstalled_response_limits =
+  (* An unavailable opt-in has no installed trace policy to borrow. Its fixed
+     error and bounded request ID still deserve a correlated reply. *)
+  Document_schema.Limits.create ~max_bytes:1_024 ~max_depth:8 ~max_fields:32 ~max_nodes:48
+  |> Result.ok
+  |> Option.value_exn
+;;
+
 let developer t =
   Result.of_option
     t.developer
@@ -64,6 +130,13 @@ let dispatch_developer_repl t ?actor ~context request =
   Developer_endpoint.handle_repl installed.endpoint ?actor ~connection:context request
 ;;
 
+let dispatch_developer_trace t ?actor ~context request =
+  let open Result.Let_syntax in
+  let%bind installed = developer t in
+  let%bind () = installed.admit () in
+  Developer_endpoint.handle_trace installed.endpoint ?actor ~connection:context request
+;;
+
 let dispatch_command t ?actor ~context command =
   let open Result.Let_syntax in
   let%bind () = t.admit command in
@@ -81,7 +154,62 @@ let inference_method method_ =
 ;;
 
 let request t ?actor context (request : Agent_protocol.Envelope.request) =
-  if developer_repl_method request.method_
+  if developer_trace_method request.method_
+  then
+    let open Result.Let_syntax in
+    let outcome =
+      let%bind installed = developer t in
+      let%bind () = installed.admit () in
+      let%bind limits = Developer_endpoint.trace_limits installed.endpoint in
+      let%bind () = trace_request_id request.id in
+      let%bind () =
+        trace_envelope
+          ~limits:(Agent_protocol.Developer_trace_wire.Limits.request limits)
+          (Agent_protocol.Envelope.Request request)
+      in
+      let%bind decoded =
+        Agent_protocol.Developer_trace_wire.Request.of_method_and_params
+          ~limits
+          ~method_:request.method_
+          ~params:request.params
+      in
+      let%bind response =
+        Developer_endpoint.handle_trace
+          installed.endpoint
+          ?actor
+          ~connection:context
+          decoded
+      in
+      if
+        not
+          (String.equal
+             request.method_
+             (Agent_protocol.Developer_trace_wire.Response.method_name response))
+      then
+        Error
+          (Agent_protocol.Error.create
+             Invalid_state
+             ~message:"trace result has a different method"
+             ~retryable:false
+             ())
+      else Developer_endpoint.encode_trace_response installed.endpoint response
+    in
+    let response =
+      match outcome with
+      | Ok result -> Agent_protocol.Envelope.success ~id:request.id result
+      | Error error -> Agent_protocol.Envelope.failure ~id:request.id error
+    in
+    let response_limits =
+      match t.developer with
+      | None -> trace_uninstalled_response_limits
+      | Some installed ->
+        (match Developer_endpoint.trace_limits installed.endpoint with
+         | Ok limits -> Agent_protocol.Developer_trace_wire.Limits.response limits
+         | Error _ -> trace_uninstalled_response_limits)
+    in
+    let%bind () = trace_envelope ~limits:response_limits response in
+    Ok (Some response)
+  else if developer_repl_method request.method_
   then (
     let outcome =
       let open Result.Let_syntax in
@@ -192,7 +320,10 @@ let notification_safe = function
 ;;
 
 let notification t ?actor context (notification : Agent_protocol.Envelope.notification) =
-  if developer_method notification.method_ || developer_repl_method notification.method_
+  if
+    developer_method notification.method_
+    || developer_repl_method notification.method_
+    || developer_trace_method notification.method_
   then
     Error
       (Agent_protocol.Error.create
