@@ -150,6 +150,10 @@ val host_principal : host -> Agent_protocol.Principal.t
 
 val host_dispatcher : host -> Dispatcher.t
 
+(** Physical close for an owned host used without an ordinary session. It
+    joins the same connection owners as [close_connection] on an attached host. *)
+val host_close_connection : host -> Connection_context.t -> unit
+
 module Script_selection : sig
   (** Actual frozen source classification, not command or native authority. *)
   type t = private

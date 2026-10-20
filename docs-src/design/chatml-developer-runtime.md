@@ -129,6 +129,10 @@ Local stdio can opt in through
 `Embedded_operator` selector to the one Store-owned `embedded.local` identity,
 then reuses the same project, upload, Developer and manifest validators. An
 absent policy leaves the prior local scope and source setup unchanged.
+`ochat-agent-stdio --local --developer-only --developer-policy FILE` is the
+closed offline REPL host path: it installs the configured Developer service
+without starting an unrelated ordinary agent session or capturing a provider
+target. The flag is invalid for a gateway or without an explicit policy.
 
 For example, this `server` record field admits the selected `s` script from
 an already authorized supplied ChatMD document for one configured bearer
@@ -210,7 +214,72 @@ principal list is rejected. The policy accepts only the documented sections,
 bounded input and exact local authentication kind. It cannot silently override
 a separately configured project-source or Developer policy.
 
-Status: M5 design v1, 2026-10-15. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission, durable developer run checkpoint foundation, selected-document transactions, physical job-claim worker, compiler-side REPL typing transaction and incremental module registry described below are implemented. The developer root staging owner, bounded root/native terminal coordinator, selected native policy and claimed job-parent effect-entry proof are implemented. The owner-neutral lexical script-job kernel and its physical developer adapter are implemented. Actor-bound provider selection, the shared Model.spawn recipe decoder, durable intent, physical call-boundary admission, selected compiled-script adapter and claimed model-job runner are implemented. Hosted command, native, job and Model approval callbacks and the portable Developer transport client are implemented. The hosted library REPL Task service retains exact Task references, starts work durably on explicit request, and joins cancellation and reset. The portable server REPL endpoint, typed first-party REPL client, first-party local stdio process and embedded connector are implemented; the terminal client remains pending. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
+The separate `chatml-repl` executable uses that same local policy and the
+portable REPL client. This complete offline example grants only the selected
+local source and the two method scopes needed to submit and explicitly run a
+Task; it does not enable model inference or Shell approvals:
+
+```sh
+project=$(mktemp -d)
+mkdir -p "$project/workspace"
+printf '%s\n' 'let main input = Task.pure(input)' > "$project/check.chatml"
+printf '%s\n' '<developer>Local deterministic REPL.</developer>' > "$project/agent.chatmd"
+cat > "$project/policy.sexp" <<EOF
+(project_sources ((external_roots ($project))))
+(authoring_project_access
+ ((read_grants (((root $project) (principal_id Embedded_operator)
+                 (authentication_kind embedded.local))))
+  (selections (((root $project) (project check.chatml)
+                (request (entry ((name main)))) (target one_off_v1))))))
+(developer
+ ((selections
+   (((source (Local_source (root $project) (member check.chatml)))
+     (target One_off_v1)
+     (principals (((principal_id Embedded_operator)
+                   (authentication_kind embedded.local)))))))
+  (capacity
+   ((max_runs 128) (max_active_commands 4) (max_active_agent_calls 8)
+    (max_agent_sources 6) (max_native_bindings 32) (max_retained_tasks 8)
+    (max_watches_per_connection 4) (max_pending_approvals 4)
+    (max_repl_instances 8) (max_repl_keys_per_instance 128)
+    (max_repl_submissions_per_epoch 64) (max_repl_source_bytes 65536)))
+  (model Disabled) (approvals Disabled) (repl Standard_v1) (portable true)))
+(developer_scopes (developer.repl developer.live.run))
+EOF
+chatml-repl --local --developer-policy "$project/policy.sexp" \
+  --prompt-file "$project/agent.chatmd" --workspace "$project/workspace" \
+  --transient --source check.chatml
+```
+
+The terminal shows the active source or project entry, its requested
+environment (or the project's default selection), source root, and prompt and
+workspace definitions. This frontend selects `One_off_v1`. For an explicitly
+configured project entry, use `--project PATH --entry NAME` and optionally
+`--environment NAME`; repeat `--dependency-root-index N` for each admitted
+dependency root. The source route does not accept dependency roots. These
+indices select existing configured roots and grant no new source access.
+
+Enter multiline ChatML literally and place `:submit` on its own final line
+or press Ctrl+S. A successful `Task.pure(8)` submission displays a Task
+reference; it does not run the Task. `:run 1` executes the displayed reference.
+`:type N`, `:refs`, `:observe`, `:cancel`, `:reset`, `:close`, `:retry`, and
+`:abandon` use the same typed service. Up/Down navigate bounded local history;
+Ctrl+Q exits. Reset keeps the existing captured source and increments the
+epoch; selecting a different project or environment requires a new Create.
+After a lost keyed reply, `:retry` uses the original key and payload;
+`:abandon` only relinquishes local retry custody and does not undo effects.
+After abandon, `:observe` may read that exact historical key, but its receipt
+does not prove the current revision; new source requires reset or a new Create.
+Ctrl+C sends exact-key cancellation while Submit or Task execution is still
+running; an early missing-key reply leaves custody unresolved for an explicit
+same-key retry.
+The terminal displays bounded sanitized diagnostics and restores the PTY on
+normal exit and handled errors. Remote use requires an installed Developer
+REPL service, an authenticated connection profile and the same explicit
+source selection; the client requests `developer.run`, `developer.repl` and
+`developer.repl.events` in one Initialize and checks the pinned server.
+
+Status: M5 design v1, 2026-10-15. The REPL language decisions in §4.3 are accepted. The owner-neutral native admission, durable developer run checkpoint foundation, selected-document transactions, physical job-claim worker, compiler-side REPL typing transaction and incremental module registry described below are implemented. The developer root staging owner, bounded root/native terminal coordinator, selected native policy and claimed job-parent effect-entry proof are implemented. The owner-neutral lexical script-job kernel and its physical developer adapter are implemented. Actor-bound provider selection, the shared Model.spawn recipe decoder, durable intent, physical call-boundary admission, selected compiled-script adapter and claimed model-job runner are implemented. Hosted command, native, job and Model approval callbacks and the portable Developer transport client are implemented. The hosted library REPL Task service retains exact Task references, starts work durably on explicit request, and joins cancellation and reset. The portable server REPL endpoint, typed first-party REPL client, first-party local stdio process, embedded connector and Eio/Notty terminal client are implemented. OCH-130 owns the research; OCH-137, OCH-138 and their implementation children own delivery.
 
 The [authoring service design](chatml-authoring-services.md) owns source context,
 overlay and immutable upload contracts used here. Implementation and validation

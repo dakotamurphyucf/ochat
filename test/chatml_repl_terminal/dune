@@ -1,0 +1,14 @@
+(library
+ (name chatml_repl_terminal_tests)
+ (libraries core notty uuseg ochat.chatml_repl_terminal)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(rule
+ (alias terminal-pty)
+ (action
+  (run
+   python3
+   %{dep:terminal_pty.py}
+   %{exe:../../bin/chatml_repl.exe}
+   %{exe:../../bin/ochat_agent_stdio.exe})))

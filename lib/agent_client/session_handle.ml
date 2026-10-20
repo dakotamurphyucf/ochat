@@ -30,7 +30,12 @@ let interrupted message =
   Agent_protocol.Error.create Interrupted ~message ~retryable:true ()
 ;;
 
-let initialize connection ~implementation_name ~implementation_version =
+let initialize_with_features
+      connection
+      ~implementation_name
+      ~implementation_version
+      ~features
+  =
   let open Result.Let_syntax in
   let%bind implementation =
     Agent_protocol.Initialize.Implementation.create
@@ -42,7 +47,7 @@ let initialize connection ~implementation_name ~implementation_version =
       ~implementation
       ~protocol_min:Agent_protocol.Version.current
       ~protocol_max:Agent_protocol.Version.current
-      ~features:Agent_protocol.Inference_query.Features.all
+      ~features
       ~event_encodings:[ Json ]
       ~max_inbound_event_bytes:(16 * 1024 * 1024)
       ()
@@ -51,6 +56,14 @@ let initialize connection ~implementation_name ~implementation_version =
   | Ok (Protocol_initialize response) -> Ok response
   | Ok _ -> Error (Agent_protocol.Error.invalid_request "unexpected initialize result")
   | Error _ as failure -> failure
+;;
+
+let initialize connection ~implementation_name ~implementation_version =
+  initialize_with_features
+    connection
+    ~implementation_name
+    ~implementation_version
+    ~features:Agent_protocol.Inference_query.Features.all
 ;;
 
 let initial_projection connection session_id replay previous_projection =
