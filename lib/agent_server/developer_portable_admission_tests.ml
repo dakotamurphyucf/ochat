@@ -79,6 +79,7 @@ let%test_module "Developer portable framing admission" =
            ~initialize:Daemon.default_options.protocol_limits
            ~budgets
            ~approval:(Some broker)
+           ~trace:None
            ~repl:None);
       let equal_receipt_limits =
         must
@@ -111,6 +112,7 @@ let%test_module "Developer portable framing admission" =
              ~initialize:Daemon.default_options.protocol_limits
              ~budgets
              ~approval:(Some broker)
+             ~trace:None
              ~repl:None));
       let larger_host_budget =
         must
@@ -128,6 +130,7 @@ let%test_module "Developer portable framing admission" =
              ~initialize:Daemon.default_options.protocol_limits
              ~budgets:larger_host_budget
              ~approval:(Some broker)
+             ~trace:None
              ~repl:None));
       let command_id = must (P.Developer_command_id.of_string (String.make 256 '\001')) in
       let run_id = must (P.Id.Developer_run.of_string (id96 "dvr")) in
@@ -379,6 +382,7 @@ let%test_module "Developer portable framing admission" =
           ~initialize:Daemon.default_options.protocol_limits
           ~budgets
           ~approval:None
+          ~trace:None
           ~repl:(Some repl)
         |> Result.is_ok
       in
@@ -551,6 +555,128 @@ let%test_module "Developer portable framing admission" =
       assert (
         Result.is_error
           (Developer_command_wire_receipt.validate_prepared overlong_prepared))
+    ;;
+
+    let%test_unit "trace startup admits one advancing page and full RPC envelope" =
+      let recorder =
+        Chatml_trace.Recorder.Limits.create
+          ~max_events:256
+          ~max_normal_bytes:65_536
+          ~max_terminal_bytes:1_024
+        |> Or_error.ok_exn
+      in
+      let retention =
+        Developer_trace_retention.Limits.create
+          ~max_traces:4
+          ~max_retained_bytes:(2 * 1024 * 1024)
+          ~max_source_refs_per_trace:8
+          ~max_provenance_bytes_per_trace:4_096
+          ~max_expired_tombstones:4
+          ~max_age_seconds:60.
+          ~max_header_bytes:4_096
+          ~recorder
+        |> Or_error.ok_exn
+      in
+      let budgets =
+        must
+          (Developer_command_budgets.Configuration.create
+             ~compilation:(Bounded Chatml_compilation.default_limits)
+             ~max_dependency_depth:32
+             ~execution:Chatml_execution.default_limits
+             ~max_output_bytes:1_024
+             ~receipt:stored_receipt_limit)
+      in
+      let trace_wire
+            ?(request_bytes = 4_096)
+            ?(page_bytes = 80_000)
+            ?(response_bytes = 96_000)
+            ?(cursor_bytes = 2_048)
+            ()
+        =
+        must
+          (P.Developer_trace_wire.Limits.create
+             ~request:(bound ~bytes:request_bytes ~depth:12 ~fields:128 ~nodes:256)
+             ~page:(bound ~bytes:page_bytes ~depth:12 ~fields:256 ~nodes:256)
+             ~response:(bound ~bytes:response_bytes ~depth:16 ~fields:300 ~nodes:300)
+             ~max_page_items:16
+             ~max_cursor_bytes:cursor_bytes)
+      in
+      let policy wire =
+        must
+          (Developer_endpoint.Policy.create
+             ~wire_limits:limits
+             ~max_connections:1
+             ~max_watches_per_connection:2
+             ~max_pending_hints_per_connection:2)
+        |> fun policy -> must (Developer_endpoint.Policy.with_trace_wire policy wire)
+      in
+      let admitted ?(initialize = Daemon.default_options.protocol_limits) wire trace =
+        Developer_portable_admission.check
+          ~policy:(policy wire)
+          ~initialize
+          ~budgets
+          ~approval:None
+          ~repl:None
+          ~trace
+        |> Result.is_ok
+      in
+      assert (admitted (trace_wire ()) (Some retention));
+      assert (not (admitted (trace_wire ()) None));
+      assert (not (admitted (trace_wire ~cursor_bytes:1 ()) (Some retention)));
+      let module Trace_wire = P.Developer_trace_wire in
+      let instance =
+        P.Developer_repl_wire.Wire_id.Instance.of_string ("ri_" ^ String.make 93 'a')
+        |> must
+      in
+      let epoch =
+        P.Developer_repl_wire.Wire_id.Epoch.of_string ("re_" ^ String.make 93 'a') |> must
+      in
+      let key = P.Idempotency_key.of_string (String.make 256 'a') |> must in
+      let locator = Trace_wire.Locator.Repl_statement { instance; epoch; key } in
+      let fingerprint =
+        Chatml_source.Digest.of_contents "trace-cursor" ~checkpoint:ignore
+      in
+      let cursor =
+        Trace_wire.Cursor.create
+          ~limits:(trace_wire ())
+          ~locator
+          ~execution_id:(String.make 128 'a')
+          ~submission_fingerprint:fingerprint
+          ~selection_fingerprint:fingerprint
+          ~after_sequence:Int64.max_value
+        |> must
+      in
+      let cursor_bytes =
+        String.length (Jsonaf.to_string (Trace_wire.Cursor.to_json cursor))
+      in
+      let resumed =
+        Trace_wire.Page_request.create
+          ~limits:(trace_wire ())
+          ~locator
+          ~after:(Some cursor)
+          ~limit:16
+        |> must
+      in
+      let request_bytes =
+        String.length (Jsonaf.to_string (Trace_wire.Page_request.to_json resumed))
+      in
+      assert (admitted (trace_wire ~cursor_bytes ~request_bytes ()) (Some retention));
+      assert (
+        not
+          (admitted
+             (trace_wire ~cursor_bytes:(cursor_bytes - 1) ~request_bytes ())
+             (Some retention)));
+      assert (
+        not
+          (admitted
+             (trace_wire ~cursor_bytes ~request_bytes:(request_bytes - 1) ())
+             (Some retention)));
+      assert (not (admitted (trace_wire ~page_bytes:60_000 ()) (Some retention)));
+      assert (not (admitted (trace_wire ~response_bytes:80_000 ()) (Some retention)));
+      let initialize =
+        { Daemon.default_options.protocol_limits with max_event_bytes = 96_511 }
+      in
+      assert (not (admitted ~initialize (trace_wire ()) (Some retention)))
     ;;
   end)
 ;;

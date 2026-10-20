@@ -257,6 +257,7 @@ module Event = struct
       else Or_error.error_string "invalid trace correlation"
     ;;
 
+    let to_opaque_string t = t
     let length = String.length
   end
 
@@ -343,6 +344,7 @@ module Recorder = struct
 
     let max_normal_bytes t = t.max_normal_bytes
     let max_terminal_bytes t = t.max_terminal_bytes
+    let max_events t = t.max_events
   end
 
   module Drop_count = struct

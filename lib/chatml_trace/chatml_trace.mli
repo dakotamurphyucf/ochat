@@ -138,6 +138,10 @@ module Event : sig
     (** Host-generated bounded opaque token. It contains no source, operation
         arguments/results, prompt, credential or user-controlled label. *)
     val of_host_token : string -> t Or_error.t
+
+    (** Comparison-only bounded encoding of the host-issued token for an
+        authenticated portable trace page. No source or effect authority. *)
+    val to_opaque_string : t -> string
   end
 
   module Kind : sig
@@ -230,6 +234,7 @@ module Recorder : sig
         or change event admission. *)
     val max_normal_bytes : t -> int
 
+    val max_events : t -> int
     val max_terminal_bytes : t -> int
   end
 

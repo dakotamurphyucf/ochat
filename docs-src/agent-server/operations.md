@@ -225,6 +225,21 @@ join root-owned work before retiring the epoch. A Task terminal alone leaves
 the Root available for already admitted jobs. Ordinary developer Command
 methods do not expose Task rows.
 
+Developer trace pages require both bounded `Developer_configuration.with_traces`
+and `Portable.with_trace_wire` at startup. A declarative Developer record can
+select `(traces Trace_summary)` or `(traces Trace_full)`; an omitted trace field
+stays disabled. `(portable false)` retains only private recording, while
+`(portable true)` installs the bounded page method. The daemon advertises the read-only
+trace feature only when the same Host owns the recorder and historical source
+policy. Each Command, REPL statement or Task page authenticates the exact
+association and current source-read grant before comparing a cursor; reconnect
+does not turn an execution ID into read authority. Pages contain coarse event
+kinds, captured locations and terminal/drop metadata, never source text or
+effect arguments. Expired or omitted recordings remain unavailable rather
+than being reconstructed from current editor content. Native source metadata
+outside the portable encoding limit returns a bounded resource error without
+changing the underlying execution.
+
 A REPL submission returns bounded statement summaries and an exact count of
 retained Task references. A small output limit can shorten the displayed
 summary or omit an oversized diagnostic location; `Output_limited` marks that

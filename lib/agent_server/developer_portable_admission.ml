@@ -3,6 +3,7 @@ module P = Agent_protocol
 module D = Document_schema
 module L = P.Developer_common.Limits
 module R = P.Developer_repl_wire.Limits
+module T = P.Developer_trace_wire.Limits
 
 let invalid message = Error (P.Error.invalid_request message)
 
@@ -203,7 +204,128 @@ let check_repl ~wire ~configuration ~budgets ~(initialize : P.Initialize.Limits.
   else Ok ()
 ;;
 
-let check ~policy ~(initialize : P.Initialize.Limits.t) ~budgets ~approval ~repl =
+let check_trace_cursor_progress wire =
+  let module W = P.Developer_trace_wire in
+  let open Result.Let_syntax in
+  let fail = P.Error.invalid_request "trace cursor or resumed request cannot fit" in
+  let%bind run_id =
+    P.Id.Developer_run.of_string ("dvr_" ^ String.make 92 'a')
+    |> Result.map_error ~f:(fun _ -> fail)
+  in
+  let%bind key =
+    P.Idempotency_key.of_string (String.make 256 'a')
+    |> Result.map_error ~f:(fun _ -> fail)
+  in
+  let%bind instance =
+    P.Developer_repl_wire.Wire_id.Instance.of_string ("ri_" ^ String.make 93 'a')
+    |> Result.map_error ~f:(fun _ -> fail)
+  in
+  let%bind epoch =
+    P.Developer_repl_wire.Wire_id.Epoch.of_string ("re_" ^ String.make 93 'a')
+    |> Result.map_error ~f:(fun _ -> fail)
+  in
+  let lookup = P.Developer_common.Lookup.create ~run_id ~key in
+  let fingerprint = Chatml_source.Digest.of_contents "trace-cursor" ~checkpoint:ignore in
+  [ W.Locator.Command lookup
+  ; W.Locator.Repl_task lookup
+  ; W.Locator.Repl_statement { instance; epoch; key }
+  ]
+  |> List.map ~f:(fun locator ->
+    let%bind cursor =
+      W.Cursor.create
+        ~limits:wire
+        ~locator
+        ~execution_id:(String.make 128 'a')
+        ~submission_fingerprint:fingerprint
+        ~selection_fingerprint:fingerprint
+        ~after_sequence:Int64.max_value
+      |> Result.map_error ~f:(fun _ -> fail)
+    in
+    W.Page_request.create
+      ~limits:wire
+      ~locator
+      ~after:(Some cursor)
+      ~limit:(T.max_page_items wire)
+    |> Result.map ~f:ignore
+    |> Result.map_error ~f:(fun _ -> fail))
+  |> Result.all_unit
+;;
+
+let check_trace ~wire ~retention ~(initialize : P.Initialize.Limits.t) =
+  let recorder = Developer_trace_retention.Limits.recorder retention in
+  let request = T.request wire in
+  let page = T.page wire in
+  let response = T.response wire in
+  let open Result.Let_syntax in
+  let%bind () = check_trace_cursor_progress wire in
+  let%bind single_page_bytes =
+    (* One retained event can consume the entire recorder normal budget, but
+       its closed shape is independently bounded: six words, one native site
+       (two 1,024-byte validated Source.Id components and 128 fixed bytes),
+       and one 128-byte opaque correlation plus its length word. The last
+       retained site is a separate page field and may repeat an older REPL
+       closure source outside the current Header inventory. A page can
+       contract to one event even when its requested item count is larger. *)
+    let maximal_site = 128 + (2 * 1_024) in
+    let maximal_event = 48 + maximal_site + 8 + 128 in
+    let%bind native =
+      checked_add
+        (Developer_trace_retention.Limits.max_header_bytes retention)
+        (Int.min (Chatml_trace.Recorder.Limits.max_normal_bytes recorder) maximal_event)
+      |> Option.bind ~f:(fun total -> checked_add total maximal_site)
+      |> Option.bind ~f:(fun total ->
+        checked_add total (Chatml_trace.Recorder.Limits.max_terminal_bytes recorder))
+      |> Result.of_option
+           ~error:(P.Error.invalid_request "trace native capacity overflowed")
+    in
+    checked_mul native 6
+    |> Option.bind ~f:(fun escaped ->
+      checked_mul (T.max_cursor_bytes wire) 3
+      |> Option.bind ~f:(fun cursors -> checked_add escaped cursors))
+    |> Option.bind ~f:(fun charged -> checked_add charged 2_048)
+    |> Result.of_option
+         ~error:(P.Error.invalid_request "trace encoded page bound overflowed")
+  in
+  let%bind page_structure =
+    checked_mul (Developer_trace_retention.Limits.max_source_refs_per_trace retention) 8
+    |> Option.bind ~f:(fun count -> checked_add count 128)
+    |> Result.of_option
+         ~error:(P.Error.invalid_request "trace source node bound overflowed")
+  in
+  if T.max_page_items wire > initialize.max_page_size
+  then invalid "trace page count exceeds Initialize capacity"
+  else if
+    not (at_least_plus initialize.max_request_bytes (D.Limits.max_bytes request) 512)
+  then invalid "trace request and JSON-RPC envelope exceed Initialize capacity"
+  else if not (at_least_plus initialize.max_event_bytes (D.Limits.max_bytes response) 512)
+  then invalid "trace response and JSON-RPC envelope exceed Initialize capacity"
+  else if D.Limits.max_bytes page < single_page_bytes
+  then invalid "trace page cannot represent one maximal retained event"
+  else if
+    D.Limits.max_nodes page < page_structure
+    || D.Limits.max_fields page < page_structure
+    || D.Limits.max_depth page < 10
+  then invalid "trace page cannot represent installed source and event structure"
+  else if
+    not
+      (at_least_plus (D.Limits.max_bytes response) (D.Limits.max_bytes page) 512
+       && at_least_plus (D.Limits.max_nodes response) (D.Limits.max_nodes page) 8
+       && at_least_plus (D.Limits.max_fields response) (D.Limits.max_fields page) 8
+       && at_least_plus (D.Limits.max_depth response) (D.Limits.max_depth page) 2)
+  then invalid "trace response cannot represent page framing"
+  else (
+    let%bind capabilities =
+      P.Developer_trace_wire.Capabilities.create
+        ~methods:P.Developer_trace_wire.Request.supported_methods
+        ~limits:wire
+    in
+    P.Developer_trace_wire.Response.to_json
+      (P.Developer_trace_wire.Response.Capabilities capabilities)
+      ~limits:wire
+    |> Result.map ~f:ignore)
+;;
+
+let check ~policy ~(initialize : P.Initialize.Limits.t) ~budgets ~approval ~repl ~trace =
   let limits = Developer_endpoint.Policy.wire_limits policy in
   let request = L.request limits in
   let receipt = L.receipt limits in
@@ -228,9 +350,15 @@ let check ~policy ~(initialize : P.Initialize.Limits.t) ~budgets ~approval ~repl
   then invalid "Developer approval policy cannot represent the installed broker"
   else (
     let%bind () = check_capabilities limits in
-    match Developer_endpoint.Policy.repl_wire_limits policy, repl with
+    let%bind () =
+      match Developer_endpoint.Policy.repl_wire_limits policy, repl with
+      | None, _ -> Ok ()
+      | Some _, None -> invalid "REPL wire requires the installed REPL Host"
+      | Some wire, Some configuration ->
+        check_repl ~wire ~configuration ~budgets ~initialize
+    in
+    match Developer_endpoint.Policy.trace_wire_limits policy, trace with
     | None, _ -> Ok ()
-    | Some _, None -> invalid "REPL wire requires the installed REPL Host"
-    | Some wire, Some configuration ->
-      check_repl ~wire ~configuration ~budgets ~initialize)
+    | Some _, None -> invalid "trace wire requires installed retention"
+    | Some wire, Some retention -> check_trace ~wire ~retention ~initialize)
 ;;

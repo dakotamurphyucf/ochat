@@ -4,6 +4,7 @@ module S = Agent_server
 module D = P.Developer_common
 module W = P.Developer_wire
 module R = P.Developer_repl_wire
+module T = P.Developer_trace_wire
 
 let fail message = raise_s [%sexp "developer transport E2E failed", (message : string)]
 let require condition message = if not condition then fail message
@@ -107,6 +108,52 @@ let configured_repl_decoder_limits () =
   |> ok
 ;;
 
+let trace_wire_limits () =
+  let bound ~bytes ~depth ~fields ~nodes =
+    match
+      Document_schema.Limits.create
+        ~max_bytes:bytes
+        ~max_depth:depth
+        ~max_fields:fields
+        ~max_nodes:nodes
+    with
+    | Ok limits -> limits
+    | Error _ -> fail "invalid trace fixture limits"
+  in
+  T.Limits.create
+    ~request:(bound ~bytes:4_096 ~depth:12 ~fields:128 ~nodes:256)
+    ~page:(bound ~bytes:80_000 ~depth:12 ~fields:256 ~nodes:256)
+    ~response:(bound ~bytes:96_000 ~depth:16 ~fields:300 ~nodes:300)
+    ~max_page_items:16
+    ~max_cursor_bytes:2_048
+  |> ok
+;;
+
+let trace_configuration () =
+  let recorder =
+    Chatml_trace.Recorder.Limits.create
+      ~max_events:256
+      ~max_normal_bytes:65_536
+      ~max_terminal_bytes:1_024
+    |> Or_error.ok_exn
+  in
+  let limits =
+    S.Daemon.Developer_configuration.Traces.Limits.create
+      ~max_traces:16
+      ~max_retained_bytes:(2 * 1024 * 1024)
+      ~max_source_refs_per_trace:8
+      ~max_provenance_bytes_per_trace:4_096
+      ~max_expired_tombstones:16
+      ~max_age_seconds:60.
+      ~max_header_bytes:4_096
+      ~recorder
+    |> ok
+  in
+  S.Daemon.Developer_configuration.Traces.create
+    ~mode:Chatml_trace.Recorder.Mode.Full
+    ~limits
+;;
+
 type raw_client =
   { send : P.Envelope.t -> P.Envelope.t
   ; close : unit -> unit
@@ -145,7 +192,13 @@ let call_repl client ~limits request =
   R.Response.of_method_and_json ~limits ~method_ result |> ok
 ;;
 
-let initialize_response ?(repl = false) client =
+let call_trace client ~limits request =
+  let method_ = T.Request.method_name request in
+  let result = call client ~method_ ~params:(T.Request.params request) in
+  T.Response.of_method_and_json ~limits ~method_ result |> ok
+;;
+
+let initialize_response ?(repl = false) ?(trace = false) client =
   let implementation =
     P.Initialize.Implementation.create ~name:"developer-wire-e2e" ~version:"1" |> ok
   in
@@ -156,7 +209,8 @@ let initialize_response ?(repl = false) client =
       ~protocol_max:P.Version.current
       ~features:
         ([ P.Authoring.Features.core; P.Authoring.Features.semantic; D.Features.run ]
-         @ if repl then [ R.Features.repl; R.Features.events ] else [])
+         @ (if repl then [ R.Features.repl; R.Features.events ] else [])
+         @ if trace then [ T.Features.trace ] else [])
       ~event_encodings:[ Json ]
       ~max_inbound_event_bytes:(2 * 1024 * 1024)
       ()
@@ -170,11 +224,16 @@ let initialize_response ?(repl = false) client =
   |> ok
 ;;
 
-let initialize client =
-  let response = initialize_response client in
+let initialize ?(trace = false) client =
+  let response = initialize_response ~trace client in
   require
     (List.mem response.enabled_features D.Features.run ~equal:String.equal)
-    "Developer run feature was not selected"
+    "Developer run feature was not selected";
+  if trace
+  then
+    require
+      (List.mem response.enabled_features T.Features.trace ~equal:String.equal)
+      "installed trace feature was not selected"
 ;;
 
 let qualify_unconfigured_client client =
@@ -193,6 +252,26 @@ let qualify_unconfigured_client client =
           [%sexp
             "unconfigured Developer method returned another error", (error : P.Error.t)]
       | Ok _ -> fail "unconfigured daemon exposed Developer capabilities")
+    ~finally:client.close
+;;
+
+let qualify_trace_disabled client =
+  Exn.protect
+    ~f:(fun () ->
+      let response = initialize_response ~trace:true client in
+      require
+        (not (List.mem response.enabled_features T.Features.trace ~equal:String.equal))
+        "uninstalled trace feature was selected";
+      match
+        call_outcome
+          client
+          ~method_:(T.Request.method_name T.Request.Capabilities)
+          ~params:(T.Request.params T.Request.Capabilities)
+      with
+      | Error { code = P.Error.Invalid_state; _ } -> ()
+      | Error error ->
+        raise_s [%sexp "uninstalled trace method had another error", (error : P.Error.t)]
+      | Ok _ -> fail "uninstalled trace method returned capabilities")
     ~finally:client.close
 ;;
 
@@ -333,10 +412,103 @@ let qualify_rejected_check client ~limits ~run_id =
     "rejected Check diagnostic lost its captured fragment, digest or byte range"
 ;;
 
-let qualify_client ?expected_wire_limits ?(after_check = fun _ _ -> ()) client =
+let qualify_trace client ~run_id ~key =
+  let caps =
+    match call_trace client ~limits:(trace_wire_limits ()) T.Request.Capabilities with
+    | T.Response.Capabilities value -> value
+    | _ -> fail "trace Capabilities returned another method"
+  in
+  let limits = T.Capabilities.limits caps in
+  require
+    (List.mem (T.Capabilities.methods caps) "developer.trace.page" ~equal:String.equal)
+    "installed trace page method was not advertised";
+  let locator = T.Locator.Command (D.Lookup.create ~run_id ~key) in
+  let request = T.Page_request.create ~limits ~locator ~after:None ~limit:16 |> ok in
+  let page =
+    match call_trace client ~limits (T.Request.Page request) with
+    | T.Response.Page (T.Availability.Retained page) -> page
+    | _ -> fail "terminal Check trace was not retained"
+  in
+  require (not (List.is_empty (T.Page.events page))) "terminal Check trace lost events";
+  (match T.Page.state page with
+   | T.Page.Complete terminal ->
+     require
+       (match T.Terminal.disposition terminal with
+        | Succeeded -> true
+        | Failed _ | Cancelled | Denied | Interrupted -> false)
+       "terminal Check trace changed disposition"
+   | Incomplete -> fail "terminal Check trace remains incomplete");
+  let foreign =
+    T.Cursor.create
+      ~limits
+      ~locator
+      ~execution_id:(T.Header.execution_id (T.Page.header page))
+      ~submission_fingerprint:
+        (Chatml_source.Digest.of_contents "foreign trace" ~checkpoint:ignore)
+      ~selection_fingerprint:(T.Header.selection_fingerprint (T.Page.header page))
+      ~after_sequence:1L
+    |> ok
+  in
+  let foreign_request =
+    T.Page_request.create ~limits ~locator ~after:(Some foreign) ~limit:16 |> ok
+  in
+  (match
+     call_outcome
+       client
+       ~method_:(T.Request.method_name (T.Request.Page foreign_request))
+       ~params:(T.Request.params (T.Request.Page foreign_request))
+   with
+   | Error { code = P.Error.Lease_stale; _ } -> ()
+   | Error error ->
+     raise_s [%sexp "foreign trace cursor had another error", (error : P.Error.t)]
+   | Ok _ -> fail "foreign trace cursor was accepted");
+  let capabilities = T.Request.Capabilities in
+  let request_with_id count =
+    let id = P.Envelope.Request_id.of_json (`String (String.make count '"')) |> ok in
+    P.Envelope.request
+      ~id
+      ~method_:(T.Request.method_name capabilities)
+      ~params:(T.Request.params capabilities)
+      ()
+    |> client.send
+  in
+  (match request_with_id 127 with
+   | P.Envelope.Response { outcome = Ok _; _ } -> ()
+   | _ -> fail "exact 256-byte escaped trace request ID did not fit");
+  match request_with_id 128 with
+  | P.Envelope.Response { outcome = Error { code = P.Error.Resource_limit; _ }; _ } -> ()
+  | _ -> fail "oversized escaped trace request ID was accepted"
+;;
+
+let qualify_unselected_trace client ~run_id ~key =
   Exn.protect
     ~f:(fun () ->
-      initialize client;
+      initialize ~trace:true client;
+      let limits = trace_wire_limits () in
+      let locator = T.Locator.Command (D.Lookup.create ~run_id ~key) in
+      let request = T.Page_request.create ~limits ~locator ~after:None ~limit:1 |> ok in
+      match
+        call_outcome
+          client
+          ~method_:(T.Request.method_name (T.Request.Page request))
+          ~params:(T.Request.params (T.Request.Page request))
+      with
+      | Error { code = P.Error.Lease_stale; _ } -> ()
+      | Error error ->
+        raise_s [%sexp "unselected trace read had another error", (error : P.Error.t)]
+      | Ok _ -> fail "unselected principal disclosed a retained trace")
+    ~finally:client.close
+;;
+
+let qualify_client
+      ?expected_wire_limits
+      ?(trace = false)
+      ?(after_check = fun _ _ -> ())
+      client
+  =
+  Exn.protect
+    ~f:(fun () ->
+      initialize ~trace client;
       let caps =
         match call_developer client ~limits:(wire_limits ()) W.Request.Capabilities with
         | W.Response.Capabilities caps -> caps
@@ -446,6 +618,7 @@ let qualify_client ?expected_wire_limits ?(after_check = fun _ _ -> ()) client =
           | _ -> fail "Developer Check did not produce Ready")
        | _ -> fail "Developer Check was not terminal");
       qualify_rejected_check client ~limits ~run_id;
+      if trace then qualify_trace client ~run_id ~key;
       after_check run_id key)
     ~finally:client.close
 ;;
@@ -1599,6 +1772,7 @@ let run_configured env =
            options
            (fun sw daemon ->
               qualify_repl_capacity daemon fixture;
+              qualify_trace_disabled (http_client ~sw env fixture);
               start_socket_listener ~sw env fixture daemon;
               qualify_client
                 ~expected_wire_limits:(configured_wire_limits ())
@@ -1662,6 +1836,14 @@ let run_embedded env =
              ~max_watches_per_connection:4
              ~max_pending_hints_per_connection:8
            |> ok
+           |> fun portable ->
+           S.Daemon.Developer_configuration.Portable.with_trace_wire
+             portable
+             (trace_wire_limits ())
+           |> ok
+         in
+         let developer =
+           S.Daemon.Developer_configuration.with_traces developer (trace_configuration ())
          in
          let options =
            { (Support.Daemon_host.with_offline_inference S.Daemon.default_options) with
@@ -1673,8 +1855,19 @@ let run_embedded env =
          in
          Support.Daemon_host.with_ env fixture ~options (fun sw daemon ->
            start_socket_listener ~sw env fixture daemon;
-           qualify_client (http_client ~sw env fixture);
-           qualify_client (unix_client ~sw env fixture);
+           qualify_client
+             ~trace:true
+             ~after_check:(fun run_id key ->
+               qualify_unselected_trace
+                 (http_client
+                    ~token:(Support.Config_fixture.admin_token fixture)
+                    ~sw
+                    env
+                    fixture)
+                 ~run_id
+                 ~key)
+             (http_client ~sw env fixture);
+           qualify_client ~trace:true (unix_client ~sw env fixture);
            qualify_client (stdio_client ~sw env fixture))));
   Eio.Flow.copy_string "developer wire transports passed\n" (Eio.Stdenv.stdout env)
 ;;

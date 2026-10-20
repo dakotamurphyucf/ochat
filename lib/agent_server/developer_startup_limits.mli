@@ -12,6 +12,7 @@ val create
   -> approvals:Developer_startup_configuration.approvals
   -> repl:Developer_startup_configuration.repl
   -> portable:bool
+  -> traces:Developer_startup_configuration.traces
   -> initialize_limits:Agent_protocol.Initialize.Limits.t
   -> (t, Agent_protocol.Error.t) result
 
@@ -21,3 +22,9 @@ val publisher : t -> Agent_store.Developer_result_publisher.Limits.t
 val approvals : t -> Developer_approval_owner.Limits.t option
 val repl : t -> Developer_daemon_configuration.Repl.t option
 val portable : t -> Developer_daemon_configuration.Portable.t option
+
+(** A finite observational owner only when tracing was explicitly selected.
+    Every limit uses the existing recorder/retention constructors. A requested
+    portable trace wire is constructed against this exact owner and the actual
+    Initialize limit; incompatible profiles reject startup. *)
+val traces : t -> Developer_daemon_configuration.Traces.t option

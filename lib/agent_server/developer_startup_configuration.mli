@@ -128,6 +128,16 @@ type repl =
   | Standard_v1
 [@@deriving compare, equal, sexp]
 
+(** Explicit recording opt-in for declarative Developer startup. Absence from a
+    previously saved record remains disabled. Summary and Full select only the
+    existing bounded recorder mode; they add no source-read grant or portable
+    method by themselves. A portable page method also requires [portable]. *)
+type traces =
+  | No_traces
+  | Trace_summary
+  | Trace_full
+[@@deriving compare, equal, sexp]
+
 type t =
   { selections : Selection.t list
   ; capacity : Capacity.t
@@ -135,6 +145,7 @@ type t =
   ; approvals : approvals
   ; repl : repl
   ; portable : bool
+  ; traces : traces [@sexp.default No_traces]
   }
 [@@deriving compare, equal, sexp]
 

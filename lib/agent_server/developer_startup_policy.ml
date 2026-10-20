@@ -517,6 +517,7 @@ let bind
       ~approvals:config.approvals
       ~repl:config.repl
       ~portable:config.portable
+      ~traces:config.traces
       ~initialize_limits
   in
   let%bind model_target = model_target inference_policy config.model in
@@ -559,6 +560,12 @@ let bind
       (Developer_startup_limits.repl preset)
       ~default:developer
       ~f:(fun repl -> Developer_daemon_configuration.with_repl developer repl)
+  in
+  let developer =
+    Option.value_map
+      (Developer_startup_limits.traces preset)
+      ~default:developer
+      ~f:(fun traces -> Developer_daemon_configuration.with_traces developer traces)
   in
   let developer =
     Option.value_map

@@ -642,7 +642,11 @@ let with_installed_developer_features options endpoint =
     List.filter options.features ~f:(fun feature ->
       not
         (List.mem
-           [ Features.run; Features.approvals; Features.events ]
+           [ Features.run
+           ; Features.approvals
+           ; Features.events
+           ; Agent_protocol.Developer_trace_wire.Features.trace
+           ]
            feature
            ~equal:String.equal))
   in
@@ -1542,6 +1546,7 @@ let compose
              ~approval:
                (Option.map configuration.shell_approvals ~f:(fun shell -> shell.limits))
              ~repl:configuration.repl
+             ~trace:(Option.map configuration.traces ~f:(fun traces -> traces.limits))
          in
          Developer_change_hub.create
            ~sw
@@ -1628,6 +1633,13 @@ let compose
             ~job_read:shell.job_read
             ~job_respond:shell.job_respond)
       in
+      let trace =
+        Option.map configuration.traces ~f:(fun traces ->
+          Developer_trace_retention.Configuration.create
+            ~mode:traces.mode
+            ~limits:traces.limits
+            ~read_policy:(Developer_trace_retention.Read_policy.of_authoring authoring))
+      in
       Developer_host.create
         ~sw
         ~env
@@ -1668,7 +1680,7 @@ let compose
         ~limits:limits.host
         ~budget_configuration:limits.budgets
         ~repl:configuration.repl
-        ~trace:None
+        ~trace
         ?on_change:on_developer_change
         ?on_repl_change
         ?on_task_change
