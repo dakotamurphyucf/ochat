@@ -1,10 +1,11 @@
 # ChatML developer run/test and REPL design
 
-The protocol defines three independent method scopes for future hosted
-developer commands: `developer.check`, `developer.fixture.run`, and
-`developer.live.run`. Current source, selected prompt/workspace, native,
-provider, result-disclosure and cancellation authority remains separate.
-Defining the scopes alone does not install the hosted command service.
+The hosted Developer service uses three independent method scopes:
+`developer.check`, `developer.fixture.run`, and `developer.live.run`.
+The shipped daemon and local host install these methods only under an explicit
+Developer policy with the corresponding source and method grants. Current
+source, selected prompt/workspace, native, provider, result-disclosure and
+cancellation authority remains separate; naming a scope does not grant it.
 
 The pure [Developer wire types](../../lib/agent_protocol/developer.mli) now
 define closed request/result method pairs for command submission, observation,

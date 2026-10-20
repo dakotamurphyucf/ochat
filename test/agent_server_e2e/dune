@@ -167,6 +167,10 @@
   ochat.agent_transport_http
   ochat.agent_transport_socket
   ochat.agent_transport_stdio
+  chatml_project_build_tests
+  ochat.chatml_project_build
+  ochat.chatml_source
+  ochat.chatml
   piaf
   uri)
  (preprocessor_deps
@@ -233,7 +237,8 @@
  (deps
   (alias agent-e2e-developer-wire)
   (alias agent-e2e-developer-configured)
-  (alias agent-e2e-developer-trace-client)))
+  (alias agent-e2e-developer-trace-client)
+  (alias agent-e2e-developer-workflow)))
 
 (rule
  (alias agent-e2e-developer-trace-client)
@@ -257,6 +262,17 @@
      stdio-modes
      --case
      stdio.local-typed-repl)))))
+
+(rule
+ (alias agent-e2e-developer-workflow)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv
+    OCHAT_E2E_STDIO_EXE
+    %{exe:../../bin/ochat_agent_stdio.exe}
+    (run %{exe:agent_server_e2e.exe} --scenario developer-workflow)))))
 
 (rule
  (alias agent-e2e-developer-configured)

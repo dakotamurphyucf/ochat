@@ -1,6 +1,7 @@
 """Bounded real-PTY qualification for the separate terminal executable."""
 
 import fcntl
+import json
 import os
 import platform
 import pty
@@ -58,6 +59,19 @@ def policy(root):
     (max_repl_submissions_per_epoch 64) (max_repl_source_bytes 65536)))
   (model Disabled) (approvals Disabled) (repl Standard_v1) (portable true)))
 (developer_scopes (developer.repl developer.live.run))"""
+
+
+def project_policy(root):
+    """The same local authority boundary with an explicit Project environment."""
+    return policy(root).replace(
+        "(project check.chatml)\n                (request (entry ((name main))))",
+        "(project chatml.project.json)\n"
+        "                (request (entry ((name main) (environment workflow))))",
+    ).replace(
+        f"(Local_source (root {root}) (member check.chatml))",
+        f"(Local_project (root {root}) (project chatml.project.json) "
+        "(request (Entry (name main) (environment (workflow)))))",
+    )
 
 
 class Session:
@@ -176,15 +190,35 @@ with tempfile.TemporaryDirectory(prefix="och255-terminal-") as tmp:
     (root / "smoke.chatmd").write_text("<developer>Deterministic local terminal.</developer>")
     (root / "check.chatml").write_text("let main input = Task.pure(input)")
     (root / "policy.sexp").write_text(policy(root))
+    (root / "src").mkdir()
+    (root / "src" / "main.chatml").write_text(
+        'let marker = "é"\nlet dependency_value = Util.value\n'
+        'let main input = Task.pure(input)\n'
+    )
+    (root / "src" / "util.chatml").write_text('let marker = "é"\nlet value = 8\n')
+    (root / "chatml.project.json").write_text(json.dumps({
+        "schema_version": 1,
+        "namespace": "terminal-workflow",
+        "source_dirs": ["src"],
+        "default_environment": "workflow",
+        "environments": {"workflow": {"modules": {"Util": "self.Util"}}},
+        "entries": {"main": {"source": "src/main.chatml", "target": "one_off_v1"}},
+    }))
+    (root / "project-policy.sexp").write_text(project_policy(root))
 
-    def command(name):
+    def command(name, project=False):
+        policy_name = "project-policy.sexp" if project else "policy.sexp"
+        selection = (
+            ["--project", "chatml.project.json", "--entry", "main", "--environment", "workflow"]
+            if project else ["--source", "check.chatml"]
+        )
         return [
             TERMINAL, "--local", "--stdio-executable", STDIO,
-            "--developer-policy", str(root / "policy.sexp"),
+            "--developer-policy", str(root / policy_name),
             "--prompt-file", str(root / "smoke.chatmd"),
             "--workspace", str(root / "workspace"),
-            "--data-root", str(root / name), "--source", "check.chatml",
-        ]
+            "--data-root", str(root / name),
+        ] + selection
 
     with Session(command("normal-data")) as normal:
         normal.await_bytes(b"[ready]")
@@ -195,6 +229,17 @@ with tempfile.TemporaryDirectory(prefix="och255-terminal-") as tmp:
         normal.await_bytes(b"Task succeeded")
         normal.write(b"\x11")  # Ctrl+Q
         normal.finish(0)
+
+    with Session(command("project-data", project=True)) as project:
+        project.await_bytes(b"[ready]")
+        project.await_bytes(b"environment=workflow")
+        project.write(b"Task.pure(Util.value)\r:submit\r")
+        project.await_bytes(b"Task 1:")
+        check(b"Task succeeded" not in project.output, "Project Submit auto-ran Task", project.output)
+        project.write(b":run 1\r")
+        project.await_bytes(b"Task succeeded 8")
+        project.write(b"\x11")
+        project.finish(0)
 
     with Session(command("cancel-data")) as cancelled:
         cancelled.await_bytes(b"[ready]")
@@ -230,4 +275,4 @@ with tempfile.TemporaryDirectory(prefix="och255-terminal-") as tmp:
         failed.write(b"\x1b[200~\x7f")  # Unsupported Backspace inside bracketed paste
         failed.finish(1)
 
-print("terminal local PTY submit/manual Task, held cancellation and fatal-input cleanup passed")
+print("terminal local source/Project environment, manual Task, held cancellation and fatal-input cleanup passed")
