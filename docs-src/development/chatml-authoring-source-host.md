@@ -40,6 +40,19 @@ The context explicitly selects any additional permitted dependency roots;
 unselected configured roots never enter its resolver attempt. Connection cleanup
 calls `Context.close_and_wait` before the source host is closed.
 
+The installed context owner bounds and fingerprints the exact immutable Project
+contract before retaining comparison evidence beside its admitted Ledger view.
+Repeated checks can reuse that evidence when both newly selected contracts are
+the same physical value as the source context's admitted contract and the view
+still has its verified fingerprint. A separately constructed equivalent contract
+uses the bounded semantic comparison. Every check still repeats source/Root,
+original and current actor, and current selection-policy admission. This evidence
+grants no authority. Refresh can carry it only with the same source owner; a
+retained REPL selection keeps its independently charged source owner and the same
+comparison evidence. Yielding work still requires the current entry, view and
+cache heads before publication, so an edit or revocation cannot publish an old
+result.
+
 The initial host capture is deliberately local-only. It calls the existing
 `Chatml_project_prepare.prepare_sources` with only selected admitted anchors,
 `Build_without_previous`, and **no** Git store or Git grants. A project that

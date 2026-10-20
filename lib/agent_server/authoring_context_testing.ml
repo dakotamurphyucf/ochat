@@ -283,6 +283,7 @@ let context_entry ~identity ~original_actor ~view ~owner =
     ; origin = P.Authoring.Context.origin view
     ; owner
     ; view
+    ; verified_project_contract = None
     }
 ;;
 

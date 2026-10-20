@@ -8,6 +8,14 @@ val source_host_error : Sources.Error.t -> Error.t
 
 val upload_host_error : Upload.Error.t -> Error.t
 
+(** A Host Project's first successful full check may attach immutable
+    [verified_project_contract] comparison evidence to that exact context
+    entry. Later checks still prove physical source/Root, original and current
+    actors and fresh configured selection. They skip re-encoding only when
+    both newly selected contracts physically equal the admitted source
+    contract and the current Ledger view retains its verified fingerprint.
+    Distinct contracts use the existing bounded semantic comparison. Failed
+    context publication does not install evidence in another entry. *)
 val check_context_owner
   :  ?ledger:Ledger.t
   -> t
@@ -80,7 +88,11 @@ module Retained_selection : sig
       the creating Authoring context's admitted source/view limits. Ordinary
       editor edits/replacement/close do not reinterpret it. Genuine root,
       supplied policy, upload Store pin/deadline and daemon lifetime remain
-      current requirements. May yield for the upload Store proof. *)
+      current requirements. A retained Host Project copies only its verified
+      contract comparison evidence from the published editor context.
+      Rechecking it never replaces source/Root, actor or policy checks; an
+      unattested or distinctly selected contract uses the full bounded
+      fingerprint path. May yield for the upload Store proof. *)
   val check_current
     :  t
     -> actor:Operator_authorization.t

@@ -651,6 +651,10 @@ let%test_unit "host root read is fresh while project context remains captured" =
            Agent_server.Authoring_source_host.Context.close_and_wait second_owner;
            let static_allowed = ref true in
            let project_allowed = ref true in
+           let project_contract =
+             ref (Chatml.Chatml_compiler_contract.for_target One_off_v1 ~checkpoint:Fn.id)
+           in
+           let fresh_project_contract = ref true in
            let on_static = ref Fn.id in
            let host = P.Id.Server.create () in
            let connection =
@@ -675,9 +679,12 @@ let%test_unit "host root read is fresh while project context remains captured" =
                       if !project_allowed
                       then
                         Some
-                          (Chatml.Chatml_compiler_contract.for_target
-                             One_off_v1
-                             ~checkpoint:Fn.id)
+                          (if !fresh_project_contract
+                           then
+                             Chatml.Chatml_compiler_contract.for_target
+                               One_off_v1
+                               ~checkpoint:Fn.id
+                           else !project_contract)
                       else None)
                     ~document_static:(fun _ ~requested_environment:_ ->
                       !on_static ();
@@ -755,6 +762,169 @@ let%test_unit "host root read is fresh while project context remains captured" =
              match call (Context_open open_request) with
              | Ok (Context_open context) -> context
              | Ok _ | Error _ -> failwith "actual project context open failed"
+           in
+           let check_context context ~checkpoint =
+             S.with_current
+               service
+               ~actor
+               ~connection
+               ~expected:(P.Authoring.Context.Expected.of_view context)
+               ~checkpoint
+               ~f:(fun _ ~checkpoint:_ -> Ok ())
+           in
+           let contract_checkpoints context =
+             let count = ref 0 in
+             check_context context ~checkpoint:(fun () -> incr count) |> ok;
+             !count
+           in
+           (* Policies may construct an equivalent value at every lookup. This
+              retains the full bounded semantic path, including final checks. *)
+           let distinct_checkpoints = contract_checkpoints context in
+           call
+             (Context_close
+                (P.Authoring.Context.Close_request.create
+                   ~expected:(P.Authoring.Context.Expected.of_view context)))
+           |> ok
+           |> ignore;
+           fresh_project_contract := false;
+           let context =
+             match call (Context_open open_request) with
+             | Ok (Context_open context) -> context
+             | Ok _ | Error _ -> failwith "shared-contract project open failed"
+           in
+           let exact_checkpoints = contract_checkpoints context in
+           assert (exact_checkpoints < 32);
+           assert (distinct_checkpoints > exact_checkpoints + 100);
+           let admitted_contract = !project_contract in
+           project_contract
+           := Chatml.Chatml_compiler_contract.for_target One_off_v1 ~checkpoint:ignore;
+           assert (contract_checkpoints context > exact_checkpoints + 100);
+           project_contract
+           := Chatml.Chatml_compiler_contract.for_target Tool_v1 ~checkpoint:ignore;
+           (match check_context context ~checkpoint:ignore with
+            | Error S.Error.Stale_context -> ()
+            | Ok () | Error _ -> failwith "attestation admitted changed contract");
+           project_contract := admitted_contract;
+           project_allowed := false;
+           (match check_context context ~checkpoint:ignore with
+            | Error S.Error.Selection_unavailable -> ()
+            | Ok () | Error _ -> failwith "attestation cached selection authority");
+           project_allowed := true;
+           historical_read_allowed := false;
+           assert (Result.is_error (check_context context ~checkpoint:ignore));
+           historical_read_allowed := true;
+           check_context context ~checkpoint:ignore |> ok;
+           (* Revoke during genuine bounded fallback work. The nonyielding
+              publication suffix must reject it despite the admitted proof. *)
+           fresh_project_contract := true;
+           let revoked_at_checkpoint = ref false in
+           let borrowed = ref false in
+           let published = ref false in
+           (match
+              S.For_testing.with_publication_probe
+                service
+                ~actor
+                ~connection
+                ~expected:(P.Authoring.Context.Expected.of_view context)
+                ~feature:Semantic
+                ~checkpoint:(fun () ->
+                  if !borrowed
+                  then (
+                    revoked_at_checkpoint := true;
+                    project_allowed := false))
+                ~after_borrow:(fun _ -> borrowed := true)
+                ~final_check:(fun () -> Ok ())
+                ~publish:(fun () -> published := true)
+            with
+            | Error _ -> ()
+            | Ok _ -> failwith "revoked fallback published Project result");
+           assert !revoked_at_checkpoint;
+           assert !borrowed;
+           assert (not !published);
+           project_allowed := true;
+           fresh_project_contract := false;
+           check_context context ~checkpoint:ignore |> ok;
+           let context =
+             let source_id =
+               match
+                 call
+                   (Source_list
+                      (P.Authoring.Source_read.List_request.create
+                         ~context:(P.Authoring.Context.Expected.of_view context)
+                         ~package_namespace:None
+                         ~directory:None
+                       |> ok))
+               with
+               | Ok (Source_list result) ->
+                 P.Authoring.Source_read.List_result.sources result
+                 |> List.find_exn ~f:(fun source ->
+                   String.equal
+                     (Chatml_source.Id.relative_path (P.Authoring.Source.id source))
+                     "main.chatml")
+                 |> P.Authoring.Source.id
+               | Ok _ | Error _ -> failwith "checkpoint edit inventory failed"
+             in
+             let version =
+               match
+                 call
+                   (Document_version
+                      (P.Authoring.Document.Version_request.create
+                         ~context:(P.Authoring.Context.Expected.of_view context)
+                         ~source_id
+                       |> ok))
+               with
+               | Ok (Document_version version) -> version
+               | Ok _ | Error _ -> failwith "checkpoint edit version failed"
+             in
+             let replacement = ref None in
+             let borrowed = ref false in
+             published := false;
+             fresh_project_contract := true;
+             (match
+                S.For_testing.with_publication_probe
+                  service
+                  ~actor
+                  ~connection
+                  ~expected:(P.Authoring.Context.Expected.of_view context)
+                  ~feature:Semantic
+                  ~checkpoint:(fun () ->
+                    match !borrowed, !replacement with
+                    | false, _ | true, Some _ -> ()
+                    | true, None ->
+                      fresh_project_contract := false;
+                      (match
+                         call
+                           (Document_replace
+                              (P.Authoring.Document.Replace_request.create
+                                 ~expected:version
+                                 ~next_editor_revision:1
+                                 ~contents:"let main input = Task.pure(input)\n"
+                               |> ok))
+                       with
+                       | Ok (Document_replace result) ->
+                         replacement := Some result.P.Authoring.Document.Result.context
+                       | Ok _ | Error _ -> failwith "checkpoint edit failed"))
+                  ~after_borrow:(fun _ -> borrowed := true)
+                  ~final_check:(fun () -> Ok ())
+                  ~publish:(fun () -> published := true)
+              with
+              | Error S.For_testing.Stale_context -> ()
+              | Ok _ | Error _ -> failwith "replaced Project published old result");
+             assert !borrowed;
+             assert (not !published);
+             let replacement = Option.value_exn !replacement in
+             assert (contract_checkpoints replacement < 32);
+             match
+               call
+                 (Context_refresh
+                    (P.Authoring.Context.Refresh_request.create
+                       ~expected:(P.Authoring.Context.Expected.of_view replacement)
+                       ~policy:Discard_open_documents))
+             with
+             | Ok (Context_refresh refreshed) ->
+               assert (contract_checkpoints refreshed < 32);
+               refreshed
+             | Ok _ | Error _ -> failwith "attested Project refresh failed"
            in
            let expected = P.Authoring.Context.Expected.of_view context in
            let standard =
@@ -873,6 +1043,7 @@ let%test_unit "host root read is fresh while project context remains captured" =
            in
            let occupied_at_checkpoint = ref false in
            let cancelled = Failure "cancel retained source after slot acquisition" in
+           fresh_project_contract := true;
            (match
               Eio.Cancel.sub (fun cancel ->
                 let interrupt_after_retention () =
@@ -894,6 +1065,7 @@ let%test_unit "host root read is fresh while project context remains captured" =
               assert (phys_equal reason cancelled)
             | Ok _ | Error _ -> failwith "retention did not cancel at occupied slot");
            assert !occupied_at_checkpoint;
+           fresh_project_contract := false;
            let released_slot = open_extra_source () |> ok in
            Agent_server.Authoring_source_host.Context.close_and_wait released_slot;
            let retained =
@@ -906,6 +1078,32 @@ let%test_unit "host root read is fresh while project context remains captured" =
            let retained_fingerprint =
              Selection.repl_root_fingerprint retained_selection
            in
+           let retained_checkpoints () =
+             let count = ref 0 in
+             Selection.Shared.check_current
+               retained_selection
+               ~actor
+               ~checkpoint:(fun () -> incr count)
+             |> ok
+             |> ignore;
+             !count
+           in
+           let retained_exact_checkpoints = retained_checkpoints () in
+           assert (retained_exact_checkpoints < 32);
+           fresh_project_contract := true;
+           assert (retained_checkpoints () > retained_exact_checkpoints + 100);
+           fresh_project_contract := false;
+           historical_read_allowed := false;
+           assert (
+             Result.is_error
+               (Selection.Shared.check_current
+                  retained_selection
+                  ~actor
+                  ~checkpoint:ignore));
+           historical_read_allowed := true;
+           Selection.Shared.check_current retained_selection ~actor ~checkpoint:ignore
+           |> ok
+           |> ignore;
            let analyze =
              S.Semantic.create
                ~owner:service

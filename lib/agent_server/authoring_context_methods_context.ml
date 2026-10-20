@@ -235,7 +235,16 @@ let handle_context_open t ~actor ~connection request ~checkpoint =
            next, origin
        in
        let%bind view = view_of_context t next ~id ~identity ~origin ~checkpoint in
-       let context = { id; identity; original_actor = actor; origin; owner; view } in
+       let context =
+         { id
+         ; identity
+         ; original_actor = actor
+         ; origin
+         ; owner
+         ; view
+         ; verified_project_contract = None
+         }
+       in
        let%bind () = check_context_owner ~ledger:next t context ~actor ~checkpoint in
        let%map response = checked_response t (W.Response.Context_open view) in
        pending := Some (entry, ledger, next, context);

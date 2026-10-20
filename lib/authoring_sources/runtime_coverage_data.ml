@@ -228,6 +228,7 @@ let shared_features =
       ] )
   ; ( "execution.developer_repl_source_retention"
     , "Captured REPL source survives editor closure under a separately charged owner; \
+       immutable Project contract comparison evidence avoids repeated encoding while \
        fresh actor, source and upload checks still deny revoked effects"
     , [ "lib/agent_server/authoring_source_host.ml"
       ; "lib/agent_server/authoring_context_owner.ml"
@@ -238,6 +239,7 @@ let shared_features =
     , [ "test/project_source_host/authoring_tests.ml"
       ; "test/authoring_context_service/service_tests.ml"
       ; "test/authoring_upload_store/publication_tests.ml"
+      ; "docs-src/development/chatml-authoring-source-host.md"
       ; "docs-src/design/chatml-developer-runtime.md"
       ] )
   ; ( "execution.authoring_upload_selection"
@@ -790,7 +792,7 @@ let implementation_sources =
   ; ( "lib/agent_server/authoring_source_host.ml"
     , "eb5183c8659d25c59a480875548ef2e1b038126786266b58b5ad88b241e86035" )
   ; ( "lib/agent_server/authoring_context_owner.ml"
-    , "f1c74b20f51d473d2b783b37c5c860ce67e68e901cbc88345f57b09d7f283bca" )
+    , "ddd01bf4bbeb53c562bce7f6935acaf990ca1031c62818d277c9282a674e0df7" )
   ; ( "lib/agent_server/developer_capture_host.ml"
     , "7212e5fb9fd8025df3fda921a2e1ba28c266ffbe53c614b8bf6a873847b7c0f6" )
   ; ( "lib/agent_server/developer_root_source.ml"
