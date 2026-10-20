@@ -6,7 +6,7 @@ test('documentation paths lead through search setup to labeled sample output', a
 }) => {
   await page.goto('/docs/');
   const paths = page.getByRole('navigation', { name: 'Documentation paths' });
-  await expect(paths.getByRole('link')).toHaveCount(3);
+  await expect(paths.getByRole('link')).toHaveCount(4);
   await page
     .getByRole('navigation', { name: 'Applications and reference' })
     .getByRole('link', { name: 'Explore applications →' })
@@ -70,6 +70,7 @@ test('readers discover shell, teams and workflows before opening the reference c
     ['Build tools with guardrails', '/docs/concepts/shell-access/'],
     ['Work with a team of specialists', '/docs/guides/subagents/'],
     ['Program the workflow', '/docs/concepts/chatml/'],
+    ['Develop ChatML interactively', '/docs/guides/chatml-development/'],
   ]) {
     await page.goto('/docs/');
     const link = page

@@ -65,7 +65,12 @@ test('the framework map exposes the capability catalog and reaches maintained MC
     const navigation = page.getByRole('navigation', {
       name: 'Framework capabilities',
     });
-    await expect(navigation.getByRole('link')).toHaveCount(16);
+    await expect(navigation.getByRole('link')).toHaveCount(17);
+    await expect(
+      navigation.getByRole('link', {
+        name: 'Captured ChatML development and REPL',
+      }),
+    ).toHaveAttribute('href', '/docs/guides/chatml-development/');
     await navigation
       .getByRole('link', { name: 'MCP tools and authentication' })
       .click();
