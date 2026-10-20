@@ -98,6 +98,13 @@ const paths = [
       'Sequence tools, retain workflow state, coordinate sessions, and deliver background results with ChatML.',
     label: 'ChatML workflows',
   },
+  {
+    id: 'guide/chatml-development-workflow',
+    title: 'Develop ChatML interactively',
+    description:
+      'Edit a captured revision, Check it, choose Fixture or Live, drive REPL Tasks explicitly, and inspect authorized traces.',
+    label: 'ChatML workflows',
+  },
 ];
 
 export function documentationPaths(entries) {

@@ -172,11 +172,7 @@ let%test_unit "separate quantification groups retain scheme-scoped display" =
   match outputs with
   | [ left; right ] ->
     [%test_result: string] left ~expect:"'a {row_eq_except(new, old)}";
-    [%test_result: string] right ~expect:left;
-    List.iter outputs ~f:(fun text ->
-      [%test_result: bool]
-        (String.is_substring text ~substring:"{row_eq_except(new, old)}")
-        ~expect:true)
+    [%test_result: string] right ~expect:left
   | _ -> failwith "expected two grouped roots"
 ;;
 

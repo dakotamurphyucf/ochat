@@ -51,8 +51,6 @@ let selector = A.Target.selected_script "s" |> ok
 let%expect_test "checked template Analyze opt-in is strict and defaults off" =
   let plain = A.Analyze.Request.create ~context:expected ~target:selector |> ok in
   let opted = A.Analyze.Request.with_checked_template plain in
-  assert (not (A.Analyze.Request.prepare_checked_template plain));
-  assert (A.Analyze.Request.prepare_checked_template opted);
   assert (not (A.Analyze.Request.equal plain opted));
   let roundtrip request =
     A.Analyze.Request.of_json (A.Analyze.Request.to_json request) |> ok

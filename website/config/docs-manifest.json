@@ -1718,7 +1718,7 @@
     "id": "chatml",
     "source": "docs-src/chatml/README.md",
     "disposition": "publish",
-    "title": "Programmable workflows",
+    "title": "ChatML workflows",
     "reviewNote": "P05 retained foundation: canonical reader destination reviewed in the P01\u2013P04 audit and P05 coverage pass. Source provenance, fenced examples, routes and fragment behavior remain checked; live/runtime verification is separate.",
     "provenance": "authored",
     "route": "/docs/concepts/chatml/",
@@ -5131,5 +5131,142 @@
     "title": "A captured project with one shared counter",
     "reviewNote": "Contributor execution fixture and host API walkthrough for captured module graphs, shared aliases, source removal and exact dependency locks; not a standalone downloadable agent workflow.",
     "provenance": "authored"
+  },
+  {
+    "id": "design/chatml-authoring-services",
+    "source": "docs-src/design/chatml-authoring-services.md",
+    "disposition": "repository-only",
+    "title": "ChatMD and ChatML authoring services",
+    "reviewNote": "Repository architecture, source/projection custody and implementation boundaries; published protocol and captured workflow provide user-facing contracts.",
+    "provenance": "authored"
+  },
+  {
+    "id": "design/chatml-developer-runtime",
+    "source": "docs-src/design/chatml-developer-runtime.md",
+    "disposition": "repository-only",
+    "title": "Developer runtime architecture and policy",
+    "reviewNote": "Detailed implementation design and host-policy examples retained as a repository reference; the practical captured workflow, REPL submission and protocol references are published.",
+    "provenance": "authored"
+  },
+  {
+    "id": "design/chatml-execution-tracing",
+    "source": "docs-src/design/chatml-execution-tracing.md",
+    "disposition": "publish",
+    "title": "Bounded execution tracing",
+    "reviewNote": "Delivered read-only trace contract with source ownership, retention, disclosure and transport limits.",
+    "provenance": "authored",
+    "route": "/docs/reference/chatml/execution-tracing/",
+    "description": "Understand bounded trace pages, exact source attribution and current read authority.",
+    "section": "ChatML reference",
+    "kind": "reference",
+    "order": 12,
+    "navigation": true,
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "experimental",
+    "verification": "not-checked"
+  },
+  {
+    "id": "design/chatml-type-display",
+    "source": "docs-src/design/chatml-type-display.md",
+    "disposition": "repository-only",
+    "title": "Frozen ChatML type display",
+    "reviewNote": "Compiler display/retention internals for contributors, not an additional user-facing language contract.",
+    "provenance": "authored"
+  },
+  {
+    "id": "design/chatml-type-graph-copy",
+    "source": "docs-src/design/chatml-type-graph-copy.md",
+    "disposition": "repository-only",
+    "title": "ChatML inference graph copy",
+    "reviewNote": "Internal mutable-type graph copying and independent regression evidence; no public client API.",
+    "provenance": "authored"
+  },
+  {
+    "id": "design/developer-command-storage",
+    "source": "docs-src/design/developer-command-storage.md",
+    "disposition": "repository-only",
+    "title": "Developer command storage",
+    "reviewNote": "Internal durable command custody, settlement and crash-recovery contracts; operator-facing recovery is documented separately.",
+    "provenance": "authored"
+  },
+  {
+    "id": "development/chatml-authoring-context",
+    "source": "docs-src/development/chatml-authoring-context.md",
+    "disposition": "repository-only",
+    "title": "Immutable authoring contexts",
+    "reviewNote": "Contributor context/overlay lifecycle implementation notes; the public protocol and workflow describe supported operations.",
+    "provenance": "authored"
+  },
+  {
+    "id": "development/chatml-authoring-source-host",
+    "source": "docs-src/development/chatml-authoring-source-host.md",
+    "disposition": "repository-only",
+    "title": "Authoring source host",
+    "reviewNote": "Host adapter and read-grant implementation notes; published host configuration and protocol remain the public entry points.",
+    "provenance": "authored"
+  },
+  {
+    "id": "development/chatml-developer-capture",
+    "source": "docs-src/development/chatml-developer-capture.md",
+    "disposition": "repository-only",
+    "title": "Developer capture core",
+    "reviewNote": "Portable capture and deterministic fixture internals; installed-host grants and user workflow are documented separately.",
+    "provenance": "authored"
+  },
+  {
+    "id": "development/chatml-repl-submission",
+    "source": "docs-src/development/chatml-repl-submission.md",
+    "disposition": "publish",
+    "title": "REPL submission and captured state",
+    "reviewNote": "Delivered bounded submission, source lifetime, sequential publication and explicit Task semantics for integrators.",
+    "provenance": "authored",
+    "route": "/docs/reference/chatml/repl-submission/",
+    "description": "Understand bounded REPL parsing, committed state, retained captures, reset and explicit Task driving.",
+    "section": "ChatML reference",
+    "kind": "reference",
+    "order": 11,
+    "navigation": true,
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "experimental",
+    "verification": "not-checked"
+  },
+  {
+    "id": "development/language-highlighting",
+    "source": "docs-src/development/language-highlighting.md",
+    "disposition": "repository-only",
+    "title": "ChatML and ChatMD highlighting",
+    "reviewNote": "Contributor lexical/TextMate rendering contract and test evidence, with frontend-specific limits; no new authoring or execution authority.",
+    "provenance": "authored"
+  },
+  {
+    "id": "development/terminal-highlighting",
+    "source": "docs-src/development/terminal-highlighting.md",
+    "disposition": "repository-only",
+    "title": "Shared terminal highlighting",
+    "reviewNote": "UI-side library ownership and compatibility details for contributors; user-facing terminal setup is in the captured workflow.",
+    "provenance": "authored"
+  },
+  {
+    "id": "guide/chatml-development-workflow",
+    "source": "docs-src/guide/chatml-development-workflow.md",
+    "disposition": "publish",
+    "title": "Develop a captured ChatML revision",
+    "reviewNote": "Practical installed-host guide joining exact source editing, Developer Check, Fixture/Live, terminal REPL and separately authorized trace readback; no live-provider or deployment claim.",
+    "provenance": "authored",
+    "route": "/docs/guides/chatml-development/",
+    "description": "Use chatml-repl, Developer Check and Fixture/Live on exact captured revisions, immutable uploads and attributable traces.",
+    "section": "ChatML workflows",
+    "kind": "guide",
+    "order": 8,
+    "navigation": true,
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "experimental",
+    "verification": "not-checked"
   }
 ]

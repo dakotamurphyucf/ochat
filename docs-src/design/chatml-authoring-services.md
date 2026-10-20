@@ -1,9 +1,9 @@
 # ChatMD and ChatML authoring services
 
-Status: M5 design, 2026-10-13. The portable project/document context ledger and
-host document capture are implemented; the remote language-service handlers
-and wire document projection are still proposed. This document defines the
-selected service and edit/save/run boundary. The
+Status: implemented opt-in Authoring service. The portable Project/Document
+context ledger, native semantic and assistance handlers, upload publication,
+and typed client/wire projections share the installed host policy and finite
+limits. This document describes their source and edit/save/run contracts. The
 [developer runtime](chatml-developer-runtime.md) owns test and
 REPL execution over selected immutable sources; the
 [trace design](chatml-execution-tracing.md) owns execution observations.
@@ -31,10 +31,13 @@ still select their fixed contracts inside the bounded worker.
 
 `Chatml_source.Location` is an exact half-open byte range tied to a source ID and
 digest. `Chatmd_parser_input` retains authored/effective bytes and parser-owned
-ranges; located import expansion retains each imported source owner. The current
-ChatMD script conversion retains the extracted inline body and a declaration
-range, but does not expose a proven byte map from every extracted body interval
-through RAW delimiters, entities and serialization to original markup.
+ranges; located import expansion retains each imported source owner. The [parser-owned extraction map](../../lib/chatmd/chatmd_extraction_map.mli)
+binds the exact emitted ChatML body to its declaring input. A span has an exact
+inline projection only when its bytes prove one continuous authored origin.
+An external `src` origin additionally needs the host's immutable captured-source
+custody. Transformed, synthetic, ambiguous or budget-degraded spans retain
+explicit approximate or unavailable projections; not every extracted interval
+has an exact markup range.
 
 `Project_source_host` and its admitted roots own host source acquisition. Its
 borrowed source handles are not a client path grant. `Source_loader` has bounded
@@ -47,7 +50,8 @@ over direct, HTTP and full-duplex NDJSON stdio paths.
 
 OCH-277 implements the [host-only source read/capture adapter](../development/chatml-authoring-source-host.md)
 over configured external roots, current operator policy and the existing local
-project preparation path. It is not yet a protocol method or an overlay service.
+project preparation path. This adapter does not itself install protocol methods
+or overlays; the installed service borrows it under the current host policy.
 
 OCH-278 implements the [pure immutable authoring context store](../development/chatml-authoring-context.md).
 It owns exact pending overlay revisions and a bounded current-context source
@@ -228,10 +232,10 @@ same checked compiler and bounded native-site projection as project analysis.
 Inline sites can retain parser-owned authored ranges, external sources retain
 member/digest provenance pending host custody, and effective-only or generated
 text remains approximate. Its pure document result map and the project result
-map use one policy and a shared aggregate retention count. The service host
-must serialize both maps with its context ledger and reauthorize actor, parser
-selection, source custody, and currentness before publishing or exposing either
-result; these host handlers remain separate work.
+map use one policy and a shared aggregate retention count. The installed
+[semantic host](../../lib/agent_server/authoring_semantic_service.mli) serializes
+these results with its context ledger and reauthorizes actor, parser selection,
+source custody and currentness before publication or readback.
 
 ## Queries and incomplete input
 
@@ -573,10 +577,11 @@ M5 service for presently installed assets.
 
 ## Positions
 
-Compiler locations remain exact byte offsets. OCH-256 owns the proposed pure
-`Chatml_editor_position` module in `lib/chatml_sources`, independent of runtime,
-transport and UI. Its draft contract has `Encoding.Utf8_bytes | Utf16_units`,
-source-bound index, abstract positions/ranges and typed errors. Wire requests
+Compiler locations remain exact byte offsets. The pure
+[`Chatml_editor_position`](../../lib/chatml_sources/chatml_editor_position.mli)
+module is independent of runtime, transport and UI. Its immutable source-bound
+index supports `Encoding.Utf8_bytes | Utf16_units`, abstract positions/ranges
+and typed errors. Wire requests
 negotiate one encoding and use zero-based lines and units. CR, LF and CRLF retain
 their original bytes and one logical line break. Conversions reject out-of-range
 coordinates, CRLF midpoints, byte positions inside a valid UTF-8 scalar and
@@ -598,8 +603,9 @@ write. OChat reobserves saved bytes through the existing local source owner and
 captures a new graph; a concurrent external edit can change what is observed,
 so the result must name exact captured bytes and never claim an atomic filesystem
 CAS against uncooperative writers. A run/test selects that saved capture
-explicitly. Existing agent sessions and REPLs retain their prior source until
-an explicit new capture/reset/upgrade operation.
+explicitly. Existing agent sessions keep their selected source under their own
+replacement lifecycle. A REPL keeps its original capture across reset; selecting
+new saved bytes, a project graph or an environment requires a new Create.
 
 A remote author may read a permitted host source closure, save a local edited
 copy, then upload a complete immutable closure. The manifest names portable
@@ -792,44 +798,31 @@ run, test and REPL behavior over that pinned source. REPL create/submit/
 drive-task/reset/close operations share the source identity and typed transport,
 not an agent conversation or editor lease. Accepted REPL behavior commits each
 successful statement after whole-submission parsing; a top-level `Task` runs
-only through the separate explicit drive action. A terminal Eio+Notty client,
-chat TUI and future desktop editor consume the same portable core/client API.
+only through the separate explicit drive action. The shipped Eio/Notty
+`chatml-repl` frontend uses the portable client API. Future chat-TUI REPL panels
+and desktop editors can use the same contracts; those panels are not installed
+by the language service.
 
-## Implementation ownership and validation
+## Implementation boundaries and validation
 
-OCH-132 and OCH-136 remain **unestimated tracking parents** so their complete
-acceptance is not accidentally narrowed or double-counted. The concrete children
-are: OCH-277 host read-grant/capture adapter (5) and OCH-278 pure immutable
-context/overlay lifecycle (5), under unestimated tracking parent OCH-257;
-OCH-256 pure position bridge (3); OCH-258 unestimated checker projection
-parent with OCH-301 project analysis core (8) and OCH-302 selected ChatMD
-script adapter (5);
-OCH-259 parser-owned ChatMD extraction mapping (5); OCH-260 compiler-owned
-provisional prefix assistance (5); OCH-261 common/source/context protocol and
-client contract (8);
-OCH-280 unestimated analysis/assistance tracking parent, split after concrete
-interface review into OCH-299 semantic wire/client contract (8) and OCH-300
-lexical/assistance wire/client contract (8); OCH-281
-bundle wire/client contract (5); OCH-282 document-only context host admission
-(5); OCH-262 HTTP/stdio server adapters (5); OCH-263 authoring bundle
-staging/storage/receipt (8); and OCH-264 as an unestimated tracking parent for
-OCH-294 captured project closure validation, OCH-295 tagged ChatMD and project
-upload basis, and OCH-296 durable proof-gated publication. OCH-261 includes
-separate live host browse/read and captured source read.
-The shared ChatMD validator schema supplies declaration metadata to later
-tolerant-cursor and seven-category suggestion work. Semantic assistance and
-highlighter assets retain their own implementation boundaries. The
-run/test/trace/REPL implementation belongs to its developer-runtime
-tickets. Assign estimates before starting each ticket and link completion
-dependencies, including the bundle path into editor save/reload integration.
+The [source host](../development/chatml-authoring-source-host.md) owns current
+read grants and immutable capture; the [context store](../development/chatml-authoring-context.md)
+owns overlay revisions and generation. The installed
+[Authoring composition](../../lib/agent_server/authoring_installation.mli)
+selects semantic, assistance and upload services independently under finite
+limits. The parser owns extraction maps, the compiler owns complete and
+provisional checking, and the typed client/wire adapters preserve their exact
+source and result identities. Bundle validation and publication retain their
+own Store-backed proof. Developer execution and historical trace disclosure
+remain separately authorized services, rather than privileges conferred by
+an analysis result.
 
 The [frozen type display](chatml-type-display.md) is a bounded, presentation-only
 view of immutable inferred types. Its text is not a type equality key or a
 source-language annotation.
 
-Each implementation ticket updates affected `docs-src/` contracts and runs
-relevant local checks. Draft PRs can skip CI; final integrated M5 validation
-must run the combined CI gate under OCH-254. Validation includes
+Integrated qualification exercises the [captured workflow](../guide/chatml-development-workflow.md)
+and the focused service suites. Validation includes
 build/analysis agreement, cross-file scope and source ownership,
 failed/partial/provisional separation, Unicode and CRLF boundaries, ChatMD
 RAW/entity/import mapping, changed overlays

@@ -187,7 +187,10 @@ they reuse the Authoring read or upload grants above, authenticated method
 scopes, the native permission profile and the same Standard contract cache.
 The [complete `server.developer` field example](../design/chatml-developer-runtime.md)
 selects a supplied ChatMD script and a bearer principal. Omitting the field
-leaves Developer methods unavailable. Local `--local` policy-file setup has
+leaves Developer methods unavailable. See the
+[captured development workflow](../guide/chatml-development-workflow.md) for
+source selection, Check, Fixture/Live and explicit REPL Task driving.
+Local `--local` policy-file setup has
 its own integration path and is not implied by this daemon setting.
 
 ### Scoped external session helpers
@@ -276,8 +279,8 @@ a replacement snapshot.
 `maximum_events` advertised during initialization. `response_artifact_ms` bounds
 raw response-artifact lifetime. The legacy `completed_stream_ms` spelling is
 accepted only as the default for an omitted `response_artifact_ms`; it does not
-retain or enable replay of live deltas. Protocol 1.0 recovers through durable
-events and snapshots, not a completed-stream replay API. The maintenance service removes
+retain or enable replay of live deltas. Session synchronization recovers through
+durable events and snapshots, not a completed-stream replay API. The maintenance service removes
 expired response files with Eio without following symbolic links. Journals are
 pruned only behind an installed snapshot. Snapshot retention keeps the current
 checkpoint and one validated fallback. Journal pruning uses the older retained

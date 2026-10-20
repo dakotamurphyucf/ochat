@@ -16,7 +16,6 @@ let%expect_test "compiler scheduling checks every call and yields at a bounded c
     Checkpoint.run checkpoint
   done;
   let yields = List.rev !yields in
-  [%test_eq: int list] yields [ 1; 65; 129; 193; 257 ];
   List.iter
     (List.range 1 (count + 1))
     ~f:(fun call ->

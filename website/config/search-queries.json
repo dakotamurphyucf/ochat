@@ -249,5 +249,35 @@
       "/docs/tutorials/"
     ],
     "maxRank": 3
+  },
+  {
+    "query": "chatml-repl",
+    "expected": [
+      "/docs/guides/chatml-development/",
+      "/docs/reference/chatml/repl-submission/"
+    ],
+    "maxRank": 3
+  },
+  {
+    "query": "Developer Check Fixture",
+    "expected": [
+      "/docs/guides/chatml-development/"
+    ],
+    "maxRank": 3
+  },
+  {
+    "query": "immutable bundle revision",
+    "expected": [
+      "/docs/guides/chatml-development/"
+    ],
+    "maxRank": 3
+  },
+  {
+    "query": "attributable trace",
+    "expected": [
+      "/docs/guides/chatml-development/",
+      "/docs/reference/chatml/execution-tracing/"
+    ],
+    "maxRank": 3
   }
 ]

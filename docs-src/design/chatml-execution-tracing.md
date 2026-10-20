@@ -1,6 +1,6 @@
 # ChatML execution tracing design
 
-Status: The bounded core recorder, compile/evaluator/host instrumentation, Developer command and REPL attachment, historical source-read owner, and authenticated server page protocol are implemented. HTTP and Unix server reads use the same bounded page contract; the first-party local/stdio trace client and integrated transport parity remain pending. A full debugger is outside this trace contract.
+Status: The bounded core recorder, compile/evaluator/host instrumentation, Developer command and REPL attachment, historical source-read owner, and authenticated server page protocol are implemented. The [initialized first-party client](../../lib/agent_client/developer_trace_connection.mli) reads the same separately authorized bounded pages over embedded, HTTP, Unix and stdio connections. Transport qualification does not make source capture or a cursor an execution/read grant. A full debugger is outside this trace contract.
 
 ## Purpose and existing boundaries
 
@@ -18,7 +18,7 @@ Use small typed modules for run identity, source site, event, recorder and page,
 
 The core event carries a monotone per-trace sequence, safe kind, optional native source site and opaque correlation; the OCH-273 wire envelope adds schema version and trace ID. Phases describe observations rather than inventing a global clock. The core records phase start/end; statement/call entry in `Full` mode; effect attempted/host-returned/failed; a real host wait or approval suspension entered/resumed; recovered task failure; and a coarse failure category with owned site. `Summary` intentionally omits statement/call entries without counting them as capacity drops. `Job.read_result` is a nonblocking result query and is labelled `Job_read`, never an inferred wait. A trusted host adapter can bracket an actual Eio wait; cancellation leaves entered without inventing resumed. Job admission/status/terminal observations require their host adapter. Compilation runs in a joined worker domain, so its start/result/failure observations are made at the owning caller after the worker returns; interpreter and task observations remain in their execution domain. Linked dependency units and the entry unit use distinct initialization phases. The terminal outcome lives in a separately reserved record described below. A host-returned effect is **not** a transaction commit. A failed REPL submission does not publish its failed new binding, but effects and mutations already completed remain; `Task.catch` itself does not roll them back. Trace wording must preserve that distinction. Source-free infrastructure events have no fabricated site. A timeout or cancellation without a primary diagnostic site may carry the last **retained** site explicitly marked as context, never as failure origin.
 
-The source site is a validated `Chatml_source.Location.t` or an equivalent validated ID/digest/byte-span DTO tied to an exact captured source. Closures that outlive an edit or REPL reset keep the old source owner, even while the current execution has a new trace ID; OCH-273 must retain and authorize that historic source separately when it is outside the current submission inventory. An optional authored-origin projection is separate and qualified by the exact parent document revision. [ChatMD parser ranges](../../lib/chatmd/chatmd_parser_input.mli) are exact ranges in their effective input, but do not guarantee that a generated script is contiguous in that input. The [parser-owned extraction map](../../lib/chatmd/chatmd_extraction_map.mli) provides an exact projection only where an emitted span has one continuous authored origin; otherwise readers retain the native ChatML site and a declaration-related context. Never add a guessed declaration offset or relabel against current disk bytes.
+The source site is a validated `Chatml_source.Location.t` or an equivalent validated ID/digest/byte-span DTO tied to an exact captured source. Closures that outlive an edit or REPL reset keep the old source owner, even while the current execution has a new trace ID; the historical source owner retains and authorizes that source separately when it is outside the current submission inventory. An optional authored-origin projection is separate and qualified by the exact parent document revision. [ChatMD parser ranges](../../lib/chatmd/chatmd_parser_input.mli) are exact ranges in their effective input, but do not guarantee that a generated script is contiguous in that input. The [parser-owned extraction map](../../lib/chatmd/chatmd_extraction_map.mli) provides an exact projection only where an emitted span has one continuous authored origin; otherwise readers retain the native ChatML site and a declaration-related context. Never add a guessed declaration offset or relabel against current disk bytes.
 
 The event payload is deliberately coarse: a fixed stage/kind/category enum, a stable safe code from an explicit allowlist, a host-allowlisted public operation label if available, source coordinates and opaque correlation IDs. It excludes argument/result values, prompt or model text, tool payloads, environment variables, credentials, source excerpts, raw exception names/messages and rendered diagnostics. Unknown or sensitive operation names collapse to a generic kind. The separately authorized diagnostic/source endpoints may render their own content under their own grants. The recorder must not eagerly stringify a value just to decide whether the trace is enabled.
 
@@ -42,14 +42,26 @@ The private Developer host attachment keeps only a bounded trace token and exact
 
 Source-owned sites could support future breakpoint matching, but the recursive evaluator and tail-call trampoline in [Chatml_eval](../../lib/chatml/chatml_eval.ml) do not expose a stable, suspendable frame stack. The host's current approval continuation is specific to permission flow, not an expression pause primitive. A debugger would need safe-point continuations, tail-call/frame semantics, bounded redacted value snapshots and explicit treatment of async jobs that continue while a script is paused. A pause must not hold an expired Eio or actor borrow; it needs owner-held lifetime bounds, disconnect behavior, current authorization on every step/resume and cancellation that still joins the action. Deterministic replay/time travel additionally needs external-effect recording or sandboxing and is outside this proposal. Research a narrow safe-point/stack spike before estimating a debugger protocol. Trace implementation requires none of these pause or replay capabilities.
 
-## Delivery and verification
+## Implementation and verification
 
-The children below split OCH-139 into independently reviewable outcomes. OCH-139 remains a tracking parent; these estimates cover their own work, not the final milestone review.
+The [core recorder](../../lib/chatml_trace/chatml_trace.mli) owns bounded
+prefix/drop/terminal truth. The [host retention owner](../../lib/agent_server/developer_trace_retention.mli)
+binds the immutable source and execution association; the
+[page service](../../lib/agent_server/developer_trace_page.mli) rechecks current
+read authority. The [typed trace client](../../lib/agent_client/developer_trace_connection.mli)
+validates exact locators/cursors and reconnects only to the same server,
+principal and authentication kind. None of these read paths mutates execution.
 
-| Ticket | Points | Owned outcome and acceptance |
-| --- | ---: | --- |
-| [OCH-272](https://linear.app/ochat/issue/OCH-272) | 8 | Typed source/event/terminal contract and bounded prefix recorder; optional per-run compile/evaluator/task/effect hooks; source-owned failures and unchanged execution/cancellation semantics. Focused tests compare tracing on/off for errors, async waits, effects and limits, and verify prefix/drop/terminal invariants. Own `.mli` and source docs. |
-| [OCH-273](https://linear.app/ochat/issue/OCH-273) | Staged delivery | Bind Developer command and REPL traces to execution custody with bounded historical source retention, then expose authenticated read-only pagination through neutral local/HTTP/stdio adapters. Test denied/wrong-run/stale-source reads, reconnect and slow observer behavior. |
-| [OCH-274](https://linear.app/ochat/issue/OCH-274) | 8 | Qualify the integrated edit/save or upload → check → run/test/REPL → trace workflow with OCH-135/136/138 and the actual Eio/Notty terminal client. Exercise source mapping, failed/incomplete edits, environment changes, async cancel, REPL fault/reset and local/HTTP/stdio parity; distinguish fixture evidence from live authority. Repair feature defects in their owning tickets and update affected guides. |
-
-OCH-272 follows OCH-130 identity and captured-source/host boundaries; OCH-273 follows OCH-272 plus developer run/REPL service custody; OCH-274 follows those implementations and the terminal client. Each ticket runs targeted local tests and updates affected source docs. [OCH-254](https://linear.app/ochat/issue/OCH-254) alone owns the comprehensive website checks and final M5 review/merge gate. OCH-131 research completion does not imply the trace service or debugger is implemented.
+[Core trace tests](../../test/chatml_trace/trace_tests.ml) compare tracing on/off
+and independent prefix accounting. [Client tests](../../test/agent_client_trace/trace_connection_tests.ml)
+exercise paging and authority-preserving reconnect. The
+[transport scenario](../../test/agent_server_e2e/scenarios/developer_trace_client_scenario.ml)
+qualifies actual embedded, HTTP, Unix and stdio command reads; its HTTP REPL
+cases additionally cover Task/reset/reconnect and source-root revocation.
+These are explicit transport and authority oracles, not a claim that every
+REPL operation was repeated over every transport. The
+[captured development workflow](../guide/chatml-development-workflow.md)
+composes edit/save or immutable upload, Check, Fixture/Live, REPL and exact trace
+sites. Final combined documentation and runtime qualification remains separate
+from these implementation references. Debugger pause, stepping and replay are
+not provided by this trace contract.

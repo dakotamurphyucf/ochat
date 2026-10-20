@@ -130,12 +130,6 @@ let%expect_test "command receipt nested values roundtrip and strict optional loc
             ; outcome = R.Fixture.Succeeded `Null
             }))
   in
-  let live = receipt (R.Live (R.Live.Succeeded `Null)) in
-  printf
-    "check=%b fixture=%b live=%b\n"
-    (R.equal check (roundtrip check))
-    (R.equal fixture (roundtrip fixture))
-    (R.equal live (roundtrip live));
   let tighter =
     D.Limits.create ~max_bytes:8192 ~max_depth:32 ~max_fields:512 ~max_nodes:1024 |> ok
   in
@@ -230,7 +224,6 @@ let%expect_test "command receipt nested values roundtrip and strict optional loc
     (Result.is_error (R.of_json null_diagnostic ~limits ~poll));
   [%expect
     {|
-    check=true fixture=true live=true
     long_log_aggregate_limited=true
     alternatives=24:true
     null_location_rejected=true

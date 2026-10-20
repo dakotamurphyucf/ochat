@@ -266,7 +266,7 @@ and update the configuration's versions and base-file hash. Qualify cold and
 warm runs before merging. Nottui is constrained below 0.5 because the project's
 Notty integration conflicts with the Notty Community dependency introduced by
 Nottui 0.5. Do not silently remove that constraint without qualifying the terminal
-integration. Oniguruma 0.1.2 resolves through the pinned repository checksum;
+integration. Oniguruma 0.2.0 resolves through the pinned repository checksum;
 Piaf and the TextMate fork use immutable source commits.
 
 For corruption, inspect `gh cache list` and delete the affected exact cache IDs,

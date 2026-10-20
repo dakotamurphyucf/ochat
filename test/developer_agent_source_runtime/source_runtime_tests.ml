@@ -271,7 +271,7 @@ let%expect_test "deferred saved Agent binds one physical Root/runtime" =
           ~managed_definition:None
           ~agent_runtime:(Some runtime)
           ~jobs
-          ~authorize:(fun _ _ -> Ok ())
+          ~authorize_for_runtime:(fun _ -> fun _ _ -> Ok ())
           ~prepare_output:(function
             | Openai.Responses.Tool_output.Output.Text value -> Ok (`String value)
             | _ -> Error (P.Error.invalid_request "unexpected Agent output"))

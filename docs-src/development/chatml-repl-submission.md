@@ -32,9 +32,13 @@ defines the later session revision and sequential statement commit policy.
 ## Hosted process-local foundation
 
 The optional `Daemon.Developer.Repl` service uses the daemon's installed
-Developer source owner. A create request selects an authentic Standard
-`One_off_v1` or `Tool_v1` capture, retains its original authenticated actor,
-and binds one typing owner and evaluator to that captured contract. A current
+Developer source owner. A create request selects an authentic `One_off_v1`,
+`Tool_v1` or `Developer_tool_v1` capture, retains its original authenticated
+actor, and binds one typing owner and evaluator to that captured contract.
+`Developer_tool_v1` additionally requires the configured Developer compiler
+contract and current provider/native/child-work authority for operations such
+as `Model.spawn`; selecting the target does not grant that authority. The
+standalone `chatml-repl` frontend intentionally selects `One_off_v1`. A current
 reconnected actor must have the same principal ID and authentication kind;
 both actors and the selected source are checked again after waits. This source
 selection admits no native or Task effect by itself. The selected Standard
@@ -44,8 +48,11 @@ wide output sink.
 Concurrent authenticated reads repeat the same source and actor validation
 without replacing an active statement's admission proof. At its effect entry,
 the statement still checks the current source owner and exact selected
-contract. Revoked source policy or a refreshed authoring context denies that
-proof.
+contract. An accepted instance separately retains its original source selection.
+Editing, replacing, refreshing or closing the authoring context does not
+reinterpret or revoke that capture. A stale editor/candidate proof still
+rejects; current physical root, source policy, upload pin/deadline and original
+and current actor checks remain mandatory for the retained selection.
 
 Each submission carries an opaque instance, epoch, expected revision and
 idempotency key. The parser returns bounded `Need_more` or `Rejected` detail
@@ -62,6 +69,8 @@ never re-execute; a changed request conflicts. A final key slot is reserved
 for authenticated close after fresh work keys are exhausted. Cancel signals
 the exact active callback and joins its finalization; reset joins work,
 invalidates the epoch's Task handles and retains old-key replay evidence.
+Reset rebuilds lexical/runtime state from the same original capture; selecting
+changed project bytes or another environment requires a new Create.
 Close joins work and releases the evaluator. Instances and handles expire on
 daemon restart. The daemon joins its REPL callbacks before closing their
 shared source owner.

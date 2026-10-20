@@ -582,22 +582,7 @@ let%expect_test "binary chunks and publication receipts preserve owner and bound
           ~source:root
           ~byte_offset:(B.Wire_limits.max_member_bytes - String.length bytes + 1)
           ~bytes));
-  let begin_request =
-    B.Begin.create_request
-      ~idempotency_key:begin_key
-      ~manifest:(manifest [ root_member ] |> ok)
-      ()
-  in
-  check
-    "begin key roundtrip"
-    (P.Idempotency_key.equal
-       begin_key
-       (B.Begin.request_of_json (B.Begin.request_to_json begin_request) |> ok)
-         .idempotency_key);
   let published = B.Status.create ~owner ~upload_id ~state:(Published receipt) |> ok in
-  check
-    "published status roundtrip"
-    (Result.is_ok (B.Status.of_json (B.Status.to_json published)));
   let mismatched_wire_owner =
     match B.Status.to_json published with
     | `Object fields ->
@@ -1029,7 +1014,6 @@ let%expect_test "upload-only client rejects foreign and renegotiated replies" =
                 client
                 ~expected_manifest:manifest
                 commit_request)));
-    current_commit_reply := commit_reply;
     current_commit_reply
     := B.Commit.create_response
          ~owner

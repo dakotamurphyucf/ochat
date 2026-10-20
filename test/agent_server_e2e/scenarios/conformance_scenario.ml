@@ -4258,9 +4258,13 @@ let method_coverage =
   ]
 ;;
 
-let require_complete_method_coverage () =
-  (* The authoring core has closed wire codecs but no installed server handler
-     until OCH-262; conformance covers callable methods only. *)
+let require_core_method_coverage () =
+  (* This scenario initializes the core protocol without Authoring features.
+     Opt-in Authoring handlers are qualified separately by the configured
+     installation and authored workflow suites; semantic/source invariants also
+     have direct service tests. This inventory checks core scenario ownership,
+     not every Authoring method on every transport. The independent full method
+     inventory in agent_protocol_test checks codec dispatch completeness. *)
   let expected =
     Set.diff
       (String.Set.of_list Agent_protocol.Command.supported_methods)
@@ -4273,7 +4277,7 @@ let require_complete_method_coverage () =
   then
     raise_s
       [%sexp
-        "conformance method coverage differs from the closed protocol"
+        "core conformance method coverage differs from the closed protocol"
       , { missing : string list; unknown : string list }]
 ;;
 
@@ -4287,7 +4291,7 @@ let select case =
 ;;
 
 let run env ~case =
-  require_complete_method_coverage ();
+  require_core_method_coverage ();
   Temporary_environment.with_
     ~scenario:"cross-transport-conformance"
     ~env

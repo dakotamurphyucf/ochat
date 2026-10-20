@@ -277,6 +277,10 @@ Never delete locks, broad directories or unknown processes as a generic fix for
 contention. [Troubleshooting](troubleshooting.md) lists safer checks.
 
 
+The [captured development workflow](../guide/chatml-development-workflow.md)
+connects these source, reset, Task and trace rules to an offline terminal
+session and the joined HTTP/local-stdio qualification.
+
 ## Explicit dependency selection
 
 Ordinary configuration reload, prompt/import edits and `SIGHUP` rebuild against

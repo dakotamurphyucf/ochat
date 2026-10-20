@@ -197,7 +197,7 @@ update needs its own reviewed inputs, provenance and bounded execution scope.
 | Search or changes to discoverability | Build, then `npm run evaluate:search` |
 | UI, CSS, templates or browser behavior | Build, install browsers, then `npm run test:browser -- --workers=2`; also `npm run measure:performance` for affected presentation |
 | Hosting, headers, redirects or downloads | Retain the qualified artifact and follow the runbook's local/hosted routing checks |
-| Planning-only documentation | Check referenced paths/commands and `git diff --check`; current GitHub policy still runs the full gate |
+| Planning-only documentation | Check referenced paths/commands and `git diff --check`; ready PRs retain change detection and the final gate, while heavy jobs and publication may be skipped for these maintainer-only paths |
 
 Install browser binaries with
 `npx playwright install chromium firefox webkit` (Linux runners also need the

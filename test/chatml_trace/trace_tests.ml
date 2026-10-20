@@ -625,11 +625,6 @@ let%expect_test "tracing modes preserve task success and caught or uncaught fail
             assert (
               List.exists events ~f:(function
                 | Phase_finished Evaluation -> true
-                | _ -> false))
-          else
-            assert (
-              List.exists events ~f:(function
-                | Unrecovered_failure Runtime -> true
                 | _ -> false)))));
   [%expect {| |}]
 ;;

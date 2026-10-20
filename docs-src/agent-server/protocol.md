@@ -37,6 +37,10 @@ actual JSON encoders/decoders. It is regenerated from public interfaces by the
 documentation check. OCaml `option` denotes optional data, not permission to add
 unknown wire fields; enum/tag encoding is defined by the linked codec.
 
+The [captured development workflow](../guide/chatml-development-workflow.md)
+shows how Authoring selection, Developer checks/runs, REPL actions and trace
+pages compose without treating source identity as authority.
+
 ## Method reference
 
 Methods below use typed `Command` and `Method_result` variants in the

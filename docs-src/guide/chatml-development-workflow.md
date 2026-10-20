@@ -4,10 +4,46 @@ An Authoring context identifies an exact source revision and environment.
 Developer Check, Fixture, Live and REPL operations borrow that revision under
 separate installed grants. A successful Check does not grant execution.
 
-For an offline terminal session, use the complete
-[local policy and launch example](../design/chatml-developer-runtime.md#chatml-developer-runtest-and-repl-design).
-It creates a source file, prompt, workspace and explicit local Developer policy;
-`chatml-repl --local` starts the first-party stdio host. For a configured Project,
+## Start the terminal REPL
+
+With Ochat installed, `chatml-repl` uses an explicit local policy and the
+portable REPL client. This complete offline example grants only the selected
+local source and the two method scopes needed to submit and explicitly run a
+Task; it does not enable model inference or Shell approvals:
+
+```sh
+project=$(mktemp -d)
+mkdir -p "$project/workspace"
+printf '%s\n' 'let main input = Task.pure(input)' > "$project/check.chatml"
+printf '%s\n' '<developer>Local deterministic REPL.</developer>' > "$project/agent.chatmd"
+cat > "$project/policy.sexp" <<EOF
+(project_sources ((external_roots ($project))))
+(authoring_project_access
+ ((read_grants (((root $project) (principal_id Embedded_operator)
+                 (authentication_kind embedded.local))))
+  (selections (((root $project) (project check.chatml)
+                (request (entry ((name main)))) (target one_off_v1))))))
+(developer
+ ((selections
+   (((source (Local_source (root $project) (member check.chatml)))
+     (target One_off_v1)
+     (principals (((principal_id Embedded_operator)
+                   (authentication_kind embedded.local)))))))
+  (capacity
+   ((max_runs 128) (max_active_commands 4) (max_active_agent_calls 8)
+    (max_agent_sources 6) (max_native_bindings 32) (max_retained_tasks 8)
+    (max_watches_per_connection 4) (max_pending_approvals 4)
+    (max_repl_instances 8) (max_repl_keys_per_instance 128)
+    (max_repl_submissions_per_epoch 64) (max_repl_source_bytes 65536)))
+  (model Disabled) (approvals Disabled) (repl Standard_v1) (portable true)))
+(developer_scopes (developer.repl developer.live.run))
+EOF
+chatml-repl --local --developer-policy "$project/policy.sexp" \
+  --prompt-file "$project/agent.chatmd" --workspace "$project/workspace" \
+  --transient --source check.chatml
+```
+
+For a configured Project,
 select `--project chatml.project.json --entry main --environment default` in place
 of `--source check.chatml` and authorize that exact `Local_project` selection in
 the policy. A Project capture selects its source closure; it does not evaluate the
@@ -41,7 +77,11 @@ an uncertain request; a missing response is not proof that no work ran.
 The compact historical receipt remains stable even when separately retained type
 details have been evicted.
 
-An editor uses the typed Authoring and Developer APIs for the fuller workflow:
+## Edit, Check and choose Fixture or Live
+
+An editor uses the typed Authoring and Developer APIs for the fuller workflow.
+An immutable bundle revision identifies exact uploaded bytes, while every
+execution still needs its own installed authority:
 
 1. Open the admitted Project selection, then Analyze its current `Expected`
    generation. Keep source IDs, digests and byte offsets with diagnostics.
@@ -75,6 +115,14 @@ env -u OPENAI_API_KEY -u OPENAI_KEY -u ANTHROPIC_API_KEY \
   -u GEMINI_API_KEY -u GOOGLE_API_KEY dune build \
   @test/agent_server_e2e/agent-e2e-developer-workflow
 ```
+
+## Read attributable trace pages
+
+An attributable trace names the admitted execution and exact captured source;
+it is a bounded observation, not a substitute for the authoritative receipt.
+The initialized client supports read-only pages on embedded, HTTP, Unix and
+stdio connections. That transport coverage is separate from the joined authored
+workflow above, which runs its complete phases over HTTP and local stdio.
 
 The [Authoring service contract](../design/chatml-authoring-services.md) defines
 context, upload and refresh ownership. The

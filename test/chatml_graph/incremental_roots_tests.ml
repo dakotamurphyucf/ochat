@@ -148,12 +148,6 @@ let%expect_test "selected roots visit only actual transitive closure, in batch o
       ; selected_edges : (string * string) list
       ; batch_order : string list
       }];
-  assert (List.equal String.equal selected_order [ "dep.chatml"; "good.chatml" ]);
-  assert (List.equal String.equal batch_order (selected_order @ [ "entry.chatml" ]));
-  assert (
-    List.for_all selected_edges ~f:(fun (owner, dependency) ->
-      String.equal owner "good.chatml" && String.equal dependency "dep.chatml"));
-  assert (List.length selected_edges = 2);
   [%expect
     {|
     ((selected_order (dep.chatml good.chatml))

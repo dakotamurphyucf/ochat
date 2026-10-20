@@ -32,6 +32,7 @@ test('feature destinations remain visible and onboarding stays in order', async 
       '/docs/concepts/shell-access/',
       '/docs/guides/subagents/',
       '/docs/concepts/chatml/',
+      '/docs/guides/chatml-development/',
     ],
   );
 });

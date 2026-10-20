@@ -162,11 +162,11 @@ let%test_unit "developer-only codecs roundtrip validated states and reject wrapp
   let resolved =
     P.Host_invocation.resolve dispatched (P.Invocation.Complete `Null) |> F.ok
   in
+  assert (Result.is_error (P.Host_invocation.developer_of_json `Null));
   List.iter [ invocation; dispatched; resolved ] ~f:(fun value ->
     let json = P.Host_invocation.developer_to_json value |> F.ok in
     let decoded = P.Host_invocation.developer_of_json json |> F.ok in
     assert (Jsonaf.exactly_equal json (P.Host_invocation.developer_to_json decoded |> F.ok));
-    assert (Result.is_error (P.Host_invocation.developer_of_json `Null));
     let unknown =
       match json with
       | `Object fields -> `Object (("unexpected", `Null) :: fields)
@@ -295,6 +295,7 @@ let%test_unit "developer-only codecs roundtrip validated states and reject wrapp
       ~nested_depth:0
     |> F.ok
   in
+  assert (Result.is_error (P.Developer_job.of_json `Null));
   List.iter states ~f:(fun state ->
     let value =
       P.Developer_job.create
@@ -312,7 +313,6 @@ let%test_unit "developer-only codecs roundtrip validated states and reject wrapp
     let json = P.Developer_job.to_json value in
     let decoded = P.Developer_job.of_json json |> F.ok in
     assert (Jsonaf.exactly_equal json (P.Developer_job.to_json decoded));
-    assert (Result.is_error (P.Developer_job.of_json `Null));
     let unknown =
       match json with
       | `Object fields -> `Object (("unexpected", `Null) :: fields)

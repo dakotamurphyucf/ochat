@@ -215,42 +215,11 @@ principal list is rejected. The policy accepts only the documented sections,
 bounded input and exact local authentication kind. It cannot silently override
 a separately configured project-source or Developer policy.
 
-The separate `chatml-repl` executable uses that same local policy and the
-portable REPL client. This complete offline example grants only the selected
-local source and the two method scopes needed to submit and explicitly run a
-Task; it does not enable model inference or Shell approvals:
-
-```sh
-project=$(mktemp -d)
-mkdir -p "$project/workspace"
-printf '%s\n' 'let main input = Task.pure(input)' > "$project/check.chatml"
-printf '%s\n' '<developer>Local deterministic REPL.</developer>' > "$project/agent.chatmd"
-cat > "$project/policy.sexp" <<EOF
-(project_sources ((external_roots ($project))))
-(authoring_project_access
- ((read_grants (((root $project) (principal_id Embedded_operator)
-                 (authentication_kind embedded.local))))
-  (selections (((root $project) (project check.chatml)
-                (request (entry ((name main)))) (target one_off_v1))))))
-(developer
- ((selections
-   (((source (Local_source (root $project) (member check.chatml)))
-     (target One_off_v1)
-     (principals (((principal_id Embedded_operator)
-                   (authentication_kind embedded.local)))))))
-  (capacity
-   ((max_runs 128) (max_active_commands 4) (max_active_agent_calls 8)
-    (max_agent_sources 6) (max_native_bindings 32) (max_retained_tasks 8)
-    (max_watches_per_connection 4) (max_pending_approvals 4)
-    (max_repl_instances 8) (max_repl_keys_per_instance 128)
-    (max_repl_submissions_per_epoch 64) (max_repl_source_bytes 65536)))
-  (model Disabled) (approvals Disabled) (repl Standard_v1) (portable true)))
-(developer_scopes (developer.repl developer.live.run))
-EOF
-chatml-repl --local --developer-policy "$project/policy.sexp" \
-  --prompt-file "$project/agent.chatmd" --workspace "$project/workspace" \
-  --transient --source check.chatml
-```
+The separate `chatml-repl` executable uses the same local policy and portable
+REPL client. The published [terminal setup guide](../guide/chatml-development-workflow.md#start-the-terminal-repl)
+contains the complete offline source, prompt, workspace, policy and launch
+example. The remaining sections here describe detailed host configuration,
+flags and implementation contracts.
 
 The terminal shows the active source or project entry, its requested
 environment (or the project's default selection), source root, and prompt and
@@ -270,7 +239,7 @@ epoch; selecting a different project or environment requires a new Create.
 After a lost keyed reply, `:retry` uses the original key and payload;
 `:abandon` only relinquishes local retry custody and does not undo effects.
 After abandon, `:observe` may read that exact historical key, but its receipt
-does not prove the current revision; new source requires reset or a new Create.
+does not prove the current revision; further submissions require reset or a new Create.
 Ctrl+C sends exact-key cancellation while Submit or Task execution is still
 running; an early missing-key reply leaves custody unresolved for an explicit
 same-key retry.
@@ -300,7 +269,7 @@ The configured Prompt that supplies Live native and managed tools chooses its sc
 
 The [physical Root registry](../../lib/agent_server/developer_root_owner.mli) keeps one candidate-specific final admission callback in its existing provisional slot. After its Store, tracking and Worker waits, it reruns the candidate's full owner check, rechecks the Root's original actor and capture, then performs a bounded nonyielding comparison immediately before the provisional-to-owned swap. Uncertain recovery retains the same candidate but requires a fresh checkpoint and full check; an old final receipt cannot be reused. A failed comparison exposes no Root and retains any unresolved Store custody for exact reconciliation. This is a capture-to-Root seam, not the hosted command/result service.
 
-OCH-265 implements the [immutable developer capture and deterministic fixture check/test core](../development/chatml-developer-capture.md). It is not yet a hosted run service or live capability admission.
+The [immutable developer capture and deterministic fixture check/test core](../development/chatml-developer-capture.md) is the portable foundation. It does not itself install a hosted service or grant live capabilities; the installed Developer host composes those separate owners.
 
 A developer Live owner may resolve a configured Physical workspace or one
 Temporary workspace with `on_session_stop` cleanup through the existing
@@ -681,7 +650,7 @@ omitted. Exact-key reference pages and on-demand type rendering repeat live
 actor, source and epoch checks, and type rendering uses roots from the
 original immutable snapshot. These projections neither rerun a statement nor
 convey effect authority. The portable server endpoint projects these bounded
-results; the typed first-party client adds bounded mutation custody and explicit same-key recovery. The embedded connector retains the existing local Host and connection owner; the terminal client remains separate work.
+results; the typed first-party client adds bounded mutation custody and explicit same-key recovery. The embedded connector retains the existing local Host and connection owner; the shipped [terminal client](../../lib/chatml_repl_terminal/controller.mli) owns its separate input and rendering lifecycle.
 
 An accepted REPL transfers the exact selected Prepared graph and compiler
 contract to a run-owned source selection before publishing its instance. The
@@ -699,7 +668,7 @@ still denies new effects.
 
 A REPL has a separate opaque ID, principal/workspace owner, project/environment, pinned source graph, reset epoch and monotone state revision. It is not an agent conversation or a durable background job. One actor serializes access to its mutable runtime and inference state. Creation carries a unique request ID bound to principal and graph/environment payload, so a lost response cannot create two sessions. Creation records the session and is inert: it does not evaluate module initializers.
 
-The REPL pins the selected project's immutable catalog, compiler contract, environment and configured scope, but **does not use the project's selected main source as an executable REPL entry**. [Linked runtime instantiation](../../lib/chatml_linked_runtime/chatml_linked_runtime.mli) evaluates its selected entry last, so calling it unchanged on the project graph would run that source's top-level body. The [incremental registry](../../lib/chatml_linked_runtime/chatml_repl_modules.mli) instead starts empty and inert, bound to the exact compiler owner/epoch and selected graph. A complete submitted snippet has its own immutable source owner with the selected configured scope. After a statement typechecks, the registry lowers newly checked canonical units with the existing resolver, validates the authentic checked order and direct value-reference closure, then acquires the typing execution reservation before effects. It never evaluates project main. Under the actor's persistent bounded execution runner, missing units initialize once in dependency-before-owner order through the [same source-owned initializer](../../lib/chatml_linked_runtime/chatml_module_initializer.mli) used by batch linked execution; type-only/open branches stay inert. The registry returns only the completed modules selected directly by this statement. The actor's statement evaluator and portable service remain to be delivered; the registry does not itself execute a submitted statement or drive a Task. A parse or typecheck failure never initializes a dependency. A failing initializer retains completed predecessors and partial effects, faults that module without replay, and preserves its captured diagnostic when available. A selected closure containing that fault fails again; unrelated work remains available under the registry. The actor's broader continuation/reset policy is separate. An explicit dependency preload, if exposed later, needs its own named selection and admitted action.
+The REPL pins the selected project's immutable catalog, compiler contract, environment and configured scope, but **does not use the project's selected main source as an executable REPL entry**. [Linked runtime instantiation](../../lib/chatml_linked_runtime/chatml_linked_runtime.mli) evaluates its selected entry last, so calling it unchanged on the project graph would run that source's top-level body. The [incremental registry](../../lib/chatml_linked_runtime/chatml_repl_modules.mli) instead starts empty and inert, bound to the exact compiler owner/epoch and selected graph. A complete submitted snippet has its own immutable source owner with the selected configured scope. After a statement typechecks, the registry lowers newly checked canonical units with the existing resolver, validates the authentic checked order and direct value-reference closure, then acquires the typing execution reservation before effects. It never evaluates project main. Under the actor's persistent bounded execution runner, missing units initialize once in dependency-before-owner order through the [same source-owned initializer](../../lib/chatml_linked_runtime/chatml_module_initializer.mli) used by batch linked execution; type-only/open branches stay inert. The registry returns only the completed modules selected directly by this statement. The installed [REPL epoch owner](../../lib/agent_server/developer_repl_epoch.mli) composes this registry with statement evaluation and explicit Task drives. The registry alone does not execute a submitted statement or drive a Task. A parse or typecheck failure never initializes a dependency. A failing initializer retains completed predecessors and partial effects, faults that module without replay, and preserves its captured diagnostic when available. A selected closure containing that fault fails again; unrelated work remains available under the registry. The actor's broader continuation/reset policy is separate. An explicit dependency preload, if exposed later, needs its own named selection and admitted action.
 
 The compiler-side [configured REPL scope](../../lib/chatml_graph/chatml_configured_lookup.mli) is implemented by OCH-285. It derives each snippet lookup from an authentic implementation anchor and the same admitted `Prepared` fingerprint and selected bindings. The new snippet owner identifies a compiler use site; it is not inserted into the project graph or treated as a runtime grant. An imported binding keeps the source ID/digest and configured declaration site of its first introduction in snippet A; a use in snippet B records B's own source owner, digest and byte site. Only the current lookup in the same private epoch may resolve or reuse that origin. The REPL require adapter must call `Repl_scope.validate_reference` against the current context before selecting an already checked dependency; this primitive does not perform the dependency check or initialization. Revoking the scope or admitting a newer snippet makes older *compiler lookups* stale. It does not relabel old runtime closures, captured bytes or Task handles. A failed or cancelled admission leaves the previous current lookup and bounded source-ID ledger intact.
 
@@ -707,27 +676,55 @@ OCH-286's [incremental root driver](../../lib/chatml_graph/chatml_dependency_ses
 
 `submit` carries an expected revision and unique submission ID. The service binds that ID to the exact action and payload fingerprint: an exact retry returns its previous bounded receipt, while reuse with different source, task handle or action rejects. The same rule applies to task drive, reset and close actions. A stale revision rejects without evaluation. Each admitted submission receives its own immutable source ID/digest and execution ID. A multiline pending buffer is bounded; parsing the entire submission precedes effects. Incomplete syntax returns `Need_more` without typing or evaluating any statement, though accepting an additional buffer fragment advances the session revision. Completed malformed syntax returns a diagnostic without changing typing or runtime state. [The submission parser](../../lib/chatml/chatml_parse.mli) classifies a whole captured unit with the production grammar and a bounded, source-owned result; OCH-269 consumes it before any statement typing. Its EOF classification does not claim that every arbitrary byte prefix of a later valid program is `Need_more`: a cut inside a multi-character token may be terminal under the current lexer.
 
-The instance pins its imported module graph and selected environment. Refreshing either requires an explicit reset/new instance; imports cannot silently swap implementations under existing closures. Reset cancels and joins the active submission, drops REPL-owned compiler/runtime roots, increments epoch and revision, and preserves old bounded receipts/traces with their prior epoch. It does not reverse effects outside the REPL. Close releases roots and rejects future submissions. Idle and maximum lifetime are host-selected bounds, independent of connection and conversation lifetimes. An authorized client can reconnect after its prior transport connection closes; the host checks current principal access and returns the current epoch/revision before new submissions. No editor connection lease is required for reattachment. A host restart expires the live REPL rather than reconstructing it by executing old inputs.
+The instance pins its imported module graph and selected environment. Selecting a changed graph, environment or import revision requires a new Create with a fresh capture; imports cannot silently swap implementations under existing closures. Reset rebuilds lexical/runtime state from the same original selection. Reset cancels and joins the active submission, drops REPL-owned compiler/runtime roots, increments epoch and revision, and preserves old bounded receipts/traces with their prior epoch. It does not reverse effects outside the REPL. Close releases roots and rejects future submissions. Idle and maximum lifetime are host-selected bounds, independent of connection and conversation lifetimes. An authorized client can reconnect after its prior transport connection closes; the host checks current principal access and returns the current epoch/revision before new submissions. No editor connection lease is required for reattachment. A host restart expires the live REPL rather than reconstructing it by executing old inputs.
 
-The core emits bounded frozen display/result DTOs for types and values, diagnostics, output/progress events and terminal dispositions through bounded cursor reads or subscriptions. No raw runtime value, reference cell or closure crosses the service boundary. It has no Notty, terminal or desktop types. A standalone M5 client uses Eio and Notty for multiline input, type/value rendering, events, cancellation, reset, close and reconnect. Desktop and embedded chat TUI clients consume the same service and choose their own rendering. The M5 terminal client is required; later command unification cannot defer it.
+The core emits bounded frozen display/result DTOs for types and values, diagnostics, output/progress events and terminal dispositions through bounded cursor reads or subscriptions. No raw runtime value, reference cell or closure crosses the service boundary. It has no Notty, terminal or desktop types. A standalone M5 client uses Eio and Notty for multiline input, type/value rendering, events, cancellation, reset, close and reconnect. Future desktop and embedded chat-TUI REPL panels can consume the same service and choose their own rendering; they are not shipped by this service. The separate `chatml-repl` frontend is installed today.
 
-### 3.1 Terminal rendering reuse for OCH-255
+### 3.1 Shared terminal rendering
 
-The current [chat TUI library](../../lib/chat_tui/dune) bundles a reusable highlighting pipeline with its entire chat/agent UI. [Highlight_styles](../../lib/chat_tui/highlight_styles.mli) owns Notty attributes, including validated RGB channels and `hex_to_rgb`/`fg_hex`/`bg_hex`; [Highlight_theme](../../lib/chat_tui/highlight_theme.mli) maps TextMate scope rules to the GitHub-dark palette; [Highlight_tm_loader](../../lib/chat_tui/highlight_tm_loader.mli) and [Highlight_tm_engine](../../lib/chat_tui/highlight_tm_engine.mli) turn a private grammar registry into per-line Notty spans with plain fallback and cancellation; [Highlight_grammars](../../lib/chat_tui/highlight_grammars.mli) embeds curated OCaml, Markdown, JSON and other grammars. These implementations do not depend on chat messages. The separate [Notty/Eio terminal adapter](../../lib/notty-eio/notty_eio.mli) already owns event input, synchronized frames and cleanup, while [Notty_scroll_box](../../lib/notty_scroll_box.ml) provides viewport scrolling.
+The installed [terminal-highlighting library](../../lib/terminal_highlighting/dune)
+owns the Notty styles, immutable TextMate theme, grammar loader, span engine and
+embedded grammars. Each frontend owns its registry and engine; each engine has
+its own bounded, collision-free theme resolver cache. The chat-facing
+`Highlight_*` modules re-export the shared implementation for compatibility.
+[Highlight_registry](../../lib/chat_tui/highlight_registry.mli),
+[Renderer_highlight_engine](../../lib/chat_tui/renderer_highlight_engine.ml),
+[Markdown_fences](../../lib/chat_tui/markdown_fences.mli), chat layout, render
+caches and filesystem grammar discovery remain chat-owned.
 
-OCH-275 (5 points after discovery of a shared theme-cache correctness and ownership defect) extracts the styles, theme, TextMate loader/engine and bundled grammar registration into one shared UI-side terminal-highlighting library with `Core`, `Notty`, `textmate-language`, `Jsonaf` and embedded grammar assets; it preserves existing chat-facing module names through aliases or a compatible re-export. The theme rules stay immutable, while each engine owns a bounded, collision-free resolver cache safe for concurrent reads. OCH-255 constructs its own private registry and engine from that library. [Highlight_registry](../../lib/chat_tui/highlight_registry.mli) currently mixes a useful private `create` with a process-wide mutable `get`/`replace`; the latter and [Renderer_highlight_engine](../../lib/chat_tui/renderer_highlight_engine.ml) remain chat-owned. [Markdown_fences](../../lib/chat_tui/markdown_fences.mli), message layout, render caches, custom-grammar filesystem discovery and path-to-language choices remain chat-owned as well. They are not required to display REPL source or structured result DTOs. OCH-135 delivers accurate ChatML/ChatMD highlighting assets and shared metadata; OCH-255 uses those assets for final interactive source rendering. Plain spans are an intermediate/unavailable-asset fallback, never a substitute OCaml grammar for ChatML.
+The shipped [REPL renderer](../../lib/chatml_repl_terminal/render.ml) registers
+the dedicated ChatML grammar in a private registry and highlights sanitized,
+bounded display chunks through the shared TextMate engine. This generic regex
+path is not interruptible inside one Oniguruma call. The chat TUI's bundled
+ChatML/ChatMD code fences instead use the bounded source-lexical adapter;
+[language highlighting](../development/language-highlighting.md) describes the
+separate paths and their limits. Plain fallback never substitutes an OCaml
+grammar for ChatML.
 
-The terminal REPL owns prompt layout, multiline editing, event-to-service dispatch, visible status/diagnostics, and local interactive validation. It uses the shared Notty palette and spans, while the REPL engine, run receipts and protocol DTOs remain rendering-neutral. OCH-255 depends on OCH-135 and OCH-275 for final delivery.
+The terminal REPL owns multiline editing, prompt layout, service dispatch,
+visible status/diagnostics, cancellation, reset, reconnect and cleanup. It uses
+the existing [Notty/Eio adapter](../../lib/notty-eio/notty_eio.mli) and shared
+palette/spans. Compiler state, run receipts and protocol DTOs remain
+presentation-neutral; no chat message layout is required by the REPL core.
 
 ## 4. Stateful compiler and evaluator
 
-The existing public checker starts a fresh inference machine and type environment for each program ([typechecker](../../lib/chatml/chatml_typechecker.ml) around `check_program_with_surface`). A checked span table retains mutable inferred type cells and cannot be treated as a deep immutable snapshot. The [resolver](../../lib/chatml/chatml_resolver.ml) starts a fresh lexical frame stack and lowers prior top-level reads to `REVarGlobal`; persistent static bindings and the matching runtime table must therefore advance together. [Runtime environments](../../lib/chatml/chatml_lang.ml) are mutable tables of cells. `copy_env` copies the table while preserving cell sharing, which already makes old closures retain old bindings after rebinding. [Evaluation](../../lib/chatml/chatml_eval.ml) discards top-level expression values and publishes `RSLetRec` placeholders before all right-hand sides complete, so a new staged, value-returning statement entrypoint is needed.
+The existing public checker starts a fresh inference machine and type environment for each program ([typechecker](../../lib/chatml/chatml_typechecker.ml) around `check_program_with_surface`). A checked span table retains mutable inferred type cells and cannot be treated as a deep immutable snapshot. The [resolver](../../lib/chatml/chatml_resolver.ml) starts a fresh lexical frame stack and lowers prior top-level reads to `REVarGlobal`; persistent static bindings and the matching runtime table must therefore advance together. [Runtime environments](../../lib/chatml/chatml_lang.ml) are mutable tables of cells. `copy_env` copies the table while preserving cell sharing, which already makes old closures retain old bindings after rebinding. Batch [evaluation](../../lib/chatml/chatml_eval.ml) discards top-level expression values and publishes `RSLetRec` placeholders before all right-hand sides complete. The REPL uses the implemented [staged statement entrypoint](../../lib/chatml/chatml_eval.mli), which returns the expression result and holds new bindings privately until publication.
 
 ### 4.1 Reuse the existing graph copy
 
 [Chatml_type_probe](../../lib/chatml/chatml_type_probe.mli) already clones *all supplied type roots together*. Its `create`/`types` path preserves free-cell identity, sharing, cycles, levels and equality information by installing a copied cell before traversing a bound edge. It checkpoints during traversal. Its `commit` projects constraints back into original cells for interface matching, which the REPL should **not** call: a REPL candidate must be published as the new state or discarded without changing the old state.
 
-Extract the graph-copy traversal into a small internal shared helper used by both `Type_probe.create` and REPL candidate preparation, or initially use `Type_probe.create`/`types` and drop the probe after remapping roots. This is one implementation of graph copying, not a second clone algorithm. Budget the total retained roots, cells, edges and traversal work; the current probe uses linear physical-identity searches and its recursive shape traversal needs qualification under REPL-sized bounds. Its `commit` stale-graph and non-cancellable publication behavior must remain unchanged if refactored. `Chatml_type_scheme.transform` is not a replacement because it deliberately shares free cells; `Chatml_type_snapshot.freeze` is an immutable display projection and omits inference levels needed to resume checking.
+The shared [type-graph copier](../../lib/chatml/chatml_type_graph_copy.mli)
+now serves both `Type_probe.create` and REPL candidate preparation. The
+[REPL root collector](../../lib/chatml/chatml_repl_type_roots.ml) invokes
+`copy_detached` once for lexical and imported roots under one identity memo.
+It bounds roots, cells, edges, depth and traversal work and preserves
+cancellation identity. The copier uses linear physical-identity searches with
+an explicit work budget. The probe keeps its existing stale-graph validation
+and short non-cancellable commit protocol. `Chatml_type_scheme.transform` is
+not a detached copy because it shares free cells; `Chatml_type_snapshot.freeze`
+is a display projection and omits the inference levels required for checking.
 
 The candidate clone includes every scheme reachable from the committed `Value_scope` and configured/imported public module exports, using one identity memo across all roots. Clone inference-machine counters and reserve names already used by admitted configured schemes. The existing instantiator groups generics by string name, so a fresh counter starting at zero could alias unrelated binders even when mutable cells were copied correctly. Preserve grouped quantification and both ordinary and recursive binder namespaces across submissions. Keep the existing `Type_alias` namespace by value: it is a functional map, source alias conversion has no inference `Var` construction path, and host closed templates reject mutable inference cells. A candidate is actor-owned and tied to one REPL ID, epoch and base revision. No candidate cell may point back to a committed mutable cell. Per-submission span/visibility/configured-annotation tables and callbacks remain invocation-local. Freeze displayed types and checked facts before a later submission can mutate candidate cells.
 
@@ -746,14 +743,14 @@ The user accepted these M5 REPL conventions:
 1. Parse a whole multiline submission before evaluating any statement. Statements then typecheck and evaluate sequentially, committing each success. A later failure reports the last committed statement and leaves earlier successes intact.
 2. A failed typecheck leaves prior typing unchanged. A statement that typechecks then fails at runtime keeps any necessary constraints on prior weak variables and any effects already performed, but does not publish its failed new binding.
 3. Rebinding shadows the name. Existing closures retain their old lexical cells, matching the current runtime test.
-4. Project/environment/import graph changes require explicit reset. Reset does not undo external effects.
+4. Project/environment/import graph changes require a new Create. Reset clears interactive state on the same original capture and does not undo external effects.
 5. A top-level `Task` is a value until a separate explicit run action drives it. There is no implicit task execution merely because an expression was entered. Each explicit drive action receives a distinct execution receipt and current host admission.
 
 For example, four separate submissions `let x = 1`, `let f () = x`, `let x = 2`, then `f()` display `1` for the final expression. The first three submissions are not replayed. Submitting `Task.pure(3)` displays a task value and handle; an explicit task run action produces the `3` result. In deterministic test mode, `main` calling a selected tool succeeds only when an admitted fixture matches that exact call. The same source in live mode needs current host permission and may have a different outcome; the two receipts name their respective environments.
 
 ## 5. Typed service shape for implementation review
 
-The following is a contract sketch. Modules such as `Developer_run_id` and `Repl_revision` need validated opaque constructors in their owning implementation tickets; no raw ID, capability or mutable environment is returned to a client.
+The following is a historical architecture sketch, not the installed OCaml API. The current [Developer host](../../lib/agent_server/developer_host.mli), [REPL epoch owner](../../lib/agent_server/developer_repl_epoch.mli), and [typed client](../../lib/agent_client/developer_repl_connection.mli) expose the validated source, key, instance and epoch contracts. No raw capability or mutable runtime environment is returned to a client.
 
 ```ocaml
 module Developer_environment : sig
@@ -820,4 +817,4 @@ The strongest local regression sequence starts with a weakly typed reference. A 
 
 The implementation has separate compiler, execution and presentation boundaries. Shared type-graph copying preserves cycles, aliases and free-cell constraints; persistent statement typing builds on that foundation to remap `Value_scope` roots and commit inferred state. Incremental module initialization then provides the dependency registry used by the evaluator without running the project entrypoint. Each boundary needs its own regression evidence, while higher-level checks should exercise their composition without duplicating the lower-level test matrices.
 
-Live execution combines the captured source and selected compiler contract with the host's native invocation admission, shared job capacity, durable ownership and result disclosure. The portable run and REPL services must expose that lifecycle to clients. The terminal REPL must use the shared Eio/Notty rendering components, with interactive input, cancellation and reconnect checks in addition to renderer tests. Delivery requires working test runs and an interactive REPL; this design alone does not establish completion.
+Live execution combines the captured source and selected compiler contract with the host's native invocation admission, shared job capacity, durable ownership and result disclosure. The installed portable run and REPL services expose that lifecycle to clients. The separate terminal REPL uses shared Eio/Notty rendering components. Its [actual PTY qualification](../../test/chatml_repl_terminal/terminal_pty.py) checks interactive input, cancellation, reset, reconnect and terminal cleanup; the [joined workflow](../guide/chatml-development-workflow.md) composes authored source, checks, runs and trace readback over HTTP and local stdio. These executable checks complement the component invariants; this design text alone is not a qualification result.

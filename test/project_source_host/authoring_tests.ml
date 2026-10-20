@@ -2556,7 +2556,9 @@ let%test_unit "developer local project and standalone source retain captured byt
       Exn.protect
         ~finally:(fun () -> Service.close_and_wait owner |> ok)
         ~f:(fun () ->
-          let developer = Developer.create ~owner ~policy ~limits in
+          let developer =
+            Developer.create ~historical_recording:None ~owner ~policy ~limits
+          in
           let request =
             Developer.Request.create
               ~target:One_off_v1

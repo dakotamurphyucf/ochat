@@ -65,7 +65,7 @@ test('protocol anchors and source excerpts remain usable without JavaScript', as
       page.locator(
         '.sl-markdown-content a[href$="/lib/agent_protocol/session.ml"]',
       ),
-    ).toHaveText('JSON codec');
+    ).toHaveText('implementation');
     await expect(
       page.locator('pre').filter({ hasText: 'module Delete_history_request' }),
     ).toContainText('expected_revision : int64');

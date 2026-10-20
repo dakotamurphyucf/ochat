@@ -344,9 +344,10 @@ It also checks native tool/reference contract snapshots and their executable
 examples through the `native_contract_tests.ml` inline-test partition. Reviewed
 reference updates must keep these aggregate snapshots in sync; API hashes should
 change only when the native API contract changes.
-The CI workflow runs this prerequisite before preview and production website
-jobs and has no input path filters. Its final gate rejects failed, skipped and
-cancelled prerequisites. Actual clean GitHub execution and strict main protection are verified in
+The CI workflow runs selected semantic, preview and production checks
+concurrently. Its final gate requires every selected prerequisite to succeed;
+skips are accepted only when change detection classified that job as unnecessary.
+Draft PRs skip runner jobs, and ready PRs run change detection and the final gate. Actual clean GitHub execution and strict main protection are verified in
 [the enforcement record](planning/p10-github-enforcement.md). Main requires
 `release-gate` from GitHub Actions, including for administrators. Production publishing is enabled only after the passing main release gate, using that run’s retained artifact.
 

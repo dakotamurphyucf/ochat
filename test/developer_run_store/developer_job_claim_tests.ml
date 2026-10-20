@@ -2025,6 +2025,7 @@ let%test_unit "terminal rename cancellation retains exact Prepared and original 
       let sync_blocked = ref false in
       let parent_sync_blocked = ref false in
       let cancellation = ref None in
+      let reason = Failure "terminal rename cancellation" in
       let env =
         F.fault_after_authority_rename_env
           original
@@ -2032,7 +2033,7 @@ let%test_unit "terminal rename cancellation retains exact Prepared and original 
           ~sync_blocked
           ~parent_sync_blocked
           ~after_rename:(fun () ->
-            Option.iter !cancellation ~f:(fun context -> Eio.Cancel.cancel context Exit);
+            Option.iter !cancellation ~f:(fun context -> Eio.Cancel.cancel context reason);
             Eio.Fiber.check ())
       in
       let root = Filename.concat temporary "data" in
@@ -2074,7 +2075,7 @@ let%test_unit "terminal rename cancellation retains exact Prepared and original 
                : (P.Developer_job.t option, P.Error.t) result));
           false
         with
-        | Eio.Cancel.Cancelled _ -> true
+        | Eio.Cancel.Cancelled actual -> phys_equal actual reason
       in
       assert propagated;
       assert (Int.equal !callback_count 1);
