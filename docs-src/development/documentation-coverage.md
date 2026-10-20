@@ -945,6 +945,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chatml/chatml_builtin_surface.mli` | [contract](../../lib/chatml/chatml_builtin_surface.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_checkpoint.mli` | [contract](../../lib/chatml/chatml_checkpoint.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_compilation.mli` | [contract](../../lib/chatml/chatml_compilation.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chatml/chatml_compilation_checkpoint.mli` | [contract](../../lib/chatml/chatml_compilation_checkpoint.mli) | [integration](../design/chatml-developer-runtime.md) | Private compiler checkpoint scheduling; per-call policy checks and bounded yield cadence. |
 | `lib/chatml/chatml_compiler_contract.mli` | [contract](../../lib/chatml/chatml_compiler_contract.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_configured_check.mli` | [contract](../../lib/chatml/chatml_configured_check.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_configured_resolution.mli` | [contract](../../lib/chatml/chatml_configured_resolution.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |

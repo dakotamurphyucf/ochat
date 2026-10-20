@@ -144,8 +144,8 @@ let run_worker
   let execute () =
     let clock = Eio.Stdenv.mono_clock env in
     let started = Eio.Time.Mono.now clock in
-    let checkpoint () =
-      Eio.Fiber.yield ();
+    let check () =
+      Eio.Fiber.check ();
       match policy with
       | Unrestricted -> ()
       | Bounded limits ->
@@ -153,6 +153,14 @@ let run_worker
         if Float.(Mtime.Span.to_float_ns elapsed >= limits.wall_seconds *. 1e9)
         then raise Eio.Time.Timeout
     in
+    (* Dense metadata/type traversals may checkpoint per emitted field. Keep
+       cancellation/deadline checks at that granularity while bounding scheduler
+       entries independently. Preparation hands this owner to its joined domain;
+       the two phases never invoke it concurrently. *)
+    let checkpoints =
+      Chatml_compilation_checkpoint.create ~check ~yield:Eio.Fiber.yield
+    in
+    let checkpoint () = Chatml_compilation_checkpoint.run checkpoints in
     let%bind input = prepare ~checkpoint in
     Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () ->
       compile input ~checkpoint)

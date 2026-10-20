@@ -121,9 +121,11 @@
 (library
  (name chatml_compilation)
  (public_name ochat.chatml_compilation)
- (modules chatml_compilation)
+ (modules chatml_compilation chatml_compilation_checkpoint chatml_compilation_checkpoint_tests)
+ (private_modules chatml_compilation_checkpoint chatml_compilation_checkpoint_tests)
  (libraries core eio eio.unix mtime chatml chatml_source chatml_prepared_program chatml_linked_program chatml_host_runtime chatml_semantics chatml_trace)
- (preprocess (pps ppx_jane)))
+ (preprocess (pps ppx_jane ppx_expect))
+ (inline_tests))
 
 (library
  (name chatml_configured_check)

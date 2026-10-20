@@ -52,7 +52,10 @@ val contract : target -> Sexp.t
     evaluates initializers or calls tools. Mutable compiler state is invocation-local.
 
     Cancellation and elapsed time are checked between compiler stages and within
-    inference traversals. Work between checkpoints must finish before cancellation
+    inference traversals on every checkpoint. Scheduler yields use a bounded
+    checkpoint cadence, with another policy check after each yield; dense metadata
+    traversals therefore do not require a scheduler entry per field. Work between
+    checkpoints must finish before cancellation
     takes effect; the caller waits for domain cleanup. This is a cooperative time budget, not a hard deadline or
     process/heap sandbox. No domain is abandoned after cancellation. *)
 val compile
