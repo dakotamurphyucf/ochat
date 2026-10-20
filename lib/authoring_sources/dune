@@ -252,6 +252,8 @@
     lib/agent_server/authoring_context_service.ml %{dep:../agent_server/authoring_context_service.ml}
     lib/agent_server/authoring_host_policy.ml %{dep:../agent_server/authoring_host_policy.ml}
     lib/agent_server/authoring_upload_host.ml %{dep:../agent_server/authoring_upload_host.ml}
+    lib/agent_server/authoring_configured_upload_policy.ml %{dep:../agent_server/authoring_configured_upload_policy.ml}
+    lib/agent_server/authoring_upload_validation.ml %{dep:../agent_server/authoring_upload_validation.ml}
     lib/agent_store/authoring_upload_store.ml %{dep:../agent_store/authoring_upload_store.ml}
     lib/agent_server/developer_background_job_runner.ml %{dep:../agent_server/developer_background_job_runner.ml}
     lib/agent_server/developer_child_agent_runner.ml %{dep:../agent_server/developer_child_agent_runner.ml}

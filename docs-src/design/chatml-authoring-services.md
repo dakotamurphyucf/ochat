@@ -756,8 +756,12 @@ marker boundary. No parent is required for an upload-only client. The store
 samples the host wall clock after its own gate and recovery, so queue time
 cannot extend an expired upload. Publication separately rechecks the current
 host-selected contracts, source grant, wall-clock deadline and daemon lock
-immediately before the durable marker rename. A published read also checks
-the deadline and lock after materialization, before lending the capture.
+immediately before the durable marker rename. Rechecking the exact same
+immutable compiler-contract object avoids re-encoding its identity; a fresh
+contract value still receives the full semantic fingerprint comparison. Current
+policy selection, actor/grant checks and post-wait admission remain required.
+A published read also checks the deadline and lock after materialization,
+before lending the capture.
 Rebinding that capture uses an independent current bundle-read grant under the
 same host gate. Before this request materializes captured source bytes, the
 host compares the saved manifest and receipt with its current selected target,
