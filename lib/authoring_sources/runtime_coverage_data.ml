@@ -240,6 +240,19 @@ let shared_features =
       ; "test/authoring_upload_store/publication_tests.ml"
       ; "docs-src/design/chatml-developer-runtime.md"
       ] )
+  ; ( "execution.authoring_upload_selection"
+    , "Configured upload publication reselects current actor and target policy; exact \
+       immutable compiler identity avoids redundant encoding while distinct values \
+       retain semantic comparison and parent/previous checks"
+    , [ "lib/agent_server/authoring_configured_upload_policy.ml"
+      ; "lib/agent_server/authoring_upload_validation.ml"
+      ; "lib/agent_server/authoring_upload_host.ml"
+      ]
+    , "runtime.execution"
+    , [ "test/authoring_upload_host/host_tests.ml"
+      ; "test/authoring_installation/installation_tests.ml"
+      ; "docs-src/design/chatml-authoring-services.md"
+      ] )
   ; ( "execution.trace"
     , "Optional bounded source-owned event prefix, final outcome custody and unchanged \
        execution, effects and cancellation"
@@ -874,6 +887,10 @@ let implementation_sources =
     , "b48f6f6c86b47207bf134b535edf388a44fa4d9a7bbf59953b4b91a7f1bde30c" )
   ; ( "lib/agent_server/authoring_upload_host.ml"
     , "8774074a3192360392904b79b9e9101d05a6f1da03a63653be7bb8aeefa61a57" )
+  ; ( "lib/agent_server/authoring_configured_upload_policy.ml"
+    , "eba2c3c6d6bdf9e52b907e0eecee174aaa3a33a3c47e3bb8dfbb89ad7986d2b1" )
+  ; ( "lib/agent_server/authoring_upload_validation.ml"
+    , "e493028079cd44dc8513f5f03656da3fb3dc0f3bba5c22b51334b49bb7f7c6c0" )
   ; ( "lib/agent_store/authoring_upload_store.ml"
     , "c71ff246dcfcc411df0419b86de3b127599a80e20397a9915fbce54b97f6fa4b" )
   ]

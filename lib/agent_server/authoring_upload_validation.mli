@@ -84,10 +84,13 @@ val admit
   -> (t, Error.t) result
 
 (** Re-select the same raw host targets and compare resolved environment,
-    contract fingerprint, prior Prepared fingerprint and exact prior lock
-    source. The parent scope independently rechecks its physical Current and
-    immutable effective prior at guarded checkpoints; raw policy None never
-    substitutes for missing required parent evidence. *)
+    compiler contract, prior Prepared fingerprint and exact prior lock source.
+    The exact same immutable compiler-contract object needs no repeated identity
+    encoding; physically distinct objects retain semantic fingerprint comparison.
+    This comparison grants no authority: the current policy is still selected
+    on every call, and the parent scope independently rechecks its physical
+    Current and immutable effective prior at guarded checkpoints. Raw policy
+    None never substitutes for missing required parent evidence. *)
 val check_current
   :  t
   -> policy:Policy.t

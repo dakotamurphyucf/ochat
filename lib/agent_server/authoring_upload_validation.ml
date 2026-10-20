@@ -192,9 +192,10 @@ let admit policy ~actor ~manifest ~parent_previous ~checkpoint =
 let same_selected left right ~checkpoint =
   checkpoint ();
   String.equal left.Selected.environment right.Selected.environment
-  && Captured.Digest.equal
-       (Chatml.Chatml_compiler_contract.fingerprint left.contract ~checkpoint)
-       (Chatml.Chatml_compiler_contract.fingerprint right.contract ~checkpoint)
+  && (phys_equal left.contract right.contract
+      || Captured.Digest.equal
+           (Chatml.Chatml_compiler_contract.fingerprint left.contract ~checkpoint)
+           (Chatml.Chatml_compiler_contract.fingerprint right.contract ~checkpoint))
   && same_previous left.previous right.previous
 ;;
 
@@ -329,4 +330,40 @@ let validate t ~snapshot ~document_dir ~limits ~checkpoint =
              | Some selected -> checked_build selected project))
       then Ok (Store.Proof.Chatmd_document validated)
       else Error Error.Invalid_closure)
+;;
+
+let%expect_test "selected compiler identity avoids only redundant immutable encoding" =
+  let module Contract = Chatml.Chatml_compiler_contract in
+  let admitted = Contract.for_target One_off_v1 ~checkpoint:Fn.id in
+  let equivalent = Contract.for_target One_off_v1 ~checkpoint:Fn.id in
+  let changed = Contract.for_target Tool_v1 ~checkpoint:Fn.id in
+  let selected contract environment =
+    Selected.create ~environment ~contract ~previous:None |> Or_error.ok_exn
+  in
+  let original = selected admitted "default" in
+  let checkpoints = ref 0 in
+  let compare candidate =
+    checkpoints := 0;
+    let equal =
+      same_selected original candidate ~checkpoint:(fun () -> Int.incr checkpoints)
+    in
+    equal, !checkpoints
+  in
+  let identical, identical_work = compare original in
+  let fresh_equal, fresh_work = compare (selected equivalent "default") in
+  let changed_contract, changed_work = compare (selected changed "default") in
+  let changed_environment, environment_work = compare (selected admitted "other") in
+  if
+    not
+      (identical
+       && Int.equal identical_work 1
+       && fresh_equal
+       && fresh_work > 1
+       && (not changed_contract)
+       && changed_work > 1
+       && (not changed_environment)
+       && Int.equal environment_work 1)
+  then failwith "selected compiler identity or fallback comparison changed";
+  print_endline "immutable identity bounded; distinct semantic fallback; changes denied";
+  [%expect {| immutable identity bounded; distinct semantic fallback; changes denied |}]
 ;;
