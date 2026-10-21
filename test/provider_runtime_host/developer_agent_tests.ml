@@ -2854,6 +2854,9 @@ let%test_unit "selected ordinary Agent Tool runs through its registered child so
   in
   let hold_grand_response = ref false in
   let awaiting_grand_submit = ref false in
+  let depth_output_waiter : (int * unit Eio.Promise.u) option ref = ref None in
+  let depth_body_start = ref None in
+  let depth_output_seen = ref false in
   let held_grand = ref None in
   let grand_entered, grand_entered_u = Eio.Promise.create () in
   let release_grand, release_grand_u = Eio.Promise.create () in
@@ -2999,6 +3002,14 @@ let%test_unit "selected ordinary Agent Tool runs through its registered child so
       else None)
     ~on_model_body:(fun body ->
       bodies := body :: !bodies;
+      (match !depth_output_waiter with
+       | Some (previous_bodies, resolver)
+         when List.length !bodies > previous_bodies
+              && String.is_substring body ~substring:"function_call_output" ->
+         depth_output_seen := true;
+         depth_output_waiter := None;
+         Eio.Promise.resolve resolver ()
+       | Some _ | None -> ());
       if !hold_grand_response && String.is_substring body ~substring:"OCH421 grand marker"
       then (
         held_grand := !latest_grand;
@@ -3026,6 +3037,8 @@ let%test_unit "selected ordinary Agent Tool runs through its registered child so
            | Shutdown_join
            | Response_release
            | Start_depth_limited
+           | Depth_submit
+           | Depth_command_await
            | Depth_output
            | Queued_depth_parent
          [@@deriving sexp_of]
@@ -3053,7 +3066,7 @@ let%test_unit "selected ordinary Agent Tool runs through its registered child so
            if not !timeout_reported
            then (
              timeout_reported := true;
-             (* Only static fixture labels and monotonic timings are reported.
+             (* Only static fixture labels, timings, counts and flags are reported.
                 Reporting must not replace the original timeout/backtrace. *)
              try
                eprintf
@@ -3066,7 +3079,19 @@ let%test_unit "selected ordinary Agent Tool runs through its registered child so
                     , (!phase : Phase.t)
                     , (elapsed () : float)
                     , (List.rev !phases : (Phase.t * float) list)
-                    , (!scheduler_barrier : (Phase.t * float * bool) option)])
+                    , (!scheduler_barrier : (Phase.t * float * bool) option)
+                    , ("provider-requests", (!requests : int))
+                    , ("provider-bodies", (List.length !bodies : int))
+                    , ( "depth-provider-bodies"
+                      , (Option.map !depth_body_start ~f:(fun start ->
+                           List.length !bodies - start)
+                         : int option) )
+                    , ("tool-response-sent", (!sent_tool_call : bool))
+                    , ("depth-output-seen", (!depth_output_seen : bool))
+                    , ( "depth-native-attempts"
+                      , (List.length !limited_grand_revisions : int) )
+                    , ("held-response-enabled", (!hold_grand_response : bool))
+                    , ("held-submit-waiting", (!awaiting_grand_submit : bool))])
              with
              | _ -> ());
            Stdlib.Printexc.raise_with_backtrace exn backtrace
@@ -3757,7 +3782,7 @@ let run ctx input =
                   ~checkpoint:ignore
                 |> ok
               in
-              let submit_limited name =
+              let submit_limited ?await_phase name =
                 let run_id = P.Id.Developer_run.create () in
                 let key = P.Idempotency_key.of_string name |> ok in
                 ignore
@@ -3770,6 +3795,7 @@ let run ctx input =
                      ~fresh_source:(Some (Document_script { connection }))
                    |> ok
                    : S.Daemon.Developer.View.t);
+                Option.iter await_phase ~f:mark;
                 let view =
                   S.Daemon.Developer.await_terminal limited_daemon ~actor ~run_id ~key
                   |> ok
@@ -3784,21 +3810,24 @@ let run ctx input =
                 in
                 run_id, job_id
               in
-              mark Phase.Depth_output;
-              let _depth_run, _depth_job = submit_limited "ordinary-agent-tool-depth" in
-              with_timeout_exn ~wait:"depth-output" 25. (fun () ->
-                let rec await_output () =
-                  if
-                    List.exists
-                      (List.take !bodies (List.length !bodies - previous_bodies))
-                      ~f:(fun body ->
-                        String.is_substring body ~substring:"function_call_output")
-                  then ()
-                  else (
-                    Eio.Fiber.yield ();
-                    await_output ())
-                in
-                await_output ());
+              let depth_output, resolve_depth_output = Eio.Promise.create () in
+              (* A provider body may arrive before the command receipt. Arm the
+                 same fresh-output observation before submitting the command. *)
+              depth_body_start := Some (List.length !bodies);
+              depth_output_seen := false;
+              depth_output_waiter := Some (previous_bodies, resolve_depth_output);
+              Fun.protect
+                ~finally:(fun () -> depth_output_waiter := None)
+                (fun () ->
+                   mark Phase.Depth_submit;
+                   let _depth_run, _depth_job =
+                     submit_limited
+                       ~await_phase:Phase.Depth_command_await
+                       "ordinary-agent-tool-depth"
+                   in
+                   mark Phase.Depth_output;
+                   with_timeout_exn ~wait:"depth-output" 25. (fun () ->
+                     Eio.Promise.await depth_output));
               let limited_bodies =
                 List.take !bodies (List.length !bodies - previous_bodies)
               in
