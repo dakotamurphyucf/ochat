@@ -1222,7 +1222,53 @@ let unix_client ~sw env fixture =
   }
 ;;
 
-let qualify_unix_repl_saturation ~sw env fixture =
+module Native_hold = struct
+  type t =
+    { entered : unit Eio.Promise.t
+    ; signal_entered : unit Eio.Promise.u
+    ; release : unit Eio.Promise.t
+    ; signal_release : unit Eio.Promise.u
+    ; mutable finished : bool
+    ; mutable returned : bool
+    }
+
+  let create () =
+    let entered, signal_entered = Eio.Promise.create () in
+    let release, signal_release = Eio.Promise.create () in
+    { entered
+    ; signal_entered
+    ; release
+    ; signal_release
+    ; finished = false
+    ; returned = false
+    }
+  ;;
+
+  let await t =
+    require (not (Eio.Promise.is_resolved t.entered)) "native hold entered twice";
+    Eio.Promise.resolve t.signal_entered ();
+    Exn.protect
+      ~finally:(fun () -> t.finished <- true)
+      ~f:(fun () ->
+        Eio.Promise.await t.release;
+        t.returned <- true)
+  ;;
+
+  let require_cancelled t =
+    require
+      (t.finished && not t.returned)
+      "Task cancellation did not join the held native call"
+  ;;
+
+  (* Failure cleanup only. Successful cases must cancel the real Task while its
+     authorization is still pending, without completing this promise. *)
+  let release t =
+    if (not t.finished) && not (Eio.Promise.is_resolved t.release)
+    then Eio.Promise.resolve t.signal_release ()
+  ;;
+end
+
+let qualify_unix_task_saturation ~sw ~daemon ~current_hold ~holds env fixture =
   let raw =
     Support.Unix_driver.connect_raw
       ~sw
@@ -1230,8 +1276,12 @@ let qualify_unix_repl_saturation ~sw env fixture =
       ~socket_path:(Support.Config_fixture.unix_socket fixture)
       ~max_response_bytes:(2 * 1024 * 1024)
   in
+  let observer = unix_client ~sw env fixture in
   Exn.protect
-    ~finally:(fun () -> Support.Unix_driver.close_raw raw)
+    ~finally:(fun () ->
+      List.iter holds ~f:Native_hold.release;
+      observer.close ();
+      Support.Unix_driver.close_raw raw)
     ~f:(fun () ->
       let clock = Eio.Stdenv.clock env in
       let client =
@@ -1249,17 +1299,17 @@ let qualify_unix_repl_saturation ~sw env fixture =
       require
         (List.mem initialized.enabled_features R.Features.repl ~equal:String.equal)
         "saturation connection did not select REPL";
-      let caps =
+      ignore (initialize_response ~repl:true observer : P.Initialize.Response.t);
+      let limits =
         match
           call_repl
             client
-            ~limits:(configured_repl_decoder_limits ())
+            ~limits:(Support.Developer_fixture.repl_wire_limits ())
             R.Request.Capabilities
         with
-        | R.Response.Capabilities caps -> caps
+        | R.Response.Capabilities caps -> R.Capabilities.limits caps
         | _ -> fail "saturation capabilities changed method"
       in
-      let limits = R.Capabilities.limits caps in
       let expected, selector = open_and_analyze client in
       let route =
         D.Route.document_script ~limits:(R.Limits.request limits) ~expected ~selector
@@ -1284,186 +1334,226 @@ let qualify_unix_repl_saturation ~sw env fixture =
         | R.Response.Create view -> view
         | _ -> fail "saturation Create changed method"
       in
-      let key = key "saturation-held" in
-      let lookup = R.Lookup.create ~instance:(R.View.instance created) ~key in
+      let submission_key = key "saturation-task-expression" in
       let request =
         R.Submit.create
           ~limits
           ~instance:(R.View.instance created)
           ~epoch:(R.View.epoch created)
           ~expected_revision:(R.View.revision created)
-          ~key
-          ~source:"let rec loop x = loop(x)\nlet never = loop(0)"
+          ~key:submission_key
+          ~source:
+            {|Tool.call("read_file", `Object([{key="file"; value=`String("sample.txt")}]))|}
         |> ok
       in
-      let send_unread id request =
-        let id = P.Envelope.Request_id.of_json (`Number (Int.to_string id)) |> ok in
-        let envelope =
-          P.Envelope.request
-            ~id
-            ~method_:(R.Request.method_name request)
-            ~params:(R.Request.params request)
-            ()
+      let envelope id request =
+        P.Envelope.request
+          ~id
+          ~method_:(R.Request.method_name request)
+          ~params:(R.Request.params request)
+          ()
+      in
+      let id number =
+        P.Envelope.Request_id.of_json (`Number (Int.to_string number)) |> ok
+      in
+      let schedule request =
+        S.Dispatcher.dispatch_schedule
+          (S.Daemon.dispatcher daemon)
+          (envelope (id 90) request)
+      in
+      let submission_lookup =
+        R.Lookup.create ~instance:(R.View.instance created) ~key:submission_key
+      in
+      (* The real transport proof below uses a Task held at a supported native
+         boundary. Keep the production Submit/Cancel classification contract
+         explicit, alongside the configured actual statement-cancellation smoke. *)
+      (match
+         ( schedule (R.Request.Submit request)
+         , schedule (R.Request.Cancel_submission submission_lookup) )
+       with
+       | S.Dispatcher.Repl_wait, S.Dispatcher.Repl_cancel -> ()
+       | _ -> fail "Submit and Cancel_submission lost their transport scheduling classes");
+      let submitted =
+        match call_repl client ~limits (R.Request.Submit request) with
+        | R.Response.Submit value -> value
+        | _ -> fail "saturation Task expression changed method"
+      in
+      let reference =
+        match R.Submission.task_references submitted with
+        | [ reference ] -> reference
+        | _ -> fail "saturation Submit did not retain one native Task"
+      in
+      let require_running lookup started hold =
+        (match call_repl observer ~limits (R.Request.Task_observe lookup) with
+         | R.Response.Task_observe (Some observed) ->
+           require
+             (P.Developer_command_id.equal
+                (R.Task_view.command_id started)
+                (R.Task_view.command_id observed))
+             "held Task observation changed command identity";
+           (match R.Task_view.phase observed with
+            | Execution_started -> ()
+            | _ ->
+              raise_s
+                [%sexp
+                  "held Task was not executing", (R.Task_view.to_json observed : Jsonaf.t)])
+         | _ -> fail "held Task was not observable");
+        require
+          (not hold.Native_hold.finished)
+          "held Task ended before explicit cancellation"
+      in
+      let start_task hold name =
+        current_hold := Some hold;
+        let task_key = key name in
+        let lookup = D.Lookup.create ~run_id:(R.View.run_id created) ~key:task_key in
+        let request =
+          R.Task_submit.create
+            ~limits
+            ~key:task_key
+            ~reference
+            ~requested_execution:None
+            ~requested_max_output_bytes:None
+            ~fresh_epoch:(Some (R.View.instance created, R.View.epoch created))
+          |> ok
         in
-        Support.Unix_driver.send_line raw (P.Envelope.to_json envelope |> Jsonaf.to_string);
+        let started =
+          match call_repl client ~limits (R.Request.Task_submit request) with
+          | R.Response.Task_submit value -> value
+          | _ -> fail "saturation Task_submit changed method"
+        in
+        Eio.Time.with_timeout_exn clock 5. (fun () ->
+          Eio.Promise.await hold.Native_hold.entered);
+        require_running lookup started hold;
+        lookup, started
+      in
+      let send_unread number request =
+        let id = id number in
+        Support.Unix_driver.send_line
+          raw
+          (envelope id request |> P.Envelope.to_json |> Jsonaf.to_string);
         id
       in
-      let submit_id = send_unread 100 (R.Request.Submit request) in
-      let observer =
-        Agent_transport_socket.Client.connect
-          ~sw
-          ~net:(Eio.Stdenv.net env)
-          ~socket_path:(Support.Config_fixture.unix_socket fixture)
-          ~max_line_length:(16 * 1024 * 1024)
-          ~notification_capacity:8
+      let require_cancelled started terminal hold =
+        require
+          (P.Developer_command_id.equal
+             (R.Task_view.command_id started)
+             (R.Task_view.command_id terminal))
+          "saturated control changed Task command identity";
+        (match R.Task_view.phase terminal with
+         | Terminal { execution_started = true; outcome = Cancelled } -> ()
+         | _ ->
+           raise_s
+             [%sexp
+               "saturated Task did not finish cancelled"
+             , (R.Task_view.to_json terminal : Jsonaf.t)]);
+        Native_hold.require_cancelled hold
       in
-      Exn.protect
-        ~finally:(fun () -> Agent_client.Connection.close observer)
-        ~f:(fun () ->
-          let implementation =
-            P.Initialize.Implementation.create ~name:"saturation-observer" ~version:"1"
-            |> ok
-          in
-          let initialize =
-            P.Initialize.Request.create
-              ~implementation
-              ~protocol_min:P.Version.current
-              ~protocol_max:P.Version.current
-              ~features:[ D.Features.run; R.Features.repl ]
-              ~event_encodings:[ Json ]
-              ~max_inbound_event_bytes:(2 * 1024 * 1024)
-              ()
-            |> ok
-          in
-          (match
-             Agent_client.Connection.request_without_history
-               observer
-               (Protocol_initialize initialize)
-             |> ok
-           with
-           | Protocol_initialize _ -> ()
-           | _ -> fail "saturation observer Initialize changed method");
-          let observer_repl =
-            Agent_client.Developer_repl_connection.create observer |> ok
-          in
-          Eio.Time.with_timeout_exn clock 5. (fun () ->
-            let rec await_active () =
-              match
-                Agent_client.Developer_repl_connection.observe observer_repl lookup
-              with
-              | Error { code = P.Error.Conflict; _ } -> ()
-              | Ok None ->
-                Eio.Fiber.yield ();
-                await_active ()
-              | Ok (Some _) | Error _ -> fail "held Submit was not active"
-            in
-            await_active ());
-          let ping_id =
-            let id = P.Envelope.Request_id.of_json (`Number "101") |> ok in
-            let envelope =
-              P.Envelope.request ~id ~method_:"protocol.ping" ~params:(`Object []) ()
-            in
-            Support.Unix_driver.send_line
-              raw
-              (P.Envelope.to_json envelope |> Jsonaf.to_string);
-            id
-          in
-          let cancel_id = send_unread 102 (R.Request.Cancel_submission lookup) in
-          let responses : P.Envelope.response list ref = ref [] in
-          let rec collect remaining =
-            if remaining > 0
-            then (
-              match Support.Unix_driver.read_envelope raw ~clock ~timeout_seconds:5. with
-              | Support.Unix_driver.Envelope (P.Envelope.Response response) ->
-                responses := response :: !responses;
-                collect (remaining - 1)
-              | Support.Unix_driver.Envelope (P.Envelope.Notification _) ->
-                collect remaining
-              | Support.Unix_driver.Envelope (P.Envelope.Request _)
-              | Support.Unix_driver.End_of_file
-              | Support.Unix_driver.Timeout
-              | Support.Unix_driver.Invalid_response _ ->
-                fail "saturation response was unavailable")
-          in
-          collect 3;
-          let outcome id =
-            List.find_exn !responses ~f:(fun (response : P.Envelope.response) ->
-              P.Envelope.Request_id.compare response.id id = 0)
-            |> fun (response : P.Envelope.response) -> response.outcome
-          in
-          (match outcome ping_id with
-           | Error { code = P.Error.Resource_limit; _ } -> ()
-           | _ -> fail "busy ordinary request was not rejected with Resource_limit");
-          let decode id method_ =
-            outcome id |> ok |> R.Response.of_method_and_json ~limits ~method_ |> ok
-          in
-          let submitted =
-            match decode submit_id (R.Request.method_name (R.Request.Submit request)) with
-            | R.Response.Submit value -> value
-            | _ -> fail "held Submit changed method"
-          in
-          let cancelled =
-            match
-              decode
-                cancel_id
-                (R.Request.method_name (R.Request.Cancel_submission lookup))
-            with
-            | R.Response.Cancel_submission value -> value
-            | _ -> fail "held Cancel changed method"
-          in
-          require
-            (R.Wire_id.Revision.equal
-               (R.Submission.revision submitted)
-               (R.Submission.revision cancelled))
-            "saturated control changed submission identity";
-          (match R.Submission.status cancelled with
-           | Stopped (Some diagnostic)
-             when String.is_substring
-                    (R.Submission.Diagnostic.message diagnostic)
-                    ~substring:"cancelled" -> ()
-           | _ -> fail "saturated control did not cancel held Submit");
-          let eof_key = P.Idempotency_key.of_string "saturation-held-eof" |> ok in
-          let eof_lookup =
-            R.Lookup.create ~instance:(R.View.instance created) ~key:eof_key
-          in
-          let eof_request =
-            R.Submit.create
-              ~limits
-              ~instance:(R.View.instance created)
-              ~epoch:(R.View.epoch created)
-              ~expected_revision:(R.Submission.revision cancelled)
-              ~key:eof_key
-              ~source:"let rec eof_loop x = eof_loop(x)\nlet eof_never = eof_loop(0)"
-            |> ok
-          in
-          let eof_id = send_unread 103 (R.Request.Submit eof_request) in
-          Eio.Time.with_timeout_exn clock 5. (fun () ->
-            let rec await_active () =
-              match
-                Agent_client.Developer_repl_connection.observe observer_repl eof_lookup
-              with
-              | Error { code = P.Error.Conflict; _ } -> ()
-              | Ok None ->
-                Eio.Fiber.yield ();
-                await_active ()
-              | Ok (Some _) | Error _ -> fail "EOF Submit was not active"
-            in
-            await_active ());
-          Support.Unix_driver.shutdown_write raw;
-          Eio.Time.with_timeout_exn clock 5. (fun () ->
-            let rec await_eof () =
-              match Support.Unix_driver.read_envelope raw ~clock ~timeout_seconds:5. with
-              | Support.Unix_driver.End_of_file -> ()
-              | Support.Unix_driver.Envelope (P.Envelope.Response response)
-                when P.Envelope.Request_id.compare response.id eof_id = 0 ->
-                fail "held Submit published a response after input EOF"
-              | Support.Unix_driver.Envelope
-                  (P.Envelope.Response _ | P.Envelope.Notification _) -> await_eof ()
-              | Support.Unix_driver.Envelope (P.Envelope.Request _)
-              | Support.Unix_driver.Timeout | Support.Unix_driver.Invalid_response _ ->
-                fail "held Submit EOF did not close cleanly"
-            in
-            await_eof ())))
+      let first, second =
+        match holds with
+        | [ first; second ] -> first, second
+        | _ -> fail "invalid saturation hold count"
+      in
+      let lookup, started = start_task first "saturation-held-task" in
+      (match
+         ( schedule (R.Request.Task_await_terminal lookup)
+         , schedule (R.Request.Task_cancel_and_wait lookup) )
+       with
+       | S.Dispatcher.Repl_wait, S.Dispatcher.Repl_cancel -> ()
+       | _ -> fail "Task wait and cancellation lost their transport scheduling classes");
+      let await_id = send_unread 100 (R.Request.Task_await_terminal lookup) in
+      let ping_id = id 101 in
+      Support.Unix_driver.send_line
+        raw
+        (P.Envelope.request ~id:ping_id ~method_:"protocol.ping" ~params:(`Object []) ()
+         |> P.Envelope.to_json
+         |> Jsonaf.to_string);
+      let cancel_id = send_unread 102 (R.Request.Task_cancel_and_wait lookup) in
+      let responses : P.Envelope.response list ref = ref [] in
+      let rec collect remaining =
+        if remaining > 0
+        then (
+          match Support.Unix_driver.read_envelope raw ~clock ~timeout_seconds:5. with
+          | Support.Unix_driver.Envelope (P.Envelope.Response response) ->
+            responses := response :: !responses;
+            collect (remaining - 1)
+          | Support.Unix_driver.Envelope (P.Envelope.Notification _) -> collect remaining
+          | ( Support.Unix_driver.Envelope (P.Envelope.Request _)
+            | Support.Unix_driver.End_of_file
+            | Support.Unix_driver.Timeout
+            | Support.Unix_driver.Invalid_response _ ) as observed ->
+            raise_s
+              [%sexp
+                "saturation response was unavailable"
+              , (observed : Support.Unix_driver.raw_read)
+              , (List.map !responses ~f:(fun response ->
+                   P.Envelope.to_json (P.Envelope.Response response))
+                 : Jsonaf.t list)])
+      in
+      collect 3;
+      let outcome id =
+        List.find_exn !responses ~f:(fun (response : P.Envelope.response) ->
+          P.Envelope.Request_id.compare response.id id = 0)
+        |> fun (response : P.Envelope.response) -> response.outcome
+      in
+      (match outcome ping_id with
+       | Error { code = P.Error.Resource_limit; _ } -> ()
+       | _ -> fail "busy ordinary request was not rejected with Resource_limit");
+      let decode id request =
+        outcome id
+        |> ok
+        |> R.Response.of_method_and_json ~limits ~method_:(R.Request.method_name request)
+        |> ok
+      in
+      let awaited =
+        match decode await_id (R.Request.Task_await_terminal lookup) with
+        | R.Response.Task_await_terminal value -> value
+        | _ -> fail "held Task await changed method"
+      in
+      let cancelled =
+        match decode cancel_id (R.Request.Task_cancel_and_wait lookup) with
+        | R.Response.Task_cancel_and_wait value -> value
+        | _ -> fail "held Task cancellation changed method"
+      in
+      require_cancelled started awaited first;
+      require_cancelled started cancelled first;
+      let eof_lookup, eof_started = start_task second "saturation-held-eof-task" in
+      let eof_id = send_unread 103 (R.Request.Task_await_terminal eof_lookup) in
+      (* The held Task cannot finish between the busy-lane probe and input EOF.
+         Disconnect cancels the transport waiter, not the daemon-owned Task. *)
+      let eof_ping_id = id 104 in
+      Support.Unix_driver.send_line
+        raw
+        (P.Envelope.request
+           ~id:eof_ping_id
+           ~method_:"protocol.ping"
+           ~params:(`Object [])
+           ()
+         |> P.Envelope.to_json
+         |> Jsonaf.to_string);
+      (match read_unix_response raw clock 4 with
+       | P.Envelope.Response { id; outcome = Error { code = P.Error.Resource_limit; _ } }
+         when P.Envelope.Request_id.compare id eof_ping_id = 0 -> ()
+       | _ -> fail "EOF Task waiter did not occupy the ordinary lane");
+      Support.Unix_driver.shutdown_write raw;
+      Eio.Time.with_timeout_exn clock 5. (fun () ->
+        let rec await_eof () =
+          match Support.Unix_driver.read_envelope raw ~clock ~timeout_seconds:5. with
+          | Support.Unix_driver.End_of_file -> ()
+          | Support.Unix_driver.Envelope (P.Envelope.Response response)
+            when P.Envelope.Request_id.compare response.id eof_id = 0 ->
+            fail "held Task waiter published a response after input EOF"
+          | Support.Unix_driver.Envelope
+              (P.Envelope.Response _ | P.Envelope.Notification _) -> await_eof ()
+          | Support.Unix_driver.Envelope (P.Envelope.Request _)
+          | Support.Unix_driver.Timeout | Support.Unix_driver.Invalid_response _ ->
+            fail "held Task waiter EOF did not close cleanly"
+        in
+        await_eof ());
+      require_running eof_lookup eof_started second;
+      match call_repl observer ~limits (R.Request.Task_cancel_and_wait eof_lookup) with
+      | R.Response.Task_cancel_and_wait terminal ->
+        require_cancelled eof_started terminal second
+      | _ -> fail "EOF Task cleanup changed method")
 ;;
 
 let absolute env path =
@@ -1569,6 +1659,82 @@ let start_socket_listener ~sw env fixture daemon =
       await_socket (attempts - 1)
   in
   await_socket 250
+;;
+
+let qualify_embedded_unix_saturation env =
+  Support.Temporary_environment.with_
+    ~scenario:"developer-repl-saturation"
+    ~env
+    (fun environment ->
+       let fixture =
+         Support.Config_fixture.create
+           environment
+           ~name:"developer-repl-saturation"
+           ~http_port:(reserve_port env)
+       in
+       Support.Config_fixture.grant_public_all_scopes fixture;
+       Eio.Path.save
+         ~create:(`Or_truncate 0o600)
+         (Support.Temporary_environment.path
+            environment
+            (Support.Config_fixture.prompt_path fixture))
+         "<developer>Native Task saturation fixture.</developer>\n\
+          <tool name=\"read_file\"/>";
+       Eio.Path.save
+         ~create:(`Exclusive 0o600)
+         (Support.Temporary_environment.path
+            environment
+            (Filename.concat
+               (Support.Config_fixture.physical_workspace fixture)
+               "sample.txt"))
+         "saturation fixture";
+       let current_hold = ref None in
+       let holds = [ Native_hold.create (); Native_hold.create () ] in
+       let developer =
+         Support.Developer_fixture.developer_configuration
+           ~authorize_native:(fun invocation binding ->
+             require
+               (String.equal
+                  (Chat_response.Tool_capability.reference binding).name
+                  "read_file")
+               "unexpected saturation native binding";
+             require
+               (P.Invocation.equal_origin
+                  (P.Host_invocation.context invocation).origin
+                  P.Invocation.Script)
+               "saturation native origin changed";
+             Native_hold.await (Option.value_exn !current_hold);
+             Ok ())
+           ()
+       in
+       let module Config = S.Daemon.Developer_configuration in
+       let portable =
+         Config.Portable.create
+           ~wire_limits:(wire_limits ())
+           ~max_connections:4
+           ~max_watches_per_connection:4
+           ~max_pending_hints_per_connection:8
+         |> ok
+         |> fun portable ->
+         Config.Portable.with_repl_wire
+           portable
+           (Support.Developer_fixture.repl_wire_limits ())
+         |> ok
+       in
+       let developer =
+         Config.with_portable_wire developer portable
+         |> fun developer ->
+         Config.with_repl developer (Support.Developer_fixture.repl_configuration ())
+       in
+       let options =
+         { (Support.Daemon_host.with_offline_inference S.Daemon.default_options) with
+           authoring = Some (Support.Developer_fixture.semantic_authoring_policy env)
+         ; developer = Some developer
+         }
+       in
+       Support.Daemon_host.with_ env fixture ~options (fun sw daemon ->
+         start_socket_listener ~sw env fixture daemon;
+         qualify_unix_task_saturation ~sw ~daemon ~current_hold ~holds env fixture))
 ;;
 
 let qualify_terminal_remote_profile env fixture =
@@ -1808,8 +1974,8 @@ let run_configured env =
                    ~net:(Eio.Stdenv.net env)
                    ~socket_path:(Support.Config_fixture.unix_socket fixture)
                    ~max_line_length:(16 * 1024 * 1024)
-                   ~notification_capacity:64);
-              qualify_unix_repl_saturation ~sw env fixture)));
+                   ~notification_capacity:64)));
+    qualify_embedded_unix_saturation env);
   Eio.Flow.copy_string
     "configured Developer HTTP and Unix passed\n"
     (Eio.Stdenv.stdout env)

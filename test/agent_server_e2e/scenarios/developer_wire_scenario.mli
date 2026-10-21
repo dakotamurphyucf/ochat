@@ -1,8 +1,10 @@
 open! Core
 
-(** Qualify installed Developer methods over the production HTTP and Unix socket
-    servers against one in-process daemon. The Unix server uses the same stdio
-    envelope dispatcher, while client relay parity belongs to OCH-426. This uses
-    real authenticated Authoring context/source custody and a pure Check; it
-    never dispatches inference or native effects. *)
+(** Qualify installed Authoring, Developer and REPL methods over production HTTP
+    and Unix socket servers with owned in-process daemons. The Unix server uses
+    the production stdio envelope dispatcher. Configured startup checks remain
+    distinct from the embedded native-authorization barrier used to qualify
+    saturation, cancellation and disconnected waiters. Successful qualification
+    cancels the held native calls before their effects execute; inference is
+    disabled. Client relay parity is qualified separately. *)
 val run : Eio_unix.Stdenv.base -> case:string option -> unit

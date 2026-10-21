@@ -55,104 +55,6 @@ let trace_limits () =
   |> ok
 ;;
 
-let repl_wire_limits () =
-  R.Limits.create
-    ~request:(document ~bytes:512000 ~depth:24 ~fields:2048 ~nodes:4096)
-    ~result:(document ~bytes:(2 * 1024 * 1024) ~depth:20 ~fields:2048 ~nodes:4096)
-    ~page:(document ~bytes:8192 ~depth:8 ~fields:128 ~nodes:128)
-    ~response:(document ~bytes:(3 * 1024 * 1024) ~depth:24 ~fields:4096 ~nodes:8192)
-    ~max_source_bytes:4096
-    ~max_reference_bytes:384
-    ~max_output_bytes:32768
-    ~max_page_items:8
-    ~max_event_bytes:4096
-    ~max_registry_entries:18
-  |> ok
-;;
-
-let repl_configuration () =
-  let parse =
-    Chatml.Chatml_parse.Submission.Limits.create
-      ~max_source_bytes:4096
-      ~max_tokens:4096
-      ~max_work_steps:100_000
-      ~sites:
-        (Chatml.Chatml_syntax_sites.Limits.create ~max_sites:4096 ~max_name_bytes:16384
-         |> admitted)
-    |> admitted
-  in
-  let display =
-    Chatml_typechecker.Type_snapshot.Limits.create
-      ~max_nodes:4096
-      ~max_edges:4096
-      ~max_label_bytes:16384
-    |> admitted
-  in
-  let root_copy =
-    Chatml_typechecker.Repl_type_roots.Limits.create
-      ~max_bindings:128
-      ~max_type_roots:256
-      ~max_type_nodes:4096
-      ~max_variable_cells:1024
-      ~max_type_edges:4096
-      ~max_copy_work:100_000
-      ~max_copy_depth:128
-      ~max_name_work:100_000
-      ~max_name_bytes:16384
-    |> admitted
-  in
-  let typing_limits =
-    Chatml_repl_typing.Limits.create
-      ~parse
-      ~display
-      ~max_display_name_bytes:4096
-      ~max_statements:16
-      ~root_copy
-    |> admitted
-  in
-  S.Daemon.Developer_configuration.Repl.create
-    ~scope_limits:
-      (Chatml_configured_lookup.Repl_scope.Limits.create
-         ~max_snippets:16
-         ~max_identity_bytes:4096
-       |> admitted)
-    ~root_limits:
-      (Chatml_dependency_session.Roots.Limits.create
-         ~max_checked_modules:16
-         ~max_edges:64
-         ~max_dependency_depth:16
-       |> admitted)
-    ~typing_limits
-    ~evaluator_limits:
-      (Chatml_repl_execution.Limits.create
-         ~max_preview_bytes:4096
-         ~max_preview_nodes:1024
-         ~max_preview_depth:16
-         ~max_diagnostic_bytes:1024
-         ~max_retained_tasks:8
-       |> admitted)
-    ~execution_policy:(Bounded Chatml_execution.default_limits)
-    ~type_display_limits:
-      (Chatml_type_display.Limits.create
-         ~max_nodes:4096
-         ~max_edges:8192
-         ~max_depth:32
-         ~max_work_steps:131072
-         ~max_text_bytes:4096
-         ~max_output_bytes:32768
-       |> admitted)
-    ~max_instances:2
-    ~max_keys_per_instance:4
-    ~max_submissions_per_epoch:8
-    ~max_source_bytes:4096
-    ~max_receipt_bytes:4096
-    ~max_total_receipt_bytes:(1024 * 1024)
-    ~max_total_type_detail_bytes:(1024 * 1024)
-    ~max_task_origins:8
-    ~max_reference_page_bytes:4096
-  |> ok
-;;
-
 let daemon_options source =
   let module Config = S.Daemon.Developer_configuration in
   let recorder =
@@ -187,7 +89,11 @@ let daemon_options source =
     |> fun portable ->
     Config.Portable.with_trace_wire portable (trace_limits ())
     |> ok
-    |> fun portable -> Config.Portable.with_repl_wire portable (repl_wire_limits ()) |> ok
+    |> fun portable ->
+    Config.Portable.with_repl_wire
+      portable
+      (Support.Developer_fixture.repl_wire_limits ())
+    |> ok
   in
   let developer =
     Support.Developer_fixture.developer_configuration
@@ -198,7 +104,8 @@ let daemon_options source =
     Config.with_portable_wire configuration portable
     |> fun configuration ->
     Config.with_traces configuration traces
-    |> fun configuration -> Config.with_repl configuration (repl_configuration ())
+    |> fun configuration ->
+    Config.with_repl configuration (Support.Developer_fixture.repl_configuration ())
   in
   { (Support.Daemon_host.with_offline_inference S.Daemon.default_options) with
     authoring = Some (Support.Trace_source_fixture.authoring_policy source)
