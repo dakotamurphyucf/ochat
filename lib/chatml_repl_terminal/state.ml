@@ -316,6 +316,7 @@ let with_view t view =
   ; submission = None
   ; reference_page = None
   ; task = None
+  ; notice = None
   ; editor = Editor.empty
   ; history_position = None
   ; history_draft = None
@@ -381,6 +382,8 @@ let submitted t ~source ~preserve_editor =
   in
   { t with
     editor = (if preserve_editor then t.editor else Editor.empty)
+  ; task = None
+  ; notice = None
   ; history
   ; history_position = None
   ; history_draft = None

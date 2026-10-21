@@ -125,6 +125,25 @@ let run
   Mirage_crypto_rng_unix.use_default ();
   Eio_main.run (fun env ->
     let open Result.Let_syntax in
+    let terminal_input = Eio.Stdenv.stdin env in
+    let terminal_output = Eio.Stdenv.stdout env in
+    let is_terminal flow =
+      (* Eio has no terminal probe; borrow the actual stream's descriptor only
+         for this nonblocking terminal check, as Notty does for terminal setup. *)
+      Eio_unix.Fd.use_exn
+        "chatml-repl terminal validation"
+        (Eio_unix.Resource.fd flow)
+        Core_unix.isatty
+    in
+    let%bind () =
+      if is_terminal terminal_input && is_terminal terminal_output
+      then Ok ()
+      else
+        Error
+          (P.Error.invalid_request
+             "chatml-repl requires terminal stdin and stdout; redirected input/output is \
+              unsupported")
+    in
     let%bind target =
       target
         ~local
@@ -289,8 +308,8 @@ let run
           ~nosig:true
           ~mouse:false
           ~bpaste:true
-          ~input:(Eio.Stdenv.stdin env)
-          ~output:(Eio.Stdenv.stdout env)
+          ~input:terminal_input
+          ~output:terminal_output
           ~on_event
           (fun term ->
              let present state =

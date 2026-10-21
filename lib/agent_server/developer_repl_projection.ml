@@ -152,7 +152,7 @@ let present ~display_limits ~max_bytes receipts ~checkpoint =
           ; value_preview
           ; diagnostic
           ; expression_type
-          ; binding_count = List.length (Typing.Frozen_types.bindings frozen)
+          ; binding_count = List.length (Typing.Frozen_types.statement_bindings frozen)
           ; task_retention =
               (match Evaluator.Receipt.task_retention receipt with
                | Not_a_task -> Not_a_task
@@ -195,7 +195,7 @@ let inspect ~display_limits ~max_bytes receipt ~selector ~checkpoint =
         Option.map (Evaluator.Receipt.expression_type receipt) ~f:(fun root -> None, root)
       | Binding_index index when index >= 0 ->
         Option.map
-          (List.nth (Typing.Frozen_types.bindings frozen) index)
+          (List.nth (Typing.Frozen_types.statement_bindings frozen) index)
           ~f:(fun (name, root) -> Some name, root)
       | Binding_index _ -> None
     in

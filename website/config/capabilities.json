@@ -206,6 +206,7 @@
     "title": "Captured ChatML development and REPL",
     "pages": [
       "guide/chatml-development-workflow",
+      "guide/chatml-development-services",
       "development/chatml-repl-submission",
       "design/chatml-execution-tracing"
     ],

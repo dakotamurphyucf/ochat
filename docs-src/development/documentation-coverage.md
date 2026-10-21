@@ -1382,7 +1382,8 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../guide/chatml-authoring-runtime.md) | `docs-src/guide/chatml-authoring-runtime.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-background-values.md) | `docs-src/guide/chatml-background-values.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-collections.md) | `docs-src/guide/chatml-collections.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
-| [page](../guide/chatml-development-workflow.md) | `docs-src/guide/chatml-development-workflow.md` | Current captured-revision workflow for Check, Fixture, Live, REPL and explicit retained Tasks; grants remain separate. |
+| [page](../guide/chatml-development-workflow.md) | `docs-src/guide/chatml-development-workflow.md` | Practical terminal REPL setup, commands, expected results, Projects, reset and remote connection. |
+| [page](../guide/chatml-development-services.md) | `docs-src/guide/chatml-development-services.md` | Captured editor revisions, analysis and assistance, explicit save/upload, Check/Fixture/Live and trace integration. |
 | [page](../guide/chatml-evaluation.md) | `docs-src/guide/chatml-evaluation.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-execution-limits.md) | `docs-src/guide/chatml-execution-limits.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-global-helpers.md) | `docs-src/guide/chatml-global-helpers.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

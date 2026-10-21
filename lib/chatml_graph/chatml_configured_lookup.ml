@@ -208,8 +208,22 @@ let resolve t ~name ~reason ~span ~checkpoint =
         [ Diagnostic.Related.create site ~message:"Configured scope selected here" ]
     in
     let%bind () = current_or_error t in
-    Error
-      (Diagnostic.create ~site:use ~related ("Unknown configured module '" ^ name ^ "'"))
+    let kind =
+      match reason with
+      | Reason.Value_reference ->
+        (* A lexical value miss also probes the configured scope. Only UIDENT
+           names can name configured modules; preserve their module diagnostic. *)
+        if
+          (not (String.is_empty name))
+          &&
+          match String.get name 0 with
+          | 'A' .. 'Z' -> true
+          | _ -> false
+        then "configured module"
+        else "value"
+      | Open | Qualified_type -> "configured module"
+    in
+    Error (Diagnostic.create ~site:use ~related ("Unknown " ^ kind ^ " '" ^ name ^ "'"))
   | Some binding ->
     let%bind binding_site = site binding.source binding.location ~checkpoint in
     let%map () = current_or_error t in

@@ -106,6 +106,16 @@ module Frozen_types : sig
   val snapshot : t -> Snapshot.t
   val bindings : t -> (string * Snapshot.Id.t) list
 
+  (** Value bindings declared by this statement on success,
+      in compiler order: pattern names depth-first left-to-right, recursive
+      bindings in declaration order, and one name for a module declaration.
+      Rebinding includes the new declaration even when its name already existed.
+      Candidate snapshots expose these before execution; published runtime
+      failures select the BEFORE snapshot with no declared bindings. Expression,
+      type and open statements also have none. Roots belong to [snapshot], shared with [bindings];
+      this projection never adds builtins or earlier statement names. *)
+  val statement_bindings : t -> (string * Snapshot.Id.t) list
+
   (** Only a successful expression statement has this root. It belongs to the
       SAME bounded snapshot as [bindings] and was frozen before any runtime
       effect from the original checked inference, not reconstructed later. *)

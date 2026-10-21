@@ -2021,6 +2021,38 @@ let%expect_test "hosted REPL retains partial work and closes at key saturation" 
       | Finished -> true
       | Need_more _ | Rejected _ | Stopped _ -> false
     in
+    let binding =
+      Repl.inspect_type
+        daemon
+        ~actor
+        ~instance
+        ~epoch
+        ~key:(key "repl-good")
+        ~statement_index:0
+        ~selector:(Binding_index 0)
+        ~max_bytes:4096
+      |> ok
+    in
+    [%test_eq: string option] (Repl.Type_inspection.binding_name binding) (Some "good");
+    [%test_eq: string]
+      (Chatml_type_display.text (Repl.Type_inspection.rendered binding))
+      "int";
+    [%test_eq: int list]
+      (List.map
+         (Repl.Submission.summaries first)
+         ~f:Repl.Submission.Statement_summary.binding_count)
+      [ 1 ];
+    assert (
+      Result.is_error
+        (Repl.inspect_type
+           daemon
+           ~actor
+           ~instance
+           ~epoch
+           ~key:(key "repl-good")
+           ~statement_index:0
+           ~selector:(Binding_index 1)
+           ~max_bytes:4096));
     let second =
       Repl.submit
         daemon

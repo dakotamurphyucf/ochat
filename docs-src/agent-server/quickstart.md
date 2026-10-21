@@ -54,8 +54,9 @@ opam environment remains available. In a new terminal, select the same switch
 and load its environment before running Ochat. If `chat-tui` is not found,
 check that environment and the installation steps above.
 
-The installed commands include `chat-tui`, `ochat-agent-server`, and
-`ochat-agent-stdio`. The tutorials also show `dune exec bin/NAME.exe -- ...`
+The installed commands include `chat-tui`, `chatml-repl`,
+`ochat-agent-server`, and `ochat-agent-stdio`. To explore ChatML without a
+provider account, follow the [offline REPL walkthrough](../guide/chatml-development-workflow.md). The tutorials also show `dune exec bin/NAME.exe -- ...`
 for running directly from the Ochat checkout.
 
 ## Provider environment

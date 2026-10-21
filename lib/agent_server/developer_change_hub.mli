@@ -50,7 +50,11 @@ val enqueue
     final currentness comparison, not as a new grant. A repeat of the same
     physical connection/run/key refreshes that proof and both callbacks in
     place, invalidating older in-flight delivery generations without adding
-    a second watch. [authorize_change]
+    a second watch. The refresh discards that key's pre-refresh queued hints
+    and resync obligation, covered by the mandatory post-acknowledgement
+    Observe; registration itself never creates a Resync_required. Transitions
+    after this nonyielding refresh retain their hints and resync obligations,
+    including while an older delivery is in flight. [authorize_change]
     rechecks Host disclosure after any yielding read for this exact key or
     current approval owner. The pump then performs a final nonyielding actor,
     feature-lease and watch-generation check immediately before handing the

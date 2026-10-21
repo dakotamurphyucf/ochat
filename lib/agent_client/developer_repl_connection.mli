@@ -211,7 +211,11 @@ val task_cancel_and_wait
   -> (Agent_protocol.Developer_repl_wire.Task_view.t, Agent_protocol.Error.t) result
 
 (** Watch ack is only a hint subscription; immediately Observe the same key.
-    Reconnect and Resync_required repeat Watch then Observe. The caller claims
+    Reconnect repeats Watch then Observe. Ordinary hints and Resync_required
+    require an authoritative Observe; an existing subscription need not be
+    registered again. Repeating Watch then Observe is also safe: refresh
+    supersedes pre-ack hints, and the following Observe covers them without
+    registration manufacturing another Resync_required. The caller claims
     exactly one Connection.notification_lease and passes its envelopes here. *)
 val watch_and_observe_repl
   :  t

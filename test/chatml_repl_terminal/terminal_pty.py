@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import pty
+import re
 import select
 import signal
 import struct
@@ -19,6 +20,13 @@ TERMINAL = sys.argv[1]
 STDIO = sys.argv[2]
 TIMEOUT = 12.0
 MAX_TRANSCRIPT = 1_000_000
+ANSI_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def rendered_text(data):
+    # Notty uses both CSI positioning and ESC E (next line) for complete frames.
+    text = data.decode("utf-8", "replace").replace("\x1bE", "\n")
+    return ANSI_CSI.sub("", text)
 
 
 def check(condition, message, transcript=b""):
@@ -171,6 +179,34 @@ class Session:
     def write(self, data):
         os.write(self.master, data)
 
+    def await_ready_line_after(self, offset, wanted):
+        deadline = time.monotonic() + TIMEOUT
+        while time.monotonic() < deadline:
+            text = rendered_text(self.output[offset:])
+            before, ready, final = text.rpartition("[ready]")
+            if (
+                ready and "[busy " in before and "[busy " not in final
+                and wanted in {line.strip() for line in final.splitlines()}
+            ):
+                return
+            self.drain(0.05)
+        raise AssertionError(f"ready frame did not show line {wanted!r}: {text[-1000:]!r}")
+
+    def await_quiescence(self):
+        """Allow queued real transport hints to settle, then require idle silence."""
+        deadline = time.monotonic() + TIMEOUT
+        start = len(self.output)
+        while time.monotonic() < deadline:
+            offset = len(self.output)
+            self.drain(0.2)
+            check(
+                len(self.output) - start <= 65536,
+                "terminal kept redrawing while idle", self.output,
+            )
+            if len(self.output) == offset:
+                return
+        raise AssertionError(f"terminal did not become idle: {self.output[-500:]!r}")
+
     def finish(self, expected_code):
         deadline = time.monotonic() + TIMEOUT
         while self.child.poll() is None and time.monotonic() < deadline:
@@ -220,13 +256,106 @@ with tempfile.TemporaryDirectory(prefix="och255-terminal-") as tmp:
             "--data-root", str(root / name),
         ] + selection
 
+    for redirected in ("stdin", "stdout"):
+        master, slave = pty.openpty()
+        try:
+            name = f"redirected-{redirected}-data"
+            result = subprocess.run(
+                command(name),
+                stdin=subprocess.DEVNULL if redirected == "stdin" else slave,
+                stdout=slave if redirected == "stdin" else subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=TIMEOUT,
+            )
+            diagnostic = (result.stdout or b"") + result.stderr
+            check(result.returncode == 1, "redirected terminal invocation did not fail", diagnostic)
+            check(
+                b"requires terminal stdin and stdout" in diagnostic,
+                "redirected invocation lost its terminal diagnostic", diagnostic,
+            )
+            check(
+                all(marker not in diagnostic for marker in (
+                    b"\x1b", b"Raised at", b"Called from", b"Fatal error",
+                )),
+                "redirected invocation entered terminal rendering or leaked a backtrace", diagnostic,
+            )
+            check(not (root / name).exists(), "redirected invocation started the local host")
+        finally:
+            os.close(master)
+            os.close(slave)
+
+    help_result = subprocess.run(
+        [TERMINAL, "--help"], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=TIMEOUT,
+    )
+    check(help_result.returncode == 0, "redirected --help failed", help_result.stderr)
+    check(b"--local" in help_result.stdout, "redirected --help omitted usage", help_result.stdout)
+
     with Session(command("normal-data")) as normal:
         normal.await_bytes(b"[ready]")
         normal.write(b"Task.pure(8)\r:submit\r")
         normal.await_bytes(b"Task 1:")
         check(b"Task succeeded" not in normal.output, "Submit auto-ran Task", normal.output)
+        normal.await_quiescence()
+        offset = len(normal.output)
+        normal.write(b":refs\r")
+        normal.await_any_after(offset, (b"[busy References]",))
+        normal.await_ready_line_after(offset, "finished")
+        normal.await_quiescence()
+        page = rendered_text(normal.output[offset:]).rpartition("[ready]")[2]
+        check(page.count("Task 1:") == 2, "reference page did not show stored Task", normal.output)
+        check("submission key not found" not in page, "reference page lost submission key", normal.output)
         normal.write(b":run 1\r")
         normal.await_bytes(b"Task succeeded")
+        normal.await_quiescence()
+        offset = len(normal.output)
+        normal.write(b":refs\r")
+        normal.await_any_after(offset, (b"[busy References]",))
+        normal.await_ready_line_after(offset, "finished")
+        normal.await_quiescence()
+        page = rendered_text(normal.output[offset:]).rpartition("[ready]")[2]
+        check(page.count("Task 1:") == 2, "Task execution lost submission reference page", normal.output)
+        check("submission key not found" not in page, "Task execution lost reference-page key", normal.output)
+        offset = len(normal.output)
+        normal.write(b"617\r:submit\r")
+        normal.await_any_after(offset, (b"1. ok 617",))
+        normal.await_quiescence()
+        submitted = rendered_text(normal.output[offset:]).rpartition("[ready]")[2]
+        check("Task succeeded" not in submitted, "new submission retained previous Task result", normal.output)
+        offset = len(normal.output)
+        normal.write(b":type 1\r")
+        normal.await_any_after(offset, (b"[busy Inspect_type]",))
+        normal.await_ready_line_after(offset, "int")
+        normal.await_quiescence()
+        check(
+            b"submission key not found" not in normal.output[offset:],
+            "type inspection lost the stored submission key", normal.output,
+        )
+        offset = len(normal.output)
+        normal.write(b"618\r:submit\r")
+        normal.await_any_after(offset, (b"1. ok 618",))
+        normal.await_quiescence()
+        submitted = rendered_text(normal.output[offset:]).rpartition("[ready]")[2]
+        check("int" not in {line.strip() for line in submitted.splitlines()}, "new submission retained old type notice", normal.output)
+        offset = len(normal.output)
+        normal.write(b":type 1\r")
+        normal.await_any_after(offset, (b"[busy Inspect_type]",))
+        normal.await_ready_line_after(offset, "int")
+        normal.await_quiescence()
+        offset = len(normal.output)
+        normal.write(b":reset\r")
+        normal.await_any_after(offset, (b"[busy (Keyed Reset)]",))
+        normal.await_quiescence()
+        check(
+            b"No exact submission or Task key to observe" not in normal.output[offset:],
+            "reset retained a stale observation notice", normal.output,
+        )
+        reset_frame = rendered_text(normal.output[offset:]).rpartition("[ready]")[2]
+        check("int" not in {line.strip() for line in reset_frame.splitlines()}, "reset retained old type notice", normal.output)
+        offset = len(normal.output)
+        normal.write(b"619\r:submit\r")
+        normal.await_any_after(offset, (b"1. ok 619",))
+        normal.await_quiescence()
         normal.write(b"\x11")  # Ctrl+Q
         normal.finish(0)
 
@@ -275,4 +404,4 @@ with tempfile.TemporaryDirectory(prefix="och255-terminal-") as tmp:
         failed.write(b"\x1b[200~\x7f")  # Unsupported Backspace inside bracketed paste
         failed.finish(1)
 
-print("terminal local source/Project environment, manual Task, held cancellation and fatal-input cleanup passed")
+print("terminal local source/Project, Task quiescence/input/reset/type, redirected streams/help, cancellation and cleanup passed")

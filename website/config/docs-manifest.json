@@ -5156,7 +5156,7 @@
     "reviewNote": "Delivered read-only trace contract with source ownership, retention, disclosure and transport limits.",
     "provenance": "authored",
     "route": "/docs/reference/chatml/execution-tracing/",
-    "description": "Understand bounded trace pages, exact source attribution and current read authority.",
+    "description": "Enable optional recording, page exact execution traces, and interpret source attribution, redaction, truncation and current read authority.",
     "section": "ChatML reference",
     "kind": "reference",
     "order": 12,
@@ -5165,7 +5165,11 @@
     "sitemap": true,
     "noindex": false,
     "status": "experimental",
-    "verification": "not-checked"
+    "verification": "not-checked",
+    "related": [
+      "guide/chatml-development-workflow",
+      "guide/chatml-development-services"
+    ]
   },
   {
     "id": "design/chatml-type-display",
@@ -5232,7 +5236,11 @@
     "sitemap": true,
     "noindex": false,
     "status": "experimental",
-    "verification": "not-checked"
+    "verification": "not-checked",
+    "related": [
+      "guide/chatml-development-workflow",
+      "guide/chatml-development-services"
+    ]
   },
   {
     "id": "development/language-highlighting",
@@ -5254,11 +5262,11 @@
     "id": "guide/chatml-development-workflow",
     "source": "docs-src/guide/chatml-development-workflow.md",
     "disposition": "publish",
-    "title": "Develop a captured ChatML revision",
-    "reviewNote": "Practical installed-host guide joining exact source editing, Developer Check, Fixture/Live, terminal REPL and separately authorized trace readback; no live-provider or deployment claim.",
+    "title": "Develop ChatML with the terminal REPL",
+    "reviewNote": "Practical source-grounded terminal walkthrough with complete offline source and Project policies, expected outcomes, keyboard commands, recovery, remote setup and links to editor-service references.",
     "provenance": "authored",
     "route": "/docs/guides/chatml-development/",
-    "description": "Use chatml-repl, Developer Check and Fixture/Live on exact captured revisions, immutable uploads and attributable traces.",
+    "description": "Install and start chatml-repl, submit values, inspect types, explicitly run Tasks, recover from errors, and use Projects or remote hosts.",
     "section": "ChatML workflows",
     "kind": "guide",
     "order": 8,
@@ -5267,6 +5275,36 @@
     "sitemap": true,
     "noindex": false,
     "status": "experimental",
-    "verification": "not-checked"
+    "verification": "not-checked",
+    "related": [
+      "guide/chatml-development-services",
+      "development/chatml-repl-submission",
+      "design/chatml-execution-tracing"
+    ]
+  },
+  {
+    "id": "guide/chatml-development-services",
+    "source": "docs-src/guide/chatml-development-services.md",
+    "disposition": "publish",
+    "title": "Authoring and execution services",
+    "reviewNote": "Reader-facing composition of delivered Authoring contexts, compiler evidence, diagnostics, completion, navigation, highlighting, immutable uploads, Check/Fixture/Live, recovery and trace APIs; distinguishes shipped services from future UI.",
+    "provenance": "authored",
+    "route": "/docs/reference/chatml/authoring-services/",
+    "description": "Capture and analyze exact revisions, provide diagnostics and completion, save or upload explicitly, and choose Check, Fixture or Live execution.",
+    "section": "ChatML reference",
+    "kind": "reference",
+    "order": 13,
+    "navigation": true,
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "experimental",
+    "verification": "not-checked",
+    "related": [
+      "guide/chatml-development-workflow",
+      "agent-server/protocol",
+      "agent-server/protocol-types",
+      "design/chatml-execution-tracing"
+    ]
   }
 ]

@@ -213,11 +213,7 @@ let live_hint (t : t) (entry : connection) watch ~generation =
   && actor_current entry watch.actor
 ;;
 
-let revoke_watch entry watch =
-  watch.live <- false;
-  watch.generation <- watch.generation + 1;
-  entry.watches
-  <- List.filter entry.watches ~f:(fun candidate -> not (phys_equal candidate watch));
+let discard_watch_hints entry watch =
   let pending =
     Queue.to_list entry.pending
     |> List.filter ~f:(fun hint -> not (phys_equal hint.watch watch))
@@ -230,7 +226,17 @@ let revoke_watch entry watch =
   in
   Queue.clear entry.dirty;
   List.iter dirty ~f:(Queue.enqueue entry.dirty);
-  watch.dirty_queued <- false
+  watch.dirty_queued <- false;
+  watch.dirty <- false;
+  watch.dirty_revision <- watch.dirty_revision + 1
+;;
+
+let revoke_watch entry watch =
+  watch.live <- false;
+  watch.generation <- watch.generation + 1;
+  entry.watches
+  <- List.filter entry.watches ~f:(fun candidate -> not (phys_equal candidate watch));
+  discard_watch_hints entry watch
 ;;
 
 let mark_dirty (entry : connection) (watch : watch) =
@@ -692,11 +698,13 @@ let rec watch_topic t ~connection ~actor ~topic ~authorize_key ~authorize_change
             match List.find entry.watches ~f:(fun watch -> same_watch watch topic) with
             | Some existing ->
               existing.generation <- existing.generation + 1;
+              (* The mandatory Observe after this acknowledgement covers all
+                 pre-refresh transitions. Retire their hints without creating
+                 a new resync; post-refresh transitions retain their own
+                 generation and dirty revision, even if an old publisher yields. *)
+              discard_watch_hints entry existing;
               existing.actor <- actor;
               existing.authorize_change <- authorize_change;
-              existing.dirty <- true;
-              mark_dirty entry existing;
-              Eio.Condition.broadcast entry.wake;
               Ok ()
             | None ->
               if List.length entry.watches >= t.limits.max_watches_per_connection
