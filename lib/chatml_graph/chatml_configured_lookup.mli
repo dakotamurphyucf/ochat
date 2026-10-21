@@ -103,6 +103,9 @@ end
     exact file's selected scope. Missing/out-of-scope failures carry the use site
     and available selected-scope/configuration site, not guessed token offsets.
     Resolve aliases to the admitted Module_id; do not load/check any module.
+    A missing [Value_reference] whose name is not a UIDENT reports an unknown
+    value; missing module names and explicit module/type lookup report an unknown
+    configured module. This wording never changes selected-scope resolution.
     Validate sites only for this real lookup. Reference copies this context's
     input affinity; another input with identical source bytes but different
     bindings cannot supply an event to the current graph. Retain no callback. *)

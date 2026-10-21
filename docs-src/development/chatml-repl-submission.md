@@ -1,5 +1,11 @@
 # Bounded ChatML REPL submission parsing
 
+For installation, complete offline source and Project setups, keyboard commands
+and expected results, start with the [terminal REPL walkthrough](../guide/chatml-development-workflow.md).
+This reference defines the parser, committed-state and lifetime guarantees for
+integrators. The [authoring and execution reference](../guide/chatml-development-services.md)
+explains how to combine it with editor analysis and captured runs.
+
 [`Chatml_parse.Submission`](../../lib/chatml/chatml_parse.mli) admits one immutable
 captured source as a whole unit before any REPL typecheck or evaluation. The
 caller supplies positive source-byte, token, parser/lexer work and identifier

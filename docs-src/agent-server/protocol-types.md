@@ -4963,6 +4963,9 @@ module Current_epoch : sig
 end
 
 module Type_selector : sig
+  (** [Binding_index] selects this statement's declared value bindings, zero-based
+      in compiler declaration order, excluding builtins and earlier statements.
+      Expressions, types, opens and failed runtime statements have none. *)
   type t =
     | Expression
     | Binding_index of int
@@ -5548,6 +5551,9 @@ module Current_epoch : sig
 end
 
 module Type_selector : sig
+  (** [Binding_index] selects this statement's declared value bindings, zero-based
+      in compiler declaration order, excluding builtins and earlier statements.
+      Expressions, types, opens and failed runtime statements have none. *)
   type t =
     | Expression
     | Binding_index of int

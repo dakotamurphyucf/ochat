@@ -203,7 +203,11 @@ module Submission : sig
     val value_preview : t -> string option
     val diagnostic : t -> Evaluator.Diagnostic.t option
     val expression_type : t -> Chatml_type_display.t option
+
+    (** Declared value bindings of this completed statement, excluding the
+        prior environment, builtins and names brought into scope by [open]. *)
     val binding_count : t -> int
+
     val task_retention : t -> task_retention
     val text_limited : t -> bool
   end
@@ -246,8 +250,10 @@ module Submission : sig
 end
 
 module Type_selector : sig
-  (** [Binding_index] is zero-based in the original receipt's ordered frozen
-      binding list; shadowed names remain distinct. *)
+  (** [Binding_index] is zero-based in this statement's declared value bindings:
+      pattern names depth-first left-to-right, recursive bindings in declaration
+      order, or one module name. Rebinding selects that statement's declaration.
+      Expressions, types, opens and failed runtime statements have none. *)
   type t =
     | Expression
     | Binding_index of int
@@ -439,7 +445,7 @@ val historical_trace
   -> key:P.Idempotency_key.t
   -> (Developer_trace_retention.Entry.t option, P.Error.t) result
 
-(** Inspect one expression or indexed lexical binding from the exact retained
+(** Inspect one expression or indexed declared value binding from the exact retained
     zero-based [statement_index] receipt's immutable frozen snapshot. The
     binding index disambiguates shadowing;
     a foreign/expired epoch, key or graph detail fails closed. Actor, method

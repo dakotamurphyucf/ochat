@@ -1077,6 +1077,10 @@ let type_detail_bytes receipts =
           (module Int)
           (Typing.Frozen_types.bindings frozen)
           ~f:(fun (name, _) -> 64 + String.length name)
+      + List.sum
+          (module Int)
+          (Typing.Frozen_types.statement_bindings frozen)
+          ~f:(fun (name, _) -> 64 + String.length name)
       + Option.value_map
           (Evaluator.Receipt.value_preview receipt)
           ~default:0

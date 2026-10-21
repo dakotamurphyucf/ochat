@@ -73,6 +73,10 @@ let status_text = function
   | Closed -> "closed"
 ;;
 
+let task_reference_line index reference =
+  Printf.sprintf "Task %d: :run %d to execute  %s" (index + 1) (index + 1) reference
+;;
+
 let submission_lines t submission =
   let status =
     match W.Submission.status submission with
@@ -98,9 +102,7 @@ let submission_lines t submission =
       Printf.sprintf "%d. %s %s" (index + 1) outcome preview)
   in
   let references =
-    W.Submission.task_references submission
-    |> List.mapi ~f:(fun index reference ->
-      Printf.sprintf "Task %d: %s  (:run %d to execute)" (index + 1) reference (index + 1))
+    W.Submission.task_references submission |> List.mapi ~f:task_reference_line
   in
   List.map ((status :: summaries) @ references) ~f:(safe_text t)
 ;;
@@ -163,13 +165,7 @@ let image t state ~width ~height =
       Option.value_map (State.reference_page state) ~default:[] ~f:(fun page ->
         W.Reference_page.items page
         |> List.mapi ~f:(fun index reference ->
-          safe_text
-            t
-            (Printf.sprintf
-               "Task %d: %s  (:run %d to execute)"
-               (index + 1)
-               reference
-               (index + 1))))
+          safe_text t (task_reference_line index reference)))
     in
     let output_rows =
       submission @ task @ page @ notice

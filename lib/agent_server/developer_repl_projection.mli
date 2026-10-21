@@ -19,7 +19,11 @@ module Statement : sig
   val value_preview : t -> string option
   val diagnostic : t -> Evaluator.Diagnostic.t option
   val expression_type : t -> Chatml_type_display.t option
+
+  (** Declared value bindings of this completed statement, excluding the prior
+      environment, builtins and names brought into scope by [open]. *)
   val binding_count : t -> int
+
   val task_retention : t -> task_retention
 
   (** True when a textual field could not fit the requested presentation
@@ -73,7 +77,10 @@ val present
   -> (Presentation.t, Error.t) result
 
 module Selector : sig
-  (** [Binding_index] is zero-based in the receipt's ordered frozen bindings. *)
+  (** [Binding_index] is zero-based in the statement's declared value bindings:
+      pattern names in depth-first left-to-right order, recursive bindings in
+      declaration order, or one module name. Expressions, type declarations,
+      opens and runtime failures have no declared binding selection. *)
   type t =
     | Expression
     | Binding_index of int

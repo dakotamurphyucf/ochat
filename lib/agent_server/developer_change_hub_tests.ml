@@ -280,6 +280,157 @@ let%test_module "bounded Developer change ownership" =
             must (Hub.close_and_wait hub))))
     ;;
 
+    let%expect_test "Watch refresh converges and preserves post-barrier invalidation" =
+      Eio_main.run (fun env ->
+        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 8. (fun () ->
+          Eio.Switch.run (fun sw ->
+            let wire_limits = wire_limits () in
+            let limits =
+              must
+                (Hub.Limits.create
+                   ~max_connections:1
+                   ~max_watches_per_connection:2
+                   ~max_pending_hints_per_connection:1)
+            in
+            let hub = must (Hub.create ~sw ~limits ~wire_limits ~repl_wire_limits:None) in
+            let principal =
+              must
+                (P.Principal.create
+                   ~id:(must (P.Id.Principal.of_string "pri_refresh_watcher"))
+                   ~authentication_kind:"test"
+                   ~scopes:(P.Scope.Set.of_list [ P.Scope.Developer_check ])
+                   ~attributes:[])
+            in
+            let actor = Operator_authorization.trusted_local principal in
+            let run_id = must (P.Id.Developer_run.of_string "dvr_refresh_case") in
+            let key = must (P.Idempotency_key.of_string "refresh-key") in
+            let marker = must (P.Idempotency_key.of_string "refresh-marker") in
+            let old_entered, signal_old_entered = Eio.Promise.create () in
+            let old_release, release_old = Eio.Promise.create () in
+            let publishing, signal_publishing = Eio.Promise.create () in
+            let publication_release, release_publication = Eio.Promise.create () in
+            let hold_publication = ref false in
+            let changes = ref [] in
+            let connection =
+              Connection_context.create_authenticated
+                ~actor
+                ~connection_id:"refresh-connection"
+                ~transport:In_memory
+                ~publish_notification:(function
+                  | P.Envelope.Notification { params; _ } ->
+                    let change = must (Change.of_json ~limits:wire_limits params) in
+                    if !hold_publication && P.Idempotency_key.equal change.key key
+                    then (
+                      Eio.Promise.resolve signal_publishing ();
+                      Eio.Promise.await publication_release);
+                    changes := change :: !changes
+                  | Request _ | Response _ -> failwith "expected change")
+                ~max_attachments:1
+            in
+            Connection_context.mark_initialized
+              ~enabled_features:[ "developer.events" ]
+              connection;
+            let watch key ~authorize_change =
+              must
+                (Hub.watch
+                   hub
+                   ~connection
+                   ~actor
+                   ~run_id
+                   ~key
+                   ~authorize_key:(fun () -> Ok ())
+                   ~authorize_change)
+            in
+            let enqueue key = Hub.enqueue hub ~run_id ~key ~kind:Change.Command_changed in
+            let count key =
+              List.count !changes ~f:(fun change ->
+                P.Idempotency_key.equal change.key key)
+            in
+            let await_count key expected =
+              while count key < expected do
+                Eio.Fiber.yield ()
+              done
+            in
+            watch marker ~authorize_change:(fun _ -> Ok ());
+            watch key ~authorize_change:(fun _ ->
+              Eio.Promise.resolve signal_old_entered ();
+              Eio.Promise.await old_release;
+              Ok ());
+            enqueue key;
+            Eio.Promise.await old_entered;
+            (* Both a queued hint and an overflow belong to the old baseline. *)
+            enqueue key;
+            enqueue key;
+            let allowed = ref true in
+            let refreshed_authorizations = ref 0 in
+            let refresh () =
+              watch key ~authorize_change:(fun _ ->
+                Int.incr refreshed_authorizations;
+                if !allowed
+                then Ok ()
+                else
+                  Error
+                    (P.Error.create
+                       Permission_denied
+                       ~message:"revoked"
+                       ~retryable:false
+                       ()))
+            in
+            refresh ();
+            (* Post-ack overflow must survive the old authorization continuation. *)
+            enqueue key;
+            enqueue key;
+            Eio.Promise.resolve release_old ();
+            await_count key 1;
+            assert (Int.equal !refreshed_authorizations 1);
+            assert (
+              List.for_all !changes ~f:(fun change ->
+                match change.kind with
+                | Change.Resync_required -> true
+                | Command_changed | Approval_changed -> false));
+            (* Repeated registration cannot create a second recovery hint. A
+               marker traverses the same pump before checking quiescence. *)
+            for _ = 1 to 3 do
+              refresh ()
+            done;
+            enqueue marker;
+            await_count marker 1;
+            assert (Int.equal (count key) 1);
+            (* A refreshed callback still enforces current disclosure. Restore
+               the grant and explicitly register again after revocation. *)
+            allowed := false;
+            enqueue key;
+            while !refreshed_authorizations < 2 do
+              Eio.Fiber.yield ()
+            done;
+            assert (Int.equal (count key) 1);
+            allowed := true;
+            refresh ();
+            enqueue key;
+            await_count key 2;
+            assert (Int.equal !refreshed_authorizations 3);
+            (* Bytes already handed to a yielding publisher may finish after
+               refresh, but its completion cannot erase a newer dirty slot. *)
+            hold_publication := true;
+            enqueue key;
+            enqueue key;
+            Eio.Promise.await publishing;
+            refresh ();
+            enqueue key;
+            enqueue key;
+            hold_publication := false;
+            Eio.Promise.resolve release_publication ();
+            await_count key 4;
+            assert (Int.equal !refreshed_authorizations 5);
+            must (Hub.close_connection_and_wait hub connection);
+            must (Hub.close_and_wait hub))));
+      print_endline
+        "stale generation suppressed; post-refresh resync retained; repeat Watch idle; \
+         authorization refreshed";
+      [%expect
+        {| stale generation suppressed; post-refresh resync retained; repeat Watch idle; authorization refreshed |}]
+    ;;
+
     let%test_unit "full hint queue retains a key-scoped resync without restart" =
       Eio_main.run (fun env ->
         Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 8. (fun () ->

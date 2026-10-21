@@ -333,7 +333,7 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
              | None, None, None, Some lookup -> Some (W.Watch_key.Repl lookup)
              | None, None, None, None -> None)
         in
-        let observe_current () =
+        let observe_current ?(background = false) ?(refresh = false) () =
           if State.equal_activity (State.activity !state) Closed
           then false
           else if !worker_active || !control_active
@@ -350,14 +350,20 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
                   match old with
                   | Some (W.Watch_key.Task old_lookup)
                     when P.Id.Developer_run.equal old_lookup.run_id lookup.run_id
-                         && P.Idempotency_key.equal old_lookup.key lookup.key -> Ok ()
-                  | Some old -> Client.unwatch client old
-                  | None -> Ok ()
+                         && P.Idempotency_key.equal old_lookup.key lookup.key ->
+                    if refresh
+                    then Client.watch_and_observe_task client lookup
+                    else Client.task_observe client lookup
+                  | Some old ->
+                    Result.bind (Client.unwatch client old) ~f:(fun () ->
+                      active_watch := None;
+                      Client.watch_and_observe_task client lookup)
+                  | None -> Client.watch_and_observe_task client lookup
                 in
                 Task_observed
-                  (Result.bind result ~f:(fun () ->
+                  (Result.map result ~f:(fun observation ->
                      active_watch := Some next;
-                     Client.watch_and_observe_task client lookup)))
+                     observation)))
             | Some (W.Watch_key.Repl lookup) ->
               busy Observe (fun () ->
                 let old = !active_watch in
@@ -370,23 +376,29 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
                            (W.Lookup.instance lookup)
                          && P.Idempotency_key.equal
                               (W.Lookup.key old_lookup)
-                              (W.Lookup.key lookup) -> Ok ()
-                  | Some old -> Client.unwatch client old
-                  | None -> Ok ()
+                              (W.Lookup.key lookup) ->
+                    if refresh
+                    then Client.watch_and_observe_repl client lookup
+                    else Client.observe client lookup
+                  | Some old ->
+                    Result.bind (Client.unwatch client old) ~f:(fun () ->
+                      active_watch := None;
+                      Client.watch_and_observe_repl client lookup)
+                  | None -> Client.watch_and_observe_repl client lookup
                 in
                 Submission_observed
-                  (Result.bind result ~f:(fun () ->
+                  (Result.map result ~f:(fun observation ->
                      active_watch := Some next;
-                     Client.watch_and_observe_repl client lookup)))
+                     observation)))
             | None ->
-              notice "No exact submission or Task key to observe";
+              if not background then notice "No exact submission or Task key to observe";
               false)
         in
         let after_completion () =
           if !notification_dirty
           then (
             notification_dirty := false;
-            ignore (observe_current () : bool))
+            ignore (observe_current ~background:true () : bool))
         in
         let pending_activity pending =
           match
@@ -515,7 +527,6 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
             (match State.view !state with
              | None -> failure Run_task (P.Error.invalid_request "missing REPL view")
              | Some view ->
-               latest_submission := None;
                inflight_task_lookup := None;
                latest_task
                := Some
@@ -753,6 +764,22 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
                        (W.Lookup.create ~instance:(W.View.instance view) ~key))))
           | _ -> reject "Close requires an idle current instance"
         in
+        let current_submission view =
+          match !latest_submission, State.submission !state with
+          | Some lookup, Some submission
+            when W.Wire_id.Instance.equal
+                   (W.Lookup.instance lookup)
+                   (W.View.instance view)
+                 && W.Wire_id.Epoch.equal
+                      (W.Submission.epoch submission)
+                      (W.View.epoch view) ->
+            Some
+              (W.Current_epoch.create
+                 ~instance:(W.View.instance view)
+                 ~epoch:(W.View.epoch view)
+                 ~key:(W.Lookup.key lookup))
+          | Some _, Some _ | None, _ | _, None -> None
+        in
         let inspect statement_index selector =
           match State.activity !state, State.view !state with
           | Ready, Some view ->
@@ -760,17 +787,12 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
             then reject "An exact-key cancellation is already in progress"
             else (
               let limits = W.Capabilities.limits (Client.capabilities client) in
-              match key () with
-              | Error error -> reject (error_message error)
-              | Ok key ->
+              match current_submission view with
+              | Some current ->
                 (match
                    W.Inspect.create
                      ~limits
-                     ~current:
-                       (W.Current_epoch.create
-                          ~instance:(W.View.instance view)
-                          ~epoch:(W.View.epoch view)
-                          ~key)
+                     ~current
                      ~statement_index
                      ~selector
                      ~max_bytes:(Int.min 4_096 (W.Limits.max_output_bytes limits))
@@ -782,7 +804,9 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
                        { instance = W.View.instance view
                        ; epoch = W.View.epoch view
                        ; result = Client.inspect_type client request
-                       })))
+                       }))
+              | None ->
+                reject "Type inspection requires a stored submission in the current epoch")
           | _ -> reject "Type inspection requires an idle current instance"
         in
         let references () =
@@ -792,15 +816,11 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
             then reject "An exact-key cancellation is already in progress"
             else (
               let limits = W.Capabilities.limits (Client.capabilities client) in
-              match key () with
-              | Error error -> reject (error_message error)
-              | Ok key ->
-                let current =
-                  W.Current_epoch.create
-                    ~instance:(W.View.instance view)
-                    ~epoch:(W.View.epoch view)
-                    ~key
-                in
+              match current_submission view with
+              | None ->
+                reject
+                  "Reference paging requires a stored submission in the current epoch"
+              | Some current ->
                 (match
                    W.Reference_page_request.create
                      ~limits
@@ -913,7 +933,7 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
           | Run index -> run_task index
           | Type { statement_index; selector } -> inspect statement_index selector
           | References -> references ()
-          | Observe -> observe_current ()
+          | Observe -> observe_current ~refresh:true ()
           | Cancel -> cancel ()
           | Reset -> reset ()
           | Close -> close ()
@@ -968,7 +988,7 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
             after_completion ();
             loop ()
           | Ok Notification ->
-            ignore (observe_current () : bool);
+            ignore (observe_current ~background:true () : bool);
             loop ()
           | Ok (Notification_error error) ->
             notice (error_message error);
@@ -1247,6 +1267,9 @@ let%test_unit "real portable client keeps retry, Task, and abandoned-read custod
     let second_observe_keys = ref [] in
     let control_count = ref 0 in
     let observe_count = ref 0 in
+    let watch_count = ref 0 in
+    let inspection_count = ref 0 in
+    let reference_page_count = ref 0 in
     let foreign_observation = ref false in
     let reset_count = ref 0 in
     let task_submit_count = ref 0 in
@@ -1323,7 +1346,9 @@ let%test_unit "real portable client keeps retry, Task, and abandoned-read custod
                    (if Int.equal !control_count 3
                     then second_submission
                     else first_submission)))
-          | Watch _ -> response Watch
+          | Watch _ ->
+            Int.incr watch_count;
+            response Watch
           | Unwatch _ -> response Unwatch
           | Observe lookup ->
             Int.incr observe_count;
@@ -1346,6 +1371,46 @@ let%test_unit "real portable client keeps retry, Task, and abandoned-read custod
             task_key := Some (W.Task_submit.key request);
             response (Task_submit (task_view (W.Task_submit.key request)))
           | Task_observe _ -> response (Task_observe (Option.map !task_key ~f:task_view))
+          | Inspect_type request ->
+            Int.incr inspection_count;
+            let current = W.Inspect.current request in
+            if
+              not
+                (Option.value_map !first_submit_key ~default:false ~f:(fun key ->
+                   P.Idempotency_key.equal key (W.Current_epoch.key current)))
+            then Error (P.Error.invalid_request "inspection lost the submission key")
+            else
+              response
+                (Inspect_type
+                   (W.Type_inspection.create
+                      ~limits
+                      ~revision:revision_one
+                      ~binding_name:None
+                      ~rendered:
+                        (W.Submission.Rendered_type.create
+                           ~limits
+                           ~kind:Type
+                           ~completeness:Complete
+                           ~text:"Task Int"
+                         |> must)
+                    |> must))
+          | Task_references_page request ->
+            Int.incr reference_page_count;
+            let current = W.Reference_page_request.current request in
+            if
+              not
+                (Option.value_map !first_submit_key ~default:false ~f:(fun key ->
+                   P.Idempotency_key.equal key (W.Current_epoch.key current)))
+            then Error (P.Error.invalid_request "reference page lost the submission key")
+            else
+              response
+                (Task_references_page
+                   (W.Reference_page.create
+                      ~limits
+                      ~items:[ "opaque-terminal-reference" ]
+                      ~next:None
+                      ~total:1
+                    |> must))
           | Reset_and_wait _ ->
             Int.incr reset_count;
             response (Reset_and_wait view_two)
@@ -1438,6 +1503,26 @@ let%test_unit "real portable client keeps retry, Task, and abandoned-read custod
             ~present:(fun state -> shown := state))
       in
       await "Create" (fun state -> Option.is_some (State.view state));
+      command ":type 1";
+      await "inspection requires a stored submission" (fun state ->
+        Option.value_map (State.notice state) ~default:false ~f:(fun text ->
+          String.is_substring text ~substring:"requires a stored submission"));
+      if not (Int.equal !inspection_count 0)
+      then failwith "inspection invented a submission key before Submit";
+      for _ = 1 to String.length ":type 1" do
+        Input_queue.offer input Backspace
+      done;
+      command ":refs";
+      await "reference paging requires a stored submission" (fun state ->
+        Option.value_map (State.notice state) ~default:false ~f:(fun text ->
+          String.is_substring
+            text
+            ~substring:"Reference paging requires a stored submission"));
+      if not (Int.equal !reference_page_count 0)
+      then failwith "reference page invented a submission key before Submit";
+      for _ = 1 to String.length ":refs" do
+        Input_queue.offer input Backspace
+      done;
       command "Task.pure(8)\n:submit";
       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
         Eio.Promise.await first_submit_started);
@@ -1460,6 +1545,25 @@ let%test_unit "real portable client keeps retry, Task, and abandoned-read custod
              ~substring:"draft");
       if not (Int.equal !submit_count 2)
       then failwith "retry did not retain one original Submit";
+      await "initial observation settled" (fun state ->
+        State.equal_activity (State.activity state) Ready);
+      let before_hint_watch = !watch_count in
+      let before_hint_observe = !observe_count in
+      Input_queue.notify input;
+      await "same-key hint reads without registering" (fun state ->
+        !observe_count > before_hint_observe
+        && State.equal_activity (State.activity state) Ready);
+      if not (Int.equal !watch_count before_hint_watch)
+      then failwith "same-key hint registered another Watch";
+      command "\n:observe";
+      await "explicit observation refreshes registration" (fun state ->
+        !watch_count > before_hint_watch
+        && State.equal_activity (State.activity state) Ready);
+      command "\n:refs";
+      await "reference page uses stored submission before Task" (fun state ->
+        Int.equal !reference_page_count 1
+        && State.equal_activity (State.activity state) Ready
+        && Option.is_some (State.reference_page state));
       Input_queue.offer input (Text "\n:reset");
       await "pending reset command line" (fun state ->
         String.equal (State.Editor.final_line (State.editor state)) ":reset");
@@ -1491,10 +1595,46 @@ let%test_unit "real portable client keeps retry, Task, and abandoned-read custod
       await "Task terminal" (fun state ->
         Option.value_map (State.task state) ~default:false ~f:(fun task ->
           not (Transition.task_active (W.Task_view.phase task))));
+      await "Task observation settled" (fun state ->
+        State.equal_activity (State.activity state) Ready);
+      command ":type 1";
+      await "inspection retains submission key after Task" (fun state ->
+        Int.equal !inspection_count 1
+        && State.equal_activity (State.activity state) Ready
+        && Option.value_map
+             (State.notice state)
+             ~default:false
+             ~f:(String.equal "Task Int"));
+      command ":refs";
+      await "reference page retains submission key after Task" (fun state ->
+        Int.equal !reference_page_count 2
+        && State.equal_activity (State.activity state) Ready);
       command ":reset";
       await "Reset" (fun state ->
         Option.value_map (State.view state) ~default:false ~f:(fun view ->
           W.Wire_id.Epoch.equal (W.View.epoch view) epoch_two));
+      if Option.is_some (State.notice !shown) || Option.is_some (State.task !shown)
+      then failwith "Reset retained the previous Task or inspection notice";
+      command ":type 1";
+      await "reset discards inspection custody" (fun state ->
+        Option.value_map (State.notice state) ~default:false ~f:(fun text ->
+          String.is_substring text ~substring:"requires a stored submission"));
+      if not (Int.equal !inspection_count 1)
+      then failwith "inspection reused a pre-reset submission key";
+      for _ = 1 to String.length ":type 1" do
+        Input_queue.offer input Backspace
+      done;
+      command ":refs";
+      await "reset discards reference-page custody" (fun state ->
+        Option.value_map (State.notice state) ~default:false ~f:(fun text ->
+          String.is_substring
+            text
+            ~substring:"Reference paging requires a stored submission"));
+      if not (Int.equal !reference_page_count 2)
+      then failwith "reference page reused a pre-reset submission key";
+      for _ = 1 to String.length ":refs" do
+        Input_queue.offer input Backspace
+      done;
       command "Task.pure(9)\n:submit";
       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
         Eio.Promise.await second_submit_started);

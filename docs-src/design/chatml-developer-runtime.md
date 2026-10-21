@@ -63,7 +63,10 @@ changes, outside Store and approval locks; a connection-owned pump checks
 current disclosure before handing a key-bearing hint to the transport.
 Overflow yields a resync hint for each affected watched key. Watch
 acknowledgement has no replay cursor: clients Observe the key immediately
-after registration and again after a hint or reconnect. Approval_list is a
+after every registration or refresh acknowledgement. Ordinary and resync hints
+require Observe of that key without another Watch; reconnect requires a new
+authorized Watch followed by Observe. Same-key Watch refresh remains safe and
+registration itself does not manufacture a resync event. Approval_list is a
 separate, authorized refresh. Unwatch and connection close cancel and join
 blocked publication, and Daemon shutdown joins the hub before closing shared
 Host and Authoring owners. The installed HTTP and directly authenticated Unix

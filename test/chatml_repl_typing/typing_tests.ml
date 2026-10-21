@@ -469,3 +469,97 @@ let%test_unit "a declared closed alias remains usable across typed submissions" 
   let use = ready owner "alias-use.chatml" "let typed : token = { value = 1 }" in
   ignore (finish owner (prepare owner use) Typing.Published.After_success)
 ;;
+
+let%expect_test "lexical misses distinguish values from configured modules" =
+  let owner = owner () in
+  List.iteri
+    [ "missing_value"; "_missing"; "Missing.value"; "open Missing" ]
+    ~f:(fun index expression ->
+      let path = "missing" ^ Int.to_string index ^ ".chatml" in
+      let ready = ready owner path expression in
+      match Typing.prepare_next owner ready ~checkpoint with
+      | Error (Typing.Error.Type_diagnostic diagnostic) ->
+        let site = Option.value_exn diagnostic.site in
+        [%test_eq: string]
+          (S.Id.relative_path (S.id (Chatml_diagnostic.Site.source site)))
+          path;
+        [%test_eq: int] (List.length diagnostic.related) 1;
+        print_endline diagnostic.message
+      | Error error -> raise_s [%sexp (error : Typing.Error.t)]
+      | Ok _ -> failwith "missing name typechecked");
+  let selected = ready owner "selected.chatml" "let saved = Catalog.cells" in
+  ignore (finish owner (prepare owner selected) Typing.Published.After_success);
+  let lexical = ready owner "lexical.chatml" "saved" in
+  ignore (finish owner (prepare owner lexical) Typing.Published.After_success);
+  [%expect
+    {|
+    Unknown value 'missing_value'
+    Unknown value '_missing'
+    Unknown configured module 'Missing'
+    Unknown configured module 'Missing'
+    |}]
+;;
+
+let%expect_test
+    "statement binding selection preserves declaration order without the environment"
+  =
+  let owner = owner () in
+  let declarations =
+    [ "let saved = 8"
+    ; "let saved = true"
+    ; "let (|zebra, alpha|) = (|9, true|)"
+    ; "let rec later n = n + 1 and earlier n = n + 2"
+    ; "module Local = struct let member = 1 end"
+    ; "open Catalog"
+    ; "type label = int"
+    ; "saved"
+    ; "let failed = 1 / 0"
+    ]
+  in
+  List.iteri declarations ~f:(fun index body ->
+    let ready = ready owner ("bindings" ^ Int.to_string index ^ ".chatml") body in
+    let candidate = prepare owner ready in
+    let outcome =
+      if index = List.length declarations - 1
+      then Typing.Published.Constrained_before_runtime_failure
+      else After_success
+    in
+    let frozen = finish owner candidate outcome |> Typing.Published.frozen_types in
+    let snapshot = Typing.Frozen_types.snapshot frozen in
+    let rec kind seen root =
+      let index = Snapshot.Id.index root in
+      if Set.mem seen index then failwith "cyclic binding link";
+      match Snapshot.find snapshot root with
+      | Some (Snapshot.Node.Bound_link next) -> kind (Set.add seen index) next
+      | Some Int -> "int"
+      | Some Bool -> "bool"
+      | Some (Function _) -> "function"
+      | Some (Module _) -> "module"
+      | Some _ | None -> failwith "unexpected statement binding type"
+    in
+    let bindings =
+      Typing.Frozen_types.statement_bindings frozen
+      |> List.map ~f:(fun (name, root) ->
+        let full_root =
+          List.Assoc.find_exn
+            (Typing.Frozen_types.bindings frozen)
+            name
+            ~equal:String.equal
+        in
+        [%test_eq: int] (Snapshot.Id.index root) (Snapshot.Id.index full_root);
+        name, kind Int.Set.empty root)
+    in
+    print_s [%sexp (bindings : (string * string) list)]);
+  [%expect
+    {|
+    ((saved int))
+    ((saved bool))
+    ((zebra int) (alpha bool))
+    ((later function) (earlier function))
+    ((Local module))
+    ()
+    ()
+    ()
+    ()
+    |}]
+;;

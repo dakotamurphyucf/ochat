@@ -103,7 +103,7 @@ val history_previous : t -> t
 val history_next : t -> t
 
 (** A successful Create or Reset replaces the view and clears references,
-    submission, task and editor. Reset retains the same captured source; it
+    submission, task, notice and editor. Reset retains the same captured source; it
     cannot select a new project or environment. *)
 val with_view : t -> Agent_protocol.Developer_repl_wire.View.t -> t
 
@@ -128,6 +128,9 @@ val with_notice : t -> string -> t
 (** Records a source in bounded local history when it satisfies this state's
     editor limits; an unrelated oversized or malformed source is omitted.
     Clears the editor unless [preserve_editor] is set for an exact retry.
+    An acknowledged submission also supersedes the previous Task and notice,
+    including when its source was rejected or stopped. Ordinary observation
+    of the same receipt does not perform this presentation transition.
     This is presentation history, never a retry journal. Abandoning portable
     client custody never proves this source did not execute. *)
 val submitted : t -> source:string -> preserve_editor:bool -> t

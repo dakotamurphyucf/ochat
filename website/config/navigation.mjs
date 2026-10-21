@@ -102,7 +102,7 @@ const paths = [
     id: 'guide/chatml-development-workflow',
     title: 'Develop ChatML interactively',
     description:
-      'Edit a captured revision, Check it, choose Fixture or Live, drive REPL Tasks explicitly, and inspect authorized traces.',
+      'Start the terminal REPL, try values and types, run Tasks explicitly, then connect Projects and editor services.',
     label: 'ChatML workflows',
   },
 ];

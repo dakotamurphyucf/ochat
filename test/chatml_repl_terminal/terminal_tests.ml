@@ -120,3 +120,82 @@ let%test_unit "render bounds visible cursor and sanitizes multiline notice" =
   let _, cursor = Render.image renderer state ~width:32 ~height:12 in
   if Option.is_none cursor then failwith "visible editor cursor was lost"
 ;;
+
+let%test_unit "Task actions remain visible before long references in both result views" =
+  let module P = Agent_protocol in
+  let module W = P.Developer_repl_wire in
+  let document =
+    Document_schema.Limits.create
+      ~max_bytes:16_384
+      ~max_depth:32
+      ~max_fields:1_024
+      ~max_nodes:2_048
+    |> function
+    | Ok limits -> limits
+    | Error _ -> failwith "invalid fixture document limit"
+  in
+  let limits =
+    W.Limits.create
+      ~request:document
+      ~result:document
+      ~page:document
+      ~response:document
+      ~max_source_bytes:512
+      ~max_reference_bytes:384
+      ~max_output_bytes:512
+      ~max_page_items:2
+      ~max_event_bytes:256
+      ~max_registry_entries:16
+    |> ok
+  in
+  let instance = W.Wire_id.Instance.of_string "ri_render" |> ok in
+  let epoch = W.Wire_id.Epoch.of_string "re_render" |> ok in
+  let revision = W.Wire_id.Revision.of_string "rv_render" |> ok in
+  let generator = P.Id.Generator.create ~bytes:(fun count -> String.make count 'r') in
+  let view =
+    W.View.create
+      ~limits
+      ~instance
+      ~epoch
+      ~revision
+      ~run_id:(P.Id.Developer_run.create_with generator)
+      ~capture_fingerprint:
+        (Chatml_source.Digest.of_contents "render fixture" ~checkpoint:Fn.id)
+    |> ok
+  in
+  let references = [ "opaque_" ^ String.make 250 'x'; "opaque_" ^ String.make 250 'y' ] in
+  let submission =
+    W.Submission.create
+      ~limits
+      ~status:Finished
+      ~details:Available
+      ~completed_statements:0
+      ~statement_count:0
+      ~epoch
+      ~revision
+      ~summaries:[]
+      ~task_reference_count:2
+      ~task_references:references
+    |> ok
+  in
+  let page =
+    W.Reference_page.create ~limits ~items:references ~next:None ~total:2 |> ok
+  in
+  let state = State.with_view (state ()) view in
+  let renderer = Render.create ~max_display_bytes:32_768 |> ok in
+  List.iter
+    [ State.with_submission state submission |> ok; State.with_reference_page state page ]
+    ~f:(fun state ->
+      List.iter [ 40; 100 ] ~f:(fun width ->
+        let height = 16 in
+        let image, _ = Render.image renderer state ~width ~height in
+        let buffer = Buffer.create 1_024 in
+        Notty.Render.to_buffer buffer Notty.Cap.dumb (0, 0) (width, height) image;
+        let rendered = Buffer.contents buffer in
+        List.iteri references ~f:(fun index reference ->
+          let number = index + 1 in
+          let hint = Printf.sprintf "Task %d: :run %d to execute" number number in
+          if not (String.is_substring rendered ~substring:hint)
+          then failwith "Task execution hint was clipped";
+          [%test_eq: string] (State.task_reference state ~index:number |> ok) reference)))
+;;

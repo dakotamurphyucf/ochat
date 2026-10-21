@@ -37,9 +37,11 @@ actual JSON encoders/decoders. It is regenerated from public interfaces by the
 documentation check. OCaml `option` denotes optional data, not permission to add
 unknown wire fields; enum/tag encoding is defined by the linked codec.
 
-The [captured development workflow](../guide/chatml-development-workflow.md)
-shows how Authoring selection, Developer checks/runs, REPL actions and trace
-pages compose without treating source identity as authority.
+The [terminal REPL walkthrough](../guide/chatml-development-workflow.md)
+provides complete offline setup, commands and expected results. The
+[authoring and execution reference](../guide/chatml-development-services.md)
+shows how exact editor revisions, Developer Check/Fixture/Live, REPL actions
+and trace pages compose without treating source identity as authority.
 
 ## Method reference
 
@@ -219,8 +221,12 @@ bounded projections, never the retained type graph or a runnable Task handle.
 durable Task owner; its observe, await and cancel methods use the Task row's
 run/key and remain separate from Developer command receipts. REPL and Task
 watch/unwatch methods share the existing connection notification pump. A watch
-acknowledges future hints; observe the exact key for a baseline and after a
-resync hint. The typed [first-party client](../../lib/agent_client/developer_repl_connection.mli)
+acknowledges future hints; Observe the exact key immediately after every Watch
+acknowledgement for an authoritative baseline. Ordinary hints and
+`Resync_required` both require Observe, without re-registering Watch. Reconnect
+requires a new authorized Watch followed by Observe. Refreshing the same-key
+Watch remains safe, but its acknowledgement must again be followed by Observe;
+registration itself does not manufacture a resync event. The typed [first-party client](../../lib/agent_client/developer_repl_connection.mli)
 retains exact Create, Submit, Task, Reset and Close requests before handoff.
 It adopts unresolved requests only across the same host, principal and
 authentication kind, and retries a lost reply only by explicit choice with

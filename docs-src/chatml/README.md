@@ -152,9 +152,10 @@ without changing prior typing, and runs a Task only when you explicitly request
 it. Reset clears interactive state on the same captured code; start a new
 instance to adopt file or environment changes.
 
-Editor integrations use the same portable Authoring and Developer services to
-inspect exact revisions, Check a program, and select deterministic Fixture or
-permitted Live execution. A successful Check does not grant execution.
+Editor integrations use the same portable
+[Authoring and Developer services](../guide/chatml-development-services.md) to
+inspect exact revisions, offer source-bound diagnostics/completion/navigation,
+Check a program, and select deterministic Fixture or permitted Live execution. A successful Check does not grant execution.
 [Bounded execution traces](../design/chatml-execution-tracing.md) connect those
 runs to their captured source under separate read authority. A full stepping
 debugger and desktop or embedded chat-TUI REPL panels remain future work.

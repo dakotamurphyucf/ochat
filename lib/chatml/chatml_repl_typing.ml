@@ -105,11 +105,13 @@ module Frozen_types = struct
   type t =
     { snapshot : Snapshot.t
     ; bindings : (string * Snapshot.Id.t) list
+    ; statement_bindings : (string * Snapshot.Id.t) list
     ; expression_type : Snapshot.Id.t option
     }
 
   let snapshot t = t.snapshot
   let bindings t = t.bindings
+  let statement_bindings t = t.statement_bindings
   let expression_type t = t.expression_type
 end
 
@@ -305,7 +307,13 @@ let check_ready t ready ~checkpoint =
     |> Result.map_error ~f:(fun error -> Error.Lookup error)
 ;;
 
-let freeze_values ?expression_type values ~(limits : Limits.t) ~checkpoint =
+let freeze_values
+      ?expression_type
+      ?(statement_names = [])
+      values
+      ~(limits : Limits.t)
+      ~checkpoint
+  =
   let open Result.Let_syntax in
   let%bind roots =
     Scope.Roots.capture
@@ -366,8 +374,31 @@ let freeze_values ?expression_type values ~(limits : Limits.t) ~checkpoint =
       in
       split [] (Snapshot.roots snapshot)
   in
-  let%map bindings = pair names binding_roots [] in
-  { Frozen_types.snapshot; bindings; expression_type = expression_root }
+  let%bind bindings = pair names binding_roots [] in
+  let%map statement_bindings =
+    match statement_names with
+    | [] -> Ok []
+    | _ :: _ ->
+      let by_name =
+        List.fold bindings ~init:String.Map.empty ~f:(fun by_name (name, root) ->
+          checkpoint ();
+          Map.set by_name ~key:name ~data:root)
+      in
+      List.fold_result statement_names ~init:[] ~f:(fun reversed name ->
+        checkpoint ();
+        match Map.find by_name name with
+        | None -> Error Error.Display_limit
+        | Some root -> Ok ((name, root) :: reversed))
+      |> Result.map ~f:(fun reversed ->
+        List.fold reversed ~init:[] ~f:(fun bindings binding ->
+          checkpoint ();
+          binding :: bindings))
+  in
+  { Frozen_types.snapshot
+  ; bindings
+  ; statement_bindings
+  ; expression_type = expression_root
+  }
 ;;
 
 let reverse_with_checkpoint values ~checkpoint =
@@ -485,7 +516,12 @@ let prepare_next t ready ~checkpoint =
               freeze_values before_values ~limits:t.limits ~checkpoint
             in
             let%bind frozen_types =
-              freeze_values ?expression_type after_values ~limits:t.limits ~checkpoint
+              freeze_values
+                ?expression_type
+                ~statement_names:(Check.Repl_statement.introduced_values checked)
+                after_values
+                ~limits:t.limits
+                ~checkpoint
             in
             let new_checked_dependencies =
               reverse_with_checkpoint !checked_rev ~checkpoint
