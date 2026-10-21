@@ -429,6 +429,22 @@ val has_active : t -> Slot.t -> (bool, P.Error.t) result
     the Lifecycle nor cancels other runs. *)
 val retire_run : t -> Slot.t -> actor:Operator_authorization.t -> (unit, P.Error.t) result
 
+(** Read an authenticated retained row without startup Recovery or allocating a
+    run entry/admission slot. For a known run, wait only for this Lifecycle's
+    same-run mutation gate while reading Store; release the gate before host
+    authorization callbacks or any terminal wait. Current actor, principal
+    and disclosure are rechecked after yielding reads. Closure rejects queued
+    reads before Store access and after I/O/disclosure; retiring a run alone
+    does not revoke authenticated historical receipt reads. Another writer's
+    Pending or retained uncertain custody still returns Conflict, never
+    absence. Cancellation detaches only this reader. *)
+val observe
+  :  t
+  -> actor:Operator_authorization.t
+  -> run_id:P.Id.Developer_run.t
+  -> key:P.Idempotency_key.t
+  -> (View.t option, P.Error.t) result
+
 (** A passive read authenticates the exact persisted row and disclosure BEFORE
     entering Cold startup Recovery. An authorized Cold restarted nonterminal
     row then completes joined Recovery under the same-run slot and rereads its

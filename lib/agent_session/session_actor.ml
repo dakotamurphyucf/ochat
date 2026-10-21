@@ -7440,15 +7440,23 @@ let run_moderator_borrow t (borrow : moderator_borrow) f =
   match borrow.operation_id with
   | Some _ -> run_moderator_callback t borrow f
   | None ->
-    Eio.Cancel.sub (fun context ->
-      run_moderator_callback t borrow (fun ~dispatched ~commit ->
-        let open Result.Let_syntax in
-        let%bind () =
-          call
-            t
-            (Set_idle_moderator_cancel (borrow, fun () -> Eio.Cancel.cancel context Exit))
-        in
-        f ~dispatched ~commit))
+    (* A protected claim can return into a cancelled parent. Enter completion
+       handling before [sub], which can reject that parent before running its body. *)
+    run_moderator_callback t borrow (fun ~dispatched ~commit ->
+      Eio.Cancel.sub (fun context ->
+        let active = ref true in
+        (* Completion clears the actor's cancel callback after this context ends. *)
+        Exn.protect
+          ~finally:(fun () -> active := false)
+          ~f:(fun () ->
+            let open Result.Let_syntax in
+            let%bind () =
+              call
+                t
+                (Set_idle_moderator_cancel
+                   (borrow, fun () -> if !active then Eio.Cancel.cancel context Exit))
+            in
+            f ~dispatched ~commit)))
 ;;
 
 let with_moderator_borrow_unlocked t ~claim f =

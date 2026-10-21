@@ -2012,7 +2012,7 @@ let observe_once t ~actor ~run_id ~key =
          "developer command actor is no longer current"
          ~retryable:false)
   else (
-    let%bind existing = store (Store.Result_root.find_existing t.store run_id) in
+    let%bind existing = Lifecycle.observe t.lifecycle ~actor ~run_id ~key in
     match existing with
     | None ->
       if Operator_authorization.is_current actor
@@ -2025,34 +2025,21 @@ let observe_once t ~actor ~run_id ~key =
              ~retryable:false)
     | Some existing ->
       let principal = Operator_authorization.principal actor in
-      let%bind row =
-        store
-          (Store.Result_root.find_command_snapshot existing ~principal:principal.id ~key)
-      in
-      (match row with
-       | None ->
-         if Operator_authorization.is_current actor
-         then Ok None
-         else
-           Error
-             (error
-                P.Error.Permission_denied
-                "developer command actor is no longer current"
-                ~retryable:false)
-       | Some row when Receipt.Kind.equal (Row.kind row) Repl_task_run ->
-         Error (P.Error.invalid_request "REPL Task requires its own receipt method")
-       | Some row ->
-         let%bind () = check_method t ~actor ~kind:(Row.kind row) in
-         if
-           P.Id.Principal.equal (Row.owner row).principal_id principal.id
-           && Command_view.Disclosure_policy.authorize t.disclosure_policy actor row
-         then Ok (Some (Command_view.of_row row))
-         else
-           Error
-             (error
-                P.Error.Permission_denied
-                "developer command receipt access denied"
-                ~retryable:false)))
+      let row = Lifecycle.View.row existing in
+      if Receipt.Kind.equal (Row.kind row) Repl_task_run
+      then Error (P.Error.invalid_request "REPL Task requires its own receipt method")
+      else (
+        let%bind () = check_method t ~actor ~kind:(Row.kind row) in
+        if
+          P.Id.Principal.equal (Row.owner row).principal_id principal.id
+          && Command_view.Disclosure_policy.authorize t.disclosure_policy actor row
+        then Ok (Some (Command_view.of_row row))
+        else
+          Error
+            (error
+               P.Error.Permission_denied
+               "developer command receipt access denied"
+               ~retryable:false)))
 ;;
 
 let observe_command t ~actor ~run_id ~key =
@@ -2882,27 +2869,15 @@ module Repl = struct
     let observe_once t ~actor ~run_id ~key =
       let open Result.Let_syntax in
       let%bind () = check_method t ~actor ~kind:Repl_task_run in
-      let%bind existing = store (Store.Result_root.find_existing t.store run_id) in
+      let%bind existing = Lifecycle.observe t.lifecycle ~actor ~run_id ~key in
       match existing with
       | None ->
         let%map () = check_method t ~actor ~kind:Repl_task_run in
         None
       | Some existing ->
-        let principal = Operator_authorization.principal actor in
-        let%bind found =
-          store
-            (Store.Result_root.find_command_snapshot
-               existing
-               ~principal:principal.id
-               ~key)
-        in
-        (match found with
-         | None ->
-           let%map () = check_method t ~actor ~kind:Repl_task_run in
-           None
-         | Some row ->
-           let%map () = check_row t ~actor row in
-           Some { row })
+        let row = Lifecycle.View.row existing in
+        let%map () = check_row t ~actor row in
+        Some { row }
     ;;
 
     let observe t ~actor ~run_id ~key =

@@ -1912,7 +1912,9 @@ val with_queued_moderator_retirement
     moderator snapshot together. Use [retain_follow_up] in the manager so runtime
     requests survive until a host applies them durably after releasing ownership.
     Failure/cancellation records observation failure without altering native
-    results; successful acknowledgements are never replayed. The callback does
+    results; successful acknowledgements are never replayed. This includes
+    cancellation arriving during claim persistence before callback entry; the
+    original cancellation exception is preserved. The callback does
     not acquire foreground native-tool authority. This API does not schedule a
     turn, install a wakeup or apply retained follow-up requests. *)
 val with_idle_moderator_observation

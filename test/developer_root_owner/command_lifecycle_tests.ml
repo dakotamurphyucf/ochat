@@ -1229,3 +1229,229 @@ let%test_unit "retirement joins a body-exited command during durable terminal se
        failwith "late retirement changed the settled Check result");
     L.close_and_wait lifecycle |> ok)
 ;;
+
+let%test_unit "passive reads join owned Pending but retain cancellation and authority" =
+  let module Paused_encoder = struct
+    type t =
+      { manager : Eio.Domain_manager.ty Eio.Resource.t
+      ; armed : bool ref
+      ; entered : unit Eio.Promise.u
+      ; release : unit Eio.Promise.t
+      }
+
+    let run t f =
+      if !(t.armed)
+      then (
+        t.armed := false;
+        Eio.Promise.resolve t.entered ();
+        Eio.Promise.await t.release);
+      let (Eio.Resource.T (data, operations)) = t.manager in
+      let module Actual = (val Eio.Resource.get operations Eio.Domain_manager.Pi.Mgr) in
+      Actual.run data f
+    ;;
+
+    let run_raw t f = Eio.Domain_manager.run_raw t.manager f
+  end
+  in
+  let observer = Eio.Fiber.create_key () in
+  let run_case close_queued =
+    let armed = ref false in
+    let encode_armed = ref false in
+    let encoding, signal_encoding = Eio.Promise.create () in
+    let encode_release, signal_encode_release = Eio.Promise.create () in
+    let pending_now = ref (fun () -> false) in
+    let pending_reads = ref 0 in
+    let entered, signal_entered = Eio.Promise.create () in
+    let release, signal_release = Eio.Promise.create () in
+    let checkpoint () =
+      let reading = Option.value (Eio.Fiber.get observer) ~default:false in
+      if reading && !pending_now () then incr pending_reads;
+      if !armed && (not reading) && !pending_now ()
+      then (
+        armed := false;
+        Eio.Promise.resolve signal_entered ();
+        Eio.Promise.await release)
+    in
+    let wrap_env env =
+      let state =
+        Paused_encoder.
+          { manager = Eio.Stdenv.domain_mgr env
+          ; armed = encode_armed
+          ; entered = signal_encoding
+          ; release = encode_release
+          }
+      in
+      let manager =
+        Eio.Resource.T (state, Eio.Domain_manager.Pi.mgr (module Paused_encoder))
+      in
+      Developer_run_store_test_suite.Developer_run_selected_tests.with_domain_manager
+        env
+        manager
+    in
+    F.with_store ~checkpoint ~wrap_env (fun env sw store ->
+      let owner = F.owner "dvr_passive_pending" 0 in
+      let run_id = owner.run_id in
+      let captured = F.capture () in
+      let handle, _ =
+        R.admit_epoch
+          store
+          ~owner
+          ~capture_fingerprint:(Chatml_developer_capture.fingerprint captured)
+          ~previous:None
+        |> ok
+      in
+      (pending_now := fun () -> Option.is_some (R.Command.pending handle |> ok));
+      let disclosure, control = policy () in
+      let lifecycle =
+        L.create
+          ~sw
+          ~store
+          ~max_active_commands:1
+          ~disclosure
+          ~control
+          ~recovery:(recovery ())
+        |> ok
+      in
+      let actor = Operator_authorization.trusted_local F.principal in
+      let key = P.Idempotency_key.of_string "passive-pending" |> ok in
+      let request_fingerprint =
+        Chatml_source.Digest.of_contents "passive-pending" ~checkpoint:ignore
+      in
+      let completed = receipt handle (R.Command.Receipt.Check Ready) in
+      let callbacks = ref 0 in
+      let reserved =
+        L.with_slot lifecycle ~run_id ~f:(fun slot ->
+          let open Result.Let_syntax in
+          let%bind () = L.ensure_startup_recovered lifecycle slot in
+          let%bind reserved =
+            L.reserve
+              lifecycle
+              slot
+              ~handle
+              ~key
+              ~kind:R.Command.Receipt.Kind.Check
+              ~request_fingerprint
+              ~admit:(fun () -> true)
+          in
+          L.launch lifecycle slot ~handle ~reserved ~f:(fun _ ~sw:_ ->
+            incr callbacks;
+            (* This pure callback only returns Check Ready. With the fixture's
+               8 KiB document bound, reads decode directly; the next domain
+               handoff is Command Finish encoding, under its mutation gate. *)
+            encode_armed := true;
+            armed := true;
+            Ok completed))
+        |> ok
+      in
+      Exn.protect
+        ~finally:(fun () ->
+          if not (Eio.Promise.is_resolved encode_release)
+          then Eio.Promise.resolve signal_encode_release ();
+          if not (Eio.Promise.is_resolved release)
+          then Eio.Promise.resolve signal_release ())
+        ~f:(fun () ->
+          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+            Eio.Promise.await encoding;
+            let observed, signal_observed = Eio.Promise.create () in
+            Eio.Fiber.fork ~sw (fun () ->
+              Eio.Fiber.with_binding observer true (fun () ->
+                Eio.Promise.resolve
+                  signal_observed
+                  (L.observe lifecycle ~actor ~run_id ~key)));
+            assert (not (Eio.Promise.is_resolved observed));
+            Eio.Promise.resolve signal_encode_release ();
+            Eio.Promise.await entered;
+            assert (!pending_now ());
+            (* A bypassed reader queues on preparation's root lease, then
+               reaches this Store checkpoint after actual Pending registration
+               but before commit. The owning gate must keep that read out. *)
+            if !pending_reads > 0
+            then
+              raise_s [%sexp "passive read entered owned Pending", (!pending_reads : int)];
+            let cancel_context, signal_cancel_context = Eio.Promise.create () in
+            let cancelled, signal_cancelled = Eio.Promise.create () in
+            Eio.Fiber.fork ~sw (fun () ->
+              let outcome =
+                try
+                  Eio.Cancel.sub (fun cancel ->
+                    Eio.Promise.resolve signal_cancel_context cancel;
+                    ignore
+                      (L.observe lifecycle ~actor ~run_id ~key : (_, P.Error.t) result));
+                  false
+                with
+                | Eio.Cancel.Cancelled _ -> true
+              in
+              Eio.Promise.resolve signal_cancelled outcome);
+            Eio.Cancel.cancel (Eio.Promise.await cancel_context) Exit;
+            assert (Eio.Promise.await cancelled);
+            assert (!pending_now ());
+            let current = ref true in
+            let revoked_actor =
+              Operator_authorization.guarded ~principal:F.principal ~is_current:(fun () ->
+                !current)
+            in
+            let denied, signal_denied = Eio.Promise.create () in
+            Eio.Fiber.fork ~sw (fun () ->
+              Eio.Promise.resolve
+                signal_denied
+                (L.observe lifecycle ~actor:revoked_actor ~run_id ~key));
+            assert (not (Eio.Promise.is_resolved denied));
+            assert (not (Eio.Promise.is_resolved observed));
+            let closure =
+              if close_queued
+              then (
+                let finished, signal_finished = Eio.Promise.create () in
+                Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve signal_finished (L.stop_and_join lifecycle));
+                assert (not (Eio.Promise.is_resolved finished));
+                Some finished)
+              else None
+            in
+            current := false;
+            Eio.Promise.resolve signal_release ();
+            (match Eio.Promise.await denied with
+             | Error { P.Error.code = Permission_denied; _ } when not close_queued -> ()
+             | Error { P.Error.code = Invalid_state; _ } when close_queued -> ()
+             | Error _ | Ok _ -> failwith "queued reader ignored revocation or closure");
+            (match Eio.Promise.await observed with
+             | Error { P.Error.code = Invalid_state; _ } when close_queued -> ()
+             | Ok (Some view) when not close_queued ->
+               assert (R.Command.Row.same_identity (L.View.row reserved) (L.View.row view));
+               (match Option.map (L.View.receipt view) ~f:R.Command.Receipt.value with
+                | Some (Check Ready) -> ()
+                | None | Some (Check _ | Fixture _ | Live _ | Task _) ->
+                  failwith "owned Pending changed the terminal receipt")
+             | Error _ | Ok _ -> failwith "queued reader ignored lifecycle closure");
+            Option.iter closure ~f:(fun finished -> Eio.Promise.await finished |> ok);
+            assert (Int.equal !callbacks 1)));
+      if not close_queued
+      then (
+        let external_key = P.Idempotency_key.of_string "external-pending" |> ok in
+        let external_pending =
+          match
+            R.Command.prepare_reservation
+              handle
+              ~key:external_key
+              ~kind:R.Command.Receipt.Kind.Check
+              ~request_fingerprint
+            |> ok
+          with
+          | Prepared pending -> pending
+          | Unchanged _ -> failwith "external fixture did not retain actual Pending"
+        in
+        assert (!pending_now ());
+        (match L.observe lifecycle ~actor ~run_id ~key with
+         | Error { P.Error.code = Conflict; retryable = true; _ } -> ()
+         | Error _ | Ok _ -> failwith "external Pending became absence or a stale read");
+        R.Command.retire_absent_admission handle external_pending |> ok;
+        let terminal = L.await_terminal lifecycle ~actor ~run_id ~key |> ok in
+        assert (R.Command.Row.same_identity (L.View.row reserved) (L.View.row terminal)));
+      let persisted = R.Command.observe handle ~key |> ok |> Option.value_exn in
+      assert (
+        R.Command.Row.same_identity (L.View.row reserved) (R.Command.View.row persisted));
+      assert (Int.equal !callbacks 1);
+      L.close_and_wait lifecycle |> ok)
+  in
+  run_case false;
+  run_case true
+;;

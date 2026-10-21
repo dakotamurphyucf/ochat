@@ -905,7 +905,10 @@ checkpoint APIs are rejected while the callback owns the moderator. New user inp
 is deferred using the existing idle borrow. The legacy idle completion/failure
 APIs cannot release an observation callback's ownership. Cancel-stop interrupts
 its Eio cancellation context after the stop is persisted, including cancellation
-following a graceful stop. Restart is rejected until ownership is released.
+following a graceful stop. Accepted claims enter protected callback cleanup even
+if cancellation is already pending before callback entry, preserving the original
+cancellation exception and the recorded native outcome. Restart is rejected until
+ownership is released.
 
 `Moderator_observation.drain_idle` takes this scoped claim callback explicitly,
 keeping runtime construction independent of the actor module. It retains runtime

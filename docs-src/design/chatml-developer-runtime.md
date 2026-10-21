@@ -43,6 +43,15 @@ command, while a historical same-key lookup remains independent of any new
 source capture. Local nonportable commands retain their source rules. REPL Task
 receipts use their separate method family.
 
+Observation and terminal-wait admission share the command lifecycle's existing
+per-run mutation gate. A read waits for that lifecycle's in-flight Store write,
+then releases the gate before checking disclosure or waiting for execution.
+Cancellation detaches only the reader; it does not cancel the command. Current
+authority is checked again after the read, and lifecycle shutdown rejects queued
+readers. A retired run's authenticated historical receipts remain readable.
+Pending writes owned outside this lifecycle still report a conflict; they are
+never treated as missing commands or retried as new submissions.
+
 A watch belongs to one disclosed run and command key. The Host enqueues
 bounded, process-local lifecycle and approval invalidations after authoritative
 changes, outside Store and approval locks; a connection-owned pump checks

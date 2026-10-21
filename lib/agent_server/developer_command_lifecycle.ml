@@ -382,40 +382,64 @@ let best_effort_reconcile_unlocked run =
   | _ -> ()
 ;;
 
+let read_snapshot t run_id ~principal ~key =
+  let open Result.Let_syntax in
+  let%bind root = store (Store.Result_root.find_existing t.store run_id) in
+  match root with
+  | None -> Ok None
+  | Some root -> store (Store.Result_root.find_command_snapshot root ~principal ~key)
+;;
+
+let disclose_snapshot t run_id ~actor row =
+  if not (current_actor actor)
+  then Error (denied ())
+  else (
+    match row with
+    | None -> Ok None
+    | Some row ->
+      if
+        same_principal actor row
+        && t.disclosure.authorize actor row
+        && current_actor actor
+      then Ok (Some (safe_view t run_id row))
+      else Error (denied ()))
+;;
+
 let snapshot t run_id ~actor ~key =
   let open Result.Let_syntax in
   if not (current_actor actor)
   then Error (denied ())
   else (
-    let%bind root = store (Store.Result_root.find_existing t.store run_id) in
-    match root with
-    | None -> if current_actor actor then Ok None else Error (denied ())
-    | Some root ->
-      let principal = (Operator_authorization.principal actor).id in
-      let%bind row =
-        store (Store.Result_root.find_command_snapshot root ~principal ~key)
-      in
-      if not (current_actor actor)
-      then Error (denied ())
-      else (
-        match row with
-        | None -> Ok None
-        | Some row ->
-          if
-            same_principal actor row
-            && t.disclosure.authorize actor row
-            && current_actor actor
-          then Ok (Some (safe_view t run_id row))
-          else Error (denied ())))
+    let principal = (Operator_authorization.principal actor).id in
+    let%bind row = read_snapshot t run_id ~principal ~key in
+    disclose_snapshot t run_id ~actor row)
 ;;
 
-(* A terminal waiter must not observe this run while a sibling command owns
-   the run-wide Store Pending barrier. Other Store writers remain subject to
-   that barrier and still report retained custody as Conflict. *)
-let await_snapshot t run_id ~actor ~key =
-  match Hashtbl.find t.runs run_id with
-  | None -> snapshot t run_id ~actor ~key
-  | Some run -> with_mutation run (fun () -> snapshot t run_id ~actor ~key)
+(* Only Store I/O runs under the mutation gate. Host currentness/disclosure
+   callbacks remain outside it, including when they reject the resulting row. *)
+let observe t ~actor ~run_id ~key =
+  let open Result.Let_syntax in
+  if not (on_domain t)
+  then Error (stale ())
+  else if t.closed
+  then Error (closed ())
+  else if not (current_actor actor)
+  then Error (denied ())
+  else (
+    let principal = (Operator_authorization.principal actor).id in
+    let read () =
+      if t.closed then Error (closed ()) else read_snapshot t run_id ~principal ~key
+    in
+    let%bind row =
+      match Hashtbl.find t.runs run_id with
+      | None -> read ()
+      | Some run -> with_mutation run read
+    in
+    if t.closed
+    then Error (closed ())
+    else (
+      let%bind view = disclose_snapshot t run_id ~actor row in
+      if t.closed then Error (closed ()) else Ok view))
 ;;
 
 let release_clean_claim run claim =
@@ -1355,7 +1379,7 @@ let active_for_key t run_id key =
 
 let terminal_view t ~actor ~run_id ~key =
   let open Result.Let_syntax in
-  let%bind observed = await_snapshot t run_id ~actor ~key in
+  let%bind observed = observe t ~actor ~run_id ~key in
   match observed with
   | Some view when Option.is_some (View.receipt view) -> Ok view
   | None | Some _ -> Error (busy ())
@@ -1388,7 +1412,7 @@ let await_terminal t ~actor ~run_id ~key =
           | Some (Error error) -> Error error
           | None | Some (Ok _) -> terminal_view t ~actor ~run_id ~key))
     | None ->
-      let%bind before = await_snapshot t run_id ~actor ~key in
+      let%bind before = observe t ~actor ~run_id ~key in
       (match before with
        | None -> Error (stale ())
        | Some view when Option.is_some (View.receipt view) -> Ok view
