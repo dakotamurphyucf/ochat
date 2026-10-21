@@ -3011,7 +3011,67 @@ let%test_unit "selected ordinary Agent Tool runs through its registered child so
         Eio.Promise.await release_grand;
         grand_released := true))
     (fun env sw anchor create _ ->
-       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 45. (fun () ->
+       let module Phase = struct
+         type t =
+           | Bootstrap
+           | Start_primary
+           | File_success
+           | File_missing
+           | Captured_parent
+           | Captured_grand
+           | Corrupt_parent
+           | Corrupt_grand
+           | Held_parent
+           | Held_entry
+           | Shutdown_join
+           | Response_release
+           | Start_depth_limited
+           | Depth_output
+           | Queued_depth_parent
+         [@@deriving sexp_of]
+       end
+       in
+       let mono_clock = Eio.Stdenv.mono_clock env in
+       let started = Eio.Time.Mono.now mono_clock in
+       let elapsed () =
+         Mtime.span started (Eio.Time.Mono.now mono_clock)
+         |> Mtime.Span.to_float_ns
+         |> fun nanoseconds -> nanoseconds /. 1e9
+       in
+       let phase = ref Phase.Bootstrap in
+       let phases = ref [ Phase.Bootstrap, 0. ] in
+       let scheduler_barrier = ref None in
+       let timeout_reported = ref false in
+       let mark next =
+         phase := next;
+         phases := List.take ((next, elapsed ()) :: !phases) 32
+       in
+       let with_timeout_exn ~wait seconds f =
+         try Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) seconds f with
+         | Eio.Time.Timeout as exn ->
+           let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+           if not !timeout_reported
+           then (
+             timeout_reported := true;
+             (* Only static fixture labels and monotonic timings are reported.
+                Reporting must not replace the original timeout/backtrace. *)
+             try
+               eprintf
+                 "%s\n%!"
+                 (Sexp.to_string_hum
+                    [%sexp
+                      "selected Agent Tool fixture timeout"
+                    , (wait : string)
+                    , (seconds : float)
+                    , (!phase : Phase.t)
+                    , (elapsed () : float)
+                    , (List.rev !phases : (Phase.t * float) list)
+                    , (!scheduler_barrier : (Phase.t * float * bool) option)])
+             with
+             | _ -> ());
+           Stdlib.Printexc.raise_with_backtrace exn backtrace
+       in
+       with_timeout_exn ~wait:"whole-test" 45. (fun () ->
          let bootstrap = create () in
          ignore (RH.setup bootstrap : P.Method_result.t);
          let reads = ref 0 in
@@ -3100,7 +3160,10 @@ let run ctx input =
          let pause_at_scheduler_wait daemon clock pause =
            pause ();
            let paused_now = Eio.Time.now clock in
-           Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+           let barrier_phase = !phase in
+           let barrier_started = elapsed () in
+           scheduler_barrier := Some (barrier_phase, barrier_started, false);
+           with_timeout_exn ~wait:"scheduler-barrier" 5. (fun () ->
              let rec await () =
                match S.Daemon.For_testing.job_scheduler_wait_deadline daemon with
                | Some deadline when Float.(deadline > paused_now) -> ()
@@ -3108,7 +3171,8 @@ let run ctx input =
                  Eio.Fiber.yield ();
                  await ()
              in
-             await ())
+             await ());
+           scheduler_barrier := Some (barrier_phase, barrier_started, true)
          in
          let clock, pause_clock, resume_clock, _ =
            Agent_server_test_support.controlled_wall_clock
@@ -3171,6 +3235,7 @@ let run ctx input =
            | Ok store -> store
            | Error error -> raise_s [%sexp (error : Agent_store.Store_error.t)]
          in
+         mark Phase.Start_primary;
          let daemon =
            S.Daemon.start
              ~sw
@@ -3260,7 +3325,7 @@ let run ctx input =
                 P.Developer_job.state job
               in
               let await_job run_id job_id =
-                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 25. (fun () ->
+                with_timeout_exn ~wait:"job-terminal" 25. (fun () ->
                   let rec await () =
                     match (job_state run_id job_id ()).status with
                     | Succeeded -> ()
@@ -3273,6 +3338,7 @@ let run ctx input =
                   in
                   await ())
               in
+              mark Phase.File_success;
               let run_id, job_id = submit_job "ordinary-agent-tool" in
               await_job run_id job_id;
               assert !sent_tool_call;
@@ -3333,6 +3399,7 @@ let run ctx input =
                := fun () -> Eio.Path.unlink Eio.Path.(Eio.Stdenv.fs env / grand));
               sent_tool_call := false;
               let previous_bodies = List.length !bodies in
+              mark Phase.File_missing;
               let file_missing_run, file_missing_job =
                 submit_job "ordinary-agent-tool-file-missing"
               in
@@ -3368,6 +3435,7 @@ let run ctx input =
               stage_queued := true;
               sent_tool_call := false;
               let previous_bodies = List.length !bodies in
+              mark Phase.Captured_parent;
               let captured_run, captured_job =
                 submit_job "ordinary-agent-tool-captured"
               in
@@ -3404,6 +3472,7 @@ let run ctx input =
                 ~create:(`Or_truncate 0o600)
                 Eio.Path.(Eio.Stdenv.fs env / grand)
                 "<developer>OCH422 edited target marker</developer>";
+              mark Phase.Captured_grand;
               resume_clock ();
               await_job captured_run queued_grand_job;
               let claimed_bodies =
@@ -3429,6 +3498,7 @@ let run ctx input =
                := fun () -> pause_at_scheduler_wait daemon clock pause_clock);
               sent_tool_call := false;
               stage_queued := true;
+              mark Phase.Corrupt_parent;
               let corrupt_run, corrupt_parent =
                 submit_job "ordinary-agent-tool-target-corrupt"
               in
@@ -3479,8 +3549,9 @@ let run ctx input =
               assert (Result.is_error (Artifacts.load store target_revision));
               let provider_before_corrupt_claim = !requests in
               let native_before_corrupt_claim = List.length !default_grand_revisions in
+              mark Phase.Corrupt_grand;
               resume_clock ();
-              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 25. (fun () ->
+              with_timeout_exn ~wait:"corrupt-target-failure" 25. (fun () ->
                 let rec await_failed () =
                   let state = job_state corrupt_run corrupt_job () in
                   match state.status with
@@ -3522,6 +3593,7 @@ let run ctx input =
                := fun () -> pause_at_scheduler_wait daemon clock pause_clock);
               stage_queued := true;
               sent_tool_call := false;
+              mark Phase.Held_parent;
               let cancelling_run, cancelling_parent =
                 submit_job "ordinary-agent-tool-shutdown"
               in
@@ -3535,8 +3607,9 @@ let run ctx input =
                      target_revision
                      (P.Developer_agent_artifact.revision_id held_target)));
               hold_grand_response := true;
+              mark Phase.Held_entry;
               resume_clock ();
-              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+              with_timeout_exn ~wait:"held-provider-entry" 10. (fun () ->
                 Eio.Promise.await grand_entered);
               let interrupted_grand = Option.value_exn !held_grand in
               assert (not (phys_equal interrupted_grand original_grand));
@@ -3551,12 +3624,13 @@ let run ctx input =
                | Cancelled
                | Interrupted _ ->
                  failwith "selected Agent Tool owner was not running at shutdown");
+              mark Phase.Shutdown_join;
               let shutdown_done, shutdown_done_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                 S.Daemon.shutdown daemon |> ok;
                 daemon_closed := true;
                 Eio.Promise.resolve shutdown_done_u ());
-              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+              with_timeout_exn ~wait:"shutdown-join" 10. (fun () ->
                 Eio.Promise.await shutdown_done);
               assert (not !grand_released);
               (match (job_state cancelling_run cancelling_job ()).status with
@@ -3576,8 +3650,9 @@ let run ctx input =
               [%test_eq: int] !requests provider_calls;
               hold_grand_response := false;
               release_requested := true;
+              mark Phase.Response_release;
               Eio.Promise.resolve release_grand_u ();
-              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+              with_timeout_exn ~wait:"response-release" 5. (fun () ->
                 let rec await () =
                   if not !grand_released
                   then (
@@ -3612,6 +3687,7 @@ let run ctx input =
           := fun () -> Eio.Path.unlink Eio.Path.(Eio.Stdenv.fs env / grand));
          sent_tool_call := false;
          let previous_bodies = List.length !bodies in
+         mark Phase.Start_depth_limited;
          let limited_clock, pause_limited, resume_limited, _ =
            Agent_server_test_support.controlled_wall_clock
              (Eio.Stdenv.clock env)
@@ -3708,8 +3784,9 @@ let run ctx input =
                 in
                 run_id, job_id
               in
+              mark Phase.Depth_output;
               let _depth_run, _depth_job = submit_limited "ordinary-agent-tool-depth" in
-              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 25. (fun () ->
+              with_timeout_exn ~wait:"depth-output" 25. (fun () ->
                 let rec await_output () =
                   if
                     List.exists
@@ -3776,10 +3853,11 @@ let run ctx input =
                     pause_at_scheduler_wait limited_daemon limited_clock pause_limited);
               stage_queued := true;
               sent_tool_call := false;
+              mark Phase.Queued_depth_parent;
               let queued_run, queued_parent =
                 submit_limited "ordinary-agent-tool-queued-depth"
               in
-              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 25. (fun () ->
+              with_timeout_exn ~wait:"queued-depth-parent" 25. (fun () ->
                 let rec await () =
                   let parent =
                     List.find_exn (jobs limited_daemon queued_run) ~f:(fun job ->

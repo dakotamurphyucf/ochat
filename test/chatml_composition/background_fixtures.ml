@@ -79,6 +79,26 @@ let with_background_daemon
             }
         in
         let requests = ref 0 in
+        let shutdown daemon ~stage =
+          try Agent_server.Daemon.shutdown daemon |> protocol_ok with
+          | Agent_server.Runtime_owner.Cleanup_failed error as exn ->
+            let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+            (* Failure-only fixture diagnostics must preserve the cleanup failure,
+               even if formatting or writing the report also fails. *)
+            (try
+               eprintf
+                 "%s\n%!"
+                 (Sexp.to_string_hum
+                    [%sexp
+                      "background fixture cleanup failed"
+                    , (stage : string)
+                    , (error.code : Agent_protocol.Error.code)
+                    , (error.message : string)
+                    , (error.retryable : bool)])
+             with
+             | _ -> ());
+            Stdlib.Printexc.raise_with_backtrace exn backtrace
+        in
         let stage = ref "starting first daemon" in
         let live_switch = ref None in
         let with_fixture_switch f =
@@ -142,7 +162,7 @@ let with_background_daemon
             Exn.protect
               ~finally:(fun () ->
                 stage := "stopping first daemon";
-                Agent_server.Daemon.shutdown daemon |> protocol_ok;
+                shutdown daemon ~stage:"first daemon";
                 stage := "first daemon stopped")
               ~f:(fun () ->
                 List.iter
@@ -197,7 +217,7 @@ let with_background_daemon
           Exn.protect
             ~finally:(fun () ->
               stage := "stopping recovered daemon";
-              Agent_server.Daemon.shutdown recovered |> protocol_ok;
+              shutdown recovered ~stage:"recovered daemon";
               stage := "recovered daemon stopped")
             ~f:(fun () ->
               let client = connection recovered (principal ()) in
