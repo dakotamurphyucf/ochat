@@ -1,8 +1,8 @@
 # Developer command storage
 
-Status: durable storage and daemon command lifecycle are implemented. The
-hosted source capture, execution policy and client service remain separate
-integration work.
+Status: durable storage and daemon command lifecycle are implemented. Hosted
+source capture, execution policy and the portable client are implemented in
+their respective host and transport layers.
 
 A top-level check, fixture run or live run has its own command receipt. Child-job
 results and Root phase checkpoints remain separate evidence. Commands live in
