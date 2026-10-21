@@ -361,7 +361,16 @@ let rec run_child
         Ok (Content.Selected source)
       else Ok Content.Captured_only
     in
-    let checkpoint () = Chat_response.Startup_compilation.checkpoint startup in
+    (* Content materialization can execute nested agents. Their runtime belongs to
+       the invocation deadline, not the already completed compilation phase.
+       Content projectors retain their own source, authority and aggregate limits. *)
+    let checkpoint () =
+      Eio.Fiber.check ();
+      match parent.deadline with
+      | Some deadline when P.Timestamp.compare deadline (O.native_now root) <= 0 ->
+        raise (Tool_denied (invalid "developer invocation deadline has expired"))
+      | Some _ | None -> ()
+    in
     let remote = Live.Child_prepared.remote_content prepared in
     let* declaration =
       Content.create

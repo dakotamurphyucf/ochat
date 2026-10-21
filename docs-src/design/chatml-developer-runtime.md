@@ -375,6 +375,11 @@ rebind, callback and preparation, with durable settlement outside that budget.
 Retained-source compilation and custody use their own work limits while polling
 that scope's cancellation and deadline without spending interpreter fuel;
 later ChatML interpreter execution still spends fuel.
+Selected child content materialization, including nested `<agent>` execution,
+uses the original invocation deadline and cancellation checks. Waiting for a
+nested model response does not consume the completed compilation phase's time
+allowance. Source authority and aggregate content byte, work and depth limits
+remain enforced during conversion.
 Restored child resources and their fibers join before the Claim loan closes.
 Native and managed Tool targets and Script targets are supported here.
 Queued Agent Tool calls with a distinct captured target still require a

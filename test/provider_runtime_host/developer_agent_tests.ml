@@ -362,6 +362,8 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
   let requests = ref 0 in
   let model_bodies = ref [] in
   let deep_tools_sent = ref false in
+  let advance_deep_runtime = ref (fun (_ : string) -> ()) in
+  let deep_runtime_advances = ref 0 in
   let selected_parent_submitting = ref false in
   let worker_two_submitting = ref false in
   let control_submitting = ref false in
@@ -392,6 +394,7 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
       else None)
     ~on_model_body:(fun body ->
       model_bodies := body :: !model_bodies;
+      !advance_deep_runtime body;
       if String.is_substring body ~substring:"Selected Model parent instructions"
       then selected_parent_submitting := true;
       if String.is_substring body ~substring:"Selected worker two instructions"
@@ -420,9 +423,31 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
         control_submitting := false;
         Eio.Promise.await worker_two_entered))
     (fun env sw anchor create _ ->
+       let elapsed_clock = Runtime_elapsed_clock.create (Eio.Stdenv.mono_clock env) in
+       let mono_clock = Runtime_elapsed_clock.resource elapsed_clock in
+       (* Real elapsed time continues normally. One explicit advance below models
+          nested provider runtime without sleeping or pausing startup budgets. *)
+       let env =
+         object
+           method fs = env#fs
+           method cwd = env#cwd
+           method stdin = env#stdin
+           method stdout = env#stdout
+           method stderr = env#stderr
+           method net = env#net
+           method domain_mgr = env#domain_mgr
+           method process_mgr = env#process_mgr
+           method clock = env#clock
+           method mono_clock = mono_clock
+           method secure_random = env#secure_random
+           method debug = env#debug
+           method backend_id = env#backend_id
+         end
+       in
        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 60. (fun () ->
          Fun.protect
            ~finally:(fun () ->
+             (advance_deep_runtime := fun _ -> ());
              if not !first_released then Eio.Promise.resolve release_first_u ();
              if not !selected_parent_released
              then Eio.Promise.resolve release_selected_parent_u ();
@@ -1236,6 +1261,22 @@ let on_event : context -> state -> event -> state task =
                         "tool is not in the selected capability set")
                   | _ -> failwith "selected child returned unexpected tool results")
                | _ -> failwith "selected child model request count changed");
+              (* Level two has completed preparation and reached model I/O. Age
+                 its waiting parent's startup clock past compile_seconds=5 while
+                 remaining inside the unchanged native runtime allowance of 30s.
+                 The parent's post-Agent Content projection must use runtime
+                 cancellation/currentness checks rather than its startup clock. *)
+              (advance_deep_runtime
+               := fun body ->
+                    if String.is_substring body ~substring:"Deep level two instructions"
+                    then (
+                      (advance_deep_runtime := fun _ -> ());
+                      [%test_eq: int] !requests 7;
+                      incr deep_runtime_advances;
+                      let before = Eio.Time.Mono.now mono_clock in
+                      Runtime_elapsed_clock.advance elapsed_clock ~seconds:6.;
+                      let elapsed = Mtime.span before (Eio.Time.Mono.now mono_clock) in
+                      assert (Float.(Mtime.Span.to_float_ns elapsed >= 6e9))));
               let deep_request =
                 S.Daemon.Developer.Request.create
                   ~route:
@@ -1305,6 +1346,8 @@ let on_event : context -> state -> event -> state task =
                     await_deep ()
                 in
                 await_deep ());
+              (advance_deep_runtime := fun _ -> ());
+              [%test_eq: int] !deep_runtime_advances 1;
               assert !deep_tools_sent;
               let deep_bodies = List.drop (List.rev !model_bodies) 4 in
               assert (List.length deep_bodies >= 4);
