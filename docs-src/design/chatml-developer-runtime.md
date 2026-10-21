@@ -49,6 +49,11 @@ then releases the gate before checking disclosure or waiting for execution.
 Cancellation detaches only the reader; it does not cancel the command. Current
 authority is checked again after the read, and lifecycle shutdown rejects queued
 readers. A retired run's authenticated historical receipts remain readable.
+For an already-ready run without admission or unresolved cleanup custody,
+passive command and REPL Task rereads do not reserve the startup recovery slot.
+Cold or uncertain nonterminal rows still recover under that exclusive slot
+before the fresh authorizing reread. This keeps cancellation admission separate
+from another passive wait without bypassing recovery or control permission.
 Pending writes owned outside this lifecycle still report a conflict; they are
 never treated as missing commands or retried as new submissions.
 

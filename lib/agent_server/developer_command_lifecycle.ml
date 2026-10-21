@@ -1206,6 +1206,37 @@ let with_slot t ~run_id ~f =
               Stdlib.Printexc.raise_with_backtrace exn backtrace))
 ;;
 
+let observation_ready (run : run_entry) =
+  match run.phase with
+  | Cold | Recovering | Quarantined -> false
+  | Ready ->
+    Option.is_none run.slot
+    && (not run.retained_charge)
+    && Option.is_none run.pending
+    && Option.is_none run.unlaunched
+    && Option.is_none run.recovery
+    && Option.is_none run.claim_only
+;;
+
+let with_recovered_observation t ~run_id ~f =
+  if not (on_domain t)
+  then Error (stale ())
+  else if t.closed
+  then Error (closed ())
+  else (
+    match Hashtbl.find t.runs run_id with
+    | Some run when observation_ready run ->
+      (* A passive read must not reserve an admission slot merely to reread a
+         live callback. Keep genuine admission/recovery custody on the original
+         path; the callback still performs its fresh read and authorization. *)
+      f ()
+    | Some _ | None ->
+      with_slot t ~run_id ~f:(fun slot ->
+        let open Result.Let_syntax in
+        let%bind () = ensure_startup_recovered t slot in
+        f ()))
+;;
+
 let retire_active t (active : active) =
   if (not active.retired) && Option.is_none active.run.pending
   then (

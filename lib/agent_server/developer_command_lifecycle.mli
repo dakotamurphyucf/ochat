@@ -242,6 +242,28 @@ val with_slot
   -> f:(Slot.t -> ('a, P.Error.t) result)
   -> ('a, P.Error.t) result
 
+(** Coordinate a fresh passive observation after the Host has authenticated
+    the exact persisted nonterminal row and its method/kind. [f] must perform
+    the fresh authorizing read; this operation grants no read/control authority.
+
+    A known Ready run with no admission slot, retained capacity charge, Pending,
+    unlaunched reservation, recovery window or claim-only cleanup calls [f]
+    without reserving an admission slot. Otherwise preserve the existing
+    [with_slot] -> [ensure_startup_recovered] -> [f] scope, including holding
+    that slot across the recovered reread and all existing custody cleanup.
+    Healthy finished or transferred run claims remain independently owned.
+
+    The Ready decision is nonyielding, checks domain/closure and does not
+    allocate a run. No readiness proof escapes or replaces current actor,
+    method, disclosure, Root or source checks. [f] may yield for the observation;
+    it must not execute effects or wait for command completion. Cancellation
+    detaches this reader without cancelling the daemon-owned callback. *)
+val with_recovered_observation
+  :  t
+  -> run_id:P.Id.Developer_run.t
+  -> f:(unit -> ('a, P.Error.t) result)
+  -> ('a, P.Error.t) result
+
 (** Authenticate and query the exact physical Result_root before source
     capture or epoch admission. A key miss with unresolved Store Pending is
     an error, not absence. Existing rows recheck current actor/disclosure

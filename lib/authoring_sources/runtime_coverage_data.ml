@@ -664,7 +664,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_trace_retention.ml"
     , "f95116a80f0d5aed07f8773212ed585a0b97bdbb0eb1df575fd8b17f163fbc4c" )
   ; ( "lib/agent_server/developer_command_lifecycle.ml"
-    , "630101169868915f6b34f4dde5d30107f8d294fcb63471744ebcc4fc011f5a4c" )
+    , "2b45b46ab1242a9bb41404cccd65f0fbed2bcd9b204fdbf0a18b5dec97e80ac4" )
   ; ( "lib/agent_server/developer_daemon_configuration.ml"
     , "7ef6ad1812644916c0505731cb26cc008a684f7141ce341891b0376b666b77ee" )
   ; ( "lib/agent_server/developer_native_permission.ml"
@@ -770,7 +770,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_script_job_service.ml"
     , "79ab45f6fd273e4f55060607c7635b52e19e724b8ff0bf0356d4c328024db6d6" )
   ; ( "lib/agent_server/developer_host.ml"
-    , "ca3408df2a47bb5fa61fff74cb9fa0a6a90c2b18c5ade89469ad223345a40049" )
+    , "adfaea98f5408ec991c4bcb4788444fcbef39556f95da37c35319b2821354c70" )
   ; ( "lib/agent_server/schedule_scheduler.ml"
     , "37cf371632d8ad86693c162e0593d56866f76df577dceb06ddd2ac5fe5bfdae9" )
   ; ( "lib/agent_session/background_execution.ml"

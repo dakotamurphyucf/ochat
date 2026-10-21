@@ -179,6 +179,7 @@ let%test_unit "daemon command callback survives its submitting slot and publishe
        in
        let entered, signal_entered = Eio.Promise.create () in
        let release, signal_release = Eio.Promise.create () in
+       let callback_calls = ref 0 in
        let reserved =
          L.with_slot lifecycle ~run_id ~f:(fun slot ->
            let open Result.Let_syntax in
@@ -194,6 +195,7 @@ let%test_unit "daemon command callback survives its submitting slot and publishe
                ~admit:(fun () -> Operator_authorization.is_current actor)
            in
            let callback _active ~sw:_ =
+             incr callback_calls;
              assert (Result.is_error (L.await_terminal lifecycle ~actor ~run_id ~key));
              Eio.Promise.resolve signal_entered ();
              Eio.Promise.await release;
@@ -222,8 +224,46 @@ let%test_unit "daemon command callback survives its submitting slot and publishe
        Eio.Promise.await entered;
        assert (Option.is_none (R.Command.observe handle ~key:second_key |> ok));
        assert (Option.is_none (L.View.receipt reserved));
+       let require_same_pending observed =
+         let observed = Option.value_exn observed in
+         assert (R.Command.Row.same_identity (L.View.row reserved) (L.View.row observed));
+         assert (Option.is_none (L.View.receipt observed))
+       in
+       let passive_read f =
+         L.observe lifecycle ~actor ~run_id ~key |> ok |> require_same_pending;
+         match L.with_recovered_observation lifecycle ~run_id ~f with
+         | Ok observed -> require_same_pending observed
+         | Error error ->
+           raise_s [%sexp "concurrent Ready observation rejected", (error : P.Error.t)]
+       in
+       let read_entered, signal_read_entered = Eio.Promise.create () in
+       let read_release, signal_read_release = Eio.Promise.create () in
+       (* Only the first passive callback is paused. A second fresh read must
+          not contend for an admission slot created by that passive callback. *)
+       Eio.Fiber.both
+         (fun () ->
+            passive_read (fun () ->
+              Eio.Promise.resolve signal_read_entered ();
+              Eio.Promise.await read_release;
+              L.observe lifecycle ~actor ~run_id ~key))
+         (fun () ->
+            Eio.Promise.await read_entered;
+            Exn.protect
+              ~finally:(fun () -> Eio.Promise.resolve signal_read_release ())
+              ~f:(fun () ->
+                passive_read (fun () -> L.observe lifecycle ~actor ~run_id ~key)));
+       [%test_eq: int] !callback_calls 1;
        let same =
          L.with_slot lifecycle ~run_id ~f:(fun slot ->
+           let entered = ref false in
+           (match
+              L.with_recovered_observation lifecycle ~run_id ~f:(fun () ->
+                entered := true;
+                Ok ())
+            with
+            | Error { P.Error.code = Conflict; _ } -> ()
+            | Ok () | Error _ -> failwith "observation bypassed a real admission slot");
+           assert (not !entered);
            L.lookup
              lifecycle
              slot
@@ -418,6 +458,24 @@ let%test_unit "daemon command callback survives its submitting slot and publishe
         | Reserved | Waiting_permission | Execution_started ->
           failwith "unlaunched reservation stayed open");
        L.close_and_wait dead_lifecycle |> ok;
+       let cold_key = P.Idempotency_key.of_string "command-observation-recovery" |> ok in
+       let cold_reserved =
+         match
+           R.Command.prepare_reservation
+             handle
+             ~key:cold_key
+             ~kind:R.Command.Receipt.Kind.Check
+             ~request_fingerprint
+           |> ok
+         with
+         | R.Command.Unchanged _ -> failwith "cold observation key was already present"
+         | Prepared pending ->
+           (R.Command.commit handle pending ~admit:(fun () -> true) |> ok).view
+       in
+       (match R.Command.Row.phase (R.Command.View.row cold_reserved) with
+        | Reserved -> ()
+        | Waiting_permission | Execution_started | Terminal _ ->
+          failwith "cold observation was not a real nonterminal row");
        let may_read = ref false in
        let recovery_calls = ref 0 in
        let recovery_entered, signal_recovery_entered = Eio.Promise.create () in
@@ -442,6 +500,24 @@ let%test_unit "daemon command callback survives its submitting slot and publishe
          Result.is_error (L.await_terminal recovering ~actor ~run_id ~key:no_fork_key));
        assert (Int.equal !recovery_calls 0);
        may_read := true;
+       let recovered_read_entered = ref false in
+       let authenticate_cold () =
+         let observed =
+           L.observe recovering ~actor ~run_id ~key:cold_key |> ok |> Option.value_exn
+         in
+         assert (
+           R.Command.Row.same_identity
+             (R.Command.View.row cold_reserved)
+             (L.View.row observed));
+         assert (Option.is_none (L.View.receipt observed))
+       in
+       let recovered_read () =
+         recovered_read_entered := true;
+         (match L.with_slot recovering ~run_id ~f:(fun _ -> Ok ()) with
+          | Error { P.Error.code = Conflict; _ } -> ()
+          | Ok () | Error _ -> failwith "cold reread escaped its recovery slot");
+         L.observe recovering ~actor ~run_id ~key:cold_key
+       in
        let cancellation, signal_cancellation = Eio.Promise.create () in
        let cancelled, signal_cancelled = Eio.Promise.create () in
        Eio.Fiber.fork ~sw (fun () ->
@@ -449,8 +525,10 @@ let%test_unit "daemon command callback survives its submitting slot and publishe
            match
              Eio.Cancel.sub (fun cancel ->
                Eio.Promise.resolve signal_cancellation cancel;
-               L.with_slot recovering ~run_id ~f:(L.ensure_startup_recovered recovering)
-               |> ok)
+               authenticate_cold ();
+               ignore
+                 (L.with_recovered_observation recovering ~run_id ~f:recovered_read |> ok
+                  : L.View.t option))
            with
            | exception Eio.Cancel.Cancelled _ -> `Cancelled
            | () -> `Unexpected_success
@@ -463,7 +541,25 @@ let%test_unit "daemon command callback survives its submitting slot and publishe
        (match Eio.Promise.await cancelled with
         | `Cancelled -> ()
         | `Unexpected_success -> failwith "cancelled startup returned success");
-       L.with_slot recovering ~run_id ~f:(L.ensure_startup_recovered recovering) |> ok;
+       assert (not !recovered_read_entered);
+       authenticate_cold ();
+       let recovered =
+         L.with_recovered_observation recovering ~run_id ~f:recovered_read
+         |> ok
+         |> Option.value_exn
+       in
+       assert !recovered_read_entered;
+       assert (
+         R.Command.Row.same_identity
+           (R.Command.View.row cold_reserved)
+           (L.View.row recovered));
+       (match L.View.receipt recovered with
+        | Some receipt ->
+          (match R.Command.Receipt.value receipt with
+           | R.Command.Receipt.Check Interrupted -> ()
+           | Check _ | Fixture _ | Live _ | Task _ ->
+             failwith "cold observation did not recover the abandoned row")
+        | None -> failwith "cold observation did not finish startup recovery");
        assert (Int.equal !recovery_calls 2);
        L.close_and_wait recovering |> ok)
 ;;

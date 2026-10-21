@@ -2051,8 +2051,7 @@ let observe_command t ~actor ~run_id ~key =
     (match Command_view.phase view with
      | Row.Phase.Terminal _ -> Ok (Some view)
      | Reserved | Waiting_permission | Execution_started ->
-       Lifecycle.with_slot t.lifecycle ~run_id ~f:(fun slot ->
-         let%bind () = Lifecycle.ensure_startup_recovered t.lifecycle slot in
+       Lifecycle.with_recovered_observation t.lifecycle ~run_id ~f:(fun () ->
          observe_once t ~actor ~run_id ~key))
 ;;
 
@@ -2889,8 +2888,7 @@ module Repl = struct
         (match Row.phase row with
          | Row.Phase.Terminal _ -> Ok (Some view)
          | Reserved | Waiting_permission | Execution_started ->
-           Lifecycle.with_slot t.lifecycle ~run_id ~f:(fun slot ->
-             let%bind () = Lifecycle.ensure_startup_recovered t.lifecycle slot in
+           Lifecycle.with_recovered_observation t.lifecycle ~run_id ~f:(fun () ->
              observe_once t ~actor ~run_id ~key))
     ;;
 

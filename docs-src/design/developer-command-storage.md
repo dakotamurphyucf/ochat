@@ -99,6 +99,14 @@ window or command write retains its exact claim or Pending; it is never treated
 as a key miss. A later authorized same-key lookup may reconcile only the
 selected terminal without invoking the command callback again.
 Passive reads prove disclosure of the existing row before starting recovery.
+An already-ready run with no admission or unresolved cleanup custody performs
+its fresh authorizing reread without reserving a startup slot. Concurrent
+observation, terminal-wait admission and explicit cancellation can therefore
+read the same live command without contending for a recovery slot. Cold or
+uncertain runs keep the exclusive startup recovery and reread scope; an actual
+admission in progress still returns a typed conflict. Store reads remain
+serialized by the owning lifecycle's per-run mutation gate, which is released
+before disclosure checks or terminal waiting.
 Only a fresh reservation from the current slot can launch once; an old
 Reserved observation cannot start a callback.
 If a fresh reservation's slot exits before launch, the lifecycle finishes
