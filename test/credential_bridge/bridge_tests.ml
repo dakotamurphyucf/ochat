@@ -90,8 +90,84 @@ let open_host ?oauth ?net env sw anchor mode ~mappings ~environment ~authorize =
 
 let authorize ~principal ~profile:_ ~operation:_ = String.equal principal "operator"
 
+module Metadata_wait : sig
+  type t
+
+  val create : debug:Eio.Debug.t -> t
+  val environment : t -> Eio_unix.Stdenv.base -> Eio_unix.Stdenv.base
+
+  (** The actual metadata admission has observed Busy and entered its retry sleep. *)
+  val await_blocked : t -> unit
+
+  (** Resume the queued retry after publication has completed. *)
+  val resume : t -> unit
+
+  (** Exceptional cleanup may run before any retry has been queued. *)
+  val release_pending : t -> unit
+end = struct
+  type t =
+    { mono : Eio_mock.Clock.Mono.t
+    ; debug : Eio.Debug.t
+    ; blocked : unit Eio.Promise.t
+    ; blocked_u : unit Eio.Promise.u
+    }
+
+  let create ~debug =
+    let blocked, blocked_u = Eio.Promise.create () in
+    { mono = Eio_mock.Clock.Mono.make (); debug; blocked; blocked_u }
+  ;;
+
+  module Clock = struct
+    type nonrec t = t
+    type time = Mtime.t
+
+    let now t = Eio.Time.Mono.now t.mono
+
+    let sleep_until t deadline =
+      if not (Eio.Promise.is_resolved t.blocked) then Eio.Promise.resolve t.blocked_u ();
+      Eio.Time.Mono.sleep_until t.mono deadline
+    ;;
+  end
+
+  let environment t (env : Eio_unix.Stdenv.base) : Eio_unix.Stdenv.base =
+    let mono_clock = Eio.Resource.T (t, Eio.Time.Pi.clock (module Clock)) in
+    object
+      method stdin = env#stdin
+      method stdout = env#stdout
+      method stderr = env#stderr
+      method net = env#net
+      method domain_mgr = env#domain_mgr
+      method process_mgr = env#process_mgr
+      method clock = env#clock
+      method mono_clock = mono_clock
+      method fs = env#fs
+      method cwd = env#cwd
+      method secure_random = env#secure_random
+      method debug = env#debug
+      method backend_id = env#backend_id
+    end
+  ;;
+
+  let await_blocked t = Eio.Promise.await t.blocked
+
+  let advance t =
+    let quiet =
+      { Eio.Debug.traceln =
+          (fun ?__POS__:_ fmt -> Format.ifprintf Format.err_formatter fmt)
+      }
+    in
+    Eio.Fiber.with_binding t.debug#traceln quiet (fun () ->
+      Eio_mock.Clock.Mono.try_advance t.mono)
+  ;;
+
+  let resume t = assert (advance t)
+  let release_pending t = ignore (advance t : bool)
+end
+
 let%expect_test "real bridge resolution cannot issue a model selection after port close" =
   with_fixture (fun env sw anchor ->
+    let metadata_wait = Metadata_wait.create ~debug:(Eio.Stdenv.debug env) in
+    let env = Metadata_wait.environment metadata_wait env in
     let mapping, identity = mapping "one" in
     let environment =
       B.Environment.Entry.create
@@ -152,16 +228,7 @@ let%expect_test "real bridge resolution cannot issue a model selection after por
         ~attributes:[]
       |> ok
     in
-    let entered_actor, entered_actor_u = Eio.Promise.create () in
-    let checked = ref false in
-    let actor =
-      Operator_authorization.guarded ~principal ~is_current:(fun () ->
-        if not !checked
-        then (
-          checked := true;
-          Eio.Promise.resolve entered_actor_u ());
-        true)
-    in
+    let actor = Operator_authorization.guarded ~principal ~is_current:(fun () -> true) in
     let port =
       Port.create
         ~dispatch:(fun ~actor:_ _ -> Error P.Provider_operator.Error.Unsupported)
@@ -179,41 +246,59 @@ let%expect_test "real bridge resolution cannot issue a model selection after por
            C.For_testing.set_after_publication_hook registry None;
            Eio.Promise.resolve published_u ();
            Eio.Promise.await release));
-    let publication_done, publication_done_u = Eio.Promise.create () in
-    Eio.Fiber.fork ~sw (fun () ->
-      let result =
-        B.configure_environment
-          bridge
-          ~principal:"pri_operator"
-          ~profile:"one"
-          ~operation:(id "second_enrollment")
-          ~name:"ONE"
-          ~configuration_revision:None
-      in
-      Eio.Promise.resolve publication_done_u result);
-    Eio.Promise.await published;
-    let selected, selected_u = Eio.Promise.create () in
-    Eio.Fiber.fork ~sw (fun () ->
-      Eio.Promise.resolve selected_u (Port.select_model port ~actor ~target));
-    Eio.Promise.await entered_actor;
-    Eio.Fiber.yield ();
-    assert (Option.is_none (Eio.Promise.peek selected));
-    Port.close port;
-    Eio.Promise.resolve release_u ();
-    ignore (Eio.Promise.await publication_done |> ok : unit);
-    (match Eio.Promise.await selected with
-     | Error _ -> ()
-     | Ok _ -> failwith "closed port issued a model selection");
-    let fresh_port =
-      Port.create
-        ~dispatch:(fun ~actor:_ _ -> Error P.Provider_operator.Error.Unsupported)
-        ~receipt:(fun ~actor:_ _ -> Error P.Provider_operator.Error.Unsupported)
-        ~current_model_bridge:(fun () -> Ok bridge)
-        ~close:(fun () -> ())
-    in
-    ignore (Port.select_model fresh_port ~actor ~target |> ok : Port.Model_selection.t);
-    Port.close fresh_port;
-    C.For_testing.set_after_publication_hook registry None);
+    Exn.protect
+      ~finally:(fun () ->
+        Port.close port;
+        C.For_testing.set_after_publication_hook registry None;
+        if not (Eio.Promise.is_resolved release) then Eio.Promise.resolve release_u ();
+        Metadata_wait.release_pending metadata_wait)
+      ~f:(fun () ->
+        let publication_done, publication_done_u = Eio.Promise.create () in
+        Eio.Fiber.fork ~sw (fun () ->
+          let result =
+            B.configure_environment
+              bridge
+              ~principal:"pri_operator"
+              ~profile:"one"
+              ~operation:(id "second_enrollment")
+              ~name:"ONE"
+              ~configuration_revision:None
+          in
+          Eio.Promise.resolve publication_done_u result);
+        Eio.Promise.await published;
+        let selected, selected_u = Eio.Promise.create () in
+        Eio.Fiber.fork ~sw (fun () ->
+          Eio.Promise.resolve selected_u (Port.select_model port ~actor ~target));
+        Metadata_wait.await_blocked metadata_wait;
+        assert (Option.is_none (Eio.Promise.peek selected));
+        Port.close port;
+        Eio.Promise.resolve release_u ();
+        (* Keep the reader asleep until publication and its final synchronization
+           finish. The 50ms budget measures only controlled clock advancement,
+           rather than unrelated CI filesystem/thread-pool latency. *)
+        (match Eio.Promise.await publication_done with
+         | Ok () -> ()
+         | Error error -> raise_s [%sexp "publication failed", (error : B.Error.t)]);
+        Metadata_wait.resume metadata_wait;
+        (match Eio.Promise.await selected with
+         | Error error when P.Error.equal_code error.code Permission_denied -> ()
+         | Error error ->
+           raise_s [%sexp "unexpected selection error", (error : P.Error.t)]
+         | Ok _ -> failwith "closed port issued a model selection");
+        let fresh_port =
+          Port.create
+            ~dispatch:(fun ~actor:_ _ -> Error P.Provider_operator.Error.Unsupported)
+            ~receipt:(fun ~actor:_ _ -> Error P.Provider_operator.Error.Unsupported)
+            ~current_model_bridge:(fun () -> Ok bridge)
+            ~close:(fun () -> ())
+        in
+        Exn.protect
+          ~finally:(fun () -> Port.close fresh_port)
+          ~f:(fun () ->
+            match Port.select_model fresh_port ~actor ~target with
+            | Ok _ -> ()
+            | Error error ->
+              raise_s [%sexp "fresh port selection failed", (error : P.Error.t)])));
   print_endline "real metadata wait crossed port close; no selection escaped";
   [%expect {| real metadata wait crossed port close; no selection escaped |}]
 ;;
