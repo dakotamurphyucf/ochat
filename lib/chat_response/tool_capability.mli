@@ -60,6 +60,12 @@ val create
   -> (t, error) result
 
 val references : t -> reference list
+
+(** Number of bindings in this immutable selected registry, without allocating
+    a reference list. Authoring metadata admission preflights this cardinality
+    before projecting bounded names and fingerprints. It grants no authority. *)
+val length : t -> int
+
 val reference : binding -> reference
 
 (** Inspect the native runner or managed target for the owning invocation service.

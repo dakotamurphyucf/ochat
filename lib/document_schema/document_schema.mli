@@ -75,6 +75,19 @@ module Json : sig
       compact encoded-byte count without materializing encoded output. *)
   val validate_and_measure : limits:Limits.t -> t -> (int, Error.t) Result.t
 
+  (** The same single canonical measurement and error ordering, with a pure
+      caller-supplied checkpoint at a finite cadence while traversing nodes
+      and scanning string or number bytes. The callback can raise; that exact
+      exception propagates. It must not mutate [t]. The existing
+      [validate_and_measure] uses this validator with a no-op checkpoint.
+      A Store supplies its existing charging checkpoint; this function neither
+      creates a second budget nor depends on Eio. *)
+  val validate_and_measure_with_checkpoint
+    :  limits:Limits.t
+    -> checkpoint:(unit -> unit)
+    -> t
+    -> (int, Error.t) Result.t
+
   (** Lookup on a validated tree preserves absence separately from explicit null. *)
   val field : t -> name:string -> presence
 
@@ -98,6 +111,17 @@ module Document : sig
 
   val create
     :  limits:Limits.t
+    -> kind:string
+    -> version:int
+    -> payload:Json.t
+    -> (t, Error.t) Result.t
+
+  (** The same canonical envelope admission as [create], charging the supplied
+      cooperative checkpoint during JSON validation. The checkpoint does not
+      alter the limits or error ordering. *)
+  val create_with_checkpoint
+    :  limits:Limits.t
+    -> checkpoint:(unit -> unit)
     -> kind:string
     -> version:int
     -> payload:Json.t

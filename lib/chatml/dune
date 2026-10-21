@@ -39,7 +39,7 @@
   chatml_extension_surface
   chatml_surface_inventory)
  (private_modules chatml_contract_encoding)
- (libraries core jsonaf menhirLib source chatml_source chatml_diagnostic)
+ (libraries core jsonaf menhirLib source chatml_source chatml_diagnostic chatml_trace)
  (preprocess
   (pps ppx_jane)))
 
@@ -54,10 +54,12 @@
 (library
  (name chatml_typechecker)
  (public_name ochat.chatml_typechecker)
- (modules chatml_typechecker chatml_type_snapshot chatml_semantic_binding chatml_semantic_recorder chatml_semantic_elaboration chatml_semantic_scope chatml_semantic_host chatml_inferred_type chatml_type_alias chatml_type_validity chatml_type_probe chatml_type_scheme chatml_signature_check chatml_alias_equivalence chatml_value_scope chatml_configured_resolution)
+ (modules chatml_typechecker chatml_type_snapshot chatml_semantic_binding chatml_semantic_recorder chatml_semantic_elaboration chatml_semantic_scope chatml_semantic_host chatml_inferred_type chatml_type_alias chatml_type_validity chatml_type_graph_copy chatml_type_graph_copy_tests chatml_type_probe chatml_type_scheme chatml_signature_check chatml_alias_equivalence chatml_value_scope chatml_configured_resolution chatml_repl_type_roots)
+ (private_modules chatml_type_graph_copy chatml_type_graph_copy_tests)
  (libraries core chatml chatml_graph)
  (preprocess
-  (pps ppx_jane)))
+  (pps ppx_jane ppx_expect))
+ (inline_tests))
 
 (library
  (name chatml_builtin_modules)
@@ -77,7 +79,8 @@
   chatml_typechecker
   chatml_resolver
   chatml_builtin_modules
-  chatml_linked_runtime)
+  chatml_linked_runtime
+  chatml_trace)
  (preprocess
   (pps ppx_jane)))
 
@@ -118,13 +121,22 @@
 (library
  (name chatml_compilation)
  (public_name ochat.chatml_compilation)
- (modules chatml_compilation)
- (libraries core eio eio.unix mtime chatml chatml_source chatml_prepared_program chatml_linked_program chatml_host_runtime chatml_semantics)
- (preprocess (pps ppx_jane)))
+ (modules chatml_compilation chatml_compilation_checkpoint chatml_compilation_checkpoint_tests)
+ (private_modules chatml_compilation_checkpoint chatml_compilation_checkpoint_tests)
+ (libraries core eio eio.unix mtime chatml chatml_source chatml_prepared_program chatml_linked_program chatml_host_runtime chatml_semantics chatml_trace)
+ (preprocess (pps ppx_jane ppx_expect))
+ (inline_tests))
 
 (library
  (name chatml_configured_check)
  (public_name ochat.chatml_configured_check)
  (modules chatml_configured_check)
  (libraries core chatml chatml_typechecker chatml_graph)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name chatml_repl_typing)
+ (public_name ochat.chatml_repl_typing)
+ (modules chatml_repl_typing)
+ (libraries core chatml chatml_source chatml_prepared_program chatml_graph chatml_typechecker chatml_configured_check)
  (preprocess (pps ppx_jane)))

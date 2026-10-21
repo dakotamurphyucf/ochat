@@ -16,13 +16,16 @@ let attribute = function
   | Error diagnostic -> fail diagnostic
 ;;
 
-let load_source ~loader ~source_node ~source path =
+let load_source ~loader ~source_node ~source ~on_external_source path =
   match
     let open Result.Let_syntax in
     let%bind resolved = Source_loader.resolve loader ~base:source_node ~reference:path in
-    Source_loader.read loader resolved
+    let%map contents = Source_loader.read loader resolved in
+    resolved, contents
   with
-  | Ok contents -> contents
+  | Ok (resolved, contents) ->
+    on_external_source resolved contents;
+    contents
   | Error _ ->
     fail
       (D.error
@@ -32,7 +35,7 @@ let load_source ~loader ~source_node ~source path =
          (sprintf "failed to load ChatML script %S relative to the prompt directory" path))
 ;;
 
-let source ~loader ~source_node ~source attributes inline_source =
+let source ~loader ~source_node ~source ~on_external_source attributes inline_source =
   match attribute (Chatmd_attributes.optional attributes "src") with
   | Some path when not (String.is_empty inline_source) ->
     fail
@@ -49,7 +52,10 @@ let source ~loader ~source_node ~source attributes inline_source =
          ~code:"chatmd.script_empty_source"
          "script src cannot be empty")
   | Some path ->
-    S.Src { path; source_text = load_source ~loader ~source_node ~source path }
+    S.Src
+      { path
+      ; source_text = load_source ~loader ~source_node ~source ~on_external_source path
+      }
   | None when String.is_empty inline_source ->
     fail
       (D.error
@@ -146,27 +152,24 @@ let project_selection source attributes =
      | Error error -> reject (Error.to_string_hum error))
 ;;
 
-let parse ~dir:_ ~loader ~source_node ~source:source_ref ~attributes ~inline_source =
+let parse
+      ~on_external_source
+      ~dir:_
+      ~loader
+      ~source_node
+      ~source:source_ref
+      ~attributes
+      ~inline_source
+  =
   result (fun () ->
     let attributes =
       Chatmd_attributes.create
         ~source:source_ref
         ~path:[ "script" ]
         ~allowed:
-          [ "id"
-          ; "language"
-          ; "kind"
-          ; "src"
-          ; "project"
-          ; "environment"
-          ; "wall_time"
-          ; "fuel"
-          ; "max_tasks"
-          ; "max_value"
-          ; "max_output"
-          ; "max_array_items"
-          ; "max_depth"
-          ]
+          (Chatmd_declaration_schema.attributes
+             Chatmd_declaration_schema.Family.Script_legacy
+           |> Chatmd_declaration_schema.Attribute_names.names)
         attributes
       |> attribute
     in
@@ -182,7 +185,13 @@ let parse ~dir:_ ~loader ~source_node ~source:source_ref ~attributes ~inline_sou
     let kind_name = attribute (Chatmd_attributes.required attributes "kind") in
     let kind = S.kind_of_string source_ref kind_name |> attribute in
     let source =
-      source ~loader ~source_node ~source:source_ref attributes inline_source
+      source
+        ~loader
+        ~source_node
+        ~source:source_ref
+        ~on_external_source
+        attributes
+        inline_source
     in
     let source_text =
       match source with

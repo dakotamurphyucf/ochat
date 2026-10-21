@@ -47,7 +47,7 @@ module Binding : sig
       body or original authored bytes when preprocessing changed them. Retain
       registration root: restart replays its saved effective root input and raw
       captured imports to reproduce namespace context. No native dirs. *)
-  type t [@@deriving compare, equal, sexp_of]
+  type t = Chatml_prompt_binding.t [@@deriving compare, equal, sexp_of]
 
   (** Admit one actual declaration belonging to [parsed.declarations]. Its Range
       input must belong to the same Parsed inventory. Retain that exact range,
@@ -67,7 +67,7 @@ module Binding : sig
         Retains only logical registration Root path, declaration Input role/path
         and parser-qualified script ID. No source bytes/revisions/range/body hash
         or compiler contract are retained. Construct only through [slot]. *)
-    type t [@@deriving equal, sexp_of]
+    type t = Chatml_prompt_binding.Slot.t [@@deriving equal, sexp_of]
 
     val registration_path : t -> Source.Portable_path.t
     val declaration_role : t -> Parser_input.Role.t

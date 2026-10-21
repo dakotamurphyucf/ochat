@@ -1,0 +1,8 @@
+(library
+ (name chatml_repl_execution)
+ (public_name ochat.chatml_repl_execution)
+ (modules chatml_repl_execution)
+ (libraries core eio chatml chatml_source chatml_diagnostic chatml_typechecker
+  chatml_resolver chatml_repl_typing chatml_linked_runtime chatml_execution
+  chatml_builtin_modules)
+ (preprocess (pps ppx_jane)))

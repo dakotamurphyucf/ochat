@@ -81,6 +81,10 @@ module Run = Make (struct
     let prefix = "run"
   end)
 
+module Developer_run = Make (struct
+    let prefix = "dvr"
+  end)
+
 module Attachment = Make (struct
     let prefix = "att"
   end)
@@ -171,4 +175,24 @@ module Project = Make (struct
 
 module Collection = Make (struct
     let prefix = "col"
+  end)
+
+module Authoring_root = Make (struct
+    let prefix = "aroot"
+  end)
+
+module Authoring_context = Make (struct
+    let prefix = "actx"
+  end)
+
+module Authoring_analysis = Make (struct
+    let prefix = "aana"
+  end)
+
+module Authoring_upload = Make (struct
+    let prefix = "aupl"
+  end)
+
+module Authoring_bundle = Make (struct
+    let prefix = "abun"
   end)

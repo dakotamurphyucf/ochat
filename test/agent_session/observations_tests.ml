@@ -237,6 +237,7 @@ let%expect_test "idle observations own state without starting a model operation"
     ; `Stopped
     ; `Stop_cancel
     ; `Graceful_then_cancel
+    ; `Late_stop
     ]
     ~f:(fun mode ->
       let prepared = ref None
@@ -323,9 +324,17 @@ let%expect_test "idle observations own state without starting a model operation"
            let initial = await_idle actor in
            let manager, observer = Option.value_exn !prepared in
            let cancellation = ref None in
+           let before_observation_return = ref (fun () -> ()) in
            let run () =
              Agent_session.Moderator_observation.drain_idle
-               ~claim:(A.with_idle_moderator_observation actor ~observer)
+               ~claim:(fun callback ->
+                 A.with_idle_moderator_observation
+                   actor
+                   ~observer
+                   (fun ~observing ~commit ->
+                      let result = callback ~observing ~commit in
+                      !before_observation_return ();
+                      result))
                ~manager
                ~history:(fun () ->
                  (A.state actor |> protocol_ok).conversation.canonical_history
@@ -414,6 +423,64 @@ let%expect_test "idle observations own state without starting a model operation"
                 (fun () ->
                    let result = safe_run () in
                    results := result :: !results)
+            | `Late_stop ->
+              let callback_ready, callback_ready_u = Eio.Promise.create () in
+              let release_callback, release_callback_u = Eio.Promise.create () in
+              let callback_returned, callback_returned_u = Eio.Promise.create () in
+              let actor_blocked, actor_blocked_u = Eio.Promise.create () in
+              let release_actor, release_actor_u = Eio.Promise.create () in
+              let stop_requested, stop_requested_u = Eio.Promise.create () in
+              let checkpoint_finished = ref false in
+              let stop_finished = ref false in
+              let release promise resolver =
+                if not (Eio.Promise.is_resolved promise)
+                then Eio.Promise.resolve resolver ()
+              in
+              (before_observation_return
+               := fun () ->
+                    Eio.Promise.resolve callback_ready_u ();
+                    Eio.Promise.await release_callback;
+                    Eio.Promise.resolve callback_returned_u ());
+              Eio.Switch.run (fun sw ->
+                Exn.protect
+                  ~finally:(fun () ->
+                    release release_callback release_callback_u;
+                    release release_actor release_actor_u)
+                  ~f:(fun () ->
+                    Eio.Fiber.fork ~sw (fun () -> results := [ safe_run () ]);
+                    Eio.Promise.await callback_ready;
+                    Eio.Fiber.fork ~sw (fun () ->
+                      A.checkpoint actor ~persist:(fun checkpoint ->
+                        let child =
+                          List.find_exn checkpoint.invocations ~f:(fun invocation ->
+                            I.equal_origin invocation.context.origin Moderator)
+                        in
+                        (match child.observation with
+                         | Some { status = Observed; _ } -> ()
+                         | Some _ | None ->
+                           failwith "late stop preceded observation acknowledgement");
+                        Eio.Promise.resolve actor_blocked_u ();
+                        Eio.Promise.await release_actor;
+                        Ok ())
+                      |> protocol_ok;
+                      checkpoint_finished := true);
+                    Eio.Promise.await actor_blocked;
+                    Eio.Promise.resolve release_callback_u ();
+                    Eio.Promise.await callback_returned;
+                    (* Resolving these signals does not yield. The observer queues
+                       normal Finish before this controller resumes; the stop fiber
+                       queues priority Stop before this controller releases the actor. *)
+                    Eio.Fiber.fork ~sw (fun () ->
+                      Eio.Promise.resolve stop_requested_u ();
+                      A.stop actor ~attachment_id:writer.id ~mode:Cancel
+                      |> protocol_ok
+                      |> ignore;
+                      stop_finished := true);
+                    Eio.Promise.await stop_requested;
+                    Eio.Promise.resolve release_actor_u ()));
+              assert !checkpoint_finished;
+              assert !stop_finished;
+              A.set_runtime_worker actor ~worker:None ~inference:None |> protocol_ok
             | _ -> results := [ safe_run () ]);
            let state = A.state actor |> protocol_ok in
            let child =
@@ -458,6 +525,7 @@ let%expect_test "idle observations own state without starting a model operation"
              | `Stopped -> "stopped"
              | `Stop_cancel -> "cancel stop"
              | `Graceful_then_cancel -> "graceful then cancel"
+             | `Late_stop -> "stop after return"
            in
            print_s
              [%sexp
@@ -470,7 +538,7 @@ let%expect_test "idle observations own state without starting a model operation"
                }];
            (* The legacy borrow is available again even after callback failure. *)
            match mode with
-           | "stopped" | "cancel stop" | "graceful then cancel" ->
+           | "stopped" | "cancel stop" | "graceful then cancel" | "stop after return" ->
              assert (Option.is_none (A.claim_idle_moderator actor |> protocol_ok))
            | _ ->
              assert (Option.is_some (A.claim_idle_moderator actor |> protocol_ok));
@@ -524,6 +592,8 @@ let%expect_test "idle observations own state without starting a model operation"
      (observation
       (Observation_failed "observation handler cancelled before acknowledgement"))
      (follow_up ()))
+    ((mode "stop after return") (callbacks 1) (state 1) (errors 0)
+     (observation Observed) (follow_up ()))
     |}]
 ;;
 
@@ -773,4 +843,149 @@ let%test_unit
             | _ -> assert false);
            [%test_eq: int] 1 (List.length state.conversation.canonical_history);
            assert_same_session_snapshot state (Agent_session.Memory_backend.state backend)))
+;;
+
+let%test_unit "cancellation during an idle observation claim releases its runtime borrow" =
+  let module A = Agent_session.Session_actor in
+  let module I = Agent_protocol.Invocation in
+  let observer : I.observer =
+    { script_id = "handoff"; source_sha256 = String.make 64 'a' }
+  in
+  let child_id =
+    Agent_protocol.Id.Invocation.of_string "inv_cancelled_idle_claim" |> protocol_ok
+  in
+  let claim_entered, claim_entered_u = Eio.Promise.create () in
+  let release_claim, release_claim_u = Eio.Promise.create () in
+  let armed = ref false in
+  let cancellation = ref None in
+  let cancelled = ref false in
+  let callback_entered = ref false in
+  let original = Failure "idle observation cancelled during protected claim" in
+  with_handoff_actor
+    ~reject:(fun next ->
+      let observing =
+        List.exists
+          next.Agent_session.Session_transition.state.invocations
+          ~f:(fun invocation ->
+            Agent_protocol.Id.Invocation.equal invocation.context.id child_id
+            &&
+            match invocation.Agent_protocol.Invocation.observation with
+            | Some { status = Observing; _ } -> true
+            | Some _ | None -> false)
+      in
+      if !armed && observing
+      then (
+        armed := false;
+        Eio.Promise.resolve claim_entered_u ();
+        Eio.Promise.await release_claim);
+      false)
+    ~make_worker:(fun _env _actor_ready ->
+      Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+        let snapshot =
+          Some
+            (Agent_session.Runtime_builder.encode_moderator_snapshot
+               { (handoff_snapshot 0) with script_source_hash = observer.source_sha256 })
+        in
+        caps.commit_moderator snapshot |> protocol_ok;
+        let parent = invocation_fixture () in
+        caps.with_invocation ~invocation:parent (fun ~dispatched:_ ->
+          let child =
+            I.create
+              ~observer
+              { parent.context with
+                id = child_id
+              ; origin = Moderator
+              ; parent_invocation = Some parent.context.id
+              }
+            |> protocol_ok
+          in
+          caps.with_invocation ~invocation:child (fun ~dispatched:_ ->
+            Ok (Complete (`String "recorded native result")))
+          |> protocol_ok
+          |> ignore;
+          Ok (Complete `Null))
+        |> protocol_ok
+        |> ignore;
+        Completed
+          { final_history = input.history
+          ; moderator_snapshot = snapshot
+          ; runtime_requests = []
+          }))
+    (fun _env actor _writer backend ->
+       let initial = await_idle actor in
+       let child =
+         match
+           List.find initial.invocations ~f:(fun invocation ->
+             Agent_protocol.Id.Invocation.equal invocation.context.id child_id)
+         with
+         | Some child -> child
+         | None -> failwith "idle claim fixture did not prepare its native child"
+       in
+       assert (
+         I.equal_status
+           child.status
+           (Resolved (Complete (`String "recorded native result"))));
+       (match child.observation with
+        | Some { status = Awaiting; observer = actual; _ } ->
+          assert (I.equal_observer observer actual)
+        | other ->
+          raise_s
+            [%sexp
+              "idle claim fixture observation is not ready"
+            , (other : I.observation option)]);
+       armed := true;
+       Eio.Fiber.both
+         (fun () ->
+            match
+              Eio.Cancel.sub (fun context ->
+                cancellation := Some context;
+                A.with_idle_moderator_observation
+                  actor
+                  ~observer
+                  (fun ~observing:_ ~commit:_ ->
+                     callback_entered := true;
+                     failwith "cancelled observation callback entered"))
+            with
+            | Ok returned ->
+              raise_s
+                [%sexp
+                  "observation claim returned instead of cancelling"
+                , (returned : bool)
+                , (!armed : bool)]
+            | Error error ->
+              raise_s
+                [%sexp
+                  "observation claim failed before cancellation"
+                , (error : Agent_protocol.Error.t)
+                , (!armed : bool)]
+            | exception Eio.Cancel.Cancelled reason ->
+              assert (phys_equal reason original);
+              cancelled := true)
+         (fun () ->
+            Exn.protect
+              ~finally:(fun () ->
+                if not (Eio.Promise.is_resolved release_claim)
+                then Eio.Promise.resolve release_claim_u ())
+              ~f:(fun () ->
+                Eio.Promise.await claim_entered;
+                Eio.Cancel.cancel (Option.value_exn !cancellation) original));
+       assert !cancelled;
+       assert (not !armed);
+       assert (not !callback_entered);
+       (* The protected claim must be paired with cleanup even when cancellation
+         precedes entry into the callback's local cancellation sub-context. *)
+       A.set_runtime_worker actor ~worker:None ~inference:None |> protocol_ok;
+       let state = A.state actor |> protocol_ok in
+       let child =
+         List.find_exn state.invocations ~f:(fun invocation ->
+           I.equal_origin invocation.context.origin Moderator)
+       in
+       assert (
+         I.equal_status
+           child.status
+           (Resolved (Complete (`String "recorded native result"))));
+       (match child.observation with
+        | Some { status = Observation_failed _; _ } -> ()
+        | Some _ | None -> failwith "cancelled observation claim was not retired");
+       assert_same_session_snapshot state (Agent_session.Memory_backend.state backend))
 ;;

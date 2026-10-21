@@ -109,6 +109,27 @@ let%test_unit "bundles use supplied bytes and traverse the unique local-agent cl
       ]
     in
     let result = CM.parse_source_bundle ~dir (bundle sources) in
+    let observed = ref [] in
+    let checked =
+      CM.Generated.parse_source_bundle
+        ~dir
+        (bundle sources)
+        ~checkpoint:ignore
+        ~before_read:(fun ~member ~byte_length ->
+          let expected = List.Assoc.find_exn sources member ~equal:String.equal in
+          assert (Int.equal byte_length (String.length expected));
+          observed := member :: !observed)
+      |> function
+      | Ok receipt -> receipt
+      | Error _ -> failwith "valid generated source rejected"
+    in
+    assert (List.length !observed >= List.length sources);
+    assert (
+      List.equal
+        String.equal
+        (CM.Generated.read_members checked)
+        (List.map sources ~f:fst |> List.sort ~compare:String.compare));
+    assert (List.length (CM.Generated.parsed checked).parsed_agents = 1);
     assert (List.length result.agents = 1);
     let path, child = List.hd_exn result.agents in
     assert (String.equal path "agents/child.chatmd");
@@ -139,6 +160,104 @@ let%test_unit "bundles use supplied bytes and traverse the unique local-agent cl
         (bundle
            (List.filter sources ~f:(fun (path, _) ->
               not (String.equal path "parts/worker.chatml"))))))
+;;
+
+let%test_unit "checked generated parsing distinguishes authored and callback failures" =
+  with_dir (fun dir ->
+    let parse sources ~before_read =
+      CM.Generated.parse_source_bundle
+        ~dir
+        (bundle sources)
+        ~checkpoint:ignore
+        ~before_read
+    in
+    (match
+       parse
+         [ ( "root.chatmd"
+           , {|<script id="worker" language="chatml" kind="tool" src="missing.chatml"/>|}
+           )
+         ]
+         ~before_read:(fun ~member:_ ~byte_length:_ -> ())
+     with
+     | Error Source_unavailable -> ()
+     | Ok _ | Error _ -> failwith "missing captured source was not typed unavailable");
+    (match
+       parse
+         [ "root.chatmd", {|<tool name="bad" agent=""/>|} ]
+         ~before_read:(fun ~member:_ ~byte_length:_ -> ())
+     with
+     | Error Invalid_document -> ()
+     | Ok _ | Error _ -> failwith "invalid authored tool was not typed invalid");
+    List.iter
+      [ "RAW|unfinished"
+      ; "<!-- unfinished"
+      ; {|<script id="bad" language="chatml" kind="tool" value="unterminated>|}
+      ; {|<msg role="user" ochat-history-id="invalid">hello</msg>|}
+      ; {|<msg role="user" function_call="true">hello</msg>|}
+      ]
+      ~f:(fun contents ->
+        match
+          parse
+            [ "root.chatmd", contents ]
+            ~before_read:(fun ~member:_ ~byte_length:_ -> ())
+        with
+        | Error Invalid_document -> ()
+        | Ok _ | Error _ -> failwith "malformed lexical input was not typed invalid");
+    let exception Interrupted in
+    (match
+       parse
+         [ "root.chatmd", "<developer>x</developer>" ]
+         ~before_read:(fun ~member:_ ~byte_length:_ -> raise Interrupted)
+     with
+     | exception Interrupted -> ()
+     | Ok _ | Error _ -> failwith "read callback exception was reclassified");
+    let sources =
+      [ "parts/definition.chatmd", "<developer>nested</developer>"
+      ; "script.chatml", "let value = 1"
+      ]
+    in
+    let legacy = Source_loader.generated_filesystem ~root:dir ~sources in
+    let checked = Source_loader.generated_filesystem_checked ~root:dir ~sources in
+    let canonical_root loader =
+      Source_loader.root loader ~file:"parts/../parts/definition.chatmd"
+      |> Result.ok_or_failwith
+    in
+    let legacy_root = canonical_root legacy in
+    let checked_root = canonical_root checked in
+    [%test_eq: string]
+      (Source_loader.relative_path legacy_root)
+      (Source_loader.relative_path checked_root);
+    [%test_eq: string]
+      (Source_loader.relative_path checked_root)
+      "parts/definition.chatmd";
+    [%test_eq: string]
+      (Eio.Path.native_exn (Source_loader.materialized_dir legacy_root))
+      (Eio.Path.native_exn (Source_loader.materialized_dir checked_root));
+    [%test_eq: string]
+      (Eio.Path.native_exn (Source_loader.materialized_dir checked_root))
+      (Eio.Path.native_exn Eio.Path.(dir / "parts"));
+    let resolve loader base =
+      Source_loader.resolve loader ~base ~reference:"../script.chatml"
+      |> Result.ok_or_failwith
+    in
+    let legacy_script = resolve legacy legacy_root in
+    let checked_script = resolve checked checked_root in
+    [%test_eq: string] (Source_loader.relative_path checked_script) "script.chatml";
+    [%test_eq: string]
+      (Source_loader.relative_path legacy_script)
+      (Source_loader.relative_path checked_script);
+    [%test_eq: string]
+      (Source_loader.read legacy legacy_script |> Result.ok_or_failwith)
+      (Source_loader.read checked checked_script |> Result.ok_or_failwith);
+    (match Source_loader.resolve legacy ~base:legacy_root ~reference:"bad\\path" with
+     | Error _ -> ()
+     | Ok _ -> failwith "legacy generated loader accepted nonportable reference");
+    match Source_loader.resolve checked ~base:checked_root ~reference:"bad\\path" with
+    | exception exn ->
+      (match Source_loader.Generated_error.of_exn exn with
+       | Some Invalid_reference -> ()
+       | _ -> failwith "checked loader changed invalid-reference classification")
+    | Ok _ | Error _ -> failwith "checked generated loader accepted nonportable reference")
 ;;
 
 let%test_unit

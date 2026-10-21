@@ -64,7 +64,8 @@ type t
     limits precede retained rows and identity construction; original checkpoint
     exceptions propagate without conversion. No blanket role variants. *)
 val create
-  :  Prompt.Chat_markdown.Parsed.t
+  :  ?tool_contract:Chatml_compilation.Tool_contract.t
+  -> Prompt.Chat_markdown.Parsed.t
   -> moderator_invocation:Program.Role.Moderator_invocation.t
   -> moderator_surface:Chatml.Chatml_builtin_surface.surface
   -> delegated_moderator:bool

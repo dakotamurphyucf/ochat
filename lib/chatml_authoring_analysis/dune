@@ -1,0 +1,26 @@
+(library
+ (name chatml_authoring_analysis)
+ (public_name ochat.chatml_authoring_analysis)
+ (modules
+  authoring_analysis_checked
+  authoring_analysis_project
+  authoring_analysis_diagnostic
+  chatml_authoring_analysis)
+ (private_modules
+  authoring_analysis_checked
+  authoring_analysis_project
+  authoring_analysis_diagnostic)
+ (libraries
+  core
+  eio.unix
+  chatml
+  chatml_compilation
+  chatml_semantics
+  chatml_source
+  chatml_diagnostic
+  chatml_editor_position
+  chatml_prepared_program
+  chatml_project_build
+  chatml_authoring_context
+  chatml_authoring_effective)
+ (preprocess (pps ppx_jane)))

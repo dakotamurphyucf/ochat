@@ -1,7 +1,9 @@
 open! Core
 
 (** Full-duplex NDJSON gateway from caller-owned stdio flows to a typed daemon
-    client connection. The gateway never owns daemon session lifetime. *)
+    client connection. Closed Developer and REPL requests use their own typed
+    Connection lanes. The gateway never owns daemon session lifetime or REPL
+    mutation recovery custody. *)
 
 (** [run ~sw ~connection ~input ~output ~max_line_length
     ~outgoing_capacity ~on_error] forwards request envelopes and asynchronous

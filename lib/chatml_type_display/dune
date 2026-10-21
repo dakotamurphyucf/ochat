@@ -1,0 +1,6 @@
+(library
+ (name chatml_type_display)
+ (public_name ochat.chatml_type_display)
+ (private_modules chatml_type_display_budget chatml_type_display_graph)
+ (libraries core chatml chatml_typechecker)
+ (preprocess (pps ppx_jane)))

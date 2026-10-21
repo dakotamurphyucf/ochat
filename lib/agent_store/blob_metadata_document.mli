@@ -13,6 +13,11 @@ val of_bytes : string -> (t, Document_schema.Error.t) Result.t
 val to_bytes : t -> (string, Document_schema.Error.t) Result.t
 val with_value : t -> Blob_metadata.t -> (t, Document_schema.Error.t) Result.t
 
+(** Existing conversation metadata retains the released version-one encoding,
+    unknown-field carrier and optional-field presence on round trips. Explicit
+    developer-target metadata uses the new tagged version; version one with an
+    absent target_session never decodes as developer authority. *)
+
 (** Inspect original named identity before conversion/current-domain decoding. *)
 val stored_blob_id
   :  Document_schema.Document.t

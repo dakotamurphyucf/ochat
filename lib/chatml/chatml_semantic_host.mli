@@ -12,10 +12,16 @@ module Inferred = Chatml_inferred_type
     Enumerate actual closed row layers stack-safely, respecting the checker's
     leftmost override semantics. Admit children/paths before copying, poll actual
     row/duplicate traversal under the recorder work limit. Known host members
-    retain genuine contract/member paths; unknown shapes remain unlocated. *)
+    retain genuine contract/member paths; unknown shapes remain unlocated.
+    Reuse already staged host bindings only for this invocation's physically
+    identical immutable static surface. Converted schemes remain per compiler
+    unit; each unit receives fresh source-owned lexical contexts. Built-in
+    templates convert without mutable inference cells, so the first staged raw
+    host roots cannot change during later inference. *)
 val values_exn
   :  Recorder.Frame.t
   -> Values.t
+  -> surface:Chatml.Chatml_static_surface.t
   -> globals:(string * Inferred.typ) list
   -> modules:(string * Inferred.typ) list
   -> checkpoint:(unit -> unit)
@@ -26,6 +32,8 @@ val values_exn
 val alias_exn
   :  Recorder.Frame.t
   -> Types.t
+  -> surface:Chatml.Chatml_static_surface.t
+  -> ordinal:int
   -> name:string
   -> body:Inferred.typ
   -> checkpoint:(unit -> unit)

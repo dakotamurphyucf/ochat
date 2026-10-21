@@ -76,7 +76,7 @@ let%expect_test "File cancellation before reservation preserves source and Facto
               ~parser_limits:(S.Prompt_revision_builder.capture_limits ())
               ~max_work_steps:(S.Prompt_script_preparation.Policy.max_work_steps policy)
               ~preprocess:Fn.id
-              ~prepare_programs:(fun startup ~invocation scope capture ->
+              ~prepare_programs:(fun startup ~tool_contract:_ ~invocation scope capture ->
                 incr preparations;
                 !cancel ();
                 S.Prompt_script_preparation.capture_child

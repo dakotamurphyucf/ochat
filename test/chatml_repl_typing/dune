@@ -1,0 +1,6 @@
+(library
+ (name chatml_repl_typing_tests)
+ (modules typing_tests)
+ (libraries core expect_test_helpers_core chatml_repl_typing chatml_source chatml_prepared_program chatml_graph chatml chatml_typechecker)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

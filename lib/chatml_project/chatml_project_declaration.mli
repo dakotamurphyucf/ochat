@@ -238,6 +238,57 @@ type t =
   }
 
 val source : t -> Chatml_source.t
+
+module Environment_names : sig
+  module Error : sig
+    type t =
+      | Invalid_limit
+      | Too_many
+    [@@deriving equal, sexp_of]
+  end
+
+  (** Enumerate only this captured, decoded declaration's environment names.
+      Charge each retained map entry before adding it to the result; reject a
+      nonpositive ceiling or a map larger than [max_names] without first
+      allocating [Map.keys]. This does not select or resolve an environment.
+      The existing [source] accessor owns the declaration provenance.
+      Callback exceptions propagate unchanged. *)
+  val list
+    :  t
+    -> max_names:int
+    -> checkpoint:(unit -> unit)
+    -> (string list, Error.t) Result.t
+end
+
+module Declared_paths : sig
+  type role =
+    | Source_directory
+    | Module_implementation
+    | Module_interface
+    | Entry_source
+    | Local_dependency_project
+  [@@deriving equal, sexp_of]
+
+  module Error : sig
+    type t =
+      | Invalid_limit
+      | Too_many
+    [@@deriving equal, sexp_of]
+  end
+
+  (** Compare one path and role against ACTUAL retained decoded fields. The
+      bounded walk includes every relevant field before answering; local
+      dependency project members stay distinct from Git repository URLs.
+      This is declaration evidence, not existence, routing or read authority. *)
+  val contains
+    :  t
+    -> role:role
+    -> member:Source.Portable_path.t
+    -> max_entries:int
+    -> checkpoint:(unit -> unit)
+    -> (bool, Error.t) Result.t
+end
+
 val declared_at : t -> Declared_at.t
 val namespace : t -> string
 val source_dirs : t -> Source_dir.t list

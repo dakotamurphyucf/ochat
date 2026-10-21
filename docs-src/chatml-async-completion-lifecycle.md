@@ -36,7 +36,8 @@ Phase 2 keeps the async story grounded in the current implementation:
 - hosts continue to wake, drain, refresh, and optionally schedule follow-up
   turns only at the safe boundaries already described elsewhere.
 
-This document is descriptive. It does not add new runtime behavior.
+This document describes both the ordinary safe-point path and the opt-in local
+completion boundary for a live, switch-owned moderator.
 
 ## Async primitives currently in scope
 
@@ -106,6 +107,34 @@ Model.spawn
   -> host drains at a safe boundary
   -> moderator outcomes become refresh / notices / follow-up requests
 ```
+
+### Opt-in local completion
+
+`Model_executor.settle_session` joins the session's local Model jobs, retries
+delivery of terminal events, and observes escaped cancellation or worker
+exceptions without waiting behind an earlier blocked sibling. A failed event
+enqueue remains undelivered for a later attempt. Concurrent retries cannot
+enqueue the same job event twice. The enclosing switch owner must cancel and
+join its remaining work when settlement raises.
+
+`Model_completion_drain.run_entries` is a separate hosted boundary after a
+foreground provider turn. It first handles already queued events, since a
+handler may unblock a job. With an empty queue, an executor progress cursor
+waits for the next delivery instead of joining behind a sibling whose release
+depends on that event. Once all jobs are complete, strict settlement and a
+final queue observation establish quiescence. The loop handles one event per
+round so `End_session` prevents the next queued handler from running. A
+handler can spawn more jobs; the executor's
+spawn cap and the moderator policy's cumulative internal-event limit bound one
+call. The result preserves ordered outcomes and runtime requests for the
+existing host owner to process. Halt, pending UI, pause, and event-limit stops
+are explicit. A paused or UI-suspended caller must resume or cancel and join
+remaining jobs before closing the live switch.
+
+This entry-based path rejects a moderator with transactional event handlers
+before effects; such a host must use its authenticated handler. It does not
+start a follow-up provider turn, create a scheduler, or replace the ordinary
+conversation controller's idle safe points.
 
 ## Current executor and reinjection anchors
 

@@ -157,6 +157,26 @@ initialization/event. A failed callback does not poison every future event's
 budget. Access to its mutable runtime is still serialized; sharing a runner is
 not permission to execute two handlers against the same state concurrently.
 
+## Optional source-owned execution observations
+
+Trusted hosts can attach a bounded [execution trace core](../design/chatml-execution-tracing.md)
+to one admitted run or REPL action. Compilation, linked initialization, evaluator
+calls, task recovery and host effects can then report safe categories and exact
+captured source sites. A closure retains the source revision in which it was
+defined even when a later action calls it. `Summary` omits statement and call
+entries by design; `Full` includes them. Once the count or byte allowance is
+full, the recorder keeps its existing prefix and counts later attempted
+observations as omitted. Terminal disposition is a separate host-owned receipt,
+not inferred from a final event or from the absence of errors.
+
+The core has no source excerpts, values, prompts, credentials, trace read grant
+or public trace endpoint. It does not grant a tool or change interpreter fuel,
+task recovery or cancellation. A host-owned wait is recorded only around a real
+blocking operation or approval suspension; `Job.read_result` is a nonblocking
+query, not a wait. A host-returned effect does not imply a transaction commit or
+undo earlier external effects on failure. The developer-run/REPL trace read
+service and current authorization checks are separate delivery work.
+
 ## Persist data, not live execution
 
 Retained moderator state supports finite primitive values, arrays, records and
@@ -177,6 +197,7 @@ mutable globals are outside this state rollback contract.
 
 The behavior suites cover [nested and independent budgets](../../test/chatml_execution_budget_test.ml),
 [compilation without effects](../../test/chatml_compilation_test.ml),
+[bounded trace outcome and effect parity](../../test/chatml_trace/trace_tests.ml),
 [linked initialization and preflight](../../test/chatml_linked_runtime/runtime_tests.ml),
 [invocation role rejection before effects](../../test/chatml_linked_runtime/invocation_tests.ml), and
 [moderator initialization, projection, rollback and cancellation](../../test/moderation/moderator_execution_budget_test.ml).

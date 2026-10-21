@@ -13,8 +13,8 @@ verified baseline. [Contributor workflows](../CONTRIBUTING.md) and
 ## One publication owner
 
 The Website workflow is the sole production publisher for `https://ochatlabs.com`.
-Every pull request and main push runs change detection and the required final
-`release-gate`. Selected jobs include normal framework tests, PR-safe E2E tests,
+Every ready pull request and main push runs change detection and the required
+final `release-gate`; draft pull requests skip runner jobs. Selected jobs include normal framework tests, PR-safe E2E tests,
 offline documentation semantics, and both website environments. The gate rejects
 failed/cancelled selected jobs and accepts skips only when explicitly classified
 as unnecessary. Website and OCaml jobs run concurrently. See
@@ -93,7 +93,7 @@ bytes. View-source links must resolve at that public commit; edit links use
 
 The Linux CI toolchain uses `ochat.opam.locked` and
 `.github/ci-toolchain.json`, with an immutable opam repository snapshot, explicit
-Piaf/TextMate source pins, Oniguruma 0.1.2, and the compatible Nottui series below
+Piaf/TextMate source pins, Oniguruma 0.2.0, and the compatible Nottui series below
 0.5. Every dependency-cache restore is reconciled against the lock and verified
 before test execution. The semantic evidence retains the installed packages,
 pins, lock and cache/toolchain metadata. These Linux artifacts do not copy the

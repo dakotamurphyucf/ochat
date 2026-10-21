@@ -1,6 +1,6 @@
 open Core
 module Inventory = Program_inventory
-module Binding = Program_binding
+module Binding = Chatml_prompt_binding
 module Contract = Chatml.Chatml_compiler_contract
 
 module Program : sig

@@ -41,8 +41,14 @@ val interactive_permission_profile
     Defaults match [Daemon.default_options]. The embedded host always derives
     extension host metadata from explicit [storage], keeps process-bound liveness and
     starts no network listener. A durable data root preserves data; it does not
-    keep jobs running after the embedding process exits. Startup initializes the
-    Unix cryptographic RNG before allocating IDs or a transient data root. *)
+    keep jobs running after the embedding process exits. [local_policy] is an
+    opt-in parsed local fragment: startup binds all its principal selectors to
+    the one Store-owned embedded operator before source/catalog work, and adds
+    only its requested Developer method scopes to that same actual principal.
+    It conflicts with a separate [project_sources] argument rather than
+    overriding it. Omission preserves the generated local Config and scopes.
+    Startup initializes the Unix cryptographic RNG before allocating IDs or a
+    transient data root. *)
 val start
   :  sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
@@ -50,6 +56,7 @@ val start
   -> ?root_invocation:
        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
   -> ?project_sources:Project_source_configuration.t
+  -> ?local_policy:Config_validator.Embedded_local.t
   -> ?authoring_package_files:string list
        (** Absolute paths captured through the shared bounded loader before store
          creation. Packages configure the same host as daemon configuration;
@@ -94,6 +101,7 @@ val open_local_host
   -> ?root_invocation:
        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
   -> ?project_sources:Project_source_configuration.t
+  -> ?local_policy:Config_validator.Embedded_local.t
   -> ?authoring_package_files:string list
   -> ?authoring_budget:Chat_response.Authoring_validation.context_budget
   -> options
@@ -121,12 +129,17 @@ val with_local_host
   -> ?root_invocation:
        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
   -> ?project_sources:Project_source_configuration.t
+  -> ?local_policy:Config_validator.Embedded_local.t
   -> ?authoring_package_files:string list
   -> ?authoring_budget:Chat_response.Authoring_validation.context_budget
   -> options
   -> f:(host -> ('a, Agent_protocol.Error.t) Result.t)
   -> ('a, Agent_protocol.Error.t) Result.t
 
+(** Borrow the host-owned, already initialized local connection on its owning
+    Eio domain. Developer and REPL methods are usable only when installed and
+    selected by this physical Initialize. Claim at most one notification lease;
+    host cleanup closes this connection before releasing daemon and Store. *)
 val host_connection : host -> Agent_client.Connection.t
 
 (** Trusted local composition currently grants the same compiled local scopes
@@ -136,6 +149,10 @@ val host_connection : host -> Agent_client.Connection.t
 val host_principal : host -> Agent_protocol.Principal.t
 
 val host_dispatcher : host -> Dispatcher.t
+
+(** Physical close for an owned host used without an ordinary session. It
+    joins the same connection owners as [close_connection] on an attached host. *)
+val host_close_connection : host -> Connection_context.t -> unit
 
 module Script_selection : sig
   (** Actual frozen source classification, not command or native authority. *)
@@ -185,7 +202,13 @@ val complete_script_activation
   -> checkpoint:(unit -> unit)
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) Result.t
 
+(** Open a distinct, uninitialized caller-owned connection on this host's
+    owning Eio domain. The caller must Initialize it, close it, and own its sole
+    notification lease. Closing this connection does not close the host's other
+    connections. Typed Developer/REPL methods require installed and selected
+    features on its own physical Initialize. *)
 val connect_host : host -> (Agent_client.Connection.t, Agent_protocol.Error.t) result
+
 val close_host : host -> unit
 val connection : t -> Agent_client.Connection.t
 val session_id : t -> Agent_protocol.Id.Session.t
@@ -199,12 +222,13 @@ val connect : t -> Agent_client.Connection.t
 val close_connection : t -> Connection_context.t -> unit
 val close : t -> unit
 
-(** Open a distinct connection owned by this embedded host. The caller borrows
-    it until host close, may install one notification consumer, and must not
-    independently close or escape it. Acquire and close on the host owning Eio
-    domain. Acquisition/adoption do not yield on that domain, so closed admission
-    rejects acquisition before constructing a client. Existing [connect] retains its
-    caller-owned contract. All owned connection cleanup precedes daemon/store
+(** Open a distinct, uninitialized connection owned by this embedded host. The
+    caller borrows it until host close, must Initialize it before typed
+    Developer/REPL use, and may claim its sole notification lease. Do not close
+    or escape it independently. Acquire and close on the host owning Eio domain.
+    Acquisition/adoption do not yield on that domain, so closed admission rejects
+    acquisition before constructing a client. Existing [connect] retains its
+    caller-owned contract. All host-owned connection cleanup precedes daemon/Store
     release and preserves original failure plus cleanup diagnostics. *)
 val connect_owned : t -> (Agent_client.Connection.t, Agent_protocol.Error.t) result
 

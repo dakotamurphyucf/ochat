@@ -1,4 +1,9 @@
-(** Authorization scopes carried by authenticated principals. *)
+(** Authorization scopes carried by authenticated principals. Developer scopes
+    admit only their exact Check, Fixture, Live or process-local REPL method:
+    none implies another or grants source reads, configured prompt/workspace
+    selection, native effects, receipt disclosure or cancellation. The REPL
+    foundation requires [developer.repl]; a later explicit Task action also
+    requires [developer.live.run] and its separate Root/source admission. *)
 
 type t =
   | List_prompts
@@ -21,6 +26,10 @@ type t =
   | Provider_select
   | View_organization
   | Manage_organization
+  | Developer_check
+  | Developer_fixture_run
+  | Developer_live_run
+  | Developer_repl
 [@@deriving compare, equal, sexp]
 
 include Core.Comparable.S with type t := t

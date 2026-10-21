@@ -9,7 +9,8 @@ val tool
   -> (Spec.tool, Chatmd_shell_spec.Diagnostic.t list) result
 
 val script
-  :  dir:Eio.Fs.dir_ty Eio.Path.t
+  :  on_external_source:(Source_loader.source -> string -> unit)
+  -> dir:Eio.Fs.dir_ty Eio.Path.t
   -> loader:Source_loader.t
   -> source_node:Source_loader.source
   -> source:Chatmd_shell_spec.Source_ref.t

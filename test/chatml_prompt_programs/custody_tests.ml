@@ -83,7 +83,15 @@ let%test_module "immutable program and parser custody" =
       CM.Parsed.declarations parsed
       |> List.find_exn ~f:(fun d -> String.equal (CM.Declaration.script_id d) id)
       |> fun declaration ->
-      C.Binding.of_declaration parsed declaration ~checkpoint |> Or_error.ok_exn
+      let public =
+        C.Binding.of_declaration parsed declaration ~checkpoint |> Or_error.ok_exn
+      in
+      let lower : Chatml_prompt_binding.t = public in
+      let public : C.Binding.t = lower in
+      let lower_slot : Chatml_prompt_binding.Slot.t = C.Binding.slot public in
+      let public_slot : C.Binding.Slot.t = lower_slot in
+      assert (C.Binding.Slot.equal public_slot lower_slot);
+      public
     ;;
 
     let make_graph

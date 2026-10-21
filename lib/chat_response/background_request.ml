@@ -3,22 +3,7 @@ module C = Tool_capability
 module P = One_off_request
 module J = Agent_protocol.Json_codec
 module Schema = Chatmd_shell_spec.Tool_schema
-
-module Agent_artifact = struct
-  type t =
-    { revision_id : Agent_protocol.Id.Prompt_revision.t
-    ; manifest_sha256 : Chatml_source.Digest.t
-    ; root_relative_path : Source.Portable_path.t
-    }
-
-  let create ~revision_id ~manifest_sha256 ~root_relative_path =
-    { revision_id; manifest_sha256; root_relative_path }
-  ;;
-
-  let revision_id t = t.revision_id
-  let manifest_sha256 t = t.manifest_sha256
-  let root_relative_path t = t.root_relative_path
-end
+module Agent_artifact = Agent_protocol.Developer_agent_artifact
 
 type target =
   | Tool_target of string
@@ -33,7 +18,10 @@ type t =
   ; pins : (string * string) list
   ; policy : P.policy
   ; agent_artifact : Agent_artifact.t option
+  ; issuer_source : issuer_source option
   }
+
+and issuer_source = Agent_artifact.Issuer_source.t
 
 type execution =
   | Tool of
@@ -51,6 +39,57 @@ type execution =
 let invalid message = Error (Agent_protocol.Error.invalid_request message)
 let policy t = t.policy
 let agent_artifact t = t.agent_artifact
+let issuer_source t = t.issuer_source
+
+module Issuer_source = struct
+  type t = issuer_source
+
+  let create ~artifact ~prompt ~workspace ~tool_contract ~source_policy ~runtime_policy =
+    let tool_contract =
+      match tool_contract with
+      | Chatml_compilation.Tool_contract.Standard ->
+        Agent_artifact.Issuer_source.Tool_contract.Standard
+      | Chatml_compilation.Tool_contract.Developer_model_spawn ->
+        Agent_artifact.Issuer_source.Tool_contract.Developer_model_spawn
+    in
+    Agent_artifact.Issuer_source.create
+      ~artifact
+      ~prompt
+      ~workspace
+      ~tool_contract
+      ~source_policy
+      ~runtime_policy
+  ;;
+
+  let artifact = Agent_artifact.Issuer_source.artifact
+  let prompt = Agent_artifact.Issuer_source.prompt
+  let workspace = Agent_artifact.Issuer_source.workspace
+  let source_policy = Agent_artifact.Issuer_source.source_policy
+  let runtime_policy = Agent_artifact.Issuer_source.runtime_policy
+
+  let tool_contract t =
+    match Agent_artifact.Issuer_source.tool_contract t with
+    | Agent_artifact.Issuer_source.Tool_contract.Standard ->
+      Chatml_compilation.Tool_contract.Standard
+    | Developer_model_spawn -> Chatml_compilation.Tool_contract.Developer_model_spawn
+  ;;
+
+  let to_json = Agent_artifact.Issuer_source.to_json
+end
+
+module Target_kind = struct
+  type t =
+    | Tool
+    | Script
+  [@@deriving equal, sexp_of]
+end
+
+let target_kind t =
+  match t.target with
+  | Tool_target _ -> Target_kind.Tool
+  | Script_target _ -> Target_kind.Script
+;;
+
 let digest = Chatmd_shell_spec.Source_ref.digest
 let number value = `Number (Int.to_string value)
 let seconds value = Jsonaf.Export.jsonaf_of_float value
@@ -104,45 +143,17 @@ let strict_fields names json =
   J.fields json
 ;;
 
-let agent_artifact_to_json t =
-  `Object
-    [ ( "revision_id"
-      , Agent_protocol.Id.Prompt_revision.to_json (Agent_artifact.revision_id t) )
-    ; ( "manifest_sha256"
-      , `String (Chatml_source.Digest.to_hex (Agent_artifact.manifest_sha256 t)) )
-    ; ( "root_relative_path"
-      , `String (Source.Portable_path.to_string (Agent_artifact.root_relative_path t)) )
-    ]
-;;
-
-let agent_artifact_of_json json =
-  let open Result.Let_syntax in
-  let%bind fields =
-    strict_fields [ "revision_id"; "manifest_sha256"; "root_relative_path" ] json
-  in
-  let%bind revision_id =
-    J.required_as fields "revision_id" Agent_protocol.Id.Prompt_revision.of_json
-  in
-  let%bind manifest_sha256 = J.required_as fields "manifest_sha256" J.string in
-  let%bind manifest_sha256 =
-    Chatml_source.Digest.of_hex manifest_sha256
-    |> Result.map_error ~f:(fun _ ->
-      Agent_protocol.Error.invalid_request "invalid selected artifact digest")
-  in
-  let%bind root_relative_path = J.required_as fields "root_relative_path" J.string in
-  let%map root_relative_path =
-    Source.Portable_path.create root_relative_path
-    |> Result.map_error ~f:(fun _ ->
-      Agent_protocol.Error.invalid_request "invalid selected artifact root member")
-  in
-  Agent_artifact.create ~revision_id ~manifest_sha256 ~root_relative_path
-;;
-
 let with_agent_artifact t selected =
   match t.target, t.agent_artifact with
   | Tool_target _, None -> Ok { t with agent_artifact = Some selected }
   | Tool_target _, Some _ -> invalid "background request already selects agent code"
   | Script_target _, _ -> invalid "background script cannot select agent code"
+;;
+
+let with_issuer_source t selected =
+  match t.issuer_source with
+  | None -> Ok { t with issuer_source = Some selected }
+  | Some _ -> invalid "background request already selects an issuing source"
 ;;
 
 let policy_of_json json =
@@ -243,7 +254,13 @@ let target_to_json = function
 
 let to_json t =
   `Object
-    ([ "version", number (if Option.is_some t.agent_artifact then 2 else 1)
+    ([ ( "version"
+       , number
+           (if Option.is_some t.issuer_source
+            then 3
+            else if Option.is_some t.agent_artifact
+            then 2
+            else 1) )
      ; "target", target_to_json t.target
      ; "input", t.input
      ; "pins", `Object (List.map t.pins ~f:(fun (name, pin) -> name, `String pin))
@@ -251,7 +268,10 @@ let to_json t =
      ]
      @ Option.to_list
          (Option.map t.agent_artifact ~f:(fun artifact ->
-            "agent_artifact", agent_artifact_to_json artifact)))
+            "agent_artifact", Agent_artifact.to_json artifact))
+     @ Option.to_list
+         (Option.map t.issuer_source ~f:(fun issuer ->
+            "issuer_source", Issuer_source.to_json issuer)))
 ;;
 
 let source = function
@@ -321,6 +341,7 @@ let tool ~capabilities ~(reference : C.reference) ~input ~policy =
     ; pins = [ reference.name, C.permission_fingerprint binding ]
     ; policy
     ; agent_artifact = None
+    ; issuer_source = None
     }
   in
   let%map () = validate t in
@@ -340,6 +361,7 @@ let script ~prepared ~input ~policy =
     ; pins
     ; policy
     ; agent_artifact = None
+    ; issuer_source = None
     }
   in
   let%map () = validate t in
@@ -351,17 +373,35 @@ let of_json ~policy json =
   let%bind () = validate_policy ~ceiling:policy policy in
   let%bind fields =
     strict_fields
-      [ "version"; "target"; "input"; "pins"; "policy"; "agent_artifact" ]
+      [ "version"
+      ; "target"
+      ; "input"
+      ; "pins"
+      ; "policy"
+      ; "agent_artifact"
+      ; "issuer_source"
+      ]
       json
   in
-  let%bind version = J.required_as fields "version" (J.bounded_int ~min:1 ~max:2) in
+  let%bind version = J.required_as fields "version" (J.bounded_int ~min:1 ~max:3) in
   let%bind agent_artifact =
     match version, J.optional fields "agent_artifact" with
     | 1, None -> Ok None
-    | 2, Some json -> agent_artifact_of_json json |> Result.map ~f:Option.some
+    | 2, Some json -> Agent_artifact.of_json json |> Result.map ~f:Option.some
+    | 3, None -> Ok None
+    | 3, Some json -> Agent_artifact.of_json json |> Result.map ~f:Option.some
     | 1, Some _ -> invalid "version 1 cannot select agent code"
     | 2, None -> invalid "version 2 requires selected agent code"
-    | _ -> assert false
+    | _, _ -> invalid "invalid background request version"
+  in
+  let%bind issuer_source =
+    match version, J.optional fields "issuer_source" with
+    | (1 | 2), None -> Ok None
+    | 3, Some json ->
+      Agent_artifact.Issuer_source.of_json json |> Result.map ~f:Option.some
+    | (1 | 2), Some _ -> invalid "older background request cannot select an issuer"
+    | 3, None -> invalid "version 3 requires an issuing source"
+    | _, _ -> invalid "invalid background request version"
   in
   let%bind stored_policy = J.required_as fields "policy" policy_of_json in
   let%bind () = validate_policy ~ceiling:policy stored_policy in
@@ -413,7 +453,9 @@ let of_json ~policy json =
     | Tool_target _, _ | Script_target _, None -> Ok ()
     | Script_target _, Some _ -> invalid "background script cannot select agent code"
   in
-  let t = { target; input; pins; policy = stored_policy; agent_artifact } in
+  let t =
+    { target; input; pins; policy = stored_policy; agent_artifact; issuer_source }
+  in
   let%map () = validate t in
   t
 ;;
@@ -425,7 +467,9 @@ let fingerprint t =
   |> Result.ok_or_failwith
   |> fun encoded ->
   let prefix =
-    if Option.is_some t.agent_artifact
+    if Option.is_some t.issuer_source
+    then "ochat.background-request.v3\n"
+    else if Option.is_some t.agent_artifact
     then "ochat.background-request.v2\n"
     else "ochat.background-request.v1\n"
   in
@@ -449,6 +493,7 @@ let rebind_capabilities ~pins ~capabilities:current =
 
 let rebind t current = rebind_capabilities ~pins:t.pins ~capabilities:current
 let capability_pins = capture_pins
+let selected_capabilities t ~capabilities = rebind t capabilities
 let validate_capabilities t ~capabilities = Result.map (rebind t capabilities) ~f:ignore
 
 let prepare ~env ~current_capabilities ~policy t =

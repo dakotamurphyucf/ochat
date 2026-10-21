@@ -125,6 +125,12 @@ type op_kind =
   | External_async
   | Diagnostic
 
+(** Closed, default-off standalone operation filter for a host-selected tool
+    entrypoint. This admits only the canonical Model.spawn operation when it
+    is already installed as External_async; it grants no actor, provider or
+    execution authority. Ordinary callers omit the option. *)
+type scoped_async_operation = Model_spawn
+
 (** Definition of a host operation exposed to ChatML tasks. *)
 type op_def =
   { name : string
@@ -305,9 +311,13 @@ val instantiate_session_detailed
     continuations. Host cancellation/control exceptions propagate after cleanup.
     The host must compile against the intended surface and enforce authority,
     value/allocation/output limits and result validation. No persistent session
-    or model request is created by this function. *)
+    or model request is created by default. Opting into [Model_spawn] permits
+    only an installed, physically authorized Model.spawn handler as an immediate
+    external effect. A later failure, catch or discarded task cannot undo a
+    completed provider request; the host must retain its call-boundary custody. *)
 val run_entrypoint
   :  ?control:execution_control
+  -> ?scoped_async_operation:scoped_async_operation
   -> ?limits:execution_limits
   -> ?prepare_result:
        (value:value -> local_effects:eff list -> (unit -> unit, string) result)
@@ -323,6 +333,7 @@ val run_entrypoint
     propagate after the existing cleanup. *)
 val run_entrypoint_detailed
   :  ?control:execution_control
+  -> ?scoped_async_operation:scoped_async_operation
   -> ?limits:execution_limits
   -> ?prepare_result:
        (value:value -> local_effects:eff list -> (unit -> unit, string) result)
@@ -330,6 +341,43 @@ val run_entrypoint_detailed
   -> compiled_script
   -> entrypoint:string
   -> arguments:value list
+  -> unit
+  -> (value, Chatml_diagnostic.t) result
+
+(** Interpret an already evaluated, retained Task through the same standalone
+    task/catch/operation and transactional-result kernel as [run_entrypoint_detailed].
+    This entry has no function call, synthetic [on_event], program initializer or
+    session event. [environment], [task] and [source] are borrowed from one
+    serially owned evaluator; the caller must establish that physical pairing.
+    [source] is the retained captured statement which returned the Task and is
+    used only for legacy unowned-range formatting. Owned failure sites,
+    including sites from older closures or configured modules, render against
+    their own exact captured source and are never relabelled to this statement.
+
+    Operation filtering and [prepare_result] have the standalone contract above:
+    ordinary session mutations/UI suspension are unavailable, a caught local
+    reservation is rolled back, and only surviving transactional effects reach
+    the infallible installer. Synchronous external effects already completed
+    before a later failure are not undone. [control] checks the final value
+    before an installer runs; cancellation and unexpected callback exceptions
+    retain their original identity/backtrace. This function supplies no source,
+    actor, Task-handle or operation authority. The raw value is lent only to
+    this lower runtime's caller; a public REPL receipt must project it.
+    [check_now] must be the borrowed nonyielding execution-lifetime/deadline
+    check from the same active runner, repeated after any yielding
+    [prepare_result] and immediately before its installer. It is not host
+    actor/source/Store admission. *)
+val run_retained_task_detailed
+  :  ?control:execution_control
+  -> ?scoped_async_operation:scoped_async_operation
+  -> ?limits:execution_limits
+  -> ?prepare_result:
+       (value:value -> local_effects:eff list -> (unit -> unit, string) result)
+  -> runtime_config
+  -> environment:env
+  -> task:Task.t
+  -> source:Chatml_source.t
+  -> check_now:(unit -> unit)
   -> unit
   -> (value, Chatml_diagnostic.t) result
 
@@ -378,6 +426,7 @@ val run_prepared_entrypoint_detailed
   -> entrypoint:string
   -> arguments:value list
   -> ?control:execution_control
+  -> ?scoped_async_operation:scoped_async_operation
   -> ?limits:execution_limits
   -> ?prepare_result:
        (value:value -> local_effects:eff list -> (unit -> unit, string) result)

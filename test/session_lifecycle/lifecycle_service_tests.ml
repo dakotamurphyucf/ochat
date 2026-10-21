@@ -1543,6 +1543,8 @@ let%expect_test "provider close serializes retries and denies admission before y
           ~receipt:(fun ~actor:_ _ ->
             Int.incr dispatches;
             Error P.Provider_operator.Error.Unsupported)
+          ~current_model_bridge:(fun () ->
+            failwith "provider-close fixture must not select an inference model")
           ~close:(fun () ->
             Int.incr attempts;
             if Int.equal !attempts 1
@@ -1587,93 +1589,112 @@ let%expect_test "provider close serializes retries and denies admission before y
   [%expect {| (true true true 2 0) |}]
 ;;
 
-let%expect_test "startup failure retains store until actual operator retry completes" =
-  Eio_main.run (fun env ->
-    Mirage_crypto_rng_unix.use_default ();
-    let root = temporary_root env in
-    Exn.protect
-      ~finally:(fun () ->
-        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
-      ~f:(fun () ->
-        let workspace = Filename.concat root "workspace" in
-        Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
-        let prompt = Filename.concat root "root.chatmd" in
-        Eio.Path.save
-          ~create:(`Exclusive 0o600)
-          Eio.Path.(Eio.Stdenv.fs env / prompt)
-          "<developer>Startup scope.</developer>";
-        let store_root =
+let%expect_test "startup cleanup retries event and operator owners before store release" =
+  let run_case ~fail_events =
+    Eio_main.run (fun env ->
+      Mirage_crypto_rng_unix.use_default ();
+      let root = temporary_root env in
+      Exn.protect
+        ~finally:(fun () ->
+          Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+        ~f:(fun () ->
+          let workspace = Filename.concat root "workspace" in
+          Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
+          let prompt = Filename.concat root "root.chatmd" in
+          Eio.Path.save
+            ~create:(`Exclusive 0o600)
+            Eio.Path.(Eio.Stdenv.fs env / prompt)
+            "<developer>Startup scope.</developer>";
+          let store_root =
+            Eio.Switch.run (fun sw ->
+              let daemon =
+                start_daemon
+                  sw
+                  env
+                  ~root
+                  ~configuration:(config root workspace prompt)
+                  (ref 0)
+              in
+              let path =
+                Agent_server.Daemon.store daemon
+                |> Agent_store.Session_store.data_root
+                |> Agent_store.Data_root.path
+              in
+              Agent_server.Daemon.shutdown daemon |> protocol_ok;
+              path)
+          in
+          let event_attempts = ref 0 in
+          let attempts = ref 0 in
+          let open_store sw nonce =
+            Agent_store.Session_store.open_existing
+              ~env
+              ~sw
+              ~root:store_root
+              ~process_start_identity:None
+              ~lock_nonce:nonce
+          in
           Eio.Switch.run (fun sw ->
-            let daemon =
-              start_daemon
-                sw
-                env
-                ~root
-                ~configuration:(config root workspace prompt)
-                (ref 0)
+            let store = open_store sw "startup-owned" |> store_ok in
+            let guard = Agent_server.Startup_cleanup.create ~sw ~store in
+            Agent_server.Startup_cleanup.adopt_developer_events_exn
+              guard
+              ~close_and_wait:(fun () ->
+                Int.incr event_attempts;
+                if fail_events && Int.equal !event_attempts 1
+                then Error (P.Error.invalid_request "event cleanup has not joined")
+                else Ok ());
+            let registry = Agent_server.Session_registry.create () in
+            Agent_server.Startup_cleanup.adopt_registry_exn guard registry;
+            let port =
+              Agent_server.Provider_operator_port.create
+                ~dispatch:(fun ~actor:_ _ -> Error P.Provider_operator.Error.Unsupported)
+                ~receipt:(fun ~actor:_ _ -> Error P.Provider_operator.Error.Unsupported)
+                ~current_model_bridge:(fun () ->
+                  Error P.Provider_operator.Error.Unsupported)
+                ~close:(fun () ->
+                  Int.incr attempts;
+                  if (not fail_events) && Int.equal !attempts 1
+                  then failwith "original operator cleanup failure")
             in
-            let path =
-              Agent_server.Daemon.store daemon
-              |> Agent_store.Session_store.data_root
-              |> Agent_store.Data_root.path
+            Agent_server.Startup_cleanup.adopt_operator_exn guard port;
+            let primary =
+              P.Error.create
+                Persistence_error
+                ~message:"original startup failure"
+                ~retryable:false
+                ()
             in
-            Agent_server.Daemon.shutdown daemon |> protocol_ok;
-            path)
-        in
-        let attempts = ref 0 in
-        let open_store sw nonce =
-          Agent_store.Session_store.open_existing
-            ~env
-            ~sw
-            ~root:store_root
-            ~process_start_identity:None
-            ~lock_nonce:nonce
-        in
-        Eio.Switch.run (fun sw ->
-          let store = open_store sw "startup-owned" |> store_ok in
-          let guard = Agent_server.Startup_cleanup.create ~sw ~store in
-          let registry = Agent_server.Session_registry.create () in
-          Agent_server.Startup_cleanup.adopt_registry_exn guard registry;
-          let port =
-            Agent_server.Provider_operator_port.create
-              ~dispatch:(fun ~actor:_ _ -> Error P.Provider_operator.Error.Unsupported)
-              ~receipt:(fun ~actor:_ _ -> Error P.Provider_operator.Error.Unsupported)
-              ~close:(fun () ->
-                Int.incr attempts;
-                if Int.equal !attempts 1 then failwith "original operator cleanup failure")
-          in
-          Agent_server.Startup_cleanup.adopt_operator_exn guard port;
-          let primary =
-            P.Error.create
-              Persistence_error
-              ~message:"original startup failure"
-              ~retryable:false
-              ()
-          in
-          let original_preserved =
-            match
-              Agent_server.Startup_cleanup.protect guard (fun () -> Error primary)
-            with
-            | Error error -> String.equal error.message primary.message
-            | Ok () -> false
-          in
-          let still_owned =
-            match open_store sw "startup-competitor" with
-            | Error _ -> true
-            | Ok unexpected ->
-              Agent_store.Session_store.close unexpected |> store_ok;
-              false
-          in
-          print_s
-            [%sexp ((original_preserved, still_owned, !attempts) : bool * bool * int)]);
-        Eio.Switch.run (fun sw ->
-          let reopened = open_store sw "startup-after-retry" |> store_ok in
-          Agent_store.Session_store.close reopened |> store_ok;
-          print_s [%sexp (!attempts : int)])));
+            let original_preserved =
+              match
+                Agent_server.Startup_cleanup.protect guard (fun () -> Error primary)
+              with
+              | Error error -> String.equal error.message primary.message
+              | Ok () -> false
+            in
+            let still_owned =
+              match open_store sw "startup-competitor" with
+              | Error _ -> true
+              | Ok unexpected ->
+                Agent_store.Session_store.close unexpected |> store_ok;
+                false
+            in
+            print_s
+              [%sexp
+                ((original_preserved, still_owned, !event_attempts, !attempts)
+                 : bool * bool * int * int)]);
+          Eio.Switch.run (fun sw ->
+            let reopened = open_store sw "startup-after-retry" |> store_ok in
+            Agent_store.Session_store.close reopened |> store_ok;
+            print_s [%sexp ((!event_attempts, !attempts) : int * int)])))
+  in
+  run_case ~fail_events:true;
+  run_case ~fail_events:false;
   [%expect
     {|
-    (true true 1)
-    2
+    (true true 1 0)
+    (2 1)
+    (true true 1 1)
+    (1 2)
     |}]
 ;;
 

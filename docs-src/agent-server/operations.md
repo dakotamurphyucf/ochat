@@ -85,6 +85,15 @@ blobs/exports, idempotency records and security/audit state. One process owns it
 Session writers serialize commits/checkpoints so snapshot state and transaction
 identity cannot be paired across a racing mutation.
 
+The developer-run checkpoint foundation has an additive `developer-runs/`
+subtree under the same daemon lock. It stores a bounded, versioned run document
+and exact epoch checkpoints; an older root without that subtree starts empty.
+Recovery rejects malformed or foreign-host documents and does not treat an
+interrupted atomic-writer temporary file as an admitted run. The current
+foundation does not itself admit execution or publish jobs. See the
+[developer runtime design](../design/chatml-developer-runtime.md) for the
+remaining actor and service contracts.
+
 `each` synchronizes accepted transactions before acknowledgement. `interval`
 groups synchronization by its configured interval. `unsafe_buffered` explicitly
 allows loss after process/host failure. Do not apply the strongest mode's durability
@@ -197,11 +206,80 @@ workspaces are never removed by that cleanup. Archived sessions/artifacts can st
 consume disk. Do not infer unlimited retention or a fixed memory ceiling from a
 short load test. See [test evidence](testing.md).
 
+Developer Shell approvals are disabled unless the library host supplies bounded
+`Developer_configuration.Shell_approvals` policies. The current pending list is
+process-local and redacted; read and response use distinct operator policies.
+Only a decision for the current command or claimed-job attempt can resume its
+waiting invocation, and that invocation checks its source and actor again before
+an effect. Cancellation, timeout, run retirement and daemon shutdown remove
+pending requests. After restart, inspect the command or job terminal state; do
+not treat a previous pending ID or approval as a reusable grant.
+
+Starting a new library `Developer.Repl.Task` action requires an issued Task
+reference and its exact live REPL epoch. Explicit submission creates a durable
+Task row; terminal receipts contain a bounded value preview or diagnostic
+rather than an unrestricted interpreter value. Repeating the same key reads
+that row, including after restart, without recreating the evaluator or
+rerunning effects. Task cancellation joins that execution; REPL reset and close
+join root-owned work before retiring the epoch. A Task terminal alone leaves
+the Root available for already admitted jobs. Ordinary developer Command
+methods do not expose Task rows.
+
+Developer trace pages require both bounded `Developer_configuration.with_traces`
+and `Portable.with_trace_wire` at startup. A declarative Developer record can
+select `(traces Trace_summary)` or `(traces Trace_full)`; an omitted trace field
+stays disabled. `(portable false)` retains only private recording, while
+`(portable true)` installs the bounded page method. The daemon advertises the read-only
+trace feature only when the same Host owns the recorder and historical source
+policy. Each Command, REPL statement or Task page authenticates the exact
+association and current source-read grant before comparing a cursor; reconnect
+does not turn an execution ID into read authority. Pages contain coarse event
+kinds, captured locations and terminal/drop metadata, never source text or
+effect arguments. Expired or omitted recordings remain unavailable rather
+than being reconstructed from current editor content. Native source metadata
+outside the portable encoding limit returns a bounded resource error without
+changing the underlying execution.
+
+A REPL submission returns bounded statement summaries and an exact count of
+retained Task references. A small output limit can shorten the displayed
+summary or omit an oversized diagnostic location; `Output_limited` marks that
+loss without changing the parse or execution outcome. Task references remain
+available through exact-key paging while the epoch is live, even when the
+summary is limited. Type inspection renders one root from the statement's
+original immutable snapshot under a separate byte and work bound; an expired
+detail cannot be reconstructed by retyping or running the statement. Neither
+a summary nor a reference grants authority to drive a Task.
+
+The configured portable REPL uses a 4 KiB compact statement receipt and a
+separate 32 KiB on-demand type inspection ceiling. It admits requests against
+the actual REPL owner, durable Task receipt and Initialize framing limits at
+startup, before advertising REPL methods.
+
+An admitted REPL keeps its selected captured source and compiler contract after
+the editor context or transport connection closes. Reconnecting with a current
+authorized actor can inspect the same instance and drive an issued Task in its
+live epoch. Editor edits do not replace the captured program. Current actor,
+selected-source policy, physical root and uploaded-source retention are checked
+again before new effects. Reset keeps the same captured selection; close and
+shutdown release its source owner after joined work. A fresh Create still needs
+its own current source selection.
+
+The selected REPL source retains its actual Standard compiler contract: a
+`Developer_tool_v1` selection admits the matching Task surface, including
+`Model.spawn`, while `One_off_v1` and `Tool_v1` keep their narrower surfaces.
+Native tools and model work still require current Root and actor authority,
+with a pinned provider for Model work. Shell execution additionally requires
+the exact captured manifest grant and a current approval decision.
+
 Reset/rebuild/delete are authorized protocol mutations with revision checks.
 Review preservation flags and archive/remove choices in [the protocol](protocol.md).
 Never delete locks, broad directories or unknown processes as a generic fix for
 contention. [Troubleshooting](troubleshooting.md) lists safer checks.
 
+
+The [captured development workflow](../guide/chatml-development-workflow.md)
+connects these source, reset, Task and trace rules to an offline terminal
+session and the joined HTTP/local-stdio qualification.
 
 ## Explicit dependency selection
 

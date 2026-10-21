@@ -1,14 +1,13 @@
 open Core
 module Lang = Chatml.Chatml_lang
-module Eval = Chatml.Chatml_eval
 module Linked = Chatml_linked_program
 module Surface = Chatml.Chatml_builtin_surface
 module Contract = Chatml.Chatml_compiler_contract
 module Captured = Chatml_source
 module Graph = Chatml_dependency_graph
 module Id = Chatml_prepared_program.Module_id
-module Reference = Chatml.Chatml_module_reference
 module Diagnostic = Chatml_diagnostic
+module Initializer = Chatml_module_initializer
 
 module Error = struct
   module Kind = struct
@@ -56,9 +55,6 @@ let instantiate program ~surface ~entrypoints ?control () =
       |> Result.ok
     in
     Error { Error.kind; diagnostic = Diagnostic.create ?site message }
-  in
-  let runtime result =
-    Result.map_error result ~f:(fun diagnostic -> { Error.kind = Runtime; diagnostic })
   in
   checkpoint ();
   let%bind () =
@@ -114,41 +110,14 @@ let instantiate program ~surface ~entrypoints ?control () =
               (Graph.Edge.dependency edge)))
         else map)
   in
-  let restricted completed id =
+  let direct_dependencies id =
     let required =
       Map.find dependencies id |> Option.value ~default:(Set.empty (module Id))
     in
-    let required =
-      Set.fold required ~init:[] ~f:(fun deps dependency ->
-        checkpoint ();
-        allocate 24;
-        dependency :: deps)
-    in
-    List.fold_result
-      required
-      ~init:Lang.Configured_modules.empty
-      ~f:(fun modules dependency ->
-        checkpoint ();
-        let implementation = Id.implementation dependency in
-        let%bind reference =
-          match Reference.create implementation ~member_path:[] with
-          | Ok reference -> Ok reference
-          | Error _ -> failure Invalid_linkage "Invalid canonical dependency identity"
-        in
-        let%bind value =
-          match Lang.Configured_modules.read completed reference with
-          | Ok value -> Ok value
-          | Error _ ->
-            failure
-              Invalid_linkage
-              "Configured dependency has not completed initialization"
-        in
-        allocate 256;
-        match
-          Lang.Configured_modules.add modules ~implementation ~public_module:value
-        with
-        | Ok modules -> Ok modules
-        | Error _ -> failure Invalid_linkage "Invalid completed dependency module")
+    Set.fold required ~init:[] ~f:(fun deps dependency ->
+      checkpoint ();
+      allocate 24;
+      dependency :: deps)
   in
   let%bind completed, entry_env =
     List.fold_result
@@ -161,43 +130,40 @@ let instantiate program ~surface ~entrypoints ?control () =
           | Some unit -> Ok unit
           | None -> failure Invalid_linkage "Linked runtime unit is unavailable"
         in
-        let%bind configured_modules = restricted completed id in
-        let base =
-          Chatml_builtin_modules.create_controlled_env_with_surface ?control surface
-        in
-        let base = { base with Lang.configured_modules } in
         let unit_source = Linked.Unit.implementation unit in
-        let%bind env =
-          Eval.eval_captured_program base ~source:unit_source (Linked.Unit.program unit)
-          |> runtime
+        let initialization_phase =
+          if Id.equal id (Graph.entry (Linked.graph program))
+          then Chatml_trace.Event.Phase.Entry_initialization
+          else Chatml_trace.Event.Phase.Dependency_initialization
         in
-        let%bind location =
-          match
-            Captured.locate
-              unit_source
-              ~start_byte:0
-              ~end_byte:(Captured.byte_length unit_source)
-              ~checkpoint
-          with
-          | Ok location -> Ok location
-          | Error _ ->
-            failure ~source:unit_source Invalid_linkage "Invalid linked unit range"
-        in
-        let%bind public_env =
-          Eval.select_exports
-            env
+        let descriptor =
+          Initializer.Unit.create
+            ~id
+            ~source:unit_source
+            ~program:(Linked.Unit.program unit)
             ~visibility:(Linked.Unit.visibility unit)
-            ~span:(Captured.Location.span location)
-          |> runtime
         in
-        checkpoint ();
-        allocate 256;
+        let%bind env, public_module =
+          Initializer.evaluate
+            descriptor
+            ~surface
+            ~completed
+            ~direct_dependencies:(direct_dependencies id)
+            ~phase:initialization_phase
+            ?control
+            ()
+          |> Result.map_error ~f:(function
+            | Initializer.Failure.Invalid_linkage diagnostic ->
+              { Error.kind = Invalid_linkage; diagnostic }
+            | Initializer.Failure.Runtime diagnostic ->
+              { Error.kind = Runtime; diagnostic })
+        in
         let%bind completed =
           match
             Lang.Configured_modules.add
               completed
               ~implementation:(Id.implementation id)
-              ~public_module:(Lang.VModule public_env)
+              ~public_module
           with
           | Ok completed -> Ok completed
           | Error _ ->
@@ -239,3 +205,5 @@ let instantiate program ~surface ~entrypoints ?control () =
   checkpoint ();
   Ok { env; source; bindings }
 ;;
+
+module Repl_modules = Chatml_repl_modules

@@ -1,25 +1,6 @@
 open Core
-
-let with_owner mutex f =
-  let outcome =
-    Eio.Mutex.use_rw ~protect:true mutex (fun () ->
-      try Ok (f ()) with
-      | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
-  in
-  match outcome with
-  | Ok value -> value
-  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
-;;
-
 module P = Agent_protocol
 module Artifact = P.Job_artifact
-
-type phase =
-  | Allocated
-  | Prepared of Blob_store.Handle.t
-  | Attempted
-  | Retained
-  | Discarded
 
 type prepared =
   { store : Blob_store.t
@@ -29,8 +10,7 @@ type prepared =
   ; reference : Artifact.t
   ; completion : P.Completion.t
   ; content : string
-  ; mutex : Eio.Mutex.t
-  ; mutable phase : phase
+  ; phase : Blob_store.Handle.t Result_publication_phase.t
   }
 
 let reference prepared = prepared.reference
@@ -88,7 +68,7 @@ let allocate store ~env ~session ~job ~creating_principal ~now ~max_bytes comple
   let metadata : Blob_store.Metadata.t =
     { blob
     ; creating_principal
-    ; target_session = Some job.session_id
+    ; target = Blob_store.Metadata.Target.Session job.session_id
     ; allowed_use = Artifact.allowed_use reference
     ; created_at = now
     ; expires_at
@@ -103,33 +83,23 @@ let allocate store ~env ~session ~job ~creating_principal ~now ~max_bytes comple
   ; reference
   ; completion
   ; content
-  ; mutex = Eio.Mutex.create ()
-  ; phase = Allocated
+  ; phase = Result_publication_phase.create ()
   }
 ;;
 
 let ensure_prepared prepared ~sw =
-  with_owner prepared.mutex (fun () ->
-    match prepared.phase with
-    | Retained | Discarded -> Error (Store_error.Corrupt "result preparation has ended")
-    | (Allocated | Prepared _ | Attempted) as phase ->
-      let open Result.Let_syntax in
-      let%bind () =
-        Job_result_intent.save ~env:prepared.env ~session:prepared.session prepared.intent
-      in
-      let content = prepared.content in
-      let%map handle =
-        Blob_store.ensure_staged_content
-          prepared.store
-          ~sw
-          prepared.session
-          ~stage:(Job_result_intent.stage prepared.intent)
-          content
-      in
-      (match phase with
-       | Allocated | Prepared _ -> prepared.phase <- Prepared handle
-       | Attempted -> ()
-       | Retained | Discarded -> assert false))
+  Result_publication_phase.ensure_prepared prepared.phase ~stage:(fun () ->
+    let open Result.Let_syntax in
+    let%bind () =
+      Job_result_intent.save ~env:prepared.env ~session:prepared.session prepared.intent
+    in
+    let content = prepared.content in
+    Blob_store.ensure_staged_content
+      prepared.store
+      ~sw
+      prepared.session
+      ~stage:(Job_result_intent.stage prepared.intent)
+      content)
 ;;
 
 let prepare store ~env ~sw ~session ~job ~creating_principal ~now ~max_bytes completion =
@@ -142,59 +112,20 @@ let prepare store ~env ~sw ~session ~job ~creating_principal ~now ~max_bytes com
 ;;
 
 let commit prepared ~persist =
-  with_owner prepared.mutex (fun () ->
-    match prepared.phase with
-    | Retained | Discarded ->
-      Error
-        (P.Error.create
-           Already_resolved
-           ~message:"result artifact preparation has ended"
-           ~retryable:false
-           ())
-    | Allocated ->
-      Error
-        (P.Error.create
-           Invalid_state
-           ~message:"result bytes are not prepared"
-           ~retryable:true
-           ())
-    | Prepared _ | Attempted ->
-      prepared.phase <- Attempted;
-      let open Result.Let_syntax in
-      let%map result = persist prepared.reference in
-      prepared.phase <- Retained;
-      (* Publication already succeeded. A failed marker cleanup leaves an intent
-         for reconciliation; it cannot turn success into another publication. *)
-      ignore
-        (Job_result_intent.remove
-           ~env:prepared.env
-           ~session:prepared.session
-           prepared.intent
-         : (unit, Store_error.t) result);
-      result)
+  Result_publication_phase.commit
+    prepared.phase
+    ~persist:(fun () -> persist prepared.reference)
+    ~cleanup:(fun () ->
+      Job_result_intent.remove ~env:prepared.env ~session:prepared.session prepared.intent)
 ;;
 
 let discard prepared =
-  with_owner prepared.mutex (fun () ->
-    match prepared.phase with
-    | Retained -> Error (Store_error.Corrupt "cannot discard a retained result artifact")
-    | Allocated | Attempted ->
-      Error
-        (Store_error.Corrupt
-           "result artifact requires durable reference reconciliation before discard")
-    | Discarded -> Ok ()
-    | Prepared handle ->
-      let open Result.Let_syntax in
-      let%bind () =
-        Blob_store.discard_unreferenced prepared.store prepared.session handle
-      in
-      let%map () =
-        Job_result_intent.remove
-          ~env:prepared.env
-          ~session:prepared.session
-          prepared.intent
-      in
-      prepared.phase <- Discarded)
+  Result_publication_phase.discard prepared.phase ~discard:(fun handle ->
+    let open Result.Let_syntax in
+    let%bind () =
+      Blob_store.discard_unreferenced prepared.store prepared.session handle
+    in
+    Job_result_intent.remove ~env:prepared.env ~session:prepared.session prepared.intent)
 ;;
 
 let load store ~sw ~session ~max_bytes reference =
@@ -230,6 +161,8 @@ let load store ~sw ~session ~max_bytes reference =
 ;;
 
 module Publisher = struct
+  exception Work_limit
+
   module Storage = struct
     type t =
       | Automatic
@@ -242,6 +175,7 @@ module Publisher = struct
     ; max_entries : int
     ; max_bytes : int
     ; max_file_bytes : int
+    ; max_work : int
     }
 
   type collection_stats =
@@ -259,7 +193,7 @@ module Publisher = struct
     ; principal : P.Id.Principal.t
     ; inline_bytes : int
     ; max_bytes : int
-    ; mutex : Eio.Mutex.t
+    ; lock : Result_publication_lock.t
     ; mutable pending : prepared list
     }
 
@@ -280,9 +214,18 @@ module Publisher = struct
         ; principal
         ; inline_bytes
         ; max_bytes
-        ; mutex = Eio.Mutex.create ()
+        ; lock = Result_publication_lock.create ()
         ; pending = []
         }
+  ;;
+
+  let reentrant_publisher () =
+    Error
+      (P.Error.create
+         Invalid_state
+         ~message:"recursive result publisher"
+         ~retryable:false
+         ())
   ;;
 
   let prune t jobs =
@@ -321,7 +264,7 @@ module Publisher = struct
   ;;
 
   let publish t ?(storage = Storage.Automatic) ~jobs ~job ~now completion ~persist =
-    with_owner t.mutex (fun () ->
+    Result_publication_lock.with_owner t.lock ~on_reentry:reentrant_publisher (fun () ->
       let open Result.Let_syntax in
       prune t jobs;
       let%bind () = check_completion t completion in
@@ -369,7 +312,7 @@ module Publisher = struct
   ;;
 
   let pending_completion t ~(job : P.Job.t) =
-    Eio.Mutex.use_ro t.mutex (fun () ->
+    Result_publication_lock.with_read t.lock (fun () ->
       match job.status with
       | Running | Waiting_completion _ ->
         List.find_map t.pending ~f:(fun prepared ->
@@ -386,7 +329,7 @@ module Publisher = struct
   ;;
 
   let restore t ~jobs ~generation ~max_count ~max_total_bytes =
-    with_owner t.mutex (fun () ->
+    Result_publication_lock.with_owner t.lock ~on_reentry:reentrant_publisher (fun () ->
       let open Result.Let_syntax in
       let invalid message = Error (P.Error.invalid_request message) in
       let%bind () =
@@ -487,8 +430,7 @@ module Publisher = struct
               ; reference
               ; completion
               ; content
-              ; mutex = Eio.Mutex.create ()
-              ; phase = Attempted
+              ; phase = Result_publication_phase.restored_attempted ()
               }
             in
             Ok ((job, prepared, metadata.created_at) :: restored))
@@ -520,6 +462,19 @@ module Publisher = struct
     (* The actor already excludes transitions. Take the publisher before the
        response cache, and storage last; publication callbacks can need the cache. *)
     let open Result.Let_syntax in
+    let%bind () =
+      if limits.max_work > 0
+      then Ok ()
+      else Error (Store_error.Corrupt "result collection work limit is invalid")
+    in
+    let remaining = ref limits.max_work in
+    let checkpoint () =
+      Eio.Switch.check t.sw;
+      Eio.Fiber.check ();
+      if !remaining <= 0 then raise Work_limit;
+      decr remaining;
+      Eio.Fiber.check ()
+    in
     let%bind reader =
       Retention_reader.create
         ~env:t.env
@@ -533,118 +488,148 @@ module Publisher = struct
         ~session:t.session
         ~max_count:limits.max_intents
     in
-    match intents with
-    | [] -> Ok (Some { discarded = 0; retired = 0; retained = 0 })
-    | _ ->
-      let candidates =
-        List.map intents ~f:(fun intent -> (Job_result_intent.reference intent).blob.id)
-      in
-      let%bind scanner = Blob_reference_scan.create candidates |> protocol in
-      let same_attempt reference (job : P.Job.t) =
-        P.Id.Session.equal reference.Artifact.session_id job.session_id
-        && P.Id.Job.equal reference.job_id job.id
-        && Int.equal reference.generation job.generation
-        && Int.equal reference.attempt job.attempt
-      in
-      let live reference =
-        List.exists jobs ~f:(fun job ->
-          same_attempt reference job
-          && Int.equal job.generation generation
-          &&
-          match job.status with
-          | Queued | Running | Waiting_permission _ | Waiting_completion _ -> true
-          | Succeeded | Failed _ | Cancelled | Interrupted _ -> false)
-      in
-      (* No filesystem discard here: even stale cache entries may have reached
+    checkpoint ();
+    let candidates =
+      List.map intents ~f:(fun intent -> (Job_result_intent.reference intent).blob.id)
+    in
+    let%bind scanner = Blob_reference_scan.create candidates |> protocol in
+    let same_attempt reference (job : P.Job.t) =
+      P.Id.Session.equal reference.Artifact.session_id job.session_id
+      && P.Id.Job.equal reference.job_id job.id
+      && Int.equal reference.generation job.generation
+      && Int.equal reference.attempt job.attempt
+    in
+    let live reference =
+      List.exists jobs ~f:(fun job ->
+        same_attempt reference job
+        && Int.equal job.generation generation
+        &&
+        match job.status with
+        | Queued | Running | Waiting_permission _ | Waiting_completion _ -> true
+        | Succeeded | Failed _ | Cancelled | Interrupted _ -> false)
+    in
+    (* No filesystem discard here: even stale cache entries may have reached
            durable storage before an acknowledgement failed. *)
-      t.pending <- List.filter t.pending ~f:(fun prepared -> live prepared.reference);
-      let%bind () =
-        List.fold_result t.pending ~init:() ~f:(fun () prepared ->
-          let text = P.Completion.to_json prepared.completion |> Jsonaf.to_string in
-          let%map () = Retention_reader.charge_bytes reader (String.length text) in
-          Blob_reference_scan.begin_root scanner;
-          Blob_reference_scan.feed scanner text)
-      in
-      let owned =
-        List.filter_map intents ~f:(fun intent ->
-          let reference = Job_result_intent.reference intent in
-          match live reference with
-          | true -> Some reference.blob.id
-          | false -> None)
-      in
-      with_roots ~reader ~candidates ~f:(fun roots ->
-        Blob_store.with_retention t.blobs ~f:(fun scope ->
-          let%bind graph =
-            Blob_retention.scan
-              ~scope
-              ~session:t.session
-              ~reader
-              ~intents
-              ~max_file_bytes:limits.max_file_bytes
-          in
-          (* Validate every terminal descriptor before the first mutation. *)
-          let%bind published =
-            List.fold_result jobs ~init:[] ~f:(fun refs job ->
-              let%map stored = P.Job.terminal_result job |> protocol in
-              match stored with
-              | Some (Artifact { reference; _ }) -> reference :: refs
-              | None | Some (Inline _) -> refs)
-          in
-          let%bind retained =
-            Blob_retention.references
-              graph
-              ~roots:
-                (List.map published ~f:(fun reference -> reference.Artifact.blob.id)
-                 @ owned
-                 @ Blob_reference_scan.references scanner
-                 @ roots)
-          in
-          List.fold_result
-            intents
-            ~init:{ discarded = 0; retired = 0; retained = 0 }
-            ~f:(fun stats intent ->
-              let reference = Job_result_intent.reference intent in
-              match List.mem retained reference.blob.id ~equal:P.Id.Blob.equal with
-              | false ->
-                let%map () =
-                  Job_result_intent.discard_unreferenced
-                    ~env:t.env
+    t.pending <- List.filter t.pending ~f:(fun prepared -> live prepared.reference);
+    let%bind () =
+      List.fold_result t.pending ~init:() ~f:(fun () prepared ->
+        let text = P.Completion.to_json prepared.completion |> Jsonaf.to_string in
+        let%map () = Retention_reader.charge_bytes reader (String.length text) in
+        Blob_reference_scan.begin_root scanner;
+        checkpoint ();
+        Blob_reference_scan.feed scanner text)
+    in
+    let owned =
+      List.filter_map intents ~f:(fun intent ->
+        let reference = Job_result_intent.reference intent in
+        match live reference with
+        | true -> Some reference.blob.id
+        | false -> None)
+    in
+    with_roots ~reader ~candidates ~f:(fun roots ->
+      let%map outcome =
+        Blob_store.with_collection_proof t.blobs ~f:(fun scope ->
+          Blob_store.with_developer_retention
+            scope
+            ~session:t.session
+            ~reader
+            ~checkpoint
+            ~f:(fun developer ->
+              let%bind graph =
+                Blob_retention.scan
+                  ~scope
+                  ~developer
+                  ~session:t.session
+                  ~reader
+                  ~checkpoint
+                  ~intents
+                  ~max_file_bytes:limits.max_file_bytes
+              in
+              (* Validate every terminal descriptor before the first mutation. *)
+              let%bind published =
+                List.fold_result jobs ~init:[] ~f:(fun refs job ->
+                  checkpoint ();
+                  let%map stored = P.Job.terminal_result job |> protocol in
+                  match stored with
+                  | Some (Artifact { reference; _ }) -> reference :: refs
+                  | None | Some (Inline _) -> refs)
+              in
+              let%bind retained =
+                Blob_retention.references
+                  graph
+                  ~checkpoint
+                  ~roots:
+                    (List.map published ~f:(fun reference -> reference.Artifact.blob.id)
+                     @ owned
+                     @ Blob_reference_scan.references scanner
+                     @ roots)
+              in
+              checkpoint ();
+              Blob_store.protect_collection_mutation scope ~f:(fun () ->
+                let%bind developer_retired =
+                  Blob_retention.retire_published_developer_markers
+                    graph
                     ~scope
+                    ~developer
                     ~reader
-                    ~session:t.session
-                    intent
+                    ~checkpoint
                 in
-                t.pending
-                <- List.filter t.pending ~f:(fun prepared ->
-                     not (P.Id.Blob.equal prepared.reference.blob.id reference.blob.id));
-                { stats with discarded = stats.discarded + 1 }
-              | true ->
-                let installed =
-                  Blob_retention.published graph reference.blob.id
-                  && List.exists published ~f:(fun other ->
-                    Sexp.equal (Artifact.sexp_of_t other) (Artifact.sexp_of_t reference))
-                in
-                (match installed with
-                 | false -> Ok { stats with retained = stats.retained + 1 }
-                 | true ->
-                   let%map () =
-                     Job_result_intent.retire_published
-                       ~env:t.env
-                       ~reader
-                       ~session:t.session
-                       intent
-                   in
-                   { stats with retired = stats.retired + 1 }))))
+                List.fold_result
+                  intents
+                  ~init:{ discarded = 0; retired = developer_retired; retained = 0 }
+                  ~f:(fun stats intent ->
+                    checkpoint ();
+                    let reference = Job_result_intent.reference intent in
+                    match List.mem retained reference.blob.id ~equal:P.Id.Blob.equal with
+                    | false ->
+                      let%map () =
+                        Job_result_intent.discard_unreferenced
+                          ~env:t.env
+                          ~scope
+                          ~reader
+                          ~session:t.session
+                          intent
+                      in
+                      t.pending
+                      <- List.filter t.pending ~f:(fun prepared ->
+                           not
+                             (P.Id.Blob.equal
+                                prepared.reference.blob.id
+                                reference.blob.id));
+                      { stats with discarded = stats.discarded + 1 }
+                    | true ->
+                      let installed =
+                        Blob_retention.published graph reference.blob.id
+                        && List.exists published ~f:(fun other ->
+                          Sexp.equal
+                            (Artifact.sexp_of_t other)
+                            (Artifact.sexp_of_t reference))
+                      in
+                      (match installed with
+                       | false -> Ok { stats with retained = stats.retained + 1 }
+                       | true ->
+                         let%map () =
+                           Job_result_intent.retire_published
+                             ~env:t.env
+                             ~reader
+                             ~session:t.session
+                             intent
+                         in
+                         { stats with retired = stats.retired + 1 })))))
+      in
+      Option.join outcome)
   ;;
 
   let collect t ~jobs ~generation ~limits ~with_roots =
-    let outcome =
-      with_owner t.mutex (fun () ->
-        try Ok (collect_locked t ~jobs ~generation ~limits ~with_roots) with
-        | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
-    in
-    match outcome with
-    | Ok result -> result
-    | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+    try
+      Result_publication_lock.with_owner
+        t.lock
+        ~on_reentry:(fun () -> Error (Store_error.Corrupt "recursive result publisher"))
+        (fun () -> collect_locked t ~jobs ~generation ~limits ~with_roots)
+    with
+    | Work_limit ->
+      Error
+        (Store_error.Admission_capacity
+           (Document_schema.Error.Limit_exceeded "result collection work"))
   ;;
 end

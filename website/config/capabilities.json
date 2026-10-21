@@ -170,7 +170,7 @@
       "agent-server/protocol",
       "permissions"
     ],
-    "qualification": "Protocol 1.0 synchronization does not promise replay of live deltas; reconnect restores authoritative projections.",
+    "qualification": "Protocol 2.0 session synchronization does not promise replay of live deltas; reconnect restores authoritative projections.",
     "deferred": [],
     "benefit": "Build a client that connects to a running agent.",
     "example": "Use stdio or HTTP to send requests and inspect authoritative session state."
@@ -200,5 +200,18 @@
     "deferred": [],
     "benefit": "Use Ochat from scripts as well as interactive conversations.",
     "example": "Save a project report from a single batch invocation."
+  },
+  {
+    "id": "developer-workflow",
+    "title": "Captured ChatML development and REPL",
+    "pages": [
+      "guide/chatml-development-workflow",
+      "development/chatml-repl-submission",
+      "design/chatml-execution-tracing"
+    ],
+    "qualification": "Opt-in installed services require explicit source policy and method scopes. Check grants no execution; Fixture uses admitted deterministic steps, Live needs current prompt/workspace/native/provider authority. REPL Tasks require an explicit drive, reset retains the original capture, and trace pages require separate current read authority. Desktop and embedded chat-TUI REPL panels remain future consumers.",
+    "deferred": [],
+    "benefit": "Inspect exact revisions, develop interactively and attribute bounded observations to the source that ran.",
+    "example": "Save or publish an immutable bundle revision, Check it, select Fixture or Live, then inspect an exact command or REPL trace."
   }
 ]

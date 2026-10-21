@@ -3,7 +3,6 @@ open Agent_server_test_support
 module P = Agent_protocol
 module D = Agent_server.Daemon
 module R = Agent_server.Session_registry
-module A = Agent_session.Session_actor
 module H = Agent_client.Session_handle
 module M = Agent_session.Managed_submission
 module Res = Openai.Responses
@@ -18,8 +17,10 @@ let check_history expected actual =
 ;;
 
 let state daemon id =
-  R.with_loaded_read (D.registry daemon) id (fun entry -> A.state entry.actor)
-  |> protocol_ok
+  (* Observation must not reserve the parent lifecycle: generated child creation
+     correctly rejects an actual lifecycle reservation. This snapshot read must
+     neither activate a stored session nor change its lifecycle admission. *)
+  R.read_state (D.registry daemon) ~authorize:(fun _ -> Ok ()) id |> protocol_ok
 ;;
 
 let call_events index id name args =

@@ -234,8 +234,49 @@ module Chat_markdown : sig
     val markdown : t -> bool
   end
 
+  module Content_origin : sig
+    (** Provenance for one actually emitted image or document Basic item.
+        An imported item retains the input that declared it. The locator is
+        authored spelling, never a native pathname or source grant. *)
+    type t
+
+    type kind =
+      | Image
+      | Document of Document_occurrence.Selection.t
+    [@@deriving equal, sexp_of]
+
+    val kind : t -> kind
+    val range : t -> Chatmd_parser_input.Range.t
+    val locator : t -> string
+  end
+
   module Declaration : sig
     type t
+
+    module Surface : sig
+      type t =
+        | Script of
+            { language : string
+            ; kind : string
+            }
+        | Shell_script of
+            { language : string
+            ; kind : Chatmd_shell_spec.Chatmd_script_spec.kind
+            ; limits : Chatmd_shell_spec.Chatmd_script_spec.limits
+            }
+        | Extension_script of
+            { version : int
+            ; kind : Chatmd_shell_spec.Extension_spec.script_kind
+            ; limits : Chatmd_shell_spec.Chatmd_script_spec.limits
+            }
+      [@@deriving equal]
+    end
+
+    (** Converted nonbody contract metadata. ID, source locator, authored
+        project selection and source provenance have separate exact getters.
+        An edited-body comparison uses this genuine parser field rather than
+        decoding raw attributes a second time. *)
+    val surface : t -> Surface.t
 
     val range : t -> Chatmd_parser_input.Range.t
     val source_ref : t -> Chatmd_shell_spec.Source_ref.t
@@ -251,6 +292,83 @@ module Chat_markdown : sig
     (** Body is the actual inline extraction / loaded external body already used
         by the script parser; artifact custody computes/reconciles its digest. *)
     val script_body : t -> string
+
+    module Extraction : sig
+      type bound
+      type input_span
+
+      val input : input_span -> Chatmd_parser_input.t
+      val start_byte : input_span -> int
+      val end_byte : input_span -> int
+
+      type projection =
+        | Exact_inline of input_span
+        | External_origin of
+            { member : string
+            ; body_digest : Chatml_source.Digest.t
+            ; start_byte : int
+            ; end_byte : int
+            }
+        | Approximate_declaration of Chatmd_parser_input.Range.t
+
+      type error =
+        | Stale_script_source
+        | Invalid_compiler_location
+        | Invalid_authored_point
+      [@@deriving sexp_of]
+
+      module Authored_point : sig
+        type unavailable =
+          | Degraded_map
+          | External_body
+          | Effective_only
+          | Foreign_input
+          | Query_work_limit
+          | Unmapped_or_ambiguous
+        [@@deriving sexp_of]
+
+        type t =
+          | Exact_compiled_byte of int
+          | Unavailable of unavailable
+        [@@deriving sexp_of]
+      end
+
+      (** The actual parser-owned declaration supplies the map. The caller
+          authenticates Parsed membership and its capture/overlay revision, then
+          binds the exact compiled source ID/digest/bytes. Comparison and hash
+          scan the admitted script body/source bytes under their independent
+          parser/capture byte bounds, even if map recording degraded. Callback
+          and cancellation exceptions propagate unchanged. *)
+      val bind
+        :  t
+        -> compiled_source:Chatml_source.t
+        -> checkpoint:(unit -> unit)
+        -> (bound, error) Result.t
+
+      (** Only fully continuous identity bytes project exactly. Empty spans
+          require an unambiguous boundary. Mixed, transformed or effective-only
+          bytes yield the approximate declaration as a related site while the
+          caller retains the native exact ChatML location. External_origin
+          carries the actual successful read member/digest, NOT an editor source
+          ID; host custody alone may turn it into an external exact location.
+          Work is bounded by the parser's finite map segment/work caps; overflow
+          returns approximate, never a partial exact map. *)
+      val project_raw
+        :  bound
+        -> Chatml_source.Location.t
+        -> checkpoint:(unit -> unit)
+        -> (projection, error) Result.t
+
+      (** Inverse exact authored byte point on this bound declaration only;
+          unavailable/ambiguity remains typed. See
+          {!Chatmd_extraction_map.authored_point}. *)
+      val authored_point
+        :  bound
+        -> input:Chatmd_parser_input.t
+        -> authored_byte:int
+        -> checkpoint:(unit -> unit)
+        -> (Authored_point.t, error) Result.t
+    end
   end
 
   module Agent_reference : sig
@@ -336,6 +454,24 @@ module Chat_markdown : sig
     -> checkpoint:(unit -> unit)
     -> agent_content
     -> Agent_reference.t Core.Or_error.t
+
+  (** Resolve a Basic image/document to its original parser-owned occurrence.
+      With [projection], require the SAME Parsed; unchanged Basic objects keep
+      their original physical identity through document materialization,
+      whereas replaced captured-document literals have no dynamic origin.
+      Without a projection, require the original emitted Basic object. Equal
+      structure, URL, source_context or parser-input path is insufficient.
+      Plain literal text and foreign/model-created Basic items reject. The
+      complete lookup is bounded by the positive work limit and polls before
+      traversal; borrowed checkpoint exceptions propagate unchanged. The
+      origin does not authorize a read. *)
+  val content_origin
+    :  Parsed.t
+    -> ?projection:Document_projection.t
+    -> max_work_steps:int
+    -> checkpoint:(unit -> unit)
+    -> basic_content_item
+    -> Content_origin.t Core.Or_error.t
 
   (** Replace exact actual Local_capture/Builtin slots with literal Basic text.
       Reject foreign, duplicate, surplus or missing occurrences before projection
@@ -480,6 +616,58 @@ module Chat_markdown : sig
     ; parsed_root : Parsed.t
     ; parsed_agents : (string * Parsed.t) list
     }
+
+  module Generated : sig
+    type error =
+      | Invalid_source
+      | Source_unavailable
+      | Invalid_document
+      | Parser_limit
+    [@@deriving sexp_of]
+
+    type receipt
+
+    val parsed : receipt -> parsed_bundle
+
+    (** Unique exact portable members actually read by the captured loader,
+        sorted for deterministic closure comparison. Not a source grant. *)
+    val read_members : receipt -> string list
+
+    (** Checked generated admission reuses the existing captured-only parser,
+        import expansion and conversion. [before_read] runs through the loader's
+        pre-read limit hook with the exact retained member length, before parser
+        input copying; callback exceptions propagate unchanged. [checkpoint]
+        replaces the generated path's hardcoded caller poll, while the owned
+        parser still performs Eio cancellation checks and fixed read/token/depth
+        caps. Known source, syntax, declaration and limit failures use coarse
+        typed codes; unexpected and callback exceptions are never reclassified. *)
+    val parse_source_bundle
+      :  dir:Eio.Fs.dir_ty Eio.Path.t
+      -> Chatmd_source_bundle.t
+      -> checkpoint:(unit -> unit)
+      -> before_read:(member:string -> byte_length:int -> unit)
+      -> (receipt, error) Result.t
+
+    (** Explicit host-authorized closure capture, using the SAME checked
+        generated parser/lexer, path resolver, read/agent observers and fixed
+        parser depth/token/read caps as [parse_source_bundle]. It borrows one
+        [Source_loader.Generated_retained] whose current root bytes are the
+        unsaved editor revision and whose imports use the retained no-follow
+        source owner. The loader enforces its validated source/bundle byte and
+        file limits before each new native read or retained copy; the resulting
+        immutable bundle is revalidated with those SAME limits before return.
+        Repeat parser reads see the first captured bytes and still consume
+        parser work. A malformed/missing import, resource limit or cancellation
+        publishes no
+        partial receipt/bundle. This capture runs only on explicit Analyze or
+        refresh/rebuild; Prefix/Query consume its immutable bundle and never
+        call this method. The caller still checks original/current actor,
+        root grant and exact editor context generation before/after this call. *)
+    val capture_retained_bundle
+      :  Source_loader.Generated_retained.t
+      -> checkpoint:(unit -> unit)
+      -> (receipt * Chatmd_source_bundle.t, error) Result.t
+  end
 
   (** Recheck the parsed declaration registry, including IDs, handler kinds,
       dependency cycles and authoring declaration uniqueness. No source reads,

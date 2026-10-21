@@ -57,6 +57,7 @@ For exact syntax and behavior:
 
 - [ChatMD language](overview/chatmd-language.md)
 - [Built-in tools, file roots, and maintained MCP tools](overview/tools.md)
+- [Develop a captured ChatML revision](guide/chatml-development-workflow.md): edit, Check, choose Fixture or Live execution, use `chatml-repl`, and inspect separately authorized traces.
 - [ChatML moderator runtime](guide/chatml-moderator-runtime.md)
 - [ChatML language](guide/chatml-language-spec.md)
 - [Build script tools and moderator handlers](guide/chatml-authoring-runtime.md)
@@ -105,6 +106,9 @@ an explanation of what happens when work fails or is cancelled.
 - [Library documentation](lib/README.md)
 - [Architecture specification](design/ochat-agent-server-spec.md)
 - [Implementation specification](design/ochat-agent-server-implementation-spec.md)
+- [ChatMD and ChatML authoring service contracts](design/chatml-authoring-services.md)
+- [Developer runtime architecture and policy](design/chatml-developer-runtime.md)
+- [Bounded execution tracing](design/chatml-execution-tracing.md)
 - [Shared host credential lifecycle](lib/credential_registry.doc.md) and [pure registry metadata](lib/credential_registry_model.doc.md)
 - [Documentation coverage ledger](development/documentation-coverage.md)
 - [README content and navigation audit](development/readme-content-audit.md)

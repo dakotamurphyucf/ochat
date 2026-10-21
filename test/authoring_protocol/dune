@@ -1,0 +1,6 @@
+(library
+ (name authoring_protocol_test)
+ (modules authoring_protocol_test analysis_protocol_tests assistance_protocol_tests)
+ (libraries core eio eio_main ochat.agent_protocol ochat.agent_client ochat.chatml_source ochat.language_highlighting)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

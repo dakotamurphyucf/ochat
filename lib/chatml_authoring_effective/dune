@@ -1,0 +1,5 @@
+(library
+ (name chatml_authoring_effective)
+ (public_name ochat.chatml_authoring_effective)
+ (libraries core chatml_authoring_context chatml_project_build chatml_source chatml)
+ (preprocess (pps ppx_jane)))

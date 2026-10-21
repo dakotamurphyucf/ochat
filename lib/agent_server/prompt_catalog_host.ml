@@ -254,7 +254,15 @@ let prune t ~additional ~checkpoint =
   |> Result.map_error ~f:(fun error -> Error.Publication error)
 ;;
 
-let prepare_child_programs t ~startup ~invocation ~scope ~capture ~checkpoint =
+let prepare_child_programs
+      t
+      ~startup
+      ~tool_contract
+      ~invocation
+      ~scope
+      ~capture
+      ~checkpoint
+  =
   let result =
     let open Result.Let_syntax in
     let%bind result =
@@ -263,6 +271,7 @@ let prepare_child_programs t ~startup ~invocation ~scope ~capture ~checkpoint =
           t.publication
           ~sources
           ~startup
+          ~tool_contract
           ~invocation
           ~scope
           ~capture

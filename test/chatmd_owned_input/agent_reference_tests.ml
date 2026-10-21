@@ -326,6 +326,105 @@ let%expect_test "projected nested content agents retain their exact original ref
     |}]
 ;;
 
+let%expect_test "owned image and document origins stay on their imported input" =
+  Eio_main.run (fun env ->
+    let imported =
+      {|<img src="../images/p.png" local/><doc src="../notes/d.txt" local/><doc src="../notes/c.txt" local capture/>|}
+    in
+    let parsed =
+      parse
+        env#cwd
+        [ "root.chatmd", {|<user><import src="parts/content.chatmd"/></user>|}
+        ; "parts/content.chatmd", imported
+        ]
+    in
+    let captured = List.last_exn (CM.Parsed.document_occurrences parsed) in
+    let projection =
+      CM.materialize_documents
+        parsed
+        ~rendered:[ captured, "CAPTURED" ]
+        ~max_occurrences:3
+        ~max_output_bytes:64
+        ~max_work_steps:10000
+        ~checkpoint:ignore
+      |> Or_error.ok_exn
+    in
+    let basics =
+      match CM.Document_projection.elements projection with
+      | [ CM.User { content = Some (Items items); _ } ] ->
+        List.map items ~f:(function
+          | Basic basic -> basic
+          | Agent _ -> failwith "unexpected content agent")
+      | _ -> failwith "expected projected user content"
+    in
+    [%test_eq: int] (List.length basics) 3;
+    List.iter2_exn
+      (List.take basics 2)
+      [ CM.Content_origin.Image, 0, {|<img src="../images/p.png" local/>|}
+      ; ( CM.Content_origin.Document CM.Document_occurrence.Selection.Dynamic
+        , String.length {|<img src="../images/p.png" local/>|}
+        , {|<doc src="../notes/d.txt" local/>|} )
+      ]
+      ~f:(fun basic (kind, offset, tag) ->
+        let origin =
+          CM.content_origin
+            parsed
+            ~projection
+            ~max_work_steps:100
+            ~checkpoint:ignore
+            basic
+          |> Or_error.ok_exn
+        in
+        assert (CM.Content_origin.equal_kind kind (CM.Content_origin.kind origin));
+        let range = CM.Content_origin.range origin in
+        [%test_eq: string] (Input.path (Input.Range.input range)) "parts/content.chatmd";
+        [%test_eq: int] (Input.Range.start_byte range) offset;
+        [%test_eq: int] (Input.Range.end_byte range) (offset + String.length tag);
+        print_s
+          [%sexp (offset : int), (CM.Content_origin.kind origin : CM.Content_origin.kind)];
+        assert (
+          Result.is_error
+            (CM.content_origin
+               parsed
+               ~projection
+               ~max_work_steps:1
+               ~checkpoint:ignore
+               basic));
+        let sentinel = Failure "origin checkpoint" in
+        match
+          CM.content_origin
+            parsed
+            ~projection
+            ~max_work_steps:100
+            ~checkpoint:(fun () -> raise sentinel)
+            basic
+        with
+        | _ -> assert false
+        | exception exn -> assert (phys_equal exn sentinel));
+    assert (
+      Result.is_error
+        (CM.content_origin
+           parsed
+           ~projection
+           ~max_work_steps:100
+           ~checkpoint:ignore
+           (List.last_exn basics)));
+    let copied = { (List.hd_exn basics) with text = None } in
+    assert (
+      Result.is_error
+        (CM.content_origin
+           parsed
+           ~projection
+           ~max_work_steps:100
+           ~checkpoint:ignore
+           copied)));
+  [%expect
+    {|
+    (0 Image)
+    (34 (Document Dynamic))
+    |}]
+;;
+
 let%test_unit "source mode admission is exact and captured never silently becomes legacy" =
   Eio_main.run (fun env ->
     let dir = env#cwd in

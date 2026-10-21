@@ -80,3 +80,4 @@ let read_envelope t ~clock ~timeout_seconds =
 ;;
 
 let close_raw t = Eio.Flow.close t.flow
+let shutdown_write t = Eio.Flow.shutdown t.flow `Send

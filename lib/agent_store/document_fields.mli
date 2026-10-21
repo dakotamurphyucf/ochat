@@ -68,3 +68,13 @@ val record_error : Document_record.Error.t -> Store_error.t
 (** Feed decoded string values, including unknown members and escaped IDs.
     Caller validates/bounds the tree first and owns reference/deletion policy. *)
 val iter_strings : Jsonaf.t -> f:(string -> unit) -> unit
+
+(** The same decoded-string traversal for a collection's single work budget.
+    [checkpoint] runs before every JSON node, including containers without a
+    string; its cancellation/exception propagates unchanged. This does not
+    replace the prior bounded decoder or turn strings into authority. *)
+val iter_strings_with_checkpoint
+  :  Jsonaf.t
+  -> checkpoint:(unit -> unit)
+  -> f:(string -> unit)
+  -> unit

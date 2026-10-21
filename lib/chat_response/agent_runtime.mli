@@ -258,11 +258,55 @@ type native_registration = Native_tool_pool.Registration.t =
 val prepare_agent_source
   :  t
   -> binding:Tool_capability.binding
-  -> owner:Agent_protocol.Job.launch_owner
+  -> launch:Source_launch.t
   -> request:Background_request.t
   -> max_registrations:int
   -> checkpoint:(unit -> unit)
   -> (Background_request.Agent_artifact.t option, Agent_protocol.Error.t) Result.t
+
+(** Compare every native binding in [selected] with this already constructed
+    runtime's exact capability reference and physical implementation. Managed
+    bindings belong to their separately admitted dispatcher. Preflight the
+    immutable registry count before allocating references; poll the binding
+    traversal under the caller's shared budget. Source registrations are
+    admitted separately at the effect boundary. No callback,
+    source read or native effect occurs. The runtime is borrowed from the host
+    that constructed those functions and must remain live for the runner's
+    joined workers; this comparison creates no new runtime owner. *)
+val admit_native_selection
+  :  t
+  -> selected:Tool_capability.t
+  -> max_bindings:int
+  -> checkpoint:(unit -> unit)
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Require that [binding] resolves to the same physical native implementation
+    in this runtime and has exactly one ordinary [Source (Some preparer)]
+    registration with [Native_output]. Persistent [Invocation_v1], [Source None],
+    [Ordinary], managed, foreign and ambiguous registrations reject. This is a
+    read-only pre-dispatch gate: it never invokes the native handler or prepares
+    a source. The selected caller must still rebind its exact Claim/reference,
+    actor and current host permission after yields and before the effect; a
+    successful result here is not continuing authority. Registration count and
+    traversal work are admitted before lookup, with cancellation preserved. *)
+val require_saved_agent_source
+  :  t
+  -> binding:Tool_capability.binding
+  -> max_registrations:int
+  -> checkpoint:(unit -> unit)
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Compare one already admitted deferred Agent registration with this runtime's
+    exact physical implementation and Source(Some) preparer, as well as its
+    revision and result contract. The runtime may copy the registration record
+    during construction, so record identity alone is not sufficient. A bounded
+    lookup rejects missing or ambiguous registrations before any source work. *)
+val admit_exact_saved_agent_registration
+  :  t
+  -> registration:native_registration
+  -> max_registrations:int
+  -> checkpoint:(unit -> unit)
+  -> (unit, Agent_protocol.Error.t) Result.t
 
 (** Prepare a definition for an extensibility-aware host. Validates the captured
     declarations, constructs native resources through the same shell authorization
@@ -294,10 +338,15 @@ val prepare_agent_source
     contracts, and all native hook project requirements are admitted against the
     complete staged pool before any hook initializer. Missing graphs reject
     without falling back to script bodies or current files.
+    [tool_contract] selects the managed Tool compiler surface and its authority
+    fingerprint; omission keeps Standard Tool_v1 for existing sessions. A
+    developer owner uses the same Developer_model_spawn choice as its captured
+    planner. This is not Model.spawn execution authority.
     This internal preparation entrypoint does not enable public feature flags. *)
 val prepare_extensions
   :  ?native_service_revision:string
   -> ?startup:Startup_compilation.t
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
   -> ?agent_source_runner:Tool.Agent_source_runner.t
   -> ?moderator_surface:Chatml.Chatml_builtin_surface.surface
   -> ?compilation_limits:Chatml_compilation.limits
@@ -325,5 +374,63 @@ val prepare_extensions
         -> string
         -> Prompt.Chat_markdown.content_item list
         -> string)
+  -> unit
+  -> (extension_resources, diagnostic list) result
+
+(** Construct a plain native runtime without a model-provider context. Ordinary
+    Eio, workspace and tool paths come from this exact [host]; there is no Ctx,
+    fake inference Adapter/Target, nested-agent callback or model-completion
+    fallback. The same shell compiler, policy, staged registration and native
+    preflight as [create] apply. An unsupplied ordinary Agent or [meta_refine]
+    declaration rejects before exposure. The effective compiled/merged shell
+    manifest must not require Model_reviewer; rejection occurs before Registry
+    activation, including a reviewer inherited from another runtime. Genuine
+    supplied Agent registrations remain available under their existing source
+    and capability rules. Expected missing-inference denials are typed;
+    unexpected constructor exceptions and cancellation propagate unchanged. *)
+val create_without_inference
+  :  ?native_service_revision:string
+  -> ?startup:Startup_compilation.t
+  -> ?programs:Chatml_prompt_programs.Restored.t
+  -> ?moderator_surface:Chatml.Chatml_builtin_surface.surface
+  -> ?compilation_limits:Chatml_compilation.limits
+  -> ?checkpoint:(unit -> unit)
+  -> sw:Eio.Switch.t
+  -> host:Shell_runtime.Host.t
+  -> platform:Chatmd_shell_spec.Shell_spec.platform
+  -> prompt_elements:Prompt.Chat_markdown.top_level_elements list
+  -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> approval_provider:Shell_runtime.Approval_broker.provider
+  -> approval_store:Shell_access.Approval.store
+  -> unit
+  -> (t, diagnostic list) result
+
+(** Extension-aware counterpart to [create_without_inference]. It shares the
+    exact managed compiler, captured programs, native admission and returned
+    resource identity with [prepare_extensions]. Its preparation result grants
+    no Model.spawn authority: a later managed invocation still requires an
+    authentic selected developer provider, Root and current job scope. The
+    [tool_contract] has the same compiler-identity meaning and Standard default
+    as [prepare_extensions]; Developer_model_spawn does not manufacture a
+    provider Context. The caller owns [sw] through installation and close; failed preparation cannot
+    leave a staged shell registry activated. *)
+val prepare_extensions_without_inference
+  :  ?native_service_revision:string
+  -> ?startup:Startup_compilation.t
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
+  -> ?moderator_surface:Chatml.Chatml_builtin_surface.surface
+  -> ?compilation_limits:Chatml_compilation.limits
+  -> ?checkpoint:(unit -> unit)
+  -> ?check_preparation_now:(unit -> (unit, diagnostic) result)
+  -> ?native_registrations:native_registration list
+  -> ?delegated_moderator:bool
+  -> ?programs:Chatml_prompt_programs.Restored.t
+  -> sw:Eio.Switch.t
+  -> host:Shell_runtime.Host.t
+  -> platform:Chatmd_shell_spec.Shell_spec.platform
+  -> prompt_elements:Prompt.Chat_markdown.top_level_elements list
+  -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> approval_provider:Shell_runtime.Approval_broker.provider
+  -> approval_store:Shell_access.Approval.store
   -> unit
   -> (extension_resources, diagnostic list) result

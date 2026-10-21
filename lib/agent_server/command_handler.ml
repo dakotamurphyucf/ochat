@@ -27,6 +27,7 @@ type t =
   ; audit_store : Agent_store.Audit_store.t
   ; blob_store : Agent_store.Blob_store.t
   ; session_store : Agent_store.Session_store.t
+  ; authoring : Authoring_installation.t option
   ; lifecycle_service : Session_lifecycle_service.t
   ; retained : Retained_session.t
   ; archive_payload_limit : int
@@ -37,7 +38,7 @@ type t =
   ; ping : Agent_protocol.Ping.Request.t -> Agent_protocol.Ping.Response.t
   ; server_info : unit -> Agent_protocol.Method_result.Server_info.t
   ; server_health : Agent_protocol.Health.Request.t -> Agent_protocol.Health.Response.t
-  ; cancel_job : Agent_protocol.Id.Job.t -> unit
+  ; cancel_job : actor:Agent_session.Session_actor.t -> job:Agent_protocol.Job.t -> unit
   ; create_session : create_session
   ; prepare_session_start :
       Session_registry.entry -> (unit, Agent_protocol.Error.t) result
@@ -62,6 +63,7 @@ let create
       ~audit_store
       ~blob_store
       ~session_store
+      ~authoring
       ~lifecycle_service
       ~retained
       ~archive_payload_limit
@@ -103,25 +105,55 @@ let create
           |> Time_ns.of_span_since_epoch
           |> Agent_protocol.Timestamp.of_time_ns))
   in
-  let supported_features features =
-    match seed_factory with
-    | Some _ -> features
-    | None ->
-      List.filter features ~f:(fun feature -> not (String.equal feature "sessions.seed"))
+  let authoring_features =
+    [ Agent_protocol.Authoring.Features.core
+    ; Agent_protocol.Authoring.Features.bundle
+    ; Agent_protocol.Authoring.Features.semantic
+    ; Agent_protocol.Authoring.Features.lexical
+    ; Agent_protocol.Authoring.Features.assistance
+    ]
+  in
+  let installed_authoring =
+    Option.value_map authoring ~default:[] ~f:Authoring_installation.available_features
+  in
+  let base_features features =
+    List.filter features ~f:(fun feature ->
+      (not (List.mem authoring_features feature ~equal:String.equal))
+      && (Option.is_some seed_factory || not (String.equal feature "sessions.seed")))
   in
   let initialize ~principal request =
     initialize ~principal request
-    |> Result.map ~f:(fun (response : Agent_protocol.Initialize.Response.t) ->
-      { response with
-        Agent_protocol.Initialize.Response.enabled_features =
-          supported_features response.enabled_features
-      })
+    |> Result.bind ~f:(fun (response : Agent_protocol.Initialize.Response.t) ->
+      let requested =
+        List.filter installed_authoring ~f:(fun feature ->
+          List.mem
+            request.Agent_protocol.Initialize.Request.features
+            feature
+            ~equal:String.equal)
+      in
+      let requested =
+        if List.mem requested Agent_protocol.Authoring.Features.core ~equal:String.equal
+        then requested
+        else
+          List.filter requested ~f:(fun feature ->
+            String.equal feature Agent_protocol.Authoring.Features.bundle)
+      in
+      Agent_protocol.Initialize.Response.create
+        ~protocol_name:response.protocol_name
+        ~selected_version:response.selected_version
+        ~implementation:response.implementation
+        ~server_id:response.server_id
+        ~enabled_features:(base_features response.enabled_features @ requested)
+        ~extensions:response.extensions
+        ~principal:response.principal
+        ~limits:response.limits
+        ~event_retention:response.event_retention
+        ~timing:response.timing
+        ~server_time:response.server_time)
   in
   let server_info () =
     let (info : Agent_protocol.Method_result.Server_info.t) = server_info () in
-    { info with
-      Agent_protocol.Method_result.Server_info.features = supported_features info.features
-    }
+    { info with features = base_features info.features @ installed_authoring }
   in
   { sw
   ; env
@@ -146,6 +178,7 @@ let create
   ; audit_store
   ; blob_store
   ; session_store
+  ; authoring
   ; lifecycle_service
   ; retained
   ; archive_payload_limit
@@ -397,6 +430,7 @@ let idempotency = function
   | Provider_select _
   | Provider_configure_environment _ -> None
   | Agent_protocol.Command.Ingress_submit _ -> None
+  | Agent_protocol.Command.Authoring _ -> None
   | Agent_protocol.Command.Session_seed request ->
     protected None (Agent_protocol.Session_seed.Request.idempotency_key request)
   | Agent_protocol.Command.Session_create request ->
@@ -2544,7 +2578,7 @@ let handle_job_cancel t ?prepared_writer context command_audit request =
                ~job_id:request.job_id
                ())
        in
-       t.cancel_job job.id;
+       t.cancel_job ~actor:entry.actor ~job;
        let%map state = Agent_session.Session_actor.state entry.actor in
        let session = Agent_session.Session_state.summary state in
        Agent_protocol.Method_result.Job_cancel { job; mutation = mutation session })
@@ -2812,7 +2846,8 @@ let prepared_writer_attachment command =
   | Job_get _
   | Schedule_list _
   | Schedule_get _
-  | Ingress_submit _ -> None
+  | Ingress_submit _
+  | Authoring _ -> None
 ;;
 
 let authorize_mutation t ?prepared_writer context command =
@@ -2876,11 +2911,22 @@ let dispatch_authorized
     | Provider_configure_environment _ ) as command ->
     Provider_operator_port.dispatch t.provider_operator ~actor command
   | Agent_protocol.Command.Protocol_initialize request ->
-    Result.map
-      (t.initialize ~principal:(Connection_context.principal context) request)
-      ~f:(fun response ->
+    let open Result.Let_syntax in
+    let%bind response =
+      t.initialize ~principal:(Connection_context.principal context) request
+    in
+    let%map () =
+      match t.authoring with
+      | None ->
         Connection_context.mark_initialized ~version:response.selected_version context;
-        Agent_protocol.Method_result.Protocol_initialize response)
+        Ok ()
+      | Some authoring ->
+        Authoring_installation.publish_initialize_and_wait
+          authoring
+          ~connection:context
+          ~response
+    in
+    Agent_protocol.Method_result.Protocol_initialize response
   | Protocol_ping request ->
     Ok (Agent_protocol.Method_result.Protocol_ping (t.ping request))
   | Server_info -> Ok (Agent_protocol.Method_result.Server_info (t.server_info ()))
@@ -2995,6 +3041,12 @@ let dispatch_authorized
     Error (error Invalid_state "seed requires original receipt dispatch")
   | Command_receipt _ -> Error (error Invalid_state "receipt requires read-only dispatch")
   | Ingress_submit request -> handle_ingress_submit t context request
+  | Authoring request ->
+    (match t.authoring with
+     | None -> Error (error Method_not_found "authoring handler is not installed")
+     | Some authoring ->
+       Authoring_installation.handle authoring ~actor ~connection:context request
+       |> Result.map ~f:(fun response -> Agent_protocol.Method_result.Authoring response))
 ;;
 
 let handle_authorized
@@ -3107,6 +3159,7 @@ let command_session_id = function
   | Schedule_create request -> Some request.session_id
   | Schedule_cancel request -> Some request.session_id
   | Ingress_submit request -> Some request.session_id
+  | Authoring _ -> None
 ;;
 
 let audit_outcome
@@ -3269,8 +3322,8 @@ let receipt_summary ~session_id result =
   | Job_get _
   | Schedule_list _
   | Schedule_get _
-  | Ingress_submit _ ->
-    Error (error Invalid_request "method has no generic command receipt")
+  | Ingress_submit _
+  | Authoring _ -> Error (error Invalid_request "method has no generic command receipt")
 ;;
 
 let retained_run_receipt t ~actor (request : Agent_protocol.Run_start.t) ~request_sha256 =
@@ -3760,7 +3813,12 @@ let execute t ~actor context ~inference_budget command =
 let handle t ?actor ~context ~inference_budget command =
   let open Result.Let_syntax in
   let%bind actor = Connection_context.request_actor context actor in
-  let%bind () = Authorization.authorize (Connection_context.principal context) command in
+  let%bind () =
+    Authorization.authorize
+      ~installed_authoring:(Option.is_some t.authoring)
+      (Connection_context.principal context)
+      command
+  in
   if
     (not (Connection_context.initialized context))
     && not
@@ -3824,11 +3882,40 @@ let handle t ?actor ~context ~inference_budget command =
 ;;
 
 let close_connection t context =
-  Connection_context.attachments context
-  |> List.iter ~f:(fun attachment ->
-    Option.iter (Session_registry.find t.registry attachment.session_id) ~f:(fun entry ->
-      ignore
-        (Agent_session.Session_actor.detach entry.actor attachment.id
-         : (unit, Agent_protocol.Error.t) result));
-    Connection_context.remove_attachment context attachment.id)
+  let authoring_outcome =
+    try
+      Ok
+        (match t.authoring with
+         | None -> Ok ()
+         | Some authoring ->
+           Authoring_installation.close_connection_and_wait authoring context)
+    with
+    | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+  in
+  let attachment_failure = ref None in
+  let attachments =
+    try Connection_context.attachments context with
+    | exn ->
+      attachment_failure := Some (exn, Stdlib.Printexc.get_raw_backtrace ());
+      []
+  in
+  List.iter attachments ~f:(fun attachment ->
+    try
+      Option.iter
+        (Session_registry.find t.registry attachment.session_id)
+        ~f:(fun entry ->
+          ignore
+            (Agent_session.Session_actor.detach entry.actor attachment.id
+             : (unit, Agent_protocol.Error.t) result));
+      Connection_context.remove_attachment context attachment.id
+    with
+    | exn ->
+      if Option.is_none !attachment_failure
+      then attachment_failure := Some (exn, Stdlib.Printexc.get_raw_backtrace ()));
+  match authoring_outcome, !attachment_failure with
+  | Error (exn, backtrace), _ -> Stdlib.Printexc.raise_with_backtrace exn backtrace
+  | Ok (Error error), _ -> Error error
+  | Ok (Ok ()), Some (exn, backtrace) ->
+    Stdlib.Printexc.raise_with_backtrace exn backtrace
+  | Ok (Ok ()), None -> Ok ()
 ;;

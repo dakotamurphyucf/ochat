@@ -6,6 +6,13 @@
  (preprocess (pps ppx_jane)))
 
 (library
+ (name chatml_editor_position)
+ (public_name ochat.chatml_editor_position)
+ (modules chatml_editor_position)
+ (libraries core chatml_source)
+ (preprocess (pps ppx_jane)))
+
+(library
  (name chatml_prepared_program)
  (public_name ochat.chatml_prepared_program)
  (modules chatml_prepared_program)

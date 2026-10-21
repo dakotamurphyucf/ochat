@@ -110,6 +110,89 @@ metadata. Explicit reload of changed package contents requires a restart, even
 when filenames remain the same. The active snapshot stays unchanged on failure.
 Daemon and embedded hosts provide authoring services by default for selected tools.
 
+`authoring_project_access` declares explicit read grants for configured
+`project_sources.external_roots` and selected Standard Project contracts. Each
+`read_grants` row pairs one root with an authenticated `principal_id` and its
+`authentication_kind`; each `selections` row maps an exact portable project
+member and Entry or Library environment request under that root to one of
+`one_off_v1`, `tool_v1`, `developer_tool_v1`, `moderator_v1` or
+`delegated_moderator_v1`. Root paths resolve relative to this configuration.
+The field is bounded, rejects duplicate or unknown roots/requests, and requires
+a restart when changed. The daemon binds it to the exact opened source host and
+installs native Project and selected ChatMD semantic methods alongside the
+default supplied-document, lexical and assistance methods. A configured root
+without an exact read grant for the actor grants no authoring source read; each
+request rechecks both original and current actors. Explicitly disabling the
+authoring host while configuring this field is a startup conflict. An Entry
+selection checks a Project context; a selected script in a host ChatMD document
+needs its own Library selection for that project and environment. Standard
+targets retain finite contract, source, parser, compiler and result allowances.
+This policy opens no additional root and grants no tool or execution permission.
+For example, these fields can appear together in `server` after replacing the
+root and principal with the deployment's actual values:
+
+```lisp
+(project_sources ((external_roots (./projects))))
+(authoring_project_access
+  ((read_grants
+     (((root ./projects)
+       (principal_id pri_example_operator)
+       (authentication_kind unix.peer))))
+   (selections
+     (((root ./projects)
+       (project chatml.project.json)
+       (request (entry ((name main) (environment prod))))
+       (target one_off_v1))))))
+```
+
+`authoring_upload_access` independently installs durable bundle upload. Its
+`mode` is `upload_only` or `augment_core`; the latter keeps the installed core
+and native authoring methods on the same service and Store. Each authenticated
+principal and authentication kind needs separate `upload_write`, `publish`,
+`bundle_read`, and `rebind` grants for those operations. Write alone cannot
+seal or publish a bundle, and reading a published bundle does not permit
+rebind. A `selections` row maps an exact manifest Entry or Library request and
+environment to a Standard target. A manifest cannot grant its own target,
+native source read, or access to a parent context. A parent-bearing upload is
+unavailable unless the host installs a separate physical parent policy.
+Changing this field requires a restart; the active configuration is never
+partly replaced. For a fresh, parentless upload-only service:
+
+```lisp
+(authoring_upload_access
+  ((mode upload_only)
+   (grants
+     (((principal_id pri_example_operator) (authentication_kind unix.peer)
+       (operation upload_write))
+      ((principal_id pri_example_operator) (authentication_kind unix.peer)
+       (operation publish))
+      ((principal_id pri_example_operator) (authentication_kind unix.peer)
+       (operation bundle_read))
+      ((principal_id pri_example_operator) (authentication_kind unix.peer)
+       (operation rebind))))
+   (selections
+     (((principal_id pri_example_operator) (authentication_kind unix.peer)
+       (request (entry ((name main) (environment prod))))
+       (selected_environment prod) (target tool_v1))))))
+```
+
+Configured Standard contracts are admitted once per distinct target under
+finite per-target and aggregate conversion limits. When native authoring and
+upload are both configured, they share that immutable contract cache. Upload
+budgets remain finite at each request and publication boundary.
+
+`server.developer` is an explicit opt-in for the daemon's Developer command
+service. Its source/target/principal rows and capacity are comparison policy;
+they reuse the Authoring read or upload grants above, authenticated method
+scopes, the native permission profile and the same Standard contract cache.
+The [complete `server.developer` field example](../design/chatml-developer-runtime.md)
+selects a supplied ChatMD script and a bearer principal. Omitting the field
+leaves Developer methods unavailable. See the
+[captured development workflow](../guide/chatml-development-workflow.md) for
+source selection, Check, Fixture/Live and explicit REPL Task driving.
+Local `--local` policy-file setup has
+its own integration path and is not implied by this daemon setting.
+
 ### Scoped external session helpers
 
 `server.session_helpers` optionally grants a named shell tool access to the same
@@ -196,8 +279,8 @@ a replacement snapshot.
 `maximum_events` advertised during initialization. `response_artifact_ms` bounds
 raw response-artifact lifetime. The legacy `completed_stream_ms` spelling is
 accepted only as the default for an omitted `response_artifact_ms`; it does not
-retain or enable replay of live deltas. Protocol 1.0 recovers through durable
-events and snapshots, not a completed-stream replay API. The maintenance service removes
+retain or enable replay of live deltas. Session synchronization recovers through
+durable events and snapshots, not a completed-stream replay API. The maintenance service removes
 expired response files with Eio without following symbolic links. Journals are
 pruned only behind an installed snapshot. Snapshot retention keeps the current
 checkpoint and one validated fallback. Journal pruning uses the older retained

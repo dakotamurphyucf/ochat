@@ -7,18 +7,22 @@ open Core
 
     The callback is borrowed for that resource/runtime lifetime and must reject
     after either original source or native owner closes. It receives the original
-    launch owner and bounded request from the actual selected job scope; neither
+    launch correlation and bounded request from the actual selected job scope; neither
     request JSON nor a stored artifact reference supplies source authority. *)
 type t
 
 val create
   :  implementation:Ochat_function.t
   -> prepare:
-       (owner:Agent_protocol.Job.launch_owner
+       (launch:Source_launch.t
         -> request:Background_request.t
         -> checkpoint:(unit -> unit)
         -> (Background_request.Agent_artifact.t option, Agent_protocol.Error.t) result)
   -> t
+
+(** Read-only physical comparison used by runtime pre-dispatch admission. It
+    neither invokes the preparer nor treats matching names/code as authority. *)
+val matches_implementation : t -> Ochat_function.t -> bool
 
 (** Before any callback, require the exact actual native function value stored in
     this registration. Managed and different native implementations reject. This
@@ -42,7 +46,7 @@ val create
 val prepare
   :  t
   -> binding:Tool_capability.binding
-  -> owner:Agent_protocol.Job.launch_owner
+  -> launch:Source_launch.t
   -> request:Background_request.t
   -> checkpoint:(unit -> unit)
   -> (Background_request.Agent_artifact.t option, Agent_protocol.Error.t) result

@@ -12,13 +12,14 @@ type t =
   ; token_path : string
   ; prompt_path : string
   ; physical_workspace : string
+  ; mutable public_principal : Agent_protocol.Id.Principal.t option
   }
 
 let path t value = Temporary_environment.path t.environment value
 let atom value = Sexp.to_string_mach (Sexp.Atom value)
 let generate_token () = Mirage_crypto_rng.generate 32 |> Base64.encode_exn
 
-let all_scope_names =
+let all_scope_values =
   Agent_protocol.Scope.
     [ List_prompts
     ; List_workspaces
@@ -40,9 +41,15 @@ let all_scope_names =
     ; Provider_select
     ; View_organization
     ; Manage_organization
+    ; Developer_check
+    ; Developer_fixture_run
+    ; Developer_live_run
+    ; Developer_repl
     ]
-  |> List.map ~f:Agent_protocol.Scope.to_string
 ;;
+
+let all_scope_names = List.map all_scope_values ~f:Agent_protocol.Scope.to_string
+let all_scopes = Agent_protocol.Scope.Set.of_list all_scope_values
 
 let token_record token principal scopes =
   let digest = Digestif.SHA256.digest_string token |> Digestif.SHA256.to_hex in
@@ -57,6 +64,7 @@ let token_record token principal scopes =
 let write_tokens_with_public_scopes t public_scopes =
   let admin = Agent_protocol.Id.Principal.create () in
   let public = Agent_protocol.Id.Principal.create () in
+  t.public_principal <- Some public;
   let contents =
     sprintf
       "(%s %s)"
@@ -162,6 +170,7 @@ let create environment ~name ~http_port =
     ; token_path = make "tokens.sexp"
     ; prompt_path = make "smoke.chatmd"
     ; physical_workspace
+    ; public_principal = None
     }
   in
   Temporary_environment.register_secret environment t.admin_token;
@@ -181,6 +190,7 @@ let unix_socket t = t.unix_socket
 let http_port t = t.http_port
 let admin_token t = t.admin_token
 let public_token t = t.public_token
+let public_principal t = Option.value_exn t.public_principal
 let prompt_path t = t.prompt_path
 let physical_workspace t = t.physical_workspace
 let environment t = t.environment

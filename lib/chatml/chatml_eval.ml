@@ -195,6 +195,11 @@ let rec finish_eval (initial_frames : Frame_env.env) (initial_res : eval_result)
       in
       let child_env = cl.env in
       let child_frames = param_frame :: cl.frames in
+      Chatml_trace.Scope.observe_span
+        ~kind:Chatml_trace.Event.Kind.Call_entered
+        ~source:child_env.source
+        ~span:cl.body.span
+        ~correlation:None;
       let next_res = eval_expr_tail ~tail:true child_env child_frames cl.body in
       loop child_frames next_res
   in
@@ -651,17 +656,20 @@ and select_module_exports ~span ~(origin : env) (env : env) visibility =
     define_var selected name value);
   selected
 
-and eval_stmt_with_exports (env : env) (frames : Frame_env.env) (s : resolved_stmt node)
-  : string list
-  =
+and eval_stmt_with_result (env : env) (frames : Frame_env.env) (s : resolved_stmt node) =
+  Chatml_trace.Scope.observe_span
+    ~kind:Chatml_trace.Event.Kind.Statement_entered
+    ~source:env.source
+    ~span:s.span
+    ~correlation:None;
   match s.value with
   | RSLet (pattern, e1) ->
     let value = finish_eval frames (eval_expr env frames e1) in
     (match pattern.value with
      | Binding_pattern.Name name ->
        define_var env name value;
-       [ name ]
-     | Wildcard -> []
+       [ name ], [ name ], None
+     | Wildcard -> [], [], None
      | Tuple _ ->
        let bindings = extract_binding env pattern value in
        (* All shape/resource/cancellation checks precede cell publication. No
@@ -669,13 +677,15 @@ and eval_stmt_with_exports (env : env) (frames : Frame_env.env) (s : resolved_st
        let cells = List.map bindings ~f:(fun (name, value) -> name, ref value) in
        List.iter cells ~f:(fun (name, cell) ->
          Hashtbl.set env.bindings ~key:name ~data:cell);
-       List.map bindings ~f:fst)
+       let names = List.map bindings ~f:fst in
+       names, names, None)
   | RSLetRec bindings ->
     List.iter bindings ~f:(fun (nm, _) -> define_var env nm VUnit);
     List.iter bindings ~f:(fun (nm, rhs_expr) ->
       let v = finish_eval frames (eval_expr env frames rhs_expr) in
       update_var env nm v);
-    List.map bindings ~f:fst
+    let names = List.map bindings ~f:fst in
+    names, names, None
   | RSModule { name; visibility; body } ->
     let menv = eval_module_value env frames body in
     let menv =
@@ -684,13 +694,19 @@ and eval_stmt_with_exports (env : env) (frames : Frame_env.env) (s : resolved_st
       | Some visibility -> select_module_exports ~span:s.span ~origin:env menv visibility
     in
     define_var env name (VModule menv);
-    [ name ]
+    [ name ], [ name ], None
   | RSOpen mname ->
-    let _imported = import_module_bindings ~span:s.span env mname in
-    []
+    let imported = import_module_bindings ~span:s.span env mname in
+    [], imported, None
   | RSExpr e ->
-    ignore (finish_eval frames (eval_expr env frames e));
-    []
+    let value = finish_eval frames (eval_expr env frames e) in
+    [], [], Some value
+
+and eval_stmt_with_exports (env : env) (frames : Frame_env.env) (s : resolved_stmt node)
+  : string list
+  =
+  let exports, _introduced, _expression_value = eval_stmt_with_result env frames s in
+  exports
 
 and eval_stmt (env : env) (frames : Frame_env.env) (s : resolved_stmt node) : unit =
   ignore (eval_stmt_with_exports env frames s)
@@ -739,6 +755,44 @@ let eval_captured_program env ~source prog =
       Ok env
     with
     | Runtime_error diagnostic -> Error diagnostic)
+;;
+
+module Staged_statement = struct
+  type t =
+    { environment : env
+    ; introduced_names : string list
+    ; expression_value : value option
+    }
+
+  let environment t = t.environment
+  let introduced_names t = t.introduced_names
+  let expression_value t = t.expression_value
+end
+
+let eval_captured_statement env ~source ~configured_modules statement =
+  let checkpoint () =
+    Option.iter env.control ~f:(fun control -> control.diagnostic_checkpoint ())
+  in
+  match
+    Chatml_source.locate
+      source
+      ~start_byte:statement.span.left.offset
+      ~end_byte:statement.span.right.offset
+      ~checkpoint
+  with
+  | Error _ ->
+    Error
+      (Chatml_diagnostic.create
+         "Resolved statement span does not belong to captured source")
+  | Ok _ ->
+    let environment = { (copy_env env) with source = Some source; configured_modules } in
+    (try
+       let _exports, introduced_names, expression_value =
+         eval_stmt_with_result environment [] statement
+       in
+       Ok { Staged_statement.environment; introduced_names; expression_value }
+     with
+     | Runtime_error diagnostic -> Error diagnostic)
 ;;
 
 let select_exports env ~visibility ~span =

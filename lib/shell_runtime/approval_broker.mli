@@ -19,6 +19,9 @@ type ui_response =
 
 type error =
   | Closed
+  | Capacity_exhausted
+  | Admission_denied of string
+  | Deadline_unavailable
   | Unknown_request of string
   | Duplicate_request of string
 [@@deriving sexp, compare, equal]
@@ -34,6 +37,36 @@ type provider =
 (** [create ?on_pending ()] creates a broker. [on_pending] runs after a new
     request becomes visible and must not block waiting for a response. *)
 val create : ?on_pending:(ui_request -> unit) -> unit -> t
+
+module Limits : sig
+  type t
+
+  (** Positive pending count and monotonic wait in (0, 3600] seconds. The
+      per-request absolute deadline is checked for Mtime representation
+      before publication, so a large finite input cannot wait forever. *)
+  val create : max_pending:int -> wait_seconds:float -> (t, string) result
+end
+
+(** Bounded process-local counterpart for Developer approval. [admit] is a
+    trusted nonyielding check of this request's lexical owner and retained
+    byte bound, run before insertion. Capacity is checked atomically under
+    the broker mutex before insertion; a full or denied broker exposes no
+    pending request. [on_pending] runs after publication without awaiting a
+    client. [on_finished] runs exactly once after removal on response, timeout,
+    cancellation, exception or close, so a wrapper can delete typed-ID
+    metadata. [admit], [on_pending] and [on_finished] are trusted nonyielding,
+    nonraising callbacks. The wait uses [clock], not a transport request
+    switch. Timeout denies the request. Raw Eio cancellation propagates through
+    the reviewer; ordinary create remains unchanged for existing Session
+    users. *)
+val create_bounded
+  :  clock:_ Eio.Time.Mono.t
+  -> limits:Limits.t
+  -> admit:(ui_request -> (unit, string) result)
+  -> on_pending:(ui_request -> unit)
+  -> on_finished:(ui_request -> unit)
+  -> unit
+  -> t
 
 (** [request t request] waits cooperatively until the request is answered,
     cancelled, or the broker closes. *)

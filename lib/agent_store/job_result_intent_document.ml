@@ -54,9 +54,10 @@ let decode json =
   let metadata = Blob_metadata_document.value (Blob_stage_documents.temporary stage) in
   if
     (not
-       (Option.exists
-          metadata.target_session
-          ~f:(P.Id.Session.equal reference.session_id)))
+       (match metadata.target with
+        | Blob_metadata.Target.Session target ->
+          P.Id.Session.equal target reference.session_id
+        | Unassigned | Developer _ -> false))
     || (not (String.equal metadata.allowed_use (P.Job_artifact.allowed_use reference)))
     || not (Blob_metadata.blob_equal metadata.blob reference.blob)
   then F.invalid "intent" "artifact reference differs from private stage ownership"

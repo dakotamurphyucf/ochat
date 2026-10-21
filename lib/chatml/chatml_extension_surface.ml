@@ -157,6 +157,21 @@ let tool_v1 =
     }
 ;;
 
+let developer_tool_v1 =
+  let canonical_model =
+    List.find_exn S.moderator_modules ~f:(fun module_ ->
+      String.equal module_.name "Model")
+  in
+  let model_spawn : S.builtin_module =
+    { canonical_model with
+      exports =
+        List.filter canonical_model.exports ~f:(fun builtin ->
+          String.equal builtin.name "spawn" || String.equal builtin.name "spawn_text")
+    }
+  in
+  Surface.merge tool_v1 { Surface.empty with modules = [ model_spawn ] }
+;;
+
 let one_off_entrypoints = [ "main", S.TFun ([ S.json_ty ], S.task_ty S.json_ty) ]
 
 let tool_entrypoints =

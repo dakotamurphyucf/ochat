@@ -16,7 +16,7 @@ val create : Chatml.Chatml_builtin_surface.surface -> checkpoint:(unit -> unit) 
 module Public_module : sig
   (** Completed compiler-owned public schemes/types. Weak cells deliberately
       shared; not a domain-transfer value or OCH127 frozen semantics. *)
-  type t
+  type t = Chatml_typechecker.Configured_resolution.Public_module.t
 
   val value_scheme : t -> Chatml_typechecker.typ
   val types : t -> Chatml_typechecker.Type_alias.t
@@ -48,10 +48,68 @@ val check_unit
   -> Parse.Unit.t
   -> (Checked_unit.t, Chatml_diagnostic.t) Result.t
 
+module Repl_statement : sig
+  (** One actual node selected by index from an admitted complete parsed unit.
+      All scopes contain candidate-owned inference cells; none is published by
+      this checker adapter. BEFORE retains old lexical names with any compatible
+      constraints acquired during checking. AFTER adds only successfully typed
+      new bindings/aliases. Alias templates preserve their existing closure
+      rules; the checked annotations belong to the exact captured snippet. *)
+  type t
+
+  val statement : t -> Chatml.Chatml_lang.stmt_node
+  val checked : t -> Chatml_typechecker.checked_program
+  val before_values : t -> Chatml_typechecker.Value_scope.t
+  val before_types : t -> Chatml_typechecker.Type_alias.t
+  val after_values : t -> Chatml_typechecker.Value_scope.t
+  val after_types : t -> Chatml_typechecker.Type_alias.t
+  val introduced_values : t -> string list
+
+  (** For [SExpr], the type inferred and recorded at that expression's exact
+      source span during this check; [None] for every other statement. This
+      borrows compiler-owned cells only until the caller's bounded freeze. It
+      never re-infers the expression for a later display receipt. *)
+  val expression_type : t -> Chatml_typechecker.typ option
+end
+
+(** Check exactly one source-owned top-level statement against the candidate's
+    copied lexical/alias namespaces using THIS SAME [t] inference machine as
+    [check_node] for newly selected canonical dependencies. Reuse the existing
+    [with_state] source/guarded-callback boundary and
+    [infer_stmt_with_exports] rules; do not infer a fresh unit, replay project
+    main or create a second checker. Validate [parsed]'s exact source ID/digest
+    against [source], its implementation phase, and [statement_index] before
+    inference; select the node from that parsed unit, never from caller-supplied
+    offsets. The caller validates Repl_scope currentness before and after this
+    yielding work. Per-statement annotation tables are fresh but share the
+    machine's candidate inference identities. Diagnostics retain this source's
+    real statement span. Callback/checkpoint exceptions and raw backtraces
+    propagate unchanged under the existing with_state protection. *)
+val check_repl_statement
+  :  t
+  -> source:Lookup.t
+  -> require:
+       (source:Lookup.t -> Reference.t -> (Public_module.t, Chatml_diagnostic.t) Result.t)
+  -> parsed:Parse.Unit.t
+  -> statement_index:int
+  -> before_values:Chatml_typechecker.Value_scope.t
+  -> before_types:Chatml_typechecker.Type_alias.t
+  -> (Repl_statement.t, Chatml_diagnostic.t) Result.t
+
 (** Static-only engine; runtime wrapper above immediately projects. *)
 val create_static
   :  ?recorder:Chatml_typechecker.Semantic.t
   -> Chatml.Chatml_static_surface.t
+  -> checkpoint:(unit -> unit)
+  -> t
+
+(** Fresh REPL inference machine seeded with the names reserved across the
+    detached lexical and configured-public roots. The seed is prevalidated by
+    the OCH-269 root-copy bridge; this does not import an old machine or copy
+    any inference cell. Ordinary [create_static] remains unchanged. *)
+val create_static_for_repl
+  :  Chatml.Chatml_static_surface.t
+  -> name_seed:Chatml_typechecker.Repl_type_roots.Name_seed.t
   -> checkpoint:(unit -> unit)
   -> t
 

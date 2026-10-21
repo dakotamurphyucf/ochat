@@ -83,6 +83,7 @@ type t =
   | Schedule_create of Schedule.Create_request.t
   | Schedule_cancel of Schedule.Cancel_request.t
   | Ingress_submit of Ingress.Submit_request.t
+  | Authoring of (Authoring_wire.Request.t[@sexp.opaque])
 [@@deriving sexp]
 
 (** [method_name t] returns the stable protocol method. *)
@@ -94,5 +95,7 @@ val params : t -> Jsonaf.t
 (** [of_method_and_params ~method_ ~params] performs closed typed dispatch. *)
 val of_method_and_params : method_:string -> params:Jsonaf.t -> (t, Error.t) result
 
-(** [supported_methods] contains every method accepted by the closed dispatcher. *)
+(** [supported_methods] is the codec inventory: every method accepted by this
+    typed decoder. It does not assert that a server has installed or advertised
+    a handler for the method. *)
 val supported_methods : string list

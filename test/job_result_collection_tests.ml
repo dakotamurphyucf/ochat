@@ -6,7 +6,12 @@ module Results = Agent_store.Job_result_store
 module Publisher = Results.Publisher
 
 let limits : Publisher.collection_limits =
-  { max_intents = 16; max_entries = 1024; max_bytes = 262144; max_file_bytes = 16384 }
+  { max_intents = 16
+  ; max_entries = 1024
+  ; max_bytes = 262144
+  ; max_file_bytes = 16384
+  ; max_work = 100_000
+  }
 ;;
 
 let publisher env sw blobs session =

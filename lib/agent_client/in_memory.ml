@@ -1,4 +1,4 @@
-let create ~request ~notifications ~close =
+let make ~transport ~notifications ~close =
   let closed, close_resolver = Eio.Promise.create () in
   let closed_flag = ref false in
   let mutex = Eio.Mutex.create () in
@@ -14,8 +14,7 @@ let create ~request ~notifications ~close =
     in
     if should_close then close ()
   in
-  Transport.create
-    ~request
+  transport
     ~next_notification:(fun () ->
       Eio.Fiber.first
         (fun () -> Some (Eio.Stream.take notifications))
@@ -24,4 +23,56 @@ let create ~request ~notifications ~close =
            None))
     ~close:close_once
   |> Connection.create
+;;
+
+let create ~request ~notifications ~close =
+  let transport ~next_notification ~close =
+    Transport.create ~request ~next_notification ~close
+  in
+  make ~transport ~notifications ~close
+;;
+
+let create_with_developer ~request ~request_developer ~notifications ~close =
+  let transport ~next_notification ~close =
+    Transport.create_with_developer ~request ~request_developer ~next_notification ~close
+  in
+  make ~transport ~notifications ~close
+;;
+
+let create_with_developer_repl
+      ~request
+      ~request_developer
+      ~request_repl
+      ~notifications
+      ~close
+  =
+  let transport ~next_notification ~close =
+    Transport.create_with_developer_repl
+      ~request
+      ~request_developer
+      ~request_repl
+      ~next_notification
+      ~close
+  in
+  make ~transport ~notifications ~close
+;;
+
+let create_with_developer_repl_trace
+      ~request
+      ~request_developer
+      ~request_repl
+      ~request_trace
+      ~notifications
+      ~close
+  =
+  let transport ~next_notification ~close =
+    Transport.create_with_developer_repl_trace
+      ~request
+      ~request_developer
+      ~request_repl
+      ~request_trace
+      ~next_notification
+      ~close
+  in
+  make ~transport ~notifications ~close
 ;;

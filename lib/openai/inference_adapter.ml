@@ -214,7 +214,16 @@ let create
       ~request
       ~configuration
       ~fingerprint:(D.Prepared.fingerprint prepared)
-      ~run:(fun ~sw ~scope ~accounting_id ~note_delivery ~on_event ~on_observation ->
+      ~run:
+        (fun
+          ~sw
+          ~scope
+          ~accounting_id
+          ~note_delivery
+          ~on_event
+          ~on_observation
+          ~submission_guard
+        ->
         Eio.Switch.check sw;
         let projector =
           Inference_output.create ~target:(R.target request) ~scope ~accounting_id ~limits
@@ -261,6 +270,7 @@ let create
         try
           let result =
             D.run_with_transport
+              ~submission_guard
               ~cache_assets:(R.assets request)
               driver
               ~session

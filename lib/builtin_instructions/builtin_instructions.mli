@@ -25,6 +25,23 @@ module Error : sig
   type t = Unknown_id of Id.t [@@deriving equal, sexp_of]
 end
 
+module Enumeration_error : sig
+  type t =
+    | Invalid_limit
+    | Too_many
+  [@@deriving equal, sexp_of]
+end
+
+(** Enumerate only reviewed IDs in this build's embedded table, charging each
+    visited ID before retaining it. Reject an invalid or insufficient ceiling
+    without scanning an installed directory. Each returned ID can be resolved
+    through [find] to the exact embedded asset and SHA-256. Callback failures
+    and cancellation propagate unchanged. *)
+val installed_ids
+  :  max_items:int
+  -> checkpoint:(unit -> unit)
+  -> (Id.t list, Enumeration_error.t) Result.t
+
 (** The initial catalog contains [chatml]. Other identifiers, including [skills],
     reject until their actual instruction contents are reviewed and embedded.
     Captured document replay uses retained output and never repeats lookup. *)

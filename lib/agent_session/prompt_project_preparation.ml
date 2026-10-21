@@ -212,6 +212,7 @@ let capture_with
 ;;
 
 let capture
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
       policy
       ?startup
       ~mode
@@ -236,7 +237,7 @@ let capture
     ~artifact_store
     ~baseline_limits
     ~custody_limits
-    ~capture_sources:(Sources.capture ~root_role)
+    ~capture_sources:(Sources.capture ~tool_contract ~root_role)
     ~host
     ~scope
     ~capture
@@ -247,6 +248,7 @@ let capture
 ;;
 
 let capture_child
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
       policy
       ?startup
       ~mode
@@ -271,7 +273,7 @@ let capture_child
     ~artifact_store
     ~baseline_limits
     ~custody_limits
-    ~capture_sources:(Sources.capture_child ~invocation)
+    ~capture_sources:(Sources.capture_child ~tool_contract ~invocation)
     ~host
     ~scope
     ~capture

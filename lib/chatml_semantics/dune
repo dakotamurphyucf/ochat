@@ -3,9 +3,11 @@
  (public_name ochat.chatml_semantics)
  (modules chatml_semantics chatml_semantic_identity chatml_semantic_limits
   chatml_semantic_error chatml_semantic_budget chatml_semantic_query
-  chatml_semantic_snapshot chatml_semantic_partial chatml_semantic_publication)
+  chatml_semantic_snapshot chatml_semantic_partial chatml_semantic_publication
+  chatml_semantic_provisional_input)
  (private_modules chatml_semantic_identity chatml_semantic_limits
   chatml_semantic_error chatml_semantic_budget chatml_semantic_query
-  chatml_semantic_snapshot chatml_semantic_partial chatml_semantic_publication)
+  chatml_semantic_snapshot chatml_semantic_partial chatml_semantic_publication
+  chatml_semantic_provisional_input)
  (libraries core chatml chatml_typechecker chatml_graph chatml_prepared_program chatml_checked_graph)
  (preprocess (pps ppx_jane)))

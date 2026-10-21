@@ -1,5 +1,5 @@
 (library
  (name chatml_linked_runtime_tests)
- (libraries core expect_test_helpers_core eio eio_main chatml chatml_source chatml_prepared_program chatml_diagnostic chatml_graph chatml_linked_program chatml_linked_runtime chatml_execution chatml_host_runtime)
+ (libraries core expect_test_helpers_core eio eio_main eio.mock chatml chatml_source chatml_prepared_program chatml_diagnostic chatml_graph chatml_linked_program chatml_linked_runtime chatml_execution chatml_host_runtime chatml_repl_typing chatml_repl_execution chatml_typechecker)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))

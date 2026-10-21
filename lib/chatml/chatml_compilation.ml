@@ -4,9 +4,22 @@ module X = Chatml.Chatml_extension_surface
 type target =
   | One_off_v1
   | Tool_v1
+  | Developer_tool_v1
   | Moderator_v1
   | Delegated_moderator_v1
 [@@deriving sexp, equal]
+
+module Tool_contract = struct
+  type t =
+    | Standard
+    | Developer_model_spawn
+  [@@deriving sexp, equal, compare]
+
+  let target = function
+    | Standard -> Tool_v1
+    | Developer_model_spawn -> Developer_tool_v1
+  ;;
+end
 
 type limits =
   { wall_seconds : float
@@ -36,6 +49,7 @@ let error ?diagnostic code message =
 let surface = function
   | One_off_v1 -> X.one_off_v1, X.one_off_entrypoints
   | Tool_v1 -> X.tool_v1, X.tool_entrypoints
+  | Developer_tool_v1 -> X.developer_tool_v1, X.tool_entrypoints
   | Moderator_v1 -> X.moderator_v1, X.moderator_entrypoints
   | Delegated_moderator_v1 -> X.delegated_moderator_v1, X.moderator_entrypoints
 ;;
@@ -43,6 +57,7 @@ let surface = function
 let static_target = function
   | One_off_v1 -> Chatml.Chatml_compiler_contract.Target.One_off_v1
   | Tool_v1 -> Tool_v1
+  | Developer_tool_v1 -> Developer_tool_v1
   | Moderator_v1 -> Moderator_v1
   | Delegated_moderator_v1 -> Delegated_moderator_v1
 ;;
@@ -129,8 +144,8 @@ let run_worker
   let execute () =
     let clock = Eio.Stdenv.mono_clock env in
     let started = Eio.Time.Mono.now clock in
-    let checkpoint () =
-      Eio.Fiber.yield ();
+    let check () =
+      Eio.Fiber.check ();
       match policy with
       | Unrestricted -> ()
       | Bounded limits ->
@@ -138,6 +153,14 @@ let run_worker
         if Float.(Mtime.Span.to_float_ns elapsed >= limits.wall_seconds *. 1e9)
         then raise Eio.Time.Timeout
     in
+    (* Dense metadata/type traversals may checkpoint per emitted field. Keep
+       cancellation/deadline checks at that granularity while bounding scheduler
+       entries independently. Preparation hands this owner to its joined domain;
+       the two phases never invoke it concurrently. *)
+    let checkpoints =
+      Chatml_compilation_checkpoint.create ~check ~yield:Eio.Fiber.yield
+    in
+    let checkpoint () = Chatml_compilation_checkpoint.run checkpoints in
     let%bind input = prepare ~checkpoint in
     Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () ->
       compile input ~checkpoint)
@@ -170,20 +193,63 @@ let run_worker
        Result.map_error failure ~f:map_policy_error)
 ;;
 
+let trace_compile_start () =
+  Chatml_trace.Scope.observe_unlocated
+    ~kind:(Chatml_trace.Event.Kind.Phase_started Chatml_trace.Event.Phase.Compilation)
+    ~correlation:None
+;;
+
+let trace_compile_finish result =
+  (match result with
+   | Ok _ ->
+     Chatml_trace.Scope.observe_unlocated
+       ~kind:(Chatml_trace.Event.Kind.Phase_finished Chatml_trace.Event.Phase.Compilation)
+       ~correlation:None
+   | Error error ->
+     let kind, site =
+       match error.diagnostic with
+       | None ->
+         let kind =
+           match error.code with
+           | "chatml.compile_timeout" | "chatml.compiler_limit" | "chatml.source_limit" ->
+             Chatml_trace.Event.Failure.Resource_limit
+           | _ -> Other
+         in
+         kind, None
+       | Some diagnostic ->
+         let kind =
+           match diagnostic.stage with
+           | Parse -> Chatml_trace.Event.Failure.Parse
+           | Typecheck -> Typecheck
+           | Link -> Link
+         in
+         kind, diagnostic.diagnostic.site
+     in
+     Chatml_trace.Scope.observe_site
+       ~kind:(Chatml_trace.Event.Kind.Unrecovered_failure kind)
+       ~site
+       ~correlation:None);
+  result
+;;
+
 let compile_input source ~policy ~env ~target =
-  run_worker
-    ~map_policy_error:Fn.id
-    ~exception_policy:Legacy_mapping
-    ~input_bytes:(Input.byte_length source)
-    ~policy
-    ~env
-    ~prepare:(fun ~checkpoint:_ -> Ok (source, target))
-    ~compile:(fun (source, target) ~checkpoint ->
-      let surface, required_bindings = surface target in
-      match Input.compile source ~checkpoint ~surface ~required_bindings with
-      | Ok compiled -> Ok compiled
-      | Error diagnostic ->
-        error ~diagnostic "chatml.invalid_handler" diagnostic.formatted)
+  trace_compile_start ();
+  let result =
+    run_worker
+      ~map_policy_error:Fn.id
+      ~exception_policy:Legacy_mapping
+      ~input_bytes:(Input.byte_length source)
+      ~policy
+      ~env
+      ~prepare:(fun ~checkpoint:_ -> Ok (source, target))
+      ~compile:(fun (source, target) ~checkpoint ->
+        let surface, required_bindings = surface target in
+        match Input.compile source ~checkpoint ~surface ~required_bindings with
+        | Ok compiled -> Ok compiled
+        | Error diagnostic ->
+          error ~diagnostic "chatml.invalid_handler" diagnostic.formatted)
+  in
+  trace_compile_finish result
 ;;
 
 let compile_with_policy ~policy ~env ~target ~source () =
@@ -202,18 +268,22 @@ let compile_with_surface
       ~source
       ()
   =
-  run_worker
-    ~input_bytes:(String.length source)
-    ~policy:(Bounded limits)
-    ~env
-    ~exception_policy:Preserve_unexpected
-    ~map_policy_error:Fn.id
-    ~prepare:(fun ~checkpoint:_ -> Ok source)
-    ~compile:(fun source ~checkpoint ->
-      match Input.compile (Text source) ~checkpoint ~surface ~required_bindings with
-      | Ok compiled -> Ok compiled
-      | Error diagnostic ->
-        error ~diagnostic "chatml.invalid_handler" diagnostic.formatted)
+  trace_compile_start ();
+  let result =
+    run_worker
+      ~input_bytes:(String.length source)
+      ~policy:(Bounded limits)
+      ~env
+      ~exception_policy:Preserve_unexpected
+      ~map_policy_error:Fn.id
+      ~prepare:(fun ~checkpoint:_ -> Ok source)
+      ~compile:(fun source ~checkpoint ->
+        match Input.compile (Text source) ~checkpoint ~surface ~required_bindings with
+        | Ok compiled -> Ok compiled
+        | Error diagnostic ->
+          error ~diagnostic "chatml.invalid_handler" diagnostic.formatted)
+  in
+  trace_compile_finish result
 ;;
 
 let compile_captured_with_policy source ~policy ~env ~target () =
@@ -247,20 +317,25 @@ let compile_graph input contract ~max_dependency_depth ~checkpoint =
 ;;
 
 let compile_prepared_with_policy input ~policy ~max_dependency_depth ~env ~target () =
-  run_worker
-    ~map_policy_error:Fn.id
-    ~exception_policy:Legacy_mapping
-    ~input_bytes:
-      (Chatml_prepared_program.Accounting.input_bytes
-         (Chatml_prepared_program.accounting input))
-    ~policy
-    ~env
-    ~prepare:(fun ~checkpoint ->
-      Ok
-        ( input
-        , Chatml.Chatml_compiler_contract.for_target (static_target target) ~checkpoint ))
-    ~compile:(fun (input, contract) ~checkpoint ->
-      compile_graph input contract ~max_dependency_depth ~checkpoint)
+  trace_compile_start ();
+  let result =
+    run_worker
+      ~map_policy_error:Fn.id
+      ~exception_policy:Legacy_mapping
+      ~input_bytes:
+        (Chatml_prepared_program.Accounting.input_bytes
+           (Chatml_prepared_program.accounting input))
+      ~policy
+      ~env
+      ~prepare:(fun ~checkpoint ->
+        Ok
+          ( input
+          , Chatml.Chatml_compiler_contract.for_target (static_target target) ~checkpoint
+          ))
+      ~compile:(fun (input, contract) ~checkpoint ->
+        compile_graph input contract ~max_dependency_depth ~checkpoint)
+  in
+  trace_compile_finish result
 ;;
 
 let compile_prepared
@@ -290,6 +365,93 @@ end
 exception Metadata_limit
 exception Metadata_allocation_limit
 
+let admit_prepared_contract input ~contract ?expected_entry ~policy ~checkpoint () =
+  let module Prepared = Chatml_prepared_program in
+  let module Captured = Chatml_source in
+  let module Contract = Chatml.Chatml_compiler_contract in
+  let input_bytes = Prepared.Accounting.input_bytes (Prepared.accounting input) in
+  let remaining =
+    match policy with
+    | Unrestricted -> None
+    | Bounded limits -> Some (ref (limits.max_source_bytes - input_bytes))
+  in
+  let retain bytes =
+    match remaining with
+    | None -> ()
+    | Some remaining ->
+      if bytes > !remaining then raise Metadata_limit;
+      remaining := !remaining - bytes
+  in
+  try
+    let open Result.Let_syntax in
+    let%bind entry =
+      match Prepared.find_source input (Prepared.entry input) with
+      | Some source -> Ok source
+      | None -> error "chatml.entry_mismatch" "prepared entry is unavailable"
+    in
+    let%bind () =
+      match expected_entry with
+      | None -> Ok ()
+      | Some (expected : Entry_expectation.t) ->
+        let actual = Captured.contents entry in
+        (* Only physical retained-string sharing avoids a second input debit. *)
+        if not (phys_equal actual expected.contents)
+        then retain (String.length expected.contents);
+        checkpoint ();
+        if
+          (not (Int.equal (String.length actual) (String.length expected.contents)))
+          || not (Captured.Digest.equal (Captured.digest entry) expected.digest)
+        then error "chatml.entry_mismatch" "prepared entry differs from its source owner"
+        else (
+          let rec equal offset =
+            checkpoint ();
+            if offset >= String.length actual
+            then true
+            else (
+              let stop = Int.min (String.length actual) (offset + 4096) in
+              let rec bytes index =
+                if index >= stop
+                then equal stop
+                else if Char.equal actual.[index] expected.contents.[index]
+                then bytes (index + 1)
+                else false
+              in
+              bytes offset)
+          in
+          if equal 0
+          then Ok ()
+          else
+            error "chatml.entry_mismatch" "prepared entry differs from its source owner")
+    in
+    (* A quotient/residue debit represents 32 times the remaining canonical
+       allowance without overflowing a maximal host integer. *)
+    let conversion_remaining =
+      Option.map remaining ~f:(fun remaining -> ref (!remaining, 0))
+    in
+    let allocate bytes =
+      Option.iter conversion_remaining ~f:(fun remaining ->
+        let units, residue = !remaining in
+        let whole = bytes / 32 in
+        let part = bytes % 32 in
+        if whole > units || (Int.equal whole units && part > residue)
+        then raise Metadata_allocation_limit;
+        remaining
+        := if part <= residue
+           then units - whole, residue - part
+           else units - whole - 1, residue + 32 - part)
+    in
+    retain (Contract.input_bytes contract ~checkpoint ~allocate);
+    checkpoint ();
+    Ok (input, contract)
+  with
+  | Metadata_limit ->
+    error "chatml.source_limit" "native entry/contract exceeds compiler input allowance"
+  | Metadata_allocation_limit ->
+    error
+      "chatml.metadata_allocation_limit"
+      "native contract exceeds conservative conversion allowance"
+;;
+
 let compile_prepared_with_contract_and_policy
       input
       ~contract
@@ -303,102 +465,20 @@ let compile_prepared_with_contract_and_policy
   let module Captured = Chatml_source in
   let module Contract = Chatml.Chatml_compiler_contract in
   let input_bytes = Prepared.Accounting.input_bytes (Prepared.accounting input) in
-  run_worker
-    ~map_policy_error:Fn.id
-    ~exception_policy:Legacy_mapping
-    ~input_bytes
-    ~policy
-    ~env
-    ~prepare:(fun ~checkpoint ->
-      let open Result.Let_syntax in
-      let remaining =
-        match policy with
-        | Unrestricted -> None
-        | Bounded limits -> Some (ref (limits.max_source_bytes - input_bytes))
-      in
-      let retain bytes =
-        match remaining with
-        | None -> ()
-        | Some remaining ->
-          if bytes > !remaining then raise Metadata_limit;
-          remaining := !remaining - bytes
-      in
-      try
-        let%bind entry =
-          match Prepared.find_source input (Prepared.entry input) with
-          | Some source -> Ok source
-          | None -> error "chatml.entry_mismatch" "prepared entry is unavailable"
-        in
-        let%bind () =
-          match expected_entry with
-          | None -> Ok ()
-          | Some (expected : Entry_expectation.t) ->
-            let actual = Captured.contents entry in
-            (* Identity here is deliberately physical retained-string sharing;
-               equal separately retained strings still consume both allowances. *)
-            if not (phys_equal actual expected.contents)
-            then retain (String.length expected.contents);
-            checkpoint ();
-            if
-              (not (Int.equal (String.length actual) (String.length expected.contents)))
-              || not (Captured.Digest.equal (Captured.digest entry) expected.digest)
-            then
-              error "chatml.entry_mismatch" "prepared entry differs from its source owner"
-            else (
-              let rec equal offset =
-                checkpoint ();
-                if offset >= String.length actual
-                then true
-                else (
-                  let stop = Int.min (String.length actual) (offset + 4096) in
-                  let rec bytes index =
-                    if index >= stop
-                    then equal stop
-                    else if Char.equal actual.[index] expected.contents.[index]
-                    then bytes (index + 1)
-                    else false
-                  in
-                  bytes offset)
-              in
-              if equal 0
-              then Ok ()
-              else
-                error
-                  "chatml.entry_mismatch"
-                  "prepared entry differs from its source owner")
-        in
-        (* Division/remainder represents 32 times the source allowance without
-           multiplying a potentially maximal host integer. These are conservative
-           conversion debits, separate from actual canonical input bytes. *)
-        let conversion_remaining =
-          Option.map remaining ~f:(fun remaining -> ref (!remaining, 0))
-        in
-        let allocate bytes =
-          Option.iter conversion_remaining ~f:(fun remaining ->
-            let units, residue = !remaining in
-            let whole = bytes / 32 in
-            let part = bytes % 32 in
-            if whole > units || (Int.equal whole units && part > residue)
-            then raise Metadata_allocation_limit;
-            remaining
-            := if part <= residue
-               then units - whole, residue - part
-               else units - whole - 1, residue + 32 - part)
-        in
-        retain (Contract.input_bytes contract ~checkpoint ~allocate);
-        checkpoint ();
-        Ok (input, contract)
-      with
-      | Metadata_limit ->
-        error
-          "chatml.source_limit"
-          "native entry/contract exceeds compiler input allowance"
-      | Metadata_allocation_limit ->
-        error
-          "chatml.metadata_allocation_limit"
-          "native contract exceeds conservative conversion allowance")
-    ~compile:(fun (input, contract) ~checkpoint ->
-      compile_graph input contract ~max_dependency_depth ~checkpoint)
+  trace_compile_start ();
+  let result =
+    run_worker
+      ~map_policy_error:Fn.id
+      ~exception_policy:Legacy_mapping
+      ~input_bytes
+      ~policy
+      ~env
+      ~prepare:(fun ~checkpoint ->
+        admit_prepared_contract input ~contract ?expected_entry ~policy ~checkpoint ())
+      ~compile:(fun (input, contract) ~checkpoint ->
+        compile_graph input contract ~max_dependency_depth ~checkpoint)
+  in
+  trace_compile_finish result
 ;;
 
 let compile_prepared_with_contract
@@ -474,4 +554,126 @@ let analyze_prepared
     ~env
     ~target
     ()
+;;
+
+let analyze_prepared_prefix_with_policy
+      input
+      ~source
+      ~cursor_byte
+      ~policy
+      ~semantic_limits
+      ~max_dependency_depth
+      ~env
+      ~target
+      ()
+  =
+  run_worker
+    ~map_policy_error:(fun error -> Analysis_error.Policy error)
+    ~exception_policy:Preserve_unexpected
+    ~input_bytes:
+      (Chatml_prepared_program.Accounting.input_bytes
+         (Chatml_prepared_program.accounting input))
+    ~policy
+    ~env
+    ~prepare:(fun ~checkpoint ->
+      Ok
+        ( input
+        , Chatml.Chatml_compiler_contract.for_target (static_target target) ~checkpoint ))
+    ~compile:(fun (input, contract) ~checkpoint ->
+      Chatml_semantics.analyze_prefix
+        input
+        ~source
+        ~cursor_byte
+        ~contract
+        ~max_dependency_depth
+        ~limits:semantic_limits
+        ~checkpoint
+      |> Result.map_error ~f:(fun error -> Analysis_error.Analysis error))
+;;
+
+let analyze_prepared_prefix
+      input
+      ~source
+      ~cursor_byte
+      ?(limits = default_limits)
+      ~semantic_limits
+      ~max_dependency_depth
+      ~env
+      ~target
+      ()
+  =
+  analyze_prepared_prefix_with_policy
+    input
+    ~source
+    ~cursor_byte
+    ~policy:(Bounded limits)
+    ~semantic_limits
+    ~max_dependency_depth
+    ~env
+    ~target
+    ()
+;;
+
+let analyze_prepared_with_contract_and_policy
+      input
+      ~contract
+      ~policy
+      ~semantic_limits
+      ~max_dependency_depth
+      ~env
+      ()
+  =
+  run_worker
+    ~map_policy_error:(fun error -> Analysis_error.Policy error)
+    ~exception_policy:Preserve_unexpected
+    ~input_bytes:
+      (Chatml_prepared_program.Accounting.input_bytes
+         (Chatml_prepared_program.accounting input))
+    ~policy
+    ~env
+    ~prepare:(fun ~checkpoint ->
+      admit_prepared_contract input ~contract ~policy ~checkpoint ()
+      |> Result.map_error ~f:(fun error -> Analysis_error.Policy error))
+    ~compile:(fun (input, contract) ~checkpoint ->
+      Chatml_semantics.analyze
+        input
+        ~contract
+        ~max_dependency_depth
+        ~limits:semantic_limits
+        ~checkpoint
+      |> Result.map_error ~f:(fun error -> Analysis_error.Analysis error))
+;;
+
+let analyze_prepared_prefix_with_contract_and_policy
+      input
+      ~source
+      ~cursor_byte
+      ~contract
+      ~policy
+      ~semantic_limits
+      ~max_dependency_depth
+      ~env
+      ()
+  =
+  run_worker
+    ~map_policy_error:(fun error -> Analysis_error.Policy error)
+    ~exception_policy:Preserve_unexpected
+    ~input_bytes:
+      (Chatml_prepared_program.Accounting.input_bytes
+         (Chatml_prepared_program.accounting input))
+    ~policy
+    ~env
+    ~prepare:(fun ~checkpoint ->
+      admit_prepared_contract input ~contract ~policy ~checkpoint ()
+      |> Result.map_error ~f:(fun error -> Analysis_error.Policy error))
+    ~compile:(fun (input, contract) ~checkpoint ->
+      Chatml_semantics.analyze_prefix
+        input
+        ~source
+        ~cursor_byte
+        ~contract
+        ~max_dependency_depth
+        ~limits:semantic_limits
+        ~checkpoint
+      |> Result.map_error ~f:(fun error -> Analysis_error.Analysis error))
 ;;

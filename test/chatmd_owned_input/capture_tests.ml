@@ -49,6 +49,125 @@ let capture ?(checkpoint = ignore) env root preprocess =
   |> Result.ok_or_failwith
 ;;
 
+let%expect_test "selected capture narrows root and distinct dependency bytes" =
+  with_directory (fun env root ->
+    let entry = Source.Portable_path.create "root.chatmd" |> Or_error.ok_exn in
+    let capture ?max_total_source_bytes () =
+      B.capture_with_loader
+        ~loader:(Source_loader.filesystem ~root)
+        ~entry
+        ?max_total_source_bytes
+        ~env
+        ~preprocess:Fn.id
+        ~limits:(Input_tests.limits ~bytes:(16 * 1024 * 1024) ())
+        ~checkpoint:ignore
+        (definition root)
+    in
+    let rejects ?max_total_source_bytes () =
+      match capture ?max_total_source_bytes () with
+      | exception Failure _ -> true
+      | Error _ -> true
+      | Ok _ -> false
+    in
+    let captured ?max_total_source_bytes () =
+      capture ?max_total_source_bytes ()
+      |> Result.map_error ~f:(fun diagnostics ->
+        Sexp.to_string_hum ([%sexp_of: B.Diagnostic.t list] diagnostics))
+      |> Result.ok_or_failwith
+    in
+    let authored =
+      {|<tool name="first" agent="child.chatmd" local/><tool name="second" agent="child.chatmd" local/>|}
+    in
+    let child = "<user>retained dependency</user>" in
+    save root "root.chatmd" authored;
+    save root "child.chatmd" child;
+    let total = String.length authored + String.length child in
+    assert (rejects ~max_total_source_bytes:(total - 1) ());
+    let exact = captured ~max_total_source_bytes:total () in
+    [%test_eq: int] total (B.Capture.source_bytes exact);
+    let wider_request = captured ~max_total_source_bytes:(16 * 1024 * 1024) () in
+    [%test_eq: int] total (B.Capture.source_bytes wider_request);
+    save root "root.chatmd" ("<user>" ^ String.make (8 * 1024 * 1024) 'x' ^ "</user>");
+    assert (rejects ~max_total_source_bytes:(16 * 1024 * 1024) ());
+    print_endline "root and dependency caps held");
+  [%expect {| root and dependency caps held |}]
+;;
+
+let%test_unit "retained generated loader reuses first exact bytes and preflights files" =
+  with_directory (fun _env dir ->
+    Eio.Path.save ~create:(`Or_truncate 0o600) Eio.Path.(dir / "part.chatmd") "first";
+    let result =
+      Eio.Path.with_open_dir dir (fun opened ->
+        Chatml_local_source.with_root
+          opened
+          ~max_path_components:8
+          ~checkpoint:ignore
+          ~f:(fun owner ->
+            let module Retained = Source_loader.Generated_retained in
+            let limits =
+              Retained.Limits.create
+                ~max_source_bytes:16
+                ~max_bundle_bytes:20
+                ~max_files:2
+              |> Or_error.ok_exn
+            in
+            let reads = ref 0 in
+            let retained =
+              Retained.create
+                ~root:dir
+                ~owner
+                ~root_file:(Source.Portable_path.create "root.chatmd" |> Or_error.ok_exn)
+                ~root_contents:"unsaved"
+                ~limits
+                ~before_import_read:(fun ~member:_ ->
+                  incr reads;
+                  16)
+                ~on_import_read:(fun ~member:_ ~contents:_ -> ())
+                ~checkpoint:ignore
+              |> Or_error.ok_exn
+            in
+            let loader = Retained.loader retained in
+            let root =
+              Source_loader.root loader ~file:"root.chatmd" |> Result.ok_or_failwith
+            in
+            [%test_eq: string]
+              (Source_loader.read_bounded ~max_bytes:16 loader root
+               |> Result.ok_or_failwith)
+              "unsaved";
+            let part =
+              Source_loader.root loader ~file:"part.chatmd" |> Result.ok_or_failwith
+            in
+            [%test_eq: string]
+              (Source_loader.read_bounded ~max_bytes:16 loader part
+               |> Result.ok_or_failwith)
+              "first";
+            Eio.Path.save
+              ~create:(`Or_truncate 0o600)
+              Eio.Path.(dir / "part.chatmd")
+              "later";
+            [%test_eq: string]
+              (Source_loader.read_bounded ~max_bytes:16 loader part
+               |> Result.ok_or_failwith)
+              "first";
+            [%test_eq: int] !reads 1;
+            [%test_eq: int] (List.length (Retained.captured_sources retained)) 2;
+            let absent =
+              Source_loader.root loader ~file:"absent.chatmd" |> Result.ok_or_failwith
+            in
+            (match Source_loader.read_bounded ~max_bytes:16 loader absent with
+             | exception exn ->
+               (match Source_loader.Generated_error.of_exn exn with
+                | Some Limit_exceeded -> ()
+                | _ -> raise exn)
+             | _ -> failwith "file cap did not reject before a native read");
+            [%test_eq: int] !reads 1;
+            Ok ()))
+    in
+    match result with
+    | Ok () -> ()
+    | Error _ -> failwith "retained root fixture failed")
+;;
+
 let%test_unit
     "actual queued Roots preprocess once and retained replay uses captured bytes only"
   =

@@ -18,6 +18,243 @@ type startup_mode =
   | Operator_only
 [@@deriving equal, sexp]
 
+module Developer_configuration : sig
+  type t
+
+  module Portable : sig
+    type t
+
+    (** Opt in the authenticated Developer wire service with explicit finite
+        request/result/event ceilings and bounded process-local watches. The
+        daemon checks this policy against the actual installed Host, approval
+        owner and Initialize bounds before advertising any Developer method.
+        Construction grants no source, method or approval permission. *)
+    val create
+      :  wire_limits:Agent_protocol.Developer_common.Limits.t
+      -> max_connections:int
+      -> max_watches_per_connection:int
+      -> max_pending_hints_per_connection:int
+      -> (t, Agent_protocol.Error.t) result
+
+    (** Add closed REPL/Task methods to the same installed Developer endpoint
+        and notification hub. Daemon admission compares these bounds with
+        the actual REPL Host, Initialize and transport envelopes before any
+        method is advertised. *)
+    val with_repl_wire
+      :  t
+      -> Agent_protocol.Developer_repl_wire.Limits.t
+      -> (t, Agent_protocol.Error.t) result
+
+    (** Add a separately bounded read-only trace page family. This is valid
+        only with an actually installed [with_traces] owner on the same Host;
+        Daemon startup rejects a mismatch before method advertisement. The
+        base portable/REPL methods remain independently selectable. *)
+    val with_trace_wire
+      :  t
+      -> Agent_protocol.Developer_trace_wire.Limits.t
+      -> (t, Agent_protocol.Error.t) result
+  end
+
+  (** Without this copy, a Developer Host remains callable in-process but
+      has no portable command/approval/event handlers or feature advertisement.
+      This preserves existing Host-only installations. *)
+  val with_portable_wire : t -> Portable.t -> t
+
+  module Shell_approvals : sig
+    type t
+
+    module Limits : sig
+      type t
+
+      val create
+        :  max_pending:int
+        -> max_request_bytes:int
+        -> max_display_bytes:int
+        -> max_decision_reason_bytes:int
+        -> wait_seconds:float
+        -> (t, Agent_protocol.Error.t) result
+    end
+
+    (** Opt-in process-local Once approvals for this Developer host.
+        Command policies come from the same configuration's existing
+        receipt_read/command_control decisions. Job policies are separate
+        trusted daemon decisions on a fresh Root-current Job snapshot; a
+        pending item or command receipt does not authorize its response. *)
+    val create
+      :  limits:Limits.t
+      -> job_read:(Operator_authorization.t -> Agent_protocol.Developer_job.t -> bool)
+      -> job_respond:(Operator_authorization.t -> Agent_protocol.Developer_job.t -> bool)
+      -> t
+
+    (** Override command approval responses independently of command cancellation.
+        Without an override, embedding configurations retain the command_control
+        policy for both operations. The approval owner also checks the command
+        kind and original owner before accepting a response. *)
+    val with_command_respond
+      :  t
+      -> authorize:
+           (Operator_authorization.t -> Agent_store.Developer_command_row.t -> bool)
+      -> t
+  end
+
+  (** Disabled by default. This configures an owner, not a supplied broker,
+      Session grant or Assume_approved provider. *)
+  val with_shell_approvals : t -> Shell_approvals.t -> t
+
+  module Remote_content : sig
+    type t
+
+    (** Optional daemon policy for exact remote content origins. Absence denies
+        child document/image network reads before I/O. Bounds are positive,
+        finite and validated at construction. *)
+    val create
+      :  allowed_origins:string list
+      -> max_response_bytes:int
+      -> max_wall_seconds:float
+      -> t Core.Or_error.t
+  end
+
+  module Repl : sig
+    type t
+
+    (** Validated, inert REPL actor policy. It selects no new language ABI and
+        grants no source, method, Task or native authority. *)
+    val create
+      :  scope_limits:Chatml_configured_lookup.Repl_scope.Limits.t
+      -> root_limits:Chatml_dependency_session.Roots.Limits.t
+      -> typing_limits:Chatml_repl_typing.Limits.t
+      -> evaluator_limits:Chatml_repl_execution.Limits.t
+      -> execution_policy:Chatml_execution.policy
+      -> type_display_limits:Chatml_type_display.Limits.t
+      -> max_instances:int
+      -> max_keys_per_instance:int
+      -> max_submissions_per_epoch:int
+      -> max_source_bytes:int
+      -> max_receipt_bytes:int
+      -> max_total_receipt_bytes:int
+      -> max_total_type_detail_bytes:int
+      -> max_task_origins:int
+      -> max_reference_page_bytes:int
+      -> (t, Agent_protocol.Error.t) result
+  end
+
+  (** Opt in one process-local REPL actor under the same installed Developer
+      host and capture owner. The base configuration leaves REPL disabled. *)
+  val with_repl : t -> Repl.t -> t
+
+  module Traces : sig
+    type t
+
+    module Limits : sig
+      type t
+
+      val create
+        :  max_traces:int
+        -> max_retained_bytes:int
+        -> max_source_refs_per_trace:int
+        -> max_provenance_bytes_per_trace:int
+        -> max_expired_tombstones:int
+        -> max_age_seconds:float
+        -> max_header_bytes:int
+        -> recorder:Chatml_trace.Recorder.Limits.t
+        -> (t, Agent_protocol.Error.t) result
+    end
+
+    (** Only mode and finite retention bounds are configured externally.
+        Daemon startup binds historical reads to its already installed
+        Authoring owner; callers cannot supply a read callback, Root, Source
+        or retained Entry. Summary and Full are explicit opt-ins. *)
+    val create : mode:Chatml_trace.Recorder.Mode.t -> limits:Limits.t -> t
+  end
+
+  (** Host-only trace retention remains private without portable wire opt-in.
+      Absence takes the existing disabled path with no recorder/origin cost. *)
+  val with_traces : t -> Traces.t -> t
+
+  module Limits : sig
+    type t
+
+    val create
+      :  store:Agent_store.Developer_run_store.Limits.t
+      -> roots:Developer_root_owner.Limits.t
+      -> max_active_commands:int
+      -> disclosure:Developer_result_disclosure.Limits.t
+      -> compilation:Chatml_compilation.policy
+      -> max_dependency_depth:int
+      -> execution:Chatml_execution.limits
+      -> max_output_bytes:int
+      -> receipt:Document_schema.Limits.t
+      -> max_agent_sources:int
+      -> max_agent_source_work_steps:int
+      -> max_native_bindings:int
+      -> workspace_cleanup:Agent_session.Workspace_cleanup.Limits.t
+      -> max_agent_cache_entries:int
+      -> (t, Agent_protocol.Error.t) result
+
+    (** [create] uses eight active synchronous Agent calls by default. Change
+        only this developer selected policy through a validated receiver-first
+        copy before installing the daemon. The first Saved child counts as one;
+        accepted values are 1 through 64. *)
+    val with_max_active_agent_calls
+      :  t
+      -> max_active_calls:int
+      -> (t, Agent_protocol.Error.t) result
+  end
+
+  (** Trusted daemon policy. The daemon shares its existing child source
+      policy, catalogs, Store, Blob owner, workspace lease and scheduler with
+      Developer commands. Predicate callbacks are nonyielding and rechecked
+      after waits; they grant neither source nor method permission. *)
+  val create
+    :  capture_policy:Authoring_context_service.Developer.Target_policy.t
+    -> capture_limits:Authoring_context_service.Developer.Limits.t
+    -> limits:Limits.t
+    -> result_disclosure:Developer_result_disclosure.Policy.t
+    -> receipt_read:
+         (Operator_authorization.t -> Agent_store.Developer_command_row.t -> bool)
+    -> command_control:
+         (Operator_authorization.t -> Agent_store.Developer_command_row.t -> bool)
+    -> publisher_limits:Agent_store.Developer_result_publisher.Limits.t
+    -> publisher_storage:Agent_store.Developer_result_publisher.Storage.t
+    -> model_target:Inference.Request.Target.t option
+    -> authorize_native:
+         (Agent_protocol.Host_invocation.t
+          -> Chat_response.Tool_capability.binding
+          -> (unit, Agent_protocol.Error.t) result)
+    -> prepare_output:
+         (Openai.Responses.Tool_output.Output.t
+          -> (Jsonaf.t, Agent_protocol.Error.t) result)
+    -> (t, Agent_protocol.Error.t) result
+
+  (** The configured-Prompt sibling of [create]. It selects the existing
+      Permission_policy only after the actual Live Prompt/Workspace and physical
+      Root are admitted. No caller callback, dummy allow function or new grant
+      language is supplied. The selected profile is rechecked after policy or
+      reviewer waits; Shell remains under exact Manifest_grant plus Once. This
+      constructor is for the future declarative startup builder and still does
+      not select a source or install an endpoint. *)
+  val create_with_selected_prompt_profile
+    :  capture_policy:Authoring_context_service.Developer.Target_policy.t
+    -> capture_limits:Authoring_context_service.Developer.Limits.t
+    -> limits:Limits.t
+    -> result_disclosure:Developer_result_disclosure.Policy.t
+    -> receipt_read:
+         (Operator_authorization.t -> Agent_store.Developer_command_row.t -> bool)
+    -> command_control:
+         (Operator_authorization.t -> Agent_store.Developer_command_row.t -> bool)
+    -> publisher_limits:Agent_store.Developer_result_publisher.Limits.t
+    -> publisher_storage:Agent_store.Developer_result_publisher.Storage.t
+    -> model_target:Inference.Request.Target.t option
+    -> prepare_output:
+         (Openai.Responses.Tool_output.Output.t
+          -> (Jsonaf.t, Agent_protocol.Error.t) result)
+    -> (t, Agent_protocol.Error.t) result
+
+  (** Attach an explicitly admitted remote child-content policy before daemon
+      construction. Omission keeps remote reads disabled. *)
+  val with_remote_content : t -> Remote_content.t -> t
+end
+
 type options =
   { startup_mode : startup_mode
   ; root_invocation :
@@ -28,6 +265,17 @@ type options =
   ; implementation_name : string
   ; implementation_version : string
   ; features : string list
+  ; authoring : Authoring_installation.Host_policy.t option
+    (** [Some] installs one real bounded authoring service. The daemon default
+        is supplied-document/core/lexical/local assistance with no native read
+        or upload grant; [None] explicitly disables authoring. Optional native
+        source, upload and selected semantic policies are trusted host inputs,
+        never inferred from feature strings or client request identities. The
+        installed handler set, not this options record alone, is advertised. *)
+  ; developer : Developer_configuration.t option
+    (** Optional callable developer service. Some requires Authoring plus
+        Execute or On_demand; None is the default. Portable handlers and
+        feature advertisement additionally require [with_portable_wire]. *)
   ; extension_host : Agent_protocol.Extension_capabilities.host
   ; protocol_limits : Agent_protocol.Initialize.Limits.t
   ; timing : Agent_protocol.Initialize.Timing.t
@@ -94,6 +342,405 @@ type options =
 
 type t
 
+module For_testing : sig
+  (** Read-only projection of this daemon's actual JobScheduler wait deadline,
+      in seconds on the daemon's injected wall clock. The observation grants
+      no polling, candidate or claim control. *)
+  val job_scheduler_wait_deadline : t -> float option
+end
+
+module Developer : sig
+  module Configuration = Developer_configuration
+
+  module Approval : sig
+    module Pending = Developer_approval_owner.Pending
+
+    type decision = Developer_approval_owner.decision =
+      | Approve_once
+      | Deny of string
+
+    (** Read only current process-local pending approvals. On restart, ended
+        epoch or foreign run the list cannot resurrect an effect. *)
+    val pending
+      :  t
+      -> actor:Operator_authorization.t
+      -> run_id:Agent_protocol.Id.Developer_run.t
+      -> (Pending.t list, Agent_protocol.Error.t) result
+
+    val respond
+      :  t
+      -> actor:Operator_authorization.t
+      -> run_id:Agent_protocol.Id.Developer_run.t
+      -> id:Agent_protocol.Id.Permission.t
+      -> decision
+      -> (unit, Agent_protocol.Error.t) result
+
+    val cancel
+      :  t
+      -> actor:Operator_authorization.t
+      -> run_id:Agent_protocol.Id.Developer_run.t
+      -> id:Agent_protocol.Id.Permission.t
+      -> (unit, Agent_protocol.Error.t) result
+  end
+
+  module Request : sig
+    type t
+
+    module Route : sig
+      type t =
+        | Local_project of
+            { root_index : int
+            ; dependency_root_indices : int list
+            ; project : Source.Portable_path.t
+            ; selection : Chatml_project.Selection.request
+            }
+        | Local_source of
+            { root_index : int
+            ; member : Source.Portable_path.t
+            }
+        | Authoring_project of { expected : Agent_protocol.Authoring.Context.Expected.t }
+        | Document_script of
+            { expected : Agent_protocol.Authoring.Context.Expected.t
+            ; selector : Agent_protocol.Authoring.Analysis.Target.selector
+            }
+    end
+
+    module Fresh_source : sig
+      type t =
+        | Local_project of
+            { root : Authoring_source_host.Root.t
+            ; dependency_roots : Authoring_source_host.Root.t list
+            }
+        | Local_source of { root : Authoring_source_host.Root.t }
+        | Authoring_project of { connection : Connection_context.t }
+        | Document_script of { connection : Connection_context.t }
+    end
+
+    val create
+      :  route:Route.t
+      -> kind:Agent_store.Developer_command_receipt.Kind.t
+      -> target:Chatml.Chatml_compiler_contract.Target.t
+      -> prompt:Agent_protocol.Id.Prompt_definition.t option
+      -> workspace:Agent_protocol.Id.Workspace_definition.t option
+      -> entrypoint:string
+      -> input:Jsonaf.t
+      -> fixtures:Chatml_developer_capture.Fixture.t option
+      -> requested_execution:Chatml_execution.limits option
+      -> requested_max_output_bytes:int option
+      -> bounds:Chatml_developer_capture.Json_bounds.t
+      -> checkpoint:(unit -> unit)
+      -> (t, Agent_protocol.Error.t) result
+  end
+
+  module View : sig
+    type t
+
+    val id : t -> Agent_store.Developer_command_receipt.Id.t
+    val owner : t -> Agent_protocol.Execution_owner.developer
+    val kind : t -> Agent_store.Developer_command_receipt.Kind.t
+    val phase : t -> Agent_store.Developer_command_row.Phase.t
+    val receipt : t -> Agent_store.Developer_command_receipt.t option
+    val capture_fingerprint : t -> Chatml_source.Digest.t
+    val request_fingerprint : t -> Chatml_source.Digest.t
+  end
+
+  (** The daemon checks that this exact host was installed with the single
+      serviceable Job_scheduler. There is no transport parsing or independent
+      worker queue here. Fresh source capabilities are needed only for a true
+      original-key miss; an identical historical retry may omit them. *)
+  val submit
+    :  t
+    -> actor:Operator_authorization.t
+    -> run_id:Agent_protocol.Id.Developer_run.t
+    -> key:Agent_protocol.Idempotency_key.t
+    -> request:Request.t
+    -> fresh_source:Request.Fresh_source.t option
+    -> (View.t, Agent_protocol.Error.t) result
+
+  val observe
+    :  t
+    -> actor:Operator_authorization.t
+    -> run_id:Agent_protocol.Id.Developer_run.t
+    -> key:Agent_protocol.Idempotency_key.t
+    -> (View.t option, Agent_protocol.Error.t) result
+
+  val await_terminal
+    :  t
+    -> actor:Operator_authorization.t
+    -> run_id:Agent_protocol.Id.Developer_run.t
+    -> key:Agent_protocol.Idempotency_key.t
+    -> (View.t, Agent_protocol.Error.t) result
+
+  val cancel_and_wait
+    :  t
+    -> actor:Operator_authorization.t
+    -> run_id:Agent_protocol.Id.Developer_run.t
+    -> key:Agent_protocol.Idempotency_key.t
+    -> (View.t, Agent_protocol.Error.t) result
+
+  (** Process-local developer REPL over this daemon's authenticated source
+      owner. Instances, epochs, revisions and Task handles expire at reset,
+      close or daemon restart. The Standard surface keeps Task construction
+      inert; executing a Task requires a separate authorized Host action. *)
+  module Repl : sig
+    module Original : sig
+      type t
+
+      val create
+        :  route:Request.Route.t
+        -> target:Chatml.Chatml_compiler_contract.Target.t
+        -> prompt:Agent_protocol.Id.Prompt_definition.t
+        -> workspace:Agent_protocol.Id.Workspace_definition.t
+        -> requested_execution:Chatml_execution.limits option
+        -> requested_max_output_bytes:int option
+        -> checkpoint:(unit -> unit)
+        -> (t, Agent_protocol.Error.t) result
+    end
+
+    module Instance : sig
+      type t
+
+      val equal : t -> t -> bool
+    end
+
+    module Epoch : sig
+      type t
+
+      val equal : t -> t -> bool
+    end
+
+    module Revision : sig
+      type t
+
+      val equal : t -> t -> bool
+    end
+
+    module Task_reference : sig
+      type t
+
+      val to_string : t -> string
+      val of_string : string -> (t, Agent_protocol.Error.t) result
+      val equal : t -> t -> bool
+    end
+
+    module Type_selector : sig
+      type t =
+        | Expression
+        | Binding_index of int
+      [@@deriving equal, sexp_of]
+    end
+
+    module Type_inspection : sig
+      type t
+
+      val revision : t -> Revision.t
+      val binding_name : t -> string option
+      val rendered : t -> Chatml_type_display.t
+    end
+
+    module Task_reference_page : sig
+      type t
+
+      val items : t -> Task_reference.t list
+      val next : t -> Task_reference.t option
+      val total : t -> int
+    end
+
+    module View : sig
+      type t
+
+      val instance : t -> Instance.t
+      val epoch : t -> Epoch.t
+      val revision : t -> Revision.t
+      val run_id : t -> Agent_protocol.Id.Developer_run.t
+      val capture_fingerprint : t -> Chatml_source.Digest.t
+    end
+
+    module Submission : sig
+      type t
+
+      module Statement_summary : sig
+        type t
+
+        type task_retention =
+          | Not_a_task
+          | Retained
+          | Limit_reached
+        [@@deriving equal, sexp_of]
+
+        val outcome : t -> Chatml_repl_execution.Receipt.outcome
+        val value_preview : t -> string option
+        val diagnostic : t -> Chatml_repl_execution.Diagnostic.t option
+        val expression_type : t -> Chatml_type_display.t option
+        val binding_count : t -> int
+        val task_retention : t -> task_retention
+        val text_limited : t -> bool
+      end
+
+      module Diagnostic : sig
+        type t
+
+        val message : t -> string
+        val location : t -> Chatml_source.Location.t option
+      end
+
+      type status =
+        | Need_more of
+            Chatml.Chatml_parse.Submission.Need_more.reason
+            * Chatml_source.Location.t option
+        | Rejected of Diagnostic.t
+        | Finished
+        | Stopped of Diagnostic.t option
+
+      type details =
+        | Available
+        | Output_limited
+
+      (** [status] preserves the execution outcome even when oversized detail
+          is omitted. [completed_statements] counts successful statements;
+          a failed final receipt remains visible when its detail fits. *)
+      val status : t -> status
+
+      val details : t -> details
+      val completed_statements : t -> int
+      val statement_count : t -> int
+      val revision : t -> Revision.t
+      val summaries : t -> Statement_summary.t list
+      val statements : t -> Chatml_repl_execution.Receipt.t list
+      val task_handles : t -> Chatml_repl_execution.Task_handle.t list
+      val task_reference_count : t -> int
+      val task_references : t -> Task_reference.t list
+    end
+
+    module Task : sig
+      module Original : sig
+        type t
+
+        val create
+          :  reference:Task_reference.t
+          -> requested_execution:Chatml_execution.limits option
+          -> requested_max_output_bytes:int option
+          -> checkpoint:(unit -> unit)
+          -> (t, Agent_protocol.Error.t) result
+      end
+
+      type view
+
+      val row : view -> Agent_store.Developer_run_store.Command.Row.t
+      val receipt : view -> Agent_store.Developer_run_store.Command.Receipt.t option
+
+      val submit
+        :  t
+        -> actor:Operator_authorization.t
+        -> key:Agent_protocol.Idempotency_key.t
+        -> original:Original.t
+        -> fresh_epoch:(Instance.t * Epoch.t) option
+        -> (view, Agent_protocol.Error.t) result
+
+      val observe
+        :  t
+        -> actor:Operator_authorization.t
+        -> run_id:Agent_protocol.Id.Developer_run.t
+        -> key:Agent_protocol.Idempotency_key.t
+        -> (view option, Agent_protocol.Error.t) result
+
+      val await_terminal
+        :  t
+        -> actor:Operator_authorization.t
+        -> run_id:Agent_protocol.Id.Developer_run.t
+        -> key:Agent_protocol.Idempotency_key.t
+        -> (view, Agent_protocol.Error.t) result
+
+      val cancel_and_wait
+        :  t
+        -> actor:Operator_authorization.t
+        -> run_id:Agent_protocol.Id.Developer_run.t
+        -> key:Agent_protocol.Idempotency_key.t
+        -> (view, Agent_protocol.Error.t) result
+    end
+
+    (** Same run/key/original request reuses its authenticated instance without
+        recapture; changed payload conflicts. A current actor with the same
+        principal/authentication kind must still pass source and method policy. *)
+    val create
+      :  t
+      -> actor:Operator_authorization.t
+      -> run_id:Agent_protocol.Id.Developer_run.t
+      -> key:Agent_protocol.Idempotency_key.t
+      -> original:Original.t
+      -> fresh_source:Request.Fresh_source.t option
+      -> (View.t, Agent_protocol.Error.t) result
+
+    (** Optimistic epoch/revision and exact-key admission. Need_more and
+        Rejected execute no statement; earlier successes survive a later
+        failure. Same-key retry never executes again. Unexpected callback
+        exceptions preserve their original backtrace for the submitting
+        waiter; a bounded partial outcome and consumed key remain observable. *)
+    val submit
+      :  t
+      -> actor:Operator_authorization.t
+      -> instance:Instance.t
+      -> epoch:Epoch.t
+      -> expected_revision:Revision.t
+      -> key:Agent_protocol.Idempotency_key.t
+      -> source:string
+      -> (Submission.t, Agent_protocol.Error.t) result
+
+    val observe
+      :  t
+      -> actor:Operator_authorization.t
+      -> instance:Instance.t
+      -> key:Agent_protocol.Idempotency_key.t
+      -> (Submission.t option, Agent_protocol.Error.t) result
+
+    val inspect_type
+      :  t
+      -> actor:Operator_authorization.t
+      -> instance:Instance.t
+      -> epoch:Epoch.t
+      -> key:Agent_protocol.Idempotency_key.t
+      -> statement_index:int
+      -> selector:Type_selector.t
+      -> max_bytes:int
+      -> (Type_inspection.t, Agent_protocol.Error.t) result
+
+    val task_references_page
+      :  t
+      -> actor:Operator_authorization.t
+      -> instance:Instance.t
+      -> epoch:Epoch.t
+      -> key:Agent_protocol.Idempotency_key.t
+      -> after:Task_reference.t option
+      -> limit:int
+      -> (Task_reference_page.t, Agent_protocol.Error.t) result
+
+    val cancel_and_wait
+      :  t
+      -> actor:Operator_authorization.t
+      -> instance:Instance.t
+      -> key:Agent_protocol.Idempotency_key.t
+      -> (Submission.t, Agent_protocol.Error.t) result
+
+    (** Signal and join the active statement before invalidating this epoch's
+        evaluator and Task handles. Reset retains prior key evidence; close
+        consumes the reserved final ledger slot even when work keys are full. *)
+    val reset_and_wait
+      :  t
+      -> actor:Operator_authorization.t
+      -> instance:Instance.t
+      -> expected_epoch:Epoch.t
+      -> key:Agent_protocol.Idempotency_key.t
+      -> (View.t, Agent_protocol.Error.t) result
+
+    val close_and_wait
+      :  t
+      -> actor:Operator_authorization.t
+      -> instance:Instance.t
+      -> key:Agent_protocol.Idempotency_key.t
+      -> (unit, Agent_protocol.Error.t) result
+  end
+end
+
 (** The default inference policy permits storage inspection but refuses target
     capture, target changes and runtime resolution; legacy migration callbacks
     are absent. Executing composition roots must supply an explicit host policy. *)
@@ -111,6 +758,16 @@ val start
        (Agent_store.Session_store.t -> (unit, Agent_protocol.Error.t) result)
        (** Trusted composition hook after exclusive root ownership and before
            catalog/runtime construction. Failure closes the owned store. *)
+  -> ?local_setup:
+       (Agent_store.Session_store.t
+        -> (Config_validator.Embedded_local.bound, Agent_protocol.Error.t) result)
+       (** Trusted embedded-local handoff after the exclusive Store owner opens.
+           This callback can return only a validated, identity-bound local
+           section patch, not a replacement Config. Daemon applies that patch
+           to the generated embedded Config, repeats final configuration
+           admission, then starts provider/catalog/source work. Failure joins
+           the Store startup owner. Existing [before_activation] callers remain
+           source-compatible; Embedded uses one handoff for its minted ID. *)
   -> unit
   -> (t, Agent_protocol.Error.t) result
 
@@ -154,6 +811,12 @@ val inspect_prompt_shell
        Result.t
 
 val workspaces : t -> Agent_session.Workspace_catalog.t
+
+(** Transport-compatible unit close facade. The typed Command_handler close
+    joins authoring before session detach. A finite failed join is recorded in
+    daemon health/status and retains the authoring/source/upload owners for
+    shutdown retry; this callback never claims successful cleanup or releases
+    a borrowed owner. Unexpected exceptions retain their original backtrace. *)
 val close_connection : t -> Connection_context.t -> unit
 
 (** [reload_config] validates and atomically publishes catalog changes.

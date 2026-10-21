@@ -1,0 +1,13 @@
+(copy_files ../../lib/agent_server/developer_agent_source_runtime.{ml,mli})
+
+(library
+ (name developer_agent_source_runtime_tests)
+ (modules developer_agent_source_runtime source_runtime_tests)
+ (libraries core eio eio_main mirage-crypto-rng.unix
+  ochat.agent_server ochat.agent_session ochat.agent_store ochat.agent_protocol
+  ochat.chat_response ochat.chatml ochat.inference ochat.provider_runtime
+  ochat.provider_runtime_host ochat.document_schema
+  provider_runtime_host_tests developer_root_owner_test_suite)
+ (flags (:standard -open Agent_server))
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

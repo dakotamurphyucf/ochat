@@ -63,74 +63,60 @@ open Chatmd_tokens
 
 type state =
   { mutable pending_token : Chatmd_parser.token option
-  ; mutable depth : int
-  ; mutable structured_scope_depths : int list
-  ; mutable extension_scope_depths : int list
+  ; mutable scope : Chatmd_tag_scope.t
   ; scratch : Buffer.t
+  ; error_exn : string -> exn
+  ; on_limit : unit -> unit
   }
 
-let create_state () =
+let create_state ~error_exn ~on_limit () =
   { pending_token = None
-  ; depth = 0
-  ; structured_scope_depths = []
-  ; extension_scope_depths = []
+  ; scope = Chatmd_tag_scope.root
   ; scratch = Buffer.create 256
+  ; error_exn
+  ; on_limit
   }
+
+let fail state message = raise (state.error_exn message)
+
+let text_fragment ~text ~start_byte ~end_byte =
+  TEXT (Chatmd_parser_builder.Text_fragment.create ~text ~start_byte ~end_byte)
+
+let lexeme_text lexbuf text =
+  text_fragment
+    ~text
+    ~start_byte:(Lexing.lexeme_start lexbuf)
+    ~end_byte:(Lexing.lexeme_end lexbuf)
 
 (*--------------------------------------------------------------------------*)
 (* Helpers                                                                  *)
 (*--------------------------------------------------------------------------*)
 
-let is_structured_scope state = not (List.is_empty state.structured_scope_depths)
-
 let tag_of_string_in_state state name =
-  match tag_of_string_opt name with
-  | Some (Shell_element _) when not (is_structured_scope state) -> None
-  | Some Uses when List.is_empty state.extension_scope_depths -> None
-  | Some (Authoring_context | Authoring_help) when state.depth <> 0 -> None
-  | tag -> tag
+  Chatmd_tag_scope.recognize state.scope ~name
 
 let is_recognised state name = Option.is_some (tag_of_string_in_state state name)
 
 let tag_of_string_exn state name =
   Option.value_exn (tag_of_string_in_state state name)
 
-let is_shell_tool attrs =
-  List.Assoc.find attrs "type" ~equal:String.equal
-  |> Option.value_map ~default:false ~f:(Option.value_map ~default:false ~f:(String.equal "shell"))
-
-let is_read_file_tool attrs =
-  List.Assoc.find attrs "name" ~equal:String.equal
-  |> Option.value_map ~default:false ~f:(Option.value_map ~default:false ~f:(fun name ->
-    String.equal name "read_file" || String.equal name "get_contents"))
-
-let is_extension_tool attrs =
-  List.exists attrs ~f:(function
-    | "type", Some ("moderator" | "chatml") -> true
-    | _ -> false)
-
-let is_structured_root tag attrs =
-  match tag with
-  | Shell_access -> true
-  | Tool -> is_shell_tool attrs || is_read_file_tool attrs || is_extension_tool attrs
-  | _ -> false
-
 let enter_element state tag attrs =
-  state.depth <- state.depth + 1;
-  if tag_equal tag Tool && is_extension_tool attrs
-  then state.extension_scope_depths <- state.depth :: state.extension_scope_depths;
-  if is_structured_root tag attrs
-  then state.structured_scope_depths <- state.depth :: state.structured_scope_depths
+  state.scope <-
+    (match
+       Chatmd_tag_scope.enter
+         state.scope
+         ~tag
+         ~attributes:attrs
+         ~max_depth:Int.max_value
+         ~checkpoint:(fun () -> ())
+     with
+     | Ok scope -> scope
+     | Error Chatmd_tag_scope.Error.Depth_limit ->
+       state.on_limit ();
+       fail state "ChatMD lexical scope depth exhausted")
 
 let leave_element state =
-  (match state.extension_scope_depths with
-   | depth :: rest when Int.equal depth state.depth -> state.extension_scope_depths <- rest
-   | _ -> ());
-  (match state.structured_scope_depths with
-   | depth :: rest when Int.equal depth state.depth ->
-     state.structured_scope_depths <- rest
-   | _ -> ());
-  state.depth <- Int.max 0 (state.depth - 1)
+  state.scope <- Chatmd_tag_scope.leave state.scope
 
 (* Parse attribute list contained in the raw string *)
 (* ------------------------------------------------------------------ *)
@@ -140,146 +126,15 @@ let leave_element state =
 (* Decode a handful of HTML entities that are common in prompts.  We do *not*
    attempt full entity decoding – just the basics so authors can write
    `&amp;`, `&lt;`, … without having them arrive verbatim in the runtime. *)
-let decode_entities (s : string) : string =
-  let buf = Buffer.create (String.length s) in
-  let flush_entity entity =
-    match entity with
-    | "amp" -> Buffer.add_char buf '&'
-    | "lt" -> Buffer.add_char buf '<'
-    | "gt" -> Buffer.add_char buf '>'
-    | "quot" -> Buffer.add_char buf '"'
-    | "apos" -> Buffer.add_char buf '\''
-    | _ -> Buffer.add_string buf "&"; Buffer.add_string buf entity; Buffer.add_char buf ';'
-  in
-  let len = String.length s in
-  let rec loop i =
-    if i >= len then ()
-    else
-      match s.[i] with
-      | '&' ->
-          let rec find_semi k =
-            if k >= len then None
-            else if Char.equal s.[k] ';' then Some k else find_semi (k + 1)
-          in
-          (match find_semi (i + 1) with
-           | None -> Buffer.add_char buf '&'; loop (i + 1)
-           | Some j ->
-               let entity = String.sub s ~pos:(i + 1) ~len:(j - i - 1) in
-               flush_entity entity;
-               loop (j + 1))
-      | _ as c -> Buffer.add_char buf c; loop (i + 1)
-  in
-  loop 0; Buffer.contents buf
-
-let parse_attrs (s : string) : attribute list =
-  (** [parse_attrs raw] converts the attribute fragment of an opening tag
-      – everything that follows the element name up to, but excluding, the
-      closing [`>`] or [`/>`] – into an association list.
-
-      Behaviour and invariants:
-      • The order of attributes is preserved.  
-      • Flag attributes such as [disabled] are represented by a tuple
-        [("disabled", None)].  
-      • Quoted values can use either single or double quotes; the function
-        accepts backslash-escaped quote characters inside the literal.  
-      • A small subset of HTML entities – [&amp;] [&lt;] [&gt;] [&quot;]
-        [&apos;] – is decoded.  All other entities are left intact.
-
-      @raise Failure if the attribute string contains an unterminated
-             quoted literal or other structural error. *)
-
-  (* Imperative scan to handle quoted values that may contain spaces and to
-     detect single / double quotes as well as unterminated strings. *)
-  let len = String.length s in
-  let pos = ref 0 in
-
-  let raise_unterminated quote_char name start_pos =
-    let chr = if Char.equal quote_char '"' then '"' else '\'' in
-    failwithf "Unterminated quoted attribute value for %s starting at offset %d (expected %c)" name start_pos chr ()
-  in
-
-  (* Whitespace skipper *)
-  let skip_ws () =
-    while !pos < len && Char.is_whitespace s.[!pos] do
-      incr pos
-    done
-  in
-
-  (* Attribute name  [A-Za-z0-9_:-]+ *)
-  let read_name () =
-    let start = !pos in
-    while
-      !pos < len &&
-      (match s.[!pos] with
-       | 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '_' | ':' | '-' -> true
-       | _ -> false)
-    do incr pos done;
-    String.sub s ~pos:start ~len:(!pos - start)
-  in
-
-  (* Quoted value – handles ' and "\"" and decodes basic HTML entities. *)
-  let read_quoted ~quote (attr_name : string) : string =
-    (* consume opening quote *)
-    incr pos;
-    let start_content = !pos in
-    let rec find_closing () =
-      if !pos >= len then raise_unterminated quote attr_name start_content;
-      if Char.equal s.[!pos] quote then ()
-      else begin
-        (* Support escaping the quote via backslash so authors can write
-           alt="A \"quoted\" sample" *)
-        if Char.equal s.[!pos] '\\' && !pos + 1 < len && Char.equal s.[!pos + 1] quote then
-          (* skip the backslash, keep the quote char as content *)
-          incr pos;
-        incr pos;
-        find_closing ()
-      end
-    in
-    find_closing ();
-    let raw = String.sub s ~pos:start_content ~len:(!pos - start_content) in
-    (* consume closing quote *)
-    incr pos;
-    raw |> decode_entities
-  in
-
-  let read_unquoted () : string option =
-    let start_v = !pos in
-    while !pos < len && not (Char.is_whitespace s.[!pos]) do
-      incr pos
-    done;
-    if !pos = start_v then None
-    else Some (String.sub s ~pos:start_v ~len:(!pos - start_v))
-  in
-
-  let rec collect acc =
-    skip_ws ();
-    if !pos >= len then List.rev acc
-    else
-      let name = read_name () in
-      if String.is_empty name then (
-        (* Avoid infinite loop by consuming one char and retry *)
-        incr pos;
-        collect acc)
-      else (
-        skip_ws ();
-        let value =
-          if !pos < len && Char.equal s.[!pos] '=' then (
-            incr pos;
-            skip_ws ();
-            if !pos < len then (
-              match s.[!pos] with
-              | '"' | '\'' as q -> Some (read_quoted ~quote:q name)
-              | _ -> read_unquoted ())
-            else None)
-          else None (* flag attribute *)
-        in
-        collect ((name, value) :: acc))
-  in
-  collect []
+let parse_attrs state s =
+  Chatmd_attribute_lex.complete_exn
+    ~error_exn:state.error_exn
+    s
+    ~checkpoint:(fun () -> ())
 
 (* Take a raw tag like "<msg role=\"user\">" or "<img src=.../>" and
    return (tagName, attrs, self_closing)  – *without* the surrounding <>. *)
-let dissect (raw : string) : string * attribute list * bool =
+let dissect state (raw : string) : string * attribute list * bool =
   let len = String.length raw in
   let self_closing =
     if len >= 2 then Char.equal raw.[len - 2] '/' else false
@@ -300,7 +155,7 @@ let dissect (raw : string) : string * attribute list * bool =
   | Some index ->
     let name = String.prefix body index in
     let attrs_str = String.drop_prefix body (index + 1) in
-    name, parse_attrs attrs_str, self_closing
+    name, parse_attrs state attrs_str, self_closing
   | None -> body, [], self_closing
 
 (* The buffer into which we accumulate the raw text of an unknown tag *)
@@ -330,8 +185,14 @@ rule token_inner state = parse
   (* Opening RAW delimiter – optional leading horizontal or vertical
      whitespace is permitted, but we also accept the delimiter directly
      after arbitrary text. *)
-  | [' ' '\t' '\r' '\n']* "RAW|" { Buffer.clear state.scratch; raw_block state lexbuf }
-  | "RAW|"                            { Buffer.clear state.scratch; raw_block state lexbuf }
+  | [' ' '\t' '\r' '\n']* "RAW|" {
+      Buffer.clear state.scratch;
+      raw_block state (Lexing.lexeme_end lexbuf) lexbuf
+    }
+  | "RAW|" {
+      Buffer.clear state.scratch;
+      raw_block state (Lexing.lexeme_end lexbuf) lexbuf
+    }
 
   (* RAW opener preceded by in-line text – we split the token stream into two   *)
   (* events: the leading text as a TEXT token (returned now) and the token      *)
@@ -343,29 +204,33 @@ rule token_inner state = parse
          trailing "RAW|" forms the leading TEXT token. *)
       let txt_len = String.length raw_prefix_delim - 4 (* len "RAW|" *) in
       let prefix = String.sub raw_prefix_delim ~pos:0 ~len:txt_len in
+      let prefix_start = Lexing.lexeme_start lexbuf in
       Buffer.clear state.scratch;
-      let next_tok = raw_block state lexbuf in
+      let next_tok = raw_block state (Lexing.lexeme_end lexbuf) lexbuf in
       state.pending_token <- Some next_tok;
-      TEXT prefix
+      text_fragment
+        ~text:prefix
+        ~start_byte:prefix_start
+        ~end_byte:(prefix_start + txt_len)
     }
 
  
 
-  | "<!--"                     { comment lexbuf; token_inner state lexbuf }
+  | "<!--"                     { comment state lexbuf; token_inner state lexbuf }
 
   (* self‐closing recognised tag, e.g. <img .../>                     *)
   | '<' ['a'-'z''A'-'Z''_'] [^'>' ]* "/>" as raw_tag {
-      let name, attrs, _ = dissect raw_tag in
+      let name, attrs, _ = dissect state raw_tag in
       if is_recognised state name then
         let tag = tag_of_string_exn state name in
         SELF (tag, attrs)
       else
-        TEXT raw_tag
+        lexeme_text lexbuf raw_tag
     }
 
   (* normal start tag                                                 *)
   | '<' ['a'-'z''A'-'Z''_'] [^'>' ]* '>' as raw_tag {
-      let name, attrs, _ = dissect raw_tag in
+      let name, attrs, _ = dissect state raw_tag in
       if is_recognised state name then
         let tag = tag_of_string_exn state name in
         enter_element state tag attrs;
@@ -383,7 +248,7 @@ rule token_inner state = parse
 
            This is exactly what higher layers expect.  We no longer try to
            collapse the whole unknown subtree into a single token. *)
-        TEXT raw_tag
+        lexeme_text lexbuf raw_tag
     }
 
   (* end tag                                                          *)
@@ -395,7 +260,7 @@ rule token_inner state = parse
         leave_element state;
         END tag
       else
-        TEXT raw_tag
+        lexeme_text lexbuf raw_tag
     }
 
 
@@ -405,30 +270,31 @@ rule token_inner state = parse
   (* as *one* TEXT token so sequences like "<<<<<" do **not** explode   *)
   (* into five separate tokens anymore.                                  *)
   (*--------------------------------------------------------------------*)
-  | '<'+ as lt_run { TEXT lt_run }
+  | '<'+ as lt_run { lexeme_text lexbuf lt_run }
 
   (* raw text – sequence of characters that does *not* contain '<' or the pipe
      character.  We *exclude* `|` so that the RAW| / |RAW delimiters are
      detected by their dedicated rules above instead of being swallowed by
      this catch-all clause due to the longest-match heuristic of ocamllex. *)
-  | [^'<' '|']+                  { TEXT (Lexing.lexeme lexbuf) }
+  | [^'<' '|']+                  { lexeme_text lexbuf (Lexing.lexeme lexbuf) }
 
   (* lone pipe – emitted verbatim as text *)
-  | '|'                          { TEXT (Lexing.lexeme lexbuf) }
+  | '|'                          { lexeme_text lexbuf (Lexing.lexeme lexbuf) }
 
   | eof                          { EOF }
 
   | _ as c {
       let p = Lexing.lexeme_start_p lexbuf in
-      failwithf "Unexpected char %c at %d:%d" c p.pos_lnum
-        (p.pos_cnum - p.pos_bol) ()
+      fail state
+        (sprintf "Unexpected char %c at %d:%d" c p.pos_lnum
+           (p.pos_cnum - p.pos_bol))
     }
 
 (*--------------------------------------------------------------------------*)
 (* Helper rule – skip an entire unknown element and return a single TEXT   *)
 (*--------------------------------------------------------------------------*)
 
-and skip_unknown state name depth = parse
+and skip_unknown state name depth start_byte = parse
   | "</" ['a'-'z''A'-'Z''_']+ [^'>' ]* '>' as raw_tag {
       Buffer.add_string state.scratch raw_tag;
       let len = String.length raw_tag in
@@ -437,48 +303,51 @@ and skip_unknown state name depth = parse
       if depth = 0 then (
         let txt = Buffer.contents state.scratch in
         Buffer.clear state.scratch;
-        TEXT txt
-      ) else skip_unknown state name depth lexbuf
+        text_fragment ~text:txt ~start_byte ~end_byte:(Lexing.lexeme_end lexbuf)
+      ) else skip_unknown state name depth start_byte lexbuf
     }
 
   | '<' ['a'-'z''A'-'Z''_'] [^'>' ]* "/>" as raw_tag {
       Buffer.add_string state.scratch raw_tag;
-      skip_unknown state name depth lexbuf
+      skip_unknown state name depth start_byte lexbuf
     }
 
   | '<' ['a'-'z''A'-'Z''_'] [^'>' ]* '>' as raw_tag {
       Buffer.add_string state.scratch raw_tag;
-      let open_name, _, self = dissect raw_tag in
+      let open_name, _, self = dissect state raw_tag in
       let depth = if (not self) && String.equal open_name name then depth + 1 else depth in
-      skip_unknown state name depth lexbuf
+      skip_unknown state name depth start_byte lexbuf
     }
 
-  | '<' { Buffer.add_string state.scratch "<"; skip_unknown state name depth lexbuf }
+  | '<' { Buffer.add_string state.scratch "<"; skip_unknown state name depth start_byte lexbuf }
 
-  | [^ '<' ]+ as chunk { Buffer.add_string state.scratch chunk; skip_unknown state name depth lexbuf }
+  | [^ '<' ]+ as chunk { Buffer.add_string state.scratch chunk; skip_unknown state name depth start_byte lexbuf }
 
-  | eof { failwithf "Unterminated unknown tag <%s>" name () }
+  | eof { fail state (sprintf "Unterminated unknown tag <%s>" name) }
 
-and raw_block state = parse
+and raw_block state start_byte = parse
   (* Terminating delimiter *)
   | "|RAW" {
       let txt = Buffer.contents state.scratch in
       Buffer.clear state.scratch;
-      TEXT txt
+      text_fragment
+        ~text:txt
+        ~start_byte
+        ~end_byte:(Lexing.lexeme_start lexbuf)
     }
 
   (* Any character – accumulate and continue *)
   | _ as c {
       Buffer.add_char state.scratch c;
-      raw_block state lexbuf
+      raw_block state start_byte lexbuf
     }
 
-  | eof { failwith "Unterminated raw block RAW| ... |RAW" }
+  | eof { fail state "Unterminated raw block RAW| ... |RAW" }
 
-and comment = parse
+and comment state = parse
   | "-->" { () }
-  | eof    { failwith "Unterminated <!-- comment-->" }
-  | _      { comment lexbuf }
+  | eof    { fail state "Unterminated <!-- comment-->" }
+  | _      { comment state lexbuf }
 
 
 (* 
@@ -498,8 +367,8 @@ and comment = parse
     tokens in succession can do so transparently.  Apart from this tiny
     buffer, the function is stateless and re-entrant. *)
 {
-let create () =
-  let state = create_state () in
+let create ?(error_exn = fun message -> Failure message) ?(on_limit = ignore) () =
+  let state = create_state ~error_exn ~on_limit () in
   fun lexbuf ->
   match state.pending_token with
   | Some tok ->

@@ -83,6 +83,31 @@ These phases are deliberately split across modules.
 - `chatml_eval.ml`
   - evaluator for resolved AST only
 
+The portable incremental REPL uses these same phases for one complete,
+source-owned statement at a time. `chatml_repl_typing.ml` retains the checked
+candidate and freezes named and anonymous expression types before execution.
+`chatml_resolver.ml` lowers only that candidate's indexed statement, including
+the existing type-only and inert-open cases that have no runtime statement.
+`chatml_linked_runtime/chatml_repl_modules.ml` lowers new configured units
+before reservation and initializes only selected value dependencies. The
+`chatml_repl_execution` owner runs that initialization and one staged statement
+under a single persistent execution runner. A successful statement publishes
+its copied top-level binding table after typing finalizes; a failed statement
+keeps the old table while mutations to already shared cells and external
+effects remain. Earlier closures keep the source and module map they captured.
+
+The portable result contains bounded frozen type/value text and an opaque
+epoch-scoped handle when an expression returns a Task. Producing a Task does not
+interpret it. The portable evaluator can later resolve that exact live handle
+and interpret the retained Task through the existing task, catch and operation
+kernel on its one runner. The caller supplies a selected operation registry and
+an action budget that adds ceilings without removing the epoch or inherited
+ceilings. It receives bounded immutable value or diagnostic text; the raw Task,
+mutable result and captured source remain inside the evaluator. A host must
+separately authenticate the action, authorize each operation and own its
+execution receipt. The portable driver itself supplies no such authority or
+durable replay protection.
+
 ### Builtins / standard library
 
 - `chatml_builtin_spec.ml`

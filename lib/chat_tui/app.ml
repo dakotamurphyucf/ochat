@@ -1822,13 +1822,14 @@ let run_chat
           Highlight_grammar_discovery.parse_discovered_sources loaded
         in
         let registry =
-          Highlight_registry.create_with_sources (explicit_grammar_sources @ discovered)
+          Highlight_registry.create_with_sources_and_baseline
+            (explicit_grammar_sources @ discovered)
         in
         discovered, warnings, registry)
     in
     List.iter warnings ~f:(fun message -> eprintf "[chat-tui] warning: %s\n%!" message);
     (match registry with
-     | Ok registry -> Highlight_registry.replace registry
+     | Ok (registry, baseline) -> Highlight_registry.replace ~baseline registry
      | Error error ->
        eprintf
          "[chat-tui] warning: Failed to prepare discovered TextMate grammars: %s\n%!"

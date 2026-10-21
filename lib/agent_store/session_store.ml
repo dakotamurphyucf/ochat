@@ -73,6 +73,32 @@ module Initial_projection = struct
   ;;
 end
 
+module Developer_root_state = struct
+  type t =
+    { gate : Eio.Mutex.t
+    ; mutable owner : unit ref option
+    }
+
+  let create () = { gate = Eio.Mutex.create (); owner = None }
+  let scopes : t list Eio.Fiber.key = Eio.Fiber.create_key ()
+
+  let with_gate t ~protect f =
+    let stack = Option.value (Eio.Fiber.get scopes) ~default:[] in
+    if List.exists stack ~f:(phys_equal t)
+    then Error (Store_error.Corrupt "recursive developer root lease or self-close")
+    else (
+      let outcome =
+        Eio.Mutex.use_rw ~protect t.gate (fun () ->
+          match Eio.Fiber.with_binding scopes (t :: stack) f with
+          | value -> `Returned value
+          | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ()))
+      in
+      match outcome with
+      | `Returned value -> Ok value
+      | `Raised (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace)
+  ;;
+end
+
 module Handle = struct
   type t =
     { mutable metadata : Metadata.t
@@ -83,7 +109,11 @@ module Handle = struct
     ; mutable lifecycle_epoch : unit ref
     ; mutable closed : bool
     ; owner_available : unit -> bool
+    ; daemon_lock_live : unit -> bool
     ; store_owner : unit ref
+    ; env : Eio_unix.Stdenv.base
+    ; data_root : Data_root.t
+    ; developer_root_state : Developer_root_state.t
     ; directory : string
     ; metadata_path : string
     ; actor_lock : Lock.t
@@ -111,6 +141,54 @@ module Handle = struct
 
   let session_id t = t.metadata.session.id
   let directory t = t.directory
+
+  let developer_evidence_root t ~env ~temporary_directory ~durable_directory =
+    let open Result.Let_syntax in
+    let%bind _ = metadata_checked t in
+    let%bind () =
+      if t.daemon_lock_live () && Lock.is_live t.actor_lock
+      then Ok ()
+      else Error (Store_error.Corrupt "session or daemon lock has ended")
+    in
+    let owner_fs, owner_prefix = Eio.Stdenv.fs t.env in
+    let candidate_fs, candidate_prefix = Eio.Stdenv.fs env in
+    if
+      phys_equal owner_fs candidate_fs
+      && String.equal owner_prefix candidate_prefix
+      && String.equal t.directory (Data_root.session_path t.data_root (session_id t))
+      && String.equal temporary_directory (Data_root.temporary_blobs_path t.data_root)
+      && String.equal durable_directory (Data_root.durable_blobs_path t.data_root)
+    then Ok t.data_root
+    else Error (Store_error.Corrupt "session and blob storage have different roots")
+  ;;
+
+  let developer_evidence_directory t ~env ~temporary_directory ~durable_directory =
+    Result.map
+      (developer_evidence_root t ~env ~temporary_directory ~durable_directory)
+      ~f:(fun root -> Filename.concat (Data_root.path root) "developer-runs")
+  ;;
+
+  let developer_result_intents_directory t ~env ~temporary_directory ~durable_directory =
+    Result.map
+      (developer_evidence_root t ~env ~temporary_directory ~durable_directory)
+      ~f:Data_root.developer_result_intents_path
+  ;;
+
+  let with_developer_root_collection t ~f =
+    Developer_root_state.with_gate t.developer_root_state ~protect:false (fun () ->
+      let open Result.Let_syntax in
+      let%bind _ = metadata_checked t in
+      let%bind () =
+        if t.daemon_lock_live () && Lock.is_live t.actor_lock
+        then Ok ()
+        else Error (Store_error.Corrupt "session or daemon lock has ended")
+      in
+      match t.developer_root_state.owner with
+      | Some _ -> Ok None
+      | None -> Result.map (f ()) ~f:Option.some)
+    |> Result.bind ~f:Fn.id
+  ;;
+
   let snapshot_directory t = t.snapshot_directory
   let journal_directory t = t.journal_directory
   let cache_directory t = t.cache_directory
@@ -212,7 +290,9 @@ type t =
   ; delegations : Delegation_store.t
   ; organizations : Organization_store.t
   ; projection_updates : Session_projection_update.t
+  ; developer_root_state : Developer_root_state.t
   ; mutable index_was_rebuilt : bool
+  ; mutable authoring_upload_child : Authoring_upload_store.t option
   ; mutable closed : bool
   }
 
@@ -233,6 +313,123 @@ let delegations t = t.delegations
 let organizations t = t.organizations
 let index_was_rebuilt t = t.index_was_rebuilt
 let is_closed t = t.closed
+
+let with_developer_root_gate store ~protect f =
+  Developer_root_state.with_gate store.developer_root_state ~protect f
+;;
+
+let open_authoring_upload_store t ~sw ~limits ~checkpoint =
+  with_developer_root_gate t ~protect:false (fun () ->
+    let open Result.Let_syntax in
+    if t.closed || not (Lock.is_live t.daemon_lock)
+    then Error Authoring_upload_store.Error.Closed
+    else if
+      Option.exists t.authoring_upload_child ~f:(fun child ->
+        not (Authoring_upload_store.fully_closed child))
+    then Error Authoring_upload_store.Error.Busy
+    else (
+      let%map child =
+        Authoring_upload_store.open_or_create
+          ~env:t.env
+          ~sw
+          ~data_root:t.root
+          ~daemon_lock:t.daemon_lock
+          ~host_id:t.server_id
+          ~limits
+          ~checkpoint
+      in
+      t.authoring_upload_child <- Some child;
+      child))
+  |> Result.map_error ~f:(fun error -> Authoring_upload_store.Error.Storage error)
+  |> Result.bind ~f:Fn.id
+;;
+
+module Developer_root = struct
+  type owner =
+    { store : t
+    ; token : unit ref
+    ; mutable released : bool
+    }
+
+  let valid_lock store =
+    Lock.is_live store.daemon_lock
+    && String.equal (Lock.path store.daemon_lock) (Data_root.daemon_lock_path store.root)
+    && Agent_protocol.Id.Server.equal
+         (Lock.owner store.daemon_lock).server_id
+         store.server_id
+  ;;
+
+  let check store =
+    if store.closed || not (valid_lock store)
+    then Error (Store_error.Corrupt "developer run root has no live daemon owner")
+    else Ok ()
+  ;;
+
+  let claim store =
+    with_developer_root_gate store ~protect:false (fun () ->
+      let open Result.Let_syntax in
+      let%bind () = check store in
+      match store.developer_root_state.owner with
+      | Some _ -> Error (Store_error.Corrupt "developer run root is already claimed")
+      | None ->
+        let token = ref () in
+        store.developer_root_state.owner <- Some token;
+        Ok { store; token; released = false })
+    |> Result.bind ~f:Fn.id
+  ;;
+
+  let issued_by owner store = phys_equal owner.store store && not owner.released
+
+  let with_lease owner ~f =
+    let store = owner.store in
+    with_developer_root_gate store ~protect:false (fun () ->
+      let open Result.Let_syntax in
+      let%bind () = check store in
+      let%bind () =
+        match store.developer_root_state.owner with
+        | Some token when phys_equal token owner.token && not owner.released -> Ok ()
+        | _ -> Error (Store_error.Corrupt "developer run root claim is stale")
+      in
+      Ok (f ~env:store.env ~root:store.root))
+    |> Result.bind ~f:Fn.id
+  ;;
+
+  let check_not_active owner =
+    let stack = Option.value (Eio.Fiber.get Developer_root_state.scopes) ~default:[] in
+    if List.exists stack ~f:(phys_equal owner.store.developer_root_state)
+    then Error (Store_error.Corrupt "cannot close an active developer root lease")
+    else Ok ()
+  ;;
+
+  let release owner =
+    let store = owner.store in
+    match
+      with_developer_root_gate store ~protect:true (fun () ->
+        (match store.developer_root_state.owner with
+         | Some token when phys_equal token owner.token ->
+           store.developer_root_state.owner <- None
+         | _ -> ());
+        owner.released <- true)
+    with
+    | Ok () -> ()
+    | Error _ -> invalid_arg "cannot release an active developer root lease"
+  ;;
+end
+
+let validate_blob_storage t ~env ~temporary_directory ~durable_directory =
+  let open Result.Let_syntax in
+  let%bind () = Developer_root.check t in
+  let owner_fs, owner_prefix = Eio.Stdenv.fs t.env in
+  let candidate_fs, candidate_prefix = Eio.Stdenv.fs env in
+  if
+    phys_equal owner_fs candidate_fs
+    && String.equal owner_prefix candidate_prefix
+    && String.equal temporary_directory (Data_root.temporary_blobs_path t.root)
+    && String.equal durable_directory (Data_root.durable_blobs_path t.root)
+  then Ok ()
+  else Error (Store_error.Corrupt "blob storage does not belong to the live daemon root")
+;;
+
 let eio_path t path = Eio.Path.(Eio.Stdenv.fs t.env / path)
 
 let check_writable t =
@@ -586,7 +783,9 @@ let make ~env ~root ~server_id ~daemon_lock ~organizations (index, index_was_reb
   ; index
   ; projection_updates =
       Session_projection_update.create ~env ~marker_path:(recovery_marker_path root) ()
+  ; developer_root_state = Developer_root_state.create ()
   ; index_was_rebuilt
+  ; authoring_upload_child = None
   ; closed = false
   ; delegations = Delegation_store.create ~env ~data_root:root
   ; organizations
@@ -675,11 +874,17 @@ let open_existing ~env ~sw ~root ~process_start_identity ~lock_nonce =
 ;;
 
 let close t =
-  if t.closed
-  then Ok ()
-  else (
-    Organization_store.close t.organizations;
-    Result.map (Lock.release ~env:t.env t.daemon_lock) ~f:(fun () -> t.closed <- true))
+  with_developer_root_gate t ~protect:true (fun () ->
+    if t.closed
+    then Ok ()
+    else if
+      Option.exists t.authoring_upload_child ~f:(fun child ->
+        not (Authoring_upload_store.fully_closed child))
+    then Error (Store_error.Locked (Some "authoring upload child remains open"))
+    else (
+      Organization_store.close t.organizations;
+      Result.map (Lock.release ~env:t.env t.daemon_lock) ~f:(fun () -> t.closed <- true)))
+  |> Result.bind ~f:Fn.id
 ;;
 
 let metadata_document carrier =
@@ -704,7 +909,11 @@ let make_handle
       ~metadata:session_metadata
       ~actor_lock
       ~owner_available
+      ~daemon_lock_live
+      ~developer_root_state
       ~store_owner
+      ~env
+      ~data_root
   =
   let child name = Filename.concat session_directory name in
   { Handle.metadata = session_metadata
@@ -715,7 +924,11 @@ let make_handle
   ; lifecycle_epoch = ref ()
   ; closed = false
   ; owner_available
+  ; daemon_lock_live
   ; store_owner
+  ; env
+  ; data_root
+  ; developer_root_state
   ; directory = session_directory
   ; metadata_path = metadata_path session_directory
   ; actor_lock
@@ -752,7 +965,11 @@ let acquire_handle t ~sw ~directory ~actor_lock_nonce _metadata =
       ~metadata
       ~actor_lock
       ~owner_available:(fun () -> not t.closed)
+      ~daemon_lock_live:(fun () -> Lock.is_live t.daemon_lock)
+      ~developer_root_state:t.developer_root_state
       ~store_owner:t.owner_token
+      ~env:t.env
+      ~data_root:t.root
   in
   Eio.Switch.on_release sw (fun () ->
     handle.Handle.closed <- true;

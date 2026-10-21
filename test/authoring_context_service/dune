@@ -1,0 +1,27 @@
+(library
+ (name authoring_context_service_tests)
+ (modules service_tests foundation_tests analysis_tests assistance_tests)
+ (libraries
+  core
+  eio
+  eio.unix
+  eio_main
+  mirage-crypto-rng.unix
+  ochat.agent_server
+  ochat.agent_store
+  ochat.agent_protocol
+  ochat.operator_authorization
+  ochat.chatml_authoring_context
+  ochat.chatml_authoring_analysis
+  ochat.chatml_semantics
+  ochat.chatml_typechecker
+  ochat.chatml_compilation
+  ochat.chatml_source
+  ochat.chatml
+  ochat.chat_response
+  ochat.ochat_function
+  ochat.openai
+  chatml_project_build_tests
+  source)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

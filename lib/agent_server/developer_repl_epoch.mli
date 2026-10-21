@@ -1,0 +1,784 @@
+(** One daemon-owned, process-local REPL foundation over the existing developer
+    source owner and OCH-401 typing/evaluator. It has no Store writer, Root,
+    scheduler, native provider or Task interpreter. Task actions belong to the
+    later Host adapter. A restart expires every instance and handle. *)
+
+open! Core
+module P = Agent_protocol
+module Capture_host = Authoring_context_service.Developer
+module Evaluator = Chatml_repl_execution
+
+type t
+
+module Original : sig
+  type t
+
+  (** Canonical capture-independent create identity. Route, selected Standard
+      ABI, configured Prompt/Workspace selectors and requested execution/output
+      ceilings are comparison data, not grants. This is a REPL action; it does
+      not manufacture a Check/Live command kind or entrypoint. *)
+  val create
+    :  route:Developer_command_original.Route.t
+    -> target:Chatml.Chatml_compiler_contract.Target.t
+    -> prompt:P.Id.Prompt_definition.t
+    -> workspace:P.Id.Workspace_definition.t
+    -> requested_execution:Chatml_execution.limits option
+    -> requested_max_output_bytes:int option
+    -> checkpoint:(unit -> unit)
+    -> (t, P.Error.t) result
+
+  val fingerprint : t -> Chatml_source.Digest.t
+
+  (** Immutable requested lineage for historical trace-source policy. This
+      route is comparison data, not the current selected source or a grant. *)
+  val route : t -> Developer_command_original.Route.t
+end
+
+module Instance : sig
+  type t
+
+  val equal : t -> t -> bool
+end
+
+module Epoch : sig
+  type t
+
+  val equal : t -> t -> bool
+end
+
+module Revision : sig
+  type t
+
+  val equal : t -> t -> bool
+end
+
+module Limits : sig
+  type t
+
+  (** Every scalar cap is validated as positive and at most 1 MiB; receipt
+      bytes must admit 256, and the origin count must not exceed the submission
+      count. [Configuration.create] separately requires the origin cap to cover
+      the evaluator's retained-Task capacity. Source, typing and execution
+      policies impose their own independent limits. [max_receipt_bytes] caps the compact
+      statement presentation; [max_total_receipt_bytes] bounds retained compact
+      outcomes and exact reference metadata across one instance. A distinct
+      [max_total_type_detail_bytes] bounds private immutable frozen graphs;
+      evicting those graphs never removes completed Task origins or their
+      references. Retained metadata uses conservative bounded charges;
+      the aggregate receipt budget must reserve enough for the configured
+      maximum number of bounded Task references before any evaluator effect.
+      [max_reference_page_bytes] bounds conservative in-process reference and
+      page-framing charges, including the first page returned by Submit. It is
+      not an encoded transport envelope bound; the later portable DTO layer
+      applies its own wire limit. Validation guarantees room for at least one
+      maximum-size reference plus framing, so a page with remaining references
+      contains a new item and its [after] cursor advances on the next read.
+      The bounded key ledger retains a compact historical outcome or tombstone
+      after detail eviction or reset; reset drops frozen graphs, physical Task
+      handles and reference pages, while an exact old-key retry remains inert.
+      Known keys never execute again. At
+      least two keys are required: one slot is reserved for an authenticated
+      close even after submit/reset admission is exhausted.
+      Exhaustion rejects fresh work keys before any effect. *)
+  val create
+    :  max_instances:int
+    -> max_keys_per_instance:int
+    -> max_submissions_per_epoch:int
+    -> max_source_bytes:int
+    -> max_receipt_bytes:int
+    -> max_total_receipt_bytes:int
+    -> max_total_type_detail_bytes:int
+    -> max_task_origins:int
+    -> max_reference_page_bytes:int
+    -> t Or_error.t
+
+  (** Checked I*(2*K+1), where I is max_instances and K the global
+      per-instance key ledger cap. No reset clears historical key tokens. *)
+  val registry_required_entries : t -> (int, P.Error.t) result
+
+  val max_source_bytes : t -> int
+  val max_receipt_bytes : t -> int
+  val max_reference_page_bytes : t -> int
+  val max_task_origins : t -> int
+end
+
+module Change : sig
+  type t =
+    | Submission of Instance.t * P.Idempotency_key.t
+    | Instance_invalidated of Instance.t
+end
+
+module Configuration : sig
+  type t
+
+  (** Immutable REPL-only policy. This does not mint source, method or Task
+      authority. The host binds it to its existing capture owner at install.
+      The Epoch origin cap must cover the evaluator's installed retained-Task
+      capacity, so every successfully retained handle has a reference; a
+      mismatch is rejected before creating an instance or running effects. *)
+  val create
+    :  scope_limits:Chatml_configured_lookup.Repl_scope.Limits.t
+    -> root_limits:Chatml_dependency_session.Roots.Limits.t
+    -> typing_limits:Chatml_repl_typing.Limits.t
+    -> evaluator_limits:Evaluator.Limits.t
+    -> execution_policy:Chatml_execution.policy
+    -> type_display_limits:Chatml_type_display.Limits.t
+    -> limits:Limits.t
+    -> t Or_error.t
+
+  val limits : t -> Limits.t
+end
+
+module View : sig
+  type t
+
+  val instance : t -> Instance.t
+  val epoch : t -> Epoch.t
+  val revision : t -> Revision.t
+  val run_id : t -> P.Id.Developer_run.t
+
+  (** Source_selection.repl_root_fingerprint: exact Prepared graph plus
+      selected Standard contract policy. This same canonical identity is the
+      later Store handle and Root.Source.Repl fingerprint. *)
+  val capture_fingerprint : t -> Chatml_source.Digest.t
+end
+
+module Task_reference : sig
+  type t
+
+  (** Maximum canonical encoded comparison reference issued by this owner;
+      portable installation must admit at least this many reference bytes. *)
+  val max_encoded_bytes : int
+
+  (** Canonical process-instance/epoch/ordinal/source identity. A decoded
+      reference remains inert; only the exact current physical handle and
+      [task_origin] may authenticate it for a fresh action. *)
+  val of_string : string -> (t, P.Error.t) result
+
+  val to_string : t -> string
+  val equal : t -> t -> bool
+  val run_id : t -> P.Id.Developer_run.t
+end
+
+module Submission : sig
+  type t
+
+  module Diagnostic : sig
+    type t
+
+    val message : t -> string
+    val location : t -> Chatml_source.Location.t option
+  end
+
+  type status =
+    | Need_more of
+        Chatml.Chatml_parse.Submission.Need_more.reason * Chatml_source.Location.t option
+    | Rejected of Diagnostic.t
+    | Finished
+    | Stopped of Diagnostic.t option
+
+  (** An omitted [Need_more] location means only the source coordinate exceeded
+      the requested presentation ceiling; [details] is [Output_limited]. The
+      parse outcome itself is unchanged. *)
+
+  type details =
+    | Available
+    | Output_limited
+
+  module Statement_summary : sig
+    type t
+
+    type task_retention =
+      | Not_a_task
+      | Retained
+      | Limit_reached
+    [@@deriving equal, sexp_of]
+
+    (** Original evaluator outcome and bounded scalar projections from this
+        exact receipt. The type is rendered from its immutable frozen snapshot;
+        [Chatml_type_display.completeness] distinguishes truncation from a
+        complete type. No language value, raw graph or Task handle escapes. *)
+    val outcome : t -> Evaluator.Receipt.outcome
+
+    val value_preview : t -> string option
+    val diagnostic : t -> Evaluator.Diagnostic.t option
+    val expression_type : t -> Chatml_type_display.t option
+    val binding_count : t -> int
+    val task_retention : t -> task_retention
+    val text_limited : t -> bool
+  end
+
+  val status : t -> status
+  val details : t -> details
+  val completed_statements : t -> int
+  val statement_count : t -> int
+
+  (** The authenticated issuing epoch retained with this keyed outcome. It
+      remains the same after reset, so portable Observe and Cancel can issue
+      the original comparison ID even when their first response was lost. *)
+  val origin_epoch : t -> Epoch.t
+
+  val revision : t -> Revision.t
+
+  (** Byte-bounded execution-order prefix of compact receipts. A display
+      ceiling can truncate a field or shorten the prefix without changing the
+      actual [statement_count], outcomes already shown or Task reference
+      count. The full frozen graph stays private and is inspected separately
+      while its exact-key detail is retained. *)
+  val summaries : t -> Statement_summary.t list
+
+  (** Existing in-process detail projection, present only while the explicit
+      private frozen-detail budget retains these receipts. Portable clients
+      use [summaries] and [inspect_type], never this graph-bearing accessor. *)
+  val statements : t -> Evaluator.Receipt.t list
+
+  val task_handles : t -> Evaluator.Task_handle.t list
+
+  (** This count survives frozen-detail eviction and presentation truncation.
+      The list is the first byte-bounded page while the issuing epoch is live;
+      use [task_references_page] for the rest or after an uncertain/lost Submit
+      response. Reset preserves the historical count but clears this page.
+      Each reference is inert until a fresh Task action resolves its exact
+      physical origin. *)
+  val task_reference_count : t -> int
+
+  val task_references : t -> Task_reference.t list
+end
+
+module Type_selector : sig
+  (** [Binding_index] is zero-based in the original receipt's ordered frozen
+      binding list; shadowed names remain distinct. *)
+  type t =
+    | Expression
+    | Binding_index of int
+  [@@deriving equal, sexp_of]
+end
+
+module Type_inspection : sig
+  type t
+
+  val revision : t -> Revision.t
+  val binding_name : t -> string option
+  val rendered : t -> Chatml_type_display.t
+end
+
+module Task_reference_page : sig
+  type t
+
+  val items : t -> Task_reference.t list
+  val next : t -> Task_reference.t option
+  val total : t -> int
+end
+
+module Task_origin : sig
+  type t
+
+  (** Exact Candidate.source paired with the physical Task handle only after
+      successful evaluator finalization; it may be an earlier snippet. Source
+      identity and digest do not grant Task execution. *)
+  val source : t -> Chatml_source.t
+
+  (** Stable bounded comparison reference minted with this origin, never from
+      a caller-provided Task value or a later latest-snippet lookup. *)
+  val reference : t -> Task_reference.t
+
+  (** Current epoch's single bounded source lineage. The Host calls this only
+      after [check_current] inside the exact Task_action.with_current loan,
+      then admits the Entry without yielding. That active action excludes
+      reset/close until its callback joins; the accessor itself does not
+      renew or grant Task authority. No per-Task provenance copy is retained
+      in the origin ledger. *)
+  val trace_provenance : t -> Developer_trace_retention.Provenance.t option
+
+  (** Recheck the exact original/current actor and selected base source and
+      contract after waits. A newly captured equal-looking graph is not this
+      epoch's authority. *)
+  val check_current
+    :  t
+    -> actor:Operator_authorization.t
+    -> checkpoint:(unit -> unit)
+    -> (unit, P.Error.t) result
+end
+
+(* A live instance retains at most one bounded current-epoch source lineage.
+   Across installed instances this uses at most [max_instances] times the
+   trace owner's per-trace provenance cap, independent of the owner's
+   recording/expired-tombstone aggregate. Reset rebuilds the lineage for the
+   new epoch; immutable older lineages live only in charged retained traces. *)
+
+(** Private host installation. Borrow the SAME capture host already installed
+    by developer commands; no second source resolver or writer. [surface] is
+    selected internally from the authentic Standard contract. One_off_v1 and
+    Tool_v1 deliberately omit Model; only an actual selected Developer_tool_v1
+    contract exposes its bounded Model.spawn interface. All three omit print
+    and never touch the process-global print sink/stdout. No arbitrary
+    caller-supplied runtime implementation is accepted. No language or native
+    effect runs at installation. [on_change] is a trusted nonyielding,
+    nonraising invalidation enqueue, invoked only after a committed transition
+    and outside the instance gate; notification delivery never changes the
+    transition's truthful outcome. *)
+val install
+  :  sw:Eio.Switch.t
+  -> capture_host:Capture_host.t
+  -> traces:Developer_trace_retention.t option
+  -> env:Eio_unix.Stdenv.base
+  -> clock:Eio.Time.Mono.ty Eio.Time.Mono.t
+  -> configuration:Configuration.t
+  -> ?on_change:(Change.t -> unit)
+  -> checkpoint:(unit -> unit)
+  -> unit
+  -> t
+
+(** Serialize this new instance's keyed create and exact physical source
+    acquisition. The original actor token is retained; reconnect may provide
+    a fresh current token only for the same principal ID and authentication
+    kind, with both tokens current and the source policy approving each.
+    Match route/Fresh_source before read, then use the shared
+    Source_selection kernel; require its selected target to equal Original.
+    Before publishing the Instance, acquire its separately counted retained
+    Source_selection and construct Repl_scope, Typing and the sole evaluator
+    from THAT selection's exact same Prepared and contract. The existing
+    max_instances gate reserves capacity before yielding capture/acquisition.
+    Any typed failure or exception before publication releases the retained
+    source/evaluator and preserves cancellation identity. A duplicate
+    key/payload returns the retained View without recapture; changed payload
+    conflicts. No Task/initializer runs here. *)
+val create
+  :  t
+  -> actor:Operator_authorization.t
+  -> run_id:P.Id.Developer_run.t
+  -> key:P.Idempotency_key.t
+  -> original:Original.t
+  -> fresh_source:Developer_command_original.Fresh_source.t option
+  -> (View.t, P.Error.t) result
+
+(** Portable Create's authoritative key-first route. [resolve_fresh] runs at
+    most once inside the serialized true miss, never for a same-key retry.
+    [request_current] is trusted, nonyielding and nonraising, checked after
+    source resolution and before admission. The callback supplies only the
+    same authentic Fresh_source accepted by ordinary [create]. No second
+    source owner or caller-provided capture is installed. *)
+val create_resolving
+  :  t
+  -> actor:Operator_authorization.t
+  -> run_id:P.Id.Developer_run.t
+  -> key:P.Idempotency_key.t
+  -> original:Original.t
+  -> resolve_fresh:(unit -> (Developer_command_original.Fresh_source.t, P.Error.t) result)
+  -> request_current:(unit -> bool)
+  -> (View.t, P.Error.t) result
+
+(** Expected-revision, keyed statement submission. The actor makes a fresh
+    captured snippet ID/bytes under its bounded namespace, calls the existing
+    Typing.admit/prepare_next and Evaluator.execute_next in order, and stores
+    every truthful partial outcome. A syntax Need_more/Rejected result does not
+    run code. Selected configured initializers execute only inside
+    [execute_next]'s current execution scope. Before each
+    code entry, repeat source/contract and original/current actor admission
+    after waits. Selected Standard surfaces have no print or eager native
+    callbacks. Even Developer_tool_v1 Model.spawn remains inside an inert
+    deferred Task until a distinct durable action starts it. Same key and
+    identical action/payload return the exact prior result without re-executing
+    effects; changed payload conflicts. If receipt detail was evicted but its
+    bounded key tombstone remains, matching retry reports result-expired and
+    never runs again. Fresh keys reject when the per-instance key ledger is
+    full; reset does not clear old-key tombstones. Cancellation cannot leave a reserved
+    typing candidate or detached evaluator callback. An unexpected callback
+    exception is contained by the daemon owner: the original waiter receives
+    the same exception/backtrace after join. If statement execution began, a
+    bounded [Stopped] partial outcome remains; in every case the key is
+    consumed and an authorized retry cannot execute it again. *)
+val submit
+  :  t
+  -> actor:Operator_authorization.t
+  -> instance:Instance.t
+  -> epoch:Epoch.t
+  -> expected_revision:Revision.t
+  -> key:P.Idempotency_key.t
+  -> source:string
+  -> (Submission.t, P.Error.t) result
+
+(** Portable admission uses a trusted nonyielding, nonraising request lease
+    comparator immediately before publishing the fresh statement key. An
+    accepted callback owns completion independently of that transport lease.
+    Direct embedded callers use [submit] with no transport lease. *)
+val submit_with_request
+  :  t
+  -> actor:Operator_authorization.t
+  -> instance:Instance.t
+  -> epoch:Epoch.t
+  -> expected_revision:Revision.t
+  -> key:P.Idempotency_key.t
+  -> source:string
+  -> request_current:(unit -> bool)
+  -> (Submission.t, P.Error.t) result
+
+(** Read-only current process-local result, with current actor/source
+    disclosure checks. A known evicted key reports result-expired rather than
+    looking like a miss. Unknown or expired instances do not restart/replay. *)
+val observe
+  :  t
+  -> actor:Operator_authorization.t
+  -> instance:Instance.t
+  -> key:P.Idempotency_key.t
+  -> (Submission.t option, P.Error.t) result
+
+(** Private Host trace selection after reset or explicit instance close. This
+    compares the same physical Instance, original epoch, key and authenticated
+    current actor against their retained historical identity; it does NOT
+    invoke Source_selection.check_current or demand that the old editor/file
+    generation remain executable. It grants no source-site disclosure: the
+    Host must additionally apply the trace owner's distinct historical read
+    policy before returning a snapshot. A missing/evicted trace is inert and
+    never reparses or reexecutes the key. *)
+val historical_trace
+  :  t
+  -> actor:Operator_authorization.t
+  -> instance:Instance.t
+  -> epoch:Epoch.t
+  -> key:P.Idempotency_key.t
+  -> (Developer_trace_retention.Entry.t option, P.Error.t) result
+
+(** Inspect one expression or indexed lexical binding from the exact retained
+    zero-based [statement_index] receipt's immutable frozen snapshot. The
+    binding index disambiguates shadowing;
+    a foreign/expired epoch, key or graph detail fails closed. Actor, method
+    and selected source are rechecked after any yield. The installed display
+    limits and [max_bytes] bound work and output; truncation is explicit in
+    [Type_inspection.rendered]. No latest-snippet reconstruction occurs. *)
+val inspect_type
+  :  t
+  -> actor:Operator_authorization.t
+  -> instance:Instance.t
+  -> epoch:Epoch.t
+  -> key:P.Idempotency_key.t
+  -> statement_index:int
+  -> selector:Type_selector.t
+  -> max_bytes:int
+  -> (Type_inspection.t, P.Error.t) result
+
+(** Read an exact issuing submission's retained Task origins, even if its
+    rich result detail was evicted or the Submit response was lost. [after]
+    must be an issued reference of this same physical instance/epoch/key;
+    it is a cursor, never authority. Items and framing are bounded by the
+    installed page-byte cap and [limit]. Expired reset/close/restart state
+    cannot be revived by a decoded reference. *)
+val task_references_page
+  :  t
+  -> actor:Operator_authorization.t
+  -> instance:Instance.t
+  -> epoch:Epoch.t
+  -> key:P.Idempotency_key.t
+  -> after:Task_reference.t option
+  -> limit:int
+  -> (Task_reference_page.t, P.Error.t) result
+
+(** Explicit current-actor control of the exact in-flight submission. This
+    signal path does not wait for the serialized statement lock: it marks and
+    cancels that physical callback first, then joins its finalization and
+    returns the truthful retained outcome. A foreign/historical key cannot
+    cancel a different statement. It does not clear idempotency evidence. *)
+val cancel_and_wait
+  :  t
+  -> actor:Operator_authorization.t
+  -> instance:Instance.t
+  -> key:P.Idempotency_key.t
+  -> (Submission.t, P.Error.t) result
+
+(** Check the current portable request after yielding source checks and before
+    signaling the exact active callback. The signal is the control handoff. *)
+val cancel_and_wait_with_request
+  :  t
+  -> actor:Operator_authorization.t
+  -> instance:Instance.t
+  -> key:P.Idempotency_key.t
+  -> request_current:(unit -> bool)
+  -> (Submission.t, P.Error.t) result
+
+type borrowed
+
+(** Lexically lend the exact serialized actor/epoch to the later Task adapter.
+    It must create a separate durable action receipt and fresh Root admission;
+    this borrow itself never runs a Task. It expires on scope exit. *)
+val with_current
+  :  t
+  -> actor:Operator_authorization.t
+  -> instance:Instance.t
+  -> epoch:Epoch.t
+  -> f:(borrowed -> ('a, P.Error.t) result)
+  -> ('a, P.Error.t) result
+
+val evaluator : borrowed -> Evaluator.t
+
+(** Immutable selected Standard surface used by this same borrow's typing and
+    evaluator. Comparison data, not a new source or effect grant; call after
+    [check_now] and repeat admission after any yielding work. *)
+val execution_surface : borrowed -> Chatml.Chatml_builtin_surface.surface
+
+val check_now : borrowed -> (unit, P.Error.t) result
+val task_origin : borrowed -> Evaluator.Task_handle.t -> (Task_origin.t, P.Error.t) result
+
+(** The retained selected source is a comparison-only projection from the same
+    physical borrowed instance. It is NOT the original editor-connection pin.
+    Root admission must recheck this exact selection after its Store/worker
+    waits; it cannot use a caller-constructed Prepared graph. *)
+val source_selection : borrowed -> Capture_host.Source_selection.t
+
+(** Configured selectors retained with the authenticated instance, used only
+    to prepare its exact Host Root after the first durable Task Start. *)
+val prompt : borrowed -> P.Id.Prompt_definition.t
+
+val workspace : borrowed -> P.Id.Workspace_definition.t
+val original_actor : borrowed -> Operator_authorization.t
+val current_actor : borrowed -> Operator_authorization.t
+val run_id : borrowed -> P.Id.Developer_run.t
+
+module Task_action : sig
+  type active
+
+  type unlaunched_disposition =
+    | No_durable_row
+    | Terminal_row
+
+  (** Register an independently cancellable Task action in the SAME instance
+      state as statements and reset/close control, then run the trusted
+      reservation/launch callback in a daemon-owned child fiber. Registration
+      mutates the control state nonyieldingly after acquiring its gate and
+      rejects reserved control, another statement/Task, changed epoch, reused
+      key or expired owner. The marker and its cancellation/join handle exist
+      BEFORE any yielding Store/actor work. Transport disconnect abandons only
+      its waiter. Reset/close can signal this prelaunch fiber as well as the
+      later Lifecycle callback. A typed error, exception or cancellation
+      before Launch is attempted abandons exactly the unentered marker. Once
+      the registered fiber calls Lifecycle.launch, the marker stays owned
+      through its launched-but-not-yet-entered child, entered child, and any
+      unknown launch/Finish. Returning the initial persisted View does not
+      release it; the registered fiber awaits the exact Lifecycle terminal or
+      retained uncertainty, and reset/close can cancel and join it meanwhile.
+      A conclusive launch refusal with no child settles/abandons the marker
+      only after Lifecycle's exact unlaunched-row cleanup; uncertain custody
+      never becomes an apparently idle instance. [publish_initial] is an
+      owner-supplied nonyielding, nonraising, one-shot resolver. If [f]
+      raises or returns before publishing, [start] resolves its waiting caller
+      with that typed/raised outcome while retaining any launched custody;
+      it never waits for the interpreter merely to return an initial View. *)
+  val start
+    :  t
+    -> actor:Operator_authorization.t
+    -> instance:Instance.t
+    -> epoch:Epoch.t
+    -> key:P.Idempotency_key.t
+    -> f:
+         (active
+          -> publish_initial:(('a, P.Error.t) result -> unit)
+          -> (unit, P.Error.t) result)
+    -> ('a, P.Error.t) result
+
+  (** Before [Lifecycle.launch], the owner fiber has a registered prelaunch
+      marker. It must call [mark_launching] immediately before Launch with no
+      intervening yield, then publish exactly one initial View/error through
+      the [start] callback's [publish_initial]. The callback continues to
+      await exact Lifecycle settlement while the marker remains registered.
+      The Lifecycle child may call [enter] before or after publication.
+      [mark_launching] does not grant execution or assert Launch succeeded;
+      a conclusive no-child refusal uses [finish_unlaunched] only after Store
+      cleanup, whereas uncertain Launch is retained for reset/recovery. Its
+      closed disposition says whether no row was ever durably installed or a
+      terminal row now owns the key; an unknown/partial reservation has no
+      disposition and retains marker/key. Historical same-action lookup still
+      precedes registration, while statement/reset/close reuse of a retained
+      Task key is rejected. [f]
+      must await exact Lifecycle terminal or retained uncertainty after
+      publication. Only a conclusively settled terminal releases the action;
+      callback-body exit alone cannot make reset replace its Root. *)
+  val mark_launching : active -> (unit, P.Error.t) result
+
+  val finish_unlaunched
+    :  active
+    -> disposition:unlaunched_disposition
+    -> (unit, P.Error.t) result
+
+  (** Trusted Host acknowledgement AFTER it has awaited/reconciled the exact
+      Lifecycle terminal row, compared its physical run/key/owner and checked
+      terminal persistence. This is not itself a Store proof. It rejects a
+      prelaunch, conclusive no-child or foreign/expired marker. Only this
+      state or [finish_unlaunched] lets the owner fiber clear registration on
+      normal exit; returning Ok from its callback alone never does. Any
+      exception, cancellation or unknown Finish retains retryable custody. *)
+  val mark_settled : active -> (unit, P.Error.t) result
+
+  (** On a true key miss, authenticate the reference against this active
+      instance's internally retained physical Task handle, exact Task_origin
+      and current source before reserving a Store row. This returns no Task
+      or effect capability. The returned exact Source_selection is comparison
+      data for the Store capture fingerprint; callback entry repeats the proof
+      after waits. *)
+  val preflight
+    :  active
+    -> actor:Operator_authorization.t
+    -> reference:Task_reference.t
+    -> (Capture_host.Source_selection.t, P.Error.t) result
+
+  (** Enter only from the one daemon-owned Lifecycle callback paired with
+      this marker. The callback's joined switch and cancellation handle are
+      recorded before [f]; an earlier reset signal cancels entry. [f] may
+      enter [with_current] repeatedly but never exposes an unregistered Task.
+      On exit the execution callback's completion resolves exactly once; this
+      is not the durable Lifecycle Finish acknowledgement and does not clear
+      the registered action. *)
+  val enter
+    :  active
+    -> sw:Eio.Switch.t
+    -> f:(unit -> ('a, P.Error.t) result)
+    -> ('a, P.Error.t) result
+
+  (** Serialize the exact active marker with this instance's evaluator gate;
+      refresh original/current actor and Source_selection before yielding work,
+      then resolve the reference to the exact internally retained physical
+      handle/origin and check membership immediately before interpreter entry.
+      The caller never supplies a mutable Task or borrowed handle. Escaped
+      scopes expire. Reset reserves
+      control outside this gate, signals/joins [active], then acquires it. *)
+  val with_current
+    :  active
+    -> actor:Operator_authorization.t
+    -> reference:Task_reference.t
+    -> f:(borrowed -> Evaluator.Task_handle.t -> Task_origin.t -> ('a, P.Error.t) result)
+    -> ('a, P.Error.t) result
+end
+
+type owner = t
+
+(** Comparison-only bound from the installed immutable instance/key policy. *)
+val registry_required_entries : owner -> (int, P.Error.t) result
+
+(** Comparison-only projection for trusted Task cleanup callbacks. The
+    instance must be physically installed by this exact REPL owner; a decoded
+    or foreign display identity cannot select another run. It is available
+    during reserved reset/close and owner shutdown, including after admission
+    has stopped, and grants no evaluator or Store mutation. *)
+val instance_run_id : owner -> Instance.t -> (P.Id.Developer_run.t, P.Error.t) result
+
+(** Comparison only: the exact installed instance's selected source and
+    original actor are physically the ones retained by a Host Root. This
+    cannot borrow a Task or authorize teardown on its own. *)
+val instance_paired_to
+  :  owner
+  -> Instance.t
+  -> selection:Capture_host.Source_selection.t
+  -> original_actor:Operator_authorization.t
+  -> bool
+
+(** The same physical source comparison for an admitted Task whose durable
+    Start failed before a Root existed. Its Host package still retains the
+    selected source; there is no Root actor to compare in that phase. *)
+val instance_uses_selection
+  :  owner
+  -> Instance.t
+  -> Capture_host.Source_selection.t
+  -> bool
+
+module Task_cleanup : sig
+  type t
+  type custody
+
+  (** Comparison-only identity of the exact reserved reset/close control.
+      Same-key cleanup retries carry the same physical custody token. This
+      projection is available only while that instance's control remains
+      reserved and its Task/statement has joined; it grants no fresh effect
+      or source authority. *)
+  val current_custody : owner -> Instance.t -> (custody, P.Error.t) result
+
+  val same_custody : custody -> custody -> bool
+
+  (** Inside the authentic reset/close callback after it has reserved control
+      and joined the current action, refresh original/current actor and exact
+      selected source under that same still-reserved control. Repeat a final
+      nonyielding control/actor/source suffix after the yielding refresh.
+      Host calls this immediately before retiring the paired Root; it is not
+      an evaluator borrow or a grant to start another Task. Shutdown has a
+      separate trusted no-actor path. *)
+  val check_retiring_current
+    :  owner
+    -> actor:Operator_authorization.t
+    -> instance:Instance.t
+    -> (unit, P.Error.t) result
+
+  (** Trusted Host-only coordination. [authorize_retirement] checks distinct
+      Task/Control permission and any retained Root policy before control is
+      reserved; it is nonyielding. Reset/close reserve control before any
+      later wait, signal and join statement/Task outside the evaluator gate,
+      then repeat yielding actor/source/affected-row checks and final
+      nonyielding admission before destructive retirement. [retire_instance]
+      also joins the exact Lifecycle terminal/uncertain-result custody for
+      every affected Task row, then closes its Root/jobs before evaluator/
+      epoch replacement. A pending/unknown Finish or failed Root/Job close
+      remains retryable under the reserved control; callback exit alone is
+      insufficient to replace the epoch.
+      Shutdown uses [retire_all] after stopping new actions, with no expired
+      request actor. Callbacks retain the exact per-instance Host package,
+      never a Root selected by display run ID alone. *)
+  val create
+    :  authorize_retirement:
+         (actor:Operator_authorization.t
+          -> instance:Instance.t
+          -> (unit, P.Error.t) result)
+    -> retire_instance:
+         (actor:Operator_authorization.t -> Instance.t -> (unit, P.Error.t) result)
+    -> retire_all:(unit -> (unit, P.Error.t) result)
+    -> t
+
+  val install_once : owner -> t -> (unit, P.Error.t) result
+end
+
+(** Reset/close signal the actor's current statement through the independent
+    control path, then join it before revoking
+    scope/evaluator/handles. OCH-402 registers any background Task action with
+    the same owner and joins it before these operations return. Reset retains
+    the same run-owned source selection if the immutable captured graph is
+    unchanged; editor connection closure or edits do not replace it. Close
+    releases that source owner only after all interpreter, Task and Root-owned
+    work has joined, including retryable uncertain cleanup. Reset retains
+    charged compact historical outcomes for exact-key retry, but drops private
+    frozen graphs, physical handles and first-page references. Already-evicted
+    key tombstones remain expired. No restart recovery or effect replay exists. *)
+val reset_and_wait
+  :  t
+  -> actor:Operator_authorization.t
+  -> instance:Instance.t
+  -> expected_epoch:Epoch.t
+  -> key:P.Idempotency_key.t
+  -> (View.t, P.Error.t) result
+
+(** Check the portable request after yielding retirement authorization and
+    immediately before [begin_control]. Once control owns the action, its
+    joined retirement/cleanup continues if the transport lease expires. *)
+val reset_and_wait_with_request
+  :  t
+  -> actor:Operator_authorization.t
+  -> instance:Instance.t
+  -> expected_epoch:Epoch.t
+  -> key:P.Idempotency_key.t
+  -> request_current:(unit -> bool)
+  -> (View.t, P.Error.t) result
+
+val close_and_wait
+  :  t
+  -> actor:Operator_authorization.t
+  -> instance:Instance.t
+  -> key:P.Idempotency_key.t
+  -> (unit, P.Error.t) result
+
+val close_and_wait_with_request
+  :  t
+  -> actor:Operator_authorization.t
+  -> instance:Instance.t
+  -> key:P.Idempotency_key.t
+  -> request_current:(unit -> bool)
+  -> (unit, P.Error.t) result
+
+(** Trusted daemon destructor: stop admission, signal and join every owned
+    statement callback and rooted work, then close evaluators and retained
+    source owners. It does not rely on a
+    request actor whose credential may have expired during shutdown. *)
+val shutdown_and_wait : t -> (unit, P.Error.t) result

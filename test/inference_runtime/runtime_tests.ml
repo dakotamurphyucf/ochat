@@ -144,8 +144,50 @@ let execute attempt ~on_event ~on_observation =
 
 let quiet attempt = execute attempt ~on_event:ignore ~on_observation:ignore
 
-let no_effect ~sw:_ ~scope ~accounting_id ~note_delivery:_ ~on_event:_ ~on_observation:_ =
+let no_effect
+      ~sw:_
+      ~scope
+      ~accounting_id
+      ~note_delivery:_
+      ~on_event:_
+      ~on_observation:_
+      ~submission_guard:_
+  =
   receipt ~scope ~accounting_id ()
+;;
+
+let%test_unit
+    "submission guard composes refresh before checks with attempt-local evidence"
+  =
+  let order = ref [] in
+  let member label =
+    Runtime.Submission_guard.create ~refresh:(fun () ->
+      order := ("refresh-" ^ label) :: !order;
+      fun () -> order := ("check-" ^ label) :: !order)
+  in
+  Runtime.Submission_guard.check
+    (Runtime.Submission_guard.compose (member "parent") (member "child"));
+  assert (
+    List.equal
+      String.equal
+      (List.rev !order)
+      [ "refresh-parent"; "refresh-child"; "check-parent"; "check-child" ]);
+  Eio_main.run (fun _ ->
+    let opened = ref 0 in
+    let both_opened, resolve_both_opened = Eio.Promise.create () in
+    let seen = ref [] in
+    let physical =
+      Runtime.Submission_guard.create ~refresh:(fun () ->
+        incr opened;
+        let own = !opened in
+        if !opened = 2 then Eio.Promise.resolve resolve_both_opened ();
+        Eio.Promise.await both_opened;
+        fun () -> seen := own :: !seen)
+    in
+    Eio.Fiber.both
+      (fun () -> Runtime.Submission_guard.check physical)
+      (fun () -> Runtime.Submission_guard.check physical);
+    assert (List.equal Int.equal (List.sort !seen ~compare:Int.compare) [ 1; 2 ]))
 ;;
 
 let%expect_test "one attempt, candidate reconciliation and one authoritative final usage" =
@@ -153,13 +195,28 @@ let%expect_test "one attempt, candidate reconciliation and one authoritative fin
   let first = candidate "first"
   and second = candidate "second" in
   let attempt =
-    attempt (fun ~sw:_ ~scope ~accounting_id ~note_delivery ~on_event ~on_observation ->
-      incr calls;
-      note_delivery Response_started;
-      on_event first;
-      on_event first;
-      on_observation (usage ~revision:1L ~tokens:10L ~scope ~accounting_id ());
-      receipt ~output:[ first; second ] ~revision:2L ~tokens:4L ~scope ~accounting_id ())
+    attempt
+      (fun
+          ~sw:_
+           ~scope
+           ~accounting_id
+           ~note_delivery
+           ~on_event
+           ~on_observation
+           ~submission_guard:_
+         ->
+         incr calls;
+         note_delivery Response_started;
+         on_event first;
+         on_event first;
+         on_observation (usage ~revision:1L ~tokens:10L ~scope ~accounting_id ());
+         receipt
+           ~output:[ first; second ]
+           ~revision:2L
+           ~tokens:4L
+           ~scope
+           ~accounting_id
+           ())
   in
   let events = ref []
   and counts = ref [] in
@@ -196,7 +253,15 @@ let%expect_test
     let seen = ref 0 in
     let attempt =
       attempt
-        (fun ~sw:_ ~scope ~accounting_id ~note_delivery:_ ~on_event ~on_observation:_ ->
+        (fun
+            ~sw:_
+             ~scope
+             ~accounting_id
+             ~note_delivery:_
+             ~on_event
+             ~on_observation:_
+             ~submission_guard:_
+           ->
            on_event (candidate "first");
            let output =
              if String.equal mode "conflict"
@@ -223,7 +288,15 @@ exception Observer_failure
 let%expect_test "observer failure propagates and attempt cannot be resumed or retried" =
   let attempt =
     attempt
-      (fun ~sw:_ ~scope ~accounting_id ~note_delivery:_ ~on_event ~on_observation:_ ->
+      (fun
+          ~sw:_
+           ~scope
+           ~accounting_id
+           ~note_delivery:_
+           ~on_event
+           ~on_observation:_
+           ~submission_guard:_
+         ->
          on_event (candidate "first");
          receipt ~scope ~accounting_id ())
   in
@@ -248,7 +321,15 @@ let%expect_test "cancellation propagates without inventing a terminal" =
   let events = ref 0 in
   let attempt =
     attempt
-      (fun ~sw ~scope:_ ~accounting_id:_ ~note_delivery:_ ~on_event:_ ~on_observation:_ ->
+      (fun
+          ~sw
+           ~scope:_
+           ~accounting_id:_
+           ~note_delivery:_
+           ~on_event:_
+           ~on_observation:_
+           ~submission_guard:_
+         ->
          Eio.Switch.fail sw Exit;
          Eio.Fiber.yield ();
          failwith "unreachable")
@@ -270,7 +351,15 @@ let%expect_test "cancellation propagates without inventing a terminal" =
 let%expect_test "usage revisions replace lower counts but stale final receipt rejects" =
   let attempt =
     attempt
-      (fun ~sw:_ ~scope ~accounting_id ~note_delivery:_ ~on_event:_ ~on_observation ->
+      (fun
+          ~sw:_
+           ~scope
+           ~accounting_id
+           ~note_delivery:_
+           ~on_event:_
+           ~on_observation
+           ~submission_guard:_
+         ->
          on_observation (usage ~revision:2L ~scope ~accounting_id ());
          receipt ~revision:1L ~scope ~accounting_id ())
   in
@@ -283,7 +372,15 @@ let%expect_test "usage revisions replace lower counts but stale final receipt re
 let%expect_test "authentication failure refines conservative delivery without submission" =
   let attempt =
     attempt
-      (fun ~sw:_ ~scope ~accounting_id ~note_delivery:_ ~on_event:_ ~on_observation:_ ->
+      (fun
+          ~sw:_
+           ~scope
+           ~accounting_id
+           ~note_delivery:_
+           ~on_event:_
+           ~on_observation:_
+           ~submission_guard:_
+         ->
          let terminal =
            E.Terminal.create
              ~scope
@@ -362,6 +459,7 @@ let%expect_test
               ~note_delivery:_
               ~on_event:_
               ~on_observation:_
+              ~submission_guard:_
             -> receipt ~scope ~accounting_id ())
       in
       let adapter =
@@ -440,6 +538,7 @@ let%expect_test
                ~note_delivery:_
                ~on_event:_
                ~on_observation:_
+               ~submission_guard:_
              -> receipt ~scope ~accounting_id ())
       in
       let context = Runtime.Context.with_session context session |> ok in
@@ -508,6 +607,7 @@ let%expect_test "owned binding without adapter session rejects new prepare after
                ~note_delivery:_
                ~on_event:_
                ~on_observation:_
+               ~submission_guard:_
              -> receipt ~scope ~accounting_id ())
       in
       let binding = Runtime.Context.open_owned_binding base owner |> ok in

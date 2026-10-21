@@ -199,7 +199,7 @@ let maybe_annotate_expr (expr_node : expr node) (type_opt : type_expr option) : 
 (***************************************************************************)
 
 program:
-    program_stmts EOF  { $1 }
+    program_stmts EOF  { List.rev $1 }
 
 module_interface:
     signature_items EOF { $1 }
@@ -231,8 +231,10 @@ signature_requirement:
         ; span = span_of_lex $startpos $endpos } }
 
 program_stmts:
-    program_stmts program_stmt { $1 @ [$2] }
-| program_stmts SEMISEMI { $1 }
+    program_stmts program_stmt
+      { Sites.completed_program_statement ~end_byte:$endpos($2).pos_cnum; $2 :: $1 }
+| program_stmts SEMISEMI
+      { Sites.completed_program_separator ~end_byte:$endpos($2).pos_cnum; $1 }
 | /* empty */ { [] }
 
 module_stmts:

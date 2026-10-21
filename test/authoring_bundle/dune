@@ -1,0 +1,13 @@
+(library
+ (name authoring_bundle_test)
+ (modules authoring_bundle_test)
+ (libraries
+  core
+  eio
+  eio_main
+  ochat.agent_protocol
+  ochat.agent_client
+  ochat.chatml_source
+  ochat.chatml_project)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

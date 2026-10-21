@@ -16,6 +16,12 @@ module Public_module : sig
   val types : t -> Alias.t
   val members : t -> Chatml_semantic_binding.Members.t option
   val with_members : t -> Chatml_semantic_binding.Members.t -> t
+
+  (** OCH-269's one-memo candidate copy replaces only the raw public scheme,
+      retaining the exact closed alias templates and immutable member metadata.
+      Reject a copied root whose shape is not a module row; never reconstruct
+      through [create], which would lose provenance. No weak cell is copied here. *)
+  val with_value_scheme : t -> Inferred.typ -> (t, [ `Invalid_module_scheme ]) Result.t
 end
 
 module Annotation : sig

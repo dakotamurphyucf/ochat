@@ -164,6 +164,7 @@ let execute
       ?(table = String.Table.create ())
       ?(on_commit = ignore)
       ?(on_attempt = ignore)
+      ?(on_admitted_call = ignore)
       ()
   =
   let allocator =
@@ -174,6 +175,7 @@ let execute
     ~inference_context:context
     ~inference_identity:(identity ())
     ~on_inference_attempt:on_attempt
+    ~on_admitted_call
     ~on_inference_completion:(fun _ -> ())
     ~allocator
     ~history
@@ -193,6 +195,150 @@ let kind entry =
   | Message _ | Reasoning _ | Unknown _ -> "other"
 ;;
 
+let%expect_test "admitted calls retain their exact attempt and committed parent" =
+  Eio_main.run (fun env ->
+    let admitted = Queue.create () in
+    let effects = ref 0 in
+    let run () =
+      let rounds = ref 0 in
+      let acknowledged = ref None in
+      let committed = Queue.create () in
+      let observed = ref None in
+      let table = String.Table.create () in
+      Hashtbl.set table ~key:"inspect" ~data:(fun ~invocation _ ->
+        Int.incr effects;
+        let token = Option.value_exn !observed in
+        let parent = C.In_memory_stream.Admitted_call.parent token in
+        let delivered =
+          Option.value_exn (Ochat_function.Invocation.inference_parent invocation)
+        in
+        assert (Transcript.Scope.Key.equal parent.scope delivered.scope);
+        assert (
+          Option.equal History_entry.Id.equal parent.call_entry_id delivered.call_entry_id);
+        Openai.Responses.Tool_output.Output.Text "done");
+      let context =
+        context
+          (fun
+              _
+               ~sw:_
+               ~scope
+               ~accounting_id
+               ~note_delivery:_
+               ~on_event
+               ~on_observation:_
+               ~submission_guard:_
+             ->
+             Int.incr rounds;
+             if !rounds = 1
+             then (
+               let eligible =
+                 candidate scope "eligible" (call "inspect") Tool_candidate
+               in
+               on_event eligible;
+               receipt
+                 scope
+                 accounting_id
+                 [ eligible; candidate scope "retained" (call "inspect") Not_eligible ])
+             else
+               receipt
+                 scope
+                 accounting_id
+                 [ candidate scope "answer" (message "done") Not_eligible ])
+      in
+      ignore
+        (execute
+           env
+           context
+           ~table
+           ~on_attempt:(fun attempt -> acknowledged := Some attempt)
+           ~on_commit:(Queue.enqueue committed)
+           ~on_admitted_call:(fun token ->
+             let attempt = C.In_memory_stream.Admitted_call.attempt token in
+             assert (phys_equal attempt (Option.value_exn !acknowledged));
+             let parent = C.In_memory_stream.Admitted_call.parent token in
+             assert (
+               Transcript.Scope.Key.equal
+                 parent.scope
+                 (Transcript.Scope.key (Runtime.Attempt.scope attempt)));
+             assert (Option.equal String.equal parent.call_alias (Some "same-alias"));
+             assert (
+               Queue.exists committed ~f:(fun entry ->
+                 Option.equal
+                   History_entry.Id.equal
+                   parent.call_entry_id
+                   (Some (History_entry.id entry))));
+             observed := Some token;
+             Queue.enqueue admitted token)
+           ()
+         : History_entry.t list);
+      assert (!rounds = 2)
+    in
+    run ();
+    run ();
+    let first = Queue.dequeue_exn admitted in
+    let second = Queue.dequeue_exn admitted in
+    let first_attempt = C.In_memory_stream.Admitted_call.attempt first in
+    let second_attempt = C.In_memory_stream.Admitted_call.attempt second in
+    assert (not (phys_equal first_attempt second_attempt));
+    assert (
+      Transcript.Scope.Key.equal
+        (C.In_memory_stream.Admitted_call.parent first).scope
+        (C.In_memory_stream.Admitted_call.parent second).scope);
+    assert (Queue.is_empty admitted);
+    printf "tokens=2 effects=%d independent_attempts=true\n" !effects);
+  [%expect {| tokens=2 effects=2 independent_attempts=true |}]
+;;
+
+exception Admitted_hook_failed
+
+let%expect_test "admitted-call failure and cancellation stop the tool effect" =
+  Eio_main.run (fun env ->
+    let failures =
+      [ Admitted_hook_failed
+      ; Eio.Cancel.Cancelled (Failure "admitted-call cancellation")
+      ]
+    in
+    List.iter failures ~f:(fun original ->
+      let effects = ref 0 in
+      let commits = ref 0 in
+      let table = String.Table.create () in
+      Hashtbl.set table ~key:"inspect" ~data:(fun ~invocation:_ _ ->
+        Int.incr effects;
+        Openai.Responses.Tool_output.Output.Text "must not run");
+      let context =
+        context
+          (fun
+              _
+               ~sw:_
+               ~scope
+               ~accounting_id
+               ~note_delivery:_
+               ~on_event:_
+               ~on_observation:_
+               ~submission_guard:_
+             ->
+             receipt
+               scope
+               accounting_id
+               [ candidate scope "eligible" (call "inspect") Tool_candidate ])
+      in
+      (match
+         execute
+           env
+           context
+           ~table
+           ~on_commit:(fun _ -> Int.incr commits)
+           ~on_admitted_call:(fun _ -> raise original)
+           ()
+       with
+       | _ -> assert false
+       | exception exn -> assert (phys_equal exn original));
+      assert (!commits = 1);
+      assert (!effects = 0));
+    print_endline "committed=2 effects=0 original_exceptions=true");
+  [%expect {| committed=2 effects=0 original_exceptions=true |}]
+;;
+
 let%expect_test "early call retains arrival commit order and terminal unseen items" =
   Eio_main.run (fun env ->
     let rounds = ref 0 in
@@ -206,7 +352,16 @@ let%expect_test "early call retains arrival commit order and terminal unseen ite
       Openai.Responses.Tool_output.Output.Text "host output");
     let context =
       context
-        (fun _ ~sw:_ ~scope ~accounting_id ~note_delivery:_ ~on_event ~on_observation:_ ->
+        (fun
+            _
+             ~sw:_
+             ~scope
+             ~accounting_id
+             ~note_delivery:_
+             ~on_event
+             ~on_observation:_
+             ~submission_guard:_
+           ->
            Int.incr rounds;
            if !rounds = 1
            then (
@@ -270,6 +425,7 @@ let%expect_test "retained unsupported call is not execution eligibility" =
              ~note_delivery:_
              ~on_event:_
              ~on_observation:_
+             ~submission_guard:_
            ->
            receipt
              scope
@@ -297,6 +453,7 @@ let%expect_test
              ~note_delivery:_
              ~on_event:_
              ~on_observation:_
+             ~submission_guard:_
            ->
            called := true;
            receipt scope accounting_id [])
@@ -333,6 +490,7 @@ let%expect_test
              ~note_delivery:_
              ~on_event:_
              ~on_observation:_
+             ~submission_guard:_
            ->
            assert (
              Document_schema.Json.equal
@@ -359,7 +517,16 @@ let%expect_test "repeated provider alias executes distinct committed call occurr
       Openai.Responses.Tool_output.Output.Text "host output");
     let context =
       context
-        (fun _ ~sw:_ ~scope ~accounting_id ~note_delivery:_ ~on_event ~on_observation:_ ->
+        (fun
+            _
+             ~sw:_
+             ~scope
+             ~accounting_id
+             ~note_delivery:_
+             ~on_event
+             ~on_observation:_
+             ~submission_guard:_
+           ->
            Int.incr rounds;
            if !rounds = 1
            then (
@@ -400,6 +567,7 @@ let%expect_test
              ~note_delivery:_
              ~on_event:_
              ~on_observation:_
+             ~submission_guard:_
            ->
            let setting =
              R.Target.settings (R.target request)
@@ -453,6 +621,7 @@ let%expect_test "Driver rejects retired transport before document or model effec
              ~note_delivery:_
              ~on_event:_
              ~on_observation:_
+             ~submission_guard:_
            ->
            dispatched := true;
            failwith "retired transport dispatched")
@@ -525,6 +694,7 @@ let%expect_test
                ~note_delivery:_
                ~on_event:_
                ~on_observation:_
+               ~submission_guard:_
              ->
              match scope.relation with
              | Nested _ ->
@@ -573,6 +743,11 @@ let%expect_test "legacy wrapper fork depths retain the shared child bound" =
         let calls = ref 0 in
         let nested = ref 0 in
         let rejected = ref false in
+        let submission_checks = ref 0 in
+        let dispatch_checks = ref 0 in
+        let issued_attempts = Queue.create () in
+        let root_admissions = ref 0 in
+        let nested_admissions = ref 0 in
         let context =
           context
             (fun
@@ -583,7 +758,9 @@ let%expect_test "legacy wrapper fork depths retain the shared child bound" =
                  ~note_delivery:_
                  ~on_event:_
                  ~on_observation:_
+                 ~submission_guard
                ->
+               Runtime.Submission_guard.check submission_guard;
                Int.incr calls;
                (match scope.relation with
                 | Root -> ()
@@ -612,13 +789,26 @@ let%expect_test "legacy wrapper fork depths retain the shared child bound" =
           C.Ctx.create
             ~inference_context:context
             ~inference_identity:(identity ())
-            ~on_inference_attempt:ignore
+            ~on_inference_attempt:(Queue.enqueue issued_attempts)
             ~on_inference_completion:ignore
+            ~before_inference_dispatch:(fun _ -> Int.incr dispatch_checks)
+            ~on_admitted_call:(fun admitted ->
+              let attempt = C.In_memory_stream.Admitted_call.attempt admitted in
+              assert (
+                Queue.exists issued_attempts ~f:(fun issued -> phys_equal issued attempt));
+              match (Runtime.Attempt.scope attempt).relation with
+              | Root -> Int.incr root_admissions
+              | Nested _ -> Int.incr nested_admissions)
             ~env
             ~dir
             ~tool_dir:dir
             ~cache:(C.Cache.create ~max_size:1 ())
             ()
+          |> fun ctx ->
+          C.Ctx.with_submission_guard
+            ctx
+            (Runtime.Submission_guard.create ~refresh:(fun () ->
+               fun () -> incr submission_checks))
         in
         let allocator =
           History_entry.Allocator.create ~namespace:"fork-bound" ~next_sequence:0 |> ok
@@ -643,6 +833,10 @@ let%expect_test "legacy wrapper fork depths retain the shared child bound" =
         in
         assert (List.length history = 3);
         assert !rejected;
+        assert (!submission_checks = !calls);
+        assert (!dispatch_checks = !calls);
+        assert (!root_admissions > 0);
+        if fork_depth < 2 then assert (!nested_admissions > 0);
         print_s
           [%sexp (observed : bool), (fork_depth : int), (!calls : int), (!nested : int)])));
   [%expect
@@ -662,8 +856,11 @@ let%expect_test
   Eio_main.run (fun env ->
     Eio.Switch.run (fun sw ->
       let active = ref false
+      and dispatch_open = ref true
+      and dispatch_checks = ref 0
       and guards = ref 0
       and upstream = ref 0
+      and submission_checks = ref 0
       and transports = ref 0 in
       let context =
         context
@@ -675,7 +872,9 @@ let%expect_test
                ~note_delivery
                ~on_event:_
                ~on_observation:_
+               ~submission_guard
              ->
+             Runtime.Submission_guard.check submission_guard;
              Int.incr transports;
              note_delivery E.Terminal.Response_started;
              receipt
@@ -690,11 +889,21 @@ let%expect_test
           ~inference_identity:(identity ())
           ~on_inference_attempt:(fun _ -> Int.incr upstream)
           ~on_inference_completion:ignore
+          ~before_inference_dispatch:(fun _ ->
+            Int.incr dispatch_checks;
+            if not !dispatch_open then raise C.Ctx.Inference_admission_rejected)
           ~env
           ~dir
           ~tool_dir:dir
           ~cache:(C.Cache.create ~max_size:1 ())
           ()
+        |> fun ctx ->
+        C.Ctx.with_submission_guard
+          ctx
+          (Runtime.Submission_guard.create ~refresh:(fun () ->
+             fun () ->
+             incr submission_checks;
+             if not !active then raise C.Ctx.Inference_admission_rejected))
       in
       let guard _ =
         Int.incr guards;
@@ -726,6 +935,13 @@ let%expect_test
       [%test_eq: string] "done" (complete child);
       [%test_eq: int] 1 !upstream;
       [%test_eq: int] 1 !transports;
+      [%test_eq: int] 1 !submission_checks;
+      dispatch_open := false;
+      (match complete child with
+       | _ -> failwith "inherited dispatch guard permitted a revoked preparation"
+       | exception C.Ctx.Inference_admission_rejected -> ());
+      [%test_eq: int] 1 !transports;
+      dispatch_open := true;
       active := false;
       let executor =
         C.Model_executor.create
@@ -760,7 +976,9 @@ let%expect_test
        | _ -> failwith "recipe did not report safe admission revocation");
       [%test_eq: int] 3 !guards;
       [%test_eq: int] 1 !upstream;
-      [%test_eq: int] 1 !transports));
+      [%test_eq: int] 1 !submission_checks;
+      [%test_eq: int] 1 !transports;
+      [%test_eq: int] 4 !dispatch_checks));
   print_endline
     "revoked derived and recipe attempts stop before upstream/transport; live control \
      dispatches";
@@ -786,7 +1004,8 @@ let%expect_test
             ~accounting_id
             ~note_delivery:_
             ~on_event:_
-            ~on_observation:_ ->
+            ~on_observation:_
+            ~submission_guard:_ ->
              receipt
                scope
                accounting_id
@@ -866,4 +1085,93 @@ let%expect_test
           turn Root "last-root";
           print_s [%sexp (List.rev !prepared_bindings : string list)])));
   [%expect {| (attached detached detached detached attached) |}]
+;;
+
+let%expect_test "fork context forwards admission without inheriting an attempt" =
+  Mirage_crypto_rng_unix.use_default ();
+  Eio_main.run (fun env ->
+    let parent =
+      Transcript.Scope.
+        { scope =
+            { source = Transcript.Source_id.of_string "outer" |> ok
+            ; attempt = Transcript.Attempt_id.of_string "1" |> ok
+            }
+        ; call_entry_id =
+            Some (History_entry.Id.create ~namespace:"outer" ~sequence:0 |> ok)
+        ; call_alias = Some "outer-call"
+        }
+    in
+    let rounds = ref 0 in
+    let attempts = Queue.create () in
+    let admissions = ref 0 in
+    let effects = ref 0 in
+    let context =
+      context
+        (fun
+            _
+             ~sw:_
+             ~scope
+             ~accounting_id
+             ~note_delivery:_
+             ~on_event:_
+             ~on_observation:_
+             ~submission_guard:_
+           ->
+           Int.incr rounds;
+           receipt
+             scope
+             accounting_id
+             [ (if !rounds = 1
+                then candidate scope "child-call" (call "inspect") Tool_candidate
+                else candidate scope "answer" (message "done") Not_eligible)
+             ])
+    in
+    let dir = Eio.Stdenv.cwd env in
+    let ctx =
+      C.Ctx.create
+        ~inference_context:context
+        ~inference_identity:(identity ())
+        ~inference_relation:(Nested parent)
+        ~on_inference_attempt:(Queue.enqueue attempts)
+        ~on_inference_completion:ignore
+        ~on_admitted_call:(fun admitted ->
+          let attempt = C.In_memory_stream.Admitted_call.attempt admitted in
+          assert (Queue.exists attempts ~f:(fun issued -> phys_equal attempt issued));
+          (match (Runtime.Attempt.scope attempt).relation with
+           | Root -> assert false
+           | Nested actual ->
+             assert (Transcript.Scope.Key.equal actual.scope parent.scope));
+          assert (!effects = 0);
+          Int.incr admissions)
+        ~env
+        ~dir
+        ~tool_dir:dir
+        ~cache:(C.Cache.create ~max_size:1 ())
+        ()
+    in
+    let table = String.Table.create () in
+    Hashtbl.set table ~key:"inspect" ~data:(fun ~invocation:_ _ ->
+      Int.incr effects;
+      Openai.Responses.Tool_output.Output.Text "child effect");
+    let invocation_id = C.Fork.Invocation_id.create () in
+    let result =
+      C.Fork.execute_entries
+        ~ctx
+        ~allocator:(C.Fork.allocator ~parent_namespace:"outer" invocation_id)
+        ~history:[]
+        ~invocation_id
+        ~call_id:"outer-call"
+        ~arguments:{|{"command":"inspect","arguments":[]}|}
+        ~tools:[]
+        ~tool_tbl:table
+        ~on_fn_out:ignore
+        ()
+    in
+    assert (String.equal result "done");
+    printf
+      "nested_attempts=%d admitted=%d effects=%d\n"
+      (Queue.length attempts)
+      !admissions
+      !effects);
+  [%expect {| nested_attempts=2 admitted=1 effects=1 |}]
 ;;

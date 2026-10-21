@@ -300,6 +300,19 @@ val handle_tool_result
   -> item:Openai.Responses.Item.t
   -> (Moderation.Runtime_request.t list, string) result
 
+module Admitted_call : sig
+  type t
+
+  (** Comparison evidence for the actual attempt acknowledged by this request.
+      A consumer must compare physical identity with its own retained attempt;
+      this value alone grants no authority to execute a tool or child inference. *)
+  val attempt : t -> Inference_runtime.Attempt.t
+
+  (** The committed direct parent call. Its scope, entry ID and alias are
+      correlation data and must be checked against the consumer's owned state. *)
+  val parent : t -> Transcript.Scope.parent
+end
+
 (** [run_completion_stream_in_memory_entries ~env ~allocator ~history
     ~tools ()] streams a canonical conversation held entirely in memory.
 
@@ -370,6 +383,13 @@ val handle_tool_result
            source or attempt. Errors and cancellation propagate. On cancellation
            no strict Finished callback runs: the authoritative operation terminal
            fences live activity without claiming a tool output/outcome.
+    @param on_admitted_call Strict callback for an eligible tool call after its
+           canonical call entry and host admission have committed, before its
+           execution can be scheduled. The opaque value binds this stream's
+           exact acknowledged inference attempt to that entry and alias.
+           Rejected, synthetic and duplicate candidates do not call it.
+           Exceptions and cancellation propagate unchanged and prevent that
+           tool effect. The default is a no-op for ordinary conversations.
     @param on_runtime_request Optional callback invoked for surfaced moderator
            runtime requests such as compaction or end-session notifications.
 
@@ -390,8 +410,10 @@ val run_completion_stream_in_memory_entries
   -> inference_identity:Neutral_turn.Identity.t
   -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
   -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> ?submission_guard:Inference_runtime.Submission_guard.t
   -> ?inference_relation:Transcript.Scope.relation
   -> ?on_inference_observation:(Inference.Observation.t -> unit)
+  -> ?on_admitted_call:(Admitted_call.t -> unit)
   -> ?before_inference_dispatch:(Inference_runtime.Prepared.t -> unit)
   -> ?resolve_inference_assets:(History_entry.t list -> Inference.Request.Asset.t list)
   -> ?datadir:Eio.Fs.dir_ty Eio.Path.t

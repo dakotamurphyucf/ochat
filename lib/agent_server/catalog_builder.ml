@@ -77,6 +77,8 @@ let prompt ~root_invocation (value : Config.Prompt.t) =
     ~runtime_policy:value.runtime_policy
     ~enabled:value.enabled
     ~description:value.description
+  |> Result.map ~f:(fun definition ->
+    Agent_session.Prompt_definition.with_tool_contract definition value.tool_contract)
 ;;
 
 let resolve_reviewer reviewer_resolver kind id =

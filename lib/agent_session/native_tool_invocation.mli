@@ -8,6 +8,16 @@ type executor =
       -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
   -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
 
+(** The same actor-backed transition contract over the owner-neutral record.
+    The developer implementation is [Developer_invocation_owner.with_invocation];
+    conversation callers keep their existing [executor] adapter. *)
+type owned_executor =
+  invocation:Agent_protocol.Host_invocation.t
+  -> (active:Developer_invocation_owner.active
+      -> dispatched:Agent_protocol.Host_invocation.t
+      -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Host_invocation.t, Agent_protocol.Error.t) result
+
 (** Actor-owned handoff whose commit atomically saves moderator state and result.
     It has no provider-history or general session mutation capability. *)
 type moderator_executor =
@@ -36,6 +46,100 @@ val current_scope : unit -> scope
     verified capability ceiling. It provides admission/result persistence and
     narrowing, without foreground history, moderator ownership or a policy bypass. *)
 type borrowed
+
+(** A developer/owner-neutral borrow never projects as a conversation borrow.
+    The old [current_scope]/[borrow] report Expired in an active developer scope
+    so Session-only services cannot fall back to an unrelated operation. *)
+type owned_borrowed
+
+(** Expiring borrow of a physically selected developer invocation. Its issuer
+    and direct-parent proof come from the stable selected executor, not an
+    equal run ID. This separate scope never falls back to a conversation or
+    legacy no-child owner. *)
+type selected_borrowed
+
+val borrow_selected : unit -> (selected_borrowed, Agent_protocol.Error.t) result
+val selected_borrowed_issuer : selected_borrowed -> Developer_invocation_owner.Selected.t
+
+(** Exact direct parent invocation carried by this live selected borrow. A
+    developer Job scope compares it with its registered physical child context
+    before accepting the borrow's narrowed capability ceiling. *)
+val selected_borrowed_invocation : selected_borrowed -> Agent_protocol.Host_invocation.t
+
+val selected_borrowed_parent
+  :  selected_borrowed
+  -> Developer_invocation_owner.Selected.active
+
+(** Inherited aggregate execution budget of the SAME live selected callback.
+    A borrowed value retained after that callback expires cannot start another
+    interpreter scope. The returned context is budget ancestry, not a current
+    native effect grant; effect_entry and physical parent checks still apply. *)
+val selected_borrowed_execution_context
+  :  selected_borrowed
+  -> (Chatml_execution.context, Agent_protocol.Error.t) result
+
+val selected_borrowed_capabilities
+  :  selected_borrowed
+  -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
+
+(** Nonyielding physical ancestry comparison for an entered selected child.
+    Only [with_selected_scope] records the ambient selected borrow when it
+    installs the child binding; an invocation ID or copied owner cannot create
+    this link. Require [child] to be the current selected fiber binding and
+    every link through [ancestor] to remain live on this domain. Same-invocation
+    narrowing retains the exact context; a distinct invocation must name its
+    immediate parent's invocation ID, and at least one such child edge is
+    required. This grants no binding or effect by itself; saved source, Root,
+    terminal, Claim and child selection checks remain required before execution. *)
+val check_selected_ancestor
+  :  ancestor:selected_borrowed
+  -> child:selected_borrowed
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Recheck the actual selected callback's original parent/actor, current host
+    registry and unchanged physical native function after a yielding source
+    restoration. The implementation must match both the callback's retained
+    ceiling and its independently current selection. It reuses this exact
+    invocation's trusted native [effect_entry] guard: fresh Root currentness,
+    selected binding, yielding inherited Claim check, then nonyielding Root and
+    Parent checks. A child invocation installs its own guard; a narrowed scope
+    of the same invocation retains it. This check never treats source path or
+    saved artifact data as authority. *)
+val check_selected_source
+  :  selected_borrowed
+  -> implementation:Ochat_function.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Content from the defining captured revision may run inside an
+    ordinary selected native callback without consuming that callback's saved
+    Agent.run tool pin. Derive the exact physical native implementation from
+    this invocation's retained selected binding and apply the same fresh Root,
+    Claim, actor and scope check as [check_selected_source]. Managed or foreign
+    scopes cannot use this ordinary native content path. No content/path/source
+    reference is made authoritative by this comparison. *)
+val check_selected_content_context
+  :  selected_borrowed
+  -> (unit, Agent_protocol.Error.t) result
+
+val borrow_owned : unit -> (owned_borrowed, Agent_protocol.Error.t) result
+val owned_borrowed_invocation : owned_borrowed -> Agent_protocol.Host_invocation.t
+val owned_borrowed_execution_context : owned_borrowed -> Chatml_execution.context
+
+val owned_borrowed_capabilities
+  :  owned_borrowed
+  -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
+
+val require_owned_native_admission
+  :  owned_borrowed
+  -> binding:Chat_response.Tool_capability.binding
+  -> (unit, Agent_protocol.Error.t) result
+
+val select_owned_tools
+  :  owned_borrowed
+  -> names:string list
+  -> (owned_borrowed, Agent_protocol.Error.t) result
+
+val execute_owned_borrowed : owned_borrowed -> owned_executor
 
 (** Fails outside an active native callback, including a fiber whose inherited
     binding has expired. Never falls back to a different foreground operation. *)
@@ -157,6 +261,162 @@ type managed_dispatch =
           -> ('a, Agent_protocol.Invocation.outcome) result)
       -> ('a, Agent_protocol.Invocation.outcome) result
   }
+
+type owned_managed_dispatch =
+  { definition : Chat_response.Managed_tool_registry.t
+  ; current : unit -> Chat_response.Tool_capability.t
+  ; run :
+      'a.
+      Chat_response.Managed_tool_registry.owned_execution
+      -> owned_borrowed
+      -> (validate_work:(Agent_protocol.Invocation.work -> (unit, string) result)
+          -> outcome:Agent_protocol.Invocation.outcome
+          -> ('a, Agent_protocol.Invocation.outcome) result)
+      -> ('a, Agent_protocol.Invocation.outcome) result
+  }
+
+(** Installed runtime coordinates for one selected managed callback. A scoped
+    asynchronous mode only filters the interpreter's operation table; actual
+    provider, actor, parent and job admission belong to its physical host. *)
+type managed_script_install =
+  { config : Chatml_host_runtime.runtime_config
+  ; scoped_async_operation : Chatml_host_runtime.scoped_async_operation option
+  }
+
+(** A managed selected callback receives a stage operation for the current
+    physical native terminal only. It returns IDs admitted through the shared
+    capacity ledger, and both this operation and the selected borrow expire
+    with the callback. [current] is a typed fail-closed selected lookup: a
+    revoked child registry cannot fall back to Root or be treated as empty.
+    The result continuation names the exact subset that survives alongside
+    its canonical outcome. *)
+type selected_managed_dispatch =
+  { definition : Chat_response.Managed_tool_registry.t
+  ; current : unit -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
+  ; run :
+      'a.
+      Chat_response.Managed_tool_registry.owned_execution
+      -> selected_borrowed
+      -> effect_entry:(unit -> (unit, Agent_protocol.Error.t) result)
+      -> stage_background:
+           (request:Chat_response.Background_request.t
+            -> checkpoint:(unit -> unit)
+            -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result)
+      -> install_jobs:(Chatml_host_runtime.runtime_config -> managed_script_install)
+      -> (validate_work:(Agent_protocol.Invocation.work -> (unit, string) result)
+          -> outcome:Agent_protocol.Invocation.outcome
+          -> selected_jobs:Agent_protocol.Id.Job.t list
+          -> ('a, Agent_protocol.Invocation.outcome) result)
+      -> ('a, Agent_protocol.Invocation.outcome) result
+  }
+
+(** Trusted selected dispatch specialization of the common Function/Custom/
+    managed policy. The host passes one exact physically scoped dispatch bridge
+    and seal continuation from a registered native terminal. [effect_entry]
+    checks fresh root/current-parent authority at the actual handler entry,
+    including after a managed handler's own yields. Failure never silently
+    selects provisional work; Pending requires the scope's exact Job ID.
+    [parent_live_now] comes from that same physical native bracket and is
+    checked for every nested child after its parent may have been cancelled
+    while joining the callback Switch. It is nonyielding and cannot be
+    substituted with the child's own cancellation context.
+    [admit_managed] runs only after the managed registry issues the exact
+    [owned_execution] for this dispatched invocation and before its prepared
+    script runs. The trusted physical owner uses that receipt to admit declared
+    lexical dependencies. An Error stops the callback before script effects.
+    This hook grants no authority itself and does not replace native permission,
+    current-parent or effect-entry checks. [native_invocation], when present,
+    lends the actual Driver observer and inference parent to the native
+    implementation for this synchronous call only. It does not replace any
+    policy check or derive ancestry from the Host invocation DTO. *)
+val run_owned_selected
+  :  admit_managed:
+       (Chat_response.Managed_tool_registry.owned_execution
+        -> (unit, Agent_protocol.Error.t) result)
+  -> install_jobs:
+       (Chat_response.Extension_compiler.t
+        -> Chatml_host_runtime.runtime_config
+        -> managed_script_install)
+  -> owner:Developer_invocation_owner.Selected.t
+  -> parent:Developer_invocation_owner.Selected.parent
+  -> dispatch:Developer_invocation_owner.Selected.dispatch_storage
+  -> parent_live_now:(unit -> bool)
+  -> frozen:(unit -> (Agent_protocol.Invocation.outcome * 'selection) option)
+  -> enter_callback:
+       (dispatched:Agent_protocol.Host_invocation.t
+        -> (unit
+            -> ( Agent_protocol.Invocation.outcome * 'selection option
+                 , Agent_protocol.Error.t )
+                 result)
+        -> ( Agent_protocol.Invocation.outcome * 'selection option
+             , Agent_protocol.Error.t )
+             result)
+  -> managed:selected_managed_dispatch option
+  -> registry:(unit -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result)
+  -> reference:Chat_response.Tool_capability.reference
+  -> invocation:Agent_protocol.Host_invocation.t
+  -> native_invocation:Ochat_function.Invocation.t option
+  -> authorize:
+       (Agent_protocol.Host_invocation.t
+        -> Chat_response.Tool_capability.binding
+        -> (unit, Agent_protocol.Error.t) result)
+  -> prepare_output:
+       (Openai.Responses.Tool_output.Output.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> effect_entry:
+       (Chat_response.Tool_capability.binding -> (unit, Agent_protocol.Error.t) result)
+  -> stage_background:
+       (Chat_response.Tool_capability.binding
+        -> request:Chat_response.Background_request.t
+        -> checkpoint:(unit -> unit)
+        -> (Agent_protocol.Id.Job.t, Agent_protocol.Error.t) result)
+  -> seal:
+       (Agent_protocol.Invocation.outcome
+        -> selected_jobs:Agent_protocol.Id.Job.t list
+        -> ('selection option, Agent_protocol.Error.t) result)
+  -> ( 'selection Developer_invocation_owner.Selected.Completion.t
+       , Agent_protocol.Error.t )
+       result
+
+(** Developer calls enter the same native/managed admission kernel as
+    [run_scoped_with_managed]. [owner] is trusted host wiring: it supplies the
+    persisted actor executor, original ceiling, current selected registry and
+    authenticated currentness check. Selection, schema, policy, post-wait
+    re-resolution, exact physical native admission, disclosure and output/work
+    validation happen once in the shared kernel. The authorizer may wait, but
+    must use a developer permission subject bound to this exact invocation;
+    no Session attachment or grant is inferred from its ID. *)
+val run_owned_root
+  :  owner:Developer_invocation_owner.t
+  -> managed:owned_managed_dispatch option
+  -> reference:Chat_response.Tool_capability.reference
+  -> invocation:Agent_protocol.Host_invocation.t
+  -> authorize:
+       (Agent_protocol.Host_invocation.t
+        -> Chat_response.Tool_capability.binding
+        -> (unit, Agent_protocol.Error.t) result)
+  -> prepare_output:
+       (Openai.Responses.Tool_output.Output.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Host_invocation.t, Agent_protocol.Error.t) result
+
+(** A direct child of this exact active owned borrow. The implementation derives
+    its opaque [Child active] parent proof from [parent]; it cannot substitute a
+    Root claim or use another invocation with matching owner coordinates. The
+    borrow expires with its creating callback across inherited fibers/domains. *)
+val run_owned_child
+  :  parent:owned_borrowed
+  -> managed:owned_managed_dispatch option
+  -> reference:Chat_response.Tool_capability.reference
+  -> invocation:Agent_protocol.Host_invocation.t
+  -> authorize:
+       (Agent_protocol.Host_invocation.t
+        -> Chat_response.Tool_capability.binding
+        -> (unit, Agent_protocol.Error.t) result)
+  -> prepare_output:
+       (Openai.Responses.Tool_output.Output.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Host_invocation.t, Agent_protocol.Error.t) result
 
 (** Common owned dispatch with managed targets installed. Performs capability,
     schema and policy checks and repeats managed admission after authorization.

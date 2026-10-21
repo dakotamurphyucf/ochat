@@ -1,13 +1,14 @@
-# Protocol types and codec reference
+# Protocol types and implementation reference
 
 Generated from the current public interfaces. Do not hand-edit the excerpts.
 The [protocol guide](protocol.md) explains operation semantics and authorization.
-Each section includes the complete typed contract and a link to its JSON codec;
-wire tags/defaults are defined by that codec, not OCaml constructor spelling.
+Each section includes the complete typed contract and its implementation.
+Modules with wire codecs define their tags/defaults there, not through OCaml
+constructor spelling.
 
 ## activity
 
-[JSON codec](../../lib/agent_protocol/activity.ml) · [interface](../../lib/agent_protocol/activity.mli)
+[implementation](../../lib/agent_protocol/activity.ml) · [interface](../../lib/agent_protocol/activity.mli)
 
 ```ocaml
 (** Neutral transient tool activity. A call alias is scoped to an actual source
@@ -144,7 +145,7 @@ end
 
 ## activity_query
 
-[JSON codec](../../lib/agent_protocol/activity_query.ml) · [interface](../../lib/agent_protocol/activity_query.mli)
+[implementation](../../lib/agent_protocol/activity_query.ml) · [interface](../../lib/agent_protocol/activity_query.mli)
 
 ```ocaml
 (** Bounded cross-session query. The scan bound is checked against the authorized
@@ -171,7 +172,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## audit
 
-[JSON codec](../../lib/agent_protocol/audit.ml) · [interface](../../lib/agent_protocol/audit.mli)
+[implementation](../../lib/agent_protocol/audit.ml) · [interface](../../lib/agent_protocol/audit.mli)
 
 ```ocaml
 (** Redacted, cursor-paged server and session audit records. *)
@@ -212,9 +213,2677 @@ module Read_request : sig
 end
 ```
 
+## authoring
+
+[implementation](../../lib/agent_protocol/authoring.ml) · [interface](../../lib/agent_protocol/authoring.mli)
+
+```ocaml
+(** Thin public facade for the portable authoring wire contracts. DTO modules
+    are split by ownership so codecs do not become one monolithic component. *)
+
+module Features = Authoring_common.Features
+module Encoding = Authoring_common.Encoding
+module Method = Authoring_common.Method
+module Failure = Authoring_common.Failure
+module Limits = Authoring_common.Limits
+module Capabilities = Authoring_common.Capabilities
+module Source = Authoring_common.Source
+module Position = Authoring_common.Position
+module Site = Authoring_common.Site
+module Context = Authoring_context.Context
+module Document = Authoring_context.Document
+module Source_read = Authoring_context.Source_read
+module Bundle = Authoring_bundle.Bundle
+module Analysis = Authoring_analysis
+module Assistance = Authoring_assistance
+module Wire = Authoring_wire
+```
+
+## authoring_analysis
+
+[implementation](../../lib/agent_protocol/authoring_analysis.ml) · [interface](../../lib/agent_protocol/authoring_analysis.mli)
+
+```ocaml
+(** Portable analysis and query DTOs. These values are comparison evidence, not
+    source access or proof that a host ran the checker. The host constructs them
+    only from its current admitted closure and the public semantic facade; the
+    client checks them against its current context and requested evidence. No
+    compiler, Eio, runtime or UI dependency belongs in this library.
+
+    Textual wire labels, messages, names and environment identifiers require
+    valid UTF-8 and return a typed constructor/decoder error otherwise. This
+    never changes compiler acceptance of arbitrary captured source bytes or
+    their native byte sites. A host must explicitly render unrepresentable
+    diagnostic text as escaped bytes or return a typed unavailable projection;
+    it cannot silently normalize or discard source evidence. *)
+
+module Context = Authoring_context_core.Context
+module Source = Authoring_common.Source
+
+module Limits : sig
+  (** Fixed protocol ceilings; a host may select smaller request/result limits
+      through the existing authoring capabilities. Every constructor checks
+      retained counts and aggregate label bytes before building JSON. Decoders
+      also enforce the outer encoded-byte/node/depth budget. *)
+  val max_result_bytes : int
+
+  val max_diagnostics : int
+  val max_syntax_sites : int
+  val max_query_items : int
+  val max_label_bytes : int
+  val max_display_bytes : int
+end
+
+module Byte_range : sig
+  (** Exact half-open byte site. Zero-width sites are allowed for cursors and
+      diagnostics. Construction checks 0 <= start <= finish <= source length;
+      a later host projection checks the actual captured source ID/digest. *)
+  type t
+
+  val create : source:Source.t -> start_byte:int -> end_byte:int -> (t, Error.t) result
+  val source : t -> Source.t
+  val start_byte : t -> int
+  val end_byte : t -> int
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Site : sig
+  (** The compiler-owned [native] location is always retained. An embedded
+      ChatMD projection is optional and never replaces or relabels that native
+      source. [Authored_exact] alone is safe for a precise editor selection;
+      an approximate declaration is a related display site only. An external
+      member is unresolved until the host separately proves captured custody. *)
+  type projection =
+    | Authored_exact of Byte_range.t
+    | External_origin of
+        { member : string
+        ; body_digest : Chatml_source.Digest.t
+        ; start_byte : int
+        ; end_byte : int
+        }
+    | Approximate_declaration of Byte_range.t
+
+  type t
+
+  val create : native:Byte_range.t -> projection:projection option -> (t, Error.t) result
+  val native : t -> Byte_range.t
+  val projection : t -> projection option
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Target : sig
+  (** A request selects a project or one parser-assigned script ID in the
+      current document context. The client does not supply a Build, contract,
+      graph or parser fingerprint before its first analysis. The host resolves
+      a script ID against the actual current Parsed declaration registry;
+      missing or ambiguous selection never guesses a path. *)
+  type selector = private
+    | Project
+    | Selected_script of string
+  [@@deriving compare, equal, sexp_of]
+
+  val project : selector
+  val selected_script : string -> (selector, Error.t) result
+  val selector_to_json : selector -> Jsonaf.t
+  val selector_of_json : Jsonaf.t -> (selector, Error.t) result
+
+  (** Host-derived comparison stamp for one genuinely selected declaration.
+      The two source revisions and parser/declaration fingerprints are distinct:
+      a document edit, changed preprocessor output or different selected graph
+      cannot silently reuse the old result. None is a source grant. *)
+  type script_stamp
+
+  val script_stamp
+    :  document_source:Source.t
+    -> parser_root_fingerprint:Chatml_source.Digest.t
+    -> script_id:string
+    -> declaration_input_fingerprint:Chatml_source.Digest.t
+    -> declaration_input_byte_length:int
+    -> declaration_start_byte:int
+    -> declaration_end_byte:int
+    -> selected_script_source:Source.t
+    -> (script_stamp, Error.t) result
+
+  val document_source : script_stamp -> Source.t
+  val parser_root_fingerprint : script_stamp -> Chatml_source.Digest.t
+  val script_id : script_stamp -> string
+  val declaration_input_fingerprint : script_stamp -> Chatml_source.Digest.t
+  val declaration_input_byte_length : script_stamp -> int
+  val declaration_start_byte : script_stamp -> int
+  val declaration_end_byte : script_stamp -> int
+  val selected_script_source : script_stamp -> Source.t
+
+  type resolved =
+    | Project_input
+    | Script_input of script_stamp
+
+  val selector : resolved -> selector
+  val resolved_to_json : resolved -> Jsonaf.t
+  val resolved_of_json : Jsonaf.t -> (resolved, Error.t) result
+end
+
+module Capture : sig
+  (** Full input identity. [input_fingerprint] includes the selected exact
+      source closure, entry, provenance, environment and compiler contract.
+      It is meaningful for Complete and Failed, without implying success.
+      The selected contract and environment come from authentic host admission,
+      not client labels. [context] binds the whole overlay generation. *)
+  type t
+
+  val create
+    :  context:Context.Expected.t
+    -> target:Target.resolved
+    -> input_fingerprint:Chatml_source.Digest.t
+    -> environment:string
+    -> required_contract:Chatml_source.Digest.t
+    -> selected_contract:Chatml_source.Digest.t
+    -> (t, Error.t) result
+
+  val context : t -> Context.Expected.t
+  val target : t -> Target.resolved
+  val input_fingerprint : t -> Chatml_source.Digest.t
+  val environment : t -> string
+  val required_contract : t -> Chatml_source.Digest.t
+  val selected_contract : t -> Chatml_source.Digest.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Snapshot_id : sig
+  (** Host-minted, bounded snapshot-incarnation label. Equal bytes do not make
+      independently published snapshots share an owner. Not a bearer token. *)
+  type t [@@deriving compare, equal, sexp_of]
+
+  val create : string -> (t, Error.t) result
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Diagnostic : sig
+  module Related : sig
+    type t
+
+    val create : site:Site.t -> message:string -> (t, Error.t) result
+    val site : t -> Site.t
+    val message : t -> string
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  type t
+
+  (** Actual Chatml_diagnostic has a message, optional owned site and related
+      sites, not a severity or machine code. A missing site is distinct from a
+      zero-width site; no legacy unowned span becomes a source claim. *)
+  val create
+    :  message:string
+    -> site:Site.t option
+    -> related:Related.t list
+    -> (t, Error.t) result
+
+  val message : t -> string
+  val site : t -> Site.t option
+  val related : t -> Related.t list
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Syntax_site : sig
+  (** Parser-owned same-run syntax only, never a certified binding, type or
+      reference. These rows are allowed on Failed, including earlier units that
+      parsed before a later unit failed. *)
+  type role =
+    | Value_reference
+    | Value_binder
+    | Module_binder
+    | Module_reference
+    | Type_binder
+    | Type_parameter_binder
+    | Type_reference
+    | Signature_value_binder
+    | Field_label
+    | Variant_tag
+    | Constraint_name
+    | Constraint_parameter_reference
+  [@@deriving compare, equal, sexp_of]
+
+  type t
+
+  val create : role:role -> name:string -> site:Site.t -> (t, Error.t) result
+  val role : t -> role
+  val name : t -> string
+  val site : t -> Site.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Analyze : sig
+  module Request : sig
+    type t
+
+    val create
+      :  context:Context.Expected.t
+      -> target:Target.selector
+      -> (t, Error.t) result
+
+    (** Explicitly opt in to preparing at most one selected-contract checked
+        template during this Analyze request. The default is analysis only.
+        The flag does not certify a template or grant a source/host selection. *)
+    val with_checked_template : t -> t
+
+    val context : t -> Context.Expected.t
+    val target : t -> Target.selector
+    val prepare_checked_template : t -> bool
+    val equal : t -> t -> bool
+    val sexp_of_t : t -> Core.Sexp.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  type parser_phase =
+    | Implementation
+    | Interface
+  [@@deriving compare, equal, sexp_of]
+
+  type failure_phase =
+    | Parse of
+        { source : Source.t
+        ; phase : parser_phase
+        }
+    | Implementation of Source.t
+    | Companion of Source.t
+    | Host_requirements
+    | Dependency
+  [@@deriving equal, sexp_of]
+
+  type unavailable =
+    | Document_basis
+    | No_checked_closure
+    | No_selected_script
+    | Ambiguous_script_id
+    | No_validated_project
+    | Incomplete_or_malformed_document
+    | Dynamic_only_source
+    | Unsupported_target
+  [@@deriving compare, equal, sexp_of]
+
+  (** A Failed result carries no Snapshot_id, certified item, graph order or
+      type root. [syntax] and diagnostics come from exactly this check run.
+      Complete binds a real host-owned immutable snapshot and validated graph;
+      its diagnostics may include warnings. Every list and string has both
+      per-field and aggregate result bounds. *)
+  type t = private
+    | Complete of
+        { capture : Capture.t
+        ; snapshot : Snapshot_id.t
+        ; validated_graph : Chatml_source.Digest.t
+        ; diagnostics : Diagnostic.t list
+        ; truncated_diagnostics : bool
+        }
+    | Failed of
+        { capture : Capture.t
+        ; phase : failure_phase
+        ; syntax : Syntax_site.t list
+        ; diagnostics : Diagnostic.t list
+        ; truncated_syntax : bool
+        ; truncated_diagnostics : bool
+        }
+    | Unavailable of
+        { context : Context.Expected.t
+        ; target : Target.selector
+        ; reason : unavailable
+        }
+
+  val complete
+    :  capture:Capture.t
+    -> snapshot:Snapshot_id.t
+    -> validated_graph:Chatml_source.Digest.t
+    -> diagnostics:Diagnostic.t list
+    -> truncated_diagnostics:bool
+    -> (t, Error.t) result
+
+  val failed
+    :  capture:Capture.t
+    -> phase:failure_phase
+    -> syntax:Syntax_site.t list
+    -> diagnostics:Diagnostic.t list
+    -> truncated_syntax:bool
+    -> truncated_diagnostics:bool
+    -> (t, Error.t) result
+
+  (** A raw document has no project Analysis_key, even when a separately
+      authorized static Build is attached. A genuinely selected and admitted
+      script can still be analyzed under that Document context. A project
+      without an admitted checked closure is unavailable. These are not
+      compiler failures; denial, stale context and exhausted work use protocol
+      errors. Reason/target combinations are validated by this constructor. *)
+  val unavailable
+    :  context:Context.Expected.t
+    -> target:Target.selector
+    -> reason:unavailable
+    -> (t, Error.t) result
+
+  val capture : t -> Capture.t option
+  val sexp_of_t : t -> Core.Sexp.t
+  val to_json : t -> Jsonaf.t
+
+  (** Bounded structural byte/node/depth admission of this already validated
+      result under a host-selected response ceiling. The protocol's private
+      codec performs the same conservative encoding preflight used by its
+      constructors. It constructs a bounded Jsonaf value to measure; callers
+      do not first build an unbounded encoded JSON string. *)
+  val within_bytes : t -> max_bytes:int -> (unit, Error.t) result
+
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Prefix : sig
+  (** Full and prefix owners remain separate. [full_source] is the current
+      compiler-owned source revision; [prefix_source] is its parser-confirmed
+      prefix under the same source ID, normally with another digest/length.
+      For selected ChatMD scripts an optional authored request echoes the
+      distinct current editor source/cursor while this compiled prefix remains
+      native. The prefix graph can be queried provisionally only, never run or
+      relabelled Complete. Unavailable is distinct from an empty success. *)
+  type unavailable =
+    | No_complete_statement
+    | Unsupported_source_phase
+    | Unchecked_source
+    | Prefix_rejected of Analyze.failure_phase
+    | Invalid_rebased_metadata
+  [@@deriving equal, sexp_of]
+
+  type provisional
+
+  module Authored_request : sig
+    (** An exact current Document or imported authored source cursor echoed
+        alongside a selected script's DIFFERENT compiled full source/cursor.
+        Construction validates the source and byte bound. This is comparison
+        data only; the host proves physical parser-input and extraction-map
+        ownership before producing it. *)
+    type t
+
+    val create : source:Source.t -> cursor_byte:int -> (t, Error.t) result
+    val source : t -> Source.t
+    val cursor_byte : t -> int
+  end
+
+  val create
+    :  capture:Capture.t
+    -> full_source:Source.t
+    -> prefix_source:Source.t
+    -> cursor_byte:int
+    -> end_byte:int
+    -> prefix_graph:Chatml_source.Digest.t
+    -> snapshot:Snapshot_id.t
+    -> (provisional, Error.t) result
+
+  (** The native full/prefix sources and cursor remain the compiler-owned
+      emitted script body. [authored_request] echoes the exact editor request;
+      it is admitted only for a Script_input target, with its cursor in range.
+      The host separately proves its parser-input membership and maps it via
+      the selected Script's bound extraction map. It must not label compiled
+      prefix bytes as an authored document prefix. *)
+  val create_with_authored_request
+    :  capture:Capture.t
+    -> full_source:Source.t
+    -> prefix_source:Source.t
+    -> cursor_byte:int
+    -> end_byte:int
+    -> prefix_graph:Chatml_source.Digest.t
+    -> snapshot:Snapshot_id.t
+    -> authored_request:Authored_request.t
+    -> (provisional, Error.t) result
+
+  val capture : provisional -> Capture.t
+  val full_source : provisional -> Source.t
+  val prefix_source : provisional -> Source.t
+  val cursor_byte : provisional -> int
+  val end_byte : provisional -> int
+  val prefix_graph : provisional -> Chatml_source.Digest.t
+  val snapshot : provisional -> Snapshot_id.t
+  val authored_request : provisional -> Authored_request.t option
+
+  (** Compare the complete admitted provisional wire value, including its
+      optional authored request. This is comparison data, not authority. *)
+  val equal_provisional : provisional -> provisional -> bool
+
+  module Request : sig
+    type t
+
+    val create
+      :  context:Context.Expected.t
+      -> target:Target.selector
+      -> source:Source.t
+      -> cursor_byte:int
+      -> (t, Error.t) result
+
+    val context : t -> Context.Expected.t
+    val target : t -> Target.selector
+    val source : t -> Source.t
+    val cursor_byte : t -> int
+    val equal : t -> t -> bool
+    val sexp_of_t : t -> Core.Sexp.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  type t = private
+    | Provisional of provisional
+    | Unavailable of
+        { context : Context.Expected.t
+        ; target : Target.selector
+        ; source : Source.t
+        ; cursor_byte : int
+        ; reason : unavailable
+        }
+
+  val provisional : provisional -> t
+
+  val unavailable
+    :  context:Context.Expected.t
+    -> target:Target.selector
+    -> source:Source.t
+    -> cursor_byte:int
+    -> reason:unavailable
+    -> (t, Error.t) result
+
+  val to_json : t -> Jsonaf.t
+
+  (** Bounded structural encoded-size preflight under the host's smaller
+      response ceiling, using the protocol's existing node/depth/byte codec. *)
+  val within_bytes : t -> max_bytes:int -> (unit, Error.t) result
+
+  val of_json : Jsonaf.t -> (t, Error.t) result
+  val sexp_of_t : t -> Core.Sexp.t
+end
+
+module Query : sig
+  (** Every response carries one of these CLOSED evidence forms. A Failed
+      analysis cannot be used as Certified or Provisional. Syntax_only is
+      parsed same-run syntax, never a name/type fact. *)
+  type evidence =
+    | Certified of
+        { capture : Capture.t
+        ; snapshot : Snapshot_id.t
+        ; validated_graph : Chatml_source.Digest.t
+        }
+    | Provisional of Prefix.provisional
+    | Syntax_only of Capture.t
+
+  type namespace =
+    | Value
+    | Type
+    | Type_parameter
+  [@@deriving compare, equal, sexp_of]
+
+  type kind =
+    | References
+    | Definitions
+    | Type_at
+    | Candidates of namespace
+    | Configured_modules
+    | Syntax_at
+  [@@deriving compare, equal, sexp_of]
+
+  module Request : sig
+    type t
+
+    val create
+      :  evidence:evidence
+      -> source:Source.t
+      -> byte_offset:int
+      -> kind:kind
+      -> max_items:int
+      -> (t, Error.t) result
+
+    val evidence : t -> evidence
+    val source : t -> Source.t
+    val byte_offset : t -> int
+    val kind : t -> kind
+    val max_items : t -> int
+    val equal : t -> t -> bool
+    val sexp_of_t : t -> Core.Sexp.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  type unavailable =
+    | Not_checked
+    | No_recorded_context
+    | No_recorded_type
+    | No_nominal_members
+    | No_syntax
+  [@@deriving compare, equal, sexp_of]
+
+  type 'a page =
+    { items : 'a list
+    ; truncated : bool
+    }
+
+  type 'a found =
+    | Available of 'a
+    | Unavailable of unavailable
+
+  type 'a selected =
+    | Selected of 'a
+    | Missing of unavailable
+    | Ambiguous of 'a page
+
+  module Display : sig
+    (** Bounded, escaped IDE presentation of one actual frozen type root. It
+        names a versioned display format and never claims to be a portable
+        executable/inferable type graph. The host renders the selected PUBLIC
+        binding root for completion/signature results; a principal declaration
+        root remains separate and cannot replace a restricted public scheme. *)
+    type format = Chatml_display_v1 [@@deriving compare, equal, sexp_of]
+
+    type kind =
+      | Type
+      | Signature
+    [@@deriving compare, equal, sexp_of]
+
+    type completeness =
+      | Complete
+      | Truncated of [ `Work_limit | `Byte_limit ]
+    [@@deriving compare, equal, sexp_of]
+
+    type t
+
+    val create
+      :  format:format
+      -> kind:kind
+      -> completeness:completeness
+      -> text:string
+      -> (t, Error.t) result
+
+    val format : t -> format
+    val kind : t -> kind
+    val completeness : t -> completeness
+    val text : t -> string
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  module Item : sig
+    type symbol_kind =
+      | Value
+      | Parameter
+      | Module
+      | Type_alias
+      | Type_parameter
+    [@@deriving compare, equal, sexp_of]
+
+    type origin =
+      | Authored of Site.t
+      | Implicit_specification_parameter of Site.t
+      | Host of
+          { contract : Chatml_source.Digest.t
+          ; member_path : string list
+          }
+
+    type symbol
+
+    val symbol
+      :  id:int
+      -> name:string
+      -> kind:symbol_kind
+      -> origin:origin
+      -> principal_signature:Display.t option
+      -> specification_ids:int list
+      -> (symbol, Error.t) result
+
+    val symbol_id : symbol -> int
+    val symbol_name : symbol -> string
+    val symbol_kind : symbol -> symbol_kind
+    val symbol_origin : symbol -> origin
+    val principal_signature : symbol -> Display.t option
+    val symbol_specification_ids : symbol -> int list
+
+    type target =
+      | Symbol of int
+      | Configured_module of string
+      | Structural_label
+      | Unlocated_module_member
+      | Language_type of string
+
+    type reference
+
+    val reference
+      :  selection:Site.t
+      -> target:target
+      -> inferred_type:Display.t option
+      -> (reference, Error.t) result
+
+    val reference_selection : reference -> Site.t
+    val reference_target : reference -> target
+    val reference_inferred_type : reference -> Display.t option
+
+    type binding
+
+    (** The selected scheme and actual nominal member bindings are projected
+        from one Snapshot.Binding view. Member traversal has explicit depth,
+        edge and aggregate-byte caps; a truncated available member page stays
+        distinct from both an unavailable fact and an available empty page. *)
+
+    val binding
+      :  symbol:int
+      -> name:string
+      -> selected_signature:Display.t option
+      -> value_members:binding page found
+      -> type_members:binding page found
+      -> (binding, Error.t) result
+
+    val binding_symbol : binding -> int
+    val binding_name : binding -> string
+    val binding_selected_signature : binding -> Display.t option
+    val binding_value_members : binding -> binding page found
+    val binding_type_members : binding -> binding page found
+
+    type configured_module
+
+    (** One authentic export fact has separate value and type namespaces. An
+        unavailable export fact cannot be represented as one populated namespace
+        and one fabricated empty namespace. *)
+    type exports
+
+    val exports : values:binding page -> types:binding page -> (exports, Error.t) result
+    val export_values : exports -> binding page
+    val export_types : exports -> binding page
+
+    val configured_module
+      :  name:string
+      -> module_key:string
+      -> declared_at:Site.t
+      -> exports:exports found
+      -> shadowed_by:int option
+      -> (configured_module, Error.t) result
+
+    val configured_module_name : configured_module -> string
+    val configured_module_key : configured_module -> string
+    val configured_module_declared_at : configured_module -> Site.t
+    val configured_module_exports : configured_module -> exports found
+    val configured_module_shadowed_by : configured_module -> int option
+    val symbol_to_json : symbol -> Jsonaf.t
+    val symbol_of_json : Jsonaf.t -> (symbol, Error.t) result
+    val reference_to_json : reference -> Jsonaf.t
+    val reference_of_json : Jsonaf.t -> (reference, Error.t) result
+    val binding_to_json : binding -> Jsonaf.t
+    val binding_of_json : Jsonaf.t -> (binding, Error.t) result
+    val configured_module_to_json : configured_module -> Jsonaf.t
+    val configured_module_of_json : Jsonaf.t -> (configured_module, Error.t) result
+  end
+
+  type payload =
+    | References_result of Item.reference page found
+    | Definitions_result of Item.symbol page found
+    | Type_result of Display.t selected
+    | Candidates_result of Item.binding page selected
+    | Configured_modules_result of Item.configured_module page selected
+    | Syntax_result of Syntax_site.t page found
+
+  type t
+
+  val create : request:Request.t -> payload:payload -> (t, Error.t) result
+  val request : t -> Request.t
+  val payload : t -> payload
+  val sexp_of_t : t -> Core.Sexp.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## authoring_assistance
+
+[implementation](../../lib/agent_protocol/authoring_assistance.ml) · [interface](../../lib/agent_protocol/authoring_assistance.mli)
+
+```ocaml
+(** Portable lexical and early authoring DTOs. Byte scans and suggestions never
+    certify parser/type success or grant source/catalog access. The host binds
+    these values to its current admitted context and actual captured bytes;
+    this library depends on neither the compiler, highlighter implementation,
+    filesystem, Eio nor terminal UI. *)
+
+module Context = Authoring_context_core.Context
+module Source = Authoring_common.Source
+
+module Limits : sig
+  (** Fixed portable result ceilings, also constrained by the initialized
+      host's existing request/result byte limits. Counting includes labels,
+      insert text, owners, issues and spans before JSON construction. *)
+  val max_result_bytes : int
+
+  val max_spans : int
+  val max_issues : int
+  val max_suggestions : int
+  val max_label_bytes : int
+end
+
+module Lexical : sig
+  module View : sig
+    type t =
+      | Chatml
+      | Chatmd_authored
+      | Chatmd_effective
+    [@@deriving compare, equal, sexp_of]
+  end
+
+  module Request : sig
+    (** [source] is the current captured document/ChatML revision. ChatMD
+        effective-byte highlighting is selected explicitly; its response owner
+        retains a distinct view digest/length. No UTF-8 position conversion is
+        required for lexical bytes. *)
+    type t
+
+    val create
+      :  context:Context.Expected.t
+      -> source:Source.t
+      -> view:View.t
+      -> (t, Error.t) result
+
+    val context : t -> Context.Expected.t
+    val source : t -> Source.t
+    val view : t -> View.t
+    val equal : t -> t -> bool
+    val sexp_of_t : t -> Core.Sexp.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  module Owner : sig
+    type chatmd_view =
+      | Authored
+      | Effective
+    [@@deriving compare, equal, sexp_of]
+
+    type t = private
+      | Chatml of Source.t
+      | Chatmd of
+          { captured_source : Source.t
+          ; input_identity : Chatml_source.Digest.t
+          ; view : chatmd_view
+          ; view_sha256 : Chatml_source.Digest.t
+          ; view_byte_length : int
+          }
+
+    (** The host derives the ChatMD input identity from actual parser input.
+        Authored digest and length must equal [captured_source]; Effective may
+        differ. A client cannot apply Effective spans to the authored edit
+        buffer. *)
+    val chatml : Source.t -> t
+
+    val chatmd
+      :  captured_source:Source.t
+      -> input_identity:Chatml_source.Digest.t
+      -> view:chatmd_view
+      -> view_sha256:Chatml_source.Digest.t
+      -> view_byte_length:int
+      -> (t, Error.t) result
+
+    val byte_length : t -> int
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  module Range : sig
+    (** Nonempty half-open byte span inside one exact Owner. Invalid UTF-8 is
+        permitted; CRLF remains byte-exact. *)
+    type t
+
+    val create : owner:Owner.t -> start_byte:int -> end_byte:int -> (t, Error.t) result
+    val owner : t -> Owner.t
+    val start_byte : t -> int
+    val end_byte : t -> int
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  module Role : sig
+    (** Version-1 roles of the portable highlighter, without inferred symbols. *)
+    type t =
+      | Tag_name
+      | Attribute_name
+      | Attribute_value
+      | Keyword
+      | Identifier
+      | Type_variable
+      | Variant_tag
+      | String_literal
+      | Number_literal
+      | Boolean_literal
+      | Comment
+      | Raw_delimiter
+      | Raw_text
+      | Script_body
+      | Operator
+      | Punctuation
+    [@@deriving compare, equal, sexp_of]
+  end
+
+  module Span : sig
+    type t
+
+    val create : range:Range.t -> role:Role.t -> t
+    val range : t -> Range.t
+    val role : t -> Role.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  module Issue : sig
+    type kind =
+      | Open_comment
+      | Open_string
+      | Open_raw_block
+      | Open_tag
+      | Open_script
+    [@@deriving compare, equal, sexp_of]
+
+    type t
+
+    val create : kind:kind -> range:Range.t -> t
+    val kind : t -> kind
+    val range : t -> Range.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  module Status : sig
+    type reason =
+      | Span_limit
+      | Issue_limit
+      | Work_limit
+      | Nesting_limit
+    [@@deriving compare, equal, sexp_of]
+
+    type t =
+      | Reached_eof
+      | Truncated of
+          { next_byte : int
+          ; reason : reason
+          }
+    [@@deriving compare, equal, sexp_of]
+  end
+
+  module Result : sig
+    (** Spans are ordered/nonoverlapping and issues lie inside the scanned
+        prefix. [Request.view] and [Owner] must select the same ChatML or
+        ChatMD authored/effective view and exact captured source. Every range
+        ends at or before [next_byte] when Truncated, or the owner's byte
+        length on Reached_eof. The latter is LEXICAL completion only. Aggregate
+        span/issue/owner/label bytes and JSON nodes/depth are checked before
+        whole-result construction and again during decoding. *)
+    type t
+
+    val create
+      :  request:Request.t
+      -> owner:Owner.t
+      -> spans:Span.t list
+      -> issues:Issue.t list
+      -> status:Status.t
+      -> (t, Error.t) result
+
+    val request : t -> Request.t
+    val owner : t -> Owner.t
+    val spans : t -> Span.t list
+    val issues : t -> Issue.t list
+    val status : t -> Status.t
+    val sexp_of_t : t -> Core.Sexp.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+end
+
+module Assistance : sig
+  module Request : sig
+    (** The host derives parser/embedded script context and any separately
+        authorized catalog at this exact byte cursor. A document-only context
+        with no Build can still ask for basic local markup help. A client path
+        or environment name is never resolver authority. *)
+    type t
+
+    val create
+      :  context:Context.Expected.t
+      -> source:Source.t
+      -> cursor_byte:int
+      -> max_items:int
+      -> (t, Error.t) result
+
+    val context : t -> Context.Expected.t
+    val source : t -> Source.t
+    val cursor_byte : t -> int
+    val max_items : t -> int
+    val equal : t -> t -> bool
+    val sexp_of_t : t -> Core.Sexp.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  module Selected_catalog : sig
+    (** One authentic selected Build for the particular embedded script, when
+        a suggestion actually needs admitted closure or compiler contract.
+        Basic grammar and parsed environment-name help require no Build. The
+        handler rechecks source/catalog authority before publication; this
+        comparison stamp grants no path access. *)
+    type t
+
+    val create
+      :  environment:string
+      -> input_fingerprint:Chatml_source.Digest.t
+      -> compiler_contract:Chatml_source.Digest.t
+      -> (t, Error.t) result
+
+    val environment : t -> string
+    val input_fingerprint : t -> Chatml_source.Digest.t
+    val compiler_contract : t -> Chatml_source.Digest.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  module Checked_template : sig
+    (** Portable comparison evidence emitted only after the host has matched a
+        retained opaque checked-example witness to the current selected Build,
+        environment, compiler contract and source. This DTO itself is not
+        compiler certification or a capability. *)
+    type target =
+      | One_off_v1
+      | Tool_v1
+      | Developer_tool_v1
+      | Moderator_v1
+      | Delegated_moderator_v1
+    [@@deriving equal, sexp_of]
+
+    type t
+
+    val create
+      :  selected:Selected_catalog.t
+      -> target:target
+      -> example_digest:Chatml_source.Digest.t
+      -> checked_input_fingerprint:Chatml_source.Digest.t
+      -> (t, Error.t) result
+
+    val selected : t -> Selected_catalog.t
+    val target : t -> target
+    val example_digest : t -> Chatml_source.Digest.t
+    val checked_input_fingerprint : t -> Chatml_source.Digest.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  module Selected_tool : sig
+    (** Comparison evidence for one binding in the host's ACTUALLY selected
+        tool registry. Both digests come from the existing SHA-256
+        Tool_capability reference/selected-registry fingerprints, admitted
+        through Digest.of_hex. The host resolves the same capability within
+        the current selected registry before publishing a suggestion. This
+        carries no implementation, invocation or permission grant. *)
+    type t
+
+    val create
+      :  capability_id:Id.Capability.t
+      -> binding_fingerprint:Chatml_source.Digest.t
+      -> selected_registry_fingerprint:Chatml_source.Digest.t
+      -> (t, Error.t) result
+
+    val capability_id : t -> Id.Capability.t
+    val binding_fingerprint : t -> Chatml_source.Digest.t
+    val selected_registry_fingerprint : t -> Chatml_source.Digest.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  (** Reuse the semantic protocol's exact source-bound, zero-width-capable byte
+      range. The host admits replacement only against the current AUTHORED
+      source, projecting embedded effective coordinates through the real map;
+      the range itself does not grant edit authority. *)
+  module Range = Authoring_analysis.Byte_range
+
+  module Suggestion : sig
+    type kind =
+      | Tag
+      | Attribute
+      | Value
+      | Reference
+      | Path
+      | Template
+      | Environment
+    [@@deriving compare, equal, sexp_of]
+
+    type evidence =
+      | Lexical
+      | Parsed_document of Source.t
+      | Parsed_project of Source.t
+      | Installed_builtin of
+          { id : string
+          ; sha256 : Chatml_source.Digest.t
+          }
+      | Selected_catalog of Selected_catalog.t
+      | Checked_template of Checked_template.t
+      | Selected_tool of Selected_tool.t
+      | Host_root of Id.Authoring_root.t
+    [@@deriving sexp_of]
+
+    (** Admitted evidence matrix: Tag/Attribute/Value use Lexical or
+        Parsed_document; Reference uses Parsed_document, Selected_catalog or
+        Selected_tool;
+        Path uses Parsed_project for a declared path, or Host_root or
+        Selected_catalog for a separately authorized member; Template uses
+        Lexical static syntax, Parsed_document, Installed_builtin or an
+        independently checked current Checked_template witness. For the latter
+        the suggestion constructor/decoder recomputes the bounded inserted
+        text digest; copied evidence still cannot authorize or certify.
+        Environment uses Parsed_project or Selected_catalog. Parsed_document
+        refers to genuine captured parser input. Parsed_project identifies the
+        actual captured project declaration whose environment names were
+        decoded, even when selecting one would fail. Installed_builtin comes
+        from a found embedded asset, not a caller-named catalog. The host
+        authenticates every source/root/asset stamp before emission and must
+        not present declared paths as verified files. No suggestion certifies
+        a semantic binding. *)
+    type t
+
+    val create
+      :  kind:kind
+      -> label:string
+      -> insert_text:string
+      -> replace:Range.t
+      -> evidence:evidence
+      -> (t, Error.t) result
+
+    val kind : t -> kind
+    val label : t -> string
+    val insert_text : t -> string
+    val evidence : t -> evidence
+    val replace : t -> Range.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  module Status : sig
+    type unavailable =
+      | No_local_context
+      | Catalog_unavailable
+      | Source_map_unavailable
+    [@@deriving compare, equal, sexp_of]
+
+    type truncation =
+      | Item_limit
+      | Work_limit
+      | Result_bytes
+      (** A relevant source-derived candidate needs bytes that cannot be
+          represented as valid UTF-8 insert text in this cursor context.
+          Earlier valid items remain; unrelated invalid metadata does not
+          truncate another suggestion family. No source bytes are rewritten. *)
+      | Unrepresentable_text
+    [@@deriving compare, equal, sexp_of]
+
+    type t =
+      | Complete
+      | Truncated of truncation
+      | Unavailable of unavailable
+    [@@deriving compare, equal, sexp_of]
+  end
+
+  module Result : sig
+    (** Empty Complete is an available empty set, not Unavailable. The client
+        checks echoed context/generation/source, every replacement range and
+        selected method feature before applying an item. *)
+    type t
+
+    module Builder : sig
+      (** Incremental bounded result admission for producers. [Full] means
+          only aggregate output capacity was reached. Invalid ownership or
+          suggestion structure returns the original typed error. The builder
+          reserves the largest finite status envelope before accepting items,
+          so [finish] performs one final shared validation without trimming. *)
+      type completed = t
+
+      type t
+
+      type addition =
+        | Added
+        | Full of Status.truncation
+
+      val create : request:Request.t -> (t, Error.t) result
+      val add : t -> Suggestion.t -> (addition, Error.t) result
+      val finish : t -> status:Status.t -> (completed, Error.t) result
+    end
+
+    val create
+      :  request:Request.t
+      -> items:Suggestion.t list
+      -> status:Status.t
+      -> (t, Error.t) result
+
+    val request : t -> Request.t
+    val items : t -> Suggestion.t list
+    val status : t -> Status.t
+    val sexp_of_t : t -> Core.Sexp.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+end
+```
+
+## authoring_bundle
+
+[implementation](../../lib/agent_protocol/authoring_bundle.ml) · [interface](../../lib/agent_protocol/authoring_bundle.mli)
+
+```ocaml
+(** Immutable bundle-upload wire values. These DTOs validate portable syntax and
+    finite framing; they do not authorize an upload, prove source custody, close
+    a project graph, or publish a bundle. The host reauthorizes the authenticated
+    principal on every call. Storage (OCH-263) and closure validation (OCH-264)
+    independently enforce their own limits and evidence. Explicit [None] fields
+    are absent in JSON; explicit null, duplicate and unknown fields are errors. *)
+
+module Bundle : sig
+  module Wire_limits : sig
+    (** Fixed codec ceilings. The initialized host may advertise and enforce
+        lower principal/store limits; these constants do not reserve quota. *)
+    val max_members : int
+
+    val max_manifest_bytes : int
+    val max_member_bytes : int
+    val max_total_declared_bytes : int
+    val max_chunk_bytes : int
+  end
+
+  module Owner : sig
+    (** Echoed comparison coordinates from the authenticated upload owner.
+        These labels carry no upload, read or execution authority. *)
+    type t = private
+      { host : Id.Server.t
+      ; principal : Id.Principal.t
+      }
+    [@@deriving equal, sexp_of]
+
+    val create : host:Id.Server.t -> principal:Id.Principal.t -> t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  module Member : sig
+    (** One qualified source ID, SHA-256 digest and exact byte length. An open
+        editor revision cannot be placed in an immutable upload manifest. *)
+    type t [@@deriving equal, sexp_of]
+
+    val create : source:Authoring_common.Source.t -> (t, Error.t) result
+    val source : t -> Authoring_common.Source.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  module Manifest : sig
+    module Route : sig
+      type t [@@deriving equal]
+
+      (** Owner-local selected dependency associations. Git origin is routing
+          intent, never an acquisition grant. Actual declaration and prior-lock
+          coherence belongs to the captured Project gate. *)
+      val create
+        :  declaration:Chatml_source.Id.t
+        -> origin:Chatml_project.Lock.Catalog.origin
+        -> dependencies:Chatml_project.Lock.Dependency_selection.t list
+        -> (t, Error.t) result
+
+      val declaration : t -> Chatml_source.Id.t
+      val origin : t -> Chatml_project.Lock.Catalog.origin
+      val dependencies : t -> Chatml_project.Lock.Dependency_selection.t list
+    end
+
+    module Project : sig
+      module Captured_entry : sig
+        type delivery =
+          | Uploaded_member
+          | Derived_script
+        [@@deriving equal, sexp_of]
+
+        type t [@@deriving equal]
+
+        val create
+          :  source:Authoring_common.Source.t
+          -> delivery:delivery
+          -> (t, Error.t) result
+
+        val source : t -> Authoring_common.Source.t
+        val delivery : t -> delivery
+      end
+
+      type entry =
+        | Declared
+        | Captured of Captured_entry.t
+
+      type mode =
+        | Exact_lock of Chatml_source.Id.t
+        | Compose of
+            { selected_previous_lock : Authoring_common.Source.t option
+            ; generated_lock : Chatml_source.Id.t
+            }
+
+      type t [@@deriving equal]
+
+      val create
+        :  root_source:Chatml_source.Id.t
+        -> selection:Authoring_context.Context.Selection.t
+        -> entry:entry
+        -> source_members:Chatml_source.Id.t list
+        -> routes:Route.t list
+        -> mode:mode
+        -> (t, Error.t) result
+
+      val root_source : t -> Chatml_source.Id.t
+      val selection : t -> Authoring_context.Context.Selection.t
+      val entry : t -> entry
+      val source_members : t -> Chatml_source.Id.t list
+      val routes : t -> Route.t list
+      val mode : t -> mode
+    end
+
+    module Document_member : sig
+      type t [@@deriving equal]
+
+      val create
+        :  source:Chatml_source.Id.t
+        -> member:Source.Portable_path.t
+        -> (t, Error.t) result
+
+      val source : t -> Chatml_source.Id.t
+      val member : t -> Source.Portable_path.t
+    end
+
+    module Script : sig
+      module Selector : sig
+        type t [@@deriving equal]
+
+        (** Exact uploaded document owner/range and expected extracted body.
+            No parser Binding or read authority is constructed here. *)
+        val create
+          :  registration_source:Chatml_source.Id.t
+          -> declaration_source:Chatml_source.Id.t
+          -> start_byte:int
+          -> end_byte:int
+          -> script_id:string
+          -> body_digest:Chatml_source.Digest.t
+          -> body_byte_length:int
+          -> (t, Error.t) result
+
+        val registration_source : t -> Chatml_source.Id.t
+        val declaration_source : t -> Chatml_source.Id.t
+        val start_byte : t -> int
+        val end_byte : t -> int
+        val script_id : t -> string
+        val body_digest : t -> Chatml_source.Digest.t
+        val body_byte_length : t -> int
+        val to_json : t -> Jsonaf.t
+        val of_json : Jsonaf.t -> (t, Error.t) result
+      end
+
+      type choice =
+        | Source_only
+        | Selected_project of Project.t
+
+      type t [@@deriving equal]
+
+      val create : selector:Selector.t -> choice:choice -> (t, Error.t) result
+      val selector : t -> Selector.t
+      val choice : t -> choice
+    end
+
+    module Chatmd_document : sig
+      type t [@@deriving equal]
+
+      (** [root_source] and both owner sources of every script selector must be
+          present in [document_members]. Exact byte-range admission follows
+          when the enclosing manifest supplies their immutable metadata. *)
+      val create
+        :  root_source:Chatml_source.Id.t
+        -> document_members:Document_member.t list
+        -> scripts:Script.t list
+        -> (t, Error.t) result
+
+      val root_source : t -> Chatml_source.Id.t
+      val document_members : t -> Document_member.t list
+      val scripts : t -> Script.t list
+    end
+
+    type basis =
+      | Project of Project.t
+      | Chatmd_document of Chatmd_document.t
+    [@@deriving equal]
+
+    type t [@@deriving equal, sexp_of]
+
+    (** One canonical immutable inventory. Nested Project subsets can share
+        only this single qualified ID/digest/length record. Project root and
+        selected exact lock must occur in its subset. Top-level Project cannot
+        use Derived_script; nested derived entry must match the enclosing script
+        body digest/length and cannot collide with an uploaded member. Repeated
+        derived IDs require exact same revision metadata. Decoder performs the
+        same validation. Metadata never grants custody or execution.
+
+        Fixed wire ceilings: <=1024 members, <=32MiB/member, <=512MiB total,
+        <=4MiB manifest JSON; <=256 document members/scripts and <=4096 total
+        nested metadata nodes. One aggregate admission ledger covers the whole
+        manifest, not a renewed allowance per script. ChatMD document members
+        obey <=1MiB each and <=8MiB jointly. The canonical v2 fingerprint
+        includes tag, all basis fields and typed-sorted full member inventory. *)
+    val create : basis:basis -> members:Member.t list -> (t, Error.t) result
+
+    val basis : t -> basis
+    val members : t -> Member.t list
+    val fingerprint : t -> Chatml_source.Digest.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  module Begin : sig
+    (** The optional parent is current-read provenance only. It is not an
+        upload prerequisite. Host authorization binds the request to the
+        authenticated principal and server; an upload-only caller may set it
+        to None. Reusing [idempotency_key] with an identical complete request
+        recovers the same upload without a second quota reservation. *)
+    type request = private
+      { parent_context : Authoring_context.Context.Expected.t option
+      ; idempotency_key : Idempotency_key.t
+      ; manifest : Manifest.t
+      }
+    [@@deriving sexp_of]
+
+    type response [@@deriving sexp_of]
+
+    val create_request
+      :  ?parent_context:Authoring_context.Context.Expected.t
+      -> idempotency_key:Idempotency_key.t
+      -> manifest:Manifest.t
+      -> unit
+      -> request
+
+    (** The host echoes exact request affinity. [expires_at] is host clock
+        output, never a client lease extension. [max_chunk_bytes] is positive
+        and no larger than the protocol's fixed decoded-chunk ceiling. *)
+    val create_response
+      :  owner:Owner.t
+      -> upload_id:Id.Authoring_upload.t
+      -> idempotency_key:Idempotency_key.t
+      -> manifest_fingerprint:Chatml_source.Digest.t
+      -> parent_context:Authoring_context.Context.Expected.t option
+      -> max_chunk_bytes:int
+      -> expires_at:Timestamp.t
+      -> (response, Error.t) result
+
+    val owner : response -> Owner.t
+    val upload_id : response -> Id.Authoring_upload.t
+    val idempotency_key : response -> Idempotency_key.t
+    val manifest_fingerprint : response -> Chatml_source.Digest.t
+    val parent_context : response -> Authoring_context.Context.Expected.t option
+    val max_chunk_bytes : response -> int
+    val expires_at : response -> Timestamp.t
+    val request_to_json : request -> Jsonaf.t
+    val request_of_json : Jsonaf.t -> (request, Error.t) result
+    val response_to_json : response -> Jsonaf.t
+    val response_of_json : Jsonaf.t -> (response, Error.t) result
+  end
+
+  module Chunk : sig
+    (** One exact member byte offset and bounded binary payload. The wire uses
+        base64 and checks encoded size before decoding, decoded size before
+        retention, and offset + length without overflow. A repeat of already
+        accepted identical bytes is safe; changed or partial-overlap repeats
+        conflict in storage. The source ID is never a filesystem path. *)
+    type request = private
+      { upload_id : Id.Authoring_upload.t
+      ; source : Chatml_source.Id.t
+      ; byte_offset : int
+      ; bytes : string
+      }
+    [@@deriving sexp_of]
+
+    type response [@@deriving sexp_of]
+
+    val create_request
+      :  upload_id:Id.Authoring_upload.t
+      -> source:Chatml_source.Id.t
+      -> byte_offset:int
+      -> bytes:string
+      -> (request, Error.t) result
+
+    val create_response
+      :  owner:Owner.t
+      -> upload_id:Id.Authoring_upload.t
+      -> source:Chatml_source.Id.t
+      -> accepted_until_byte:int
+      -> (response, Error.t) result
+
+    val owner : response -> Owner.t
+    val upload_id : response -> Id.Authoring_upload.t
+    val source : response -> Chatml_source.Id.t
+    val accepted_until_byte : response -> int
+    val request_to_json : request -> Jsonaf.t
+    val request_of_json : Jsonaf.t -> (request, Error.t) result
+    val response_to_json : response -> Jsonaf.t
+    val response_of_json : Jsonaf.t -> (response, Error.t) result
+  end
+
+  module Rejection : sig
+    (** Coarse safe status codes, with no source path, private policy or
+        compiler diagnostic body. Detailed authorized diagnostics are separate. *)
+    type t =
+      | Invalid_closure
+      | Unsupported_environment
+      | Resource_limit
+      | Internal_failure
+    [@@deriving compare, equal, sexp_of]
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  module Receipt : sig
+    module Project : sig
+      type t [@@deriving equal]
+
+      (** Exact admitted Prepared input identity; not semantic check success or
+          an execution grant. The selected lock is the validated Build's lock. *)
+      val create
+        :  root_source:Chatml_source.Id.t
+        -> entry_source:Chatml_source.Id.t
+        -> selected_lock:Chatml_source.Id.t
+        -> input_fingerprint:Chatml_source.Digest.t
+        -> compiler_contract:Chatml_source.Digest.t
+        -> environment:string
+        -> (t, Error.t) result
+
+      val root_source : t -> Chatml_source.Id.t
+      val entry_source : t -> Chatml_source.Id.t
+      val selected_lock : t -> Chatml_source.Id.t
+      val input_fingerprint : t -> Chatml_source.Digest.t
+      val compiler_contract : t -> Chatml_source.Digest.t
+      val environment : t -> string
+    end
+
+    module Script : sig
+      (** Source-only is deliberately graph-free. Selected Project records
+          remain separate per script even if source IDs and bytes overlap. *)
+      type result =
+        | Source_only of
+            { selector : Manifest.Script.Selector.t
+            ; body_digest : Chatml_source.Digest.t
+            }
+        | Selected_project of
+            { selector : Manifest.Script.Selector.t
+            ; body_digest : Chatml_source.Digest.t
+            ; project : Project.t
+            }
+      [@@deriving equal]
+    end
+
+    module Chatmd_document : sig
+      type t [@@deriving equal]
+
+      val create
+        :  root_source:Chatml_source.Id.t
+        -> closure_fingerprint:Chatml_source.Digest.t
+        -> scripts:Script.result list
+        -> (t, Error.t) result
+
+      val root_source : t -> Chatml_source.Id.t
+      val closure_fingerprint : t -> Chatml_source.Digest.t
+      val scripts : t -> Script.result list
+    end
+
+    type basis =
+      | Project of Project.t
+      | Chatmd_document of Chatmd_document.t
+    [@@deriving equal]
+
+    (** Constructing/decoding this DTO does not mint a validated-closure proof.
+        Only the proof-gated publisher may expose Published. Shared owner/upload,
+        manifest fingerprint and expiry apply to both bases. No document accessor
+        invents a Project graph. Script results are bounded, canonical and unique. *)
+    type t [@@deriving equal, sexp_of]
+
+    val create
+      :  owner:Owner.t
+      -> upload_id:Id.Authoring_upload.t
+      -> bundle_id:Id.Authoring_bundle.t
+      -> manifest_fingerprint:Chatml_source.Digest.t
+      -> basis:basis
+      -> expires_at:Timestamp.t
+      -> (t, Error.t) result
+
+    val owner : t -> Owner.t
+    val upload_id : t -> Id.Authoring_upload.t
+    val bundle_id : t -> Id.Authoring_bundle.t
+    val manifest_fingerprint : t -> Chatml_source.Digest.t
+    val basis : t -> basis
+    val expires_at : t -> Timestamp.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  module Status : sig
+    type request = private { upload_id : Id.Authoring_upload.t } [@@deriving sexp_of]
+
+    module Progress : sig
+      type t [@@deriving equal, sexp_of]
+
+      val create
+        :  source:Chatml_source.Id.t
+        -> accepted_until_byte:int
+        -> (t, Error.t) result
+
+      val source : t -> Chatml_source.Id.t
+      val accepted_until_byte : t -> int
+    end
+
+    type state =
+      | Staging of Progress.t list
+      | Validating
+      | Published of Receipt.t
+      | Rejected of Rejection.t
+      | Expired
+    [@@deriving sexp_of]
+
+    (** [Validating] covers a sealed claim pending a publisher as well as an
+        active durable validation intent. It promises neither automatic
+        scheduling nor eventual publication. A same-key commit retry is
+        required to resume a sealed claim when publication was unavailable. *)
+
+    (** A status response always echoes the upload ID. Staging progress is
+        bounded, ordered by qualified source ID and has no duplicate source.
+        Published receipts must echo that same owner and upload ID. Status never renews
+        expiry or retries commit/publication. *)
+    type t [@@deriving sexp_of]
+
+    val create_request : upload_id:Id.Authoring_upload.t -> request
+
+    val create
+      :  owner:Owner.t
+      -> upload_id:Id.Authoring_upload.t
+      -> state:state
+      -> (t, Error.t) result
+
+    val owner : t -> Owner.t
+    val upload_id : t -> Id.Authoring_upload.t
+    val state : t -> state
+    val request_to_json : request -> Jsonaf.t
+    val request_of_json : Jsonaf.t -> (request, Error.t) result
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  module Commit : sig
+    (** An incomplete attempt is an error and records no commit key. Once
+        complete, the key binds upload, manifest and exact payload digest;
+        repeated same-key requests recover the same sealed claim/result.
+        A different key conflicts. A successful response may still be pending
+        closure validation and does not itself assert publication. *)
+    type request = private
+      { upload_id : Id.Authoring_upload.t
+      ; idempotency_key : Idempotency_key.t
+      }
+    [@@deriving sexp_of]
+
+    type outcome =
+      | Accepted_for_validation
+      | Published of Receipt.t
+      | Rejected of Rejection.t
+    [@@deriving sexp_of]
+
+    (** A Published receipt must echo this response's owner and upload ID. *)
+    type response [@@deriving sexp_of]
+
+    val create_request
+      :  upload_id:Id.Authoring_upload.t
+      -> idempotency_key:Idempotency_key.t
+      -> request
+
+    val create_response
+      :  owner:Owner.t
+      -> upload_id:Id.Authoring_upload.t
+      -> idempotency_key:Idempotency_key.t
+      -> outcome:outcome
+      -> (response, Error.t) result
+
+    val owner : response -> Owner.t
+    val upload_id : response -> Id.Authoring_upload.t
+    val idempotency_key : response -> Idempotency_key.t
+    val outcome : response -> outcome
+    val request_to_json : request -> Jsonaf.t
+    val request_of_json : Jsonaf.t -> (request, Error.t) result
+    val response_to_json : response -> Jsonaf.t
+    val response_of_json : Jsonaf.t -> (response, Error.t) result
+  end
+end
+```
+
+## authoring_bundle_basis
+
+[implementation](../../lib/agent_protocol/authoring_bundle_basis.ml) · [interface](../../lib/agent_protocol/authoring_bundle_basis.mli)
+
+```ocaml
+module A = Authoring_common
+module Context = Authoring_context.Context
+module Captured = Chatml_source
+module Project = Chatml_project
+module Path = Source.Portable_path
+
+module Route : sig
+  type t
+
+  val create
+    :  declaration:Captured.Id.t
+    -> origin:Project.Lock.Catalog.origin
+    -> dependencies:Project.Lock.Dependency_selection.t list
+    -> (t, Error.t) result
+
+  val declaration : t -> Captured.Id.t
+  val origin : t -> Project.Lock.Catalog.origin
+  val dependencies : t -> Project.Lock.Dependency_selection.t list
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Project_basis : sig
+  module Captured_entry : sig
+    type delivery =
+      | Uploaded_member
+      | Derived_script
+    [@@deriving equal, sexp_of]
+
+    type t
+
+    val create : source:A.Source.t -> delivery:delivery -> (t, Error.t) result
+    val source : t -> A.Source.t
+    val delivery : t -> delivery
+    val equal : t -> t -> bool
+  end
+
+  type entry =
+    | Declared
+    | Captured of Captured_entry.t
+
+  type mode =
+    | Exact_lock of Captured.Id.t
+    | Compose of
+        { selected_previous_lock : A.Source.t option
+        ; generated_lock : Captured.Id.t
+        }
+
+  type t
+
+  val create
+    :  root_source:Captured.Id.t
+    -> selection:Context.Selection.t
+    -> entry:entry
+    -> source_members:Captured.Id.t list
+    -> routes:Route.t list
+    -> mode:mode
+    -> (t, Error.t) result
+
+  val root_source : t -> Captured.Id.t
+  val selection : t -> Context.Selection.t
+  val entry : t -> entry
+  val source_members : t -> Captured.Id.t list
+  val routes : t -> Route.t list
+  val mode : t -> mode
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Document_member : sig
+  type t
+
+  val create : source:Captured.Id.t -> member:Path.t -> (t, Error.t) result
+  val source : t -> Captured.Id.t
+  val member : t -> Path.t
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Script : sig
+  module Selector : sig
+    type t
+
+    val create
+      :  registration_source:Captured.Id.t
+      -> declaration_source:Captured.Id.t
+      -> start_byte:int
+      -> end_byte:int
+      -> script_id:string
+      -> body_digest:Captured.Digest.t
+      -> body_byte_length:int
+      -> (t, Error.t) result
+
+    val registration_source : t -> Captured.Id.t
+    val declaration_source : t -> Captured.Id.t
+    val start_byte : t -> int
+    val end_byte : t -> int
+    val script_id : t -> string
+    val body_digest : t -> Captured.Digest.t
+    val body_byte_length : t -> int
+    val key_compare : t -> t -> int
+    val equal : t -> t -> bool
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  type choice =
+    | Source_only
+    | Selected_project of Project_basis.t
+
+  type t
+
+  val create : selector:Selector.t -> choice:choice -> (t, Error.t) result
+  val selector : t -> Selector.t
+  val choice : t -> choice
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Chatmd_document : sig
+  type t
+
+  val create
+    :  root_source:Captured.Id.t
+    -> document_members:Document_member.t list
+    -> scripts:Script.t list
+    -> (t, Error.t) result
+
+  val root_source : t -> Captured.Id.t
+  val document_members : t -> Document_member.t list
+  val scripts : t -> Script.t list
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+type t =
+  | Project of Project_basis.t
+  | Chatmd_document of Chatmd_document.t
+
+val equal : t -> t -> bool
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** One whole-manifest preflight; [member_sources] is already bounded by the
+    enclosing wire count/bytes. Reject missing or conflicting references,
+    including dependency targets outside their Project subset or without a
+    selected owner route, and conflicting
+    derived/uploaded identities, before canonical JSON.
+    No source-body or host authority validation happens here. *)
+val validate_inventory : t -> member_sources:A.Source.t list -> (unit, Error.t) result
+```
+
+## authoring_bundle_basis_common
+
+[implementation](../../lib/agent_protocol/authoring_bundle_basis_common.ml) · [interface](../../lib/agent_protocol/authoring_bundle_basis_common.mli)
+
+```ocaml
+(** Private bounded primitives shared by the tagged project/document basis and
+    the single-inventory validator. These helpers convey syntax, never custody. *)
+
+module A = Authoring_common
+module C = Authoring_codec
+module Context = Authoring_context.Context
+module Captured = Chatml_source
+module Project = Chatml_project
+module Path = Source.Portable_path
+
+val ( let* ) : ('a, 'error) result -> ('a -> ('b, 'error) result) -> ('b, 'error) result
+val obj : (string * Jsonaf.t) list -> Jsonaf.t
+val str : string -> Jsonaf.t
+val invalid : string -> ('a, Error.t) result
+val bounded_count : max:int -> 'a list -> bool
+val fields : Jsonaf.t -> string list -> (Json_codec.fields, Error.t) result
+
+val required
+  :  Json_codec.fields
+  -> string
+  -> (Jsonaf.t -> ('a, Error.t) result)
+  -> ('a, Error.t) result
+
+val optional
+  :  Json_codec.fields
+  -> string
+  -> (Jsonaf.t -> ('a, Error.t) result)
+  -> ('a option, Error.t) result
+
+val path_json : Path.t -> Jsonaf.t
+val path_of_json : Jsonaf.t -> (Path.t, Error.t) result
+val immutable_source : A.Source.t -> (unit, Error.t) result
+val origin_equal : Project.Lock.Catalog.origin -> Project.Lock.Catalog.origin -> bool
+val origin_to_json : Project.Lock.Catalog.origin -> Jsonaf.t
+val origin_of_json : Jsonaf.t -> (Project.Lock.Catalog.origin, Error.t) result
+```
+
+## authoring_bundle_basis_document
+
+[implementation](../../lib/agent_protocol/authoring_bundle_basis_document.ml) · [interface](../../lib/agent_protocol/authoring_bundle_basis_document.mli)
+
+```ocaml
+(** Private typed basis constructors; canonical syntax is not source custody. *)
+module A = Authoring_common
+
+module Context = Authoring_context.Context
+module Captured = Chatml_source
+module Project = Chatml_project
+module Path = Source.Portable_path
+module Project_basis = Authoring_bundle_basis_project.Project_basis
+
+module Document_member : sig
+  type t
+
+  val create : source:Captured.Id.t -> member:Path.t -> (t, Error.t) result
+  val source : t -> Captured.Id.t
+  val member : t -> Path.t
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Script : sig
+  module Selector : sig
+    type t
+
+    val create
+      :  registration_source:Captured.Id.t
+      -> declaration_source:Captured.Id.t
+      -> start_byte:int
+      -> end_byte:int
+      -> script_id:string
+      -> body_digest:Captured.Digest.t
+      -> body_byte_length:int
+      -> (t, Error.t) result
+
+    val registration_source : t -> Captured.Id.t
+    val declaration_source : t -> Captured.Id.t
+    val start_byte : t -> int
+    val end_byte : t -> int
+    val script_id : t -> string
+    val body_digest : t -> Captured.Digest.t
+    val body_byte_length : t -> int
+    val key_compare : t -> t -> int
+    val equal : t -> t -> bool
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
+  type choice =
+    | Source_only
+    | Selected_project of Project_basis.t
+
+  type t
+
+  val create : selector:Selector.t -> choice:choice -> (t, Error.t) result
+  val selector : t -> Selector.t
+  val choice : t -> choice
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Chatmd_document : sig
+  type t
+
+  val create
+    :  root_source:Captured.Id.t
+    -> document_members:Document_member.t list
+    -> scripts:Script.t list
+    -> (t, Error.t) result
+
+  val root_source : t -> Captured.Id.t
+  val document_members : t -> Document_member.t list
+  val scripts : t -> Script.t list
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## authoring_bundle_basis_project
+
+[implementation](../../lib/agent_protocol/authoring_bundle_basis_project.ml) · [interface](../../lib/agent_protocol/authoring_bundle_basis_project.mli)
+
+```ocaml
+(** Private typed basis constructors; canonical syntax is not source custody. *)
+module A = Authoring_common
+
+module Context = Authoring_context.Context
+module Captured = Chatml_source
+module Project = Chatml_project
+module Path = Source.Portable_path
+
+module Route : sig
+  type t
+
+  val create
+    :  declaration:Captured.Id.t
+    -> origin:Project.Lock.Catalog.origin
+    -> dependencies:Project.Lock.Dependency_selection.t list
+    -> (t, Error.t) result
+
+  val declaration : t -> Captured.Id.t
+  val origin : t -> Project.Lock.Catalog.origin
+  val dependencies : t -> Project.Lock.Dependency_selection.t list
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Project_basis : sig
+  module Captured_entry : sig
+    type delivery =
+      | Uploaded_member
+      | Derived_script
+    [@@deriving equal, sexp_of]
+
+    type t
+
+    val create : source:A.Source.t -> delivery:delivery -> (t, Error.t) result
+    val source : t -> A.Source.t
+    val delivery : t -> delivery
+    val equal : t -> t -> bool
+  end
+
+  type entry =
+    | Declared
+    | Captured of Captured_entry.t
+
+  type mode =
+    | Exact_lock of Captured.Id.t
+    | Compose of
+        { selected_previous_lock : A.Source.t option
+        ; generated_lock : Captured.Id.t
+        }
+
+  type t
+
+  val create
+    :  root_source:Captured.Id.t
+    -> selection:Context.Selection.t
+    -> entry:entry
+    -> source_members:Captured.Id.t list
+    -> routes:Route.t list
+    -> mode:mode
+    -> (t, Error.t) result
+
+  val root_source : t -> Captured.Id.t
+  val selection : t -> Context.Selection.t
+  val entry : t -> entry
+  val source_members : t -> Captured.Id.t list
+  val routes : t -> Route.t list
+  val mode : t -> mode
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## authoring_codec
+
+[implementation](../../lib/agent_protocol/authoring_codec.ml) · [interface](../../lib/agent_protocol/authoring_codec.mli)
+
+```ocaml
+(** Internal strict, bounded primitives shared by the authoring DTO codecs. *)
+
+(** Largest exact integer shared with common JSON clients. Constructors and
+    decoders keep all revision/generation counters within this bound. *)
+val maximum_wire_integer : int
+
+(** Conservative escaped-JSON byte, node and depth preflight over an already parsed
+    value, before family-specific decoding. The new analysis/assistance family
+    uses the smaller of its fixed limit and the negotiated result limit; the
+    host checks request/result sizes against its current capability as well.
+    This does not replace constructors' pre-allocation count/label budgets. *)
+val admit_json : max_bytes:int -> Jsonaf.t -> (unit, Error.t) result
+
+(** Conservative escaped-wire upper bound, with the same node/depth checks as
+    [admit_json]. Callers can debit many bounded DTO pieces before forming a
+    whole response; punctuation overcount is allowed and fails closed. *)
+val encoded_size : max_bytes:int -> Jsonaf.t -> (int, Error.t) result
+
+(** A single conservative budget for DTO pieces. [reserve] accounts for the
+    fixed enclosing objects, arrays and punctuation before any large response
+    is assembled. [charge_json] counts bytes and nodes across all pieces and
+    checks their depth at the position they occupy in the complete JSON tree. *)
+module Budget : sig
+  type t
+
+  val create : max_bytes:int -> (t, Error.t) result
+  val reserve : t -> bytes:int -> nodes:int -> (unit, Error.t) result
+  val charge_json : t -> parent_depth:int -> Jsonaf.t -> (unit, Error.t) result
+end
+
+val invalid : string -> ('a, Error.t) result
+val fields : allowed:string list -> Jsonaf.t -> (Json_codec.fields, Error.t) result
+val required : Json_codec.fields -> string -> (Jsonaf.t, Error.t) result
+
+val required_as
+  :  Json_codec.fields
+  -> string
+  -> (Jsonaf.t -> ('a, Error.t) result)
+  -> ('a, Error.t) result
+
+val optional_as
+  :  Json_codec.fields
+  -> string
+  -> (Jsonaf.t -> ('a, Error.t) result)
+  -> ('a option, Error.t) result
+
+val string : max_bytes:int -> Jsonaf.t -> (string, Error.t) result
+val nonnegative : Jsonaf.t -> (int, Error.t) result
+val positive : Jsonaf.t -> (int, Error.t) result
+val integer : int -> Jsonaf.t
+val boolean : bool -> Jsonaf.t
+
+val list
+  :  max_items:int
+  -> (Jsonaf.t -> ('a, Error.t) result)
+  -> Jsonaf.t
+  -> ('a list, Error.t) result
+
+val array : ('a -> Jsonaf.t) -> 'a list -> Jsonaf.t
+val optional_field : string -> 'a option -> ('a -> Jsonaf.t) -> (string * Jsonaf.t) list
+
+(** Source IDs encode the arbitrary-byte package namespace as bounded base64;
+    the portable relative member remains a UTF-8 JSON string. Constructor and
+    decoder validation both require each source-ID component to fit 1,024
+    bytes, so an admitted ID can round-trip through this wire codec. *)
+val source_id : Jsonaf.t -> (Chatml_source.Id.t, Error.t) result
+
+val validate_source_id : Chatml_source.Id.t -> (unit, Error.t) result
+val source_id_json : Chatml_source.Id.t -> Jsonaf.t
+val digest : Jsonaf.t -> (Chatml_source.Digest.t, Error.t) result
+val digest_json : Chatml_source.Digest.t -> Jsonaf.t
+val portable_member : Jsonaf.t -> (string, Error.t) result
+val portable_member_string : string -> (string, Error.t) result
+val utf8_text : max_bytes:int -> Jsonaf.t -> (string, Error.t) result
+val bytes_base64 : max_bytes:int -> Jsonaf.t -> (string, Error.t) result
+val bytes_base64_json : string -> Jsonaf.t
+```
+
+## authoring_common
+
+[implementation](../../lib/agent_protocol/authoring_common.ml) · [interface](../../lib/agent_protocol/authoring_common.mli)
+
+```ocaml
+(** Versioned, transport-neutral authoring DTOs. All identities and source sites
+    are comparison coordinates, never read, write, analysis or execution grants.
+    The host reauthorizes the authenticated actor on every method, including
+    cached reads. Codecs validate bounded wire values before domain admission.
+    Every optional field in this family uses absence for [None] and a concrete
+    value for [Some]; explicit JSON null is invalid, including response fields.
+    Unknown and duplicate object fields are invalid. Integers must be exact
+    bounded JSON integers, never floats or exponent notation.
+    Method failures use the existing typed protocol error channel:
+    [Permission_denied] for unauthorized access, [Lease_stale] for a lost
+    context lease, [Conflict] for stale source/context revisions,
+    [Invalid_request] with a bounded position-reason tag for invalid editor
+    coordinates, [Resource_limit] for work/admission ceilings and [Interrupted]
+    for cancellation. These wire codes do not reveal whether a denied source
+    exists. Later semantic queries return unavailable facts as typed results
+    rather than protocol errors.
+    This module has no compiler, Eio, filesystem, runtime or UI dependency. *)
+
+module Features : sig
+  (** Initialization advertises [core] only after a host installs the
+      source/context handlers. Codecs and {!Command.supported_methods} alone
+      do not make any method available. Bundle and later analysis features
+      are selected separately only after their handlers are installed. *)
+  val core : string
+
+  (** Separately negotiated immutable upload access. An upload-only principal
+      need not select [core] or open a source context. *)
+  val bundle : string
+
+  (** Selected separately from source access, and advertised only when the
+      corresponding analyze/query or lexical/assistance handlers are installed. *)
+  val semantic : string
+
+  (** Lexical scanning and early assistance may be installed independently.
+      Neither feature implies a selected Build or semantic analysis. *)
+  val lexical : string
+
+  val assistance : string
+end
+
+module Encoding : sig
+  type t = Chatml_editor_position.Encoding.t =
+    | Utf8_bytes
+    | Utf16_units
+  [@@deriving compare, equal, sexp_of]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Method : sig
+  type t =
+    | Capabilities
+    | Roots
+    | Host_list
+    | Host_read
+    | Context_open
+    | Context_refresh
+    | Context_close
+    | Source_list
+    | Source_read
+    | Document_version
+    | Document_replace
+    | Document_close
+    | Bundle_begin
+    | Bundle_chunk
+    | Bundle_commit
+    | Bundle_status
+    | Analyze
+    | Prefix
+    | Query
+    | Lexical
+    | Assistance
+  [@@deriving compare, equal, sexp_of]
+
+  (** Closed stable [authoring.*] method names. A method's presence in this
+      enumeration or the decoder does not advertise an installed handler. *)
+  val to_string : t -> string
+
+  val of_string : string -> (t, Error.t) Result.t
+end
+
+module Failure : sig
+  (** Bounded authoring-specific reasons in [Protocol_error.data]. The ordinary
+      protocol code remains authoritative; malformed or mismatched detail
+      decodes as [Other] instead of changing that code's meaning. No path,
+      source existence, supplied bytes or private host policy is exposed. *)
+  type invalid_position =
+    | Invalid_utf8
+    | Out_of_bounds
+    | Inside_scalar
+    | Inside_surrogate
+    | Inside_crlf
+    | Foreign_source
+  [@@deriving compare, equal, sexp_of]
+
+  type reason =
+    | Unauthorized
+    | Context_lease_stale
+    | Stale_context
+    | Stale_source
+    | Invalid_position of invalid_position
+    | Source_unavailable
+    | Environment_unavailable
+    | Work_limit
+    | Cancelled
+    | Other
+  [@@deriving compare, equal, sexp_of]
+
+  (** [attach] admits only reason/code pairs defined by this protocol family.
+      [classify] never string-matches messages. Server code may create an
+      ordinary error when no more specific safe detail applies. *)
+  val attach : Error.t -> reason -> (Error.t, Error.t) Result.t
+
+  val classify : Error.t -> reason
+end
+
+module Limits : sig
+  (** Largest exact JSON counter admitted for generations and editor revisions. *)
+  val maximum_wire_integer : int
+
+  (** Actual per-host method limits, not claims about OCaml heap or wall time.
+      [max_request_bytes] is also bounded by the generic initialize limit.
+      Constructors check positivity, representable integer bounds and local
+      cross-field consistency. They do not prove a host can honor a limit;
+      the handler selects ceilings at initialization and checks each request
+      against them and its current principal quota before allocation. *)
+  type t = private
+    { max_sources : int
+    ; max_source_bytes : int
+    ; max_context_source_bytes : int
+    ; max_request_bytes : int
+    ; max_result_bytes : int
+    ; max_path_candidates : int
+    }
+  [@@deriving sexp_of]
+
+  val create
+    :  max_sources:int
+    -> max_source_bytes:int
+    -> max_context_source_bytes:int
+    -> max_request_bytes:int
+    -> max_result_bytes:int
+    -> max_path_candidates:int
+    -> (t, Error.t) Result.t
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Capabilities : sig
+  (** Actual installed handler methods, selected position encodings and policy
+      bounds. [encodings] is empty for an upload-only principal with no source
+      position service; it never advertises an unavailable editor conversion.
+      A codec may know a method that is absent here. [authoring.capabilities]
+      requires selected [Features.core] or [Features.bundle], according to the
+      installed handler and authenticated principal. *)
+  type t = private
+    { methods : string list
+    ; encodings : Encoding.t list
+    ; limits : Limits.t
+    }
+  [@@deriving sexp_of]
+
+  val create
+    :  methods:string list
+    -> encodings:Encoding.t list
+    -> limits:Limits.t
+    -> (t, Error.t) Result.t
+
+  (** Unknown future [authoring.*] method names are retained but do not make
+      an older client callable; [supports] tests only its typed known methods. *)
+  val supports : t -> Method.t -> bool
+
+  val supports_encoding : t -> Encoding.t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Source : sig
+  (** Exact captured source revision. Optional [editor_revision] is absent for
+      host/bundle base bytes and present as a positive monotonically increasing
+      client revision for an open overlay. Wire [null] is invalid: absence and
+      a value are the only admitted states. Byte length is nonnegative and
+      digest is SHA-256; neither claims that the bytes are currently readable. *)
+  type t [@@deriving equal, sexp_of]
+
+  val create
+    :  id:Chatml_source.Id.t
+    -> digest:Chatml_source.Digest.t
+    -> byte_length:int
+    -> editor_revision:int option
+    -> (t, Error.t) Result.t
+
+  val id : t -> Chatml_source.Id.t
+  val digest : t -> Chatml_source.Digest.t
+  val byte_length : t -> int
+  val editor_revision : t -> int option
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Position : sig
+  (** Zero-based coordinates. Construction rejects negatives; applying a
+      position to a source additionally validates CRLF, scalar, surrogate and
+      EOF boundaries with {!Chatml_editor_position}. *)
+  type t = Chatml_editor_position.Position.t
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Site : sig
+  (** Exact source owner plus ordered half-open editor coordinates in one
+      explicit encoding. A site is accepted for a query only after the service
+      matches its source ID, digest, byte length and editor revision to the
+      current context and projects through the captured position index. An
+      [Approximate] site denotes declaration-level attribution, never an exact
+      embedded byte map; OCH-259 owns that provenance projection. *)
+  type precision =
+    | Exact
+    | Approximate
+  [@@deriving compare, equal, sexp_of]
+
+  type t [@@deriving sexp_of]
+
+  val create
+    :  source:Source.t
+    -> encoding:Encoding.t
+    -> start:Position.t
+    -> finish:Position.t
+    -> precision:precision
+    -> (t, Error.t) Result.t
+
+  val source : t -> Source.t
+  val encoding : t -> Encoding.t
+  val start : t -> Position.t
+  val finish : t -> Position.t
+  val precision : t -> precision
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+```
+
+## authoring_context
+
+[implementation](../../lib/agent_protocol/authoring_context.ml) · [interface](../../lib/agent_protocol/authoring_context.mli)
+
+```ocaml
+(** Compatibility umbrella for the three cohesive authoring core DTO families. *)
+module Context = Authoring_context_core.Context
+
+module Document = Authoring_document.Document
+module Source_read = Authoring_source_read.Source_read
+```
+
+## authoring_context_core
+
+[implementation](../../lib/agent_protocol/authoring_context_core.ml) · [interface](../../lib/agent_protocol/authoring_context_core.mli)
+
+```ocaml
+open Authoring_common
+
+module Context : sig
+  module Selection : sig
+    type target =
+      | Entry of string
+      | Library
+    [@@deriving equal, sexp_of]
+
+    (** [environment] absent selects the declared default; explicit JSON null
+        is rejected. Names are bounded, nonempty, exact bytes. *)
+    type t = private
+      { target : target
+      ; environment : string option
+      }
+    [@@deriving equal, sexp_of]
+
+    val create : target:target -> environment:string option -> (t, Error.t) Result.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  type origin =
+    | Host_project of
+        { root : Id.Authoring_root.t
+        ; dependency_roots : Id.Authoring_root.t list
+        ; project_member : string
+        ; selection : Selection.t
+        }
+    | Uploaded_project of Id.Authoring_bundle.t
+    | Host_document of
+        { root : Id.Authoring_root.t
+        ; source : Source.t
+        ; default_environment : string option
+        }
+    | Supplied_document of
+        { source : Source.t
+        ; default_environment : string option
+        }
+  [@@deriving equal, sexp_of]
+
+  module Open_request : sig
+    (** [Supplied_document] transports exact bytes by base64 and requires an
+        independent document-admission grant. It creates a captured base
+        source, not a host file or uploaded project. Other origins have no
+        supplied content. No project graph/check success is required for either
+        document-only origin. *)
+    type t = private
+      | Host_project of
+          { root : Id.Authoring_root.t
+          ; dependency_roots : Id.Authoring_root.t list
+          ; project_member : string
+          ; selection : Selection.t
+          }
+      | Uploaded_project of Id.Authoring_bundle.t
+      | Host_document of
+          { root : Id.Authoring_root.t
+          ; member : string
+          ; default_environment : string option
+          }
+      | Supplied_document of
+          { member : string
+          ; default_environment : string option
+          ; contents : string
+          }
+    [@@deriving sexp_of]
+
+    val create_host_project
+      :  root:Id.Authoring_root.t
+      -> dependency_roots:Id.Authoring_root.t list
+      -> project_member:string
+      -> selection:Selection.t
+      -> (t, Error.t) Result.t
+
+    val create_uploaded_project : Id.Authoring_bundle.t -> t
+
+    val create_host_document
+      :  root:Id.Authoring_root.t
+      -> member:string
+      -> default_environment:string option
+      -> (t, Error.t) Result.t
+
+    val create_supplied_document
+      :  member:string
+      -> default_environment:string option
+      -> contents:string
+      -> (t, Error.t) Result.t
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  type static_selection =
+    { environment : string
+    ; compiler_contract : Chatml_source.Digest.t
+    }
+  [@@deriving equal, sexp_of]
+
+  (** A document-only static selection is host-admitted from an actual
+      immutable catalog/compiler contract, never client-provided signatures.
+      Absence still permits lexical and basic declaration syntax help; paths,
+      templates and script references require separate source/catalog grants. *)
+
+  type basis =
+    | Project of
+        { base_graph : Chatml_source.Digest.t
+        ; selection : static_selection
+        }
+    | Document of
+        { source : Source.t
+        ; selection : static_selection option
+        }
+  [@@deriving equal, sexp_of]
+
+  (** One connection-scoped context view. The host and nonce are selected by
+      the server; [id] alone is not a transferable capability. Generation is
+      nonnegative and advances on each edit/close. A document basis can be
+      admitted without a successful project build; optional static selection
+      exists only after the host authenticates that environment. It is not a
+      certified analysis or a synthetic project graph. [origin] records the
+      admitted base capture; [basis] reflects the current overlay revision.
+      Host-document refresh may replace the base source revision under the same
+      authorized root/member locator. A supplied document keeps its original
+      base capture until a new context is opened. Generation is bounded by
+      {!Authoring_common.Limits.maximum_wire_integer}.
+      The host, not this DTO constructor, mints the fingerprint from exact
+      custody/selection/source identity. *)
+  type t [@@deriving sexp_of]
+
+  val create
+    :  id:Id.Authoring_context.t
+    -> host:Id.Server.t
+    -> origin:origin
+    -> generation:int
+    -> basis:basis
+    -> basis_fingerprint:Chatml_source.Digest.t
+    -> editable_sources:Source.t list
+    -> (t, Error.t) Result.t
+
+  val id : t -> Id.Authoring_context.t
+  val host : t -> Id.Server.t
+  val origin : t -> origin
+  val generation : t -> int
+  val basis : t -> basis
+  val basis_fingerprint : t -> Chatml_source.Digest.t
+  val editable_sources : t -> Source.t list
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+
+  type view = t
+
+  module Expected : sig
+    (** CAS input for operations on one current context generation. A stale
+        response cannot be applied after another document changes. *)
+    type t = private
+      { context_id : Id.Authoring_context.t
+      ; host : Id.Server.t
+      ; generation : int
+      ; basis_fingerprint : Chatml_source.Digest.t
+      }
+    [@@deriving equal, sexp_of]
+
+    val of_view : view -> t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Refresh_request : sig
+    type policy =
+      | Reject_open_documents
+      | Discard_open_documents
+    [@@deriving equal, sexp_of]
+
+    type t = private
+      { expected : Expected.t
+      ; policy : policy
+      }
+    [@@deriving sexp_of]
+
+    val create : expected:Expected.t -> policy:policy -> t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Close_request : sig
+    type t = private { expected : Expected.t } [@@deriving sexp_of]
+
+    val create : expected:Expected.t -> t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Close_result : sig
+    (** Final generation of a closed context; no active view is returned. *)
+    type t = private
+      { id : Id.Authoring_context.t
+      ; host : Id.Server.t
+      ; generation : int
+      }
+    [@@deriving sexp_of]
+
+    val create
+      :  id:Id.Authoring_context.t
+      -> host:Id.Server.t
+      -> generation:int
+      -> (t, Error.t) Result.t
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+end
+```
+
+## authoring_document
+
+[implementation](../../lib/agent_protocol/authoring_document.ml) · [interface](../../lib/agent_protocol/authoring_document.mli)
+
+```ocaml
+open Authoring_common
+module Context = Authoring_context_core.Context
+
+module Document : sig
+  module Version : sig
+    (** Source CAS receipt: exact source revision and whole context generation.
+        [overlay_open] distinguishes a base version after a close. The last
+        accepted editor revision remains in the CAS even after closing an
+        overlay, so a later replacement cannot reuse it. *)
+    type t [@@deriving sexp_of]
+
+    val create
+      :  context:Context.Expected.t
+      -> source:Source.t
+      -> last_editor_revision:int option
+      -> overlay_open:bool
+      -> (t, Error.t) Result.t
+
+    val context : t -> Context.Expected.t
+    val source : t -> Source.t
+    val last_editor_revision : t -> int option
+    val overlay_open : t -> bool
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Version_request : sig
+    (** Read current source CAS after any context edit. The server authorizes
+        and resolves the source under this context; a caller cannot assert a
+        fresh version using a source digest. *)
+    type t = private
+      { context : Context.Expected.t
+      ; source_id : Chatml_source.Id.t
+      }
+    [@@deriving sexp_of]
+
+    val create
+      :  context:Context.Expected.t
+      -> source_id:Chatml_source.Id.t
+      -> (t, Error.t) Result.t
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Replace_request : sig
+    (** Full exact UTF-8 text only. Arbitrary byte content uses bundle chunks;
+        this method never repairs invalid UTF-8 or writes a host file. *)
+    type t = private
+      { expected : Version.t
+      ; next_editor_revision : int
+      ; contents : string
+      }
+    [@@deriving sexp_of]
+
+    val create
+      :  expected:Version.t
+      -> next_editor_revision:int
+      -> contents:string
+      -> (t, Error.t) Result.t
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Close_request : sig
+    type t = private { expected : Version.t } [@@deriving sexp_of]
+
+    val create : expected:Version.t -> t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Result : sig
+    type t = private
+      { context : Context.t
+      ; version : Version.t
+      }
+    [@@deriving sexp_of]
+
+    val create : context:Context.t -> version:Version.t -> (t, Error.t) Core.Result.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Core.Result.t
+  end
+end
+```
+
 ## authoring_guidance
 
-[JSON codec](../../lib/agent_protocol/authoring_guidance.ml) · [interface](../../lib/agent_protocol/authoring_guidance.mli)
+[implementation](../../lib/agent_protocol/authoring_guidance.ml) · [interface](../../lib/agent_protocol/authoring_guidance.mli)
 
 ```ocaml
 (** Host-owned provenance for guidance, never inferred from message text. Source
@@ -320,7 +2989,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## authoring_reference
 
-[JSON codec](../../lib/agent_protocol/authoring_reference.ml) · [interface](../../lib/agent_protocol/authoring_reference.mli)
+[implementation](../../lib/agent_protocol/authoring_reference.ml) · [interface](../../lib/agent_protocol/authoring_reference.mli)
 
 ```ocaml
 (** Persisted evidence of an exact documentation response, not an execution grant
@@ -379,9 +3048,256 @@ val matches_output : t -> Jsonaf.t -> bool
 val scope_for : session_id:Id.Session.t -> generation:int -> string
 ```
 
+## authoring_source_read
+
+[implementation](../../lib/agent_protocol/authoring_source_read.ml) · [interface](../../lib/agent_protocol/authoring_source_read.mli)
+
+```ocaml
+open Authoring_common
+module Context = Authoring_context_core.Context
+
+module Source_read : sig
+  (** Host-root IDs are connection-local candidates, not path grants. Host
+      browse/read observes a granted root afresh; context inventory/read uses
+      exact captured effective bytes at a generation, including an open
+      overlay. Only explicit context refresh reobserves host bytes for that
+      context. Path strings are validated portable members. *)
+  module Root : sig
+    type t = private
+      { id : Id.Authoring_root.t
+      ; display_name : string
+      }
+    [@@deriving sexp_of]
+
+    val create : id:Id.Authoring_root.t -> display_name:string -> (t, Error.t) Result.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Roots_result : sig
+    (** Authorized roots available to this connection at the time of read.
+        A subsequent open reauthorizes the chosen root. *)
+    type t = private { roots : Root.t list } [@@deriving sexp_of]
+
+    val create : roots:Root.t list -> (t, Error.t) Result.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Host_list_request : sig
+    type t = private
+      { root : Id.Authoring_root.t
+      ; directory : string option
+      }
+    [@@deriving sexp_of]
+
+    val create
+      :  root:Id.Authoring_root.t
+      -> directory:string option
+      -> (t, Error.t) Result.t
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Host_list_result : sig
+    (** Complete bounded nonrecursive candidates from one granted root.
+        Entries do not prove file type or grant a subsequent read. If native
+        enumeration exceeds its cap, the whole request fails Resource_limit. *)
+    type t = private
+      { root : Id.Authoring_root.t
+      ; members : string list
+      }
+    [@@deriving sexp_of]
+
+    val create : root:Id.Authoring_root.t -> members:string list -> (t, Error.t) Result.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Host_read_request : sig
+    type t = private
+      { root : Id.Authoring_root.t
+      ; member : string
+      }
+    [@@deriving sexp_of]
+
+    val create : root:Id.Authoring_root.t -> member:string -> (t, Error.t) Result.t
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Host_read_result : sig
+    (** New read observation with host-constructed Source ID/digest/length.
+        Content is exact base64 bytes and does not mutate any open context. *)
+    type t [@@deriving sexp_of]
+
+    val create
+      :  root:Id.Authoring_root.t
+      -> member:string
+      -> source:Source.t
+      -> contents:string
+      -> (t, Error.t) Result.t
+
+    val root : t -> Id.Authoring_root.t
+    val member : t -> string
+    val source : t -> Source.t
+    val contents : t -> string
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module List_request : sig
+    type t = private
+      { context : Context.Expected.t
+      ; package_namespace : string option
+      ; directory : string option
+      }
+    [@@deriving sexp_of]
+
+    val create
+      :  context:Context.Expected.t
+      -> package_namespace:string option
+      -> directory:string option
+      -> (t, Error.t) Result.t
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Read_request : sig
+    type t = private
+      { context : Context.Expected.t
+      ; source_id : Chatml_source.Id.t
+      }
+    [@@deriving sexp_of]
+
+    val create
+      :  context:Context.Expected.t
+      -> source_id:Chatml_source.Id.t
+      -> (t, Error.t) Result.t
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module List_result : sig
+    (** A finite authorized inventory prefix sorted by full Source ID.
+        [omitted] is the number of
+        further entries in this exact observed manifest; [truncated] iff it
+        is positive. A changed context requires a fresh list. *)
+    type t [@@deriving sexp_of]
+
+    val create
+      :  context:Context.Expected.t
+      -> sources:Source.t list
+      -> omitted:int
+      -> (t, Error.t) Result.t
+
+    val context : t -> Context.Expected.t
+    val sources : t -> Source.t list
+    val omitted : t -> int
+    val truncated : t -> bool
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
+  module Read_result : sig
+    type t [@@deriving sexp_of]
+
+    (** Wire contents are base64 of exact source bytes. Source ID/digest/length
+        must match decoded bytes before this value is admitted. The context
+        echo lets a client reject a response from a superseded generation. *)
+    val create
+      :  context:Context.Expected.t
+      -> source:Source.t
+      -> contents:string
+      -> (t, Error.t) Result.t
+
+    val context : t -> Context.Expected.t
+    val source : t -> Source.t
+    val contents : t -> string
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+end
+```
+
+## authoring_wire
+
+[implementation](../../lib/agent_protocol/authoring_wire.ml) · [interface](../../lib/agent_protocol/authoring_wire.mli)
+
+```ocaml
+(** Closed, portable dispatch for the authoring method family. The sum
+    constructors keep each request and result tied to its method-specific DTO;
+    accepted syntax alone does not advertise an installed server handler. *)
+
+module Request : sig
+  type t =
+    | Capabilities
+    | Roots
+    | Host_list of Authoring_context.Source_read.Host_list_request.t
+    | Host_read of Authoring_context.Source_read.Host_read_request.t
+    | Context_open of Authoring_context.Context.Open_request.t
+    | Context_refresh of Authoring_context.Context.Refresh_request.t
+    | Context_close of Authoring_context.Context.Close_request.t
+    | Source_list of Authoring_context.Source_read.List_request.t
+    | Source_read of Authoring_context.Source_read.Read_request.t
+    | Document_version of Authoring_context.Document.Version_request.t
+    | Document_replace of Authoring_context.Document.Replace_request.t
+    | Document_close of Authoring_context.Document.Close_request.t
+    | Bundle_begin of Authoring_bundle.Bundle.Begin.request
+    | Bundle_chunk of Authoring_bundle.Bundle.Chunk.request
+    | Bundle_commit of Authoring_bundle.Bundle.Commit.request
+    | Bundle_status of Authoring_bundle.Bundle.Status.request
+    | Analyze of Authoring_analysis.Analyze.Request.t
+    | Prefix of Authoring_analysis.Prefix.Request.t
+    | Query of Authoring_analysis.Query.Request.t
+    | Lexical of Authoring_assistance.Lexical.Request.t
+    | Assistance of Authoring_assistance.Assistance.Request.t
+  [@@deriving sexp_of]
+
+  val method_name : t -> string
+  val params : t -> Jsonaf.t
+  val of_method_and_params : method_:string -> params:Jsonaf.t -> (t, Error.t) result
+  val supported_methods : string list
+end
+
+module Response : sig
+  type t =
+    | Capabilities of Authoring_common.Capabilities.t
+    | Roots of Authoring_context.Source_read.Roots_result.t
+    | Host_list of Authoring_context.Source_read.Host_list_result.t
+    | Host_read of Authoring_context.Source_read.Host_read_result.t
+    | Context_open of Authoring_context.Context.t
+    | Context_refresh of Authoring_context.Context.t
+    | Context_close of Authoring_context.Context.Close_result.t
+    | Source_list of Authoring_context.Source_read.List_result.t
+    | Source_read of Authoring_context.Source_read.Read_result.t
+    | Document_version of Authoring_context.Document.Version.t
+    | Document_replace of Authoring_context.Document.Result.t
+    | Document_close of Authoring_context.Document.Result.t
+    | Bundle_begin of Authoring_bundle.Bundle.Begin.response
+    | Bundle_chunk of Authoring_bundle.Bundle.Chunk.response
+    | Bundle_commit of Authoring_bundle.Bundle.Commit.response
+    | Bundle_status of Authoring_bundle.Bundle.Status.t
+    | Analyze of Authoring_analysis.Analyze.t
+    | Prefix of Authoring_analysis.Prefix.t
+    | Query of Authoring_analysis.Query.t
+    | Lexical of Authoring_assistance.Lexical.Result.t
+    | Assistance of Authoring_assistance.Assistance.Result.t
+  [@@deriving sexp_of]
+
+  val method_name : t -> string
+  val to_json : t -> Jsonaf.t
+  val of_method_and_json : method_:string -> Jsonaf.t -> (t, Error.t) result
+  val supported_methods : string list
+end
+```
+
 ## blob
 
-[JSON codec](../../lib/agent_protocol/blob.ml) · [interface](../../lib/agent_protocol/blob.mli)
+[implementation](../../lib/agent_protocol/blob.ml) · [interface](../../lib/agent_protocol/blob.mli)
 
 ```ocaml
 (** Server-managed blob metadata and typed message input references. *)
@@ -478,7 +3394,7 @@ end
 
 ## command
 
-[JSON codec](../../lib/agent_protocol/command.ml) · [interface](../../lib/agent_protocol/command.mli)
+[implementation](../../lib/agent_protocol/command.ml) · [interface](../../lib/agent_protocol/command.mli)
 
 ```ocaml
 (** Typed method dispatch for transport-neutral protocol requests. *)
@@ -566,6 +3482,7 @@ type t =
   | Schedule_create of Schedule.Create_request.t
   | Schedule_cancel of Schedule.Cancel_request.t
   | Ingress_submit of Ingress.Submit_request.t
+  | Authoring of (Authoring_wire.Request.t[@sexp.opaque])
 [@@deriving sexp]
 
 (** [method_name t] returns the stable protocol method. *)
@@ -577,13 +3494,15 @@ val params : t -> Jsonaf.t
 (** [of_method_and_params ~method_ ~params] performs closed typed dispatch. *)
 val of_method_and_params : method_:string -> params:Jsonaf.t -> (t, Error.t) result
 
-(** [supported_methods] contains every method accepted by the closed dispatcher. *)
+(** [supported_methods] is the codec inventory: every method accepted by this
+    typed decoder. It does not assert that a server has installed or advertised
+    a handler for the method. *)
 val supported_methods : string list
 ```
 
 ## command_receipt
 
-[JSON codec](../../lib/agent_protocol/command_receipt.ml) · [interface](../../lib/agent_protocol/command_receipt.mli)
+[implementation](../../lib/agent_protocol/command_receipt.ml) · [interface](../../lib/agent_protocol/command_receipt.mli)
 
 ```ocaml
 (** Read-only reconciliation of an original bounded request. The authenticated
@@ -687,7 +3606,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## completion
 
-[JSON codec](../../lib/agent_protocol/completion.ml) · [interface](../../lib/agent_protocol/completion.mli)
+[implementation](../../lib/agent_protocol/completion.ml) · [interface](../../lib/agent_protocol/completion.mli)
 
 ```ocaml
 (** Terminal background outcomes, separate from initial tool acknowledgements. *)
@@ -713,7 +3632,7 @@ val wake_of_json : Jsonaf.t -> (wake, Error.t) result
 
 ## completion_contract
 
-[JSON codec](../../lib/agent_protocol/completion_contract.ml) · [interface](../../lib/agent_protocol/completion_contract.mli)
+[implementation](../../lib/agent_protocol/completion_contract.ml) · [interface](../../lib/agent_protocol/completion_contract.mli)
 
 ```ocaml
 open Core
@@ -738,7 +3657,7 @@ val of_json : Jsonaf.t -> (t, Protocol_error.t) result
 
 ## completion_projection
 
-[JSON codec](../../lib/agent_protocol/completion_projection.ml) · [interface](../../lib/agent_protocol/completion_projection.mli)
+[implementation](../../lib/agent_protocol/completion_projection.ml) · [interface](../../lib/agent_protocol/completion_projection.mli)
 
 ```ocaml
 (** Evidence retained by a host-managed standalone completion adapter. The hashes
@@ -773,7 +3692,7 @@ val rejection : Invocation.tool_error
 
 ## delivery
 
-[JSON codec](../../lib/agent_protocol/delivery.ml) · [interface](../../lib/agent_protocol/delivery.mli)
+[implementation](../../lib/agent_protocol/delivery.ml) · [interface](../../lib/agent_protocol/delivery.mli)
 
 ```ocaml
 (** Durable notification intent. Committing a delivery is only valid in the
@@ -898,7 +3817,7 @@ end
 
 ## delivery_subscription_binding
 
-[JSON codec](../../lib/agent_protocol/delivery_subscription_binding.ml) · [interface](../../lib/agent_protocol/delivery_subscription_binding.mli)
+[implementation](../../lib/agent_protocol/delivery_subscription_binding.ml) · [interface](../../lib/agent_protocol/delivery_subscription_binding.mli)
 
 ```ocaml
 (** Immutable subscription epoch captured at actual notification admission.
@@ -917,9 +3836,2607 @@ val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
+## developer
+
+[implementation](../../lib/agent_protocol/developer.ml) · [interface](../../lib/agent_protocol/developer.mli)
+
+```ocaml
+(** Public transport-neutral Developer DTO family. The physical Host remains
+    the only source/Store/execution/approval authority. *)
+
+module Command_id = Developer_command_id
+module Receipt = Developer_receipt
+module Common = Developer_common
+module Approval = Developer_approval
+module Wire = Developer_wire
+module Features = Developer_common.Features
+module Method = Developer_common.Method
+module Kind = Developer_common.Kind
+module Target = Developer_common.Target
+module Route = Developer_common.Route
+module Fixture = Developer_common.Fixture
+module Execution_limits = Developer_common.Execution_limits
+module Limits = Developer_common.Limits
+module Capabilities = Developer_common.Capabilities
+module Submit = Developer_common.Submit
+module Lookup = Developer_common.Lookup
+module Owner = Developer_common.Owner
+module View = Developer_common.View
+```
+
+## developer_agent_artifact
+
+[implementation](../../lib/agent_protocol/developer_agent_artifact.ml) · [interface](../../lib/agent_protocol/developer_agent_artifact.mli)
+
+```ocaml
+open! Core
+
+(** Immutable reference to an already selected Agent.run source artifact. Its
+    validated revision, manifest digest, and portable root member are data, not
+    source, native, actor, provider, or execution authority. The same codec is
+    used by Background_request v2 and durable inference-row classification. *)
+type t
+
+type artifact = t
+
+val create
+  :  revision_id:Id.Prompt_revision.t
+  -> manifest_sha256:Chatml_source.Digest.t
+  -> root_relative_path:Source.Portable_path.t
+  -> t
+
+val revision_id : t -> Id.Prompt_revision.t
+val manifest_sha256 : t -> Chatml_source.Digest.t
+val root_relative_path : t -> Source.Portable_path.t
+
+(** The existing three-field Background_request v2 representation, with exact
+    known keys, duplicate rejection, bounded field count, typed digest and
+    portable member. [of_json] inspects this small object only; callers bound
+    the surrounding JSON tree before admitting it. *)
+val to_json : t -> Jsonaf.t
+
+val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+
+module Issuer_source : sig
+  (** Pure v3 issuing-child comparison data. The [artifact] is the issuer's
+      selected revision, independent of a Tool's optional target artifact.
+      This object is never a source lease, Claim or execution grant. *)
+  type nonrec artifact = artifact
+
+  type t
+
+  module Tool_contract : sig
+    type t =
+      | Standard
+      | Developer_model_spawn
+    [@@deriving equal, sexp_of]
+  end
+
+  val create
+    :  artifact:artifact
+    -> prompt:Id.Prompt_definition.t
+    -> workspace:Id.Workspace_definition.t
+    -> tool_contract:Tool_contract.t
+    -> source_policy:Chatml_source.Digest.t
+    -> runtime_policy:Chatml_source.Digest.t
+    -> t
+
+  val artifact : t -> artifact
+  val prompt : t -> Id.Prompt_definition.t
+  val workspace : t -> Id.Workspace_definition.t
+  val tool_contract : t -> Tool_contract.t
+  val source_policy : t -> Chatml_source.Digest.t
+  val runtime_policy : t -> Chatml_source.Digest.t
+
+  (** Six exact known fields, duplicate rejection and typed validation. The
+      enclosing bounded Store payload is already admitted before this decoder;
+      the finite contract spelling is mapped by its Chat_response consumer. *)
+  val to_json : t -> Jsonaf.t
+
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+end
+
+module Saved_tool_request : sig
+  type t
+
+  (** Structural historical classification of an immutable Async_tool job
+      payload. Require a strict v2 or v3 envelope, Tool target/name, exactly
+      one matching capability pin, and [agent_artifact] decoded above. A v3
+      [issuer_source] is a separate fixed-shape comparison field; it does not
+      change the target artifact or grant issuer authority. Inspect only
+      these fixed-size fields; the Store has already bounded the complete job
+      payload and does not reparse its executable input or policy. Valid copied
+      JSON may classify historically but cannot enter a Worker, source owner,
+      native callback, or inference provider. Host execution still re-decodes
+      the whole Background_request with its actual policy and physical proof. *)
+  val of_payload : Jsonaf.t -> (t, Protocol_error.t) result
+
+  val artifact : t -> artifact
+  val selected_name : t -> string
+end
+```
+
+## developer_approval
+
+[implementation](../../lib/agent_protocol/developer_approval.ml) · [interface](../../lib/agent_protocol/developer_approval.mli)
+
+```ocaml
+(** Process-local approval comparison data. A decoded pending request or ID is
+    never a Shell approval, responder grant, Root scope or Worker capability.
+    The Host rechecks separate read/respond policy and the physical command or
+    claimed Job, source, attempt and origin when using these values. *)
+
+module Owner : sig
+  type t =
+    | Command of Developer_command_id.t
+    | Claimed_job of
+        { job_id : Id.Job.t
+        ; attempt : int
+        }
+end
+
+module Execution : sig
+  type t =
+    | Native_invocation of Id.Invocation.t
+    | Claimed_model_job of
+        { job_id : Id.Job.t
+        ; attempt : int
+        }
+end
+
+module Pending : sig
+  type t
+
+  (** The bounded display is already redacted by the installed owner. No raw
+      Shell request or unbounded stdout is represented. An expiration time is
+      informational; the real owner clock decides currentness. *)
+  val create
+    :  limits:Developer_common.Limits.t
+    -> id:Id.Permission.t
+    -> owner:Owner.t
+    -> execution:Execution.t
+    -> runtime_id:string
+    -> manifest_sha256:string
+    -> redacted_display:string
+    -> expires_at:Timestamp.t
+    -> (t, Error.t) result
+
+  val id : t -> Id.Permission.t
+  val owner : t -> Owner.t
+  val execution : t -> Execution.t
+  val runtime_id : t -> string
+  val manifest_sha256 : t -> string
+  val redacted_display : t -> string
+  val expires_at : t -> Timestamp.t
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Developer_common.Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Page : sig
+  type t
+
+  (** One finite process-local snapshot under the advertised page bound. The
+      complete JSON also fits [Limits.approval_page]'s bytes, fields, nodes
+      and depth. Overflow returns Resource_limit and no partial page; there is
+      no cursor or silent truncation. An installation advertises Approval_list
+      only when its finite page policy can represent its configured pending
+      set. The Host applies current disclosure policy before construction. *)
+  val create : limits:Developer_common.Limits.t -> Pending.t list -> (t, Error.t) result
+
+  val pending : t -> Pending.t list
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Developer_common.Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Decision : sig
+  type t =
+    | Approve_once
+    | Deny of string
+
+  (** [Deny] reason is bounded by the installed decision policy. Decoding a
+      decision cannot bypass the Host's separate response authorization. *)
+  val create_deny : max_reason_bytes:int -> string -> (t, Error.t) result
+end
+
+module Response : sig
+  type t = private
+    { run_id : Id.Developer_run.t
+    ; id : Id.Permission.t
+    ; decision : Decision.t
+    }
+
+  val create
+    :  max_reason_bytes:int
+    -> run_id:Id.Developer_run.t
+    -> id:Id.Permission.t
+    -> decision:Decision.t
+    -> (t, Error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : max_reason_bytes:int -> Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## developer_codec
+
+[implementation](../../lib/agent_protocol/developer_codec.ml) · [interface](../../lib/agent_protocol/developer_codec.mli)
+
+```ocaml
+(** Strict finite JSON primitives for the Developer wire family only. *)
+
+val invalid : string -> ('a, Error.t) result
+val limit : string -> ('a, Error.t) result
+val validate : limits:Document_schema.Limits.t -> Jsonaf.t -> (unit, Error.t) result
+val measure : limits:Document_schema.Limits.t -> Jsonaf.t -> (int, Error.t) result
+val fields : allowed:string list -> Jsonaf.t -> (Json_codec.fields, Error.t) result
+val required : Json_codec.fields -> string -> (Jsonaf.t, Error.t) result
+val optional : Json_codec.fields -> string -> (Jsonaf.t option, Error.t) result
+val string : max_bytes:int -> Jsonaf.t -> (string, Error.t) result
+val nonnegative : Jsonaf.t -> (int, Error.t) result
+val positive : Jsonaf.t -> (int, Error.t) result
+val finite_positive_float : Jsonaf.t -> (float, Error.t) result
+val boolean : Jsonaf.t -> (bool, Error.t) result
+
+val array
+  :  max_items:int
+  -> (Jsonaf.t -> ('a, Error.t) result)
+  -> Jsonaf.t
+  -> ('a list, Error.t) result
+
+val integer_json : int -> Jsonaf.t
+val optional_field : string -> 'a option -> ('a -> Jsonaf.t) -> (string * Jsonaf.t) list
+val digest : Jsonaf.t -> (Chatml_source.Digest.t, Error.t) result
+val digest_json : Chatml_source.Digest.t -> Jsonaf.t
+val source_id : Jsonaf.t -> (Chatml_source.Id.t, Error.t) result
+val source_id_json : Chatml_source.Id.t -> Jsonaf.t
+```
+
+## developer_command_id
+
+[implementation](../../lib/agent_protocol/developer_command_id.ml) · [interface](../../lib/agent_protocol/developer_command_id.mli)
+
+```ocaml
+(** Portable comparison identity for an existing persisted Developer command.
+    This preserves the Store receipt ID's historical wire format exactly:
+    any nonempty string of at most 256 bytes. It is deliberately not a
+    prefixed {!Id} value. Decoding an ID never creates or controls a command.
+
+    Agent_store.Developer_command_receipt.Id aliases this type and delegates
+    validation here, adapting only its existing Document_schema error channel.
+    Persisted bytes and equality remain unchanged. *)
+
+type t [@@deriving compare, equal, sexp_of]
+
+val of_string : string -> (t, Error.t) result
+val to_string : t -> string
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## developer_common
+
+[implementation](../../lib/agent_protocol/developer_common.ml) · [interface](../../lib/agent_protocol/developer_common.mli)
+
+```ocaml
+(** Versioned, transport-neutral Developer request, view and capability data.
+    All source selectors, fingerprints, IDs and owner coordinates are data, not
+    a source read, execution, approval or cancellation grant. Every method must
+    be reauthorized by the physical Host after decoding and after yields.
+    Unknown/duplicate fields and explicit null for absent options reject. *)
+
+module Features : sig
+  val run : string
+  val approvals : string
+  val events : string
+end
+
+module Method : sig
+  type t =
+    | Capabilities
+    | Submit
+    | Observe
+    | Await_terminal
+    | Cancel_and_wait
+    | Approval_list
+    | Approval_respond
+    | Approval_cancel
+    | Watch
+    | Unwatch
+  [@@deriving compare, equal, sexp_of]
+
+  val to_string : t -> string
+  val of_string : string -> (t, Error.t) result
+end
+
+module Kind = Developer_receipt.Kind
+
+module Target : sig
+  type t =
+    | One_off_v1
+    | Tool_v1
+    | Developer_tool_v1
+    | Moderator_v1
+    | Delegated_moderator_v1
+  [@@deriving compare, equal, sexp_of]
+
+  (** Closed pure counterpart of the existing compiler Target. The server
+      converts only after its actual captured compiler ABI is selected. *)
+  val to_string : t -> string
+
+  val of_string : string -> (t, Error.t) result
+end
+
+module Route : sig
+  type t = private
+    | Local_project of
+        { root_index : int
+        ; dependency_root_indices : int list
+        ; project : Source.Portable_path.t
+        ; selection : Chatml_project.Selection.request
+        }
+    | Local_source of
+        { root_index : int
+        ; member : Source.Portable_path.t
+        }
+    | Authoring_project of { expected : Authoring.Context.Expected.t }
+    | Document_script of
+        { expected : Authoring.Context.Expected.t
+        ; selector : Authoring.Analysis.Target.selector
+        }
+
+  (** Indices and Expected are stable requested selectors. A fresh Host
+      operation must borrow the actual configured roots or current Authoring
+      connection only after its authoritative historical key miss. *)
+  val local_project
+    :  limits:Document_schema.Limits.t
+    -> root_index:int
+    -> dependency_root_indices:int list
+    -> project:Source.Portable_path.t
+    -> selection:Chatml_project.Selection.request
+    -> (t, Error.t) result
+
+  val local_source
+    :  limits:Document_schema.Limits.t
+    -> root_index:int
+    -> member:Source.Portable_path.t
+    -> (t, Error.t) result
+
+  val authoring_project
+    :  limits:Document_schema.Limits.t
+    -> expected:Authoring.Context.Expected.t
+    -> (t, Error.t) result
+
+  val document_script
+    :  limits:Document_schema.Limits.t
+    -> expected:Authoring.Context.Expected.t
+    -> selector:Authoring.Analysis.Target.selector
+    -> (t, Error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Document_schema.Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Fixture : sig
+  module Response : sig
+    type t =
+      | Return of Jsonaf.t
+      | Fail of string
+  end
+
+  module Step : sig
+    type t
+
+    (** Pure finite JSON and scalar validation only. The Host later performs
+        the existing selected Tool schema/ChatML conversion checks. *)
+    val create
+      :  limits:Document_schema.Limits.t
+      -> tool_name:string
+      -> input_schema:Jsonaf.t
+      -> output_schema:Jsonaf.t
+      -> expected_input:Jsonaf.t
+      -> response:Response.t
+      -> (t, Error.t) result
+
+    val tool_name : t -> string
+    val input_schema : t -> Jsonaf.t
+    val output_schema : t -> Jsonaf.t
+    val expected_input : t -> Jsonaf.t
+    val response : t -> Response.t
+  end
+
+  type t
+
+  (** [max_steps] and [max_bytes] are finite effective host limits; empty
+      fixtures are valid. Aggregate admission includes every step and nested
+      JSON. Decoding applies the same checks. *)
+  val create
+    :  limits:Document_schema.Limits.t
+    -> max_steps:int
+    -> max_bytes:int
+    -> steps:Step.t list
+    -> (t, Error.t) result
+
+  val steps : t -> Step.t list
+  val to_json : t -> Jsonaf.t
+
+  val of_json
+    :  limits:Document_schema.Limits.t
+    -> max_steps:int
+    -> max_bytes:int
+    -> Jsonaf.t
+    -> (t, Error.t) result
+end
+
+module Execution_limits : sig
+  type t = private
+    { fuel : int
+    ; max_tasks : int
+    ; wall_seconds : float
+    ; max_value_bytes : int
+    ; max_array_items : int
+    ; max_depth : int
+    ; allocation_bytes : int
+    ; max_calls : int
+    ; max_invocation_depth : int
+    }
+
+  (** Pure counterpart of Chatml_execution.valid_limits within the portable
+      wire-integer domain; it does not grant execution or widen the Host's
+      installed budget. *)
+  val create
+    :  fuel:int
+    -> max_tasks:int
+    -> wall_seconds:float
+    -> max_value_bytes:int
+    -> max_array_items:int
+    -> max_depth:int
+    -> allocation_bytes:int
+    -> max_calls:int
+    -> max_invocation_depth:int
+    -> (t, Error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Limits : sig
+  type t
+
+  (** Effective installed finite ceilings. [request] and [receipt] include
+      complete nested JSON bytes/depth/fields/nodes; output is separately
+      bounded by the actual Host and may be lower than [receipt]. [response]
+      admits the complete method result/View framing around a receipt or an
+      approval page. The installed Host chooses adequate headroom; a result
+      exceeding it rejects before serialization, never truncates. *)
+  val create
+    :  request:Document_schema.Limits.t
+    -> receipt:Document_schema.Limits.t
+    -> response:Document_schema.Limits.t
+    -> approval_page:Document_schema.Limits.t
+    -> max_output_bytes:int
+    -> max_fixture_steps:int
+    -> max_fixture_bytes:int
+    -> max_approval_display_bytes:int
+    -> max_approval_decision_reason_bytes:int
+    -> max_approval_page:int
+    -> max_event_bytes:int
+    -> (t, Error.t) result
+
+  val request : t -> Document_schema.Limits.t
+  val receipt : t -> Document_schema.Limits.t
+  val response : t -> Document_schema.Limits.t
+  val approval_page : t -> Document_schema.Limits.t
+  val max_output_bytes : t -> int
+  val max_fixture_steps : t -> int
+  val max_fixture_bytes : t -> int
+  val max_approval_display_bytes : t -> int
+  val max_approval_decision_reason_bytes : t -> int
+  val max_approval_page : t -> int
+  val max_event_bytes : t -> int
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Capabilities : sig
+  type t
+
+  (** [format_version] is this DTO's supported schema version (currently 1),
+      separate from Initialize.selected_version. Methods are the actual
+      installed Host handlers for this authenticated connection, never the
+      codec inventory. The server must additionally enforce selected Features.
+      Construction is pure comparison data and does not install a handler.
+      [create] and [of_json] share a fixed 64 KiB bootstrap Document_schema
+      bound before reading advertised limits; a peer cannot choose its own
+      decode budget. *)
+  val max_json_bytes : int
+
+  val create
+    :  format_version:int
+    -> methods:string list
+    -> limits:Limits.t
+    -> (t, Error.t) result
+
+  val format_version : t -> int
+  val supports : t -> Method.t -> bool
+  val limits : t -> Limits.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Submit : sig
+  type t
+
+  (** All fields enter the original action/payload fingerprint; source bytes
+      and a later capture fingerprint do not. Live requires Prompt and
+      Workspace IDs; Check/Fixture require both absent. The Host separately
+      validates the exact current source, compiler, schema and policies. *)
+  val create
+    :  limits:Limits.t
+    -> run_id:Id.Developer_run.t
+    -> key:Idempotency_key.t
+    -> kind:Kind.t
+    -> route:Route.t
+    -> target:Target.t
+    -> prompt:Id.Prompt_definition.t option
+    -> workspace:Id.Workspace_definition.t option
+    -> entrypoint:string
+    -> input:Jsonaf.t
+    -> fixtures:Fixture.t option
+    -> requested_execution:Execution_limits.t option
+    -> requested_max_output_bytes:int option
+    -> (t, Error.t) result
+
+  val run_id : t -> Id.Developer_run.t
+  val key : t -> Idempotency_key.t
+  val kind : t -> Kind.t
+  val route : t -> Route.t
+  val target : t -> Target.t
+  val prompt : t -> Id.Prompt_definition.t option
+  val workspace : t -> Id.Workspace_definition.t option
+  val entrypoint : t -> string
+  val input : t -> Jsonaf.t
+  val fixtures : t -> Fixture.t option
+  val requested_execution : t -> Execution_limits.t option
+  val requested_max_output_bytes : t -> int option
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Lookup : sig
+  type t = private
+    { run_id : Id.Developer_run.t
+    ; key : Idempotency_key.t
+    }
+
+  val create : run_id:Id.Developer_run.t -> key:Idempotency_key.t -> t
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Document_schema.Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Owner : sig
+  type t = Execution_owner.developer
+
+  (** Delegates to the existing Execution_owner.developer constructor and
+      validator. These comparison coordinates do not prove a live process. *)
+  val create
+    :  host_id:Id.Server.t
+    -> run_id:Id.Developer_run.t
+    -> epoch:int
+    -> principal_id:Id.Principal.t
+    -> (t, Error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module View : sig
+  type phase =
+    | Reserved
+    | Waiting_permission
+    | Execution_started
+    | Terminal of
+        { execution_started : bool
+        ; receipt : Developer_receipt.t
+        }
+
+  type t
+
+  (** A historical row proves its exact request and capture through distinct
+      canonical fingerprints, not recoverable raw input/environment bytes.
+      [Waiting_permission] is solely the pre-Start phase. A runtime shell
+      approval leaves the command [Execution_started]. Kind, phase and
+      receipt must agree as in the existing Store Row. *)
+  val create
+    :  limits:Limits.t
+    -> command_id:Developer_command_id.t
+    -> owner:Owner.t
+    -> key:Idempotency_key.t
+    -> kind:Kind.t
+    -> phase:phase
+    -> request_fingerprint:Chatml_source.Digest.t
+    -> capture_fingerprint:Chatml_source.Digest.t
+    -> (t, Error.t) result
+
+  val command_id : t -> Developer_command_id.t
+  val owner : t -> Owner.t
+  val key : t -> Idempotency_key.t
+  val kind : t -> Kind.t
+  val phase : t -> phase
+  val request_fingerprint : t -> Chatml_source.Digest.t
+  val capture_fingerprint : t -> Chatml_source.Digest.t
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## developer_job
+
+[implementation](../../lib/agent_protocol/developer_job.ml) · [interface](../../lib/agent_protocol/developer_job.mli)
+
+```ocaml
+(** Pure developer-owned job record. An ID or this value grants no execution,
+    result-read, cancellation, or source authority. The developer actor admits
+    it only against the current principal, host, epoch, capture and live launch
+    parent, then persists it under the real daemon-owned run root. *)
+
+open! Core
+
+module Launch : sig
+  type parent =
+    | Run_root
+    | Invocation of Id.Invocation.t
+  [@@deriving equal, sexp_of]
+
+  type t
+
+  (** [parent_job] names the exact creating attempt, if any. A run-root launch
+      need not fabricate a native invocation. The optional attempt and depth
+      must be nonnegative. The recorded ancestry alone cannot derive the live
+      scheduler depth. These are comparison coordinates; the actor proves the
+      live run scope or active invocation and depth separately. *)
+  val create
+    :  parent:parent
+    -> parent_job:(Id.Job.t * int) option
+    -> nested_depth:int
+    -> (t, Protocol_error.t) result
+
+  val parent : t -> parent
+  val parent_job : t -> (Id.Job.t * int) option
+  val nested_depth : t -> int
+end
+
+module Result_value : sig
+  (** Artifact metadata is a selected result descriptor, not read authority.
+      The result store binds the final reference to owner/job/attempt, stores
+      verified bytes and checks disclosure. No session artifact is reused. *)
+  type t =
+    | Inline of Completion.t
+    | Artifact of
+        { outcome : Stored_completion.outcome
+        ; blob : Blob.Metadata.t
+        }
+  [@@deriving sexp_of]
+end
+
+module State : sig
+  type t =
+    { status : Job.status
+    ; attempt : int
+    ; started_at : Timestamp.t option
+    ; next_run_at : Timestamp.t option
+    ; completed_at : Timestamp.t option
+    ; result : Result_value.t option
+    ; retry_failure : Protocol_error.t option
+    }
+  [@@deriving sexp_of]
+
+  (** Validates nonnegative attempt and retry coordinates. A new queued attempt
+      has no prior execution state. A queued retry retains its prior attempt
+      count, clears [started_at], sets [next_run_at] and records the previous
+      failure in [retry_failure], separate from the terminal [result].
+      Running and waiting attempts are positive, started, incomplete and have no
+      result; a dependency wait requires an async tool, a deadline no earlier
+      than creation and cannot target its own job ID. Success requires a claimed
+      attempt, start, completion time and matching result; failure, cancellation
+      and interruption may precede claim but require a completion time. A
+      cancelled queued retry keeps its positive prior attempt count and absent
+      current [started_at]; no next attempt is invented. This is record shape,
+      not authority to cancel an unclaimed retry: the Store validates the exact
+      observed transition. Inline
+      completions and artifact metadata are validated. Wall-clock timestamps
+      are not ordered against each other: the host clock may step backward.
+      This proves record shape, not authority to make the transition. *)
+  val validate
+    :  job_id:Id.Job.t
+    -> kind:Job.kind
+    -> created_at:Timestamp.t
+    -> t
+    -> (unit, Protocol_error.t) result
+
+  (** The existing canonical state JSON codec, exposed for versioned private
+      result-selection records. [of_json] validates field syntax only; the
+      owner must still call [with_state] on its authentic job to validate the
+      state against kind, creation time and immutable claim identity. *)
+  val to_json : t -> Jsonaf.t
+
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+end
+
+type t
+
+val create
+  :  owner:Execution_owner.developer
+  -> capture_fingerprint:Chatml_source.Digest.t
+  -> id:Id.Job.t
+  -> launch:Launch.t
+  -> kind:Job.kind
+  -> payload:Jsonaf.t
+  -> retry_policy:Job.retry_policy
+  -> created_at:Timestamp.t
+  -> state:State.t
+  -> (t, Protocol_error.t) result
+
+(** Recheck the same immutable identity and lifecycle shape after a proposed
+    actor-owned transition. The actor checks previous/current CAS revision,
+    attempt, live parent and execution policy; this pure function is no grant. *)
+val with_state : t -> State.t -> (t, Protocol_error.t) result
+
+val owner : t -> Execution_owner.developer
+val capture_fingerprint : t -> Chatml_source.Digest.t
+val id : t -> Id.Job.t
+val launch : t -> Launch.t
+val kind : t -> Job.kind
+val payload : t -> Jsonaf.t
+val retry_policy : t -> Job.retry_policy
+val created_at : t -> Timestamp.t
+val state : t -> State.t
+
+(** Exact immutable claim identity, excluding mutable lifecycle state. The
+    comparison includes owner/capture/ID, launch, kind, payload, retry policy
+    and creation timestamp. It grants no authority by itself. *)
+val same_immutable : t -> t -> bool
+
+(** Version-one developer-only record codec. It preserves the exact immutable
+    launch/owner/capture/payload/retry fields and validated state. Neither a
+    decoded record nor a result descriptor grants execution or disclosure. *)
+val to_json : t -> Jsonaf.t
+
+val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+```
+
+## developer_model_call
+
+[implementation](../../lib/agent_protocol/developer_model_call.ml) · [interface](../../lib/agent_protocol/developer_model_call.mli)
+
+```ocaml
+(** Versioned, nonsecret intent for an externally admitted developer Model_call.
+    The value is pure comparison/storage data: it grants no actor, provider,
+    parent, job-claim, result-read or execution authority. *)
+open! Core
+
+type t
+
+(** Encode exactly one supported [agent_prompt_v1] request and the complete
+    selected Target. [request] preserves its original JSON including unknown
+    unique-key fields. Developer admission rejects duplicate keys through the
+    shared whole-tree validator, then applies the real shared recipe grammar;
+    only syntax-only conversation [Model_spawn_request.decode] retains its
+    historic first-duplicate-field lookup behavior. [target] is revalidated
+    including nonsecret binding/revision fields and unknown target members.
+    [limits] cap the COMPLETE encoded envelope (request, Target and wrapper)
+    as one tree, rather than giving each subtree a full independent budget.
+    The physical host separately proves that its selected provider issued
+    this Target for the original actor. *)
+val create
+  :  request:Jsonaf.t
+  -> target:Inference.Request.Target.t
+  -> limits:Document_schema.Limits.t
+  -> (t, Protocol_error.t) result
+
+val request : t -> Jsonaf.t
+val target : t -> Inference.Request.Target.t
+
+(** Canonical v1 envelope with exactly [schema_version], [recipe], [request]
+    and [target] members. The envelope has no secret, native Context, callback
+    or Session ID; unknown nested request/Target members remain lossless. *)
+val to_json : t -> Jsonaf.t
+
+(** Apply the same aggregate envelope, recipe, full-tree bounds and Target
+    validation as [create] to every persisted job on load/recovery. Unsupported
+    version, unknown envelope member, duplicate key, malformed recipe or
+    invalid Target rejects. *)
+val of_json : Jsonaf.t -> limits:Document_schema.Limits.t -> (t, Protocol_error.t) result
+```
+
+## developer_receipt
+
+[implementation](../../lib/agent_protocol/developer_receipt.ml) · [interface](../../lib/agent_protocol/developer_receipt.mli)
+
+```ocaml
+(** Pure bounded projections of the existing Developer Check, Fixture and Live
+    terminal receipts. No Store, runtime, source handle or disclosure grant is
+    retained. The server converts an already authorized Store receipt; a
+    decoded value alone is never evidence of execution. *)
+
+(** Check that a captured executable source identifier can be represented by a
+    Developer diagnostic receipt. This validates protocol namespace/member
+    bounds only; it grants no source authority and does not construct a
+    diagnostic location. *)
+val validate_source_id : Chatml_source.Id.t -> (unit, Error.t) result
+
+module Kind : sig
+  type t =
+    | Check
+    | Fixture_run
+    | Live_run
+  [@@deriving compare, equal, sexp_of]
+end
+
+module Diagnostic : sig
+  module Location : sig
+    type t = private
+      { source : Chatml_source.Id.t
+      ; digest : Chatml_source.Digest.t
+      ; source_bytes : int
+      ; start_byte : int
+      ; end_byte : int
+      }
+
+    (** Offsets are half-open byte coordinates in this exact source/digest.
+        The constructor validates ordering and bounds, not source ownership. *)
+    val create
+      :  source:Chatml_source.Id.t
+      -> digest:Chatml_source.Digest.t
+      -> source_bytes:int
+      -> start_byte:int
+      -> end_byte:int
+      -> (t, Error.t) result
+  end
+
+  type t = private
+    { code : string
+    ; message : string
+    ; location : Location.t option
+    }
+
+  (** Existing 1..256-byte code and at most 16-KiB message bounds. *)
+  val create
+    :  code:string
+    -> message:string
+    -> location:Location.t option
+    -> (t, Error.t) result
+end
+
+module Check : sig
+  type t =
+    | Ready
+    | Rejected of Diagnostic.t
+    | Interrupted
+    | Cancelled
+end
+
+module Fixture : sig
+  module Failure : sig
+    type t =
+      | Compile of Diagnostic.t
+      | Fixture_mismatch of
+          { expected_step : int
+          ; actual_tool : string
+          }
+      | Fixture_missing of { next_step : int }
+      | Unsupported_effect of { operation : string }
+      | Runtime of Diagnostic.t
+      | Invalid_result of Diagnostic.t
+      | Pending_without_owner
+      | Admission_revoked
+      | Output_limit
+  end
+
+  module Log : sig
+    type level =
+      | Debug
+      | Info
+      | Warn
+      | Error
+
+    type t = private
+      { level : level
+      ; message : string
+      }
+
+    val create : level:level -> message:string -> (t, Error.t) result
+  end
+
+  type outcome =
+    | Succeeded of Jsonaf.t
+    | Tool_failed of Invocation.tool_error
+    | Failed of Failure.t
+
+  type completed = private
+    { graph_fingerprint : Chatml_source.Digest.t
+    ; fixture_digest : Chatml_source.Digest.t
+    ; tool_selection_fingerprint : Chatml_source.Digest.t option
+    ; matched_steps : int
+    ; logs : Log.t list
+    ; outcome : outcome
+    }
+
+  (** The server supplies the authentic selected-ABI fingerprint for Tool_v1
+      and omits it for One_off_v1; this pure value alone cannot prove which
+      compiler target ran. Aggregate JSON admission is [create] below. *)
+  val completed
+    :  graph_fingerprint:Chatml_source.Digest.t
+    -> fixture_digest:Chatml_source.Digest.t
+    -> tool_selection_fingerprint:Chatml_source.Digest.t option
+    -> matched_steps:int
+    -> logs:Log.t list
+    -> outcome:outcome
+    -> (completed, Error.t) result
+
+  type t =
+    | Completed of completed
+    | Interrupted
+    | Cancelled
+end
+
+module Live : sig
+  type t =
+    | Succeeded of Jsonaf.t
+    | Failed of Error.t
+    | Limited of Error.t
+    | Interrupted
+    | Cancelled
+end
+
+type value =
+  | Check of Check.t
+  | Fixture of Fixture.t
+  | Live of Live.t
+
+type t
+
+(** Validate every scalar and the complete nested JSON under one existing
+    Document_schema limit before retaining/encoding. Unknown and duplicate
+    fields reject; omitted optional fields and explicit null are distinct.
+    No per-log allowance widens the aggregate receipt bound. *)
+val create : limits:Document_schema.Limits.t -> value -> (t, Error.t) result
+
+val value : t -> value
+val kind : t -> Kind.t
+val encoded_bytes : t -> int
+val equal : t -> t -> bool
+val to_json : t -> Jsonaf.t
+val of_json : limits:Document_schema.Limits.t -> Jsonaf.t -> (t, Error.t) result
+```
+
+## developer_repl_wire
+
+[implementation](../../lib/agent_protocol/developer_repl_wire.ml) · [interface](../../lib/agent_protocol/developer_repl_wire.mli)
+
+```ocaml
+(** Closed, versioned comparison DTOs for one authenticated Developer REPL
+    endpoint. No Instance/Epoch/Revision/Task physical owner, source grant or
+    effect capability crosses this module. All constructors and decoders apply
+    the installed finite policy; the server reauthorizes every decoded call. *)
+
+module Features : sig
+  val repl : string
+  val events : string
+end
+
+module Limits : sig
+  type t
+
+  (** [request], [result], [page] and [response] bound complete JSON trees,
+      including IDs and framing. [page] counts a cursor repeated in [items]
+      and [next] twice on the wire; the in-process page charge is not a
+      transport bound. [max_registry_entries] is a server installation cap,
+      admitted against the exact Host Instance/key ledger before any work. *)
+  val create
+    :  request:Document_schema.Limits.t
+    -> result:Document_schema.Limits.t
+    -> page:Document_schema.Limits.t
+    -> response:Document_schema.Limits.t
+    -> max_source_bytes:int
+    -> max_reference_bytes:int
+    -> max_output_bytes:int
+    -> max_page_items:int
+    -> max_event_bytes:int
+    -> max_registry_entries:int
+    -> (t, Error.t) result
+
+  val request : t -> Document_schema.Limits.t
+  val result : t -> Document_schema.Limits.t
+  val page : t -> Document_schema.Limits.t
+  val response : t -> Document_schema.Limits.t
+  val max_source_bytes : t -> int
+  val max_reference_bytes : t -> int
+  val max_output_bytes : t -> int
+  val max_page_items : t -> int
+  val max_event_bytes : t -> int
+  val max_registry_entries : t -> int
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Wire_id : sig
+  module Instance : sig
+    type t
+
+    val of_string : string -> (t, Error.t) result
+    val to_string : t -> string
+    val equal : t -> t -> bool
+  end
+
+  module Epoch : sig
+    type t
+
+    val of_string : string -> (t, Error.t) result
+    val to_string : t -> string
+    val equal : t -> t -> bool
+  end
+
+  module Revision : sig
+    type t
+
+    val of_string : string -> (t, Error.t) result
+    val to_string : t -> string
+    val equal : t -> t -> bool
+  end
+end
+
+module Create : sig
+  type t
+
+  (** Route/target/Prompt/Workspace and requested ceilings are canonical
+      action identity, not source authority. Only Standard REPL targets are
+      valid. Explicit null for an absent option rejects. *)
+  val create
+    :  limits:Limits.t
+    -> run_id:Id.Developer_run.t
+    -> key:Idempotency_key.t
+    -> route:Developer_common.Route.t
+    -> target:Developer_common.Target.t
+    -> prompt:Id.Prompt_definition.t
+    -> workspace:Id.Workspace_definition.t
+    -> requested_execution:Developer_common.Execution_limits.t option
+    -> requested_max_output_bytes:int option
+    -> (t, Error.t) result
+
+  val run_id : t -> Id.Developer_run.t
+  val key : t -> Idempotency_key.t
+  val route : t -> Developer_common.Route.t
+  val target : t -> Developer_common.Target.t
+  val prompt : t -> Id.Prompt_definition.t
+  val workspace : t -> Id.Workspace_definition.t
+  val requested_execution : t -> Developer_common.Execution_limits.t option
+  val requested_max_output_bytes : t -> int option
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Submit : sig
+  type t
+
+  val create
+    :  limits:Limits.t
+    -> instance:Wire_id.Instance.t
+    -> epoch:Wire_id.Epoch.t
+    -> expected_revision:Wire_id.Revision.t
+    -> key:Idempotency_key.t
+    -> source:string
+    -> (t, Error.t) result
+
+  val instance : t -> Wire_id.Instance.t
+  val epoch : t -> Wire_id.Epoch.t
+  val expected_revision : t -> Wire_id.Revision.t
+  val key : t -> Idempotency_key.t
+  val source : t -> string
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Lookup : sig
+  type t
+
+  val create : instance:Wire_id.Instance.t -> key:Idempotency_key.t -> t
+  val instance : t -> Wire_id.Instance.t
+  val key : t -> Idempotency_key.t
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Current_epoch : sig
+  type t
+
+  val create
+    :  instance:Wire_id.Instance.t
+    -> epoch:Wire_id.Epoch.t
+    -> key:Idempotency_key.t
+    -> t
+
+  val instance : t -> Wire_id.Instance.t
+  val epoch : t -> Wire_id.Epoch.t
+  val key : t -> Idempotency_key.t
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Type_selector : sig
+  type t =
+    | Expression
+    | Binding_index of int
+  [@@deriving equal, sexp_of]
+end
+
+module Inspect : sig
+  type t
+
+  val create
+    :  limits:Limits.t
+    -> current:Current_epoch.t
+    -> statement_index:int
+    -> selector:Type_selector.t
+    -> max_bytes:int
+    -> (t, Error.t) result
+
+  val current : t -> Current_epoch.t
+  val statement_index : t -> int
+  val selector : t -> Type_selector.t
+  val max_bytes : t -> int
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Reference_page_request : sig
+  type t
+
+  val create
+    :  limits:Limits.t
+    -> current:Current_epoch.t
+    -> after:string option
+    -> limit:int
+    -> (t, Error.t) result
+
+  val current : t -> Current_epoch.t
+  val after : t -> string option
+  val limit : t -> int
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Task_submit : sig
+  type t
+
+  (** [fresh_epoch] is comparison data for a true new-key action. The Host
+      checks durable run/key/original history first; an exact old-key retry
+      never resolves these possibly stale process-local IDs. *)
+  val create
+    :  limits:Limits.t
+    -> key:Idempotency_key.t
+    -> reference:string
+    -> requested_execution:Developer_common.Execution_limits.t option
+    -> requested_max_output_bytes:int option
+    -> fresh_epoch:(Wire_id.Instance.t * Wire_id.Epoch.t) option
+    -> (t, Error.t) result
+
+  val key : t -> Idempotency_key.t
+  val reference : t -> string
+  val requested_execution : t -> Developer_common.Execution_limits.t option
+  val requested_max_output_bytes : t -> int option
+  val fresh_epoch : t -> (Wire_id.Instance.t * Wire_id.Epoch.t) option
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module View : sig
+  type t
+
+  val create
+    :  limits:Limits.t
+    -> instance:Wire_id.Instance.t
+    -> epoch:Wire_id.Epoch.t
+    -> revision:Wire_id.Revision.t
+    -> run_id:Id.Developer_run.t
+    -> capture_fingerprint:Chatml_source.Digest.t
+    -> (t, Error.t) result
+
+  val instance : t -> Wire_id.Instance.t
+  val epoch : t -> Wire_id.Epoch.t
+  val revision : t -> Wire_id.Revision.t
+  val run_id : t -> Id.Developer_run.t
+  val capture_fingerprint : t -> Chatml_source.Digest.t
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Submission : sig
+  type t
+
+  module Location : sig
+    type t
+
+    (** Byte coordinates and exact source revision for one already owned
+        diagnostic. This comparison DTO does not authenticate source bytes or
+        grant read access. The server projects a genuine Source.Location. *)
+    val create
+      :  limits:Limits.t
+      -> source:Chatml_source.Id.t
+      -> digest:Chatml_source.Digest.t
+      -> start_byte:int
+      -> end_byte:int
+      -> (t, Error.t) result
+
+    val source : t -> Chatml_source.Id.t
+    val digest : t -> Chatml_source.Digest.t
+    val start_byte : t -> int
+    val end_byte : t -> int
+  end
+
+  module Rendered_type : sig
+    type t
+
+    type kind =
+      | Type
+      | Signature
+    [@@deriving equal, sexp_of]
+
+    type truncation =
+      | Node_limit
+      | Edge_limit
+      | Depth_limit
+      | Work_limit
+      | Byte_limit
+    [@@deriving equal, sexp_of]
+
+    type completeness =
+      | Complete
+      | Truncated of truncation
+    [@@deriving equal, sexp_of]
+
+    val create
+      :  limits:Limits.t
+      -> kind:kind
+      -> completeness:completeness
+      -> text:string
+      -> (t, Error.t) result
+
+    val kind : t -> kind
+    val completeness : t -> completeness
+    val text : t -> string
+  end
+
+  module Diagnostic : sig
+    type t
+
+    val create
+      :  limits:Limits.t
+      -> message:string
+      -> location:Location.t option
+      -> (t, Error.t) result
+
+    val message : t -> string
+    val location : t -> Location.t option
+  end
+
+  module Summary : sig
+    (** Bounded scalar outcome, preview, diagnostic, rendered type and Task
+        retention. No frozen graph, value or physical Task handle. *)
+    type t
+
+    type failure_kind =
+      | Initializer
+      | Runtime
+      | Budget
+    [@@deriving equal, sexp_of]
+
+    type outcome =
+      | Succeeded
+      | Failed of failure_kind
+    [@@deriving equal, sexp_of]
+
+    type task_retention =
+      | Not_a_task
+      | Retained
+      | Limit_reached
+    [@@deriving equal, sexp_of]
+
+    val create
+      :  limits:Limits.t
+      -> outcome:outcome
+      -> value_preview:string option
+      -> diagnostic:Diagnostic.t option
+      -> expression_type:Rendered_type.t option
+      -> binding_count:int
+      -> task_retention:task_retention
+      -> text_limited:bool
+      -> (t, Error.t) result
+
+    val outcome : t -> outcome
+    val value_preview : t -> string option
+    val diagnostic : t -> Diagnostic.t option
+    val expression_type : t -> Rendered_type.t option
+    val binding_count : t -> int
+    val task_retention : t -> task_retention
+    val text_limited : t -> bool
+  end
+
+  type need_more_reason =
+    | Parser_eof
+    | Comment_eof
+    | String_eof
+
+  type status =
+    | Need_more of need_more_reason * Location.t option
+    | Rejected of Diagnostic.t
+    | Finished
+    | Stopped of Diagnostic.t option
+
+  type details =
+    | Available
+    | Output_limited
+
+  val create
+    :  limits:Limits.t
+    -> status:status
+    -> details:details
+    -> completed_statements:int
+    -> statement_count:int
+    -> epoch:Wire_id.Epoch.t
+    -> revision:Wire_id.Revision.t
+    -> summaries:Summary.t list
+    -> task_reference_count:int
+    -> task_references:string list
+    -> (t, Error.t) result
+
+  val epoch : t -> Wire_id.Epoch.t
+  val revision : t -> Wire_id.Revision.t
+  val status : t -> status
+  val details : t -> details
+  val completed_statements : t -> int
+  val statement_count : t -> int
+  val summaries : t -> Summary.t list
+  val task_reference_count : t -> int
+  val task_references : t -> string list
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Type_inspection : sig
+  type t
+
+  val create
+    :  limits:Limits.t
+    -> revision:Wire_id.Revision.t
+    -> binding_name:string option
+    -> rendered:Submission.Rendered_type.t
+    -> (t, Error.t) result
+
+  val revision : t -> Wire_id.Revision.t
+  val binding_name : t -> string option
+  val rendered : t -> Submission.Rendered_type.t
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Reference_page : sig
+  (** Encoded [items] and [next] each count toward [Limits.page], including
+      the repeated cursor string. A nonempty remaining page must advance. *)
+  type t
+
+  val create
+    :  limits:Limits.t
+    -> items:string list
+    -> next:string option
+    -> total:int
+    -> (t, Error.t) result
+
+  val items : t -> string list
+  val next : t -> string option
+  val total : t -> int
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Task_view : sig
+  module Diagnostic : sig
+    type t
+
+    val create
+      :  limits:Limits.t
+      -> code:string
+      -> message:string
+      -> location:Submission.Location.t option
+      -> (t, Error.t) result
+
+    val code : t -> string
+    val message : t -> string
+    val location : t -> Submission.Location.t option
+  end
+
+  type outcome =
+    | Succeeded of string option
+    | Failed of
+        { error : Error.t
+        ; diagnostic : Diagnostic.t option
+        }
+    | Limited of
+        { error : Error.t
+        ; diagnostic : Diagnostic.t option
+        }
+    | Interrupted
+    | Cancelled
+
+  type phase =
+    | Reserved
+    | Waiting_permission
+    | Execution_started
+    | Terminal of
+        { execution_started : bool
+        ; outcome : outcome
+        }
+
+  (** This is only an authenticated Repl_task_run projection. The ordinary
+      Developer_common.View decoder deliberately excludes Task rows. *)
+  type t
+
+  val create
+    :  limits:Limits.t
+    -> command_id:Developer_command_id.t
+    -> owner:Developer_common.Owner.t
+    -> key:Idempotency_key.t
+    -> phase:phase
+    -> request_fingerprint:Chatml_source.Digest.t
+    -> capture_fingerprint:Chatml_source.Digest.t
+    -> (t, Error.t) result
+
+  val command_id : t -> Developer_command_id.t
+  val owner : t -> Developer_common.Owner.t
+  val key : t -> Idempotency_key.t
+  val phase : t -> phase
+  val request_fingerprint : t -> Chatml_source.Digest.t
+  val capture_fingerprint : t -> Chatml_source.Digest.t
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Capabilities : sig
+  type t
+
+  val create : methods:string list -> limits:Limits.t -> (t, Error.t) result
+  val supports : t -> string -> bool
+  val limits : t -> Limits.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Watch_key : sig
+  type t =
+    | Repl of Lookup.t
+    | Task of Developer_common.Lookup.t
+
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Request : sig
+  type t =
+    | Capabilities
+    | Create of Create.t
+    | Submit of Submit.t
+    | Observe of Lookup.t
+    | Cancel_submission of Lookup.t
+    | Inspect_type of Inspect.t
+    | Task_references_page of Reference_page_request.t
+    | Task_submit of Task_submit.t
+    | Task_observe of Developer_common.Lookup.t
+    | Task_await_terminal of Developer_common.Lookup.t
+    | Task_cancel_and_wait of Developer_common.Lookup.t
+    | Reset_and_wait of Current_epoch.t
+    | Close_and_wait of Lookup.t
+    | Watch of Watch_key.t
+    | Unwatch of Watch_key.t
+
+  val method_name : t -> string
+  val params : t -> Jsonaf.t
+
+  val of_method_and_params
+    :  limits:Limits.t
+    -> method_:string
+    -> params:Jsonaf.t
+    -> (t, Error.t) result
+
+  val supported_methods : string list
+end
+
+module Response : sig
+  type t =
+    | Capabilities of Capabilities.t
+    | Create of View.t
+    | Submit of Submission.t
+    | Observe of Submission.t option
+    | Cancel_submission of Submission.t
+    | Inspect_type of Type_inspection.t
+    | Task_references_page of Reference_page.t
+    | Task_submit of Task_view.t
+    | Task_observe of Task_view.t option
+    | Task_await_terminal of Task_view.t
+    | Task_cancel_and_wait of Task_view.t
+    | Reset_and_wait of View.t
+    | Close_and_wait
+    | Watch
+    | Unwatch
+
+  val method_name : t -> string
+  val to_json : t -> limits:Limits.t -> (Jsonaf.t, Error.t) result
+
+  val of_method_and_json
+    :  limits:Limits.t
+    -> method_:string
+    -> Jsonaf.t
+    -> (t, Error.t) result
+end
+
+module Change : sig
+  type kind =
+    | Changed
+    | Resync_required
+  [@@deriving equal, sexp_of]
+
+  type t
+
+  val create : limits:Limits.t -> key:Watch_key.t -> kind:kind -> (t, Error.t) result
+  val key : t -> Watch_key.t
+  val kind : t -> kind
+  val method_name : string
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## developer_repl_wire_common
+
+[implementation](../../lib/agent_protocol/developer_repl_wire_common.ml) · [interface](../../lib/agent_protocol/developer_repl_wire_common.mli)
+
+```ocaml
+(** Closed, versioned comparison DTOs for one authenticated Developer REPL
+    endpoint. No Instance/Epoch/Revision/Task physical owner, source grant or
+    effect capability crosses this module. All constructors and decoders apply
+    the installed finite policy; the server reauthorizes every decoded call. *)
+
+module Features : sig
+  val repl : string
+  val events : string
+end
+
+module Limits : sig
+  type t
+
+  (** [request], [result], [page] and [response] bound complete JSON trees,
+      including IDs and framing. [page] counts a cursor repeated in [items]
+      and [next] twice on the wire; the in-process page charge is not a
+      transport bound. [max_registry_entries] is a server installation cap,
+      admitted against the exact Host Instance/key ledger before any work. *)
+  val create
+    :  request:Document_schema.Limits.t
+    -> result:Document_schema.Limits.t
+    -> page:Document_schema.Limits.t
+    -> response:Document_schema.Limits.t
+    -> max_source_bytes:int
+    -> max_reference_bytes:int
+    -> max_output_bytes:int
+    -> max_page_items:int
+    -> max_event_bytes:int
+    -> max_registry_entries:int
+    -> (t, Error.t) result
+
+  val request : t -> Document_schema.Limits.t
+  val result : t -> Document_schema.Limits.t
+  val page : t -> Document_schema.Limits.t
+  val response : t -> Document_schema.Limits.t
+  val max_source_bytes : t -> int
+  val max_reference_bytes : t -> int
+  val max_output_bytes : t -> int
+  val max_page_items : t -> int
+  val max_event_bytes : t -> int
+  val max_registry_entries : t -> int
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Wire_id : sig
+  module Instance : sig
+    type t
+
+    val of_string : string -> (t, Error.t) result
+    val to_string : t -> string
+    val equal : t -> t -> bool
+  end
+
+  module Epoch : sig
+    type t
+
+    val of_string : string -> (t, Error.t) result
+    val to_string : t -> string
+    val equal : t -> t -> bool
+  end
+
+  module Revision : sig
+    type t
+
+    val of_string : string -> (t, Error.t) result
+    val to_string : t -> string
+    val equal : t -> t -> bool
+  end
+end
+
+module Create : sig
+  type t
+
+  (** Route/target/Prompt/Workspace and requested ceilings are canonical
+      action identity, not source authority. Only Standard REPL targets are
+      valid. Explicit null for an absent option rejects. *)
+  val create
+    :  limits:Limits.t
+    -> run_id:Id.Developer_run.t
+    -> key:Idempotency_key.t
+    -> route:Developer_common.Route.t
+    -> target:Developer_common.Target.t
+    -> prompt:Id.Prompt_definition.t
+    -> workspace:Id.Workspace_definition.t
+    -> requested_execution:Developer_common.Execution_limits.t option
+    -> requested_max_output_bytes:int option
+    -> (t, Error.t) result
+
+  val run_id : t -> Id.Developer_run.t
+  val key : t -> Idempotency_key.t
+  val route : t -> Developer_common.Route.t
+  val target : t -> Developer_common.Target.t
+  val prompt : t -> Id.Prompt_definition.t
+  val workspace : t -> Id.Workspace_definition.t
+  val requested_execution : t -> Developer_common.Execution_limits.t option
+  val requested_max_output_bytes : t -> int option
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Submit : sig
+  type t
+
+  val create
+    :  limits:Limits.t
+    -> instance:Wire_id.Instance.t
+    -> epoch:Wire_id.Epoch.t
+    -> expected_revision:Wire_id.Revision.t
+    -> key:Idempotency_key.t
+    -> source:string
+    -> (t, Error.t) result
+
+  val instance : t -> Wire_id.Instance.t
+  val epoch : t -> Wire_id.Epoch.t
+  val expected_revision : t -> Wire_id.Revision.t
+  val key : t -> Idempotency_key.t
+  val source : t -> string
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Lookup : sig
+  type t
+
+  val create : instance:Wire_id.Instance.t -> key:Idempotency_key.t -> t
+  val instance : t -> Wire_id.Instance.t
+  val key : t -> Idempotency_key.t
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Current_epoch : sig
+  type t
+
+  val create
+    :  instance:Wire_id.Instance.t
+    -> epoch:Wire_id.Epoch.t
+    -> key:Idempotency_key.t
+    -> t
+
+  val instance : t -> Wire_id.Instance.t
+  val epoch : t -> Wire_id.Epoch.t
+  val key : t -> Idempotency_key.t
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Type_selector : sig
+  type t =
+    | Expression
+    | Binding_index of int
+  [@@deriving equal, sexp_of]
+end
+
+module Inspect : sig
+  type t
+
+  val create
+    :  limits:Limits.t
+    -> current:Current_epoch.t
+    -> statement_index:int
+    -> selector:Type_selector.t
+    -> max_bytes:int
+    -> (t, Error.t) result
+
+  val current : t -> Current_epoch.t
+  val statement_index : t -> int
+  val selector : t -> Type_selector.t
+  val max_bytes : t -> int
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Reference_page_request : sig
+  type t
+
+  val create
+    :  limits:Limits.t
+    -> current:Current_epoch.t
+    -> after:string option
+    -> limit:int
+    -> (t, Error.t) result
+
+  val current : t -> Current_epoch.t
+  val after : t -> string option
+  val limit : t -> int
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Task_submit : sig
+  type t
+
+  (** [fresh_epoch] is comparison data for a true new-key action. The Host
+      checks durable run/key/original history first; an exact old-key retry
+      never resolves these possibly stale process-local IDs. *)
+  val create
+    :  limits:Limits.t
+    -> key:Idempotency_key.t
+    -> reference:string
+    -> requested_execution:Developer_common.Execution_limits.t option
+    -> requested_max_output_bytes:int option
+    -> fresh_epoch:(Wire_id.Instance.t * Wire_id.Epoch.t) option
+    -> (t, Error.t) result
+
+  val key : t -> Idempotency_key.t
+  val reference : t -> string
+  val requested_execution : t -> Developer_common.Execution_limits.t option
+  val requested_max_output_bytes : t -> int option
+  val fresh_epoch : t -> (Wire_id.Instance.t * Wire_id.Epoch.t) option
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+(** Shared strict field decoding for the private REPL codecs. *)
+val get
+  :  Json_codec.fields
+  -> string
+  -> (Jsonaf.t -> ('a, Error.t) result)
+  -> ('a, Error.t) result
+
+val optional
+  :  Json_codec.fields
+  -> string
+  -> (Jsonaf.t -> ('a, Error.t) result)
+  -> ('a option, Error.t) result
+
+val supported_method_names : string list
+```
+
+## developer_repl_wire_result
+
+[implementation](../../lib/agent_protocol/developer_repl_wire_result.ml) · [interface](../../lib/agent_protocol/developer_repl_wire_result.mli)
+
+```ocaml
+(** Bounded REPL presentation and reference-page codecs. Shares the private request limits and IDs; no runtime resources or effect authority. *)
+
+module Limits = Developer_repl_wire_common.Limits
+module Wire_id = Developer_repl_wire_common.Wire_id
+
+module View : sig
+  type t
+
+  val create
+    :  limits:Limits.t
+    -> instance:Wire_id.Instance.t
+    -> epoch:Wire_id.Epoch.t
+    -> revision:Wire_id.Revision.t
+    -> run_id:Id.Developer_run.t
+    -> capture_fingerprint:Chatml_source.Digest.t
+    -> (t, Error.t) result
+
+  val instance : t -> Wire_id.Instance.t
+  val epoch : t -> Wire_id.Epoch.t
+  val revision : t -> Wire_id.Revision.t
+  val run_id : t -> Id.Developer_run.t
+  val capture_fingerprint : t -> Chatml_source.Digest.t
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Submission : sig
+  type t
+
+  module Location : sig
+    type t
+
+    (** Byte coordinates and exact source revision for one already owned
+        diagnostic. This comparison DTO does not authenticate source bytes or
+        grant read access. The server projects a genuine Source.Location. *)
+    val create
+      :  limits:Limits.t
+      -> source:Chatml_source.Id.t
+      -> digest:Chatml_source.Digest.t
+      -> start_byte:int
+      -> end_byte:int
+      -> (t, Error.t) result
+
+    val source : t -> Chatml_source.Id.t
+    val digest : t -> Chatml_source.Digest.t
+    val start_byte : t -> int
+    val end_byte : t -> int
+    val to_json : t -> Jsonaf.t
+    val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+  end
+
+  module Rendered_type : sig
+    type t
+
+    type kind =
+      | Type
+      | Signature
+    [@@deriving equal, sexp_of]
+
+    type truncation =
+      | Node_limit
+      | Edge_limit
+      | Depth_limit
+      | Work_limit
+      | Byte_limit
+    [@@deriving equal, sexp_of]
+
+    type completeness =
+      | Complete
+      | Truncated of truncation
+    [@@deriving equal, sexp_of]
+
+    val create
+      :  limits:Limits.t
+      -> kind:kind
+      -> completeness:completeness
+      -> text:string
+      -> (t, Error.t) result
+
+    val kind : t -> kind
+    val completeness : t -> completeness
+    val text : t -> string
+  end
+
+  module Diagnostic : sig
+    type t
+
+    val create
+      :  limits:Limits.t
+      -> message:string
+      -> location:Location.t option
+      -> (t, Error.t) result
+
+    val message : t -> string
+    val location : t -> Location.t option
+  end
+
+  module Summary : sig
+    (** Bounded scalar outcome, preview, diagnostic, rendered type and Task
+        retention. No frozen graph, value or physical Task handle. *)
+    type t
+
+    type failure_kind =
+      | Initializer
+      | Runtime
+      | Budget
+    [@@deriving equal, sexp_of]
+
+    type outcome =
+      | Succeeded
+      | Failed of failure_kind
+    [@@deriving equal, sexp_of]
+
+    type task_retention =
+      | Not_a_task
+      | Retained
+      | Limit_reached
+    [@@deriving equal, sexp_of]
+
+    val create
+      :  limits:Limits.t
+      -> outcome:outcome
+      -> value_preview:string option
+      -> diagnostic:Diagnostic.t option
+      -> expression_type:Rendered_type.t option
+      -> binding_count:int
+      -> task_retention:task_retention
+      -> text_limited:bool
+      -> (t, Error.t) result
+
+    val outcome : t -> outcome
+    val value_preview : t -> string option
+    val diagnostic : t -> Diagnostic.t option
+    val expression_type : t -> Rendered_type.t option
+    val binding_count : t -> int
+    val task_retention : t -> task_retention
+    val text_limited : t -> bool
+  end
+
+  type need_more_reason =
+    | Parser_eof
+    | Comment_eof
+    | String_eof
+
+  type status =
+    | Need_more of need_more_reason * Location.t option
+    | Rejected of Diagnostic.t
+    | Finished
+    | Stopped of Diagnostic.t option
+
+  type details =
+    | Available
+    | Output_limited
+
+  val create
+    :  limits:Limits.t
+    -> status:status
+    -> details:details
+    -> completed_statements:int
+    -> statement_count:int
+    -> epoch:Wire_id.Epoch.t
+    -> revision:Wire_id.Revision.t
+    -> summaries:Summary.t list
+    -> task_reference_count:int
+    -> task_references:string list
+    -> (t, Error.t) result
+
+  val epoch : t -> Wire_id.Epoch.t
+  val revision : t -> Wire_id.Revision.t
+  val status : t -> status
+  val details : t -> details
+  val completed_statements : t -> int
+  val statement_count : t -> int
+  val summaries : t -> Summary.t list
+  val task_reference_count : t -> int
+  val task_references : t -> string list
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Type_inspection : sig
+  type t
+
+  val create
+    :  limits:Limits.t
+    -> revision:Wire_id.Revision.t
+    -> binding_name:string option
+    -> rendered:Submission.Rendered_type.t
+    -> (t, Error.t) result
+
+  val revision : t -> Wire_id.Revision.t
+  val binding_name : t -> string option
+  val rendered : t -> Submission.Rendered_type.t
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Reference_page : sig
+  (** Encoded [items] and [next] each count toward [Limits.page], including
+      the repeated cursor string. A nonempty remaining page must advance. *)
+  type t
+
+  val create
+    :  limits:Limits.t
+    -> items:string list
+    -> next:string option
+    -> total:int
+    -> (t, Error.t) result
+
+  val items : t -> string list
+  val next : t -> string option
+  val total : t -> int
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## developer_repl_wire_task
+
+[implementation](../../lib/agent_protocol/developer_repl_wire_task.ml) · [interface](../../lib/agent_protocol/developer_repl_wire_task.mli)
+
+```ocaml
+(** Durable REPL Task receipt codec, sharing source locations with submission presentation. This projection grants no execution authority. *)
+
+module Limits = Developer_repl_wire_common.Limits
+module Submission = Developer_repl_wire_result.Submission
+
+module Task_view : sig
+  module Diagnostic : sig
+    type t
+
+    val create
+      :  limits:Limits.t
+      -> code:string
+      -> message:string
+      -> location:Submission.Location.t option
+      -> (t, Error.t) result
+
+    val code : t -> string
+    val message : t -> string
+    val location : t -> Submission.Location.t option
+  end
+
+  type outcome =
+    | Succeeded of string option
+    | Failed of
+        { error : Error.t
+        ; diagnostic : Diagnostic.t option
+        }
+    | Limited of
+        { error : Error.t
+        ; diagnostic : Diagnostic.t option
+        }
+    | Interrupted
+    | Cancelled
+
+  type phase =
+    | Reserved
+    | Waiting_permission
+    | Execution_started
+    | Terminal of
+        { execution_started : bool
+        ; outcome : outcome
+        }
+
+  (** This is only an authenticated Repl_task_run projection. The ordinary
+      Developer_common.View decoder deliberately excludes Task rows. *)
+  type t
+
+  val create
+    :  limits:Limits.t
+    -> command_id:Developer_command_id.t
+    -> owner:Developer_common.Owner.t
+    -> key:Idempotency_key.t
+    -> phase:phase
+    -> request_fingerprint:Chatml_source.Digest.t
+    -> capture_fingerprint:Chatml_source.Digest.t
+    -> (t, Error.t) result
+
+  val command_id : t -> Developer_command_id.t
+  val owner : t -> Developer_common.Owner.t
+  val key : t -> Idempotency_key.t
+  val phase : t -> phase
+  val request_fingerprint : t -> Chatml_source.Digest.t
+  val capture_fingerprint : t -> Chatml_source.Digest.t
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## developer_trace_wire
+
+[implementation](../../lib/agent_protocol/developer_trace_wire.ml) · [interface](../../lib/agent_protocol/developer_trace_wire.mli)
+
+```ocaml
+(** Closed, versioned, read-only Developer trace pages. A locator, execution ID
+    or cursor is comparison data, never source-read, execution or disclosure
+    authority. The installed Host authenticates every page independently. No
+    source contents, prompts, values, arguments or output enter this wire. *)
+
+module Features : sig
+  val trace : string
+end
+
+module Limits : sig
+  type t
+
+  (** [request] includes the locator and cursor; [page] includes the repeated
+      Header, all selected events, metadata and next cursor; [response]
+      includes method framing around the whole page. Each Document_schema
+      limit covers exact compact JSON bytes (including escaping), depth,
+      total fields and nodes. Startup also accounts for the JSON-RPC request
+      and success/error envelope around these method values against the
+      negotiated Initialize capacity, including the bounded request ID.
+      [max_cursor_bytes] bounds the complete encoded
+      cursor object, not merely its opaque fields. All bounds are finite and
+      positive. Daemon installation compares them with Initialize and the
+      actual Host retention owner before advertising the method. *)
+  val create
+    :  request:Document_schema.Limits.t
+    -> page:Document_schema.Limits.t
+    -> response:Document_schema.Limits.t
+    -> max_page_items:int
+    -> max_cursor_bytes:int
+    -> (t, Error.t) result
+
+  val request : t -> Document_schema.Limits.t
+  val page : t -> Document_schema.Limits.t
+  val response : t -> Document_schema.Limits.t
+  val max_page_items : t -> int
+  val max_cursor_bytes : t -> int
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Locator : sig
+  type t =
+    | Command of Developer_common.Lookup.t
+    | Repl_statement of
+        { instance : Developer_repl_wire.Wire_id.Instance.t
+        ; epoch : Developer_repl_wire.Wire_id.Epoch.t
+        ; key : Idempotency_key.t
+        }
+    | Repl_task of Developer_common.Lookup.t
+
+  (** The REPL statement's epoch is historical comparison data. It is resolved
+      through the installed bounded registry to the exact physical token, not
+      interpreted as a current editor lease. Command and Task share durable
+      run/key syntax but remain different disclosure families. *)
+  val to_json : t -> Jsonaf.t
+
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+  val equal : t -> t -> bool
+end
+
+module Cursor : sig
+  type t
+
+  (** A page cursor binds the complete locator, host-minted Execution_id,
+      exact admitted Header submission/selection fingerprints, schema version
+      and last emitted sequence. One retained Entry exists per authenticated
+      association; this identity is the comparison generation, with no
+      redundant ordinal. A fabricated or foreign cursor fails only after the
+      Host reauthorizes and obtains the exact current snapshot. Cursors cannot
+      restore an evicted recording or authorize old source access. The
+      positive Int64 sequence is encoded as a decimal string, avoiding
+      JSON-number precision loss. *)
+  val create
+    :  limits:Limits.t
+    -> locator:Locator.t
+    -> execution_id:string
+    -> submission_fingerprint:Chatml_source.Digest.t
+    -> selection_fingerprint:Chatml_source.Digest.t
+    -> after_sequence:int64
+    -> (t, Error.t) result
+
+  val locator : t -> Locator.t
+  val execution_id : t -> string
+  val submission_fingerprint : t -> Chatml_source.Digest.t
+  val selection_fingerprint : t -> Chatml_source.Digest.t
+  val after_sequence : t -> int64
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Page_request : sig
+  type t
+
+  (** [limit] is positive and at most installed max_page_items. Absent cursor
+      starts at the first retained event. The request locator is repeated in
+      and must match any cursor, before the Host later checks physical owner
+      and current source-read policy. Explicit null is not absence. *)
+  val create
+    :  limits:Limits.t
+    -> locator:Locator.t
+    -> after:Cursor.t option
+    -> limit:int
+    -> (t, Error.t) result
+
+  val locator : t -> Locator.t
+  val after : t -> Cursor.t option
+  val limit : t -> int
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+
+module Location : sig
+  type t
+
+  (** Native captured source identity and digest plus the original half-open
+      byte span and canonical byte-based line/column coordinates. Construction
+      checks shape and portable source-ID syntax; only the Host's already
+      authorized native location establishes captured-source membership. An
+      absent genuine authored map stays absent; no current document lookup or
+      guessed coordinates are performed here. The package namespace is opaque
+      bytes and uses the existing lossless portable base64 source-ID encoding;
+      the validated relative member remains UTF-8. *)
+  val create
+    :  source:Chatml_source.Id.t
+    -> digest:Chatml_source.Digest.t
+    -> start_byte:int
+    -> end_byte:int
+    -> start_line:int
+    -> start_column:int
+    -> end_line:int
+    -> end_column:int
+    -> (t, Error.t) result
+
+  val source : t -> Chatml_source.Id.t
+  val digest : t -> Chatml_source.Digest.t
+  val start_byte : t -> int
+  val end_byte : t -> int
+  val start_line : t -> int
+  val start_column : t -> int
+  val end_line : t -> int
+  val end_column : t -> int
+end
+
+module Header : sig
+  module Source_ref : sig
+    type t
+
+    val create
+      :  id:Chatml_source.Id.t
+      -> digest:Chatml_source.Digest.t
+      -> byte_length:int
+      -> (t, Error.t) result
+
+    val id : t -> Chatml_source.Id.t
+    val digest : t -> Chatml_source.Digest.t
+    val byte_length : t -> int
+  end
+
+  type admission =
+    | Submitted_capture
+    | Prepared_graph
+  [@@deriving equal, sexp_of]
+
+  type t
+
+  (** Exact immutable native Header fields only. Submitted_capture requires
+      all graph/contract/environment fingerprints absent; Prepared_graph
+      requires all three present. Source IDs use lossless namespace encoding,
+      and duplicate/colliding inventory entries reject on construction and
+      decode rather than changing source identity. *)
+  val create
+    :  execution_id:string
+    -> admission:admission
+    -> submission_fingerprint:Chatml_source.Digest.t
+    -> selection_fingerprint:Chatml_source.Digest.t
+    -> graph_fingerprint:Chatml_source.Digest.t option
+    -> contract_fingerprint:Chatml_source.Digest.t option
+    -> environment_fingerprint:Chatml_source.Digest.t option
+    -> sources:Source_ref.t list
+    -> (t, Error.t) result
+
+  val execution_id : t -> string
+  val admission : t -> admission
+  val submission_fingerprint : t -> Chatml_source.Digest.t
+  val selection_fingerprint : t -> Chatml_source.Digest.t
+  val graph_fingerprint : t -> Chatml_source.Digest.t option
+  val contract_fingerprint : t -> Chatml_source.Digest.t option
+  val environment_fingerprint : t -> Chatml_source.Digest.t option
+  val sources : t -> Source_ref.t list
+end
+
+module Event : sig
+  type phase =
+    | Preparation
+    | Compilation
+    | Dependency_initialization
+    | Entry_initialization
+    | Evaluation
+    | Task
+    | Host_wait
+  [@@deriving equal, sexp_of]
+
+  type operation =
+    | Tool_call
+    | Tool_spawn
+    | Job_start
+    | Model_call
+    | Model_spawn
+    | Process_run
+    | Schedule
+    | Job_read
+    | Local_transaction
+    | Other
+  [@@deriving equal, sexp_of]
+
+  type failure =
+    | Parse
+    | Typecheck
+    | Link
+    | Runtime
+    | Host_operation
+    | Permission
+    | Resource_limit
+    | Other
+  [@@deriving equal, sexp_of]
+
+  type kind =
+    | Phase_started of phase
+    | Phase_finished of phase
+    | Statement_entered
+    | Call_entered
+    | Effect_attempted of operation
+    | Effect_host_returned of operation
+    | Effect_host_failed of operation
+    | Host_wait_entered
+    | Host_wait_resumed
+    | Job_admitted
+    | Job_terminal
+    | Recovered_failure of failure
+    | Unrecovered_failure of failure
+  [@@deriving equal, sexp_of]
+
+  type t
+
+  (** Sequence is monotone in the original recorder and encoded as a decimal
+      string; site filtering does not
+      renumber events or remove kind/correlation. Correlation is a validated
+      host-generated opaque token, never source-defined text. *)
+  val create
+    :  sequence:int64
+    -> kind:kind
+    -> site:Location.t option
+    -> correlation:string option
+    -> (t, Error.t) result
+
+  val sequence : t -> int64
+  val kind : t -> kind
+  val site : t -> Location.t option
+  val correlation : t -> string option
+end
+
+module Terminal : sig
+  type disposition =
+    | Succeeded
+    | Failed of Event.failure
+    | Cancelled
+    | Denied
+    | Interrupted
+  [@@deriving equal, sexp_of]
+
+  type t
+
+  val create : receipt_version:int -> disposition:disposition -> (t, Error.t) result
+  val receipt_version : t -> int
+  val disposition : t -> disposition
+end
+
+module Page : sig
+  type drop =
+    { at_least : int64
+    ; overflowed : bool
+    }
+
+  type state =
+    | Incomplete
+    | Complete of Terminal.t
+
+  type t
+
+  (** One immutable authorized snapshot. [events] retain original recorder
+      sequence/order. [last_sequence] and drop/omitted-site metadata describe
+      the entire snapshot at this read, not only this page. [resume] binds
+      the final emitted event, or repeats [after] when the current page is
+      empty. A client may pass [resume] on a later poll of an Incomplete trace
+      even when [next=None], without replaying the retained prefix; an empty
+      first page has no resume and is polled from its initial request.
+      [next] is present only when this SAME snapshot has more retained events,
+      and equals [resume]. A later read may observe a longer prefix or terminal
+      but never rewinds within an Entry. No cursor points to an unreturned
+      item. An item that cannot fit the complete encoded response yields a
+      bounded Resource_limit error rather than an empty repeating page.
+
+      Constructor AND decoder reject nonpositive/nonconsecutive event
+      sequences, sequences above [last_sequence], an event at/before [after],
+      or an [after] sequence above [last_sequence] even for an empty page,
+      inconsistent locator/Header/cursor identity, a resume not at the final
+      returned event (or not exactly [after] for an empty page), a [next] that
+      differs from resume, is missing while more retained events remain, or
+      accompanies an exhausted prefix, negative omitted-site
+      counts and nonpositive drop counts. Header admission and location shape
+      invariants are likewise rechecked on decoding. Event sites may be
+      authentic older REPL closure sources outside this submission Header's
+      source inventory; the Host's historical provenance check authorizes
+      them before projection, and the wire validates their location shape. *)
+  val create
+    :  limits:Limits.t
+    -> locator:Locator.t
+    -> after:Cursor.t option
+    -> header:Header.t
+    -> events:Event.t list
+    -> last_sequence:int64
+    -> omitted_after_prefix:drop option
+    -> last_retained_site_context:Location.t option
+    -> omitted_site_count:int
+    -> state:state
+    -> resume:Cursor.t option
+    -> next:Cursor.t option
+    -> (t, Error.t) result
+
+  val locator : t -> Locator.t
+  val after : t -> Cursor.t option
+  val header : t -> Header.t
+  val events : t -> Event.t list
+  val last_sequence : t -> int64
+  val omitted_after_prefix : t -> drop option
+  val last_retained_site_context : t -> Location.t option
+  val omitted_site_count : t -> int
+  val state : t -> state
+  val resume : t -> Cursor.t option
+  val next : t -> Cursor.t option
+end
+
+module Availability : sig
+  type t =
+    | Unavailable
+    | Expired
+    | Retained of Page.t
+end
+
+module Capabilities : sig
+  type t
+
+  (** Fixed bootstrap bound before reading peer-advertised Limits. The methods
+      list is the actually installed trace family, not codec inventory. *)
+  val max_json_bytes : int
+
+  val create : methods:string list -> limits:Limits.t -> (t, Error.t) result
+  val methods : t -> string list
+  val limits : t -> Limits.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Request : sig
+  type t =
+    | Capabilities
+    | Page of Page_request.t
+
+  val method_name : t -> string
+  val params : t -> Jsonaf.t
+
+  val of_method_and_params
+    :  limits:Limits.t
+    -> method_:string
+    -> params:Jsonaf.t
+    -> (t, Error.t) result
+
+  val supported_methods : string list
+end
+
+module Response : sig
+  type t =
+    | Capabilities of Capabilities.t
+    | Page of Availability.t
+
+  val method_name : t -> string
+
+  (** Validate complete compact encoded method result, including repeated
+      Header/cursor and outer framing, against installed page/response limits
+      before serialization. Decode validates the same shape, bounds and
+      version; unknown fields/constructors and explicit null for absent
+      options reject. *)
+  val to_json : t -> limits:Limits.t -> (Jsonaf.t, Error.t) result
+
+  val of_method_and_json
+    :  limits:Limits.t
+    -> method_:string
+    -> Jsonaf.t
+    -> (t, Error.t) result
+end
+```
+
+## developer_wire
+
+[implementation](../../lib/agent_protocol/developer_wire.ml) · [interface](../../lib/agent_protocol/developer_wire.mli)
+
+```ocaml
+(** Exact method/result affinity for the portable Developer family. This is
+    codec inventory, not evidence that a Host installed or selected a handler.
+    A client additionally checks Initialize features, actual Capabilities and
+    response method identity; an authenticated server reauthorizes every call.
+    No source/effect/approval capability crosses this wire. *)
+
+module Request : sig
+  type t =
+    | Capabilities
+    | Submit of Developer_common.Submit.t
+    | Observe of Developer_common.Lookup.t
+    | Await_terminal of Developer_common.Lookup.t
+    | Cancel_and_wait of Developer_common.Lookup.t
+    | Approval_list of Id.Developer_run.t
+    | Approval_respond of Developer_approval.Response.t
+    | Approval_cancel of Id.Developer_run.t * Id.Permission.t
+    | Watch of Developer_common.Lookup.t
+    | Unwatch of Developer_common.Lookup.t
+
+  val method_name : t -> string
+  val params : t -> Jsonaf.t
+
+  val of_method_and_params
+    :  limits:Developer_common.Limits.t
+    -> method_:string
+    -> params:Jsonaf.t
+    -> (t, Error.t) result
+
+  val supported_methods : string list
+end
+
+module Response : sig
+  type t =
+    | Capabilities of Developer_common.Capabilities.t
+    | Submit of Developer_common.View.t
+    | Observe of Developer_common.View.t option
+    | Await_terminal of Developer_common.View.t
+    | Cancel_and_wait of Developer_common.View.t
+    | Approval_list of Developer_approval.Page.t
+    | Approval_respond
+    | Approval_cancel
+    | Watch
+    | Unwatch
+
+  (** Distinct constructors retain exact affinity even where several methods
+      return the same View shape or an empty acknowledgement. *)
+  val method_name : t -> string
+
+  (** Encode only after validating the complete method result, including
+      Observe framing, against the advertised aggregate response bound. *)
+  val to_json : t -> limits:Developer_common.Limits.t -> (Jsonaf.t, Error.t) result
+
+  val of_method_and_json
+    :  limits:Developer_common.Limits.t
+    -> method_:string
+    -> Jsonaf.t
+    -> (t, Error.t) result
+
+  val supported_methods : string list
+end
+
+module Change : sig
+  (** Pure bounded process-local invalidation notification. This codec
+      installs no publisher, watch, durable cursor or live stdout/progress
+      stream. After a hint or a missed connection, Observe of the exact key
+      remains authoritative; Approval_list is a separate optional refresh
+      under its own negotiated feature and current read policy. *)
+  type kind =
+    | Command_changed
+    | Approval_changed
+    | Resync_required
+    (** A bounded watcher overflow or lost generation. The client must
+        Observe its subscribed key; independently authorized clients may also
+        refresh Approval_list. This hint neither asserts an approval exists
+        nor requires approval scope to refresh a command view. It is not a
+        durable replay cursor or an event payload. *)
+
+  type t = private
+    { run_id : Id.Developer_run.t
+    ; key : Idempotency_key.t
+    ; kind : kind
+    }
+
+  val method_name : string
+
+  val create
+    :  limits:Developer_common.Limits.t
+    -> run_id:Id.Developer_run.t
+    -> key:Idempotency_key.t
+    -> kind:kind
+    -> (t, Error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : limits:Developer_common.Limits.t -> Jsonaf.t -> (t, Error.t) result
+end
+```
+
 ## envelope
 
-[JSON codec](../../lib/agent_protocol/envelope.ml) · [interface](../../lib/agent_protocol/envelope.mli)
+[implementation](../../lib/agent_protocol/envelope.ml) · [interface](../../lib/agent_protocol/envelope.mli)
 
 ```ocaml
 (** Ochat JSON-RPC-style transport envelopes. *)
@@ -980,7 +6497,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## error
 
-[JSON codec](../../lib/agent_protocol/error.ml) · [interface](../../lib/agent_protocol/error.mli)
+[implementation](../../lib/agent_protocol/error.ml) · [interface](../../lib/agent_protocol/error.mli)
 
 ```ocaml
 include module type of Protocol_error
@@ -988,7 +6505,7 @@ include module type of Protocol_error
 
 ## event
 
-[JSON codec](../../lib/agent_protocol/event.ml) · [interface](../../lib/agent_protocol/event.mli)
+[implementation](../../lib/agent_protocol/event.ml) · [interface](../../lib/agent_protocol/event.mli)
 
 ```ocaml
 (** Durable session events and recoverable operation-scoped live events. *)
@@ -1162,9 +6679,54 @@ module Recoverable : sig
 end
 ```
 
+## execution_owner
+
+[implementation](../../lib/agent_protocol/execution_owner.ml) · [interface](../../lib/agent_protocol/execution_owner.mli)
+
+```ocaml
+(** Pure ownership coordinates for host-executed invocations. No constructor in
+    this module authenticates a principal, admits a run, or grants an effect. *)
+
+type conversation = private
+  { session_id : Id.Session.t
+  ; generation : int
+  }
+[@@deriving compare, equal, sexp_of]
+
+type developer = private
+  { host_id : Id.Server.t
+  ; run_id : Id.Developer_run.t
+  ; epoch : int
+  ; principal_id : Id.Principal.t
+  }
+[@@deriving compare, equal, sexp_of]
+
+type t =
+  | Conversation of conversation
+  | Developer of developer
+[@@deriving compare, equal, sexp_of]
+
+(** Revalidate every typed ID and nonnegative revision coordinate at an
+    admission boundary. S-expression display is intentionally one-way. *)
+val validate : t -> (unit, Error.t) result
+
+val conversation : session_id:Id.Session.t -> generation:int -> (t, Error.t) result
+
+(** The host issues these coordinates only after run/capture admission. The
+    developer actor must still compare them with its current authenticated owner,
+    epoch, source capture, and durable host ID at every effectful boundary.
+    A host ID does not prove a live process lease. *)
+val developer
+  :  host_id:Id.Server.t
+  -> run_id:Id.Developer_run.t
+  -> epoch:int
+  -> principal_id:Id.Principal.t
+  -> (t, Error.t) result
+```
+
 ## extension_capabilities
 
-[JSON codec](../../lib/agent_protocol/extension_capabilities.ml) · [interface](../../lib/agent_protocol/extension_capabilities.mli)
+[implementation](../../lib/agent_protocol/extension_capabilities.ml) · [interface](../../lib/agent_protocol/extension_capabilities.mli)
 
 ```ocaml
 (** Versioned host qualification, separate from record-codec support. Presence of
@@ -1208,7 +6770,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## extension_status
 
-[JSON codec](../../lib/agent_protocol/extension_status.ml) · [interface](../../lib/agent_protocol/extension_status.mli)
+[implementation](../../lib/agent_protocol/extension_status.ml) · [interface](../../lib/agent_protocol/extension_status.mli)
 
 ```ocaml
 (** Payload-free extension lifecycle summaries. These deliberately omit arguments,
@@ -1243,7 +6805,7 @@ val list_of_json : Jsonaf.t -> (t list, Error.t) result
 
 ## grant
 
-[JSON codec](../../lib/agent_protocol/grant.ml) · [interface](../../lib/agent_protocol/grant.mli)
+[implementation](../../lib/agent_protocol/grant.ml) · [interface](../../lib/agent_protocol/grant.mli)
 
 ```ocaml
 (** Durable invocation grants and revocation requests. *)
@@ -1319,7 +6881,7 @@ end
 
 ## health
 
-[JSON codec](../../lib/agent_protocol/health.ml) · [interface](../../lib/agent_protocol/health.mli)
+[implementation](../../lib/agent_protocol/health.ml) · [interface](../../lib/agent_protocol/health.mli)
 
 ```ocaml
 (** Public and administratively detailed daemon health projections. *)
@@ -1366,7 +6928,7 @@ end
 
 ## history
 
-[JSON codec](../../lib/agent_protocol/history.ml) · [interface](../../lib/agent_protocol/history.mli)
+[implementation](../../lib/agent_protocol/history.ml) · [interface](../../lib/agent_protocol/history.mli)
 
 ```ocaml
 (** Presentation-neutral canonical and moderated transcript projections.
@@ -1485,7 +7047,7 @@ end
 
 ## history_edit
 
-[JSON codec](../../lib/agent_protocol/history_edit.ml) · [interface](../../lib/agent_protocol/history_edit.mli)
+[implementation](../../lib/agent_protocol/history_edit.ml) · [interface](../../lib/agent_protocol/history_edit.mli)
 
 ```ocaml
 (** A complete replacement of one canonical user-text occurrence. This intent
@@ -1579,9 +7141,120 @@ module Continuation : sig
 end
 ```
 
+## host_invocation
+
+[implementation](../../lib/agent_protocol/host_invocation.ml) · [interface](../../lib/agent_protocol/host_invocation.mli)
+
+```ocaml
+(** An owner-neutral invocation record for the shared admission path. The
+    conversation arm retains the entire original [Invocation.t], including
+    provider/history/routing/observation/handler/publication metadata. Existing
+    conversation codecs and actor transitions remain authoritative. Developer
+    records have no synthetic Session ID, model call, or provider history. *)
+
+type context =
+  { id : Id.Invocation.t
+  ; owner : Execution_owner.t
+  ; origin : Invocation.origin
+  ; parent_invocation : Id.Invocation.t option
+  ; parent_job : Id.Job.t option
+  ; tool_name : string
+  ; implementation_revision : string
+  ; capability_fingerprint : string
+  ; input : Jsonaf.t
+  ; created_at : Timestamp.t
+  ; deadline : Timestamp.t option
+  }
+[@@deriving equal, sexp_of]
+
+type t
+
+(** Lossless adapter. Projection returns the exact original conversation record,
+    not a reconstruction from [context]. *)
+val of_conversation : Invocation.t -> (t, Error.t) result
+
+val to_conversation : t -> Invocation.t option
+
+(** Pure data construction, not admission. Only a trusted developer actor may
+    persist/dispatch it after checking the exact owner and selected capture.
+    Model/Moderator origins and provider-history fields have no developer form. *)
+val create_developer : context -> (t, Error.t) result
+
+val context : t -> context
+val status : t -> Invocation.status
+val outcome : t -> Invocation.outcome option
+val validate : t -> (unit, Error.t) result
+val dispatch : t -> (t, Error.t) result
+val resolve : t -> Invocation.outcome -> (t, Error.t) result
+val cancel : t -> reason:string -> (t, Error.t) result
+
+(** Persist only the developer arm in the daemon-owned run document. This
+    version-one value encoding rejects conversation records, unknown fields and
+    Published status; developer invocations have no provider publication. Decode
+    reconstructs through validated pure transitions and grants no authority. *)
+val developer_to_json : t -> (Jsonaf.t, Error.t) result
+
+val developer_of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## host_job
+
+[implementation](../../lib/agent_protocol/host_job.ml) · [interface](../../lib/agent_protocol/host_job.mli)
+
+```ocaml
+(** Lossless internal job envelope for the shared capacity and scheduler path.
+    Conversation retains the exact original Job.t, including legacy fields and
+    codecs; developer has a distinct validated record and no Session ID. *)
+open! Core
+
+type t
+
+val of_conversation : Job.t -> (t, Protocol_error.t) result
+val of_developer : Developer_job.t -> (t, Protocol_error.t) result
+val to_conversation : t -> Job.t option
+val to_developer : t -> Developer_job.t option
+
+module Identity : sig
+  type t [@@deriving compare, equal, sexp_of]
+
+  include Comparator.S with type t := t
+
+  (** Owner-qualified stable job ID. Epoch/generation belongs to the owner;
+      attempt remains a separate exact reservation/claim coordinate. *)
+  val owner : t -> Execution_owner.t
+
+  val job_id : t -> Id.Job.t
+end
+
+val identity : t -> Identity.t
+val owner : t -> Execution_owner.t
+val id : t -> Id.Job.t
+val kind : t -> Job.kind
+val status : t -> Job.status
+val attempt : t -> int
+val nested_depth : t -> int
+
+module Lifecycle : sig
+  (** One read-only classification used by capacity and the later scheduler for
+      both records. [classify] requires a validated nonnegative attempt; call
+      [lifecycle] for an admitted Host_job. It does not replace actor-owned
+      state transitions. *)
+  type t =
+    | New_queued
+    | Queued_retry
+    | Claimed_or_waiting
+    | Terminal
+  [@@deriving equal, sexp_of]
+
+  val classify : status:Job.status -> attempt:int -> t
+end
+
+val lifecycle : t -> Lifecycle.t
+```
+
 ## id
 
-[JSON codec](../../lib/agent_protocol/id.ml) · [interface](../../lib/agent_protocol/id.mli)
+[implementation](../../lib/agent_protocol/id.ml) · [interface](../../lib/agent_protocol/id.mli)
 
 ```ocaml
 (** Opaque identifiers used by the Ochat agent protocol. *)
@@ -1622,6 +7295,10 @@ end
 module Server : S
 module Session : S
 module Run : S
+
+(* Developer run ownership, distinct from conversation Run and Session.
+   An ID is a comparison coordinate, never authority by possession. *)
+module Developer_run : S
 module Attachment : S
 module Operation : S
 module Event_cursor : S
@@ -1645,11 +7322,21 @@ module Blob : S
 module Idempotency_record : S
 module Project : S
 module Collection : S
+
+(** Authoring coordinates are separate from conversation/run/job identities.
+    They are never authority by possession; every use is reauthorized against
+    the authenticated principal, host and connection lease. *)
+module Authoring_root : S
+
+module Authoring_context : S
+module Authoring_analysis : S
+module Authoring_upload : S
+module Authoring_bundle : S
 ```
 
 ## idempotency_key
 
-[JSON codec](../../lib/agent_protocol/idempotency_key.ml) · [interface](../../lib/agent_protocol/idempotency_key.mli)
+[implementation](../../lib/agent_protocol/idempotency_key.ml) · [interface](../../lib/agent_protocol/idempotency_key.mli)
 
 ```ocaml
 (** Client-generated keys used to make mutating commands safely repeatable. *)
@@ -1671,7 +7358,7 @@ val to_json : t -> Jsonaf.t
 
 ## inference_query
 
-[JSON codec](../../lib/agent_protocol/inference_query.ml) · [interface](../../lib/agent_protocol/inference_query.mli)
+[implementation](../../lib/agent_protocol/inference_query.ml) · [interface](../../lib/agent_protocol/inference_query.mli)
 
 ```ocaml
 (** Additive protocol2 inference reads. No OpenAI, private Target, raw request,
@@ -1928,7 +7615,7 @@ end
 
 ## ingress
 
-[JSON codec](../../lib/agent_protocol/ingress.ml) · [interface](../../lib/agent_protocol/ingress.mli)
+[implementation](../../lib/agent_protocol/ingress.ml) · [interface](../../lib/agent_protocol/ingress.mli)
 
 ```ocaml
 (** Scoped external DATA admission. A registration ID is not a credential.
@@ -1967,7 +7654,7 @@ end
 
 ## initialize
 
-[JSON codec](../../lib/agent_protocol/initialize.ml) · [interface](../../lib/agent_protocol/initialize.mli)
+[implementation](../../lib/agent_protocol/initialize.ml) · [interface](../../lib/agent_protocol/initialize.mli)
 
 ```ocaml
 (** Connection initialization and protocol capability negotiation. *)
@@ -2091,7 +7778,7 @@ end
 
 ## invocation
 
-[JSON codec](../../lib/agent_protocol/invocation.ml) · [interface](../../lib/agent_protocol/invocation.mli)
+[implementation](../../lib/agent_protocol/invocation.ml) · [interface](../../lib/agent_protocol/invocation.mli)
 
 ```ocaml
 (** Versioned tool invocation records. These pure transitions do not grant
@@ -2154,6 +7841,14 @@ type status =
   | Resolved of outcome
   | Published of outcome
 [@@deriving equal, sexp]
+
+(** Shared value codecs for developer-only invocation persistence. They do not
+    encode a conversation context or grant transition authority. *)
+val origin_to_json : origin -> Jsonaf.t
+
+val origin_of_json : Jsonaf.t -> (origin, Error.t) result
+val status_to_json : status -> Jsonaf.t
+val status_of_json : Jsonaf.t -> (status, Error.t) result
 
 type call_kind =
   | Function
@@ -2383,7 +8078,7 @@ end
 
 ## job
 
-[JSON codec](../../lib/agent_protocol/job.ml) · [interface](../../lib/agent_protocol/job.mli)
+[implementation](../../lib/agent_protocol/job.ml) · [interface](../../lib/agent_protocol/job.mli)
 
 ```ocaml
 (** Durable background job state and control requests. *)
@@ -2436,6 +8131,21 @@ type retry_policy =
       ; backoff_ms : int
       }
 [@@deriving sexp]
+
+(** Shared closed value codecs for owner-neutral job persistence. These encode
+    only the named value; a developer job never acquires a Session ID by using
+    them. Callers still validate the containing job and its authority. *)
+val kind_to_json : kind -> Jsonaf.t
+
+val kind_of_json : Jsonaf.t -> (kind, Error.t) result
+
+(** Stable lowercase status label used by bounded script Job.get views. *)
+val status_name : status -> string
+
+val status_to_json : status -> Jsonaf.t
+val status_of_json : Jsonaf.t -> (status, Error.t) result
+val retry_to_json : retry_policy -> Jsonaf.t
+val retry_of_json : Jsonaf.t -> (retry_policy, Error.t) result
 
 type discard_reason = Authority_changed [@@deriving equal, sexp]
 
@@ -2572,7 +8282,7 @@ end
 
 ## job_artifact
 
-[JSON codec](../../lib/agent_protocol/job_artifact.ml) · [interface](../../lib/agent_protocol/job_artifact.mli)
+[implementation](../../lib/agent_protocol/job_artifact.ml) · [interface](../../lib/agent_protocol/job_artifact.mli)
 
 ```ocaml
 (** Versioned reference to a complete serialized terminal result. The reference
@@ -2604,7 +8314,7 @@ val allowed_use : t -> string
 
 ## job_progress
 
-[JSON codec](../../lib/agent_protocol/job_progress.ml) · [interface](../../lib/agent_protocol/job_progress.mli)
+[implementation](../../lib/agent_protocol/job_progress.ml) · [interface](../../lib/agent_protocol/job_progress.mli)
 
 ```ocaml
 (** Best-effort transient display state. It is not a terminal result, canonical
@@ -2639,7 +8349,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## job_result_reference
 
-[JSON codec](../../lib/agent_protocol/job_result_reference.ml) · [interface](../../lib/agent_protocol/job_result_reference.mli)
+[implementation](../../lib/agent_protocol/job_result_reference.ml) · [interface](../../lib/agent_protocol/job_result_reference.mli)
 
 ```ocaml
 (** Bounded reference to an exact retained terminal result, whether inline or
@@ -2679,7 +8389,7 @@ val of_completion
 
 ## json_codec
 
-[JSON codec](../../lib/agent_protocol/json_codec.ml) · [interface](../../lib/agent_protocol/json_codec.mli)
+[implementation](../../lib/agent_protocol/json_codec.ml) · [interface](../../lib/agent_protocol/json_codec.mli)
 
 ```ocaml
 (** Strict JSON decoding helpers for stable protocol codecs. *)
@@ -2753,7 +8463,7 @@ val canonical_string : Jsonaf.t -> (string, Error.t) result
 
 ## method_result
 
-[JSON codec](../../lib/agent_protocol/method_result.ml) · [interface](../../lib/agent_protocol/method_result.mli)
+[implementation](../../lib/agent_protocol/method_result.ml) · [interface](../../lib/agent_protocol/method_result.mli)
 
 ```ocaml
 (** Typed successful results for every Protocol 1.0 method. *)
@@ -2968,6 +8678,7 @@ type t =
   | Schedule_create of Schedule.Mutation_response.t
   | Schedule_cancel of Schedule.Mutation_response.t
   | Ingress_submit of Ingress.Acknowledgement.t
+  | Authoring of (Authoring_wire.Response.t[@sexp.opaque])
 [@@deriving sexp]
 
 (** [method_name t] returns the request method associated with [t]. *)
@@ -2981,13 +8692,64 @@ val to_json : t -> Jsonaf.t
 (** [of_json ~method_ json] decodes the successful result for [method_]. *)
 val of_json : method_:string -> Jsonaf.t -> (t, Error.t) result
 
-(** [supported_methods] contains every method with a typed success decoder. *)
+(** [supported_methods] is the typed success-codec inventory, not a host
+    capability or installed handler list. *)
 val supported_methods : string list
+```
+
+## model_spawn_request
+
+[implementation](../../lib/agent_protocol/model_spawn_request.ml) · [interface](../../lib/agent_protocol/model_spawn_request.mli)
+
+```ocaml
+(** Pure shared decoder for the existing [agent_prompt_v1] recipe. Parsing does
+    not fetch prompts, credentials or history and grants no model execution. *)
+open! Core
+
+type t
+
+val recipe_name : string
+
+(** Preserve the conversation recipe's exact field grammar, first-field
+    lookup, defaults and error strings. This syntax-only operation has no
+    developer limit and changes no conversation admission behavior. *)
+val decode : Jsonaf.t -> (t, string) result
+
+(** Developer admission validates the WHOLE original tree, unique object keys
+    and encoded byte count before decoding. Unlike syntax-only [decode], it
+    rejects duplicate keys. The Store separately applies its per-job and
+    whole-document caps; no capacity or durable mutation occurs here. *)
+val admit : Jsonaf.t -> limits:Document_schema.Limits.t -> (t, Protocol_error.t) result
+
+val original : t -> Jsonaf.t
+val prompt : t -> string
+val input : t -> string
+val is_local : t -> bool
+
+module Source_mode : sig
+  type t =
+    | File
+    | Captured
+  [@@deriving equal, sexp_of]
+end
+
+(** Optional [source_mode] is part of the ONE shared grammar: ["file"] is the
+    default, ["captured"] must be explicit and requires [is_local=true]. An
+    unknown spelling/type rejects in [decode] before any source effect.
+    Existing payloads retain File behavior. A conversation executor without
+    captured selected-source custody explicitly refuses Captured rather than
+    ignoring it; the developer selected executor may use retained inventory.
+    File checks the current original lease even when captured bytes exist.
+    The value is a request, not source authority. *)
+val source_mode : t -> Source_mode.t
+
+val history_compaction : t -> bool option
+val nested_prompt_id : t -> string option
 ```
 
 ## moderator_execution
 
-[JSON codec](../../lib/agent_protocol/moderator_execution.ml) · [interface](../../lib/agent_protocol/moderator_execution.mli)
+[implementation](../../lib/agent_protocol/moderator_execution.ml) · [interface](../../lib/agent_protocol/moderator_execution.mli)
 
 ```ocaml
 (** Durable execution receipts for ordinary moderator events. These are distinct
@@ -3122,7 +8884,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## mutation_result
 
-[JSON codec](../../lib/agent_protocol/mutation_result.ml) · [interface](../../lib/agent_protocol/mutation_result.mli)
+[implementation](../../lib/agent_protocol/mutation_result.ml) · [interface](../../lib/agent_protocol/mutation_result.mli)
 
 ```ocaml
 (** Revision and durable-event position returned by accepted session mutations. *)
@@ -3145,7 +8907,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## operation
 
-[JSON codec](../../lib/agent_protocol/operation.ml) · [interface](../../lib/agent_protocol/operation.mli)
+[implementation](../../lib/agent_protocol/operation.ml) · [interface](../../lib/agent_protocol/operation.mli)
 
 ```ocaml
 (** Foreground operation metadata shared by transports and clients. *)
@@ -3195,7 +8957,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## organization_group
 
-[JSON codec](../../lib/agent_protocol/organization_group.ml) · [interface](../../lib/agent_protocol/organization_group.mli)
+[implementation](../../lib/agent_protocol/organization_group.ml) · [interface](../../lib/agent_protocol/organization_group.mli)
 
 ```ocaml
 (** Host-owned logical organization; never an execution workspace or authority grant.
@@ -3241,7 +9003,7 @@ module Collection : S with type id = Id.Collection.t
 
 ## organization_request
 
-[JSON codec](../../lib/agent_protocol/organization_request.ml) · [interface](../../lib/agent_protocol/organization_request.mli)
+[implementation](../../lib/agent_protocol/organization_request.ml) · [interface](../../lib/agent_protocol/organization_request.mli)
 
 ```ocaml
 (** CRUD requests are host-qualified. The initialized connection host must match.
@@ -3319,7 +9081,7 @@ module Collection : S with type id = Id.Collection.t
 
 ## organization_result
 
-[JSON codec](../../lib/agent_protocol/organization_result.ml) · [interface](../../lib/agent_protocol/organization_result.mli)
+[implementation](../../lib/agent_protocol/organization_result.ml) · [interface](../../lib/agent_protocol/organization_result.mli)
 
 ```ocaml
 (** Exact organization mutation results; deletion retains the ID forever. *)
@@ -3374,7 +9136,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## page
 
-[JSON codec](../../lib/agent_protocol/page.ml) · [interface](../../lib/agent_protocol/page.mli)
+[implementation](../../lib/agent_protocol/page.ml) · [interface](../../lib/agent_protocol/page.mli)
 
 ```ocaml
 (** Opaque cursor pagination shared by list methods. *)
@@ -3433,7 +9195,7 @@ val of_json : (Jsonaf.t -> ('a, Error.t) result) -> Jsonaf.t -> ('a t, Error.t) 
 
 ## pending_control
 
-[JSON codec](../../lib/agent_protocol/pending_control.ml) · [interface](../../lib/agent_protocol/pending_control.mli)
+[implementation](../../lib/agent_protocol/pending_control.ml) · [interface](../../lib/agent_protocol/pending_control.mli)
 
 ```ocaml
 (** Controls for one still-pending occurrence. The authenticated submitting
@@ -3501,7 +9263,7 @@ end
 
 ## pending_input
 
-[JSON codec](../../lib/agent_protocol/pending_input.ml) · [interface](../../lib/agent_protocol/pending_input.mli)
+[implementation](../../lib/agent_protocol/pending_input.ml) · [interface](../../lib/agent_protocol/pending_input.mli)
 
 ```ocaml
 (** Pending input extends the existing durable deferred history queue. It grants
@@ -3591,7 +9353,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## pending_query
 
-[JSON codec](../../lib/agent_protocol/pending_query.ml) · [interface](../../lib/agent_protocol/pending_query.mli)
+[implementation](../../lib/agent_protocol/pending_query.ml) · [interface](../../lib/agent_protocol/pending_query.mli)
 
 ```ocaml
 (** Authorized nonactivating inspection of pending input. The host enforces
@@ -3700,7 +9462,7 @@ end
 
 ## permission
 
-[JSON codec](../../lib/agent_protocol/permission.ml) · [interface](../../lib/agent_protocol/permission.mli)
+[implementation](../../lib/agent_protocol/permission.ml) · [interface](../../lib/agent_protocol/permission.mli)
 
 ```ocaml
 (** Durable tool-authorization requests and compare-and-set responses. *)
@@ -3810,7 +9572,7 @@ end
 
 ## ping
 
-[JSON codec](../../lib/agent_protocol/ping.ml) · [interface](../../lib/agent_protocol/ping.mli)
+[implementation](../../lib/agent_protocol/ping.ml) · [interface](../../lib/agent_protocol/ping.mli)
 
 ```ocaml
 (** Protocol liveness request and readiness response. *)
@@ -3838,7 +9600,7 @@ end
 
 ## principal
 
-[JSON codec](../../lib/agent_protocol/principal.ml) · [interface](../../lib/agent_protocol/principal.mli)
+[implementation](../../lib/agent_protocol/principal.ml) · [interface](../../lib/agent_protocol/principal.mli)
 
 ```ocaml
 (** Authenticated identity and authorization summary. *)
@@ -3873,7 +9635,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## projection_codec
 
-[JSON codec](../../lib/agent_protocol/projection_codec.ml) · [interface](../../lib/agent_protocol/projection_codec.mli)
+[implementation](../../lib/agent_protocol/projection_codec.ml) · [interface](../../lib/agent_protocol/projection_codec.mli)
 
 ```ocaml
 (** Shared admission boundary for protocol 2 transcript envelopes. *)
@@ -3886,7 +9648,7 @@ val optional : string -> 'a option -> ('a -> Jsonaf.t) -> (string * Jsonaf.t) li
 
 ## prompt
 
-[JSON codec](../../lib/agent_protocol/prompt.ml) · [interface](../../lib/agent_protocol/prompt.mli)
+[implementation](../../lib/agent_protocol/prompt.ml) · [interface](../../lib/agent_protocol/prompt.mli)
 
 ```ocaml
 (** Transport projections for configured ChatMD prompts. *)
@@ -3943,7 +9705,7 @@ end
 
 ## prompt_dependency_selection
 
-[JSON codec](../../lib/agent_protocol/prompt_dependency_selection.ml) · [interface](../../lib/agent_protocol/prompt_dependency_selection.mli)
+[implementation](../../lib/agent_protocol/prompt_dependency_selection.ml) · [interface](../../lib/agent_protocol/prompt_dependency_selection.mli)
 
 ```ocaml
 open! Core
@@ -4065,7 +9827,7 @@ end
 
 ## protocol_error
 
-[JSON codec](../../lib/agent_protocol/protocol_error.ml) · [interface](../../lib/agent_protocol/protocol_error.mli)
+[implementation](../../lib/agent_protocol/protocol_error.ml) · [interface](../../lib/agent_protocol/protocol_error.mli)
 
 ```ocaml
 (** Stable errors exposed by the Ochat agent protocol. *)
@@ -4138,7 +9900,7 @@ val of_json : Jsonaf.t -> (t, t) result
 
 ## provider_operator
 
-[JSON codec](../../lib/agent_protocol/provider_operator.ml) · [interface](../../lib/agent_protocol/provider_operator.mli)
+[implementation](../../lib/agent_protocol/provider_operator.ml) · [interface](../../lib/agent_protocol/provider_operator.mli)
 
 ```ocaml
 open! Core
@@ -4452,7 +10214,7 @@ end
 
 ## public
 
-[JSON codec](../../lib/agent_protocol/public.ml) · [interface](../../lib/agent_protocol/public.mli)
+[implementation](../../lib/agent_protocol/public.ml) · [interface](../../lib/agent_protocol/public.mli)
 
 ```ocaml
 (** Explicit public read boundary. Private snapshot/history/event/result types
@@ -4466,7 +10228,7 @@ module Result = Public_result
 
 ## public_durable_event
 
-[JSON codec](../../lib/agent_protocol/public_durable_event.ml) · [interface](../../lib/agent_protocol/public_durable_event.mli)
+[implementation](../../lib/agent_protocol/public_durable_event.ml) · [interface](../../lib/agent_protocol/public_durable_event.mli)
 
 ```ocaml
 (** Typed public durable events. Hidden entries preserve sequence slots without
@@ -4534,7 +10296,7 @@ val to_notification : t -> Envelope.t
 
 ## public_history
 
-[JSON codec](../../lib/agent_protocol/public_history.ml) · [interface](../../lib/agent_protocol/public_history.mli)
+[implementation](../../lib/agent_protocol/public_history.ml) · [interface](../../lib/agent_protocol/public_history.mli)
 
 ```ocaml
 (** Read-only history projections. Public views never authorize canonical input
@@ -4650,7 +10412,7 @@ end
 
 ## public_result
 
-[JSON codec](../../lib/agent_protocol/public_result.ml) · [interface](../../lib/agent_protocol/public_result.mli)
+[implementation](../../lib/agent_protocol/public_result.ml) · [interface](../../lib/agent_protocol/public_result.mli)
 
 ```ocaml
 (** Public success values. Only get/create/attach replace private inline history
@@ -4717,7 +10479,7 @@ val validate : t -> (unit, Error.t) result
 
 ## public_snapshot
 
-[JSON codec](../../lib/agent_protocol/public_snapshot.ml) · [interface](../../lib/agent_protocol/public_snapshot.mli)
+[implementation](../../lib/agent_protocol/public_snapshot.ml) · [interface](../../lib/agent_protocol/public_snapshot.mli)
 
 ```ocaml
 (** Validated client read state, separate from the persisted internal snapshot.
@@ -4762,7 +10524,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## run
 
-[JSON codec](../../lib/agent_protocol/run.ml) · [interface](../../lib/agent_protocol/run.mli)
+[implementation](../../lib/agent_protocol/run.ml) · [interface](../../lib/agent_protocol/run.mli)
 
 ```ocaml
 (** Durable host run lifecycle. Session liveness and work execution are separate;
@@ -4848,7 +10610,7 @@ val validate_transition : previous:t -> t -> (unit, Error.t) result
 
 ## run_action
 
-[JSON codec](../../lib/agent_protocol/run_action.ml) · [interface](../../lib/agent_protocol/run_action.mli)
+[implementation](../../lib/agent_protocol/run_action.ml) · [interface](../../lib/agent_protocol/run_action.mli)
 
 ```ocaml
 (** Revisioned authored decision, collected transactionally with the actual
@@ -4877,7 +10639,7 @@ val combine : t option -> t option -> (t option, Error.t) result
 
 ## run_limits
 
-[JSON codec](../../lib/agent_protocol/run_limits.ml) · [interface](../../lib/agent_protocol/run_limits.mli)
+[implementation](../../lib/agent_protocol/run_limits.ml) · [interface](../../lib/agent_protocol/run_limits.mli)
 
 ```ocaml
 (** Hard protocol safety ceilings, independent of lower actor/runtime quotas.
@@ -4894,7 +10656,7 @@ val list : (Jsonaf.t -> ('a, Error.t) result) -> Jsonaf.t -> ('a list, Error.t) 
 
 ## run_query
 
-[JSON codec](../../lib/agent_protocol/run_query.ml) · [interface](../../lib/agent_protocol/run_query.mli)
+[implementation](../../lib/agent_protocol/run_query.ml) · [interface](../../lib/agent_protocol/run_query.mli)
 
 ```ocaml
 (** Current-authority, nonactivating shared run inspection. Full work and receipt
@@ -4973,7 +10735,7 @@ end
 
 ## run_receipt
 
-[JSON codec](../../lib/agent_protocol/run_receipt.ml) · [interface](../../lib/agent_protocol/run_receipt.mli)
+[implementation](../../lib/agent_protocol/run_receipt.ml) · [interface](../../lib/agent_protocol/run_receipt.mli)
 
 ```ocaml
 (** Immutable local admission/action receipt. A receipt is evidence, never current
@@ -5020,7 +10782,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## run_result_reference
 
-[JSON codec](../../lib/agent_protocol/run_result_reference.ml) · [interface](../../lib/agent_protocol/run_result_reference.mli)
+[implementation](../../lib/agent_protocol/run_result_reference.ml) · [interface](../../lib/agent_protocol/run_result_reference.mli)
 
 ```ocaml
 (** Authorized bounded references, never retained plaintext tool/provider output.
@@ -5055,7 +10817,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## run_source
 
-[JSON codec](../../lib/agent_protocol/run_source.ml) · [interface](../../lib/agent_protocol/run_source.mli)
+[implementation](../../lib/agent_protocol/run_source.ml) · [interface](../../lib/agent_protocol/run_source.mli)
 
 ```ocaml
 (** Captured actor installation identity, independent of checkpoint revisions.
@@ -5081,7 +10843,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## run_start
 
-[JSON codec](../../lib/agent_protocol/run_start.ml) · [interface](../../lib/agent_protocol/run_start.mli)
+[implementation](../../lib/agent_protocol/run_start.ml) · [interface](../../lib/agent_protocol/run_start.mli)
 
 ```ocaml
 (** Explicit host-authorized run start; no caller-supplied source/run identity.
@@ -5126,7 +10888,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## run_wake
 
-[JSON codec](../../lib/agent_protocol/run_wake.ml) · [interface](../../lib/agent_protocol/run_wake.mli)
+[implementation](../../lib/agent_protocol/run_wake.ml) · [interface](../../lib/agent_protocol/run_wake.mli)
 
 ```ocaml
 (** Exact host-issued delivered occurrence. A whole schedule/subscription ID is
@@ -5177,7 +10939,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## run_work
 
-[JSON codec](../../lib/agent_protocol/run_work.ml) · [interface](../../lib/agent_protocol/run_work.mli)
+[implementation](../../lib/agent_protocol/run_work.ml) · [interface](../../lib/agent_protocol/run_work.mli)
 
 ```ocaml
 (** Exact retained owned occurrence. This identity does not describe its outcome;
@@ -5235,7 +10997,7 @@ end
 
 ## schedule
 
-[JSON codec](../../lib/agent_protocol/schedule.ml) · [interface](../../lib/agent_protocol/schedule.mli)
+[implementation](../../lib/agent_protocol/schedule.ml) · [interface](../../lib/agent_protocol/schedule.mli)
 
 ```ocaml
 (** Durable one-shot ChatML event schedules. *)
@@ -5375,10 +11137,15 @@ end
 
 ## scope
 
-[JSON codec](../../lib/agent_protocol/scope.ml) · [interface](../../lib/agent_protocol/scope.mli)
+[implementation](../../lib/agent_protocol/scope.ml) · [interface](../../lib/agent_protocol/scope.mli)
 
 ```ocaml
-(** Authorization scopes carried by authenticated principals. *)
+(** Authorization scopes carried by authenticated principals. Developer scopes
+    admit only their exact Check, Fixture, Live or process-local REPL method:
+    none implies another or grants source reads, configured prompt/workspace
+    selection, native effects, receipt disclosure or cancellation. The REPL
+    foundation requires [developer.repl]; a later explicit Task action also
+    requires [developer.live.run] and its separate Root/source admission. *)
 
 type t =
   | List_prompts
@@ -5401,6 +11168,10 @@ type t =
   | Provider_select
   | View_organization
   | Manage_organization
+  | Developer_check
+  | Developer_fixture_run
+  | Developer_live_run
+  | Developer_repl
 [@@deriving compare, equal, sexp]
 
 include Core.Comparable.S with type t := t
@@ -5426,7 +11197,7 @@ val set_of_json : Jsonaf.t -> (Set.t, Error.t) result
 
 ## search_hit
 
-[JSON codec](../../lib/agent_protocol/search_hit.ml) · [interface](../../lib/agent_protocol/search_hit.mli)
+[implementation](../../lib/agent_protocol/search_hit.ml) · [interface](../../lib/agent_protocol/search_hit.mli)
 
 ```ocaml
 (** A disclosed occurrence in current canonical history; identity is host-owned.
@@ -5458,7 +11229,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## search_navigation
 
-[JSON codec](../../lib/agent_protocol/search_navigation.ml) · [interface](../../lib/agent_protocol/search_navigation.mli)
+[implementation](../../lib/agent_protocol/search_navigation.ml) · [interface](../../lib/agent_protocol/search_navigation.mli)
 
 ```ocaml
 (** Navigation is a fresh authorized lookup, never authority conveyed by a hit.
@@ -5522,7 +11293,7 @@ end
 
 ## search_page
 
-[JSON codec](../../lib/agent_protocol/search_page.ml) · [interface](../../lib/agent_protocol/search_page.mli)
+[implementation](../../lib/agent_protocol/search_page.ml) · [interface](../../lib/agent_protocol/search_page.mli)
 
 ```ocaml
 (** Bounded traversal progress, not a relevance-ranked or exact-count result.
@@ -5549,7 +11320,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## search_query
 
-[JSON codec](../../lib/agent_protocol/search_query.ml) · [interface](../../lib/agent_protocol/search_query.mli)
+[implementation](../../lib/agent_protocol/search_query.ml) · [interface](../../lib/agent_protocol/search_query.mli)
 
 ```ocaml
 (** Conversation search reuses catalog selectors. Page limit counts hits (1–100),
@@ -5577,7 +11348,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## search_snippet
 
-[JSON codec](../../lib/agent_protocol/search_snippet.ml) · [interface](../../lib/agent_protocol/search_snippet.mli)
+[implementation](../../lib/agent_protocol/search_snippet.ml) · [interface](../../lib/agent_protocol/search_snippet.mli)
 
 ```ocaml
 (** Plain text with one highlighted literal occurrence. Offsets and lengths count
@@ -5605,7 +11376,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## search_term
 
-[JSON codec](../../lib/agent_protocol/search_term.ml) · [interface](../../lib/agent_protocol/search_term.mli)
+[implementation](../../lib/agent_protocol/search_term.ml) · [interface](../../lib/agent_protocol/search_term.mli)
 
 ```ocaml
 (** A nonempty UTF-8 literal of at most 256 bytes. ASCII letters match without
@@ -5621,7 +11392,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## session
 
-[JSON codec](../../lib/agent_protocol/session.ml) · [interface](../../lib/agent_protocol/session.mli)
+[implementation](../../lib/agent_protocol/session.ml) · [interface](../../lib/agent_protocol/session.mli)
 
 ```ocaml
 (** Session specifications, lifecycle projections, attachments, and core requests. *)
@@ -6087,7 +11858,7 @@ end
 
 ## session_activity
 
-[JSON codec](../../lib/agent_protocol/session_activity.ml) · [interface](../../lib/agent_protocol/session_activity.mli)
+[implementation](../../lib/agent_protocol/session_activity.ml) · [interface](../../lib/agent_protocol/session_activity.mli)
 
 ```ocaml
 (** Payload-free attention observed from existing session/work owners. Reading is
@@ -6169,7 +11940,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## session_activity_summary
 
-[JSON codec](../../lib/agent_protocol/session_activity_summary.ml) · [interface](../../lib/agent_protocol/session_activity_summary.mli)
+[implementation](../../lib/agent_protocol/session_activity_summary.ml) · [interface](../../lib/agent_protocol/session_activity_summary.mli)
 
 ```ocaml
 (** Safe command-center session projection. Explicitly excludes Session.Spec,
@@ -6255,7 +12026,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## session_catalog
 
-[JSON codec](../../lib/agent_protocol/session_catalog.ml) · [interface](../../lib/agent_protocol/session_catalog.mli)
+[implementation](../../lib/agent_protocol/session_catalog.ml) · [interface](../../lib/agent_protocol/session_catalog.mli)
 
 ```ocaml
 (** Catalog projection: archive state is registry-owned, and active ownership
@@ -6277,7 +12048,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## session_catalog_query
 
-[JSON codec](../../lib/agent_protocol/session_catalog_query.ml) · [interface](../../lib/agent_protocol/session_catalog_query.mli)
+[implementation](../../lib/agent_protocol/session_catalog_query.ml) · [interface](../../lib/agent_protocol/session_catalog_query.mli)
 
 ```ocaml
 (** Catalog ordering uses bytewise display-name comparison and ascending typed
@@ -6319,7 +12090,7 @@ end
 
 ## session_configuration
 
-[JSON codec](../../lib/agent_protocol/session_configuration.ml) · [interface](../../lib/agent_protocol/session_configuration.mli)
+[implementation](../../lib/agent_protocol/session_configuration.ml) · [interface](../../lib/agent_protocol/session_configuration.mli)
 
 ```ocaml
 open! Core
@@ -6399,7 +12170,7 @@ end
 
 ## session_lifecycle
 
-[JSON codec](../../lib/agent_protocol/session_lifecycle.ml) · [interface](../../lib/agent_protocol/session_lifecycle.mli)
+[implementation](../../lib/agent_protocol/session_lifecycle.ml) · [interface](../../lib/agent_protocol/session_lifecycle.mli)
 
 ```ocaml
 open! Core
@@ -6536,7 +12307,7 @@ end
 
 ## session_metadata
 
-[JSON codec](../../lib/agent_protocol/session_metadata.ml) · [interface](../../lib/agent_protocol/session_metadata.mli)
+[implementation](../../lib/agent_protocol/session_metadata.ml) · [interface](../../lib/agent_protocol/session_metadata.mli)
 
 ```ocaml
 (** Organization metadata confers no execution authority. Stored values retain
@@ -6594,7 +12365,7 @@ end
 
 ## session_organization
 
-[JSON codec](../../lib/agent_protocol/session_organization.ml) · [interface](../../lib/agent_protocol/session_organization.mli)
+[implementation](../../lib/agent_protocol/session_organization.ml) · [interface](../../lib/agent_protocol/session_organization.mli)
 
 ```ocaml
 (** Host-qualified historical membership, independent of execution workspace,
@@ -6699,7 +12470,7 @@ end
 
 ## session_ref
 
-[JSON codec](../../lib/agent_protocol/session_ref.ml) · [interface](../../lib/agent_protocol/session_ref.mli)
+[implementation](../../lib/agent_protocol/session_ref.ml) · [interface](../../lib/agent_protocol/session_ref.mli)
 
 ```ocaml
 (** Persistent host-qualified identity; carries no connection or execution grant. *)
@@ -6718,7 +12489,7 @@ val t_of_sexp : Sexplib0.Sexp.t -> t
 
 ## session_seed
 
-[JSON codec](../../lib/agent_protocol/session_seed.ml) · [interface](../../lib/agent_protocol/session_seed.mli)
+[implementation](../../lib/agent_protocol/session_seed.ml) · [interface](../../lib/agent_protocol/session_seed.mli)
 
 ```ocaml
 open! Core
@@ -6812,7 +12583,7 @@ end
 
 ## session_work
 
-[JSON codec](../../lib/agent_protocol/session_work.ml) · [interface](../../lib/agent_protocol/session_work.mli)
+[implementation](../../lib/agent_protocol/session_work.ml) · [interface](../../lib/agent_protocol/session_work.mli)
 
 ```ocaml
 (** Payload-free work occurrence projections. Current security-view and transcript
@@ -6900,7 +12671,7 @@ end
 
 ## snapshot
 
-[JSON codec](../../lib/agent_protocol/snapshot.ml) · [interface](../../lib/agent_protocol/snapshot.mli)
+[implementation](../../lib/agent_protocol/snapshot.ml) · [interface](../../lib/agent_protocol/snapshot.mli)
 
 ```ocaml
 (** Principal-projected session state used by all connected clients. *)
@@ -6937,7 +12708,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## stored_completion
 
-[JSON codec](../../lib/agent_protocol/stored_completion.ml) · [interface](../../lib/agent_protocol/stored_completion.mli)
+[implementation](../../lib/agent_protocol/stored_completion.ml) · [interface](../../lib/agent_protocol/stored_completion.mli)
 
 ```ocaml
 (** Explicit async-job completion storage. Inline values retain their existing
@@ -6980,7 +12751,7 @@ val materialize
 
 ## stream_error
 
-[JSON codec](../../lib/agent_protocol/stream_error.ml) · [interface](../../lib/agent_protocol/stream_error.mli)
+[implementation](../../lib/agent_protocol/stream_error.ml) · [interface](../../lib/agent_protocol/stream_error.mli)
 
 ```ocaml
 (** Attachment-scoped terminal notification for a failed event subscription.
@@ -7002,7 +12773,7 @@ val to_notification : t -> Envelope.t
 
 ## subscription
 
-[JSON codec](../../lib/agent_protocol/subscription.ml) · [interface](../../lib/agent_protocol/subscription.mli)
+[implementation](../../lib/agent_protocol/subscription.ml) · [interface](../../lib/agent_protocol/subscription.mli)
 
 ```ocaml
 (** Durable moderator subscription identity and terminal state. Workflow-specific
@@ -7071,7 +12842,7 @@ end
 
 ## timestamp
 
-[JSON codec](../../lib/agent_protocol/timestamp.ml) · [interface](../../lib/agent_protocol/timestamp.mli)
+[implementation](../../lib/agent_protocol/timestamp.ml) · [interface](../../lib/agent_protocol/timestamp.mli)
 
 ```ocaml
 (** RFC 3339 UTC timestamps used by the agent protocol. *)
@@ -7110,7 +12881,7 @@ val to_json : t -> Jsonaf.t
 
 ## version
 
-[JSON codec](../../lib/agent_protocol/version.ml) · [interface](../../lib/agent_protocol/version.mli)
+[implementation](../../lib/agent_protocol/version.ml) · [interface](../../lib/agent_protocol/version.mli)
 
 ```ocaml
 (** Ochat agent protocol versions and feature negotiation. *)
@@ -7150,7 +12921,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 ## workspace
 
-[JSON codec](../../lib/agent_protocol/workspace.ml) · [interface](../../lib/agent_protocol/workspace.mli)
+[implementation](../../lib/agent_protocol/workspace.ml) · [interface](../../lib/agent_protocol/workspace.mli)
 
 ```ocaml
 (** Transport projections for configured workspace definitions. *)

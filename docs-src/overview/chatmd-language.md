@@ -341,6 +341,14 @@ Moderator scripts can call host-registered model recipes:
 - `Model.call(recipe_name, payload_json)` runs a host-defined recipe and returns structured JSON.
 - `Model.spawn(recipe_name, payload_json)` starts a background job and returns a stable job id immediately.
 
+The built-in `agent_prompt_v1` recipe takes a JSON object with required string
+fields `prompt` and `input`. Set `is_local: true` for a local prompt. Its optional
+`source_mode` is `"file"` by default; `"captured"` requires `is_local: true` and a
+host that holds the selected prompt's captured source inventory. A host without
+that inventory rejects the request before fetching the prompt. A missing,
+revoked or unavailable source never silently switches modes. Omitting
+`source_mode` selects the default; setting it to `null` is an error.
+
 Spawned model jobs deliver completion back to the moderator as internal events, using stable v1 tags:
 
 - `Model_job_succeeded(job_id, recipe_name, result_json)`

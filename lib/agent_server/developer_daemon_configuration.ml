@@ -1,0 +1,310 @@
+open! Core
+
+module Portable = struct
+  type t = Developer_endpoint.Policy.t
+
+  let create = Developer_endpoint.Policy.create
+  let with_repl_wire = Developer_endpoint.Policy.with_repl_wire
+  let with_trace_wire = Developer_endpoint.Policy.with_trace_wire
+end
+
+module Remote_content = struct
+  type t = Developer_child_remote_content.Policy.t
+
+  let create = Developer_child_remote_content.Policy.create
+end
+
+module Shell_approvals = struct
+  module Limits = Developer_approval_owner.Limits
+
+  type t =
+    { limits : Limits.t
+    ; job_read : Operator_authorization.t -> Agent_protocol.Developer_job.t -> bool
+    ; job_respond : Operator_authorization.t -> Agent_protocol.Developer_job.t -> bool
+    ; command_respond :
+        (Operator_authorization.t -> Agent_store.Developer_command_row.t -> bool) option
+    }
+
+  let create ~limits ~job_read ~job_respond =
+    { limits; job_read; job_respond; command_respond = None }
+  ;;
+
+  let with_command_respond t ~authorize = { t with command_respond = Some authorize }
+end
+
+module Repl = struct
+  type t = Developer_repl_epoch.Configuration.t
+
+  let create
+        ~scope_limits
+        ~root_limits
+        ~typing_limits
+        ~evaluator_limits
+        ~execution_policy
+        ~type_display_limits
+        ~max_instances
+        ~max_keys_per_instance
+        ~max_submissions_per_epoch
+        ~max_source_bytes
+        ~max_receipt_bytes
+        ~max_total_receipt_bytes
+        ~max_total_type_detail_bytes
+        ~max_task_origins
+        ~max_reference_page_bytes
+    =
+    let open Result.Let_syntax in
+    let%bind limits =
+      Developer_repl_epoch.Limits.create
+        ~max_instances
+        ~max_keys_per_instance
+        ~max_submissions_per_epoch
+        ~max_source_bytes
+        ~max_receipt_bytes
+        ~max_total_receipt_bytes
+        ~max_total_type_detail_bytes
+        ~max_task_origins
+        ~max_reference_page_bytes
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request (Error.to_string_hum error))
+    in
+    Developer_repl_epoch.Configuration.create
+      ~scope_limits
+      ~root_limits
+      ~typing_limits
+      ~evaluator_limits
+      ~execution_policy
+      ~type_display_limits
+      ~limits
+    |> Result.map_error ~f:(fun error ->
+      Agent_protocol.Error.invalid_request (Error.to_string_hum error))
+  ;;
+end
+
+module Traces = struct
+  module Limits = struct
+    type t = Developer_trace_retention.Limits.t
+
+    let create
+          ~max_traces
+          ~max_retained_bytes
+          ~max_source_refs_per_trace
+          ~max_provenance_bytes_per_trace
+          ~max_expired_tombstones
+          ~max_age_seconds
+          ~max_header_bytes
+          ~recorder
+      =
+      Developer_trace_retention.Limits.create
+        ~max_traces
+        ~max_retained_bytes
+        ~max_source_refs_per_trace
+        ~max_provenance_bytes_per_trace
+        ~max_expired_tombstones
+        ~max_age_seconds
+        ~max_header_bytes
+        ~recorder
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request (Error.to_string_hum error))
+    ;;
+  end
+
+  type t =
+    { mode : Chatml_trace.Recorder.Mode.t
+    ; limits : Limits.t
+    }
+
+  let create ~mode ~limits = { mode; limits }
+end
+
+module Limits = struct
+  type t =
+    { store : Agent_store.Developer_run_store.Limits.t
+    ; host : Developer_host.Limits.t
+    ; budgets : Developer_command_budgets.Configuration.t
+    ; agent_sources : Developer_agent_source_runtime.Limits.t
+    ; active_agent_calls : Agent_session.Selected_agent_depth.Limits.t
+    ; max_native_bindings : int
+    ; workspace_cleanup : Agent_session.Workspace_cleanup.Limits.t
+    ; max_agent_cache_entries : int
+    }
+
+  let create
+        ~store
+        ~roots
+        ~max_active_commands
+        ~disclosure
+        ~compilation
+        ~max_dependency_depth
+        ~execution
+        ~max_output_bytes
+        ~receipt
+        ~max_agent_sources
+        ~max_agent_source_work_steps
+        ~max_native_bindings
+        ~workspace_cleanup
+        ~max_agent_cache_entries
+    =
+    let open Result.Let_syntax in
+    let%bind host =
+      Developer_host.Limits.create ~roots ~max_active_commands ~disclosure
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request (Error.to_string_hum error))
+    in
+    let%bind budgets =
+      Developer_command_budgets.Configuration.create
+        ~compilation
+        ~max_dependency_depth
+        ~execution
+        ~max_output_bytes
+        ~receipt
+    in
+    let%bind agent_sources =
+      Developer_agent_source_runtime.Limits.create
+        ~max_agents:max_agent_sources
+        ~max_work_steps:max_agent_source_work_steps
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request (Error.to_string_hum error))
+    in
+    if max_native_bindings <= 0 || max_agent_cache_entries <= 0
+    then
+      Error
+        (Agent_protocol.Error.invalid_request
+           "developer native and cache limits must be positive")
+    else
+      Ok
+        { store
+        ; host
+        ; budgets
+        ; agent_sources
+        ; active_agent_calls = Agent_session.Selected_agent_depth.Limits.default
+        ; max_native_bindings
+        ; workspace_cleanup
+        ; max_agent_cache_entries
+        }
+  ;;
+
+  let with_max_active_agent_calls t ~max_active_calls =
+    Agent_session.Selected_agent_depth.Limits.create ~max_active_calls
+    |> Result.map_error ~f:(fun error ->
+      Agent_protocol.Error.invalid_request (Error.to_string_hum error))
+    |> Result.map ~f:(fun active_agent_calls -> { t with active_agent_calls })
+  ;;
+end
+
+type t =
+  { capture_policy : Authoring_context_service.Developer.Target_policy.t
+  ; capture_limits : Authoring_context_service.Developer.Limits.t
+  ; limits : Limits.t
+  ; result_disclosure : Developer_result_disclosure.Policy.t
+  ; receipt_read : Operator_authorization.t -> Agent_store.Developer_command_row.t -> bool
+  ; command_control :
+      Operator_authorization.t -> Agent_store.Developer_command_row.t -> bool
+  ; publisher_limits : Agent_store.Developer_result_publisher.Limits.t
+  ; publisher_storage : Agent_store.Developer_result_publisher.Storage.t
+  ; model_target : Inference.Request.Target.t option
+  ; remote_content : Remote_content.t option
+  ; repl : Repl.t option
+  ; traces : Traces.t option
+  ; shell_approvals : Shell_approvals.t option
+  ; portable_wire : Portable.t option
+  ; native_permission : Developer_native_permission.Mode.t
+  ; prepare_output :
+      Openai.Responses.Tool_output.Output.t -> (Jsonaf.t, Agent_protocol.Error.t) result
+  }
+
+let create_with_mode
+      ~capture_policy
+      ~capture_limits
+      ~limits
+      ~result_disclosure
+      ~receipt_read
+      ~command_control
+      ~publisher_limits
+      ~publisher_storage
+      ~model_target
+      ~native_permission
+      ~prepare_output
+  =
+  Ok
+    { capture_policy
+    ; capture_limits
+    ; limits
+    ; result_disclosure
+    ; receipt_read
+    ; command_control
+    ; publisher_limits
+    ; publisher_storage
+    ; model_target
+    ; remote_content = None
+    ; repl = None
+    ; traces = None
+    ; shell_approvals = None
+    ; portable_wire = None
+    ; native_permission
+    ; prepare_output
+    }
+;;
+
+let create
+      ~capture_policy
+      ~capture_limits
+      ~limits
+      ~result_disclosure
+      ~receipt_read
+      ~command_control
+      ~publisher_limits
+      ~publisher_storage
+      ~model_target
+      ~authorize_native
+      ~prepare_output
+  =
+  create_with_mode
+    ~capture_policy
+    ~capture_limits
+    ~limits
+    ~result_disclosure
+    ~receipt_read
+    ~command_control
+    ~publisher_limits
+    ~publisher_storage
+    ~model_target
+    ~native_permission:
+      (Developer_native_permission.Mode.Explicit_callback authorize_native)
+    ~prepare_output
+;;
+
+let create_with_selected_prompt_profile
+      ~capture_policy
+      ~capture_limits
+      ~limits
+      ~result_disclosure
+      ~receipt_read
+      ~command_control
+      ~publisher_limits
+      ~publisher_storage
+      ~model_target
+      ~prepare_output
+  =
+  create_with_mode
+    ~capture_policy
+    ~capture_limits
+    ~limits
+    ~result_disclosure
+    ~receipt_read
+    ~command_control
+    ~publisher_limits
+    ~publisher_storage
+    ~model_target
+    ~native_permission:Developer_native_permission.Mode.Selected_prompt_profile
+    ~prepare_output
+;;
+
+let with_remote_content t remote_content = { t with remote_content = Some remote_content }
+let with_repl t repl = { t with repl = Some repl }
+let with_traces t traces = { t with traces = Some traces }
+
+let with_shell_approvals t shell_approvals =
+  { t with shell_approvals = Some shell_approvals }
+;;
+
+let with_portable_wire t portable_wire = { t with portable_wire = Some portable_wire }

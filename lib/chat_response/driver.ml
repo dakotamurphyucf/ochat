@@ -51,20 +51,24 @@ let fetch_prompt ~ctx ~prompt ~is_local =
   | exn -> Error (Exn.to_string exn)
 ;;
 
-let capabilities_with_model_executor
-      ~(model_executor : Model_executor.t)
-      ~(session_id : string)
+let capabilities_with_model_recipe
+      ~(recipe : Moderation.Capabilities.model_recipe)
       (capabilities : Moderation.Capabilities.t)
   : Moderation.Capabilities.t
   =
   { capabilities with
     model_recipes =
-      Map.of_alist_exn
-        (module String)
-        [ ( Model_executor.agent_prompt_v1_name
-          , Model_executor.recipe_agent_prompt_v1 model_executor ~session_id () )
-        ]
+      Map.of_alist_exn (module String) [ Model_executor.agent_prompt_v1_name, recipe ]
   }
+;;
+
+let model_recipe_for_context ~sw ~(exec_context : Model_executor.exec_context) ~session_id
+  =
+  match exec_context.ctx.agent_prompt_v1_recipe with
+  | Some recipe -> recipe, None
+  | None ->
+    let executor = Model_executor.create ~sw ~exec_context () in
+    Model_executor.recipe_agent_prompt_v1 executor ~session_id (), Some executor
 ;;
 
 let create_moderator
@@ -130,6 +134,46 @@ let create_moderator
     Ok (Some moderator)
 ;;
 
+let start_moderator_entries
+      ~env
+      ~session_id
+      ~(artifact : Moderator_manager.Registry.artifact)
+      ~allocator
+      ~history
+      ~available_tools
+      ~capabilities
+      ~runtime_policy
+      ?on_process_run
+      ()
+  =
+  let open Result.Let_syntax in
+  let%bind manager =
+    Moderator_manager.create_entries
+      ~env
+      ~artifact
+      ~capabilities
+      ~allocator
+      ?on_process_run
+      ()
+  in
+  let moderator =
+    Stream_moderator.
+      { manager; session_id; session_meta = `Null; runtime_policy; event_handlers = None }
+  in
+  let now_ms = now_ms env in
+  let%map outcome =
+    Moderator_manager.handle_event_entries
+      manager
+      ~session_id
+      ~now_ms
+      ~history
+      ~available_tools
+      ~session_meta:`Null
+      ~event:Moderation.Event.Session_start
+  in
+  moderator, outcome, now_ms
+;;
+
 let create_moderator_entries
       ~env
       ~session_id
@@ -146,41 +190,25 @@ let create_moderator_entries
   match artifact with
   | None -> Ok None
   | Some artifact ->
-    let%bind manager =
-      Moderator_manager.create_entries
+    let%bind moderator, outcome, now_ms =
+      start_moderator_entries
         ~env
-        ~artifact
-        ~capabilities
-        ~allocator
-        ?on_process_run
-        ()
-    in
-    let moderator =
-      Stream_moderator.
-        { manager
-        ; session_id
-        ; session_meta = `Null
-        ; runtime_policy
-        ; event_handlers = None
-        }
-    in
-    let now_ms = now_ms env in
-    let%bind outcome =
-      Moderator_manager.handle_event_entries
-        manager
         ~session_id
-        ~now_ms
+        ~artifact
+        ~allocator
         ~history
         ~available_tools
-        ~session_meta:`Null
-        ~event:Moderation.Event.Session_start
+        ~capabilities
+        ~runtime_policy
+        ?on_process_run
+        ()
     in
     let%bind drained =
       if has_end_session_request outcome.runtime_requests
       then Ok []
       else
         Moderator_manager.drain_internal_events_entries
-          manager
+          moderator.manager
           ~session_id
           ~now_ms
           ~history
@@ -197,6 +225,114 @@ let create_moderator_entries
            "Ignoring moderator runtime request in shared driver: %s"
            (Sexp.to_string_hum ([%sexp_of: Moderation.Runtime_request.t] request))));
     Ok (Some moderator)
+;;
+
+module Selected_moderator_start = struct
+  type t =
+    | No_moderator
+    | Ready of In_memory_stream.moderator
+    | Halted
+    | Paused
+    | End_session_requested of string
+end
+
+let selected_start_request outcome =
+  let requests = outcome.Moderation.Outcome.runtime_requests in
+  if
+    List.exists requests ~f:(function
+      | Moderation.Runtime_request.Request_turn | Request_compaction -> true
+      | End_session _ -> false)
+  then Error "selected moderator requested an unsupported mutable runtime action"
+  else Ok (Runtime_semantics.should_end_session requests)
+;;
+
+let create_selected_moderator_entries
+      ~env
+      ~session_id
+      ~artifact
+      ~allocator
+      ~history
+      ~available_tools
+      ~capabilities
+      ~runtime_policy
+      ?on_process_run
+      ()
+  =
+  let open Result.Let_syntax in
+  match artifact with
+  | None -> Ok Selected_moderator_start.No_moderator
+  | Some artifact ->
+    let limit = runtime_policy.Runtime_semantics.budget.max_internal_event_drain in
+    if limit < 0
+    then Error "selected moderator has a negative startup event limit"
+    else (
+      let%bind moderator, started, _ =
+        start_moderator_entries
+          ~env
+          ~session_id
+          ~artifact
+          ~allocator
+          ~history
+          ~available_tools
+          ~capabilities
+          ~runtime_policy
+          ?on_process_run
+          ()
+      in
+      let rec drain used =
+        let%bind bounded =
+          Moderator_manager.drain_internal_events_entries_bounded
+            ~max_events:(if used >= limit then 0 else 1)
+            moderator.manager
+            ~session_id
+            ~now_ms:(now_ms env)
+            ~history
+            ~available_tools
+            ~session_meta:`Null
+        in
+        let%bind ended =
+          List.fold_result bounded.outcomes ~init:None ~f:(fun previous outcome ->
+            let%map current = selected_start_request outcome in
+            Option.first_some previous current)
+        in
+        match ended with
+        | Some reason -> Ok (Selected_moderator_start.End_session_requested reason)
+        | None ->
+          (match bounded.stop with
+           | Moderator_manager.Bounded_drain.Empty ->
+             Ok (Selected_moderator_start.Ready moderator)
+           | Halted -> Ok Selected_moderator_start.Halted
+           | Waiting_for_ui _ -> Error "selected moderator is waiting for UI input"
+           | Limit_reached ->
+             if used >= limit
+             then Ok (Selected_moderator_start.Ready moderator)
+             else drain (used + List.length bounded.outcomes))
+      in
+      let%bind ended = selected_start_request started in
+      match ended with
+      | Some reason -> Ok (Selected_moderator_start.End_session_requested reason)
+      | None ->
+        if
+          List.mem
+            runtime_policy.budget.pause_conditions
+            Runtime_semantics.Pause_internal_event_drains
+            ~equal:Runtime_semantics.equal_pause_condition
+        then (
+          let%bind observed =
+            Moderator_manager.drain_internal_events_entries_bounded
+              ~max_events:0
+              moderator.manager
+              ~session_id
+              ~now_ms:(now_ms env)
+              ~history
+              ~available_tools
+              ~session_meta:`Null
+          in
+          match observed.stop with
+          | Moderator_manager.Bounded_drain.Halted -> Ok Selected_moderator_start.Halted
+          | Waiting_for_ui _ -> Error "selected moderator is waiting for UI input"
+          | Empty | Limit_reached -> Ok Selected_moderator_start.Paused)
+        else drain 0)
 ;;
 
 let render_tool_output_text (output : Res.Tool_output.Output.t) =
@@ -576,6 +712,157 @@ let assistant_text entries =
   |> String.concat ~sep:"\n"
 ;;
 
+module Prepared_inputs = struct
+  type t =
+    { ctx : Eio_unix.Stdenv.base Ctx.t
+    ; elements : CM.top_level_elements list
+    ; config : CM.config
+    ; input : CM.content_item list
+    }
+
+  module Materialized = struct
+    type t =
+      { allocator : History_entry.Allocator.t
+      ; initial_history : History_entry.t list
+      }
+
+    let allocator t = t.allocator
+    let initial_history t = t.initial_history
+
+    let completion_text t all_history =
+      extension_entries ~prefix:t.initial_history all_history |> assistant_text
+    ;;
+  end
+
+  let prepare_elements ~(ctx : Eio_unix.Stdenv.base Ctx.t) ~prompt_dir ~elements ~input =
+    let ctx =
+      Ctx.create
+        ~env:(Ctx.env ctx)
+        ~dir:prompt_dir
+        ~tool_dir:(Ctx.tool_dir ctx)
+        ~cache:(Ctx.cache ctx)
+        ~inference_context:ctx.inference_context
+        ~inference_identity:ctx.inference_identity
+        ~on_inference_attempt:ctx.on_inference_attempt
+        ~on_inference_completion:ctx.on_inference_completion
+        ~on_inference_observation:ctx.on_inference_observation
+        ~on_admitted_call:ctx.on_admitted_call
+        ~before_inference_dispatch:ctx.before_inference_dispatch
+        ?agent_prompt_v1_recipe:ctx.agent_prompt_v1_recipe
+        ~inference_relation:ctx.inference_relation
+        ()
+      |> fun child -> Ctx.with_submission_guard child ctx.submission_guard
+    in
+    let config = Config.of_elements elements in
+    { ctx; elements; config; input }
+  ;;
+
+  let select_elements ~ctx ~prompt_dir ~elements ~input =
+    let prepared = prepare_elements ~ctx ~prompt_dir ~elements ~input in
+    { prepared with ctx = selected_context prepared.ctx prepared.config }
+  ;;
+
+  let prepared_elements ~parsed ?document_projection () =
+    let elements =
+      match document_projection with
+      | None -> CM.Parsed.elements parsed
+      | Some projection ->
+        if not (phys_equal parsed (CM.Document_projection.parsed projection))
+        then invalid_arg "prepared agent document projection belongs to another parser";
+        CM.Document_projection.elements projection
+    in
+    elements
+  ;;
+
+  let select_prepared ~ctx ~prompt_dir ~parsed ?document_projection ~input () =
+    let elements = prepared_elements ~parsed ?document_projection () in
+    select_elements ~ctx ~prompt_dir ~elements ~input
+  ;;
+
+  let select_prepared_model ~ctx ~prompt_dir ~parsed ?document_projection ~input () =
+    let elements = prepared_elements ~parsed ?document_projection () in
+    prepare_elements ~ctx ~prompt_dir ~elements ~input
+  ;;
+
+  let context t = t.ctx
+  let elements t = t.elements
+  let config t = t.config
+
+  let with_inference_context t ~inference_context =
+    { t with ctx = Ctx.with_inference t.ctx ~inference_context }
+  ;;
+
+  let with_model_recipe t recipe =
+    { t with ctx = Ctx.with_agent_prompt_v1_recipe t.ctx recipe }
+  ;;
+
+  let user t =
+    CM.User
+      { role = "user"
+      ; content = Some (Items t.input)
+      ; name = None
+      ; id = None
+      ; status = None
+      ; phase = None
+      ; ochat_history_id = None
+      ; source_context = None
+      ; function_call = None
+      ; tool_call = None
+      ; tool_call_id = None
+      ; type_ = None
+      }
+  ;;
+
+  let materialize_items ~session_id ?source ~prompt_items ~invocation_items () =
+    let items = prompt_items @ invocation_items in
+    let namespace =
+      match source with
+      | Some source -> session_id ^ "/" ^ source
+      | None -> agent_allocator_namespace session_id
+    in
+    let created_allocator =
+      History_entry.Allocator.create ~namespace ~next_sequence:0 |> Result.ok_or_failwith
+    in
+    let history = create_history_entries ~allocator:created_allocator items in
+    Materialized.{ allocator = created_allocator; initial_history = history }
+  ;;
+
+  let materialize
+        t
+        ~session_id
+        ?source
+        ?agent_source_runner
+        ?input_agent_source_runner
+        ~run_agent
+        ()
+    =
+    let convert ?agent_source_runner elements =
+      Converter.to_items ?agent_source_runner ~ctx:t.ctx ~run_agent elements
+    in
+    (* Keep prompt conversion before caller-owned input conversion: both may
+       run captured content agents while preparing the initial history. *)
+    let prompt_items = convert ?agent_source_runner t.elements in
+    let invocation_items =
+      convert ?agent_source_runner:input_agent_source_runner [ user t ]
+    in
+    materialize_items ~session_id ?source ~prompt_items ~invocation_items ()
+  ;;
+
+  let materialize_with_projectors
+        t
+        ~session_id
+        ?source
+        ~project_declaration
+        ~project_invocation
+        ()
+    =
+    let open Result.Let_syntax in
+    let%bind prompt_items = project_declaration ~ctx:t.ctx t.elements in
+    let%map invocation_items = project_invocation ~ctx:t.ctx [ user t ] in
+    materialize_items ~session_id ?source ~prompt_items ~invocation_items ()
+  ;;
+end
+
 let run_entries
       ~ctx
       ~allocator
@@ -628,6 +915,52 @@ let run_entries
       history
 ;;
 
+let run_stream_entries
+      ~ctx
+      ~allocator
+      ~history
+      ~tools
+      ~tool_tbl
+      ~moderator
+      ~history_compaction
+      ~response_dir
+      ?on_runtime_request
+      ?on_committed_entry
+      ?observer
+      ?source
+      ?parent_call_id
+      ()
+  =
+  In_memory_stream.run_completion_stream_in_memory_entries
+    ~inference_context:ctx.inference_context
+    ~inference_identity:ctx.inference_identity
+    ~on_inference_attempt:ctx.on_inference_attempt
+    ~on_inference_completion:ctx.on_inference_completion
+    ~on_inference_observation:ctx.on_inference_observation
+    ~on_admitted_call:ctx.on_admitted_call
+    ~submission_guard:ctx.submission_guard
+    ~before_inference_dispatch:ctx.before_inference_dispatch
+    ~inference_relation:ctx.inference_relation
+    ~env:(Ctx.env ctx)
+    ~datadir:response_dir
+    ~allocator
+    ~history
+    ~tools:(Some tools)
+    ~tool_tbl
+    ?moderator
+    ?on_transcript_event:(Option.map observer ~f:(fun observer -> observer.on_event))
+    ?source
+    ?parent_call_id
+    ?on_tool_execution:
+      (Option.map observer ~f:(fun observer -> observer.on_tool_execution))
+    ?on_runtime_request
+    ?on_history_item_appended:on_committed_entry
+    ?on_history_tool_out:on_committed_entry
+    ~history_compaction
+    ~parallel_tool_calls:true
+    ()
+;;
+
 type agent_input =
   | Authored of string
   | Prepared of
@@ -661,37 +994,6 @@ let rec run_agent_input
   (* 1.  Extract individual components from the shared context *)
   let dir = Option.value prompt_dir ~default:(Ctx.dir ctx) in
   let response_dir = Option.value response_dir ~default:(Ctx.dir ctx) in
-  let ctx =
-    Ctx.create
-      ~env:(Ctx.env ctx)
-      ~dir
-      ~tool_dir:(Ctx.tool_dir ctx)
-      ~cache:(Ctx.cache ctx)
-      ~inference_context:ctx.inference_context
-      ~inference_identity:ctx.inference_identity
-      ~on_inference_attempt:ctx.on_inference_attempt
-      ~on_inference_completion:ctx.on_inference_completion
-      ~on_inference_observation:ctx.on_inference_observation
-      ~inference_relation:ctx.inference_relation
-      ()
-  in
-  (* 1.  Build the full agent XML by adding any inline user items. *)
-  let msg =
-    CM.User
-      { role = "user"
-      ; content = Some (Items items)
-      ; name = None
-      ; id = None
-      ; status = None
-      ; phase = None
-      ; ochat_history_id = None
-      ; source_context = None
-      ; function_call = None
-      ; tool_call = None
-      ; tool_call_id = None
-      ; type_ = None
-      }
-  in
   let elements, programs =
     match input with
     | Authored prompt_xml ->
@@ -709,8 +1011,11 @@ let rec run_agent_input
       elements, programs
   in
   (* 3.  Configuration (max_tokens, model, …) *)
-  let cfg = Config.of_elements elements in
-  let ctx = selected_context ctx cfg in
+  let prepared =
+    Prepared_inputs.select_elements ~ctx ~prompt_dir:dir ~elements ~input:items
+  in
+  let cfg = Prepared_inputs.config prepared in
+  let ctx = Prepared_inputs.context prepared in
   let id = cfg.id in
   let runtime_session_id =
     Option.first_some id session_id |> Option.value ~default:"nested-agent"
@@ -769,11 +1074,13 @@ let rec run_agent_input
   let tools = agent_runtime.functions in
   let comp_tools, tool_tbl = Ochat_function.functions tools in
   let tools_req = Tool.convert_tools comp_tools in
-  (* 5.  Convert XML ‑> API items and enter the execute loop to handle function calls. *)
-  let convert ?agent_source_runner elements =
-    Converter.to_items
+  let materialized =
+    Prepared_inputs.materialize
+      prepared
+      ~session_id:runtime_session_id
+      ?source
       ?agent_source_runner
-      ~ctx
+      ?input_agent_source_runner
       ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
         run_agent
           ~history_compaction
@@ -785,13 +1092,10 @@ let rec run_agent_input
           ~ctx
           prompt
           items)
-      elements
+      ()
   in
-  (* Prompt declarations belong to this child; invocation items may belong to
-     its caller. Dynamic items never inherit either declaration inventory. *)
-  let prompt_items = convert ?agent_source_runner elements in
-  let invocation_items = convert ?agent_source_runner:input_agent_source_runner [ msg ] in
-  let init_items = prompt_items @ invocation_items in
+  let allocator = Prepared_inputs.Materialized.allocator materialized in
+  let init_entries = Prepared_inputs.Materialized.initial_history materialized in
   let all_items =
     if has_script elements
     then (
@@ -815,23 +1119,12 @@ let rec run_agent_input
         ; fetch_prompt
         }
       in
-      let model_executor = Model_executor.create ~sw ~exec_context () in
+      let recipe, model_executor =
+        model_recipe_for_context ~sw ~exec_context ~session_id
+      in
       let capabilities =
-        capabilities_with_model_executor
-          ~model_executor
-          ~session_id
-          Moderation.Capabilities.default
+        capabilities_with_model_recipe ~recipe Moderation.Capabilities.default
       in
-      let allocator =
-        let namespace =
-          match source with
-          | Some source -> session_id ^ "/" ^ source
-          | None -> agent_allocator_namespace session_id
-        in
-        History_entry.Allocator.create ~namespace ~next_sequence:0
-        |> Result.ok_or_failwith
-      in
-      let init_entries = create_history_entries ~allocator init_items in
       let moderator =
         let on_process_run = Agent_runtime.moderator_process_handler agent_runtime in
         create_moderator_entries
@@ -846,48 +1139,28 @@ let rec run_agent_input
           ()
         |> Result.ok_or_failwith
       in
-      Option.iter moderator ~f:(fun (m : In_memory_stream.moderator) ->
-        Model_executor.register_session
-          model_executor
-          ~session_id:m.session_id
-          ~manager:m.manager);
-      In_memory_stream.run_completion_stream_in_memory_entries
-        ~inference_context:ctx.inference_context
-        ~inference_identity:ctx.inference_identity
-        ~on_inference_attempt:ctx.on_inference_attempt
-        ~on_inference_completion:ctx.on_inference_completion
-        ~on_inference_observation:ctx.on_inference_observation
-        ~inference_relation:ctx.inference_relation
-        ~env:(Ctx.env ctx)
-        ~datadir:response_dir
+      (match model_executor, moderator with
+       | Some model_executor, Some (m : In_memory_stream.moderator) ->
+         Model_executor.register_session
+           model_executor
+           ~session_id:m.session_id
+           ~manager:m.manager
+       | None, Some _ | Some _, None | None, None -> ());
+      run_stream_entries
+        ~ctx
         ~allocator
         ~history:init_entries
-        ~tools:(Some tools_req)
+        ~tools:tools_req
         ~tool_tbl
-        ?moderator
-        ?on_transcript_event:(Option.map observer ~f:(fun observer -> observer.on_event))
+        ~moderator
+        ~history_compaction
+        ~response_dir
+        ?observer
         ?source
         ?parent_call_id
-        ?on_tool_execution:
-          (Option.map observer ~f:(fun observer -> observer.on_tool_execution))
-        ~history_compaction
-        ~parallel_tool_calls:true
         ()
-      |> extension_entries ~prefix:init_entries)
+      |> Prepared_inputs.Materialized.completion_text materialized)
     else (
-      let session_id =
-        Option.first_some id session_id |> Option.value ~default:"nested-agent"
-      in
-      let allocator =
-        let namespace =
-          match source with
-          | Some source -> session_id ^ "/" ^ source
-          | None -> agent_allocator_namespace session_id
-        in
-        History_entry.Allocator.create ~namespace ~next_sequence:0
-        |> Result.ok_or_failwith
-      in
-      let init_entries = create_history_entries ~allocator init_items in
       let all_entries =
         run_entries
           ~ctx
@@ -901,10 +1174,9 @@ let rec run_agent_input
           ~tool_tbl
           init_entries
       in
-      extension_entries ~prefix:init_entries all_entries)
+      Prepared_inputs.Materialized.completion_text materialized all_entries)
   in
-  (* Child output is semantic text; retained opaque evidence is never lowered. *)
-  assistant_text all_items
+  all_items
 
 and run_agent
       ?history_compaction
@@ -1192,26 +1464,24 @@ and run_completion_stream
     |> Result.ok_or_failwith
   in
   let input_entries = create_history_entries ~allocator inputs in
-  let model_executor =
-    let exec_context : Model_executor.exec_context =
-      { ctx
-      ; run_agent =
-          (fun ?history_compaction ?prompt_dir ?session_id ~ctx prompt items ->
-            run_agent
-              ?history_compaction
-              ?prompt_dir
-              ?session_id
-              ~response_dir:datadir
-              ~shell_manifest_authorizer
-              ~shell_approval_provider
-              ~ctx
-              prompt
-              items)
-      ; fetch_prompt
-      }
-    in
-    Model_executor.create ~sw ~exec_context ()
+  let exec_context : Model_executor.exec_context =
+    { ctx
+    ; run_agent =
+        (fun ?history_compaction ?prompt_dir ?session_id ~ctx prompt items ->
+          run_agent
+            ?history_compaction
+            ?prompt_dir
+            ?session_id
+            ~response_dir:datadir
+            ~shell_manifest_authorizer
+            ~shell_approval_provider
+            ~ctx
+            prompt
+            items)
+    ; fetch_prompt
+    }
   in
+  let recipe, model_executor = model_recipe_for_context ~sw ~exec_context ~session_id in
   let moderator =
     if has_script elements
     then
@@ -1223,20 +1493,19 @@ and run_completion_stream
         ~history:input_entries
         ~available_tools:tools
         ~capabilities:
-          (capabilities_with_model_executor
-             ~model_executor
-             ~session_id
-             Moderation.Capabilities.default)
+          (capabilities_with_model_recipe ~recipe Moderation.Capabilities.default)
         ?on_process_run:(Agent_runtime.moderator_process_handler agent_runtime)
         ()
       |> Result.ok_or_failwith
     else None
   in
-  Option.iter moderator ~f:(fun (m : In_memory_stream.moderator) ->
-    Model_executor.register_session
-      model_executor
-      ~session_id:m.session_id
-      ~manager:m.manager);
+  (match model_executor, moderator with
+   | Some model_executor, Some (m : In_memory_stream.moderator) ->
+     Model_executor.register_session
+       model_executor
+       ~session_id:m.session_id
+       ~manager:m.manager
+   | None, Some _ | Some _, None | None, None -> ());
   let runtime_requests = ref [] in
   let all_entries =
     In_memory_stream.run_completion_stream_in_memory_entries
@@ -1246,6 +1515,9 @@ and run_completion_stream
       ~on_inference_attempt:ctx.on_inference_attempt
       ~on_inference_completion:ctx.on_inference_completion
       ~on_inference_observation:ctx.on_inference_observation
+      ~on_admitted_call:ctx.on_admitted_call
+      ~submission_guard:ctx.submission_guard
+      ~before_inference_dispatch:ctx.before_inference_dispatch
       ~inference_relation:ctx.inference_relation
       ~datadir
       ~allocator

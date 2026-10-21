@@ -18,11 +18,15 @@ type t
     The host must use the matching prepared definitions under actor ownership and
     current permission/disclosure policy, including revalidation after waits.
     [delegated_moderator] selects the restricted moderator compiler contract and
-    includes it in the managed authority identity; defaults to false. *)
+    includes it in the managed authority identity; defaults to false.
+    [tool_contract] selects the actual static tool compiler contract; default
+    Standard preserves ordinary Tool_v1. This choice is included in authority
+    identity and retained by [rebind_code], never inferred from source text. *)
 val prepare
   :  ?startup:Startup_compilation.t
   -> ?limits:Chatml_compilation.limits
   -> ?delegated_moderator:bool
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
   -> ?programs:Chatml_prompt_programs.Restored.t
   -> env:Eio_unix.Stdenv.base
   -> owner:string
@@ -52,7 +56,9 @@ val authority_fingerprint : t -> string
 
     Existing capability/permission identities and authority_fingerprint remain
     unchanged. The returned definition/handlers carry their actual new executable
-    fingerprints. The owning host must authorize and dispatch the selected code
+    fingerprints. Rebinding retains this registry's original tool compiler
+    contract; it cannot widen or silently retarget the compiled surface.
+    The owning host must authorize and dispatch the selected code
     under its original resource/actor checks. Borrowed startup/checkpoint cover
     the whole comparison and compilation phase and never escape. Original
     exceptions and cancellation propagate. *)
@@ -116,6 +122,10 @@ val delegated_invocation_dependencies
     to this implementation, not to the calling script's tool selection. *)
 type execution
 
+(** Same admission checks as [execution], with an owner-neutral invocation.
+    The conversation API and its consumers retain their original exact type. *)
+type owned_execution
+
 (** Checks live captured authority, exact caller selection and dispatched source
     identity. This performs no authorization or execution; the owning dispatcher
     must repeat admission after any permission wait. *)
@@ -130,3 +140,23 @@ val admit
 val prepared : execution -> Extension_compiler.t
 val binding : execution -> Tool_capability.binding
 val invocation : execution -> Agent_protocol.Invocation.t
+
+(** Exact developer/owned admission. No provider-history or Session ID is
+    synthesized. The implementation shares the binding, revision, selection,
+    source and live-registry validation used by [admit]. *)
+val admit_owned
+  :  t
+  -> current:Tool_capability.t
+  -> selected:Tool_capability.t
+  -> reference:Tool_capability.reference
+  -> invocation:Agent_protocol.Host_invocation.t
+  -> (owned_execution, Tool_capability.error) result
+
+val owned_prepared : owned_execution -> Extension_compiler.t
+val owned_binding : owned_execution -> Tool_capability.binding
+val owned_invocation : owned_execution -> Agent_protocol.Host_invocation.t
+
+val delegated_owned_invocation_dependencies
+  :  delegation
+  -> Agent_protocol.Host_invocation.t
+  -> (Tool_capability.t, Tool_capability.error) result

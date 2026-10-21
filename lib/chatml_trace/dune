@@ -1,0 +1,6 @@
+(library
+ (name chatml_trace)
+ (public_name ochat.chatml_trace)
+ (modules chatml_trace)
+ (libraries core eio source chatml_source chatml_prepared_program chatml_diagnostic)
+ (preprocess (pps ppx_jane)))

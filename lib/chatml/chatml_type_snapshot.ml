@@ -41,6 +41,7 @@ module Id = struct
     phys_equal left.owner right.owner && Int.equal left.index right.index
   ;;
 
+  let index t = t.index
   let sexp_of_t t = [%sexp (t.index : int)]
 end
 
@@ -140,7 +141,6 @@ end
 module Binder = struct
   type t =
     { definition : Inferred.typ
-    ; group : int
     ; name : string
     ; id : Recursive_binder_id.t
     }
@@ -212,7 +212,10 @@ let freeze groups ~limits ~checkpoint =
   let quantifiers = ref Int.Map.empty in
   let free_cells = ref [] in
   let bound_cells = ref [] in
-  let binders = ref [] in
+  (* Binder identity is local to an input group. A global linear scan charges
+     work against unrelated host schemes for every recursive type. Keep the
+     same newest-first physical comparison order within each group. *)
+  let binders = Hashtbl.create (module Int) in
   let pending = ref [] in
   let new_node () =
     reserve_node ();
@@ -243,10 +246,12 @@ let freeze groups ~limits ~checkpoint =
       else None)
   in
   let binder definition group name =
+    checkpoint ();
+    let group_binders = Hashtbl.find binders group |> Option.value ~default:[] in
     match
-      List.find !binders ~f:(fun binder ->
+      List.find group_binders ~f:(fun binder ->
         checkpoint ();
-        Int.equal binder.Binder.group group && phys_equal binder.definition definition)
+        phys_equal binder.Binder.definition definition)
     with
     | Some binder -> binder.name, binder.id
     | None ->
@@ -254,7 +259,10 @@ let freeze groups ~limits ~checkpoint =
       let name = copy_label name in
       let id = { Id.owner; index = Hashtbl.length recursive_binders } in
       Hashtbl.set recursive_binders ~key:id.index ~data:name;
-      binders := { Binder.definition; group; name; id } :: !binders;
+      Hashtbl.set
+        binders
+        ~key:group
+        ~data:({ Binder.definition; name; id } :: group_binders);
       name, id
   in
   let quantifier group name =

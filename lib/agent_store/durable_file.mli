@@ -21,9 +21,16 @@ val replace
 
 (** Atomic replacement relative to a caller-owned, opened directory capability.
     [basename] must be one child name. The caller retains the directory and its
-    ownership lock throughout this operation; no absolute path is reopened. *)
+    ownership lock throughout this operation; no absolute path is reopened.
+    [before_rename] is a trusted, non-yielding final admission hook after the
+    temporary file is synced and immediately before entering the authoritative
+    rename operation. A raised exception is preserved with its original
+    backtrace and the temporary file is cleaned; the callback must not recurse
+    into this writer. No external authorization change can be made atomic with
+    the kernel rename itself. *)
 val replace_in
-  :  directory:_ Eio.Path.t
+  :  ?before_rename:(unit -> unit)
+  -> directory:_ Eio.Path.t
   -> durability:durability
   -> basename:string
   -> string

@@ -10,7 +10,7 @@ let object_ = Schema.Encoding.object_
 let array = Schema.Encoding.array
 
 module Inventory = Program_inventory
-module Binding = Program_binding
+module Binding = Chatml_prompt_binding
 module Parser = Chatmd_parser_input
 
 let source_key id ~checkpoint =

@@ -1,0 +1,39 @@
+{
+  "name": "ChatMD",
+  "scopeName": "text.chatmd",
+  "fileTypes": ["chatmd"],
+  "patterns": [
+    { "name": "comment.block.chatmd", "begin": "<!--", "end": "-->" },
+    { "name": "string.unquoted.raw.chatmd", "begin": "RAW\\|", "end": "\\|RAW" },
+    {
+      "name": "meta.embedded.chatml.chatmd",
+      "begin": "(<script)(?=[^>]{0,256}\\blanguage\\s*=\\s*[\"']chatml[\"'])[^>]{0,256}(?<!/)>",
+      "end": "</script\\s*>",
+      "contentName": "source.chatml.embedded.chatmd",
+      "patterns": [{ "include": "source.chatml" }]
+    },
+    {
+      "name": "meta.script.chatmd",
+      "begin": "<script\\b(?![^>]{0,256}/\\s*>)[^>]{0,256}>",
+      "end": "</script\\s*>",
+      "contentName": "string.unquoted.script.chatmd"
+    },
+    {
+      "name": "meta.tag.chatmd",
+      "begin": "(</?)(msg|user|agent|assistant|system|developer|script|doc|img|import|config|reasoning|summary|tool_call|tool_response|tool|shell_access|moderator_runtime|uses|authoring_context|authoring_help)\\b",
+      "end": "(/?>)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.chatmd" },
+        "2": { "name": "entity.name.tag.chatmd" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.end.chatmd" }
+      },
+      "patterns": [
+        { "match": "[A-Za-z_][A-Za-z0-9_-]*(?=\\s*(?:=|/?>))", "name": "entity.other.attribute-name.chatmd" },
+        { "name": "string.quoted.double.chatmd", "begin": "\"", "end": "\"" },
+        { "name": "string.quoted.single.chatmd", "begin": "'", "end": "'" }
+      ]
+    }
+  ]
+}

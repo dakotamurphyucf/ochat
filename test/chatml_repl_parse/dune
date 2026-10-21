@@ -1,0 +1,5 @@
+(library
+ (name chatml_repl_parse_tests)
+ (libraries core source chatml chatml_source)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

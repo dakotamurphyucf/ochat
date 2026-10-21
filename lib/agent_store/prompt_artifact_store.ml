@@ -687,6 +687,47 @@ let load t revision_id =
     | exn -> Error (Store_error.of_exn ~operation:"load root ChatMD" ~path:root_path exn))
 ;;
 
+let install_or_reuse t ~transaction_id candidate ~checkpoint =
+  let open Result.Let_syntax in
+  checkpoint ();
+  let%bind () = validate_artifact candidate in
+  let destination = revision_directory t candidate.Artifact.revision_id in
+  let destination_kind () =
+    try Ok (Eio.Path.kind ~follow:false (eio_path t destination)) with
+    | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+      Error
+        (Store_error.of_exn ~operation:"inspect prompt artifact" ~path:destination exn)
+  in
+  let verified_retained () =
+    checkpoint ();
+    let%bind retained = load t candidate.revision_id in
+    checkpoint ();
+    if not (Artifact.same_content candidate retained)
+    then
+      Error (Store_error.Corrupt "existing prompt revision differs from captured source")
+    else (
+      let%map () = Durable_file.sync_directory ~env:t.env ~path:t.root in
+      checkpoint ();
+      retained)
+  in
+  let%bind kind = destination_kind () in
+  match kind with
+  | `Directory -> verified_retained ()
+  | `Not_found ->
+    checkpoint ();
+    (match install t ~transaction_id candidate with
+     | Ok () -> verified_retained ()
+     | Error original ->
+       (* A competing publisher, or uncertainty after our rename, is resolved
+          only by the complete installed artifact and parent sync. *)
+       (match destination_kind () with
+        | Ok `Directory -> verified_retained ()
+        | Ok `Not_found -> Error original
+        | Ok _ -> Error (Store_error.Corrupt "invalid prompt revision destination")
+        | Error error -> Error error))
+  | _ -> Error (Store_error.Corrupt "invalid prompt revision destination")
+;;
+
 let verify_retained t ~reader ~revision_id ~manifest_sha256 =
   let module R = Retention_reader in
   let open Result.Let_syntax in

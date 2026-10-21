@@ -29,6 +29,28 @@ val capture
   -> checkpoint:(unit -> unit)
   -> (t, P.Error.t) Result.t
 
+(** Select a Model member from the same verified immutable authored inventory.
+    The upper checked Content_source supplies [parent] and the portable member;
+    this path does not invent a parser Agent occurrence or reread the original
+    root. Absence and inconsistent complete custody reject without File or
+    Fetch fallback. All retained source/program/content records and unknowns
+    remain subject to the existing bounded capture and replay checks. The
+    source bytes come from the actual retained root/dependency inventory and
+    are checked against [max_input_bytes] before copy/replay. The charged
+    checkpoint count is bounded by [max_work_steps]. [on_acquire] fires only
+    after pure member admission and immediately before potentially allocating
+    immutable capture/replay; earlier denial does not consume the caller's
+    budget. *)
+val capture_selected_member
+  :  parent:Prompt_revision.t
+  -> member:Source.Portable_path.t
+  -> content_limits:Chatmd_prompt_content.Limits.t option
+  -> max_input_bytes:int
+  -> max_work_steps:int
+  -> checkpoint:(unit -> unit)
+  -> on_acquire:(unit -> unit)
+  -> (t, P.Error.t) result
+
 (** Compatibility path used by Authored_agent_source only for a parent with NO
     parser custody. Require the actual emitted local tool descriptor from that
     parent's elements; keep existing confined artifact-path normalization and
@@ -40,6 +62,10 @@ val capture_legacy_tool
   -> content_limits:Chatmd_prompt_content.Limits.t option
   -> checkpoint:(unit -> unit)
   -> (t, P.Error.t) Result.t
+
+(** Observed immutable authored root and dependency bytes of this retained
+    selection, before role restoration. *)
+val selected_source_bytes : t -> int
 
 val root_relative_path : t -> string
 val authored_sources : t -> Chatmd_source_bundle.t

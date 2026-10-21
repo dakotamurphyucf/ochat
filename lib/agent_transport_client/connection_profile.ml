@@ -41,7 +41,7 @@ let name t = t.name
 let description t = t.description
 let expected_server t = t.expected_server
 
-let connect t ~sw ~env ~notification_capacity =
+let connect_with_features t ~sw ~env ~notification_capacity ~features =
   let open Result.Let_syntax in
   let%bind bearer_token =
     match t.daemon_credential_file with
@@ -55,10 +55,11 @@ let connect t ~sw ~env ~notification_capacity =
     ~finally:(fun () -> if not !keep then Agent_client.Connection.close connection)
     ~f:(fun () ->
       let%bind initialized =
-        Agent_client.Session_handle.initialize
+        Agent_client.Session_handle.initialize_with_features
           connection
           ~implementation_name:"ochat-selected-host"
           ~implementation_version:"dev"
+          ~features
       in
       let%bind () =
         match t.expected_server with
@@ -75,6 +76,15 @@ let connect t ~sw ~env ~notification_capacity =
       in
       keep := true;
       Ok connection)
+;;
+
+let connect t ~sw ~env ~notification_capacity =
+  connect_with_features
+    t
+    ~sw
+    ~env
+    ~notification_capacity
+    ~features:Agent_protocol.Inference_query.Features.all
 ;;
 
 let document_error error =

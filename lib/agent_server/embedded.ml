@@ -93,7 +93,10 @@ let server_config ~project_sources data_root =
     ; session_helpers = []
     ; authoring_packages = []
     ; authoring_budget = None
+    ; developer = None
     ; project_sources
+    ; authoring_project_access = None
+    ; authoring_upload_access = None
     ; unix_socket = Filename.concat data_root "agent.sock"
     ; http =
         { enabled = false
@@ -152,6 +155,7 @@ let prompt_config options =
     ; allowed_workspaces = [ "embedded.workspace" ]
     ; permission_profile = options.permission_profile.id
     ; runtime_policy = None
+    ; tool_contract = Chatml_compilation.Tool_contract.Standard
     ; enabled = true
     }
 ;;
@@ -193,12 +197,210 @@ let all_scopes =
     ]
 ;;
 
-let principal id =
+let principal ?(developer_scopes = Agent_protocol.Scope.Set.empty) id =
   Agent_protocol.Principal.create
     ~id
     ~authentication_kind:"embedded.local"
-    ~scopes:all_scopes
+    ~scopes:(Set.union all_scopes developer_scopes)
     ~attributes:[]
+;;
+
+let embedded_repl_request_id =
+  Agent_protocol.Envelope.Request_id.of_json (`Number "1")
+  |> Result.map_error ~f:(fun _ -> "invalid fixed embedded REPL request id")
+  |> Result.ok_or_failwith
+;;
+
+let embedded_repl_request_within_bound ~max_request_bytes request =
+  let module Repl = Agent_protocol.Developer_repl_wire in
+  let envelope =
+    Agent_protocol.Envelope.request
+      ~id:embedded_repl_request_id
+      ~method_:(Repl.Request.method_name request)
+      ~params:(Repl.Request.params request)
+      ()
+  in
+  let bytes =
+    Agent_protocol.Envelope.to_json envelope |> Jsonaf.to_string |> String.length
+  in
+  if max_request_bytes > 0 && bytes <= max_request_bytes
+  then Ok ()
+  else
+    Error
+      (Agent_protocol.Error.create
+         Resource_limit
+         ~message:"embedded REPL request exceeds its full envelope bound"
+         ~retryable:false
+         ())
+;;
+
+let embedded_trace_request_within_bound ~max_request_bytes request =
+  let module Trace = Agent_protocol.Developer_trace_wire in
+  let envelope =
+    Agent_protocol.Envelope.request
+      ~id:embedded_repl_request_id
+      ~method_:(Trace.Request.method_name request)
+      ~params:(Trace.Request.params request)
+      ()
+  in
+  let bytes =
+    Agent_protocol.Envelope.to_json envelope |> Jsonaf.to_string |> String.length
+  in
+  if max_request_bytes > 0 && bytes <= max_request_bytes
+  then Ok ()
+  else
+    Error
+      (Agent_protocol.Error.create
+         Resource_limit
+         ~message:"embedded trace request exceeds its full envelope bound"
+         ~retryable:false
+         ())
+;;
+
+let%test_unit "embedded REPL full-envelope boundary precedes dispatch" =
+  let module P = Agent_protocol in
+  let request = P.Developer_repl_wire.Request.Capabilities in
+  let envelope =
+    P.Envelope.request
+      ~id:embedded_repl_request_id
+      ~method_:(P.Developer_repl_wire.Request.method_name request)
+      ~params:(P.Developer_repl_wire.Request.params request)
+      ()
+  in
+  let bytes = P.Envelope.to_json envelope |> Jsonaf.to_string |> String.length in
+  assert (
+    Result.is_ok (embedded_repl_request_within_bound ~max_request_bytes:bytes request));
+  match embedded_repl_request_within_bound ~max_request_bytes:(bytes - 1) request with
+  | Error error -> assert (P.Error.equal_code error.code Resource_limit)
+  | Ok () -> failwith "N-1 embedded REPL envelope was admitted"
+;;
+
+let embedded_developer_request dispatcher ~context ~bound request =
+  let module Wire = Agent_protocol.Developer_wire in
+  let module Bound = Agent_client.Transport.Developer_response_bound in
+  let open Result.Let_syntax in
+  let is_capabilities =
+    match request with
+    | Wire.Request.Capabilities -> true
+    | Submit _
+    | Observe _
+    | Await_terminal _
+    | Cancel_and_wait _
+    | Approval_list _
+    | Approval_respond _
+    | Approval_cancel _
+    | Watch _
+    | Unwatch _ -> false
+  in
+  let%bind () =
+    match bound, is_capabilities with
+    | Bound.Bootstrap, true | Installed _, false -> Ok ()
+    | Bootstrap, false | Installed _, true ->
+      Error (Agent_protocol.Error.invalid_request "Developer bootstrap bound mismatch")
+  in
+  let%bind response = Dispatcher.dispatch_developer dispatcher ~context request in
+  let%bind limits =
+    match bound, response with
+    | Bound.Bootstrap, Wire.Response.Capabilities capabilities ->
+      Ok (Agent_protocol.Developer_common.Capabilities.limits capabilities)
+    | Installed _, Capabilities _ | Bootstrap, _ ->
+      Error (Agent_protocol.Error.invalid_request "Developer response bound mismatch")
+    | Installed limits, _ -> Ok limits
+  in
+  let%bind json = Wire.Response.to_json response ~limits in
+  if String.length (Jsonaf.to_string json) <= Bound.max_result_bytes bound
+  then Ok json
+  else
+    Error
+      (Agent_protocol.Error.create
+         Resource_limit
+         ~message:"embedded Developer response exceeds its bound"
+         ~retryable:false
+         ())
+;;
+
+let embedded_repl_request dispatcher ~context ~max_request_bytes ~bound request =
+  let module Wire = Agent_protocol.Developer_repl_wire in
+  let module Bound = Agent_client.Transport.Repl_response_bound in
+  let open Result.Let_syntax in
+  let is_capabilities =
+    match request with
+    | Wire.Request.Capabilities -> true
+    | Create _
+    | Submit _
+    | Observe _
+    | Cancel_submission _
+    | Inspect_type _
+    | Task_references_page _
+    | Task_submit _
+    | Task_observe _
+    | Task_await_terminal _
+    | Task_cancel_and_wait _
+    | Reset_and_wait _
+    | Close_and_wait _
+    | Watch _
+    | Unwatch _ -> false
+  in
+  let%bind () =
+    match bound, is_capabilities with
+    | Bound.Bootstrap, true | Installed _, false -> Ok ()
+    | Bootstrap, false | Installed _, true ->
+      Error (Agent_protocol.Error.invalid_request "REPL bootstrap bound mismatch")
+  in
+  (* In-memory calls have no physical request id. Number 1 is this adapter's
+     fixed equivalent for counting the complete serialized JSON-RPC envelope. *)
+  let%bind () = embedded_repl_request_within_bound ~max_request_bytes request in
+  let%bind response = Dispatcher.dispatch_developer_repl dispatcher ~context request in
+  let%bind limits =
+    match bound, response with
+    | Bound.Bootstrap, Wire.Response.Capabilities capabilities ->
+      Ok (Wire.Capabilities.limits capabilities)
+    | Installed _, Capabilities _ | Bootstrap, _ ->
+      Error (Agent_protocol.Error.invalid_request "REPL response bound mismatch")
+    | Installed limits, _ -> Ok limits
+  in
+  let%bind json = Wire.Response.to_json response ~limits in
+  if String.length (Jsonaf.to_string json) <= Bound.max_result_bytes bound
+  then Ok json
+  else
+    Error
+      (Agent_protocol.Error.create
+         Resource_limit
+         ~message:"embedded REPL response exceeds its bound"
+         ~retryable:false
+         ())
+;;
+
+let embedded_trace_request dispatcher ~context ~max_request_bytes ~bound request =
+  let module Wire = Agent_protocol.Developer_trace_wire in
+  let module Bound = Agent_client.Transport.Trace_response_bound in
+  let open Result.Let_syntax in
+  let%bind () =
+    match bound, request with
+    | Bound.Bootstrap, Wire.Request.Capabilities | Installed _, Page _ -> Ok ()
+    | Bootstrap, Page _ | Installed _, Capabilities ->
+      Error (Agent_protocol.Error.invalid_request "trace bootstrap bound mismatch")
+  in
+  let%bind () = embedded_trace_request_within_bound ~max_request_bytes request in
+  let%bind response = Dispatcher.dispatch_developer_trace dispatcher ~context request in
+  let%bind limits =
+    match bound, response with
+    | Bound.Bootstrap, Wire.Response.Capabilities capabilities ->
+      Ok (Wire.Capabilities.limits capabilities)
+    | Installed _, Capabilities _ | Bootstrap, _ ->
+      Error (Agent_protocol.Error.invalid_request "trace response bound mismatch")
+    | Installed limits, _ -> Ok limits
+  in
+  let%bind json = Wire.Response.to_json response ~limits in
+  if String.length (Jsonaf.to_string json) <= Bound.max_result_bytes bound
+  then Ok json
+  else
+    Error
+      (Agent_protocol.Error.create
+         Resource_limit
+         ~message:"embedded trace response exceeds its bound"
+         ~retryable:false
+         ())
 ;;
 
 let make_connection_owner daemon principal event_capacity ~max_attachments =
@@ -233,9 +435,12 @@ let make_connection_owner daemon principal event_capacity ~max_attachments =
           detached := true)))
   in
   let connection =
-    Agent_client.In_memory.create
-      ~request:(fun command ->
-        Dispatcher.dispatch_command (Daemon.dispatcher daemon) ~context command)
+    let dispatcher = Daemon.dispatcher daemon in
+    Agent_client.In_memory.create_with_developer_repl_trace
+      ~request:(fun command -> Dispatcher.dispatch_command dispatcher ~context command)
+      ~request_developer:(embedded_developer_request dispatcher ~context)
+      ~request_repl:(embedded_repl_request dispatcher ~context)
+      ~request_trace:(embedded_trace_request dispatcher ~context)
       ~notifications
       ~close:(fun () ->
         ignore (Eio.Promise.try_resolve close_resolver ());
@@ -261,7 +466,14 @@ let initialize connection =
       ~implementation
       ~protocol_min:Agent_protocol.Version.current
       ~protocol_max:Agent_protocol.Version.current
-      ~features:[]
+      ~features:
+        [ Agent_protocol.Developer_common.Features.run
+        ; Agent_protocol.Developer_common.Features.approvals
+        ; Agent_protocol.Developer_common.Features.events
+        ; Agent_protocol.Developer_repl_wire.Features.repl
+        ; Agent_protocol.Developer_repl_wire.Features.events
+        ; Agent_protocol.Developer_trace_wire.Features.trace
+        ]
       ~event_encodings:[ Json ]
       ~max_inbound_event_bytes:(16 * 1024 * 1024)
       ()
@@ -345,6 +557,8 @@ let open_owned_host
       ~home
       ~event_capacity
       ~temporary_root
+      ?local_policy
+      ()
   =
   let open Result.Let_syntax in
   let%bind () =
@@ -352,6 +566,7 @@ let open_owned_host
     |> Result.map_error ~f:protocol_of_store
   in
   let operator_id = ref None in
+  let bound_local = ref None in
   let captured_store = ref None in
   let namespace_transferred = ref false in
   Eio.Switch.on_release sw (fun () ->
@@ -370,6 +585,27 @@ let open_owned_host
     in
     operator_id := Some id
   in
+  let local_setup policy store =
+    let%bind () = before_activation store in
+    let%bind id =
+      Result.of_option
+        !operator_id
+        ~error:(Agent_protocol.Error.invalid_request "local identity was not minted")
+    in
+    let%map bound =
+      Config_validator.Embedded_local.bind policy ~env ~operator_id:id
+      |> Result.map_error ~f:(fun diagnostics ->
+        Agent_protocol.Error.invalid_request
+          (Sexp.to_string_hum ([%sexp_of: Config.Diagnostic.t list] diagnostics)))
+    in
+    bound_local := Some bound;
+    bound
+  in
+  let before_activation, local_setup =
+    match local_policy with
+    | None -> Some before_activation, None
+    | Some policy -> None, Some (local_setup policy)
+  in
   let%bind daemon =
     Daemon.start
       ~sw
@@ -378,7 +614,8 @@ let open_owned_host
       ~config
       ~tool_dir
       ?home
-      ~before_activation
+      ?before_activation
+      ?local_setup
       ~process_start_identity:None
       ()
   in
@@ -392,7 +629,13 @@ let open_owned_host
           (Agent_protocol.Error.invalid_request
              "local operator identity was not admitted")
     in
-    let%bind principal = principal id in
+    let developer_scopes =
+      Option.value_map
+        !bound_local
+        ~default:Agent_protocol.Scope.Set.empty
+        ~f:Config_validator.Embedded_local.developer_scopes
+    in
+    let%bind principal = principal ~developer_scopes id in
     let max_attachments =
       daemon_options.Daemon.protocol_limits.max_attachments_per_connection
     in
@@ -439,12 +682,14 @@ let open_host
     ~home:(Some home)
     ~event_capacity
     ~temporary_root:None
+    ()
 ;;
 
 let close_host host = Embedded_host_cleanup.close host.cleanup
 let host_connection host = host.connection
 let host_principal host = host.principal
 let host_dispatcher host = Daemon.dispatcher host.daemon
+let host_close_connection host = Daemon.close_connection host.daemon
 
 module Script_selection = struct
   type t =
@@ -580,7 +825,8 @@ let script_selection_in_context host ~expected ~startup =
                 then fail Invalid_state "selected revision has multiple moderators"
                 else Ok (Some role, legacy)
               | Legacy_moderator _ -> Ok (versioned, Some role)
-              | Standard (One_off_v1 | Tool_v1) | Native_hook _ -> Ok (versioned, legacy))
+              | Standard (One_off_v1 | Tool_v1 | Developer_tool_v1) | Native_hook _ ->
+                Ok (versioned, legacy))
         in
         Ok
           Script_selection.
@@ -789,6 +1035,7 @@ let open_local_host
       ?(daemon_options = Daemon.default_options)
       ?root_invocation
       ?project_sources
+      ?local_policy
       ?(authoring_package_files = [])
       ?authoring_budget
       options
@@ -798,6 +1045,14 @@ let open_local_host
   let%bind authoring_packages =
     Chat_response.Authoring_package_file.load_many ~env ~paths:authoring_package_files
     |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+  in
+  let%bind () =
+    if Option.is_some local_policy && Option.is_some project_sources
+    then
+      Error
+        (Agent_protocol.Error.invalid_request
+           "local policy and separate project sources cannot both be configured")
+    else Ok ()
   in
   let%bind data_root, temporary_root = data_root env options in
   let config = config ~project_sources options data_root in
@@ -822,6 +1077,8 @@ let open_local_host
     ~home:options.home
     ~event_capacity:options.event_capacity
     ~temporary_root
+    ?local_policy
+    ()
 ;;
 
 let with_local_host
@@ -830,6 +1087,7 @@ let with_local_host
       ?daemon_options
       ?root_invocation
       ?project_sources
+      ?local_policy
       ?authoring_package_files
       ?authoring_budget
       options
@@ -843,6 +1101,7 @@ let with_local_host
       ?daemon_options
       ?root_invocation
       ?project_sources
+      ?local_policy
       ?authoring_package_files
       ?authoring_budget
       options
@@ -858,6 +1117,7 @@ let start
       ?daemon_options
       ?root_invocation
       ?project_sources
+      ?local_policy
       ?authoring_package_files
       ?authoring_budget
       options
@@ -872,6 +1132,7 @@ let start
       ?project_sources
       ?authoring_package_files
       ?authoring_budget
+      ?local_policy
       options
   in
   Embedded_host_cleanup.protect host.cleanup (fun () ->

@@ -56,6 +56,10 @@ type 'env t =
   ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
   ; on_inference_completion : Inference_client.Completion.t -> unit
   ; on_inference_observation : Inference.Observation.t -> unit
+  ; on_admitted_call : In_memory_stream.Admitted_call.t -> unit
+  ; submission_guard : Inference_runtime.Submission_guard.t
+  ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
+  ; agent_prompt_v1_recipe : Moderation.Capabilities.model_recipe option
   ; env : 'env
   ; dir : Eio.Fs.dir_ty Eio.Path.t
     (** Root directory used by {!Fetch} helpers for reading local files. *)
@@ -75,6 +79,9 @@ let create
       ~on_inference_completion
       ?(inference_relation = Transcript.Scope.Root)
       ?(on_inference_observation = fun _ -> ())
+      ?(on_admitted_call = fun _ -> ())
+      ?(before_inference_dispatch = fun _ -> ())
+      ?agent_prompt_v1_recipe
       ~env
       ~dir
       ~tool_dir
@@ -87,6 +94,10 @@ let create
   ; on_inference_attempt
   ; on_inference_completion
   ; on_inference_observation
+  ; on_admitted_call
+  ; submission_guard = Inference_runtime.Submission_guard.empty
+  ; before_inference_dispatch
+  ; agent_prompt_v1_recipe
   ; env
   ; dir
   ; tool_dir
@@ -101,6 +112,9 @@ let of_env
       ~on_inference_completion
       ?inference_relation
       ?on_inference_observation
+      ?on_admitted_call
+      ?before_inference_dispatch
+      ?agent_prompt_v1_recipe
       ~env
       ~cache
       ()
@@ -111,6 +125,9 @@ let of_env
     ~on_inference_attempt
     ~on_inference_completion
     ?on_inference_observation
+    ?on_admitted_call
+    ?before_inference_dispatch
+    ?agent_prompt_v1_recipe
     ?inference_relation
     ~env
     ~dir:(Eio.Stdenv.fs env)
@@ -122,6 +139,13 @@ let of_env
 exception Inference_admission_rejected
 
 let with_inference t ~inference_context = { t with inference_context }
+let with_agent_prompt_v1_recipe t recipe = { t with agent_prompt_v1_recipe = Some recipe }
+
+let with_submission_guard t guard =
+  { t with
+    submission_guard = Inference_runtime.Submission_guard.compose t.submission_guard guard
+  }
+;;
 
 let with_inference_attempt_guard t ~before_attempt =
   { t with
@@ -144,10 +168,12 @@ let inference_execution t =
     ~context:t.inference_context
     ~identity:t.inference_identity
     ~relation:t.inference_relation
-    ~before_dispatch:(fun _ -> ())
+    ~before_dispatch:t.before_inference_dispatch
     ~on_attempt:t.on_inference_attempt
     ~on_observation:t.on_inference_observation
     ~on_completion:t.on_inference_completion
+  |> fun execution ->
+  Inference_client.Execution.with_submission_guard execution t.submission_guard
 ;;
 
 (** [net t] exposes the network namespace ([env#net]). *)

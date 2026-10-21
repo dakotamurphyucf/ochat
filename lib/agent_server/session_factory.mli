@@ -56,6 +56,15 @@ type inference_policy =
       prompt_revision_id:Agent_protocol.Id.Prompt_revision.t
       -> config:Chat_response.Config.t
       -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t
+  ; capture_developer_default_target :
+      unit -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t
+    (** Trusted startup capture only for an explicitly configured Developer
+        Provider_default. The composition root closes this over the SAME host
+        as capture/profile/resolve below; unlike Prompt capture it has no
+        prompt revision and cannot accept a fabricated one. Never invoked for
+        Disabled or for an embedding-supplied Developer configuration. Startup
+        resolves its result through this policy's exact resolver and fails on
+        capture/resolve error. It is not a client model-selection grant. *)
   ; select_inference_profile :
       current:Inference.Request.Target.t
       -> profile:string
@@ -100,9 +109,54 @@ module Child_source_policy : sig
     :  source:Agent_session.Captured_agent_runner.Source.t
     -> runtime_policy_revision:Chatml_source.Digest.t
     -> t
+
+  (** Bind the configured source acquisition policy to one authentic retained
+      Prompt revision's original source lease and selected compiler contract.
+      This creates no new source grant or child execution authority. *)
+  val bind
+    :  t
+    -> tool_contract:Chatml_compilation.Tool_contract.t
+    -> active_agent_calls:Agent_session.Selected_agent_depth.Limits.t
+    -> content_limits:Chatmd_prompt_content.Limits.t option
+    -> artifact_store:Agent_store.Prompt_artifact_store.t
+    -> source_lease:Agent_session.Prompt_source_lease.t
+    -> Agent_session.Captured_agent_runner.Source_binding.t
 end
 
 type t
+
+module Developer_catalog : sig
+  type t
+
+  module Admission : sig
+    module Error : sig
+      type t =
+        | Busy
+        | Publication_uncertain
+        | Foreign_domain
+      [@@deriving equal, sexp_of]
+    end
+  end
+
+  val workspace_definitions : t -> Agent_session.Workspace_definition.t list
+
+  val find_workspace
+    :  t
+    -> Agent_protocol.Id.Workspace_definition.t
+    -> Agent_session.Workspace_definition.t option
+
+  (** Read the current compiled profile during the caller's catalog admission.
+      The ID is only selection data; this projection grants no run, source or
+      native permission and cannot replace the publication owner. *)
+  val find_profile : t -> string -> Agent_session.Permission_policy.t option
+
+  val manifest_grants : t -> Operator_manifest_grant.t list
+  val with_admission : t -> f:(unit -> 'a) -> ('a, Admission.Error.t) result
+end
+
+(** Read/admission projection of the factory's exact publication owner.
+    It exposes no replacement/seal and cannot be minted from copied lists. *)
+val developer_catalog : t -> Developer_catalog.t
 
 type generated_lifetime =
   | Owned

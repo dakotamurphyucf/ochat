@@ -25,11 +25,12 @@ let rec files env root relative =
 
 let protocol_types env root =
   let header =
-    "# Protocol types and codec reference\n\n\
+    "# Protocol types and implementation reference\n\n\
      Generated from the current public interfaces. Do not hand-edit the excerpts.\n\
      The [protocol guide](protocol.md) explains operation semantics and authorization.\n\
-     Each section includes the complete typed contract and a link to its JSON codec;\n\
-     wire tags/defaults are defined by that codec, not OCaml constructor spelling.\n\n"
+     Each section includes the complete typed contract and its implementation.\n\
+     Modules with wire codecs define their tags/defaults there, not through OCaml\n\
+     constructor spelling.\n\n"
   in
   let sections =
     files env root "lib/agent_protocol"
@@ -38,7 +39,7 @@ let protocol_types env root =
       let name = Filename.basename file |> Filename.chop_extension in
       sprintf
         "## %s\n\n\
-         [JSON codec](../../%s.ml) · [interface](../../%s)\n\n\
+         [implementation](../../%s.ml) · [interface](../../%s)\n\n\
          ```ocaml\n\
          %s\n\
          ```\n\n"

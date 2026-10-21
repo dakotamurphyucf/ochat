@@ -5,6 +5,22 @@
   store_error
   data_root
   durable_file
+  authoring_upload_document
+  authoring_upload_files
+  authoring_upload_publication
+  authoring_upload_store
+  developer_command_diagnostic
+  developer_command_fixture
+  developer_command_receipt
+  developer_command_row
+  developer_command_limits
+  developer_command_rows
+  developer_inference_row
+  developer_inference_transition
+  developer_run_document
+  developer_run_cpu
+  developer_run_transition
+  developer_run_store
   frame
   document_record
   document_fields
@@ -39,12 +55,24 @@
   blob_metadata
   blob_metadata_document
   blob_stage_documents
+  blob_developer_namespace
   job_result_intent_document
   blob_store
   blob_reference_scan
   blob_retention
   retention_reader
+  bounded_tree_cleanup
+  result_intent_file
+  developer_owner_document
+  developer_result_reference
+  developer_result_intent_document
+  developer_result_intent
+  developer_result_publisher
+  developer_result_inventory
+  developer_result_recovery
   job_result_intent
+  result_publication_lock
+  result_publication_phase
   job_result_store
   transaction
   commit_writer
@@ -66,14 +94,41 @@
   prompt_artifact_staging
   prompt_artifact_store
   migration)
- (private_modules journal_initial_creation prompt_artifact_staging)
+ (private_modules
+  journal_initial_creation
+  prompt_artifact_staging
+  authoring_upload_document
+  authoring_upload_files
+  authoring_upload_publication
+  developer_inference_row
+  developer_inference_transition
+  developer_command_rows
+  developer_run_document
+  developer_run_cpu
+  developer_run_transition
+  blob_developer_namespace
+  result_intent_file
+  developer_owner_document
+  developer_result_intent_document
+  developer_result_intent
+  developer_result_inventory
+  result_publication_lock
+  result_publication_phase)
  (libraries ochat.inference
+  ochat.transcript
+  ochat.history_entry
   core
   core_unix
   cstruct
   bin_prot
   digestif
   ochat.document_schema
+  ochat.chatml_source
+  chatml_prompt_binding
+  chatml_prepared_program
+  chatml_project_build
+  chatml_authoring_bundle_project
+  chatml_authoring_bundle_document
   eio
   eio.unix
   ochat.agent_protocol)

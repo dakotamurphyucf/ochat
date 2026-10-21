@@ -14,6 +14,8 @@ type startup_mode =
   | Operator_only
 [@@deriving equal, sexp]
 
+module Developer_configuration = Developer_daemon_configuration
+
 type options =
   { startup_mode : startup_mode
   ; root_invocation :
@@ -21,6 +23,8 @@ type options =
   ; implementation_name : string
   ; implementation_version : string
   ; features : string list
+  ; authoring : Authoring_installation.Host_policy.t option
+  ; developer : Developer_configuration.t option
   ; extension_host : Agent_protocol.Extension_capabilities.host
   ; protocol_limits : Agent_protocol.Initialize.Limits.t
   ; timing : Agent_protocol.Initialize.Timing.t
@@ -59,6 +63,8 @@ type t =
   ; workspaces : Agent_session.Workspace_catalog.t
   ; registry : Session_registry.t
   ; handler : Command_handler.t
+  ; authoring : Authoring_installation.t option
+  ; developer : Developer_host.t option
   ; provider_operator : Provider_operator_port.t option
   ; dispatcher : Dispatcher.t
   ; start_scheduler : Start_scheduler.t
@@ -98,12 +104,27 @@ type health_services =
   ; health_status_ref : status ref
   }
 
+let default_protocol_limits : Agent_protocol.Initialize.Limits.t =
+  { max_request_bytes = 16 * 1024 * 1024
+  ; max_event_bytes = 16 * 1024 * 1024
+  ; max_page_size = 1_000
+  ; max_attachments_per_connection = 64
+  }
+;;
+
 let default_options =
   { startup_mode = Execute
   ; root_invocation = Ui
   ; implementation_name = "ochat-agent-server"
   ; implementation_version = "dev"
   ; extension_host = Daemon
+  ; authoring =
+      Some
+        (Authoring_installation.Host_policy.basic_supplied
+           ~initialize_limits:default_protocol_limits
+         |> Result.map_error ~f:(fun failure -> failure.Agent_protocol.Error.message)
+         |> Result.ok_or_failwith)
+  ; developer = None
   ; features =
       [ "sessions.seed"
       ; "attachments.multi_client"
@@ -115,12 +136,7 @@ let default_options =
       ]
       @ Agent_protocol.Extension_capabilities.known_features
       @ Agent_protocol.Inference_query.Features.all
-  ; protocol_limits =
-      { max_request_bytes = 16 * 1024 * 1024
-      ; max_event_bytes = 16 * 1024 * 1024
-      ; max_page_size = 1_000
-      ; max_attachments_per_connection = 64
-      }
+  ; protocol_limits = default_protocol_limits
   ; timing =
       { heartbeat_interval_ms = 15_000
       ; owner_lease_duration_ms = 60_000
@@ -164,6 +180,7 @@ let default_options =
           ; max_entries = 65_536
           ; max_bytes = 256 * 1024 * 1024
           ; max_file_bytes = 64 * 1024 * 1024
+          ; max_work = 2_000_000
           }
       }
   ; seed_recovery_limits = Session_factory.Seed_recovery_limits.default
@@ -186,6 +203,8 @@ let default_options =
       { capture_inference_target =
           (fun ~prompt_revision_id:_ ~config:_ ->
             Error Inference_runtime.Preparation_error.Target_unavailable)
+      ; capture_developer_default_target =
+          (fun () -> Error Inference_runtime.Preparation_error.Target_unavailable)
       ; select_inference_profile =
           (fun ~current:_ ~profile:_ ->
             Error Inference_runtime.Preparation_error.Target_unavailable)
@@ -253,6 +272,13 @@ let status t = !(t.status_ref)
 let dispatcher t = t.dispatcher
 let registry t = t.registry
 let store t = t.store
+
+module For_testing = struct
+  let job_scheduler_wait_deadline t =
+    Job_scheduler.For_testing.loop_wait_deadline t.job_scheduler
+  ;;
+end
+
 let factory t = t.factory
 let blob_store t = t.blob_store
 let prompts t = t.prompts
@@ -598,9 +624,37 @@ let extension_capabilities options config =
 ;;
 
 let enabled_features options capabilities requested =
-  List.filter options.features ~f:(fun feature ->
-    List.mem requested feature ~equal:String.equal)
-  |> Agent_protocol.Extension_capabilities.filter_available capabilities
+  let selected =
+    List.filter options.features ~f:(fun feature ->
+      List.mem requested feature ~equal:String.equal)
+    |> Agent_protocol.Extension_capabilities.filter_available capabilities
+  in
+  if List.mem selected Agent_protocol.Developer_common.Features.run ~equal:String.equal
+  then selected
+  else
+    List.filter selected ~f:(fun feature ->
+      not (String.equal feature Agent_protocol.Developer_common.Features.events))
+;;
+
+let with_installed_developer_features options endpoint =
+  let module Features = Agent_protocol.Developer_common.Features in
+  let configured =
+    List.filter options.features ~f:(fun feature ->
+      not
+        (List.mem
+           [ Features.run
+           ; Features.approvals
+           ; Features.events
+           ; Agent_protocol.Developer_trace_wire.Features.trace
+           ]
+           feature
+           ~equal:String.equal))
+  in
+  { options with
+    features =
+      configured
+      @ Option.value_map endpoint ~default:[] ~f:Developer_endpoint.available_features
+  }
 ;;
 
 let initialize
@@ -1156,10 +1210,9 @@ let compose
   let registry = Session_registry.create () in
   Startup_cleanup.adopt_registry_exn startup_cleanup registry;
   let start_queue = Agent_session.Start_queue.create () in
+  let workspace_leases = Agent_session.Workspace_lease.create () in
   let%bind quota_manager =
-    Agent_session.Quota_manager.create
-      ~limits:options.quota_limits
-      ~workspace_leases:(Agent_session.Workspace_lease.create ())
+    Agent_session.Quota_manager.create ~limits:options.quota_limits ~workspace_leases
   in
   let job_capacity = Job_capacity.create ~limits:config.server.job_limits in
   let factory_limits =
@@ -1197,10 +1250,11 @@ let compose
             ~parser_limits:(Agent_session.Prompt_revision_builder.capture_limits ())
             ~max_work_steps:(Sources.Policy.max_work_steps policy)
             ~preprocess:Meta_prompting.Preprocessor.preprocess
-            ~prepare_programs:(fun startup ~invocation scope capture ->
+            ~prepare_programs:(fun startup ~tool_contract ~invocation scope capture ->
               Prompt_catalog_host.prepare_child_programs
                 project_catalog
                 ~startup
+                ~tool_contract
                 ~invocation
                 ~scope
                 ~capture
@@ -1352,6 +1406,311 @@ let compose
       let%bind () = Schedule_scheduler.reconcile_recovered ~registry ~startup_time in
       Session_factory.complete_index_recovery factory (Session_registry.entries registry))
   in
+  let%bind configured_contracts =
+    match
+      ( config.server.authoring_project_access
+      , config.server.authoring_upload_access
+      , config.server.developer )
+    with
+    | None, None, None -> Ok None
+    | native, upload, developer ->
+      let%bind native_limits = Authoring_native_policy.Limits.standard in
+      let native_targets =
+        Option.value_map native ~default:[] ~f:(fun access ->
+          List.map access.selections ~f:(fun selected -> selected.target))
+      in
+      let upload_targets =
+        Option.value_map
+          upload
+          ~default:[]
+          ~f:Authoring_upload_access_configuration.targets
+      in
+      let%bind developer_targets =
+        Option.value_map
+          developer
+          ~default:(Ok [])
+          ~f:Developer_startup_configuration.standard_targets
+      in
+      Authoring_standard_contracts.create
+        ~targets:(native_targets @ upload_targets @ developer_targets)
+        ~max_identity_bytes:
+          (Authoring_native_policy.Limits.max_contract_identity_bytes native_limits)
+        ~max_work_steps:
+          (Authoring_native_policy.Limits.max_contract_work_steps native_limits)
+        ~checkpoint:Eio.Fiber.check
+      |> Result.map_error ~f:(function
+        | Authoring_standard_contracts.Error.Invalid_limits ->
+          Agent_protocol.Error.invalid_request "invalid Standard authoring limits"
+        | Contract_limit ->
+          Agent_protocol.Error.invalid_request "Standard authoring target limit")
+      |> Result.map ~f:(fun contracts -> Some (native_limits, contracts))
+  in
+  let%bind native_authoring_policy, configured_project =
+    match config.server.authoring_project_access with
+    | None -> Ok (options.authoring, None)
+    | Some configured ->
+      let native_limits, shared_contracts = Option.value_exn configured_contracts in
+      Authoring_native_policy.create
+        ~base:options.authoring
+        ~configured:(Some configured)
+        ~contracts:(Some shared_contracts)
+        ~source_configuration:
+          (Option.value
+             config.server.project_sources
+             ~default:Project_source_configuration.local_only)
+        ~source_host:project_sources
+        ~initialize_limits:options.protocol_limits
+        ~document_dir:(Eio.Stdenv.cwd env)
+        ~limits:native_limits
+        ~checkpoint:Eio.Fiber.check
+      |> Result.map ~f:(fun bound ->
+        ( Authoring_native_policy.host_policy bound
+        , Authoring_native_policy.configured_project bound ))
+  in
+  let%bind authoring_policy =
+    match config.server.authoring_upload_access with
+    | None -> Ok native_authoring_policy
+    | Some configured ->
+      let _, shared_contracts = Option.value_exn configured_contracts in
+      let%bind limits = Authoring_upload_policy.Limits.standard in
+      Authoring_upload_policy.create
+        ~base:native_authoring_policy
+        ~configured:(Some configured)
+        ~native_config:config.server.authoring_project_access
+        ~contracts:shared_contracts
+        ~initialize_limits:options.protocol_limits
+        ~document_dir:(Eio.Stdenv.cwd env)
+        ~limits
+      |> Result.map ~f:Authoring_upload_policy.host_policy
+  in
+  let%bind authoring =
+    match authoring_policy with
+    | None -> Ok None
+    | Some policy ->
+      Authoring_installation.create
+        ~env
+        ~sw
+        ~clock:(Eio.Stdenv.mono_clock env)
+        ~project_sources
+        ~store
+        ~policy
+        ~initialize_limits:options.protocol_limits
+        ~checkpoint:Eio.Fiber.check
+      |> Result.map ~f:Option.some
+  in
+  Option.iter authoring ~f:(Startup_cleanup.adopt_authoring_exn startup_cleanup);
+  let%bind options =
+    match config.server.developer with
+    | None -> Ok options
+    | Some developer ->
+      let%bind authoring =
+        Option.value_map
+          authoring
+          ~default:
+            (Error
+               (Agent_protocol.Error.invalid_request
+                  "configured Developer requires an installed Authoring owner"))
+          ~f:Result.return
+      in
+      let _, contracts = Option.value_exn configured_contracts in
+      let%map configuration =
+        Developer_startup_policy.bind
+          developer
+          ~source_host:project_sources
+          ~authoring
+          ~source_configuration:
+            (Option.value
+               config.server.project_sources
+               ~default:Project_source_configuration.local_only)
+          ~read_access:config.server.authoring_project_access
+          ~upload_access:config.server.authoring_upload_access
+          ~configured_project
+          ~contracts
+          ~inference_policy:options.inference_policy
+          ~initialize_limits:options.protocol_limits
+      in
+      { options with developer = Some configuration }
+  in
+  let%bind developer_changes =
+    match options.developer with
+    | None -> Ok None
+    | Some configuration ->
+      (match configuration.portable_wire with
+       | None -> Ok None
+       | Some policy ->
+         let%bind () =
+           Developer_portable_admission.check
+             ~policy
+             ~initialize:options.protocol_limits
+             ~budgets:configuration.limits.budgets
+             ~approval:
+               (Option.map configuration.shell_approvals ~f:(fun shell -> shell.limits))
+             ~repl:configuration.repl
+             ~trace:(Option.map configuration.traces ~f:(fun traces -> traces.limits))
+         in
+         Developer_change_hub.create
+           ~sw
+           ~limits:(Developer_endpoint.Policy.change_limits policy)
+           ~wire_limits:(Developer_endpoint.Policy.wire_limits policy)
+           ~repl_wire_limits:(Developer_endpoint.Policy.repl_wire_limits policy)
+         |> Result.map ~f:Option.some)
+  in
+  Option.iter developer_changes ~f:(fun changes ->
+    Startup_cleanup.adopt_developer_events_exn startup_cleanup ~close_and_wait:(fun () ->
+      Developer_change_hub.close_and_wait changes));
+  let on_developer_change =
+    Option.map developer_changes ~f:(fun changes ~run_id ~key ~kind ->
+      let kind =
+        match kind with
+        | Developer_host.Change.Command_changed ->
+          Agent_protocol.Developer_wire.Change.Command_changed
+        | Approval_changed -> Agent_protocol.Developer_wire.Change.Approval_changed
+      in
+      Developer_change_hub.enqueue changes ~run_id ~key ~kind)
+  in
+  let on_repl_change =
+    Option.map developer_changes ~f:(fun changes change ->
+      match change with
+      | Developer_repl_epoch.Change.Submission (instance, key) ->
+        Developer_change_hub.enqueue_repl_submission changes ~instance ~key
+      | Instance_invalidated instance ->
+        Developer_change_hub.invalidate_repl_instance changes ~instance)
+  in
+  let on_task_change =
+    Option.map developer_changes ~f:(fun changes ~run_id ~key ->
+      Developer_change_hub.enqueue_task changes ~run_id ~key)
+  in
+  let%bind developer =
+    match options.developer, authoring, home with
+    | None, _, _ -> Ok None
+    | Some _, None, _ ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "developer commands require the installed authoring owner")
+    | Some _, Some _, None ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "developer live resources require an explicit host home")
+    | Some configuration, Some authoring, Some home ->
+      let limits = configuration.limits in
+      let catalogs = Session_factory.developer_catalog factory in
+      let physical_roots =
+        Session_factory.Developer_catalog.workspace_definitions catalogs
+        |> List.filter_map ~f:(fun definition ->
+          Eio.Fiber.check ();
+          match definition.Agent_session.Workspace_definition.source with
+          | Physical { configured_root } -> Some configured_root
+          | Temporary _ -> None)
+      in
+      let cache =
+        Chat_response.Cache.create ~max_size:limits.max_agent_cache_entries ()
+      in
+      let disclosure =
+        Developer_host.Command.Disclosure_policy.create
+          ~authorize:configuration.receipt_read
+      in
+      let control =
+        Developer_host.Command.Control_policy.create
+          ~authorize:configuration.command_control
+      in
+      let approval =
+        Option.map configuration.shell_approvals ~f:(fun shell ->
+          let command_allowed policy actor row =
+            Result.is_ok
+              (Developer_method_authorization.authorize_principal
+                 (Agent_store.Developer_command_row.kind row)
+                 ~principal:(Operator_authorization.principal actor))
+            && policy actor row
+          in
+          Developer_approval_owner.Configuration.create
+            ~limits:shell.limits
+            ~command_read:(command_allowed configuration.receipt_read)
+            ~command_respond:
+              (command_allowed
+                 (Option.value
+                    shell.command_respond
+                    ~default:configuration.command_control))
+            ~job_read:shell.job_read
+            ~job_respond:shell.job_respond)
+      in
+      let trace =
+        Option.map configuration.traces ~f:(fun traces ->
+          Developer_trace_retention.Configuration.create
+            ~mode:traces.mode
+            ~limits:traces.limits
+            ~read_policy:(Developer_trace_retention.Read_policy.of_authoring authoring))
+      in
+      Developer_host.create
+        ~sw
+        ~env
+        ~session_store:store
+        ~blobs:blob_store
+        ~capacity:job_capacity
+        ~authoring
+        ~provider:provider_operator
+        ~model_target:configuration.model_target
+        ~prompts
+        ~catalogs
+        ~workspace_leases
+        ~physical_roots
+        ~workspace_cleanup:limits.workspace_cleanup
+        ~script_preparation:options.script_preparation
+        ~tool_dir:Eio.Path.(Eio.Stdenv.fs env / tool_dir)
+        ~home:Eio.Path.(Eio.Stdenv.fs env / home)
+        ~cache
+        ~approval
+        ~max_native_bindings:limits.max_native_bindings
+        ~child_sources
+        ~content_limits:options.content_limits
+        ~agent_source_limits:limits.agent_sources
+        ~active_agent_calls:limits.active_agent_calls
+        ~job_policy:Chat_response.One_off_request.default_policy
+        ~runtime_policy:options.chatml_runtime_policy
+        ~native_permission:configuration.native_permission
+        ~remote_content:configuration.remote_content
+        ~prepare_output:configuration.prepare_output
+        ~capture_policy:configuration.capture_policy
+        ~capture_limits:configuration.capture_limits
+        ~command_disclosure:disclosure
+        ~command_control:control
+        ~result_disclosure:configuration.result_disclosure
+        ~publisher_limits:configuration.publisher_limits
+        ~publisher_storage:configuration.publisher_storage
+        ~store_limits:limits.store
+        ~limits:limits.host
+        ~budget_configuration:limits.budgets
+        ~repl:configuration.repl
+        ~trace
+        ?on_change:on_developer_change
+        ?on_repl_change
+        ?on_task_change
+        ~now:(fun () -> timestamp env)
+        ~checkpoint:Eio.Fiber.check
+        ()
+      |> Result.map ~f:Option.some
+  in
+  Option.iter developer ~f:(fun developer ->
+    Startup_cleanup.adopt_developer_exn startup_cleanup ~close_and_wait:(fun () ->
+      Developer_host.close_and_wait developer));
+  let%bind developer_endpoint =
+    match developer_changes with
+    | None -> Ok None
+    | Some changes ->
+      (match developer, authoring, options.developer with
+       | Some host, Some authoring, Some configuration ->
+         (match configuration.portable_wire with
+          | Some policy ->
+            Developer_endpoint.create ~host ~authoring ~changes ~policy
+            |> Result.map ~f:Option.some
+          | None ->
+            Error
+              (Agent_protocol.Error.invalid_request
+                 "Developer endpoint has no installed portable policy"))
+       | _ ->
+         Error
+           (Agent_protocol.Error.invalid_request
+              "Developer endpoint has no paired Host and Authoring owner"))
+  in
   let start_scheduler =
     Start_scheduler.start_controlled
       ~enabled:execution_enabled
@@ -1364,14 +1723,22 @@ let compose
         then Session_factory.resume_generated_initial_starts factory
         else Session_factory.resume_selected_initial_starts factory)
   in
+  Startup_cleanup.adopt_start_scheduler_exn startup_cleanup start_scheduler;
   let job_scheduler =
     Job_scheduler.start_controlled
       ~enabled:execution_enabled
       ~sw
       ~clock:(Eio.Stdenv.clock env)
       ~registry
+      ~developer_registry:(Option.map developer ~f:Developer_host.registry)
       ~capacity:job_capacity
       ~model_job_inference:(Session_factory.model_job_inference factory)
+  in
+  Startup_cleanup.adopt_job_scheduler_exn startup_cleanup job_scheduler;
+  let%bind () =
+    match developer with
+    | None -> Ok ()
+    | Some developer -> Developer_host.install_scheduler developer job_scheduler
   in
   let permission_scheduler =
     Permission_scheduler.start_controlled
@@ -1454,6 +1821,7 @@ let compose
                  ~retryable:false
                  ())))
   in
+  let options = with_installed_developer_features options developer_endpoint in
   let handler =
     Command_handler.create
       ~sw
@@ -1466,6 +1834,7 @@ let compose
       ~audit_store
       ~blob_store
       ~session_store:store
+      ~authoring
       ~lifecycle_service
       ~retained:
         (Retained_session.create
@@ -1485,7 +1854,7 @@ let compose
       ~ping:(ping env status_ref)
       ~server_info:(fun () -> server_info options implementation config store)
       ~server_health:(server_health health_services)
-      ~cancel_job:(Job_scheduler.cancel job_scheduler)
+      ~cancel_job:(Job_scheduler.cancel_conversation job_scheduler)
       ~create_session:(Session_factory.create_session factory)
       ~seed_factory:(Some factory)
       ~seed_recovery_limits:options.seed_recovery_limits
@@ -1539,7 +1908,8 @@ let compose
       | Provider_login_cancel _
       | Provider_logout _
       | Provider_select _
-      | Provider_configure_environment _ -> Ok ()
+      | Provider_configure_environment _
+      | Authoring _ -> Ok ()
       | Session_create _
       | Session_seed _
       | Session_get _
@@ -1591,7 +1961,29 @@ let compose
              ~retryable:false
              ()))
   in
-  let dispatcher = Dispatcher.create ~admit handler in
+  let developer_installation =
+    Option.map developer_endpoint ~f:(fun endpoint ->
+      Dispatcher.Developer_installation.create ~endpoint ~admit:(fun () ->
+        if execution_enabled
+        then (
+          match !status_ref with
+          | Ready -> Ok ()
+          | Starting | Draining | Stopped | Failed _ ->
+            Error
+              (Agent_protocol.Error.create
+                 Server_shutting_down
+                 ~message:"Developer service is not accepting requests"
+                 ~retryable:true
+                 ()))
+        else
+          Error
+            (Agent_protocol.Error.create
+               Invalid_state
+               ~message:"Developer execution is unavailable"
+               ~retryable:false
+               ())))
+  in
+  let dispatcher = Dispatcher.create ~admit ?developer:developer_installation handler in
   Ok
     { env
     ; store
@@ -1600,6 +1992,8 @@ let compose
     ; workspaces = built.workspaces
     ; registry
     ; handler
+    ; authoring
+    ; developer
     ; provider_operator
     ; dispatcher
     ; start_scheduler
@@ -1634,7 +2028,8 @@ let start
       ?home
       ~process_start_identity
       ?(options = default_options)
-      ?(before_activation = fun _ -> Ok ())
+      ?before_activation
+      ?local_setup
       ()
   =
   Mirage_crypto_rng_unix.use_default ();
@@ -1652,12 +2047,67 @@ let start
       }
   in
   let open Result.Let_syntax in
+  let validate_startup_config (config : Config.t) =
+    let%bind () =
+      match options.developer, config.server.developer, options.startup_mode with
+      | None, None, _ | _, _, (Execute | On_demand) -> Ok ()
+      | _, _, Operator_only ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "developer commands require an execution-enabled daemon")
+    in
+    let%bind () =
+      match options.developer, config.server.developer with
+      | Some _, Some _ ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "configure Developer through either daemon options or server configuration")
+      | None, _ | _, None -> Ok ()
+    in
+    let%bind () =
+      match options.qualify_chatml_extensions with
+      | false -> Ok ()
+      | true ->
+        Agent_session.Automatic_turn_budget.create options.chatml_runtime_policy
+        |> Agent_session.Automatic_turn_budget.validate
+    in
+    let%bind () =
+      match config.server.authoring_project_access with
+      | None -> Ok ()
+      | Some access ->
+        (match config.server.project_sources with
+         | None ->
+           Error
+             (Agent_protocol.Error.invalid_request
+                "configured authoring read grants require project sources")
+         | Some project_sources ->
+           Authoring_project_access_configuration.validate access ~project_sources
+           |> Result.map_error ~f:(fun _ ->
+             Agent_protocol.Error.invalid_request
+               "invalid configured authoring read grants"))
+    in
+    let%bind () =
+      match config.server.authoring_upload_access with
+      | None -> Ok ()
+      | Some access ->
+        Authoring_upload_access_configuration.validate access
+        |> Result.map_error ~f:(fun _ ->
+          Agent_protocol.Error.invalid_request "invalid configured upload grants")
+    in
+    Ok ()
+  in
   let%bind () =
-    match options.qualify_chatml_extensions with
-    | false -> Ok ()
-    | true ->
-      Agent_session.Automatic_turn_budget.create options.chatml_runtime_policy
-      |> Agent_session.Automatic_turn_budget.validate
+    match before_activation, local_setup with
+    | Some _, Some _ ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "before_activation and local_setup cannot both own local identity")
+    | None, _ | _, None -> Ok ()
+  in
+  let%bind () =
+    match local_setup with
+    | Some _ -> Ok ()
+    | None -> validate_startup_config config
   in
   let%bind store, origin =
     open_store ~sw ~env config.server ~process_start_identity
@@ -1686,7 +2136,21 @@ let start
         |> Result.map_error ~f:protocol_of_store
         |> Result.map ~f:ignore
     in
-    let%bind () = before_activation store in
+    let%bind config =
+      match local_setup with
+      | Some setup ->
+        let%bind bound = setup store in
+        let%bind config = Config_validator.Embedded_local.apply bound ~config in
+        let%map () = validate_startup_config config in
+        config
+      | None ->
+        let%map () =
+          match before_activation with
+          | None -> Ok ()
+          | Some before_activation -> before_activation store
+        in
+        config
+    in
     let%bind provider_operator =
       match options.provider_operator_factory with
       | None -> Ok None
@@ -1738,7 +2202,11 @@ let start
       (Prompt_catalog_host.catalog project_catalog))
 ;;
 
-let close_connection t context = Command_handler.close_connection t.handler context
+let close_connection t context =
+  match Dispatcher.close_connection_and_wait t.dispatcher context with
+  | Ok () -> ()
+  | Error failure -> t.status_ref := Failed failure
+;;
 
 let reload_config t =
   Config_watcher.reload t.config_watcher
@@ -1781,24 +2249,41 @@ let shutdown_sessions t =
     Session_registry.shutdown t.registry)
 ;;
 
+let shutdown_remaining t =
+  Start_scheduler.close t.start_scheduler;
+  Permission_scheduler.close t.permission_scheduler;
+  Schedule_scheduler.close t.schedule_scheduler;
+  Maintenance.close t.maintenance;
+  Config_watcher.close_and_wait t.config_watcher;
+  Start_scheduler.close_and_wait t.start_scheduler;
+  let open Result.Let_syntax in
+  let%bind () =
+    match t.developer with
+    | None -> Ok ()
+    | Some developer -> Developer_host.close_and_wait developer
+  in
+  let%bind () = Job_scheduler.close_and_wait t.job_scheduler in
+  shutdown_sessions t;
+  let%bind () =
+    match t.authoring with
+    | None -> Ok ()
+    | Some authoring -> Authoring_installation.close_and_wait authoring
+  in
+  Option.iter t.provider_operator ~f:Provider_operator_port.close;
+  Project_source_host.close_and_wait t.project_sources;
+  Agent_store.Session_store.close t.store |> Result.map_error ~f:protocol_of_store
+;;
+
 let shutdown t =
   match !(t.status_ref) with
   | Stopped -> Ok ()
   | Starting | Ready | Failed _ | Draining ->
-    t.status_ref := Draining;
-    Start_scheduler.close t.start_scheduler;
-    Job_scheduler.close t.job_scheduler;
-    Permission_scheduler.close t.permission_scheduler;
-    Schedule_scheduler.close t.schedule_scheduler;
-    Maintenance.close t.maintenance;
-    Config_watcher.close_and_wait t.config_watcher;
-    Start_scheduler.close_and_wait t.start_scheduler;
-    shutdown_sessions t;
-    Option.iter t.provider_operator ~f:Provider_operator_port.close;
-    Project_source_host.close_and_wait t.project_sources;
-    Agent_store.Session_store.close t.store
-    |> Result.map_error ~f:protocol_of_store
-    |> Result.map ~f:(fun () -> t.status_ref := Stopped)
+    Eio.Cancel.protect (fun () ->
+      t.status_ref := Draining;
+      let open Result.Let_syntax in
+      let%bind () = Dispatcher.close_and_wait t.dispatcher in
+      let%map () = shutdown_remaining t in
+      t.status_ref := Stopped)
 ;;
 
 let select_session t ~principal ~expected =
@@ -1869,3 +2354,182 @@ let inspect_prompt_shell t ~definition_id ~selection ~checkpoint =
       checkpoint ();
       Preparation.inspect_shell policy revision ~env:t.env ~invocation ~checkpoint)
 ;;
+
+module Developer = struct
+  module Configuration = Developer_configuration
+
+  let with_host t f =
+    match t.developer with
+    | Some host -> f host
+    | None ->
+      Error
+        (Agent_protocol.Error.create
+           Invalid_state
+           ~message:"developer commands are not installed on this daemon"
+           ~retryable:false
+           ())
+  ;;
+
+  module Approval = struct
+    module Pending = Developer_host.Approval.Pending
+
+    type decision = Developer_host.Approval.decision =
+      | Approve_once
+      | Deny of string
+
+    let pending t ~actor ~run_id =
+      with_host t (fun host -> Developer_host.Approval.pending host ~actor ~run_id)
+    ;;
+
+    let respond t ~actor ~run_id ~id decision =
+      with_host t (fun host ->
+        Developer_host.Approval.respond host ~actor ~run_id ~id decision)
+    ;;
+
+    let cancel t ~actor ~run_id ~id =
+      with_host t (fun host -> Developer_host.Approval.cancel host ~actor ~run_id ~id)
+    ;;
+  end
+
+  module Request = Developer_command_original
+
+  module View = struct
+    type t = Developer_host.Command.view
+
+    let id = Developer_host.Command.id
+    let owner = Developer_host.Command.owner
+    let kind = Developer_host.Command.kind
+    let phase = Developer_host.Command.phase
+    let receipt = Developer_host.Command.receipt
+    let capture_fingerprint = Developer_host.Command.capture_fingerprint
+    let request_fingerprint = Developer_host.Command.request_fingerprint
+  end
+
+  let submit t ~actor ~run_id ~key ~request ~fresh_source =
+    with_host t (fun host ->
+      Developer_host.Command.submit
+        host
+        ~actor
+        ~run_id
+        ~key
+        ~original:request
+        ~fresh_source)
+  ;;
+
+  let observe t ~actor ~run_id ~key =
+    with_host t (fun host -> Developer_host.Command.observe host ~actor ~run_id ~key)
+  ;;
+
+  let await_terminal t ~actor ~run_id ~key =
+    with_host t (fun host ->
+      Developer_host.Command.await_terminal host ~actor ~run_id ~key)
+  ;;
+
+  let cancel_and_wait t ~actor ~run_id ~key =
+    with_host t (fun host ->
+      Developer_host.Command.cancel_and_wait host ~actor ~run_id ~key)
+  ;;
+
+  module Repl = struct
+    module Original = Developer_host.Repl.Original
+    module Instance = Developer_host.Repl.Instance
+    module Epoch = Developer_host.Repl.Epoch
+    module Revision = Developer_host.Repl.Revision
+    module View = Developer_host.Repl.View
+    module Submission = Developer_host.Repl.Submission
+    module Task_reference = Developer_host.Repl.Task_reference
+    module Type_selector = Developer_host.Repl.Type_selector
+    module Type_inspection = Developer_host.Repl.Type_inspection
+    module Task_reference_page = Developer_host.Repl.Task_reference_page
+
+    module Task = struct
+      module Original = Developer_host.Repl.Task.Original
+
+      type view = Developer_host.Repl.Task.view
+
+      let row = Developer_host.Repl.Task.row
+      let receipt = Developer_host.Repl.Task.receipt
+
+      let submit t ~actor ~key ~original ~fresh_epoch =
+        with_host t (fun host ->
+          Developer_host.Repl.Task.submit host ~actor ~key ~original ~fresh_epoch)
+      ;;
+
+      let observe t ~actor ~run_id ~key =
+        with_host t (fun host ->
+          Developer_host.Repl.Task.observe host ~actor ~run_id ~key)
+      ;;
+
+      let await_terminal t ~actor ~run_id ~key =
+        with_host t (fun host ->
+          Developer_host.Repl.Task.await_terminal host ~actor ~run_id ~key)
+      ;;
+
+      let cancel_and_wait t ~actor ~run_id ~key =
+        with_host t (fun host ->
+          Developer_host.Repl.Task.cancel_and_wait host ~actor ~run_id ~key)
+      ;;
+    end
+
+    let create t ~actor ~run_id ~key ~original ~fresh_source =
+      with_host t (fun host ->
+        Developer_host.Repl.create host ~actor ~run_id ~key ~original ~fresh_source)
+    ;;
+
+    let submit t ~actor ~instance ~epoch ~expected_revision ~key ~source =
+      with_host t (fun host ->
+        Developer_host.Repl.submit
+          host
+          ~actor
+          ~instance
+          ~epoch
+          ~expected_revision
+          ~key
+          ~source)
+    ;;
+
+    let observe t ~actor ~instance ~key =
+      with_host t (fun host -> Developer_host.Repl.observe host ~actor ~instance ~key)
+    ;;
+
+    let inspect_type t ~actor ~instance ~epoch ~key ~statement_index ~selector ~max_bytes =
+      with_host t (fun host ->
+        Developer_host.Repl.inspect_type
+          host
+          ~actor
+          ~instance
+          ~epoch
+          ~key
+          ~statement_index
+          ~selector
+          ~max_bytes)
+    ;;
+
+    let task_references_page t ~actor ~instance ~epoch ~key ~after ~limit =
+      with_host t (fun host ->
+        Developer_host.Repl.task_references_page
+          host
+          ~actor
+          ~instance
+          ~epoch
+          ~key
+          ~after
+          ~limit)
+    ;;
+
+    let cancel_and_wait t ~actor ~instance ~key =
+      with_host t (fun host ->
+        Developer_host.Repl.cancel_and_wait host ~actor ~instance ~key)
+    ;;
+
+    let reset_and_wait t ~actor ~instance ~expected_epoch ~key =
+      with_host t (fun host ->
+        Developer_host.Repl.reset_and_wait host ~actor ~instance ~expected_epoch ~key)
+    ;;
+
+    let close_and_wait t ~actor ~instance ~key =
+      with_host t (fun host ->
+        Developer_host.Repl.close_and_wait host ~actor ~instance ~key)
+    ;;
+  end
+end

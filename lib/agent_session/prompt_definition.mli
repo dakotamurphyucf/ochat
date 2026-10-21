@@ -8,6 +8,7 @@ type t = private
   ; root_file : string
   ; root_invocation :
       Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+  ; tool_contract : Chatml_compilation.Tool_contract.t
   ; allowed_workspaces : Agent_protocol.Id.Workspace_definition.t list
   ; permission_profile : string
   ; runtime_policy : string option
@@ -35,3 +36,10 @@ val allows_workspace : t -> Agent_protocol.Id.Workspace_definition.t -> bool
 val root_invocation
   :  t
   -> Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+
+(** [create] retains Standard for existing callers. The catalog/config owner
+    applies its explicit publication ABI before source capture. This immutable
+    value selects compilation, not native execution permission. *)
+val with_tool_contract : t -> Chatml_compilation.Tool_contract.t -> t
+
+val tool_contract : t -> Chatml_compilation.Tool_contract.t

@@ -939,6 +939,352 @@ let parse_project_sources context path sexp =
     Some configuration
 ;;
 
+let parse_authoring_project_access context path sexp ~project_sources =
+  let module Access = Authoring_project_access_configuration in
+  let open Result.Let_syntax in
+  let invalid path =
+    fail
+      context
+      ~code:"config.authoring_project_access"
+      ~path
+      ~message:"invalid authoring project access"
+      ~remediation:
+        "Use exact configured roots, authenticated principals and Standard targets."
+  in
+  let bounded_rows path sexp maximum =
+    let%bind rows = list context path sexp in
+    if List.length rows > maximum then invalid path else Ok rows
+  in
+  let parse_grant sexp =
+    let path = path ^ ".read_grants[]" in
+    let%bind fields = record context path sexp in
+    let%bind () =
+      ensure_allowed context path fields [ "root"; "principal_id"; "authentication_kind" ]
+    in
+    let%bind root =
+      required context path fields "root"
+      >>= atom context (path ^ ".root")
+      >>= resolve_project_path context (path ^ ".root")
+    in
+    let%bind principal_id =
+      required context path fields "principal_id"
+      >>= atom context (path ^ ".principal_id")
+      >>= fun id ->
+      match Agent_protocol.Id.Principal.of_string id with
+      | Ok principal_id -> Ok principal_id
+      | Error _ -> invalid (path ^ ".principal_id")
+    in
+    let%map authentication_kind =
+      required context path fields "authentication_kind"
+      >>= atom context (path ^ ".authentication_kind")
+    in
+    Access.Read_grant.{ root; principal_id; authentication_kind }
+  in
+  let parse_request sexp =
+    let request_path = path ^ ".selections[].request" in
+    let%bind name, fields =
+      match sexp with
+      | Sexp.List [ Sexp.Atom name; fields ] -> Ok (name, fields)
+      | _ -> shape_error context request_path "(library fields) or (entry fields)"
+    in
+    let%bind fields = record context request_path fields in
+    let%bind () = ensure_allowed context request_path fields [ "name"; "environment" ] in
+    let%bind environment =
+      match field fields "environment" with
+      | None -> Ok None
+      | Some value ->
+        atom context (request_path ^ ".environment") value |> Result.map ~f:Option.some
+    in
+    match name with
+    | "library" ->
+      if Option.is_some (field fields "name")
+      then invalid request_path
+      else Ok (Access.Selection.Library { environment })
+    | "entry" ->
+      let%map name =
+        required context request_path fields "name"
+        >>= atom context (request_path ^ ".name")
+      in
+      Access.Selection.Entry { name; environment }
+    | _ -> invalid request_path
+  in
+  let parse_selection sexp =
+    let row_path = path ^ ".selections[]" in
+    let%bind fields = record context row_path sexp in
+    let%bind () =
+      ensure_allowed context row_path fields [ "root"; "project"; "request"; "target" ]
+    in
+    let%bind root =
+      required context row_path fields "root"
+      >>= atom context (row_path ^ ".root")
+      >>= resolve_project_path context (row_path ^ ".root")
+    in
+    let%bind project =
+      required context row_path fields "project" >>= atom context (row_path ^ ".project")
+    in
+    let%bind request = required context row_path fields "request" >>= parse_request in
+    let%map target =
+      let%bind spelling =
+        required context row_path fields "target" >>= atom context (row_path ^ ".target")
+      in
+      match spelling with
+      | "one_off_v1" -> Ok Chatml.Chatml_compiler_contract.Target.One_off_v1
+      | "tool_v1" -> Ok Tool_v1
+      | "developer_tool_v1" -> Ok Developer_tool_v1
+      | "moderator_v1" -> Ok Moderator_v1
+      | "delegated_moderator_v1" -> Ok Delegated_moderator_v1
+      | _ -> invalid (row_path ^ ".target")
+    in
+    Access.Selection.{ root; project; request; target }
+  in
+  let%bind sources =
+    match project_sources with
+    | None -> invalid path
+    | Some sources -> Ok sources
+  in
+  let%bind fields = record context path sexp in
+  let%bind () = ensure_allowed context path fields [ "read_grants"; "selections" ] in
+  let%bind grants =
+    required context path fields "read_grants"
+    >>= fun rows ->
+    bounded_rows (path ^ ".read_grants") rows 256
+    >>= fun rows -> List.map rows ~f:parse_grant |> Result.all
+  in
+  let%bind selections =
+    required context path fields "selections"
+    >>= fun rows ->
+    bounded_rows (path ^ ".selections") rows 256
+    >>= fun rows -> List.map rows ~f:parse_selection |> Result.all
+  in
+  let result = Access.{ read_grants = grants; selections } in
+  let%map () =
+    Access.validate result ~project_sources:sources
+    |> Result.map_error ~f:(fun _ ->
+      [ diagnostic
+          context
+          ~code:"config.authoring_project_access"
+          ~path
+          ~message:"authoring read grants or Project selections are invalid"
+          ~remediation:
+            "Use bounded distinct exact principal/root grants and Project targets."
+      ])
+  in
+  result
+;;
+
+let parse_authoring_upload_access context path sexp =
+  let module Access = Authoring_upload_access_configuration in
+  let open Result.Let_syntax in
+  let invalid path =
+    fail
+      context
+      ~code:"config.authoring_upload_access"
+      ~path
+      ~message:"invalid authoring upload access"
+      ~remediation:
+        "Use bounded exact authenticated principals, independent operation grants and \
+         Standard selections."
+  in
+  let bounded_rows path sexp maximum =
+    let%bind rows = list context path sexp in
+    if List.length rows > maximum then invalid path else Ok rows
+  in
+  let principal fields row_path =
+    let%bind spelling =
+      required context row_path fields "principal_id"
+      >>= atom context (row_path ^ ".principal_id")
+    in
+    match Agent_protocol.Id.Principal.of_string spelling with
+    | Ok principal_id -> Ok principal_id
+    | Error _ -> invalid (row_path ^ ".principal_id")
+  in
+  let parse_grant sexp =
+    let row_path = path ^ ".grants[]" in
+    let%bind fields = record context row_path sexp in
+    let%bind () =
+      ensure_allowed
+        context
+        row_path
+        fields
+        [ "principal_id"; "authentication_kind"; "operation" ]
+    in
+    let%bind principal_id = principal fields row_path in
+    let%bind authentication_kind =
+      required context row_path fields "authentication_kind"
+      >>= atom context (row_path ^ ".authentication_kind")
+    in
+    let%map operation =
+      let%bind spelling =
+        required context row_path fields "operation"
+        >>= atom context (row_path ^ ".operation")
+      in
+      match spelling with
+      | "upload_write" -> Ok Access.Grant.Upload_write
+      | "publish" -> Ok Publish
+      | "bundle_read" -> Ok Bundle_read
+      | "rebind" -> Ok Rebind
+      | _ -> invalid (row_path ^ ".operation")
+    in
+    Access.Grant.{ principal_id; authentication_kind; operation }
+  in
+  let parse_request row_path sexp =
+    let request_path = row_path ^ ".request" in
+    let%bind name, fields =
+      match sexp with
+      | Sexp.List [ Sexp.Atom name; fields ] -> Ok (name, fields)
+      | _ -> shape_error context request_path "(library fields) or (entry fields)"
+    in
+    let%bind fields = record context request_path fields in
+    let%bind () = ensure_allowed context request_path fields [ "name"; "environment" ] in
+    let%bind environment =
+      match field fields "environment" with
+      | None -> Ok None
+      | Some value ->
+        atom context (request_path ^ ".environment") value |> Result.map ~f:Option.some
+    in
+    match name with
+    | "library" ->
+      if Option.is_some (field fields "name")
+      then invalid request_path
+      else Ok (Authoring_project_access_configuration.Selection.Library { environment })
+    | "entry" ->
+      let%map name =
+        required context request_path fields "name"
+        >>= atom context (request_path ^ ".name")
+      in
+      Authoring_project_access_configuration.Selection.Entry { name; environment }
+    | _ -> invalid request_path
+  in
+  let parse_selection sexp =
+    let row_path = path ^ ".selections[]" in
+    let%bind fields = record context row_path sexp in
+    let%bind () =
+      ensure_allowed
+        context
+        row_path
+        fields
+        [ "principal_id"
+        ; "authentication_kind"
+        ; "request"
+        ; "selected_environment"
+        ; "target"
+        ]
+    in
+    let%bind principal_id = principal fields row_path in
+    let%bind authentication_kind =
+      required context row_path fields "authentication_kind"
+      >>= atom context (row_path ^ ".authentication_kind")
+    in
+    let%bind request =
+      required context row_path fields "request" >>= parse_request row_path
+    in
+    let%bind selected_environment =
+      required context row_path fields "selected_environment"
+      >>= atom context (row_path ^ ".selected_environment")
+    in
+    let%map target =
+      let%bind spelling =
+        required context row_path fields "target" >>= atom context (row_path ^ ".target")
+      in
+      match spelling with
+      | "one_off_v1" -> Ok Chatml.Chatml_compiler_contract.Target.One_off_v1
+      | "tool_v1" -> Ok Tool_v1
+      | "developer_tool_v1" -> Ok Developer_tool_v1
+      | "moderator_v1" -> Ok Moderator_v1
+      | "delegated_moderator_v1" -> Ok Delegated_moderator_v1
+      | _ -> invalid (row_path ^ ".target")
+    in
+    Access.Selection.
+      { principal_id; authentication_kind; request; selected_environment; target }
+  in
+  let%bind fields = record context path sexp in
+  let%bind () = ensure_allowed context path fields [ "mode"; "grants"; "selections" ] in
+  let%bind mode =
+    let%bind spelling =
+      required context path fields "mode" >>= atom context (path ^ ".mode")
+    in
+    match spelling with
+    | "upload_only" -> Ok Access.Upload_only
+    | "augment_core" -> Ok Augment_core
+    | _ -> invalid (path ^ ".mode")
+  in
+  let%bind grants =
+    required context path fields "grants"
+    >>= fun rows ->
+    bounded_rows (path ^ ".grants") rows 256
+    >>= fun rows -> List.map rows ~f:parse_grant |> Result.all
+  in
+  let%bind selections =
+    required context path fields "selections"
+    >>= fun rows ->
+    bounded_rows (path ^ ".selections") rows 256
+    >>= fun rows -> List.map rows ~f:parse_selection |> Result.all
+  in
+  let result = Access.{ mode; grants; selections } in
+  let%map () =
+    Access.validate result
+    |> Result.map_error ~f:(fun _ ->
+      [ diagnostic
+          context
+          ~code:"config.authoring_upload_access"
+          ~path
+          ~message:"authoring upload grants or selections are invalid"
+          ~remediation:
+            "Use bounded distinct principal/operation grants and Standard targets."
+      ])
+  in
+  result
+;;
+
+let parse_developer context path sexp =
+  let open Result.Let_syntax in
+  (* The outer config parser has already constructed an S-expression. Bound
+     traversal before the derived typed conversion, then apply the precise
+     row/selector/schema limits of the pure configuration constructor. *)
+  let rec check_shape ~depth ~nodes ~bytes = function
+    | _ when depth > 32 || nodes <= 0 -> Error ()
+    | Sexp.Atom text ->
+      let length = String.length text in
+      if length > bytes then Error () else Ok (nodes - 1, bytes - length)
+    | Sexp.List values ->
+      List.fold_result
+        values
+        ~init:(nodes - 1, bytes)
+        ~f:(fun (nodes, bytes) value ->
+          check_shape ~depth:(depth + 1) ~nodes ~bytes value)
+  in
+  let%bind () =
+    check_shape ~depth:0 ~nodes:16_384 ~bytes:(9 * 1024 * 1024) sexp
+    |> Result.map ~f:(fun _ -> ())
+    |> Result.map_error ~f:(fun () ->
+      [ diagnostic
+          context
+          ~code:"config.developer"
+          ~path
+          ~message:"Developer configuration exceeds its syntax budget"
+          ~remediation:"Reduce the bounded selection, schema, or nesting size."
+      ])
+  in
+  let%bind selected =
+    match Developer_startup_configuration.t_of_sexp sexp with
+    | selected -> Ok selected
+    | exception Sexplib.Conv.Of_sexp_error _ ->
+      shape_error context path "a Developer selection/capacity record"
+  in
+  Developer_startup_configuration.validate selected
+  |> Result.map ~f:(fun () -> selected)
+  |> Result.map_error ~f:(fun _ ->
+    [ diagnostic
+        context
+        ~code:"config.developer"
+        ~path
+        ~message:"invalid Developer selection or capacity"
+        ~remediation:
+          "Use finite distinct source/principal choices, valid Standard targets and \
+           bounded capacity."
+    ])
+;;
+
 let parse_server context sexp =
   let path = "server" in
   let open Result.Let_syntax in
@@ -946,6 +1292,9 @@ let parse_server context sexp =
   let allowed =
     [ "data_dir"
     ; "project_sources"
+    ; "authoring_project_access"
+    ; "authoring_upload_access"
+    ; "developer"
     ; "session_helpers"
     ; "authoring_packages"
     ; "authoring_budget"
@@ -972,6 +1321,30 @@ let parse_server context sexp =
       "project_sources"
       parse_project_sources
       ~default:None
+  in
+  let%bind authoring_project_access =
+    match field fields "authoring_project_access" with
+    | None -> Ok None
+    | Some value ->
+      parse_authoring_project_access
+        context
+        "server.authoring_project_access"
+        value
+        ~project_sources
+      |> Result.map ~f:Option.some
+  in
+  let%bind authoring_upload_access =
+    match field fields "authoring_upload_access" with
+    | None -> Ok None
+    | Some value ->
+      parse_authoring_upload_access context "server.authoring_upload_access" value
+      |> Result.map ~f:Option.some
+  in
+  let%bind developer =
+    match field fields "developer" with
+    | None -> Ok None
+    | Some value ->
+      parse_developer context "server.developer" value |> Result.map ~f:Option.some
   in
   let%bind session_helpers =
     optional_value
@@ -1120,6 +1493,9 @@ let parse_server context sexp =
   Config.Server.
     { data_dir
     ; project_sources
+    ; authoring_project_access
+    ; authoring_upload_access
+    ; developer
     ; session_helpers
     ; authoring_packages
     ; authoring_budget
@@ -1275,6 +1651,7 @@ let parse_prompt context index sexp =
     ; "allowed_workspaces"
     ; "permission_profile"
     ; "runtime_policy"
+    ; "tool_contract"
     ; "enabled"
     ]
   in
@@ -1303,6 +1680,18 @@ let parse_prompt context index sexp =
     | Some value ->
       Result.map (identifier context (path ^ ".runtime_policy") value) ~f:Option.some
   in
+  let%bind tool_contract =
+    match field fields "tool_contract" with
+    | None -> Ok Chatml_compilation.Tool_contract.Standard
+    | Some value ->
+      let%bind value = atom context (path ^ ".tool_contract") value in
+      (match value with
+       | "standard" -> Ok Chatml_compilation.Tool_contract.Standard
+       | "developer_model_spawn" ->
+         Ok Chatml_compilation.Tool_contract.Developer_model_spawn
+       | _ ->
+         shape_error context (path ^ ".tool_contract") "standard or developer_model_spawn")
+  in
   let%map enabled =
     optional_value context path fields "enabled" parse_bool ~default:true
   in
@@ -1313,6 +1702,7 @@ let parse_prompt context index sexp =
     ; allowed_workspaces
     ; permission_profile
     ; runtime_policy
+    ; tool_contract
     ; enabled
     }
 ;;
@@ -1819,3 +2209,262 @@ let validate ~env raw =
       ; manifest_grants
       })
 ;;
+
+module Embedded_local = struct
+  type t =
+    { context : context
+    ; sections : (string * Sexp.t) list
+    }
+
+  type bound =
+    { context : context
+    ; operator_id : Agent_protocol.Id.Principal.t
+    ; project_sources : Project_source_configuration.t option
+    ; authoring_project_access : Authoring_project_access_configuration.t option
+    ; authoring_upload_access : Authoring_upload_access_configuration.t option
+    ; developer : Developer_startup_configuration.t
+    ; permission_profile : Config.Permission_profile.t option
+    ; manifest_grants : Config.Manifest_grant.t list
+    ; developer_scopes : Agent_protocol.Scope.Set.t
+    }
+
+  let maximum_file_bytes = 9 * 1024 * 1024
+
+  let load ~env ~path =
+    let context = { env; source_file = path; source_directory = Filename.dirname path } in
+    let invalid message =
+      fail
+        context
+        ~code:"config.embedded_local"
+        ~path:"$"
+        ~message
+        ~remediation:"Use a finite local policy with only the documented sections."
+    in
+    if not (Filename.is_absolute path)
+    then invalid "local policy path must be absolute"
+    else
+      Eio.Switch.run (fun sw ->
+        let contents =
+          try
+            let flow = Eio.Path.open_in ~sw Eio.Path.(Eio.Stdenv.fs env / path) in
+            Ok (Eio.Buf_read.(parse_exn take_all) flow ~max_size:maximum_file_bytes)
+          with
+          | Eio.Cancel.Cancelled _ as cancelled -> raise cancelled
+          | exn -> Error (Exn.to_string exn)
+        in
+        let open Result.Let_syntax in
+        let%bind contents =
+          Result.map_error contents ~f:(fun message ->
+            [ diagnostic
+                context
+                ~code:"config.embedded_local"
+                ~path:"$"
+                ~message
+                ~remediation:"Use a readable local policy below 9 MiB."
+            ])
+        in
+        let%bind () =
+          if Embedded_local_template.finite_syntax contents
+          then Ok ()
+          else invalid "local policy exceeds its syntax depth or node budget"
+        in
+        let%bind raw = Config_parser.parse_string ~source_file:path contents in
+        let%bind sections = top_fields context raw.forms in
+        let%bind () =
+          ensure_allowed
+            context
+            "$"
+            sections
+            [ "project_sources"
+            ; "authoring_project_access"
+            ; "authoring_upload_access"
+            ; "permission_profiles"
+            ; "manifest_grants"
+            ; "developer"
+            ; "developer_scopes"
+            ]
+        in
+        let%bind _ = required context "$" sections "developer" in
+        let%map _ = required context "$" sections "developer_scopes" in
+        { context; sections })
+  ;;
+
+  let bind (t : t) ~env ~operator_id =
+    let open Result.Let_syntax in
+    let context = { t.context with env } in
+    let section name = field t.sections name in
+    let from_template result =
+      Result.map_error result ~f:(fun Embedded_local_template.{ path; message } ->
+        [ diagnostic
+            context
+            ~code:"config.embedded_local_selector"
+            ~path
+            ~message
+            ~remediation:
+              "Use exact Embedded_operator selectors and embedded.local authentication."
+        ])
+    in
+    let%bind project_sources =
+      match section "project_sources" with
+      | None -> Ok None
+      | Some value -> parse_project_sources context "project_sources" value
+    in
+    let%bind authoring_project_access =
+      match section "authoring_project_access" with
+      | None -> Ok None
+      | Some value ->
+        let%bind value =
+          Embedded_local_template.bind_project operator_id value |> from_template
+        in
+        parse_authoring_project_access
+          context
+          "authoring_project_access"
+          value
+          ~project_sources
+        |> Result.map ~f:Option.some
+    in
+    let%bind authoring_upload_access =
+      match section "authoring_upload_access" with
+      | None -> Ok None
+      | Some value ->
+        let%bind value =
+          Embedded_local_template.bind_upload operator_id value |> from_template
+        in
+        parse_authoring_upload_access context "authoring_upload_access" value
+        |> Result.map ~f:Option.some
+    in
+    let%bind developer =
+      let%bind value = required context "$" t.sections "developer" in
+      let%bind value =
+        Embedded_local_template.bind_developer operator_id value |> from_template
+      in
+      parse_developer context "developer" value
+    in
+    let%bind permission_profile =
+      match section "permission_profiles" with
+      | None -> Ok None
+      | Some value ->
+        let%bind rows = list context "permission_profiles" value in
+        (match rows with
+         | [] -> Ok None
+         | [ row ] -> parse_permission_profile context 0 row |> Result.map ~f:Option.some
+         | _ -> shape_error context "permission_profiles" "at most one profile")
+    in
+    let%bind manifest_grants =
+      match section "manifest_grants" with
+      | None -> Ok []
+      | Some value ->
+        let%bind value =
+          Embedded_local_template.bind_manifest operator_id value |> from_template
+        in
+        let%bind rows = list context "manifest_grants" value in
+        List.mapi rows ~f:(parse_manifest_grant context) |> Result.all
+    in
+    let%map developer_scopes =
+      let%bind value = required context "$" t.sections "developer_scopes" in
+      let%bind values = list context "developer_scopes" value in
+      let%bind scopes =
+        List.map values ~f:(fun value ->
+          let%bind name = atom context "developer_scopes[]" value in
+          match Agent_protocol.Scope.of_string name with
+          | Ok
+              (( Developer_check
+               | Developer_fixture_run
+               | Developer_live_run
+               | Developer_repl ) as scope) -> Ok scope
+          | Ok _ | Error _ ->
+            shape_error context "developer_scopes[]" "a Developer method scope")
+        |> Result.all
+      in
+      let set = Agent_protocol.Scope.Set.of_list scopes in
+      if Set.length set = List.length scopes
+      then Ok set
+      else
+        fail
+          context
+          ~code:"config.duplicate_scope"
+          ~path:"developer_scopes"
+          ~message:"duplicate Developer scope"
+          ~remediation:"List each scope once."
+    in
+    { context
+    ; operator_id
+    ; project_sources
+    ; authoring_project_access
+    ; authoring_upload_access
+    ; developer
+    ; permission_profile
+    ; manifest_grants
+    ; developer_scopes
+    }
+  ;;
+
+  let operator_id t = t.operator_id
+  let developer_scopes t = t.developer_scopes
+
+  let apply t ~(config : Config.t) =
+    let invalid message = Agent_protocol.Error.invalid_request message in
+    let open Result.Let_syntax in
+    let%bind () =
+      if
+        Option.is_some config.server.developer
+        || Option.is_some config.server.authoring_project_access
+        || Option.is_some config.server.authoring_upload_access
+        || (Option.is_some t.project_sources
+            && Option.is_some config.server.project_sources)
+      then Error (invalid "local policy conflicts with an existing configured section")
+      else Ok ()
+    in
+    let%bind prompt =
+      match config.prompts with
+      | [ prompt ] when String.equal prompt.id "embedded.prompt" -> Ok prompt
+      | _ -> Error (invalid "local policy requires the generated embedded prompt")
+    in
+    let%bind () =
+      match config.workspaces with
+      | [ workspace ] when String.equal workspace.id "embedded.workspace" -> Ok ()
+      | _ -> Error (invalid "local policy requires the generated embedded workspace")
+    in
+    let%bind permission_profiles, prompts =
+      match t.permission_profile with
+      | None -> Ok (config.permission_profiles, config.prompts)
+      | Some profile ->
+        (match config.permission_profiles with
+         | [ original ] when String.equal original.id prompt.permission_profile ->
+           Ok ([ profile ], [ { prompt with permission_profile = profile.id } ])
+         | _ -> Error (invalid "local policy conflicts with the embedded profile"))
+    in
+    let%bind () =
+      if List.is_empty config.manifest_grants
+      then Ok ()
+      else Error (invalid "local policy conflicts with existing manifest grants")
+    in
+    let result =
+      Config.
+        { config with
+          server =
+            { config.server with
+              project_sources =
+                Option.first_some t.project_sources config.server.project_sources
+            ; authoring_project_access = t.authoring_project_access
+            ; authoring_upload_access = t.authoring_upload_access
+            ; developer = Some t.developer
+            }
+        ; prompts
+        ; permission_profiles
+        ; manifest_grants = t.manifest_grants
+        }
+    in
+    let%map () =
+      validate_references
+        t.context
+        result.workspaces
+        result.prompts
+        result.permission_profiles
+        result.manifest_grants
+      |> Result.map_error ~f:(fun diagnostics ->
+        invalid (Sexp.to_string_hum ([%sexp_of: Config.Diagnostic.t list] diagnostics)))
+    in
+    result
+  ;;
+end

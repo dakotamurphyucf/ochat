@@ -73,5 +73,8 @@ type t =
 (** [of_string name] returns the shell element represented by [name]. *)
 val of_string : string -> t option
 
+(** Canonical names consumed by [of_string], in stable declaration order. *)
+val all_names : string list
+
 (** [to_string t] returns the canonical lower-case element name. *)
 val to_string : t -> string

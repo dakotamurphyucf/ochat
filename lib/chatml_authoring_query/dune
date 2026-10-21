@@ -1,0 +1,9 @@
+(library
+ (name chatml_authoring_query)
+ (public_name ochat.chatml_authoring_query)
+ (private_modules authoring_query_budget authoring_query_error
+  authoring_query_evidence authoring_query_prefix_origin authoring_query_site
+  authoring_query_fact authoring_query_dispatch)
+ (libraries core chatml_source chatml_prepared_program chatml_semantics
+  chatml_typechecker ochat.chatml_type_display ochat.agent_protocol)
+ (preprocess (pps ppx_jane)))

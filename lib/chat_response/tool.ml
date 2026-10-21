@@ -62,7 +62,7 @@ module Agent_source_runner = struct
     { revision : Chatml_source.Digest.t
     ; prepare :
         (declaration:CM.agent_tool
-         -> owner:Agent_protocol.Job.launch_owner
+         -> launch:Source_launch.t
          -> checkpoint:(unit -> unit)
          -> (Background_request.Agent_artifact.t, Agent_protocol.Error.t) Result.t)
           option
@@ -117,6 +117,69 @@ let convert_tools (ts : Openai.Completions.tool list) : Res.Request.Tool.t list 
 
 (*--- 4-c.  Agent tool → Ochat_function.t ------------------------------*)
 
+module Agent_definition (Spec : sig
+    val declaration : CM.agent_tool
+  end) : Ochat_function.Def with type input = string = struct
+  type input = string
+
+  let CM.{ name; description; agent; is_local = _ } = Spec.declaration
+  let name = name
+  let type_ = "function"
+
+  let description =
+    Option.first_some
+      description
+      (Some
+         (Printf.sprintf
+            "Run agent prompt located at %s and return its final answer."
+            agent))
+  ;;
+
+  let parameters : Jsonaf.t =
+    `Object
+      [ "type", `String "object"
+      ; "properties", `Object [ "input", `Object [ "type", `String "string" ] ]
+      ; "required", `Array [ `String "input" ]
+      ; "additionalProperties", `False
+      ]
+  ;;
+
+  let input_of_string input =
+    match Jsonaf.(of_string input |> member_exn "input") with
+    | `String value -> value
+    | _ -> failwith "Expected {\"input\": string} for agent tool input"
+  ;;
+end
+
+let agent_input_items input : CM.content_item list =
+  [ Basic
+      { type_ = "text"
+      ; text = Some input
+      ; image_url = None
+      ; document_url = None
+      ; is_local = false
+      ; cleanup_html = false
+      ; markdown = false
+      }
+  ]
+;;
+
+let agent_observer invocation =
+  if Ochat_function.Invocation.is_observed invocation
+  then (
+    let trace =
+      Agent_trace.create
+        ~emit:(Ochat_function.Invocation.emit invocation)
+        ~emit_trace:(Ochat_function.Invocation.emit_trace invocation)
+    in
+    Some
+      Agent_response_loop.
+        { on_event = Agent_trace.on_transcript_event trace
+        ; on_tool_execution = Agent_trace.on_tool_execution trace
+        })
+  else None
+;;
+
 (** [agent_fn ~ctx ~run_agent spec] wraps a nested ChatMarkdown
     {e agent} into a {!Ochat_function.t}.  Calling the resulting function
     is equivalent to starting a brand-new ChatMarkdown driver on the
@@ -137,58 +200,19 @@ let convert_tools (ts : Openai.Completions.tool list) : Res.Request.Tool.t list 
 let agent_fn ?agent_source_runner ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool)
   : Ochat_function.t
   =
-  let CM.{ name; description; agent; is_local } = agent_spec in
+  let CM.{ name = _; description = _; agent; is_local } = agent_spec in
   (* pull components from the shared context *)
   let _net_unused = Ctx.net ctx in
-  (* Interface definition for the agent tool – expects an object with a
-       single string field "input". *)
-  let module M : Ochat_function.Def with type input = string = struct
-    type input = string
-
-    let name = name
-    let type_ = "function"
-
-    let description : string option =
-      Option.first_some
-        description
-        (Some
-           (Printf.sprintf
-              "Run agent prompt located at %s and return its final answer."
-              agent))
-    ;;
-
-    let parameters : Jsonaf.t =
-      `Object
-        [ "type", `String "object"
-        ; "properties", `Object [ "input", `Object [ "type", `String "string" ] ]
-        ; "required", `Array [ `String "input" ]
-        ; "additionalProperties", `False
-        ]
-    ;;
-
-    let input_of_string s : input =
-      match Jsonaf.(of_string s |> member_exn "input") with
-      | `String str -> str
-      | _ -> failwith "Expected {\"input\": string} for agent tool input"
-    ;;
-  end
+  let module M =
+    Agent_definition (struct
+      let declaration = agent_spec
+    end)
   in
   (* Construction is synchronous and cannot invoke its callback. Initialize this
      private identity cell before returning the actual function for registration. *)
   let implementation = ref None in
   let run ~ctx ~source ?observer (user_msg : string) : string =
-    (* Build a basic content item from the provided user input. *)
-    let basic_item : CM.basic_content_item =
-      { type_ = "text"
-      ; text = Some user_msg
-      ; image_url = None
-      ; document_url = None
-      ; is_local = false
-      ; cleanup_html = false
-      ; markdown = false
-      }
-    in
-    let items = [ CM.Basic basic_item ] in
+    let items = agent_input_items user_msg in
     match agent_source_runner with
     | Some runner ->
       runner.Agent_source_runner.run
@@ -215,21 +239,7 @@ let agent_fn ?agent_source_runner ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.a
       (module M)
       (fun ~invocation args ->
          let source = Fork.Invocation_id.create () |> Fork.Invocation_id.to_string in
-         let observer =
-           if Ochat_function.Invocation.is_observed invocation
-           then (
-             let trace =
-               Agent_trace.create
-                 ~emit:(Ochat_function.Invocation.emit invocation)
-                 ~emit_trace:(Ochat_function.Invocation.emit_trace invocation)
-             in
-             Some
-               Agent_response_loop.
-                 { on_event = Agent_trace.on_transcript_event trace
-                 ; on_tool_execution = Agent_trace.on_tool_execution trace
-                 })
-           else None
-         in
+         let observer = agent_observer invocation in
          let ctx =
            Option.value_map
              (Ochat_function.Invocation.inference_parent invocation)
@@ -241,6 +251,52 @@ let agent_fn ?agent_source_runner ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.a
   implementation := Some function_;
   function_
 ;;
+
+module Deferred_agent = struct
+  type t = { implementation : Ochat_function.t }
+
+  let implementation t = t.implementation
+
+  let create ~declaration:(agent_spec : CM.agent_tool) ~runner ~with_context =
+    let module M =
+      Agent_definition (struct
+        let declaration = agent_spec
+      end)
+    in
+    let implementation = ref None in
+    let function_ =
+      Ochat_function.create_streaming_function
+        (module M)
+        (fun ~invocation input ->
+           let output =
+             with_context
+               ~implementation:(Option.value_exn !implementation)
+               ~invocation
+               (fun ctx ->
+                  let ctx =
+                    Option.value_map
+                      (Ochat_function.Invocation.inference_parent invocation)
+                      ~default:ctx
+                      ~f:(fun parent -> Ctx.with_inference_parent ctx ~parent)
+                  in
+                  let observer = agent_observer invocation in
+                  let source =
+                    Fork.Invocation_id.create () |> Fork.Invocation_id.to_string
+                  in
+                  runner.Agent_source_runner.run
+                    ~implementation:(Some (Option.value_exn !implementation))
+                    ~declaration:agent_spec
+                    ~ctx
+                    ~source
+                    ~observer
+                    (agent_input_items input))
+           in
+           Res.Tool_output.Output.Text output)
+    in
+    implementation := Some function_;
+    { implementation = function_ }
+  ;;
+end
 
 (** [mcp_tool ~sw ~ctx decl] resolves a `{<tool mcp_server="…"/>}`
       declaration.  It returns one {!Ochat_function.t} per advertised
@@ -256,8 +312,9 @@ let agent_fn ?agent_source_runner ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.a
       When [decl.names] is [`Some list`] only the named tools are wrapped;
       otherwise the full catalog is exposed. *)
 let mcp_tool
+      ?(check_preparation_now = fun () -> Ok ())
       ~sw
-      ~ctx
+      ~env
       CM.{ names; description = _; mcp_server; strict; client_id_env; client_secret_env }
   =
   (* Inject per-server credentials via URI query params if attribute specifies
@@ -276,10 +333,13 @@ let mcp_tool
     let uri = add_param_if_some uri ("client_secret", client_secret_env) in
     Uri.to_string uri
   in
-  let client = Mcp_client.connect ~sw ~env:(Ctx.env ctx) mcp_server_uri in
+  let open Result.Let_syntax in
+  let%bind () = check_preparation_now () in
+  let client = Mcp_client.connect ~sw ~env mcp_server_uri in
+  let%bind () = check_preparation_now () in
   let cache =
     Mcp_discovery_cache.create
-      ~now:(fun () -> Eio.Time.now (Eio.Stdenv.clock (Ctx.env ctx)))
+      ~now:(fun () -> Eio.Time.now (Eio.Stdenv.clock env))
       ~load:(fun () ->
         match Mcp_client.list_tools client with
         | Ok tools -> tools
@@ -311,20 +371,29 @@ let mcp_tool
   in
   let get_tool name =
     let find () =
-      List.find (Mcp_discovery_cache.get cache) ~f:(fun tool ->
-        String.equal tool.Mcp_types.Tool.name name)
+      Result.map
+        (Mcp_discovery_cache.get_checked cache ~before_load:check_preparation_now)
+        ~f:(fun tools ->
+          List.find tools ~f:(fun tool -> String.equal tool.Mcp_types.Tool.name name))
     in
-    match find () with
-    | Some tool -> wrap tool
+    let%bind found = find () in
+    match found with
+    | Some tool -> Ok (wrap tool)
     | None ->
       Mcp_discovery_cache.invalidate cache;
-      (match find () with
-       | Some tool -> wrap tool
-       | None -> failwithf "MCP tool %s is unavailable" name ())
+      Result.map (find ()) ~f:(function
+        | Some tool -> wrap tool
+        | None -> failwithf "MCP tool %s is unavailable" name ())
   in
   match names with
-  | Some names -> List.map names ~f:get_tool
-  | None -> List.map (Mcp_discovery_cache.get cache) ~f:wrap
+  | Some names ->
+    List.fold_result names ~init:[] ~f:(fun found name ->
+      Result.map (get_tool name) ~f:(fun tool -> tool :: found))
+    |> Result.map ~f:List.rev
+  | None ->
+    Result.map
+      (Mcp_discovery_cache.get_checked cache ~before_load:check_preparation_now)
+      ~f:(List.map ~f:wrap)
 ;;
 
 (*--- 4-d.  Unified declaration → function mapping ------------------*)
@@ -379,44 +448,54 @@ let validate_read_roots host = function
   | Persistent_agent _ -> Ok ()
 ;;
 
-let configured_read_file host ctx (specification : Chatmd_read_file_spec.t) =
+let configured_read_file host ~env ~tool_dir (specification : Chatmd_read_file_spec.t) =
   let roots =
     match resolve_read_roots host specification with
     | Ok roots -> roots
     | Error error -> failwithf "[%s] %s" error.code error.message ()
   in
   Functions.get_contents_scoped
-    ~fs:(Eio.Stdenv.fs (Ctx.env ctx))
-    ~dir:(Ctx.tool_dir ctx)
+    ~fs:(Eio.Stdenv.fs env)
+    ~dir:tool_dir
     ~roots
     ?description:specification.description
     ()
 ;;
 
-let default_read_file ctx =
+let default_read_file ~env ~tool_dir =
   let root =
     Functions.read_file_root
       ~id:"cwd"
-      ~path:(Ctx.tool_dir ctx)
+      ~path:tool_dir
       ~description:"ochat launch directory"
       ()
   in
-  Functions.get_contents_scoped
-    ~fs:(Eio.Stdenv.fs (Ctx.env ctx))
-    ~dir:(Ctx.tool_dir ctx)
-    ~roots:[ root ]
-    ()
+  Functions.get_contents_scoped ~fs:(Eio.Stdenv.fs env) ~dir:tool_dir ~roots:[ root ] ()
 ;;
 
-let of_declaration
+module Native_error = struct
+  type t =
+    { code : string
+    ; message : string
+    }
+  [@@deriving sexp, compare, equal]
+end
+
+let inference_required message =
+  Error Native_error.{ code = "agent.inference_required"; message }
+;;
+
+let of_declaration_with
       ?shell_registry
       ?host
       ?agent_source_runner
+      ?check_preparation_now
       ~sw
-      ~(ctx : _ Ctx.t)
-      ~run_agent
+      ~env
+      ~tool_dir
+      ~agent
       (decl : CM.tool)
-  : Ochat_function.t list
+  : (Ochat_function.t list, Native_error.t) result
   =
   match decl with
   | CM.Persistent_agent _ ->
@@ -433,39 +512,29 @@ let of_declaration
        host"
   | CM.Builtin name ->
     (match name with
-     | "apply_patch" -> [ Functions.apply_patch ~dir:(Ctx.tool_dir ctx) ]
-     | "read_dir" -> [ Functions.read_dir ~dir:(Ctx.tool_dir ctx) ]
-     | "append_to_file" -> [ Functions.append_to_file ~dir:(Ctx.tool_dir ctx) ]
-     | "find_and_replace" -> [ Functions.find_and_replace ~dir:(Ctx.tool_dir ctx) ]
-     | "get_contents" | "read_file" -> [ default_read_file ctx ]
+     | "apply_patch" -> Ok [ Functions.apply_patch ~dir:tool_dir ]
+     | "read_dir" -> Ok [ Functions.read_dir ~dir:tool_dir ]
+     | "append_to_file" -> Ok [ Functions.append_to_file ~dir:tool_dir ]
+     | "find_and_replace" -> Ok [ Functions.find_and_replace ~dir:tool_dir ]
+     | "get_contents" | "read_file" -> Ok [ default_read_file ~env ~tool_dir ]
      | "webpage_to_markdown" ->
-       [ Functions.webpage_to_markdown
-           ~env:(Ctx.env ctx)
-           ~dir:(Ctx.tool_dir ctx)
-           ~net:(Ctx.net ctx)
-       ]
-     | "fork" -> [ Functions.fork ]
+       Ok [ Functions.webpage_to_markdown ~env ~dir:tool_dir ~net:(Eio.Stdenv.net env) ]
+     | "fork" -> Ok [ Functions.fork ]
      | "odoc_search" ->
-       [ Functions.odoc_search ~dir:(Ctx.tool_dir ctx) ~net:(Ctx.net ctx) ]
-     | "index_markdown_docs" ->
-       [ Functions.index_markdown_docs ~env:(Ctx.env ctx) ~dir:(Ctx.tool_dir ctx) ]
+       Ok [ Functions.odoc_search ~dir:tool_dir ~net:(Eio.Stdenv.net env) ]
+     | "index_markdown_docs" -> Ok [ Functions.index_markdown_docs ~env ~dir:tool_dir ]
      | "markdown_search" ->
-       [ Functions.markdown_search ~dir:(Ctx.tool_dir ctx) ~net:(Ctx.net ctx) ]
+       Ok [ Functions.markdown_search ~dir:tool_dir ~net:(Eio.Stdenv.net env) ]
      | "query_vector_db" ->
-       [ Functions.query_vector_db ~dir:(Ctx.tool_dir ctx) ~net:(Ctx.net ctx) ]
+       Ok [ Functions.query_vector_db ~dir:tool_dir ~net:(Eio.Stdenv.net env) ]
      | "index_ocaml_code" ->
-       [ Functions.index_ocaml_code
-           ~env:(Ctx.env ctx)
-           ~dir:(Ctx.tool_dir ctx)
-           ~net:(Ctx.net ctx)
-       ]
-     | "import_image" -> [ Functions.import_image ~dir:(Ctx.tool_dir ctx) ]
+       Ok [ Functions.index_ocaml_code ~env ~dir:tool_dir ~net:(Eio.Stdenv.net env) ]
+     | "import_image" -> Ok [ Functions.import_image ~dir:tool_dir ]
      | "meta_refine" ->
-       [ Functions.meta_refine
-           ~env:(Ctx.env ctx)
-           ~inference:(Ctx.inference_execution ctx)
-           ()
-       ]
+       (match agent with
+        | Some (ctx, _) ->
+          Ok [ Functions.meta_refine ~env ~inference:(Ctx.inference_execution ctx) () ]
+        | None -> inference_required "meta_refine requires admitted inference")
      | other -> failwithf "Unknown built-in tool: %s" other ())
   | CM.Read_file specification ->
     let host =
@@ -474,7 +543,7 @@ let of_declaration
           "Configured read_file declarations require a live shell host for path \
            resolution")
     in
-    [ configured_read_file host ctx specification ]
+    Ok [ configured_read_file host ~env ~tool_dir specification ]
   | CM.Custom tool ->
     failwithf
       "Legacy shell tool %S must be constructed through Agent_runtime"
@@ -491,8 +560,49 @@ let of_declaration
          ()
      | Some registry ->
        (match Shell_tool.create registry tool with
-        | Ok tool -> [ tool ]
+        | Ok tool -> Ok [ tool ]
         | Error error -> failwithf "%s: %s" error.code error.message ()))
-  | CM.Agent agent_spec -> [ agent_fn ?agent_source_runner ~ctx ~run_agent agent_spec ]
-  | CM.Mcp mcp -> mcp_tool ~sw ~ctx mcp
+  | CM.Agent agent_spec ->
+    (match agent with
+     | Some (ctx, run_agent) ->
+       Ok [ agent_fn ?agent_source_runner ~ctx ~run_agent agent_spec ]
+     | None -> inference_required "Agent requires admitted inference")
+  | CM.Mcp mcp -> mcp_tool ?check_preparation_now ~sw ~env mcp
+;;
+
+let of_declaration
+      ?shell_registry
+      ?host
+      ?agent_source_runner
+      ~sw
+      ~(ctx : _ Ctx.t)
+      ~run_agent
+      (decl : CM.tool)
+  =
+  match
+    of_declaration_with
+      ?shell_registry
+      ?host
+      ?agent_source_runner
+      ~sw
+      ~env:(Ctx.env ctx)
+      ~tool_dir:(Ctx.tool_dir ctx)
+      ~agent:(Some (ctx, run_agent))
+      decl
+  with
+  | Ok functions -> functions
+  | Error error -> failwithf "%s: %s" error.Native_error.code error.message ()
+;;
+
+let of_declaration_without_inference ?shell_registry ?check_preparation_now ~sw ~host decl
+  =
+  of_declaration_with
+    ?shell_registry
+    ?check_preparation_now
+    ~host
+    ~sw
+    ~env:host.Shell_runtime.Host.env
+    ~tool_dir:host.tool_dir
+    ~agent:None
+    decl
 ;;

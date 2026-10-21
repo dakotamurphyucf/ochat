@@ -37,12 +37,36 @@ actual JSON encoders/decoders. It is regenerated from public interfaces by the
 documentation check. OCaml `option` denotes optional data, not permission to add
 unknown wire fields; enum/tag encoding is defined by the linked codec.
 
+The [captured development workflow](../guide/chatml-development-workflow.md)
+shows how Authoring selection, Developer checks/runs, REPL actions and trace
+pages compose without treating source identity as authority.
+
 ## Method reference
 
-All methods below use the corresponding `Command` variant and `Method_result`
-variant of the same name in the [type reference](protocol-types.md). Request type
-names identify the complete field schema there. All mutations require applicable
-actor state and authorization, not merely passing JSON validation.
+Methods below use typed `Command` and `Method_result` variants in the
+[type reference](protocol-types.md). The authoring family is grouped under one
+`Authoring` outer variant with a closed method-specific request/result sum.
+Request type names identify the complete field schema there. All mutations
+require applicable actor state and authorization, not merely passing JSON
+validation.
+
+The daemon installs one authoring service through the same command dispatcher
+used by embedded, HTTP and stdio connections. `protocol.initialize` selects
+only features with installed handlers. Core is required to create and edit a
+context; semantic, lexical and assistance also require core to be selected.
+Bundle upload can be installed and negotiated independently. Capabilities
+reports the methods available under the current connection's selected features;
+uninstalled methods return `method_not_found`. The default daemon supplies
+core, lexical scanning and local assistance for caller-supplied documents.
+Native source access, durable upload and the semantic handler require explicit
+host policies. `server.authoring_upload_access` can install upload alone or
+augment an installed core/native service without changing the dispatcher or
+connection lifecycle. Its write, publication, read and rebind grants are
+independent. The default has no semantic handler, so semantic methods return
+`method_not_found`; an installed semantic handler reports typed Unavailable
+when no authentic selected Build exists. Successful reinitialization
+retires old context generations and joins their work before the new feature
+epoch is published.
 
 | Method | Request type | Minimum method scope | Result / behavior |
 |---|---|---|---|
@@ -128,6 +152,47 @@ actor state and authorization, not merely passing JSON validation.
 | `schedule.create` | `Schedule.Create_request` | `session.message.send` | Writable attachment; persist timer/delivery intent. |
 | `schedule.cancel` | `Schedule.Cancel_request` | `session.message.send` | Writable attachment; cancel schedule. |
 | `ingress.submit` | `Ingress.Submit_request` | `ingress.submit` | Protocol 1.1; exact producer-bound registration; durable data acceptance acknowledgement. |
+| `authoring.capabilities` | Empty object | `authoring.core.v1` or `authoring.bundle.v1` selected | Typed selected-method/encoding/limit reply. |
+| `authoring.roots` | Empty object | `authoring.core.v1` plus installed native source policy | Typed authorized host-root catalog. |
+| `authoring.host.list` | `Authoring.Source_read.Host_list_request` | `authoring.core.v1` plus installed native source policy | Fresh authorized host member listing, not a context-pinned read. |
+| `authoring.host.read` | `Authoring.Source_read.Host_read_request` | `authoring.core.v1` plus installed native source policy | Fresh exact host read with source digest. |
+| `authoring.context.open` | `Authoring.Context.Open_request` | `authoring.core.v1` selected | Project or standalone document capture. |
+| `authoring.context.refresh` | `Authoring.Context.Refresh_request` | `authoring.core.v1` selected | Explicit recapture against context CAS. |
+| `authoring.context.close` | `Authoring.Context.Close_request` | `authoring.core.v1` selected | Close current context generation. |
+| `authoring.source.list` | `Authoring.Source_read.List_request` | `authoring.core.v1` selected | Captured context source inventory. |
+| `authoring.source.read` | `Authoring.Source_read.Read_request` | `authoring.core.v1` selected | Captured exact source read. |
+| `authoring.document.version` | `Authoring.Document.Version_request` | `authoring.core.v1` selected | Current source/context CAS version. |
+| `authoring.document.replace` | `Authoring.Document.Replace_request` | `authoring.core.v1` selected | Full validated UTF-8 overlay replacement. |
+| `authoring.document.close` | `Authoring.Document.Close_request` | `authoring.core.v1` selected | Revert an overlay with retained editor revision. |
+| `authoring.analysis` | `Authoring.Analysis.Analyze.Request` | `authoring.core.v1` and `authoring.semantic.v1` selected | Current project or selected ChatMD script analysis; Complete, Failed, or typed Unavailable result. |
+| `authoring.prefix` | `Authoring.Analysis.Prefix.Request` | `authoring.core.v1` and `authoring.semantic.v1` selected | The semantic service prepares current, source-bound provisional evidence for Project or selected ChatMD script input. Selected scripts echo the exact authored request while retaining the distinct compiled source/cursor internally. Edits reuse only previously captured imports until explicit analysis or recapture. |
+| `authoring.query` | `Authoring.Analysis.Query.Request` | `authoring.core.v1` and `authoring.semantic.v1` selected | Bounded hover, completion, signature, syntax and source navigation over exact Complete, same-run Failed or Provisional evidence. |
+| `authoring.lexical` | `Authoring.Assistance.Lexical.Request` | `authoring.core.v1` and `authoring.lexical.v1` selected | Byte-exact ChatML or authored/effective ChatMD roles, open constructs, and scanned-prefix status, including malformed UTF-8 source bytes. |
+| `authoring.assistance` | `Authoring.Assistance.Assistance.Request` | `authoring.core.v1` and `authoring.assistance.v1` selected | Bounded local markup, reference, path, template and environment suggestions with exact authored replacements and explicit evidence. |
+| `authoring.bundle.begin` | `Authoring.Bundle.Begin.request` | `authoring.bundle.v1` selected; installed upload policy; with a parent, `authoring.core.v1` and current context authority | Qualified immutable manifest, optional physically checked parent and explicit begin idempotency. |
+| `authoring.bundle.chunk` | `Authoring.Bundle.Chunk.request` | `authoring.bundle.v1` selected; installed upload policy | Bounded exact binary member chunk with replay-safe offset. |
+| `authoring.bundle.commit` | `Authoring.Bundle.Commit.request` | `authoring.bundle.v1` selected; installed upload policy; with a persisted parent, `authoring.core.v1` and current context authority | Seal complete upload under explicit idempotency; acceptance may precede closure publication; terminal retries recheck the parent. |
+| `authoring.bundle.status` | `Authoring.Bundle.Status.request` | `authoring.bundle.v1` selected; installed upload policy | Principal-bound staging/validation/publication/retention state for a known upload ID. |
+
+The default daemon installs core lifecycle, exact supplied-document bytes,
+lexical scanning and local assistance. With explicit
+`server.authoring_project_access` grants it also installs native roots and
+semantic Analyze, Prefix and Query on the same owner; clients select both
+`authoring.core.v1` and `authoring.semantic.v1` for those methods. A Project
+Entry request and a host ChatMD script's Library request are distinct configured
+selections. Analysis may return typed Unavailable when the selected source or
+environment is absent. Configure the actor's exact principal ID and
+authentication kind; feature negotiation does not grant source access.
+`server.authoring_upload_access` separately admits parentless durable bundle
+publication and rebind for exact authenticated principals. Clients select
+`authoring.bundle.v1`. An upload-only daemon does not advertise core or native
+methods. A configured native and upload daemon uses one service and Store; its
+native read grants never imply upload write or publication, and upload grants
+never imply native read. A parent-bearing begin additionally requires
+`authoring.core.v1`, the same live connection's current parent context, and
+current actor/source authority. Its wire context label alone cannot attach a
+parent. A same-key terminal commit retry rechecks that persisted parent;
+refresh or revocation can deny the retry without changing the durable upload.
 
 Read-only attachments cannot authorize writer operations or permission answers.
 Ingress has separate authority: it needs its dedicated scope and matching
@@ -139,6 +204,42 @@ Inference queries read persisted observations without activating a session. Curs
 bind the authenticated principal, scopes and accounting revision; changes require
 a fresh query. See [inference observations](../lib/inference-observations.md) for
 retention, response limits, disclosure and the OCaml client contract.
+
+The opt-in portable REPL family has its own closed
+[`Developer_repl_wire`](../../lib/agent_protocol/developer_repl_wire.mli) contract.
+`developer.repl.capabilities` reports the installed finite request, result,
+reference-page, response and event limits. `developer.repl.create` and
+`developer.repl.submit` use exact keyed Host history; a same-key retry is
+resolved before consulting a changed editor selection or source. An instance,
+epoch or revision wire ID is comparison data for this process only. Reset
+issues new IDs while retaining authorized historical keyed observations.
+`developer.repl.inspect_type` and `developer.repl.task_references_page` expose
+bounded projections, never the retained type graph or a runnable Task handle.
+`developer.repl.task.submit` explicitly starts a retained Task under the
+durable Task owner; its observe, await and cancel methods use the Task row's
+run/key and remain separate from Developer command receipts. REPL and Task
+watch/unwatch methods share the existing connection notification pump. A watch
+acknowledges future hints; observe the exact key for a baseline and after a
+resync hint. The typed [first-party client](../../lib/agent_client/developer_repl_connection.mli)
+retains exact Create, Submit, Task, Reset and Close requests before handoff.
+It adopts unresolved requests only across the same host, principal and
+authentication kind, and retries a lost reply only by explicit choice with
+the original key; a missing Observe result is never proof of nonexecution.
+
+The opt-in read-only Developer trace family has closed
+[`Developer_trace_wire`](../../lib/agent_protocol/developer_trace_wire.mli)
+Capabilities and Page methods. Its typed
+[first-party client](../../lib/agent_client/developer_trace_connection.mli)
+uses the existing initialized connection and its single response/notification
+reader over embedded, HTTP, Unix or first-party stdio transport. Each page
+request names one exact Command, REPL statement or REPL Task, a finite item
+limit and an optional cursor. The client validates returned locator, requested
+cursor and count; the host checks current read and provenance authority again
+for every page. Reconnect requires the same server, principal and
+authentication kind but neither stores nor replays a cursor. A retained page
+contains bounded sites and summaries, never authored source bytes or a runnable
+effect handle. An incomplete page's resume cursor is the next poll position,
+including when no ordinary next-page cursor exists.
 
 ## Requests and results
 

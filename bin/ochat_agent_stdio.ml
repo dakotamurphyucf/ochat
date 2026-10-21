@@ -93,6 +93,8 @@ let run_local
       ~transient
       ~authoring_package_files
       ~authoring_budget
+      ~developer_policy
+      ~developer_only
   =
   let open Or_error.Let_syntax in
   Eio.Switch.run (fun sw ->
@@ -103,27 +105,30 @@ let run_local
     let authoring_package_files =
       List.map authoring_package_files ~f:(absolute (working_directory env))
     in
-    let%bind embedded =
-      Agent_server.Embedded.start
-        ~daemon_options:
-          (Inference_composition.daemon_options_default_with_policy
-             ~transport_policy
-             ~sw
-             ~env
-             ~default_model:"gpt-4.5-preview")
+    let%bind local_policy =
+      match developer_policy with
+      | None -> Ok None
+      | Some path ->
+        Agent_server.Config_validator.Embedded_local.load
+          ~env
+          ~path:(absolute (working_directory env) path)
+        |> Result.map ~f:Option.some
+        |> Result.map_error ~f:(fun diagnostics ->
+          Error.create_s [%sexp (diagnostics : Agent_server.Config.Diagnostic.t list)])
+    in
+    let daemon_options =
+      Inference_composition.daemon_options_default_with_policy
+        ~transport_policy
         ~sw
         ~env
-        ~authoring_package_files
-        ?authoring_budget
-        options
-      |> Result.map_error ~f:protocol_error
+        ~default_model:"gpt-4.5-preview"
     in
-    Agent_server.Embedded.with_session embedded ~f:(fun embedded ->
+    let serve ~dispatcher ~close_connection ~principal =
       Agent_transport_stdio.Server.run
         ~sw
-        ~dispatcher:(Agent_server.Embedded.dispatcher embedded)
-        ~close_connection:(Agent_server.Embedded.close_connection embedded)
-        ~principal:(Agent_server.Embedded.principal embedded)
+        ~dispatcher
+        ~close_connection
+        ~principal
         ~connection_id:
           (Agent_protocol.Id.Attachment.create ()
            |> Agent_protocol.Id.Attachment.to_string)
@@ -133,8 +138,42 @@ let run_local
         ~outgoing_capacity:1_024
         ~max_attachments:64
         ~on_error:(report_protocol_error env);
-      Ok ())
-    |> Result.map_error ~f:protocol_error)
+      Ok ()
+    in
+    if developer_only
+    then
+      Agent_server.Embedded.with_local_host
+        ~daemon_options
+        ~sw
+        ~env
+        ~authoring_package_files
+        ?authoring_budget
+        ?local_policy
+        options
+        ~f:(fun host ->
+          serve
+            ~dispatcher:(Agent_server.Embedded.host_dispatcher host)
+            ~close_connection:(Agent_server.Embedded.host_close_connection host)
+            ~principal:(Agent_server.Embedded.host_principal host))
+      |> Result.map_error ~f:protocol_error
+    else (
+      let%bind embedded =
+        Agent_server.Embedded.start
+          ~daemon_options
+          ~sw
+          ~env
+          ~authoring_package_files
+          ?authoring_budget
+          ?local_policy
+          options
+        |> Result.map_error ~f:protocol_error
+      in
+      Agent_server.Embedded.with_session embedded ~f:(fun embedded ->
+        serve
+          ~dispatcher:(Agent_server.Embedded.dispatcher embedded)
+          ~close_connection:(Agent_server.Embedded.close_connection embedded)
+          ~principal:(Agent_server.Embedded.principal embedded))
+      |> Result.map_error ~f:protocol_error))
 ;;
 
 let run
@@ -148,10 +187,14 @@ let run
       ~transient
       ~authoring_package_files
       ~authoring_options
+      ~developer_policy
+      ~developer_only
   =
   match local, connect with
   | true, None when Option.is_some bearer_token_file ->
     Or_error.error_string "--bearer-token-file is only valid with --connect"
+  | true, None when developer_only && Option.is_none developer_policy ->
+    Or_error.error_string "--developer-only requires --developer-policy FILE"
   | true, None ->
     (match prompt with
      | None -> Or_error.error_string "--local requires --prompt FILE"
@@ -173,7 +216,9 @@ let run
            ~data_root
            ~transient
            ~authoring_package_files
-           ~authoring_budget))
+           ~authoring_budget
+           ~developer_policy
+           ~developer_only))
   | false, Some uri ->
     if
       Option.is_some inference_transport
@@ -183,10 +228,13 @@ let run
       || transient
       || (not (List.is_empty authoring_package_files))
       || Agent_server.Authoring_options.is_configured authoring_options
+      || Option.is_some developer_policy
+      || developer_only
     then
       Or_error.error_string
         "--inference-transport, --prompt, --workspace, --data-root, --transient, \
-         authoring package and budget flags are local-mode options"
+         authoring package, budget, developer policy and --developer-only flags are \
+         local-mode options"
     else Eio_main.run (fun env -> run_gateway env ~uri ~bearer_token_file)
   | true, Some _ -> Or_error.error_string "--local and --connect are mutually exclusive"
   | false, None when Option.is_some bearer_token_file ->
@@ -228,6 +276,16 @@ let command =
          "--authoring-package"
          (listed string)
          ~doc:"FILE Capture custom documentation for the local host (repeatable)."
+     and developer_policy =
+       flag
+         "--developer-policy"
+         (optional string)
+         ~doc:"FILE Local-only bounded Developer policy with Embedded_operator selectors."
+     and developer_only =
+       flag
+         "--developer-only"
+         no_arg
+         ~doc:"Start the configured Developer host without an ordinary agent session."
      in
      fun () ->
        run
@@ -240,7 +298,9 @@ let command =
          ~data_root
          ~transient
          ~authoring_package_files
-         ~authoring_options)
+         ~authoring_options
+         ~developer_policy
+         ~developer_only)
 ;;
 
 let () =

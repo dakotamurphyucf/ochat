@@ -235,12 +235,14 @@ module Capture = struct
     ; receipt : Receipt.t
     ; root_invocation :
         Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+    ; tool_contract : Chatml_compilation.Tool_contract.t
     ; affinity : unit ref
     }
 
   let value t = t.value
   let receipt t = t.receipt
   let root_invocation t = t.root_invocation
+  let tool_contract t = t.tool_contract
 
   module Route = struct
     type t =
@@ -319,6 +321,42 @@ module Scope = struct
     ; mutable pending : pending option
     }
 
+  type scope = t
+
+  module Content_revision = struct
+    type t =
+      { scope : scope
+      ; revision : Prompt_revision.t
+      ; parsed : Prompt.Chat_markdown.Parsed.t
+      ; projection : Prompt.Chat_markdown.Document_projection.t option
+      ; captured_accounting : Chatmd_prompt_content.Accounting.t option
+      }
+
+    let captured_accounting t = t.captured_accounting
+  end
+
+  module Content_read = struct
+    type t =
+      { contents : string
+      ; input_bytes : int
+      ; work_steps : int
+      }
+
+    let contents t = t.contents
+    let input_bytes t = t.input_bytes
+    let work_steps t = t.work_steps
+  end
+
+  module Origin_read = struct
+    type t =
+      { origin : Prompt.Chat_markdown.Content_origin.t
+      ; work_steps : int
+      }
+
+    let origin t = t.origin
+    let work_steps t = t.work_steps
+  end
+
   let check t =
     if t.closed
     then Error (Error.create Closed)
@@ -326,6 +364,44 @@ module Scope = struct
       match t.failure with
       | Some error -> Error error
       | None -> check t.owner)
+  ;;
+
+  let bind_content_revision t ~revision =
+    let module CM = Prompt.Chat_markdown in
+    let open Result.Let_syntax in
+    let%bind () = check t in
+    let artifact = Prompt_revision.artifact revision in
+    let expected = receipt t.owner in
+    let%bind () =
+      match artifact.source_receipt with
+      | Some actual when Receipt.equal actual expected -> Ok ()
+      | None | Some _ -> Error (Error.foreign_receipt ())
+    in
+    let%bind parsed =
+      Prompt_revision.parser_context revision
+      |> Result.of_option ~error:(Error.create Invalid_binding)
+    in
+    let projection = Prompt_revision.document_projection revision in
+    if
+      (not
+         (String.equal
+            artifact.root_relative_path
+            (Chatmd_parser_input.path (CM.Parsed.root_input parsed))))
+      || Option.exists projection ~f:(fun projected ->
+        not (phys_equal parsed (CM.Document_projection.parsed projected)))
+    then Error (Error.create Invalid_binding)
+    else
+      Ok
+        Content_revision.
+          { scope = t
+          ; revision
+          ; parsed
+          ; projection
+          ; captured_accounting =
+              Option.map
+                (Prompt_revision.content revision)
+                ~f:Chatmd_prompt_content.accounting
+          }
   ;;
 
   let capture_matches t capture =
@@ -428,9 +504,138 @@ module Scope = struct
           | Ok (Ok value) -> Result.map (check t) ~f:(fun () -> value)))
   ;;
 
+  let content_origin t ~content ~item ~max_work_steps ~checkpoint =
+    let module CM = Prompt.Chat_markdown in
+    if (not (phys_equal t content.Content_revision.scope)) || max_work_steps <= 0
+    then Error (Error.create Invalid_binding)
+    else
+      run t (fun () ->
+        let remaining = ref max_work_steps in
+        let exception Work_limit in
+        let exception Stop of Error.t in
+        let poll () =
+          if !remaining <= 0 then raise Work_limit;
+          decr remaining;
+          match check t with
+          | Error error -> raise (Stop error)
+          | Ok () -> checked_poll t.owner checkpoint (fun error -> raise (Stop error))
+        in
+        try
+          CM.content_origin
+            content.parsed
+            ?projection:content.projection
+            ~max_work_steps
+            ~checkpoint:poll
+            item
+          |> Result.map_error ~f:(fun _ -> Error.create Invalid_binding)
+          |> Result.map ~f:(fun parsed_origin ->
+            Origin_read.
+              { origin = parsed_origin; work_steps = max_work_steps - !remaining })
+        with
+        | Work_limit -> Error (Error.create Invalid_binding)
+        | Stop error -> Error error)
+  ;;
+
+  let read_dynamic_content
+        t
+        ~content
+        ~(item : Prompt.Chat_markdown.basic_content_item)
+        ~max_bytes
+        ~max_work_steps
+        ~checkpoint
+        ~on_acquire
+    =
+    let module CM = Prompt.Chat_markdown in
+    let module Input = Chatmd_parser_input in
+    let module Member = Source.Portable_path in
+    let module Abort = struct
+      exception Work_limit
+      exception Stop of Error.t
+    end
+    in
+    run t (fun () ->
+      let invalid () = Error (Error.create Invalid_binding) in
+      if
+        (not (phys_equal t content.Content_revision.scope))
+        || max_bytes <= 0
+        || max_work_steps <= 0
+        || not item.is_local
+      then invalid ()
+      else (
+        let remaining = ref max_work_steps in
+        let poll () =
+          if !remaining <= 0 then raise Abort.Work_limit;
+          decr remaining;
+          match check t with
+          | Error error -> raise (Abort.Stop error)
+          | Ok () ->
+            checked_poll t.owner checkpoint (fun error -> raise (Abort.Stop error))
+        in
+        try
+          let open Result.Let_syntax in
+          let%bind origin =
+            CM.content_origin
+              content.parsed
+              ?projection:content.projection
+              ~max_work_steps:!remaining
+              ~checkpoint:poll
+              item
+            |> Result.map_error ~f:(fun _ -> Error.create Invalid_binding)
+          in
+          let%bind () =
+            match CM.Content_origin.kind origin with
+            | CM.Content_origin.Image
+            | CM.Content_origin.Document CM.Document_occurrence.Selection.Dynamic -> Ok ()
+            | CM.Content_origin.Document
+                ( CM.Document_occurrence.Selection.Local_capture
+                | CM.Document_occurrence.Selection.Builtin _ ) -> invalid ()
+          in
+          let range = CM.Content_origin.range origin in
+          let%bind base =
+            Member.create (Input.path (Input.Range.input range))
+            |> Result.map_error ~f:(fun _ -> Error.create Invalid_binding)
+          in
+          let%bind member =
+            Source_loader.resolve_member
+              base
+              ~reference:(CM.Content_origin.locator origin)
+              ~max_reference_bytes:1024
+              ~checkpoint:poll
+            |> Result.map_error ~f:(fun _ -> Error.create Invalid_binding)
+          in
+          let components = List.length (String.split (Member.to_string member) ~on:'/') in
+          let stage_base = (2 * components) + 6 in
+          if !remaining <= stage_base
+          then invalid ()
+          else (
+            let allowance = Int.min max_bytes (!remaining - stage_base) in
+            remaining := !remaining - stage_base;
+            on_acquire ();
+            let%bind body =
+              Local.read t.owner.local ~member ~max_bytes:allowance ~checkpoint:poll
+              |> Result.map_error ~f:Error.filesystem
+            in
+            poll ();
+            Ok
+              Content_read.
+                { contents = body
+                ; input_bytes = String.length body
+                ; work_steps = max_work_steps - !remaining
+                })
+        with
+        | Abort.Work_limit -> invalid ()
+        | Abort.Stop error -> Error error))
+  ;;
+
   type capture_selection =
     | Original of Prompt_definition.t
     | Selected of Prompt_source_entry.t
+    | Selected_model of
+        { content : Content_revision.t
+        ; entry : Prompt_source_entry.t
+        ; max_input_bytes : int
+        ; on_acquire : unit -> unit
+        }
 
   let capture_selected t ~selection ~env ~preprocess ~limits ~checkpoint =
     run t (fun () ->
@@ -439,11 +644,17 @@ module Scope = struct
         match selection with
         | Original definition -> definition
         | Selected entry -> Prompt_source_entry.definition entry
+        | Selected_model { entry; _ } -> Prompt_source_entry.definition entry
       in
       let selection_matches =
         match selection with
         | Original _ -> true
         | Selected entry -> Receipt.equal receipt (Prompt_source_entry.receipt entry)
+        | Selected_model { content; entry; max_input_bytes; _ } ->
+          max_input_bytes > 0
+          && phys_equal content.scope t
+          && Prompt_source_entry.matches_selected_parent entry content.revision
+          && Receipt.equal receipt (Prompt_source_entry.receipt entry)
       in
       if
         (not selection_matches)
@@ -459,6 +670,7 @@ module Scope = struct
           | Original _ ->
             Source.Portable_path.create (Filename.basename definition.root_file)
           | Selected entry -> Ok (Prompt_source_entry.member entry)
+          | Selected_model { entry; _ } -> Ok (Prompt_source_entry.member entry)
         in
         match member with
         | Error _ -> Error (Error.create Invalid_binding)
@@ -483,6 +695,12 @@ module Scope = struct
               checked_poll t.owner user_checkpoint (fun error -> raise (Abort.Stop error))
           in
           (try
+             (match selection with
+              | Original _ | Selected _ -> ()
+              | Selected_model { on_acquire; _ } ->
+                poll ();
+                invoke on_acquire;
+                poll ());
              let loader =
                Source_loader.retained_filesystem
                  ~root:(t.owner.root :> Eio.Fs.dir_ty Eio.Path.t)
@@ -493,6 +711,10 @@ module Scope = struct
                Prompt_revision_builder.capture_with_loader
                  ~loader
                  ~entry
+                 ?max_total_source_bytes:
+                   (match selection with
+                    | Original _ | Selected _ -> None
+                    | Selected_model { max_input_bytes; _ } -> Some max_input_bytes)
                  ~env
                  ~preprocess
                  ~limits
@@ -506,6 +728,7 @@ module Scope = struct
                  { value
                  ; receipt
                  ; root_invocation = Prompt_definition.root_invocation definition
+                 ; tool_contract = Prompt_definition.tool_contract definition
                  ; affinity = t.owner.capture_affinity
                  }
                in
@@ -543,6 +766,26 @@ module Scope = struct
 
   let capture_entry t ~entry ~env ~preprocess ~limits ~checkpoint =
     capture_selected t ~selection:(Selected entry) ~env ~preprocess ~limits ~checkpoint
+  ;;
+
+  let capture_selected_member
+        t
+        ~content
+        ~entry
+        ~env
+        ~preprocess
+        ~limits
+        ~max_input_bytes
+        ~checkpoint
+        ~on_acquire
+    =
+    capture_selected
+      t
+      ~selection:(Selected_model { content; entry; max_input_bytes; on_acquire })
+      ~env
+      ~preprocess
+      ~limits
+      ~checkpoint
   ;;
 
   let capture_documents t ~capture ~limits ~checkpoint =

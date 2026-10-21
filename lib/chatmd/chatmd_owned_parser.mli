@@ -11,6 +11,7 @@ module Limits : sig
     -> t Or_error.t
 
   val input_bytes : t -> int
+  val token_limit : t -> int
 
   (** Complete numeric parsing policy; no parsed inputs or callbacks. *)
   val policy_identity : t -> Sexp.t
@@ -20,8 +21,18 @@ end
     Never retained in a parsed result or input. *)
 type t
 
-val create : Limits.t -> checkpoint:(unit -> unit) -> t
+(** [on_limit] is invoked only at known parser/source/depth limit origins before
+    the legacy Failure message. Checked generated admission can raise its own
+    typed limit error there; ordinary callers omit it and keep existing behavior. *)
+val create
+  :  ?on_limit:(unit -> unit)
+  -> ?lexer_error_exn:(string -> exn)
+  -> Limits.t
+  -> checkpoint:(unit -> unit)
+  -> t
+
 val checkpoint : t -> unit
+val limits : t -> Limits.t
 
 (** Preserve any tighter host bound and cap referenced script/schema reads too. *)
 val bound_loader : t -> Source_loader.t -> Source_loader.t

@@ -1,0 +1,6 @@
+(library
+ (name developer_protocol_test)
+ (modules developer_protocol_tests)
+ (libraries core ochat.agent_protocol ochat.agent_store ochat.document_schema ochat.chatml_source ochat.chatml_execution)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

@@ -50,6 +50,7 @@ val render
   -> Chat_message_render_job.result
 
 module For_testing : sig
+  val uses_bundled_source : t -> [ `Chatml | `Chatmd ] -> bool
   val has_language : t -> string -> bool
   val code_cache_length : t -> int
   val highlight_cache_length : t -> int

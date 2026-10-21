@@ -7,13 +7,45 @@ open Core
     generation, parent, deadline and attempt ownership belong to that job. *)
 type t
 
+module Issuer_source : sig
+  (** Immutable issuer comparison data for a queued selected child. The
+      installed artifact is the issuing child's own revision, not the optional
+      Tool target [agent_artifact]. Headless is the only admitted v3 role.
+      These values contain no live source lease, native issuer or Claim. *)
+  type t
+
+  val create
+    :  artifact:Agent_protocol.Developer_agent_artifact.t
+    -> prompt:Agent_protocol.Id.Prompt_definition.t
+    -> workspace:Agent_protocol.Id.Workspace_definition.t
+    -> tool_contract:Chatml_compilation.Tool_contract.t
+    -> source_policy:Chatml_source.Digest.t
+    -> runtime_policy:Chatml_source.Digest.t
+    -> t
+
+  val artifact : t -> Agent_protocol.Developer_agent_artifact.t
+  val prompt : t -> Agent_protocol.Id.Prompt_definition.t
+  val workspace : t -> Agent_protocol.Id.Workspace_definition.t
+  val tool_contract : t -> Chatml_compilation.Tool_contract.t
+  val source_policy : t -> Chatml_source.Digest.t
+  val runtime_policy : t -> Chatml_source.Digest.t
+end
+
+(** Pure attachment for trusted physical staging. A caller's possession of an
+    [Issuer_source.t] is never a grant. Reject replacement; a v3 request may
+    still carry an independent Tool [agent_artifact] target. Author-facing
+    Job.start parsers do not accept this field. *)
+val with_issuer_source : t -> Issuer_source.t -> (t, Agent_protocol.Error.t) result
+
+val issuer_source : t -> Issuer_source.t option
+
 module Agent_artifact : sig
   (** Immutable reference to selected child code, not a source grant, native
       resource, compiled state or reservation. Validated domain types bound the
       revision ID, digest and exact portable root member. The trusted host must
       install and verify that artifact, its authentic role and its association
       with the original native binding before attaching this reference. *)
-  type t
+  type t = Agent_protocol.Developer_agent_artifact.t
 
   val create
     :  revision_id:Agent_protocol.Id.Prompt_revision.t
@@ -34,6 +66,20 @@ val with_agent_artifact : t -> Agent_artifact.t -> (t, Agent_protocol.Error.t) r
 
 val agent_artifact : t -> Agent_artifact.t option
 
+module Target_kind : sig
+  type t =
+    | Tool
+    | Script
+  [@@deriving equal, sexp_of]
+end
+
+(** Pure projection of the request's validated private target variant. This
+    lets a scheduler leave an uninstalled target Queued without compiling a
+    script, inspecting raw JSON tags, or granting execution authority. The
+    physical worker still decodes and re-admits the saved payload from its
+    active Claim. *)
+val target_kind : t -> Target_kind.t
+
 (** Capture exactly one already selected tool, checking its live reference and
     input schema. Managed implementations retain their full revision pin, including
     the dependencies captured by their host registration. Does not execute. *)
@@ -52,8 +98,8 @@ val script
   -> policy:One_off_request.policy
   -> (t, Agent_protocol.Error.t) result
 
-(** A present code reference uses the strict v2 carrier and participates in the
-    fingerprint. Absence retains exact existing v1 encoding and fingerprint. *)
+(** An issuer uses strict v3. Without one, the existing v1/v2 encoding and
+    fingerprint remain byte-identical, including a v2 Tool target artifact. *)
 val to_json : t -> Jsonaf.t
 
 (** Effective stored budget, retained independently of later host defaults. *)
@@ -81,6 +127,15 @@ val capability_pins
 
 val rebind_capabilities
   :  pins:(string * string) list
+  -> capabilities:Tool_capability.t
+  -> (Tool_capability.t, Agent_protocol.Error.t) result
+
+(** Rebind this exact saved request's selected names and permission fingerprints
+    against an independently current registry. The result is a ceiling for the
+    same request, never the host's full registry. This does not compile or
+    execute the request, and it confers no Job claim or source authority. *)
+val selected_capabilities
+  :  t
   -> capabilities:Tool_capability.t
   -> (Tool_capability.t, Agent_protocol.Error.t) result
 

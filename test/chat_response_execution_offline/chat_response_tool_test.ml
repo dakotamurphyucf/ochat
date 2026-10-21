@@ -28,6 +28,26 @@ let%expect_test "MCP discovery caches isolate identities, invalidation and expir
         (Chat_response.Mcp_discovery_cache.get b)
         [ "identity-b-private-tool" ]);
     Chat_response.Mcp_discovery_cache.invalidate a;
+    let checked = ref 0 in
+    let denied =
+      Chat_response.Mcp_discovery_cache.get_checked a ~before_load:(fun () ->
+        Int.incr checked;
+        Error `Expired_preparation)
+    in
+    assert (Result.is_error denied);
+    assert (!checked = 1 && !count_a = 1);
+    let admitted =
+      Chat_response.Mcp_discovery_cache.get_checked a ~before_load:(fun () ->
+        Int.incr checked;
+        Ok ())
+    in
+    assert (Result.is_ok admitted);
+    assert (!checked = 2 && !count_a = 2);
+    let cached =
+      Chat_response.Mcp_discovery_cache.get_checked a ~before_load:(fun () ->
+        failwith "cache hit must not borrow preparation authority")
+    in
+    assert (Result.is_ok cached);
     ignore (Chat_response.Mcp_discovery_cache.get a : string list);
     ignore (Chat_response.Mcp_discovery_cache.get b : string list);
     assert (!count_a = 2 && !count_b = 1);

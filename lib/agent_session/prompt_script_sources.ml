@@ -8,6 +8,66 @@ module P = Chatml_prepared_program
 module S = Chatml_source
 module Input = Chatmd_parser_input
 module Prepare = Chatml_project_prepare
+module Extraction = CM.Declaration.Extraction
+
+module Projection_receipt = struct
+  type t =
+    { binding : C.Binding.t
+    ; compiler_contract : S.Digest.t
+    ; declaration : CM.Declaration.t
+    ; declaration_range : Input.Range.t
+    ; captured_source : S.t
+    ; bound : Extraction.bound
+    ; verified_external_member : string option
+    }
+
+  let binding t = t.binding
+  let compiler_contract t = t.compiler_contract
+  let declaration_range t = t.declaration_range
+
+  let bind_compiler_source t source ~checkpoint =
+    Extraction.bind t.declaration ~compiled_source:source ~checkpoint
+    |> Result.map ~f:(fun bound -> { t with bound })
+  ;;
+
+  type projection =
+    | Exact_inline of Extraction.input_span
+    | Exact_external of S.Location.t
+    | Approximate_declaration of Input.Range.t
+
+  type error = Extraction.error =
+    | Stale_script_source
+    | Invalid_compiler_location
+    | Invalid_authored_point
+  [@@deriving sexp_of]
+
+  let project t location ~checkpoint =
+    let approximate () = Approximate_declaration t.declaration_range in
+    match Extraction.project_raw t.bound location ~checkpoint with
+    | Error error -> Error error
+    | Ok (Exact_inline span) -> Ok (Exact_inline span)
+    | Ok (Approximate_declaration _) -> Ok (approximate ())
+    | Ok (External_origin { member; body_digest; start_byte; end_byte }) ->
+      (match t.verified_external_member with
+       | Some verified
+         when String.equal member verified
+              && S.Digest.equal body_digest (S.digest t.captured_source) ->
+         (match S.locate t.captured_source ~start_byte ~end_byte ~checkpoint with
+          | Ok location -> Ok (Exact_external location)
+          | Error _ -> Error Invalid_compiler_location)
+       | None | Some _ -> Ok (approximate ()))
+  ;;
+end
+
+module Captured = struct
+  type t =
+    { programs : C.t
+    ; projections : Projection_receipt.t list
+    }
+
+  let programs t = t.programs
+  let projections t = t.projections
+end
 
 module Context = struct
   type t =
@@ -21,6 +81,7 @@ module Row = struct
   type t =
     { program : Plan.Program.t
     ; source : S.t option
+    ; projection : Projection_receipt.t option
     ; supplied : P.t option
     ; request : Prepare.Request.t option
     ; active : bool
@@ -57,7 +118,7 @@ let binding_equal left right ~checkpoint =
            (Input.identity_digest (C.Binding.registration_input right) ~checkpoint))
 ;;
 
-let capture
+let capture_with_projections
       scope
       ~capture
       ~root_plan
@@ -155,15 +216,16 @@ let capture
   let source program =
     let declaration = Plan.Program.declaration program in
     let input = Input.Range.input (CM.Declaration.range declaration) in
-    let binding = Plan.Program.binding program in
-    let relative_path =
+    let program_binding = Plan.Program.binding program in
+    let relative_path, verified_external_member =
       match CM.Declaration.script_path declaration with
       | None ->
-        Printf.sprintf
-          "fragments/%s/%d-%d.chatml"
-          (Input.identity_digest input ~checkpoint:poll)
-          (C.Binding.start_byte binding)
-          (C.Binding.end_byte binding)
+        ( Printf.sprintf
+            "fragments/%s/%d-%d.chatml"
+            (Input.identity_digest input ~checkpoint:poll)
+            (C.Binding.start_byte program_binding)
+            (C.Binding.end_byte program_binding)
+        , None )
       | Some reference ->
         let route = admit (Owner.Capture.route capture input ~checkpoint:poll) in
         let member =
@@ -191,18 +253,36 @@ let capture
              ~source:(Input.path input)
              "prompt.program_source_conflict"
              "External script differs from its original captured member");
-        path
+        path, Some path
     in
     let id = admit (S.Id.create ~package_namespace:namespace ~relative_path) in
     let contents = CM.Declaration.script_body declaration in
     debit (String.length contents);
-    admit
-      (S.create
-         id
-         ~contents
-         ~expected_digest:(Some (C.Binding.script_digest binding))
-         ~max_bytes:None
-         ~checkpoint:poll)
+    let source =
+      admit
+        (S.create
+           id
+           ~contents
+           ~expected_digest:(Some (C.Binding.script_digest program_binding))
+           ~max_bytes:None
+           ~checkpoint:poll)
+    in
+    let bound =
+      match Extraction.bind declaration ~compiled_source:source ~checkpoint:poll with
+      | Ok bound -> bound
+      | Error _ ->
+        fail "prompt.program_source_conflict" "Compiled script differs from declaration"
+    in
+    ( source
+    , Projection_receipt.
+        { binding = program_binding
+        ; compiler_contract = Plan.Program.compiler_contract program
+        ; declaration
+        ; declaration_range = CM.Declaration.range declaration
+        ; captured_source = source
+        ; bound
+        ; verified_external_member
+        } )
   in
   let check_graph program graph =
     let binding = Plan.Program.binding program in
@@ -341,7 +421,7 @@ let capture
         List.map programs ~f:(fun (program, supplied) ->
           poll ();
           let declaration = Plan.Program.declaration program in
-          let source, request =
+          let source, projection, request =
             match CM.Declaration.project_selection declaration, supplied with
             | Some _, Some _ ->
               fail
@@ -349,9 +429,9 @@ let capture
                 "Provided graph cannot replace selected project"
             | None, Some graph ->
               check_graph program graph;
-              None, None
+              None, None, None
             | selection, None ->
-              let source = source program in
+              let source, projection = source program in
               let request =
                 match selection with
                 | None -> None
@@ -404,11 +484,12 @@ let capture
                           ~lock_id
                           ~max_request_bytes))
               in
-              Some source, request
+              Some source, Some projection, request
           in
           Row.
             { program
             ; source
+            ; projection
             ; supplied
             ; request
             ; active =
@@ -454,8 +535,8 @@ let capture
          | Ok batch -> Prepare.Source_batch.preparations batch)
     in
     let selected = ref selected in
-    let programs, active =
-      List.fold rows ~init:([], []) ~f:(fun (programs, active) row ->
+    let programs, active, receipts =
+      List.fold rows ~init:([], [], []) ~f:(fun (programs, active, receipts) row ->
         poll ();
         let input =
           match row.Row.request, row.supplied, row.source with
@@ -474,12 +555,38 @@ let capture
             fail "prompt.program_source_invalid" "Inconsistent source preparation row"
         in
         let binding = Plan.Program.binding row.program in
+        let receipts =
+          match row.projection with
+          | None -> receipts
+          | Some receipt ->
+            let graph =
+              match input with
+              | C.Input.Selected build -> Chatml_project_build.prepared build
+              | Provided graph -> graph
+            in
+            let entry =
+              P.find_source graph (P.entry graph)
+              |> Option.value_or_thunk ~default:(fun () ->
+                fail "prompt.program_source_invalid" "Prepared program lacks entry")
+            in
+            let receipt =
+              match
+                Projection_receipt.bind_compiler_source receipt entry ~checkpoint:poll
+              with
+              | Ok receipt -> receipt
+              | Error _ ->
+                fail
+                  "prompt.program_source_conflict"
+                  "Prepared entry differs from declaration"
+            in
+            receipt :: receipts
+        in
         let active =
           if row.active
           then (binding, Plan.Program.compiler_contract row.program) :: active
           else active
         in
-        (binding, input) :: programs, active)
+        (binding, input) :: programs, active, receipts)
     in
     if not (List.is_empty !selected)
     then fail "prompt.program_source_invalid" "Surplus source batch";
@@ -507,7 +614,56 @@ let capture
         ])
     in
     poll ();
-    result
+    Result.map result ~f:(fun custody ->
+      Captured.{ programs = custody; projections = List.rev receipts })
   with
   | Abort.Stop errors -> Error errors
+;;
+
+let capture
+      scope
+      ~capture
+      ~root_plan
+      ~role_plans
+      ~operation
+      ~provided
+      ~additional_anchors
+      ~git_store
+      ~git_grants
+      ~root_limits
+      ~max_grants
+      ~max_grant_bytes
+      ~max_request_bytes
+      ~max_path_components
+      ~max_input_bytes
+      ~max_work_steps
+      ~policy
+      ~limits
+      ~custody_limits
+      ~clock
+      ~checkpoint
+  =
+  capture_with_projections
+    scope
+    ~capture
+    ~root_plan
+    ~role_plans
+    ~operation
+    ~provided
+    ~additional_anchors
+    ~git_store
+    ~git_grants
+    ~root_limits
+    ~max_grants
+    ~max_grant_bytes
+    ~max_request_bytes
+    ~max_path_components
+    ~max_input_bytes
+    ~max_work_steps
+    ~policy
+    ~limits
+    ~custody_limits
+    ~clock
+    ~checkpoint
+  |> Result.map ~f:Captured.programs
 ;;

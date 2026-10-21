@@ -5,9 +5,21 @@ open Core
 type target =
   | One_off_v1
   | Tool_v1
+  | Developer_tool_v1
   | Moderator_v1
   | Delegated_moderator_v1
 [@@deriving sexp, equal]
+
+(** Static tool-host selection, independent of provider credentials and runtime
+    authority. Existing callers retain [Standard] and its original fingerprint. *)
+module Tool_contract : sig
+  type t =
+    | Standard
+    | Developer_model_spawn
+  [@@deriving sexp, equal, compare]
+
+  val target : t -> target
+end
 
 type limits =
   { wall_seconds : float
@@ -40,7 +52,10 @@ val contract : target -> Sexp.t
     evaluates initializers or calls tools. Mutable compiler state is invocation-local.
 
     Cancellation and elapsed time are checked between compiler stages and within
-    inference traversals. Work between checkpoints must finish before cancellation
+    inference traversals on every checkpoint. Scheduler yields use a bounded
+    checkpoint cadence, with another policy check after each yield; dense metadata
+    traversals therefore do not require a scheduler entry per field. Work between
+    checkpoints must finish before cancellation
     takes effect; the caller waits for domain cleanup. This is a cooperative time budget, not a hard deadline or
     process/heap sandbox. No domain is abandoned after cancellation. *)
 val compile
@@ -206,3 +221,60 @@ val analyze_prepared_with_policy
   -> target:target
   -> unit
   -> (Chatml_semantics.t, Analysis_error.t) Result.t
+
+(** Authoring-only joined analysis of one parser-confirmed implementation
+    prefix in the exact admitted graph. The immutable result is explicitly
+    Provisional or semantic Unavailable; it cannot be executed or passed as a
+    complete checked snapshot. Full [analyze_prepared] diagnostics remain
+    authoritative. Incomplete companions return Unavailable. One bounded
+    semantic work ledger covers prefix discovery and publication. *)
+val analyze_prepared_prefix_with_policy
+  :  Chatml_prepared_program.t
+  -> source:Chatml_source.Id.t
+  -> cursor_byte:int
+  -> policy:policy
+  -> semantic_limits:Chatml_semantics.Limits.t
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> target:target
+  -> unit
+  -> (Chatml_semantics.Prefix.t, Analysis_error.t) Result.t
+
+val analyze_prepared_prefix
+  :  Chatml_prepared_program.t
+  -> source:Chatml_source.Id.t
+  -> cursor_byte:int
+  -> ?limits:limits
+  -> semantic_limits:Chatml_semantics.Limits.t
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> target:target
+  -> unit
+  -> (Chatml_semantics.Prefix.t, Analysis_error.t) Result.t
+
+(** Joined full and prefix semantic analysis under a host-selected authentic
+    compiler contract. Canonical contract encoding and conservative conversion
+    debits use the same admission as [compile_prepared_with_contract_and_policy]
+    before the worker starts. These calls do not relabel the contract as a
+    static target, execute initializers, or acquire sources. *)
+val analyze_prepared_with_contract_and_policy
+  :  Chatml_prepared_program.t
+  -> contract:Chatml.Chatml_compiler_contract.t
+  -> policy:policy
+  -> semantic_limits:Chatml_semantics.Limits.t
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> unit
+  -> (Chatml_semantics.t, Analysis_error.t) Result.t
+
+val analyze_prepared_prefix_with_contract_and_policy
+  :  Chatml_prepared_program.t
+  -> source:Chatml_source.Id.t
+  -> cursor_byte:int
+  -> contract:Chatml.Chatml_compiler_contract.t
+  -> policy:policy
+  -> semantic_limits:Chatml_semantics.Limits.t
+  -> max_dependency_depth:int
+  -> env:Eio_unix.Stdenv.base
+  -> unit
+  -> (Chatml_semantics.Prefix.t, Analysis_error.t) Result.t

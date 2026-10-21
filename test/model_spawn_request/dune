@@ -1,0 +1,5 @@
+(library
+ (name model_spawn_request_tests)
+ (libraries core jsonaf ochat.chat_response ochat.document_schema ochat.agent_protocol)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

@@ -101,16 +101,9 @@ let tool ~loader ~source_node ~source node =
         attrs
           source
           [ "tool" ]
-          [ "type"
-          ; "name"
-          ; "description"
-          ; "moderator"
-          ; "script"
-          ; "entrypoint"
-          ; "input_schema"
-          ; "output_schema"
-          ; "completion_schema"
-          ]
+          (Chatmd_declaration_schema.attributes
+             Chatmd_declaration_schema.Family.Tool_extension
+           |> Chatmd_declaration_schema.Attribute_names.names)
           raw
       in
       let name = required attributes "name" in
@@ -123,16 +116,16 @@ let tool ~loader ~source_node ~source node =
           "tool name requires 1..64 ASCII letters, digits, underscores or hyphens";
       let implementation =
         match
-          ( required attributes "type"
-          , optional attributes "moderator"
-          , optional attributes "script"
-          , optional attributes "entrypoint" )
+          Chatmd_declaration_schema.Extension_tool_binding.of_values
+            ~type_name:(required attributes "type")
+            ~moderator:(optional attributes "moderator")
+            ~script:(optional attributes "script")
+            ~entrypoint:(optional attributes "entrypoint")
         with
-        | "moderator", Some id, None, None when not (String.is_empty (String.strip id)) ->
-          Spec.Moderator (R.qualify source id)
-        | "chatml", None, Some id, Some "run" when not (String.is_empty (String.strip id))
-          -> Standalone { script = R.qualify source id; entrypoint = "run" }
-        | _ ->
+        | Some (Moderator id) -> Spec.Moderator (R.qualify source id)
+        | Some (Standalone { script; entrypoint }) ->
+          Standalone { script = R.qualify source script; entrypoint }
+        | None ->
           fail
             source
             [ "tool" ]
@@ -144,7 +137,15 @@ let tool ~loader ~source_node ~source node =
         List.filter_map children ~f:(function
           | Ast.Text text when String.for_all text ~f:Char.is_whitespace -> None
           | Ast.Element (Ast.Uses, raw, children) ->
-            let attributes = attrs source [ "tool"; "uses" ] [ "tool" ] raw in
+            let attributes =
+              attrs
+                source
+                [ "tool"; "uses" ]
+                (Chatmd_declaration_schema.attributes
+                   (Chatmd_declaration_schema.Family.Plain_tag Ast.Uses)
+                 |> Chatmd_declaration_schema.Attribute_names.names)
+                raw
+            in
             empty source [ "tool"; "uses" ] children;
             let tool = required attributes "tool" in
             if not (valid_tool_name tool)
@@ -197,24 +198,20 @@ let tool ~loader ~source_node ~source node =
       fail source [ "tool" ] "chatmd.extension_expected_tool" "expected tool declaration")
 ;;
 
-let script ~dir ~loader ~source_node ~source ~attributes:raw ~inline_source =
+let script
+      ~on_external_source
+      ~dir
+      ~loader
+      ~source_node
+      ~source
+      ~attributes:raw
+      ~inline_source
+  =
   protect (fun () ->
     let allowed =
-      [ "id"
-      ; "language"
-      ; "kind"
-      ; "api"
-      ; "src"
-      ; "project"
-      ; "environment"
-      ; "wall_time"
-      ; "fuel"
-      ; "max_tasks"
-      ; "max_value"
-      ; "max_output"
-      ; "max_array_items"
-      ; "max_depth"
-      ]
+      Chatmd_declaration_schema.attributes
+        Chatmd_declaration_schema.Family.Script_extension
+      |> Chatmd_declaration_schema.Attribute_names.names
     in
     let attributes = attrs source [ "script" ] allowed raw in
     List.iter allowed ~f:(fun name -> ignore (optional attributes name : string option));
@@ -226,10 +223,14 @@ let script ~dir ~loader ~source_node ~source ~attributes:raw ~inline_source =
         "chatmd.script_invalid_language"
         "only ChatML is supported";
     let kind =
-      match required attributes "kind", optional attributes "api" with
-      | "moderator", Some "extensibility-v1" -> Spec.Moderator_script
-      | "tool", (None | Some "extensibility-v1") -> Tool_script
-      | _ ->
+      match
+        Chatmd_declaration_schema.Script_surface.of_values
+          ~kind:(required attributes "kind")
+          ~api:(optional attributes "api")
+      with
+      | Some Moderator -> Spec.Moderator_script
+      | Some Tool -> Tool_script
+      | None ->
         fail
           source
           [ "script"; "api" ]
@@ -250,7 +251,10 @@ let script ~dir ~loader ~source_node ~source ~attributes:raw ~inline_source =
     let text =
       match path with
       | None -> inline_source
-      | Some path -> snd (load loader source_node source [ "script"; "src" ] path)
+      | Some path ->
+        let resolved, text = load loader source_node source [ "script"; "src" ] path in
+        on_external_source resolved text;
+        text
     in
     if String.length text > 1024 * 1024
     then
@@ -283,6 +287,7 @@ let script ~dir ~loader ~source_node ~source ~attributes:raw ~inline_source =
     in
     let parsed =
       Chatmd_script_declaration.parse
+        ~on_external_source:(fun _ _ -> ())
         ~dir
         ~loader
         ~source_node
@@ -328,7 +333,15 @@ let authoring_context ~source node =
   protect (fun () ->
     match node with
     | Ast.Element (Ast.Authoring_context, raw, children) ->
-      let attributes = attrs source [ "authoring_context" ] [ "policy"; "topics" ] raw in
+      let attributes =
+        attrs
+          source
+          [ "authoring_context" ]
+          (Chatmd_declaration_schema.attributes
+             (Chatmd_declaration_schema.Family.Plain_tag Ast.Authoring_context)
+           |> Chatmd_declaration_schema.Attribute_names.names)
+          raw
+      in
       empty source [ "authoring_context" ] children;
       let policy =
         match required attributes "policy", optional attributes "topics" with
@@ -378,7 +391,13 @@ let authoring_help ~source node =
     match node with
     | Ast.Element (Ast.Authoring_help, raw, children) ->
       let attributes =
-        attrs source path [ "tool"; "package"; "tasks"; "topics"; "required_helpers" ] raw
+        attrs
+          source
+          path
+          (Chatmd_declaration_schema.attributes
+             (Chatmd_declaration_schema.Family.Plain_tag Ast.Authoring_help)
+           |> Chatmd_declaration_schema.Attribute_names.names)
+          raw
       in
       empty source path children;
       let tool = required attributes "tool" in

@@ -202,7 +202,7 @@ let with_parent env f =
              ~parser_limits:(Agent_session.Prompt_revision_builder.capture_limits ())
              ~max_work_steps:(Sources.Policy.max_work_steps policy)
              ~preprocess:Fn.id
-             ~prepare_programs:(fun startup ~invocation scope capture ->
+             ~prepare_programs:(fun startup ~tool_contract:_ ~invocation scope capture ->
                Agent_server.Project_source_host.with_host source_host ~f:(fun _ host ->
                  Sources.capture_child
                    policy
@@ -291,6 +291,7 @@ let%expect_test
          let runner =
            Runner.create
              ~script_preparation:runtime_policy
+             ~tool_contract:Chatml_compilation.Tool_contract.Standard
              ~content_limits:None
              ~policy_revision:
                (Chatml_source.Digest.of_contents "fixture-runtime-v1" ~checkpoint:ignore)
@@ -370,7 +371,7 @@ let%expect_test
                Chat_response.Agent_runtime.prepare_agent_source
                  native
                  ~binding
-                 ~owner
+                 ~launch:(Chat_response.Source_launch.conversation owner)
                  ~request
                  ~max_registrations:16
                  ~checkpoint)

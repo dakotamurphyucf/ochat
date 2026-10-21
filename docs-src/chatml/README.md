@@ -143,6 +143,22 @@ an external effect happens exactly once. The
 [server orchestration guide](../agent-server/chatml-orchestration.md) explains
 the persistence boundary, jobs, timers, and restart behavior.
 
+## Develop ChatML interactively
+
+Use the [ChatML development guide](../guide/chatml-development-workflow.md) to
+start the separate `chatml-repl` terminal frontend with an explicit local policy.
+The REPL keeps successful bindings between submissions, reports type errors
+without changing prior typing, and runs a Task only when you explicitly request
+it. Reset clears interactive state on the same captured code; start a new
+instance to adopt file or environment changes.
+
+Editor integrations use the same portable Authoring and Developer services to
+inspect exact revisions, Check a program, and select deterministic Fixture or
+permitted Live execution. A successful Check does not grant execution.
+[Bounded execution traces](../design/chatml-execution-tracing.md) connect those
+runs to their captured source under separate read authority. A full stepping
+debugger and desktop or embedded chat-TUI REPL panels remain future work.
+
 ## Read and try
 
 See the scripts combined in complete applications: the

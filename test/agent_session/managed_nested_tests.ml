@@ -125,6 +125,71 @@ let run ctx input =
                   ~map_error:(fun (error : Chatml_compilation.error) ->
                     [ Chatmd_shell_spec.Diagnostic.error ~code:error.code error.message ])
                   ~f:(fun startup ->
+                    let developer_authored =
+                      String.substr_replace_all
+                        authored
+                        ~pattern:"let ignored = count[0] <-"
+                        ~with_:
+                          "let unused = fun () -> Model.spawn(\"agent_prompt_v1\", \
+                           input) in\n\
+                          \  let ignored = count[0] <-"
+                    in
+                    let developer_elements = parse developer_authored in
+                    assert (
+                      Result.is_error
+                        (Managed.prepare
+                           ~startup
+                           ~env
+                           ~owner:"managed-nesting"
+                           ~capabilities:base
+                           developer_elements));
+                    let developer =
+                      Managed.prepare
+                        ~startup
+                        ~tool_contract:
+                          Chatml_compilation.Tool_contract.Developer_model_spawn
+                        ~env
+                        ~owner:"managed-nesting"
+                        ~capabilities:base
+                        developer_elements
+                      |> Result.map_error ~f:(fun errors ->
+                        String.concat
+                          ~sep:"; "
+                          (List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string))
+                      |> Result.ok_or_failwith
+                    in
+                    assert (
+                      not
+                        (String.equal
+                           (EC.definition_fingerprint (Managed.definition managed))
+                           (EC.definition_fingerprint (Managed.definition developer))));
+                    let developer_selected =
+                      String.substr_replace_all
+                        developer_authored
+                        ~pattern:"to_string(count[0]) ++"
+                        ~with_:"\"fresh:\" ++ to_string(count[0]) ++"
+                      |> parse
+                    in
+                    let developer_rebound =
+                      Managed.rebind_code
+                        developer
+                        ~startup
+                        ~limits:Chatml_compilation.default_limits
+                        ~delegated_moderator:false
+                        ~programs:None
+                        ~env
+                        ~checkpoint:Eio.Fiber.check
+                        developer_selected
+                      |> Result.map_error ~f:(fun errors ->
+                        String.concat
+                          ~sep:"; "
+                          (List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string))
+                      |> Result.ok_or_failwith
+                    in
+                    assert (
+                      String.equal
+                        (Managed.authority_fingerprint developer)
+                        (Managed.authority_fingerprint developer_rebound));
                     let changed_authority =
                       String.substr_replace_all
                         authored

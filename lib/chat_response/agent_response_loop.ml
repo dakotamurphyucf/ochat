@@ -43,6 +43,9 @@ let run_entries
     ~on_inference_attempt:ctx.on_inference_attempt
     ~on_inference_completion:ctx.on_inference_completion
     ~on_inference_observation:ctx.on_inference_observation
+    ~on_admitted_call:ctx.on_admitted_call
+    ~submission_guard:ctx.submission_guard
+    ~before_inference_dispatch:ctx.before_inference_dispatch
     ~inference_relation:ctx.inference_relation
     ?datadir:response_dir
     ~allocator

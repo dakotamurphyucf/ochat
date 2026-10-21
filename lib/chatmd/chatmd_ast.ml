@@ -105,29 +105,37 @@ let tag_equal (a : tag) (b : tag) : bool =
     corresponding {!type:tag}.  Returns [Some _] when [s] is recognised, or
     [None] otherwise.  The function expects the exact canonical spelling – no
     normalisation other than case‐sensitivity is performed. *)
-let tag_of_string_opt : string -> tag option = function
-  | "msg" -> Some Msg
-  | "user" -> Some User
-  | "agent" -> Some Agent
-  | "assistant" -> Some Assistant
-  | "system" -> Some System
-  | "developer" -> Some Developer
-  | "script" -> Some Script
-  | "doc" -> Some Doc
-  | "import" -> Some Import
-  | "img" -> Some Img
-  | "config" -> Some Config
-  | "reasoning" -> Some Reasoning
-  | "summary" -> Some Summary
-  | "tool_call" -> Some Tool_call
-  | "tool_response" -> Some Tool_response
-  | "tool" -> Some Tool
-  | "shell_access" -> Some Shell_access
-  | "moderator_runtime" -> Some Moderator_runtime
-  | "uses" -> Some Uses
-  | "authoring_context" -> Some Authoring_context
-  | "authoring_help" -> Some Authoring_help
-  | name ->
+let official_names =
+  [ "msg", Msg
+  ; "user", User
+  ; "agent", Agent
+  ; "assistant", Assistant
+  ; "system", System
+  ; "developer", Developer
+  ; "script", Script
+  ; "doc", Doc
+  ; "import", Import
+  ; "img", Img
+  ; "config", Config
+  ; "reasoning", Reasoning
+  ; "summary", Summary
+  ; "tool_call", Tool_call
+  ; "tool_response", Tool_response
+  ; "tool", Tool
+  ; "shell_access", Shell_access
+  ; "moderator_runtime", Moderator_runtime
+  ; "uses", Uses
+  ; "authoring_context", Authoring_context
+  ; "authoring_help", Authoring_help
+  ]
+;;
+
+let official_names_by_spelling = String.Map.of_alist_exn official_names
+
+let tag_of_string_opt name =
+  match Map.find official_names_by_spelling name with
+  | Some tag -> Some tag
+  | None ->
     Option.map (Chatmd_shell_spec.Shell_element.of_string name) ~f:(fun element ->
       Shell_element element)
 ;;

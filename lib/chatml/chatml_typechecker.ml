@@ -62,6 +62,7 @@ module Type_snapshot = Chatml_type_snapshot
 module Value_scope = Chatml_value_scope
 module Configured_lookup = Chatml_configured_lookup
 module Configured_resolution = Chatml_configured_resolution
+module Repl_type_roots = Chatml_repl_type_roots
 module Semantic = Chatml_semantic_recorder
 module Semantic_binding = Chatml_semantic_binding
 module Semantic_scope = Chatml_semantic_scope
@@ -181,8 +182,15 @@ let with_unit_level state ~f =
   Exn.protect ~f ~finally:(fun () -> state.shared.current_lvl <- previous)
 ;;
 
+type diagnostic = Chatml_diagnostic.t
+
+exception Type_error of string
+exception Type_error_with_loc of string * Source.span
+exception Type_diagnostic of diagnostic
+
 let gensym (state : infer_state) : string =
   let id = state.shared.current_id in
+  if id = Int.max_value then raise (Type_error "Fresh type-name space exhausted");
   state.shared.current_id <- state.shared.current_id + 1;
   let letter = Char.of_int_exn ((id mod 26) + Char.to_int 'a') |> Char.to_string in
   if id >= 26 then letter ^ Int.to_string (id / 26) else letter
@@ -190,6 +198,8 @@ let gensym (state : infer_state) : string =
 
 let gensym_mu (state : infer_state) : string =
   let id = state.shared.mu_id in
+  if id = Int.max_value
+  then raise (Type_error "Fresh recursive type-name space exhausted");
   state.shared.mu_id <- state.shared.mu_id + 1;
   Int.to_string id
 ;;
@@ -197,12 +207,6 @@ let gensym_mu (state : infer_state) : string =
 let record_span_type (state : infer_state) (span : Source.span) (ty : typ) : unit =
   Hashtbl.set state.span_types ~key:(span_to_key span) ~data:ty
 ;;
-
-type diagnostic = Chatml_diagnostic.t
-
-exception Type_error of string
-exception Type_error_with_loc of string * Source.span
-exception Type_diagnostic of diagnostic
 
 type checked_program =
   { source : Chatml_source.t option
@@ -1272,7 +1276,8 @@ let init_env_with_static
   let values = Env.of_list (globals @ modules) |> Value_scope.of_schemes in
   match semantic with
   | None -> values
-  | Some frame -> Semantic_host.values_exn frame values ~globals ~modules ~checkpoint
+  | Some frame ->
+    Semantic_host.values_exn frame values ~surface ~globals ~modules ~checkpoint
 ;;
 
 let init_env_with_surface ?(checkpoint = fun () -> ()) surface =
@@ -1284,14 +1289,21 @@ let init_env_with_surface ?(checkpoint = fun () -> ()) surface =
 let init_env () : tenv = init_env_with_surface Builtin_surface.core_surface
 
 let init_types_with_static ?semantic ?(checkpoint = fun () -> ()) surface : type_env =
-  List.fold
+  List.foldi
     (Chatml.Chatml_static_surface.type_aliases surface)
     ~init:Type_alias.empty
-    ~f:(fun env (alias : Builtin_surface.builtin_type_alias) ->
+    ~f:(fun ordinal env (alias : Builtin_surface.builtin_type_alias) ->
       let alias_ty = typ_of_builtin_ty ~checkpoint alias.body in
       let metadata =
         Option.map semantic ~f:(fun frame ->
-          Semantic_host.alias_exn frame env ~name:alias.name ~body:alias_ty ~checkpoint)
+          Semantic_host.alias_exn
+            frame
+            env
+            ~surface
+            ~ordinal
+            ~name:alias.name
+            ~body:alias_ty
+            ~checkpoint)
       in
       let semantic_binding = Option.map metadata ~f:fst in
       match

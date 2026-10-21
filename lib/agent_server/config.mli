@@ -67,6 +67,26 @@ module Server : sig
   type t =
     { data_dir : string
     ; project_sources : Project_source_configuration.t option [@sexp.option]
+    ; authoring_project_access : Authoring_project_access_configuration.t option
+          [@sexp.option]
+      (** Explicit principal/root read grants and Project target selections.
+          Requires configured external roots; no authoring permission follows
+          from root presence. Startup binds it to the actual opened source host.
+          Like other Server fields, changes require daemon restart: the config
+          watcher rejects a changed Server record before publication. *)
+    ; authoring_upload_access : Authoring_upload_access_configuration.t option
+          [@sexp.option]
+      (** Explicit independent upload-write, durable-publication, bundle-read,
+          and rebind grants. A configured target is only a comparison after
+          actual authentication; it grants no native source read. Changed
+          access requires daemon restart through the existing Server snapshot
+          guard. *)
+    ; developer : Developer_startup_configuration.t option [@sexp.option]
+      (** Opt-in finite Developer selection/capacity profile, bound by Daemon to
+          the same installed Authoring/source owners and shared Standard cache.
+          It does not grant source reads, native effects or provider credentials.
+          Conflicts with an embedding-supplied Daemon.options.developer rather
+          than silently combining them. Changes require daemon restart. *)
     ; session_helpers : Session_helper_policy.t list [@sexp.list]
       (** Explicit operator grants for optional external helpers. Changes require
           restart. The helpers still require declared shell tools and normal
@@ -147,6 +167,11 @@ module Prompt : sig
     ; allowed_workspaces : string list
     ; permission_profile : string
     ; runtime_policy : string option
+    ; tool_contract : Chatml_compilation.Tool_contract.t
+      (** Explicit compiler ABI for scripts in this published Prompt revision.
+          The config atom is [standard] or [developer_model_spawn]; absence
+          defaults to Standard. An unknown atom is a configuration error, never
+          a fallback. This is not execution permission or provider selection. *)
     ; enabled : bool
     }
   [@@deriving compare, equal, sexp]

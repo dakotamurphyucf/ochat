@@ -79,15 +79,26 @@ let build_manifest
   |> Sexp.to_string_mach
 ;;
 
-let source_capture_loader source_loader root captures dependencies ~private_bytes =
+let source_capture_loader
+      source_loader
+      root
+      captures
+      dependencies
+      ~private_bytes
+      ~max_total_source_bytes
+  =
   let captured_bytes = ref (String.length root) in
-  if !captured_bytes > 8 * 1024 * 1024 then failwith "prompt source byte limit exceeded";
+  if !captured_bytes > max_total_source_bytes
+  then failwith "prompt source byte limit exceeded";
   let loader =
     source_loader
     |> Source_loader.with_read_limit ~max_bytes:(fun source ->
       match Hashtbl.find captures (Source_loader.relative_path source) with
       | Some contents -> String.length contents
-      | None -> (8 * 1024 * 1024) - !captured_bytes - !private_bytes)
+      | None ->
+        Int.min
+          (max_total_source_bytes - !captured_bytes)
+          ((8 * 1024 * 1024) - !captured_bytes - !private_bytes))
     |> Source_loader.with_observer ~f:(fun source contents ->
       let path = Source_loader.relative_path source in
       if
@@ -106,7 +117,9 @@ let source_capture_loader source_loader root captures dependencies ~private_byte
         Hashtbl.find captures path |> Option.value_map ~default:0 ~f:String.length
       in
       captured_bytes := !captured_bytes - previous_bytes + String.length contents;
-      if !captured_bytes > (8 * 1024 * 1024) - !private_bytes
+      if
+        !captured_bytes > max_total_source_bytes
+        || !captured_bytes > (8 * 1024 * 1024) - !private_bytes
       then failwith "prompt source byte limit exceeded";
       Hashtbl.set captures ~key:path ~data:contents)
     |> Source_loader.with_agent_observer ~f:(fun source ->
@@ -120,12 +133,14 @@ module Capture = struct
     { root : Prompt.Chat_markdown.Parsed.t
     ; agents : (string * Prompt.Chat_markdown.Parsed.t) list
     ; sources : (string * string) list
+    ; source_bytes : int
     ; shell_manifest_sha256 : string
     }
 
   let root t = t.root
   let agents t = t.agents
   let sources t = t.sources
+  let source_bytes t = t.source_bytes
   let shell_manifest_sha256 t = t.shell_manifest_sha256
 end
 
@@ -137,7 +152,15 @@ let inspection_diagnostics diagnostics =
     diagnostic ?source value.code value.message)
 ;;
 
-let capture_loader ~loader:root_loader ~root_name ~env ~preprocess ~limits ~checkpoint =
+let capture_loader
+      ~loader:root_loader
+      ~root_name
+      ~env
+      ~preprocess
+      ~limits
+      ~max_total_source_bytes
+      ~checkpoint
+  =
   let poll () =
     Eio.Fiber.check ();
     checkpoint ();
@@ -151,7 +174,7 @@ let capture_loader ~loader:root_loader ~root_name ~env ~preprocess ~limits ~chec
   let authored =
     Source_loader.read_bounded
       ~max_bytes:
-        (Int.min (Prompt.Chat_markdown.Limits.input_bytes limits) (8 * 1024 * 1024))
+        (Int.min (Prompt.Chat_markdown.Limits.input_bytes limits) max_total_source_bytes)
       root_loader
       root_source
     |> Result.ok_or_failwith
@@ -161,7 +184,13 @@ let capture_loader ~loader:root_loader ~root_name ~env ~preprocess ~limits ~chec
   let dependencies = Queue.create () in
   let private_bytes = ref 0 in
   let loader, authored_bytes =
-    source_capture_loader root_loader authored captures dependencies ~private_bytes
+    source_capture_loader
+      root_loader
+      authored
+      captures
+      dependencies
+      ~private_bytes
+      ~max_total_source_bytes
   in
   let private_inputs = Hashtbl.create (module String) in
   let retain_effective parsed =
@@ -231,6 +260,7 @@ let capture_loader ~loader:root_loader ~root_name ~env ~preprocess ~limits ~chec
       { root
       ; agents = List.rev !agents
       ; sources = source_values captures
+      ; source_bytes = !authored_bytes
       ; shell_manifest_sha256 = shell_digest inspection
       }
     in
@@ -240,19 +270,27 @@ let capture_loader ~loader:root_loader ~root_name ~env ~preprocess ~limits ~chec
 let capture_with_loader
       ~loader
       ~entry
+      ?(max_total_source_bytes = 8 * 1024 * 1024)
       ~env
       ~preprocess
       ~limits
       ~checkpoint
       (_definition : Prompt_definition.t)
   =
-  capture_loader
-    ~loader
-    ~root_name:(Source.Portable_path.to_string entry)
-    ~env
-    ~preprocess
-    ~limits
-    ~checkpoint
+  if max_total_source_bytes <= 0
+  then
+    Error
+      [ diagnostic "prompt.source_limit" "Selected source byte allowance must be positive"
+      ]
+  else
+    capture_loader
+      ~loader
+      ~root_name:(Source.Portable_path.to_string entry)
+      ~env
+      ~preprocess
+      ~limits
+      ~max_total_source_bytes:(Int.min max_total_source_bytes (8 * 1024 * 1024))
+      ~checkpoint
 ;;
 
 let capture ~env ~preprocess ~limits ~checkpoint (definition : Prompt_definition.t) =
@@ -265,6 +303,7 @@ let capture ~env ~preprocess ~limits ~checkpoint (definition : Prompt_definition
     ~env
     ~preprocess
     ~limits
+    ~max_total_source_bytes:(8 * 1024 * 1024)
     ~checkpoint
 ;;
 
@@ -277,25 +316,11 @@ let capture_limits () =
   |> Or_error.ok_exn
 ;;
 
-let install artifact_store ~transaction_id artifact =
+let install artifact_store ~transaction_id artifact ~checkpoint =
   let module Store = Agent_store.Prompt_artifact_store in
-  let open Result.Let_syntax in
-  let%bind () =
-    match Store.exists artifact_store artifact.Store.Artifact.revision_id with
-    | true -> Ok ()
-    | false -> Store.install artifact_store ~transaction_id artifact
-  in
-  let%bind retained = Store.load artifact_store artifact.revision_id in
-  (* Revision IDs are content-derived, while the manifest includes the original
-     creation timestamp. Catalog rebuilds must return the installed manifest,
-     not a candidate with a new timestamp under the same revision ID. Verify all
-     other candidate metadata before reusing that immutable artifact. *)
-  match Store.Artifact.same_content artifact retained with
-  | true -> Ok retained
-  | false ->
-    Error
-      (Agent_store.Store_error.Corrupt
-         "existing prompt revision differs from captured source")
+  (* The returned artifact is the verified publication. Its original creation
+     timestamp and digest may differ from this freshly authored candidate. *)
+  Store.install_or_reuse artifact_store ~transaction_id artifact ~checkpoint
 ;;
 
 (* Use the same declaration/import semantics as restoration, without starting
@@ -700,7 +725,7 @@ let publish_capture
       in
       checkpoint ();
       let%bind artifact =
-        install artifact_store ~transaction_id artifact
+        install artifact_store ~transaction_id artifact ~checkpoint
         |> Result.map_error ~f:(fun e -> [ store_error e ])
       in
       let replayed =

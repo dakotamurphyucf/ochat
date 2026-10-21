@@ -39,7 +39,7 @@ let tag_mismatch ~(open_tag : tag) ~(close_tag : tag) =
 %token <(Chatmd_ast.tag * Chatmd_ast.attribute list)> START
 %token <(Chatmd_ast.tag * Chatmd_ast.attribute list)> SELF
 %token <Chatmd_ast.tag> END
-%token <string> TEXT
+%token <Chatmd_parser_builder.Text_fragment.t> TEXT
 %token EOF
 
 %parameter <Builder : Chatmd_parser_builder.S>
@@ -63,8 +63,9 @@ rec_elems:
 
 whitespace:
   | TEXT {
-      if String.for_all ~f:Char.is_whitespace $1 then ()
-      else failwithf "Unexpected text at top level: %S" $1 ()
+      let text = Chatmd_parser_builder.Text_fragment.text $1 in
+      if String.for_all ~f:Char.is_whitespace text then ()
+      else failwithf "Unexpected text at top level: %S" text ()
     }
 
 rec_elem:
@@ -87,7 +88,7 @@ children:
 (*--------------------------------------------------------------------*)
 
 child:
-    text_block            { Builder.text (String.concat (List.rev $1)) }
+    text_block            { Builder.text (List.rev $1) }
   | SELF                  { let (t,attrs) = $1 in Builder.element t attrs ~children:[] ~start_byte:($startpos.pos_cnum) ~end_byte:($endpos.pos_cnum) }
   | START children END    {
         let (t_open, attrs) = $1 in

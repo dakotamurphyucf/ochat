@@ -70,15 +70,10 @@ let custom_function shell name =
   | Some specification -> shell_function shell specification
 ;;
 
-let functions_of_tool ~agent_source_runner ~sw ~ctx ~host ~run_agent shell = function
+let functions_of_tool ~construct shell = function
   | CM.Custom tool -> custom_function shell tool.name |> Result.map ~f:List.return
   | Shell specification -> shell_function shell specification |> Result.map ~f:List.return
-  | declaration ->
-    (try
-       Ok (Tool.of_declaration ?agent_source_runner ~host ~sw ~ctx ~run_agent declaration)
-     with
-     | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
-     | exn -> Error (error "agent.tool_construction_failed" (Exn.to_string exn)))
+  | declaration -> construct declaration
 ;;
 
 let function_name function_ = function_.Ochat_function.info.function_.name
@@ -111,11 +106,9 @@ let validate_functions functions =
 
 let build_functions
       ~agent_source_runner
+      ~allow_supplied_agent
       ~native_registrations
-      ~sw
-      ~ctx
-      ~host
-      ~run_agent
+      ~construct
       shell
       tools
   =
@@ -128,6 +121,9 @@ let build_functions
     let supplied =
       match declaration with
       | CM.Builtin name | Persistent_agent ({ name; _ }, _) ->
+        List.find native_registrations ~f:(fun (registration : Registration.t) ->
+          String.equal name (function_name registration.implementation))
+      | Agent { name; _ } when allow_supplied_agent ->
         List.find native_registrations ~f:(fun (registration : Registration.t) ->
           String.equal name (function_name registration.implementation))
       | _ -> None
@@ -157,9 +153,25 @@ let build_functions
            | Source _ as source -> source
          in
          Ok [ { registration with source_requirement } ]
+       | Agent _ ->
+         (match registration.source_requirement with
+          | Source (Some source)
+            when not
+                   (Native_source_registration.matches_implementation
+                      source
+                      registration.implementation) ->
+            Error
+              (error
+                 "agent.source_registration_mismatch"
+                 "supplied Agent source belongs to a different implementation")
+          | Ordinary ->
+            Ok
+              [ { registration with source_requirement = Source_requirement.Source None }
+              ]
+          | Source _ -> Ok [ registration ])
        | _ -> Ok [ registration ])
     | None ->
-      functions_of_tool ~agent_source_runner ~sw ~ctx ~host ~run_agent shell declaration
+      functions_of_tool ~construct shell declaration
       |> Result.map ~f:(fun functions ->
         let implementation_revision =
           let declared = CM.sexp_of_tool declaration in
@@ -184,8 +196,8 @@ let build_functions
                   Option.map runner.Tool.Agent_source_runner.prepare ~f:(fun prepare ->
                     Native_source_registration.create
                       ~implementation
-                      ~prepare:(fun ~owner ~request:_ ~checkpoint ->
-                        prepare ~declaration:specification ~owner ~checkpoint
+                      ~prepare:(fun ~launch ~request:_ ~checkpoint ->
+                        prepare ~declaration:specification ~launch ~checkpoint
                         |> Result.map ~f:Option.some)))
               in
               Source_requirement.Source registration
@@ -213,16 +225,17 @@ let validate_registrations registrations =
   |> Result.map ~f:(fun _ -> ())
 ;;
 
-let create
-      ~sw
-      ~ctx
-      ~host
+let create_with
+      ~dir
+      ~tool_dir
+      ~construct
+      ~allow_supplied_agent
+      ~(host : Shell_runtime.Host.t)
       ~shell
       ~admin_policy
       ?native_service_revision
       ?agent_source_runner
       ~registrations
-      ~run_agent
       prompt_elements
   =
   let open Result.Let_syntax in
@@ -242,11 +255,9 @@ let create
   let%map functions, registrations =
     build_functions
       ~agent_source_runner
+      ~allow_supplied_agent
       ~native_registrations
-      ~sw
-      ~ctx
-      ~host
-      ~run_agent
+      ~construct
       shell
       tools
   in
@@ -257,8 +268,8 @@ let create
            let path value = Eio.Path.native_exn value in
            [%sexp
              ("ochat.tool-resources.v2" : string)
-           , ([ path (Ctx.dir ctx)
-              ; path (Ctx.tool_dir ctx)
+           , ([ path dir
+              ; path tool_dir
               ; path host.workspace
               ; path host.tool_dir
               ; path host.prompt_dir
@@ -345,6 +356,75 @@ let create
   ; classifications = List.filter_map tools ~f:Tool.agent_page_classification
   ; registrations
   }
+;;
+
+let create
+      ~sw
+      ~ctx
+      ~host
+      ~shell
+      ~admin_policy
+      ?native_service_revision
+      ?agent_source_runner
+      ~registrations
+      ~run_agent
+      prompt_elements
+  =
+  create_with
+    ~dir:(Ctx.dir ctx)
+    ~tool_dir:(Ctx.tool_dir ctx)
+    ~allow_supplied_agent:false
+    ~construct:(fun declaration ->
+      try
+        Ok
+          (Tool.of_declaration ?agent_source_runner ~host ~sw ~ctx ~run_agent declaration)
+      with
+      | exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        (match exn with
+         | Eio.Cancel.Cancelled _ | Eio.Time.Timeout ->
+           Stdlib.Printexc.raise_with_backtrace exn backtrace
+         | _ -> Error (error "agent.tool_construction_failed" (Exn.to_string exn))))
+    ~host
+    ~shell
+    ~admin_policy
+    ?native_service_revision
+    ?agent_source_runner
+    ~registrations
+    prompt_elements
+;;
+
+let create_without_inference
+      ~sw
+      ~(host : Shell_runtime.Host.t)
+      ~shell
+      ~admin_policy
+      ?check_preparation_now
+      ?native_service_revision
+      ~registrations
+      prompt_elements
+  =
+  create_with
+    ~dir:host.Shell_runtime.Host.workspace
+    ~tool_dir:host.tool_dir
+    ~allow_supplied_agent:true
+    ~construct:(fun declaration ->
+      Tool.of_declaration_without_inference
+        ~host
+        ~sw
+        ?check_preparation_now:
+          (Option.map check_preparation_now ~f:(fun check () ->
+             Result.map_error (check ()) ~f:(fun error ->
+               Tool.Native_error.{ code = error.Error.code; message = error.message })))
+        declaration
+      |> Result.map_error ~f:(fun error ->
+        Error.{ code = error.Tool.Native_error.code; message = error.message }))
+    ~host
+    ~shell
+    ~admin_policy
+    ?native_service_revision
+    ~registrations
+    prompt_elements
 ;;
 
 let functions t = t.functions

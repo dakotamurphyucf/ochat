@@ -35,10 +35,25 @@ let%test_unit "standard static contracts preserve exact old compiler identities"
       let actual = C.for_target target ~checkpoint in
       let expected = legacy_identity target surface requirements in
       assert (Sexp.equal expected (C.identity actual ~checkpoint));
+      let allocated = ref 0 in
+      let summary =
+        C.summarize_identity actual ~checkpoint ~allocate:(fun bytes ->
+          allocated := !allocated + bytes)
+      in
+      assert (C.Identity_summary.encoded_bytes summary > 0);
+      assert (!allocated >= C.Identity_summary.encoded_bytes summary);
+      assert (
+        Chatml_source.Digest.equal
+          (C.Identity_summary.fingerprint summary)
+          (C.fingerprint actual ~checkpoint));
       assert (
         Chatml_source.Digest.equal
           (C.fingerprint actual ~checkpoint)
-          (Chatml_source.Digest.of_contents (Sexp.to_string expected) ~checkpoint)))
+          (Chatml_source.Digest.of_contents (Sexp.to_string expected) ~checkpoint)));
+  let contract = C.for_target Tool_v1 ~checkpoint in
+  [%test_eq: string]
+    (Chatml_source.Digest.to_hex (C.fingerprint contract ~checkpoint))
+    "ecfaf3ef5d5cb1f228ee1fbdb02d6ffe3f6866ee56a9eda27f7a309233a7c951"
 ;;
 
 let%test_unit

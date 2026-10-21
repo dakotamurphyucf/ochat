@@ -1,5 +1,5 @@
 open Core
-module Binding = Program_binding
+module Binding = Chatml_prompt_binding
 module Inventory = Program_inventory
 module CM = Prompt.Chat_markdown
 

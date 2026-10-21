@@ -311,6 +311,7 @@ val with_response_limit : t -> max_body_bytes:int -> t Or_error.t
     evidence and never retry, even when submission is uncertain. *)
 val run
   :  ?on_selected:(unit -> unit)
+  -> ?submission_guard:Inference_runtime.Submission_guard.t
   -> t
   -> auth:Auth.resolver
   -> prepared:Prepared.t
@@ -331,9 +332,17 @@ end
 (** Same event/outcome pipeline. Fresh auth on each attempt, including reused
     channels. Detached contexts use an ephemeral channel owned by the request.
     Prefer fallback is allowed only before response.create bytes; auth errors
-    never fall back. Cancellation/observer exceptions retire the channel. *)
+    never fall back. Cancellation/observer exceptions retire the channel.
+    The optional guard defaults to empty. For both HTTP SSE and WebSocket, the
+    actual selected transport checks it after the real credential lease,
+    connection/handshake and yielding transport-selection observation, then
+    nonyieldingly rechecks the same lease and enters model-request submission.
+    The guard may yield during its refresh phase; its final check phase must
+    not yield. Connection/handshake can precede this application-effect point.
+    No telemetry callback is treated as authorization. *)
 val run_with_transport
   :  ?cache_assets:Inference.Request.Asset.t list
+  -> ?submission_guard:Inference_runtime.Submission_guard.t
   -> t
   -> session:Websocket_session.t option
   -> policy:Inference.Observation.Transport_policy.t

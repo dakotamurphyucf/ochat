@@ -99,6 +99,11 @@ module Capture : sig
     :  t
     -> Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
 
+  (** Immutable compiler ABI copied from the SAME actual definition as
+      [root_invocation], before source capture can yield. Not execution
+      authority and never selected by looking up a mutable catalog later. *)
+  val tool_contract : t -> Chatml_compilation.Tool_contract.t
+
   module Route : sig
     (** Positive original-root member of an actual input from this capture. No
         native authority; permits207 to supply genuine file-member relationship. *)
@@ -130,7 +135,85 @@ end
 module Scope : sig
   type t
 
+  module Content_revision : sig
+    (** Parser/content view bound to this live original-source Scope. This is
+        a read prerequisite, not proof that a saved artifact was selected by
+        Store: the selected Target/Source_binding must establish that first. *)
+    type t
+
+    (** Previously admitted captured/builtin content costs from this exact
+        restored revision. The enclosing child projector seeds its one shared
+        ledger before any new declaration or caller content read. *)
+    val captured_accounting : t -> Chatmd_prompt_content.Accounting.t option
+  end
+
+  module Content_read : sig
+    type t
+
+    val contents : t -> string
+    val input_bytes : t -> int
+
+    (** Actual charged parser lookup, route and native-read stage units from
+        this call. The enclosing projector debits this against its ONE
+        aggregate allowance before processing another item. *)
+    val work_steps : t -> int
+  end
+
+  module Origin_read : sig
+    type t
+
+    val origin : t -> Prompt.Chat_markdown.Content_origin.t
+    val work_steps : t -> int
+  end
+
   val check : t -> (unit, Error.t) Result.t
+
+  (** Bind the restored revision's exact parser and document projection to
+      this same original-source receipt. Require attached parser custody,
+      artifact/source receipt equality and the projection's SAME Parsed.
+      Missing/foreign/revoked source rejects before native I/O. This does not
+      make an arbitrary [Prompt_revision.create] value an authenticated saved
+      selection; the genuine Target/Source_binding checks that separately.
+      The result expires with this Scope. *)
+  val bind_content_revision
+    :  t
+    -> revision:Prompt_revision.t
+    -> (Content_revision.t, Error.t) result
+
+  (** Verify one exact parser-owned Basic against the bound revision under the
+      physical Scope. This comparison-only origin lets a higher admitted
+      remote port use the authored URL; it grants neither local nor network
+      access. Lookup shares the caller's remaining aggregate work allowance. *)
+  val content_origin
+    :  t
+    -> content:Content_revision.t
+    -> item:Prompt.Chat_markdown.basic_content_item
+    -> max_work_steps:int
+    -> checkpoint:(unit -> unit)
+    -> (Origin_read.t, Error.t) result
+
+  (** Resolve one exact parser-owned LOCAL Basic image/document occurrence through
+      this Scope's retained original Local. [Content_revision] supplies the
+      Parsed/projection association; foreign or model-created Basic items have
+      no origin. A captured/builtin document cannot be reread here. Require its
+      Range.input to belong to that Parsed and its
+      logical member path to pass artifact-portable admission. Factor the
+      existing local_source route and charged no-follow read. The positive
+      byte/work limits and checkpoint apply before traversal/native read;
+      the SAME work allowance covers lookup, route and native stage. The caller
+      must pass the aggregate remaining allowance and debit observed bytes/
+      work after success; this operation never resets the caller's ledger.
+      Policy/closure/cancellation are rechecked after yielding work. No
+      ambient cwd, materialized tree or path fallback. *)
+  val read_dynamic_content
+    :  t
+    -> content:Content_revision.t
+    -> item:Prompt.Chat_markdown.basic_content_item
+    -> max_bytes:int
+    -> max_work_steps:int
+    -> checkpoint:(unit -> unit)
+    -> on_acquire:(unit -> unit)
+    -> (Content_read.t, Error.t) result
 
   (** Pure same-original-admission check, sharing [prepare_sources]'s affinity and
       receipt validation. No anchor/backend acquisition. Policy, closure and
@@ -166,6 +249,27 @@ module Scope : sig
     -> limits:Prompt.Chat_markdown.Limits.t
     -> checkpoint:(unit -> unit)
     -> (Capture.t, Error.t) Result.t
+
+  (** Capture an admitted Model member through this original Scope. The
+      [content] view is bound to the exact selected parent revision by the
+      authenticated Source_binding port; [entry] must name the same revision's
+      original Definition/receipt and a positive portable member. Repeat that
+      comparison here before using the retained no-follow Local. [on_acquire]
+      fires exactly once after pure admission and before source I/O, so the
+      shared child budget can distinguish a denied selector from an uncertain
+      partial capture. Same Builder walker, limits and callback/backtrace rules
+      as [capture_entry]. A Scope method alone does not select a child Target. *)
+  val capture_selected_member
+    :  t
+    -> content:Content_revision.t
+    -> entry:Prompt_source_entry.t
+    -> env:Eio_unix.Stdenv.base
+    -> preprocess:(string -> string)
+    -> limits:Prompt.Chat_markdown.Limits.t
+    -> max_input_bytes:int
+    -> checkpoint:(unit -> unit)
+    -> on_acquire:(unit -> unit)
+    -> (Capture.t, Error.t) result
 
   (** Capture rendered documents through this SAME retained Local. Reject foreign
       capture admission/receipt before any read. Derive contexts from the actual

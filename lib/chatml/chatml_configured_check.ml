@@ -43,6 +43,13 @@ let create_static ?recorder surface ~checkpoint =
   }
 ;;
 
+let create_static_for_repl surface ~name_seed ~checkpoint =
+  let machine = Checker.create_state ~checkpoint () in
+  machine.shared.current_id <- Checker.Repl_type_roots.Name_seed.next_current_id name_seed;
+  machine.shared.mu_id <- Checker.Repl_type_roots.Name_seed.next_mu_id name_seed;
+  { machine; surface; invocation = ref (); recorder = None }
+;;
+
 let create surface ~checkpoint =
   create_static (Static.of_runtime_surface surface ~checkpoint) ~checkpoint
 ;;
@@ -167,6 +174,97 @@ let check_unit t ~source ~require implementation =
   Result.map (check_implementation t ~source ~require implementation) ~f:(fun checked ->
     record_exports t checked;
     checked)
+;;
+
+module Repl_statement = struct
+  type t =
+    { statement : Chatml.Chatml_lang.stmt_node
+    ; checked : Checker.checked_program
+    ; before_values : Scope.t
+    ; before_types : Checker.Type_alias.t
+    ; after_values : Scope.t
+    ; after_types : Checker.Type_alias.t
+    ; introduced_values : string list
+    }
+
+  let statement t = t.statement
+  let checked t = t.checked
+  let before_values t = t.before_values
+  let before_types t = t.before_types
+  let after_values t = t.after_values
+  let after_types t = t.after_types
+  let introduced_values t = t.introduced_values
+
+  let expression_type t =
+    match t.statement.value with
+    | Chatml.Chatml_lang.SExpr expression ->
+      Checker.checked_lookup_span_type t.checked expression.span
+    | SLet _ | SLetRec _ | SType _ | SModule _ | SOpen _ -> None
+  ;;
+end
+
+let check_repl_statement
+      t
+      ~source
+      ~require
+      ~parsed
+      ~statement_index
+      ~before_values
+      ~before_types
+  =
+  if not (paired source (Parse.Unit.source parsed) Lookup.Phase.Implementation)
+  then
+    Error
+      (Diagnostic.create
+         "REPL parser unit does not match its admitted implementation context")
+  else (
+    let rec select index statements =
+      t.machine.checkpoint ();
+      match statements with
+      | [] -> Error (Diagnostic.create "REPL statement index is out of range")
+      | statement :: rest -> if index = 0 then Ok statement else select (index - 1) rest
+    in
+    if statement_index < 0
+    then Error (Diagnostic.create "REPL statement index is out of range")
+    else
+      let open Result.Let_syntax in
+      let%bind statement = select statement_index (Parse.Unit.program parsed).stmts in
+      let%bind _location =
+        Captured.locate
+          (Lookup.source source)
+          ~start_byte:statement.span.left.offset
+          ~end_byte:statement.span.right.offset
+          ~checkpoint:t.machine.checkpoint
+        |> Result.map_error ~f:(fun _ ->
+          Diagnostic.create "REPL statement span does not belong to its source")
+      in
+      with_state t source ~require ~f:(fun state ->
+        let after_values, after_types, introduced_values =
+          Checker.with_stmt_location statement ~f:(fun statement_value ->
+            Checker.infer_stmt_with_exports
+              ~span:statement.span
+              state
+              before_values
+              statement_value
+              before_types)
+        in
+        state.checkpoint ();
+        let checked : Checker.checked_program =
+          { source = state.source
+          ; span_types = Hashtbl.copy state.span_types
+          ; module_visibility = Hashtbl.copy state.module_visibility
+          ; configured_annotations = Hashtbl.copy state.configured_annotations
+          }
+        in
+        Ok
+          { Repl_statement.statement
+          ; checked
+          ; before_values
+          ; before_types
+          ; after_values
+          ; after_types
+          ; introduced_values
+          }))
 ;;
 
 module Failure = struct

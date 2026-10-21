@@ -136,6 +136,7 @@ let names =
   ]
 ;;
 
+let all_names = List.map names ~f:fst
 let of_string name = List.Assoc.find names name ~equal:String.equal
 
 let to_string t =

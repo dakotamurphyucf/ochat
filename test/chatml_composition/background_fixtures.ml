@@ -79,6 +79,26 @@ let with_background_daemon
             }
         in
         let requests = ref 0 in
+        let shutdown daemon ~stage =
+          try Agent_server.Daemon.shutdown daemon |> protocol_ok with
+          | Agent_server.Runtime_owner.Cleanup_failed error as exn ->
+            let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+            (* Failure-only fixture diagnostics must preserve the cleanup failure,
+               even if formatting or writing the report also fails. *)
+            (try
+               eprintf
+                 "%s\n%!"
+                 (Sexp.to_string_hum
+                    [%sexp
+                      "background fixture cleanup failed"
+                    , (stage : string)
+                    , (error.code : Agent_protocol.Error.code)
+                    , (error.message : string)
+                    , (error.retryable : bool)])
+             with
+             | _ -> ());
+            Stdlib.Printexc.raise_with_backtrace exn backtrace
+        in
         let stage = ref "starting first daemon" in
         let live_switch = ref None in
         let with_fixture_switch f =
@@ -98,6 +118,14 @@ let with_background_daemon
                failwith ("background fixture timed out: " ^ !stage ^ "\n" ^ dump))
         in
         with_fixture_switch (fun sw ->
+          let protocol_limits =
+            { Agent_server.Daemon.default_options.protocol_limits with max_request_bytes }
+          in
+          let authoring =
+            Agent_server.Authoring_installation.Host_policy.basic_supplied
+              ~initialize_limits:protocol_limits
+            |> protocol_ok
+          in
           let start () =
             Agent_server.Daemon.start
               ~sw
@@ -110,10 +138,8 @@ let with_background_daemon
                 { Agent_server.Daemon.default_options with
                   qualify_chatml_extensions = true
                 ; chatml_runtime_policy = runtime_policy
-                ; protocol_limits =
-                    { Agent_server.Daemon.default_options.protocol_limits with
-                      max_request_bytes
-                    }
+                ; protocol_limits
+                ; authoring = Some authoring
                 ; factory_limits =
                     { Agent_server.Daemon.default_options.factory_limits with
                       job_result_max_bytes
@@ -136,7 +162,7 @@ let with_background_daemon
             Exn.protect
               ~finally:(fun () ->
                 stage := "stopping first daemon";
-                Agent_server.Daemon.shutdown daemon |> protocol_ok;
+                shutdown daemon ~stage:"first daemon";
                 stage := "first daemon stopped")
               ~f:(fun () ->
                 List.iter
@@ -191,7 +217,7 @@ let with_background_daemon
           Exn.protect
             ~finally:(fun () ->
               stage := "stopping recovered daemon";
-              Agent_server.Daemon.shutdown recovered |> protocol_ok;
+              shutdown recovered ~stage:"recovered daemon";
               stage := "recovered daemon stopped")
             ~f:(fun () ->
               let client = connection recovered (principal ()) in

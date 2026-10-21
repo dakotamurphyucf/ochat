@@ -69,6 +69,7 @@ module Publisher : sig
     ; max_entries : int
     ; max_bytes : int
     ; max_file_bytes : int
+    ; max_work : int
     }
 
   type collection_stats =
@@ -83,6 +84,11 @@ module Publisher : sig
       reader, then calls [f] while keeping those roots stable. [None] defers the
       attempt. Lock order is actor, publisher, response cache, blob storage.
       Pending completion dependencies and exact nonterminal attempts are roots.
+      [max_work] bounds this collector's combined source visits, decode,
+      hashes, reference feeds and graph processing in addition to the one
+      Reader's entry/byte allowance. The host's [with_roots] callback retains
+      its own bounded contract; work exhaustion before deletion leaves all
+      markers and data.
       Only validated private intents grant ownership. All root proofs precede
       deletion; bounded reads and IO failures retain remaining records for retry.
       Successfully published final artifacts can retire their private markers. *)
@@ -142,7 +148,10 @@ module Publisher : sig
 
   (** The completion already selected for this still-current attempt, including
       failed intent/upload writes. Retrying a waiting parent must not recalculate
-      a different outcome while the original publication is pending. *)
+      a different outcome while the original publication is pending. A call
+      from this publisher's own persist/collection callback (or a child fiber
+      inheriting that callback scope) raises [Invalid_argument] before waiting
+      on its own lock; independent fibers serialize normally. *)
   val pending_completion
     :  t
     -> job:Agent_protocol.Job.t

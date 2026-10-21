@@ -383,13 +383,14 @@ let instantiate
       ~programs
       ~compilation_limits
       ~checkpoint
+      ?(check_preparation_now : (unit -> (unit, diagnostic) result) option)
       ~sw
       ~host
       ~admin_policy
       ~manifest_authorizer
       ~approval_provider
       ~approval_store
-      ~model_completion
+      ?model_completion
       ~extension_snapshots
       ~persist_extension_snapshots
       ~preflight
@@ -436,7 +437,13 @@ let instantiate
     ~grant
     ~approval_provider
     ~approval_store
-    ~model_completion
+    ?check_preparation_now:
+      (Option.map check_preparation_now ~f:(fun check () ->
+         Result.map_error (check ()) ~f:(fun diagnostic ->
+           [ Shell_runtime.Registry.
+               { code = diagnostic.code; message = diagnostic.message; runtime_id = None }
+           ])))
+    ?model_completion
     ~extension_snapshots
     ?persist_extension_snapshots
     ~preflight:(fun staged ->
@@ -461,6 +468,7 @@ let shell_registry
       ~programs
       ~compilation_limits
       ~checkpoint
+      ?(check_preparation_now : (unit -> (unit, diagnostic) result) option)
       ~sw
       ~host
       ~platform
@@ -468,7 +476,7 @@ let shell_registry
       ~manifest_authorizer
       ~approval_provider
       ~approval_store
-      ~model_completion
+      ?model_completion
       ~extension_snapshots
       ~persist_extension_snapshots
       ~preflight
@@ -489,28 +497,42 @@ let shell_registry
          ~map_error:(fun e -> [ diagnostic e.Chatml_compilation.code e.message ])
          ~f:(fun () -> compile ~platform declarations))
       ~f:(fun (manifest, material) ->
-        instantiate
-          ~startup
-          ~programs
-          ~compilation_limits
-          ~checkpoint
-          ~sw
-          ~host
-          ~admin_policy
-          ~manifest_authorizer
-          ~approval_provider
-          ~approval_store
-          ~model_completion
-          ~extension_snapshots
-          ~persist_extension_snapshots
-          ~preflight
-          manifest
-          material
-        |> Result.map ~f:(fun (registry, security_status, admitted) ->
-          ( Some registry
-          , Some (Shell_runtime.Registry.manifest registry)
-          , Some security_status
-          , admitted )))
+        if
+          Option.is_none model_completion
+          && List.mem
+               manifest.Chatmd_shell_spec.Manifest.payload.required_features
+               Chatmd_shell_spec.Feature.model_reviewer
+               ~equal:Chatmd_shell_spec.Feature.equal
+        then
+          Error
+            [ diagnostic
+                "agent.inference_required"
+                "shell model reviewer requires admitted inference"
+            ]
+        else
+          instantiate
+            ~startup
+            ~programs
+            ~compilation_limits
+            ~checkpoint
+            ?check_preparation_now
+            ~sw
+            ~host
+            ~admin_policy
+            ~manifest_authorizer
+            ~approval_provider
+            ~approval_store
+            ?model_completion
+            ~extension_snapshots
+            ~persist_extension_snapshots
+            ~preflight
+            manifest
+            material
+          |> Result.map ~f:(fun (registry, security_status, admitted) ->
+            ( Some registry
+            , Some (Shell_runtime.Registry.manifest registry)
+            , Some security_status
+            , admitted )))
 ;;
 
 let model_completion ~ctx ~agent:_ ~model =
@@ -572,21 +594,21 @@ let create_native
       ~programs
       ~compilation_limits
       ~checkpoint
+      ?(check_preparation_now : (unit -> (unit, diagnostic) result) option)
       ~preflight
-      ?(native_registrations = [])
-      ?native_service_revision
-      ?agent_source_runner
+      ~native_registrations
       ~sw
-      ~ctx
+      ~env
+      ~create_pool
       ~host
       ~platform
       ~prompt_elements
       ~manifest_authorizer
       ~approval_provider
       ~approval_store
+      ?model_completion
       ?(extension_snapshots = [])
       ?persist_extension_snapshots
-      ~run_agent
       ()
   =
   let open Result.Let_syntax in
@@ -618,7 +640,7 @@ let create_native
         else (
           let declarations = declarations prompt_elements in
           let%map admin_policy =
-            Shell_runtime.Admin_policy_loader.load_from_environment ~env:(Ctx.env ctx)
+            Shell_runtime.Admin_policy_loader.load_from_environment ~env
             |> Result.map_error ~f:(fun error -> [ diagnostic error.code error.message ])
           in
           declarations, admin_policy))
@@ -629,17 +651,7 @@ let create_native
       ~map_error:(fun e -> [ diagnostic e.Chatml_compilation.code e.message ])
       ~f:(fun () ->
         let%bind pool =
-          Native_tool_pool.create
-            ~registrations:native_registrations
-            ?native_service_revision
-            ?agent_source_runner
-            ~sw
-            ~ctx
-            ~host
-            ~run_agent
-            ~admin_policy
-            ~shell
-            prompt_elements
+          create_pool ~admin_policy ~shell
           |> Result.map_error
                ~f:
                  (List.map ~f:(fun error ->
@@ -663,6 +675,7 @@ let create_native
       ~programs
       ~compilation_limits
       ~checkpoint
+      ?check_preparation_now
       ~sw
       ~host
       ~platform
@@ -670,7 +683,7 @@ let create_native
       ~manifest_authorizer
       ~approval_provider
       ~approval_store
-      ~model_completion:(model_completion ~ctx)
+      ?model_completion
       ~extension_snapshots
       ~persist_extension_snapshots
       ~preflight:prepare_pool
@@ -727,31 +740,30 @@ let declares_legacy elements =
     | _ -> false)
 ;;
 
-let create
-      ?native_service_revision
+let create_with
       ?startup
-      ?agent_source_runner
       ?programs
       ?(moderator_surface = Chatml.Chatml_builtin_surface.moderator_surface)
       ?(compilation_limits = Chatml_compilation.default_limits)
       ?(checkpoint = Eio.Fiber.check)
       ~sw
-      ~ctx
+      ~env
+      ~create_pool
       ~host
       ~platform
       ~prompt_elements
       ~manifest_authorizer
       ~approval_provider
       ~approval_store
+      ?model_completion
       ?extension_snapshots
       ?persist_extension_snapshots
-      ~run_agent
       ()
   =
   Startup_compilation.with_context
     ?startup
     ~limits:compilation_limits
-    ~env:(Ctx.env ctx)
+    ~env
     ~checkpoint
     ~map_error:(fun e -> [ diagnostic e.Chatml_compilation.code e.message ])
     ~f:(fun startup ->
@@ -778,47 +790,39 @@ let create
                 ~startup
                 ?programs
                 ~surface:moderator_surface
-                ~env:(Ctx.env ctx)
+                ~env
                 ~capabilities
                 ~checkpoint
                 ~limits:compilation_limits
                 prompt_elements)
           in
           capabilities, legacy_moderator, ())
-        ?native_service_revision
-        ?agent_source_runner
+        ~native_registrations:[]
         ~sw
-        ~ctx
+        ~env
+        ~create_pool
         ~host
         ~platform
         ~prompt_elements
         ~manifest_authorizer
         ~approval_provider
         ~approval_store
+        ?model_completion
         ?extension_snapshots
         ?persist_extension_snapshots
-        ~run_agent
         ()
       |> Result.map ~f:fst)
     ()
 ;;
 
-type extension_resources =
-  { native : t
-  ; definition : Extension_compiler.definition
-  ; managed : Managed_tool_registry.t
-  }
-
-let prepare_extensions
+let create
       ?native_service_revision
       ?startup
       ?agent_source_runner
-      ?(moderator_surface = Chatml.Chatml_builtin_surface.moderator_surface)
-      ?(compilation_limits = Chatml_compilation.default_limits)
-      ?(checkpoint = Eio.Fiber.check)
-      ?(native_registrations = [])
-      ?(delegated_moderator = false)
       ?programs
+      ?moderator_surface
+      ?compilation_limits
+      ?checkpoint
       ~sw
       ~ctx
       ~host
@@ -832,10 +836,114 @@ let prepare_extensions
       ~run_agent
       ()
   =
+  create_with
+    ?startup
+    ?programs
+    ?moderator_surface
+    ?compilation_limits
+    ?checkpoint
+    ~sw
+    ~env:(Ctx.env ctx)
+    ~create_pool:(fun ~admin_policy ~shell ->
+      Native_tool_pool.create
+        ~sw
+        ~ctx
+        ~host
+        ~shell
+        ~admin_policy
+        ?native_service_revision
+        ?agent_source_runner
+        ~registrations:[]
+        ~run_agent
+        prompt_elements)
+    ~host
+    ~platform
+    ~prompt_elements
+    ~manifest_authorizer
+    ~approval_provider
+    ~approval_store
+    ~model_completion:(model_completion ~ctx)
+    ?extension_snapshots
+    ?persist_extension_snapshots
+    ()
+;;
+
+let create_without_inference
+      ?native_service_revision
+      ?startup
+      ?programs
+      ?moderator_surface
+      ?compilation_limits
+      ?checkpoint
+      ~sw
+      ~host
+      ~platform
+      ~prompt_elements
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+      ()
+  =
+  create_with
+    ?startup
+    ?programs
+    ?moderator_surface
+    ?compilation_limits
+    ?checkpoint
+    ~sw
+    ~env:host.Shell_runtime.Host.env
+    ~create_pool:(fun ~admin_policy ~shell ->
+      Native_tool_pool.create_without_inference
+        ~sw
+        ~host
+        ~shell
+        ~admin_policy
+        ?native_service_revision
+        ~registrations:[]
+        prompt_elements)
+    ~host
+    ~platform
+    ~prompt_elements
+    ~manifest_authorizer
+    ~approval_provider
+    ~approval_store
+    ()
+;;
+
+type extension_resources =
+  { native : t
+  ; definition : Extension_compiler.definition
+  ; managed : Managed_tool_registry.t
+  }
+
+let prepare_extensions_with
+      ?startup
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
+      ?(moderator_surface = Chatml.Chatml_builtin_surface.moderator_surface)
+      ?(compilation_limits = Chatml_compilation.default_limits)
+      ?(checkpoint = Eio.Fiber.check)
+      ?(check_preparation_now : (unit -> (unit, diagnostic) result) option)
+      ?(native_registrations = [])
+      ?(delegated_moderator = false)
+      ?programs
+      ~sw
+      ~env
+      ~create_pool
+      ~host
+      ~platform
+      ~prompt_elements
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+      ?model_completion
+      ?extension_snapshots
+      ?persist_extension_snapshots
+      ()
+  =
   Startup_compilation.with_context
     ?startup
     ~limits:compilation_limits
-    ~env:(Ctx.env ctx)
+    ~env
     ~checkpoint
     ~map_error:(fun e -> [ diagnostic e.Chatml_compilation.code e.message ])
     ~f:(fun startup ->
@@ -872,10 +980,11 @@ let prepare_extensions
         let%bind managed =
           Managed_tool_registry.prepare
             ~startup
+            ~tool_contract
             ~limits:compilation_limits
             ~delegated_moderator
             ?programs
-            ~env:(Ctx.env ctx)
+            ~env
             ~owner:host.Shell_runtime.Host.session_id
             ~capabilities
             prompt_elements
@@ -908,7 +1017,7 @@ let prepare_extensions
               ~startup
               ?programs
               ~surface:moderator_surface
-              ~env:(Ctx.env ctx)
+              ~env
               ~capabilities
               ~checkpoint
               ~limits:compilation_limits
@@ -923,24 +1032,138 @@ let prepare_extensions
           ~programs
           ~compilation_limits
           ~checkpoint
+          ?check_preparation_now
           ~preflight:prepare_managed
           ~native_registrations
-          ?native_service_revision
-          ?agent_source_runner
           ~sw
-          ~ctx
+          ~env
+          ~create_pool
           ~host
           ~platform
           ~prompt_elements
           ~manifest_authorizer
           ~approval_provider
           ~approval_store
+          ?model_completion
           ?extension_snapshots
           ?persist_extension_snapshots
-          ~run_agent
           ()
       in
       { native; definition = Managed_tool_registry.definition managed; managed })
+    ()
+;;
+
+let prepare_extensions
+      ?native_service_revision
+      ?startup
+      ?tool_contract
+      ?agent_source_runner
+      ?moderator_surface
+      ?compilation_limits
+      ?checkpoint
+      ?(native_registrations = [])
+      ?delegated_moderator
+      ?programs
+      ~sw
+      ~ctx
+      ~host
+      ~platform
+      ~prompt_elements
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+      ?extension_snapshots
+      ?persist_extension_snapshots
+      ~run_agent
+      ()
+  =
+  prepare_extensions_with
+    ?startup
+    ?tool_contract
+    ?moderator_surface
+    ?compilation_limits
+    ?checkpoint
+    ~native_registrations
+    ?delegated_moderator
+    ?programs
+    ~sw
+    ~env:(Ctx.env ctx)
+    ~create_pool:(fun ~admin_policy ~shell ->
+      Native_tool_pool.create
+        ~sw
+        ~ctx
+        ~host
+        ~shell
+        ~admin_policy
+        ?native_service_revision
+        ?agent_source_runner
+        ~registrations:native_registrations
+        ~run_agent
+        prompt_elements)
+    ~host
+    ~platform
+    ~prompt_elements
+    ~manifest_authorizer
+    ~approval_provider
+    ~approval_store
+    ~model_completion:(model_completion ~ctx)
+    ?extension_snapshots
+    ?persist_extension_snapshots
+    ()
+;;
+
+let prepare_extensions_without_inference
+      ?native_service_revision
+      ?startup
+      ?tool_contract
+      ?moderator_surface
+      ?compilation_limits
+      ?checkpoint
+      ?(check_preparation_now : (unit -> (unit, diagnostic) result) option)
+      ?(native_registrations = [])
+      ?delegated_moderator
+      ?programs
+      ~sw
+      ~host
+      ~platform
+      ~prompt_elements
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+      ()
+  =
+  prepare_extensions_with
+    ?startup
+    ?tool_contract
+    ?moderator_surface
+    ?compilation_limits
+    ?checkpoint
+    ?check_preparation_now
+    ~native_registrations
+    ?delegated_moderator
+    ?programs
+    ~sw
+    ~env:host.Shell_runtime.Host.env
+    ~create_pool:(fun ~admin_policy ~shell ->
+      Native_tool_pool.create_without_inference
+        ~sw
+        ~host
+        ~shell
+        ~admin_policy
+        ?check_preparation_now:
+          (Option.map check_preparation_now ~f:(fun check () ->
+             Result.map_error (check ()) ~f:(fun diagnostic ->
+               Native_tool_pool.Error.
+                 { code = diagnostic.code; message = diagnostic.message })))
+        ?native_service_revision
+        ~registrations:native_registrations
+        prompt_elements)
+    ~host
+    ~platform
+    ~prompt_elements
+    ~manifest_authorizer
+    ~approval_provider
+    ~approval_store
     ()
 ;;
 
@@ -1021,53 +1244,155 @@ let inherit_native ?managed ~(parent : t) ~capabilities () =
     }
 ;;
 
-let prepare_agent_source t ~binding ~owner ~request ~max_registrations ~checkpoint =
+let poll_source_checkpoint checkpoint =
+  Eio.Fiber.check ();
+  checkpoint ();
+  Eio.Fiber.check ()
+;;
+
+let source_registration t ~implementation ~max_registrations ~checkpoint =
   let open Result.Let_syntax in
-  let poll () =
-    Eio.Fiber.check ();
-    checkpoint ();
-    Eio.Fiber.check ()
-  in
   let invalid message = Error (Agent_protocol.Error.invalid_request message) in
   if max_registrations < 0
   then invalid "invalid source registration count allowance"
   else (
-    match Tool_capability.native_implementation binding with
-    | None -> Ok None
-    | Some implementation ->
-      let rec admit remaining = function
-        | [] -> Ok ()
-        | _ :: _ when remaining <= 0 ->
-          invalid "source registrations exceed their count allowance"
-        | _ :: rest ->
-          poll ();
-          admit (remaining - 1) rest
+    let rec find remaining found = function
+      | [] ->
+        (match found with
+         | None -> invalid "native source target belongs to another runtime"
+         | Some registration -> Ok registration)
+      | _ :: _ when remaining <= 0 ->
+        invalid "source registrations exceed their count allowance"
+      | registration :: rest ->
+        poll_source_checkpoint checkpoint;
+        if
+          phys_equal
+            implementation
+            registration.Native_tool_pool.Registration.implementation
+        then (
+          match found with
+          | None -> find (remaining - 1) (Some registration) rest
+          | Some _ -> invalid "native source target has ambiguous registrations")
+        else find (remaining - 1) found rest
+    in
+    find max_registrations None t.native_registrations)
+;;
+
+let admit_native_selection t ~selected ~max_bindings ~checkpoint =
+  let open Result.Let_syntax in
+  let module C = Tool_capability in
+  let invalid message = Error (Agent_protocol.Error.invalid_request message) in
+  if max_bindings <= 0 || C.length selected > max_bindings
+  then invalid "selected native bindings exceed their count allowance"
+  else (
+    let%bind runtime =
+      Lazy.force t.capabilities
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request error.C.message)
+    in
+    C.references selected
+    |> List.fold_result ~init:() ~f:(fun () reference ->
+      poll_source_checkpoint checkpoint;
+      let%bind binding =
+        C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
+        |> Result.map_error ~f:(fun error ->
+          Agent_protocol.Error.invalid_request error.C.message)
       in
-      let%bind () = admit max_registrations t.native_registrations in
-      let rec find found = function
-        | [] ->
-          (match found with
-           | None -> invalid "native source target belongs to another runtime"
-           | Some Native_tool_pool.Source_requirement.Ordinary -> Ok None
-           | Some (Source None) -> invalid "queued source preparer is unavailable"
-           | Some (Source (Some registration)) ->
-             Native_source_registration.prepare
-               registration
-               ~binding
-               ~owner
-               ~request
-               ~checkpoint)
-        | registration :: rest ->
-          poll ();
-          if
-            phys_equal
-              implementation
-              registration.Native_tool_pool.Registration.implementation
-          then (
-            match found with
-            | None -> find (Some registration.source_requirement) rest
-            | Some _ -> invalid "native source target has ambiguous registrations")
-          else find found rest
-      in
-      find None t.native_registrations)
+      match C.implementation binding with
+      | Managed _ -> Ok ()
+      | Native implementation ->
+        let%bind original =
+          C.resolve runtime ~id:reference.id ~fingerprint:reference.fingerprint
+          |> Result.map_error ~f:(fun error ->
+            Agent_protocol.Error.invalid_request error.C.message)
+        in
+        (match C.native_implementation original with
+         | Some actual when phys_equal actual implementation -> Ok ()
+         | Some _ | None -> invalid "selected native binding belongs to another runtime")))
+;;
+
+let require_saved_agent_source t ~binding ~max_registrations ~checkpoint =
+  let open Result.Let_syntax in
+  let module C = Tool_capability in
+  let invalid message = Error (Agent_protocol.Error.invalid_request message) in
+  match C.native_implementation binding with
+  | None -> invalid "saved Agent.run requires an ordinary native source"
+  | Some implementation ->
+    let%bind runtime =
+      Lazy.force t.capabilities
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request error.C.message)
+    in
+    let reference = C.reference binding in
+    let%bind original =
+      C.resolve runtime ~id:reference.id ~fingerprint:reference.fingerprint
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request error.C.message)
+    in
+    let%bind () =
+      match C.native_implementation original with
+      | Some actual when phys_equal actual implementation -> Ok ()
+      | Some _ | None -> invalid "saved Agent.run source belongs to another runtime"
+    in
+    let%bind registration =
+      source_registration t ~implementation ~max_registrations ~checkpoint
+    in
+    (match
+       ( C.result_contract binding
+       , registration.result_contract
+       , registration.source_requirement )
+     with
+     | Native_output, Native_output, Source (Some source)
+       when Native_source_registration.matches_implementation source implementation ->
+       Ok ()
+     | Native_output, Native_output, Source (Some _) ->
+       invalid "saved Agent.run source preparer belongs to another native implementation"
+     | Native_output, Native_output, Source None ->
+       invalid "saved Agent.run source preparer is unavailable"
+     | Native_output, Native_output, Ordinary ->
+       invalid "saved Agent.run requires an installed native source registration"
+     | Invocation_v1, _, _ | _, Invocation_v1, _ ->
+       invalid "persistent native source is not a saved Agent.run target")
+;;
+
+let admit_exact_saved_agent_registration t ~registration ~max_registrations ~checkpoint =
+  let invalid message = Error (Agent_protocol.Error.invalid_request message) in
+  let open Result.Let_syntax in
+  let%bind actual =
+    source_registration
+      t
+      ~implementation:registration.implementation
+      ~max_registrations
+      ~checkpoint
+  in
+  match actual.source_requirement, registration.source_requirement with
+  | Source (Some actual_source), Source (Some expected_source)
+    when phys_equal actual.implementation registration.implementation
+         && phys_equal actual_source expected_source
+         && String.equal
+              actual.implementation_revision
+              registration.implementation_revision
+         && Tool_capability.equal_result_contract actual.result_contract Native_output
+         && Tool_capability.equal_result_contract
+              actual.result_contract
+              registration.result_contract -> Ok ()
+  | Source (Some _), Source (Some _) | Source _, _ | Ordinary, _ ->
+    invalid "deferred Agent registration differs from the installed source"
+;;
+
+let prepare_agent_source t ~binding ~launch ~request ~max_registrations ~checkpoint =
+  let open Result.Let_syntax in
+  match Tool_capability.native_implementation binding with
+  | None -> Ok None
+  | Some implementation ->
+    let%bind registration =
+      source_registration t ~implementation ~max_registrations ~checkpoint
+    in
+    (match registration.source_requirement with
+     | Ordinary -> Ok None
+     | Source None ->
+       Error
+         (Agent_protocol.Error.invalid_request "queued source preparer is unavailable")
+     | Source (Some source) ->
+       Native_source_registration.prepare source ~binding ~launch ~request ~checkpoint)
 ;;

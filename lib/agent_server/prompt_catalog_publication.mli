@@ -76,7 +76,9 @@ module Prepared : sig
 end
 
 (** Reserve this host's complete preparation/publication attempt. Snapshot durable
-    history, prepare every actual definition with per-script selected operations,
+    history, prepare every actual definition with per-script selected operations
+    and its explicit Prompt_definition tool compiler contract (Standard by
+    default, Developer_model_spawn only when configured),
     preserve authentic next associations, finalize only actual successful durable
     artifacts, preallocate the bounded next index, and seal the exact catalog
     candidate. An Update validates its expected generation and target definitions
@@ -151,7 +153,8 @@ val prune
 
 (** Prepare portable child custody using the SAME host admission and actual current
     baseline snapshot. The caller supplies its original live Scope/Capture and
-    Startup; no source authority or compiler callback is retained. Mode.Build
+    Startup and the selected child [tool_contract]; no source authority or
+    compiler callback is retained. Mode.Build
     preserves known selections and rejects configured Untracked history. This
     operation neither publishes history nor installs/reserves a child artifact.
     Artifact retention through queue/delegation admission remains caller owned. *)
@@ -159,6 +162,7 @@ val prepare_child_programs
   :  t
   -> sources:Agent_session.Prompt_script_preparation.Host.t
   -> startup:Chat_response.Startup_compilation.t
+  -> tool_contract:Chatml_compilation.Tool_contract.t
   -> invocation:Agent_session.Runtime_script_preparation.Invocation.t
   -> scope:Agent_session.Prompt_source_owner.Scope.t
   -> capture:Agent_session.Prompt_source_owner.Capture.t

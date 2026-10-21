@@ -23,7 +23,10 @@ let load_config env fixture =
     (match Agent_server.Config_validator.validate ~env raw with
      | Ok config -> config
      | Error diagnostics ->
-       raise_s [%sexp "config validation failed", (diagnostics : _ list)])
+       raise_s
+         [%sexp
+           "config validation failed"
+         , (diagnostics : Agent_server.Config.Diagnostic.t list)])
 ;;
 
 let http_listener ~sw env daemon config options =

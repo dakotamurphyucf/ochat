@@ -289,7 +289,7 @@ module Registry = struct
            | Standard Moderator_v1 -> Ok Chatml.Chatml_extension_surface.moderator_v1
            | Standard Delegated_moderator_v1 ->
              Ok Chatml.Chatml_extension_surface.delegated_moderator_v1
-           | Standard (One_off_v1 | Tool_v1) | Native ->
+           | Standard (One_off_v1 | Tool_v1 | Developer_tool_v1) | Native ->
              Error "Lifecycle moderator has an incompatible compiled contract")
       in
       let artifact =
@@ -2247,6 +2247,32 @@ let drain_internal_events
       ~session_meta)
 ;;
 
+module Bounded_drain = struct
+  type stop =
+    | Empty
+    | Halted
+    | Waiting_for_ui of pending_ui_request
+    | Limit_reached
+
+  type t =
+    { outcomes : Moderation.Outcome.t list
+    ; stop : stop
+    }
+end
+
+let bounded_drain_stop t =
+  let open Bounded_drain in
+  if Runtime.is_halted t.runtime
+  then Bounded_drain.Halted
+  else (
+    match Runtime.pending_ui_request t.runtime with
+    | Some request -> Waiting_for_ui request
+    | None ->
+      (match Runtime.peek_queued_event t.runtime with
+       | None -> Empty
+       | Some _ -> Limit_reached))
+;;
+
 let rec drain_entries_loop
           t
           ~session_id
@@ -2257,13 +2283,14 @@ let rec drain_entries_loop
           ~remaining
           ~acc
   =
-  if remaining = 0 || Runtime.is_halted t.runtime
-  then Ok (List.rev acc)
-  else if Option.is_some (Runtime.pending_ui_request t.runtime)
-  then Error "Session is waiting for UI input."
+  if
+    remaining = 0
+    || Runtime.is_halted t.runtime
+    || Option.is_some (Runtime.pending_ui_request t.runtime)
+  then Ok Bounded_drain.{ outcomes = List.rev acc; stop = bounded_drain_stop t }
   else (
     match Runtime.take_queued_event t.runtime with
-    | None -> Ok (List.rev acc)
+    | None -> Ok Bounded_drain.{ outcomes = List.rev acc; stop = Empty }
     | Some event ->
       (match
          handle_event_entries_unlocked
@@ -2288,8 +2315,8 @@ let rec drain_entries_loop
            ~acc:(outcome :: acc)))
 ;;
 
-let drain_internal_events_entries_unlocked
-      ?(max_events = 100)
+let drain_internal_events_entries_bounded_unlocked
+      ~max_events
       t
       ~session_id
       ~now_ms
@@ -2308,6 +2335,29 @@ let drain_internal_events_entries_unlocked
     ~acc:[]
 ;;
 
+let drain_internal_events_entries_bounded
+      ~max_events
+      t
+      ~session_id
+      ~now_ms
+      ~history
+      ~available_tools
+      ~session_meta
+  =
+  if max_events < 0
+  then Error "Internal-event drain limit must be nonnegative."
+  else
+    with_execution_lock t (fun () ->
+      drain_internal_events_entries_bounded_unlocked
+        ~max_events
+        t
+        ~session_id
+        ~now_ms
+        ~history
+        ~available_tools
+        ~session_meta)
+;;
+
 let drain_internal_events_entries
       ?max_events
       t
@@ -2317,15 +2367,26 @@ let drain_internal_events_entries
       ~available_tools
       ~session_meta
   =
-  with_execution_lock t (fun () ->
-    drain_internal_events_entries_unlocked
-      ?max_events
+  let max_events = Option.value max_events ~default:100 in
+  match
+    drain_internal_events_entries_bounded
+      ~max_events
       t
       ~session_id
       ~now_ms
       ~history
       ~available_tools
-      ~session_meta)
+      ~session_meta
+  with
+  | Error _ as error -> error
+  | Ok { outcomes; stop = Bounded_drain.Waiting_for_ui _ } ->
+    if List.length outcomes >= max_events
+    then Ok outcomes
+    else Error "Session is waiting for UI input."
+  | Ok
+      { outcomes
+      ; stop = Bounded_drain.Empty | Bounded_drain.Halted | Bounded_drain.Limit_reached
+      } -> Ok outcomes
 ;;
 
 let effective_entries t history =

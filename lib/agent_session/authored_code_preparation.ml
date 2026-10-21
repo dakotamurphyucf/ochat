@@ -328,14 +328,29 @@ let registrations original ~capabilities ~view ~runner ~checkpoint =
                      { Chat_response.Tool.Agent_source_runner.prepare = Some prepare; _ }
                    ->
                    Ok
-                     (fun ~owner ~request:_ ~checkpoint ->
-                       prepare ~declaration ~owner ~checkpoint
+                     (fun ~launch ~request:_ ~checkpoint ->
+                       prepare ~declaration ~launch ~checkpoint
                        |> Result.map ~f:Option.some)
                  | None | Some { prepare = None; _ } ->
                    invalid "selected agent has no installed source preparer")
               | Persistent_tool _ ->
                 (match original.Original.prepare_persistent_source with
-                 | Some prepare -> Ok (prepare ~binding ~defining_revision ~reference)
+                 | Some prepare ->
+                   Ok
+                     (fun ~launch ~request ~checkpoint ->
+                       match Chat_response.Source_launch.conversation_owner launch with
+                       | None ->
+                         Error
+                           (P.Error.invalid_request
+                              "persistent agent source requires a conversation owner")
+                       | Some owner ->
+                         prepare
+                           ~binding
+                           ~defining_revision
+                           ~reference
+                           ~owner
+                           ~request
+                           ~checkpoint)
                  | None ->
                    invalid "selected persistent agent has no original Factory preparer")
               | Content _ ->

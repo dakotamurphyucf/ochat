@@ -706,7 +706,9 @@ module Executor : sig
     -> config
 
   (** [run config invocation] authorizes and executes [invocation]. Supplied
-      input is bounded and included in approval identity before execution. *)
+      input is bounded and included in approval identity before execution.
+      Reviewer cancellation escapes with its original exception and backtrace;
+      other reviewer exceptions deny approval. *)
   val run : config -> invocation -> (result, error) Result.t
 
   (** Bind the actual invoking session and its grant store without rebuilding

@@ -5,6 +5,7 @@
   cache
   config
   converter
+  converter_source
   ctx
   driver
   agent_response_loop
@@ -18,6 +19,8 @@
   neutral_turn
   in_memory_stream
   model_executor
+  model_completion_drain
+  model_spawn_request
   runtime_semantics
   automatic_turn_policy
   runtime_request_scope
@@ -68,6 +71,7 @@
   one_off_script
   one_off_request
   background_request
+  source_launch
   native_source_registration
   background_job_operations
   background_delivery
@@ -99,6 +103,7 @@
   chatml_compilation
   chatml_prompt_programs
   chatml_execution
+  ochat.chatml_tool_codec
   chatml_moderator_runtime
   session
   lru_cache

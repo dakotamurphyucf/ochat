@@ -37,6 +37,7 @@
   queued_child_tests
   retained_job_artifacts_tests
   background_admission_tests
+  job_capacity_owner_tests
   background_transaction_tests
   background_completion_tests
   background_cleanup_tests
@@ -88,6 +89,7 @@
   authored_agent_registration_tests
   managed_submission_recovery_tests
   delivery_ownership_tests
+  developer_invocation_tests
   delivery_wake_tests
   notification_transaction_tests
   notification_access_tests
@@ -142,7 +144,7 @@
   standalone_tests
   root_invocation_tests
   state_tests)
- (libraries agent_server_test_support inference_fixture ochat.transcript core eio eio_main mirage-crypto-rng.unix ochat.agent_session ochat.agent_server)
+ (libraries agent_server_test_support developer_root_owner_test_suite developer_run_store_test_suite inference_fixture ochat.transcript core eio eio_main mirage-crypto-rng.unix ochat.agent_session ochat.agent_server ochat.agent_store)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))

@@ -1,0 +1,5 @@
+(library
+ (name language_highlighting)
+ (public_name ochat.language_highlighting)
+ (libraries core ochat.chatml_source ochat.chatmd_source_input)
+ (preprocess (pps ppx_jane)))

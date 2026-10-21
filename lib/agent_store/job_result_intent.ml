@@ -45,23 +45,6 @@ let validate_session session_id t =
 
 let validate session t = validate_session (Session_store.Handle.session_id session) t
 
-let ensure_directory ~env session =
-  let path = directory session in
-  try
-    let directory = Eio.Path.(Eio.Stdenv.fs env / path) in
-    match Eio.Path.kind ~follow:false directory with
-    | `Directory ->
-      Durable_file.sync_directory ~env ~path:(Session_store.Handle.directory session)
-    | `Not_found ->
-      Eio.Path.mkdir ~perm:0o700 directory;
-      Durable_file.sync_directory ~env ~path:(Session_store.Handle.directory session)
-    | _ -> corrupt "job result preparation directory is not a regular directory"
-  with
-  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
-  | exn ->
-    Error (Store_error.of_exn ~operation:"create job result intent directory" ~path exn)
-;;
-
 let make ~session ~reference ~metadata =
   let open Result.Let_syntax in
   let%bind metadata_document =
@@ -77,8 +60,7 @@ let make ~session ~reference ~metadata =
     Job_result_intent_document.to_document document |> Document_fields.store
   in
   let%bind contents =
-    Document_record.encode named ~limits:Job_result_intent_document.limits ~flags:0
-    |> Result.map_error ~f:Document_fields.record_error
+    Result_intent_file.encode named ~limits:Job_result_intent_document.limits
   in
   let t = { reference; metadata; stage; document = named; contents } in
   Result.map (validate session t) ~f:(fun () -> t)
@@ -112,17 +94,13 @@ let decode ~session_id ~filename contents =
       |> Result.map_error ~f:(fun _ ->
         Store_error.Corrupt "invalid job result intent filename")
   in
-  match Frame.decode ~max_payload_length ~contents ~offset:0 with
-  | Ok (Complete { frame; next_offset })
-    when next_offset = String.length contents && Frame.flags frame = 0 ->
-    let%bind record =
-      Document_record.of_frame
-        frame
-        ~limits:Job_result_intent_document.limits
-        ~expected_digest:None
-      |> Result.map_error ~f:Document_fields.record_error
-    in
-    let named = Document_record.document record in
+  match
+    Result_intent_file.decode
+      contents
+      ~limits:Job_result_intent_document.limits
+      ~max_frame_bytes:(max_payload_length + 4096)
+  with
+  | Ok named ->
     let%bind stored_session, stored_blob =
       Job_result_intent_document.stored_identity named |> Document_fields.store
     in
@@ -179,9 +157,11 @@ let protects_temporary ~env ~data_root (metadata : Blob_store.Metadata.t) =
     P.Blob.Metadata.of_json (P.Blob.Metadata.to_json metadata.blob)
     |> Result.map_error ~f:(fun failure -> Store_error.Corrupt failure.P.Error.message)
   in
-  match metadata.target_session with
-  | None -> Ok false
-  | Some session_id ->
+  match metadata.target with
+  | Blob_store.Metadata.Target.Unassigned -> Ok false
+  | Developer _ ->
+    Error (Store_error.Corrupt "developer blob cannot use session intent protection")
+  | Session session_id ->
     let%bind session_id =
       P.Id.Session.of_json (P.Id.Session.to_json session_id)
       |> Result.map_error ~f:(fun failure -> Store_error.Corrupt failure.P.Error.message)
@@ -227,26 +207,12 @@ let protects_temporary ~env ~data_root (metadata : Blob_store.Metadata.t) =
 ;;
 
 let save ~env ~session t =
-  let path = path session t in
-  try
-    let open Result.Let_syntax in
-    let%bind () = validate session t in
-    let%bind () = ensure_directory ~env session in
-    let%bind () =
-      match Eio.Path.kind ~follow:false Eio.Path.(Eio.Stdenv.fs env / path) with
-      | `Not_found -> Ok ()
-      | `Regular_file ->
-        let%bind actual = read ~env ~session ~filename:(filename t) in
-        (match String.equal actual.contents t.contents with
-         | true -> Ok ()
-         | false ->
-           corrupt "job result preparation intent already belongs to another value")
-      | _ -> corrupt "job result preparation intent is not a regular file"
-    in
-    Durable_file.replace ~env ~durability:Flush_file_and_directory ~path t.contents
-  with
-  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
-  | exn -> Error (Store_error.of_exn ~operation:"save job result intent" ~path exn)
+  let open Result.Let_syntax in
+  let%bind () = validate session t in
+  Result_intent_file.save_exact
+    (Result_intent_file.conversation ~env ~session ~blob:t.reference.blob.id)
+    ~max_frame_bytes:(max_payload_length + 4096)
+    t.contents
 ;;
 
 let create ~env ~session ~reference ~metadata =
@@ -329,21 +295,10 @@ let list ~env ~session ~max_count =
 let remove ~env ~session t =
   let open Result.Let_syntax in
   let%bind () = validate session t in
-  let path = path session t in
-  try
-    match Eio.Path.kind ~follow:false Eio.Path.(Eio.Stdenv.fs env / path) with
-    | `Not_found -> Ok ()
-    | `Regular_file ->
-      let%bind actual = read ~env ~session ~filename:(filename t) in
-      (match String.equal actual.contents t.contents with
-       | false -> corrupt "job result intent changed before removal"
-       | true ->
-         Eio.Path.unlink Eio.Path.(Eio.Stdenv.fs env / path);
-         Durable_file.sync_directory ~env ~path:(directory session))
-    | _ -> corrupt "job result intent is not a regular file"
-  with
-  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
-  | exn -> Error (Store_error.of_exn ~operation:"remove job result intent" ~path exn)
+  Result_intent_file.remove_exact
+    (Result_intent_file.conversation ~env ~session ~blob:t.reference.blob.id)
+    ~expected:t.contents
+    ~max_frame_bytes:(max_payload_length + 4096)
 ;;
 
 let finish ~env ~reader ~session t ~before_remove =

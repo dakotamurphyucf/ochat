@@ -114,6 +114,10 @@ type op_kind =
   | External_async
   | Diagnostic
 
+type scoped_async_operation = Model_spawn
+
+let model_spawn_operation_name = "Model.spawn"
+
 type op_def =
   { name : string
   ; kind : op_kind
@@ -165,6 +169,7 @@ and exec_ctx =
   ; mutable end_session_requested : string option
   ; mutable fuel : int option
   ; mutable remaining_tasks : int option
+  ; mutable trace_final_failure_emitted : bool
   }
 
 and continuation_frame =
@@ -197,7 +202,7 @@ and suspended_exec =
 and session =
   { env : Lang.env
   ; mutable state : Lang.value
-  ; on_event : Lang.value
+  ; on_event : Lang.value option
   ; event_arguments : event_arguments
   ; queue : Lang.value Queue.t
   ; operations : op_def String.Map.t
@@ -680,7 +685,7 @@ let default_operations ?(handlers = default_handlers) () : op_def list =
           | Error msg -> Error msg
           | Ok recipe -> handlers.on_model_call session ~recipe ~payload)
     }
-  ; { name = "Model.spawn"
+  ; { name = model_spawn_operation_name
     ; kind = External_async
     ; phase_check = allow_all_phases
     ; perform =
@@ -924,9 +929,9 @@ let compiled_surface (compiled : compiled_script) : Builtin_surface.surface =
 
 let create_session
       ?(event_arguments = Context_state_event)
+      ?on_event
       env
       ~state
-      ~on_event
       ~operations
       ~source_text
       ~current_exec
@@ -1163,16 +1168,27 @@ let response_value_of_request (request : pending_ui_request) ~(response : string
        Error "Approval.ask_choice response must match one of the declared choices.")
 ;;
 
-let dispatch_effect
+let trace_operation name =
+  let open Chatml_trace.Event.Operation in
+  match name with
+  | "Tool.call" -> Tool_call
+  | "Tool.spawn" -> Tool_spawn
+  | "Job.start_tool" | "Job.start_script" -> Job_start
+  | "Model.call" -> Model_call
+  | "Model.spawn" -> Model_spawn
+  | "Process.run" -> Process_run
+  | "Schedule.after_ms" | "Schedule.cancel" -> Schedule
+  | "Job.read_result" -> Job_read
+  | _ -> Other
+;;
+
+let dispatch_effect_unchecked
       (session : session)
       (exec : exec_ctx)
       ~(spawned : bool)
       (eff : Lang.eff)
   : (effect_result, string) result
   =
-  Option.iter session.env.control ~f:(fun control ->
-    control.before_effect ~name:eff.op ~spawned;
-    List.iter eff.args ~f:control.check_value);
   let check_result value =
     Option.iter session.env.control ~f:(fun control -> control.after_effect value)
   in
@@ -1285,6 +1301,22 @@ let dispatch_effect
                   Error msg)))))
 ;;
 
+let dispatch_effect ?site session exec ~spawned eff =
+  let open Chatml_trace.Event.Kind in
+  Option.iter session.env.control ~f:(fun control ->
+    control.before_effect ~name:eff.Lang.op ~spawned;
+    List.iter eff.args ~f:control.check_value);
+  let operation = trace_operation eff.op in
+  let observe kind = Chatml_trace.Scope.observe_site ~kind ~site ~correlation:None in
+  observe (Effect_attempted operation);
+  let result = dispatch_effect_unchecked session exec ~spawned eff in
+  (match result with
+   | Ok (Effect_value _) -> observe (Effect_host_returned operation)
+   | Ok (Effect_suspend _) -> observe Host_wait_entered
+   | Error _ -> observe (Effect_host_failed operation));
+  result
+;;
+
 let perform_local_effect (session : session) (eff : Lang.eff) =
   with_current_exec session ~name:"perform_local_effect" ~f:(fun exec ->
     let open Result.Let_syntax in
@@ -1331,7 +1363,14 @@ and continue_array session exec ~frames traversal ~site step =
 
 and continue_with_error session exec ~frames diagnostic =
   match frames with
-  | [] -> Error diagnostic
+  | [] ->
+    exec.trace_final_failure_emitted <- true;
+    Chatml_trace.Scope.observe_site
+      ~kind:
+        (Chatml_trace.Event.Kind.Unrecovered_failure Chatml_trace.Event.Failure.Runtime)
+      ~site:(Failure.diagnostic diagnostic).site
+      ~correlation:None;
+    Error diagnostic
   | Bind_frame _ :: rest | Map_frame _ :: rest | Array_frame _ :: rest ->
     continue_with_error session exec ~frames:rest diagnostic
   | Catch_frame catch_frame :: rest ->
@@ -1348,6 +1387,10 @@ and continue_with_error session exec ~frames diagnostic =
       match find_operation session eff.Lang.op with
       | Ok { kind = Local_transactional_with_result { rollback }; _ } -> rollback eff.args
       | _ -> ());
+    Chatml_trace.Scope.observe_site
+      ~kind:(Chatml_trace.Event.Kind.Recovered_failure Chatml_trace.Event.Failure.Runtime)
+      ~site:(Failure.diagnostic diagnostic).site
+      ~correlation:None;
     let open Result.Let_syntax in
     (* Task.catch has always received the task/operation failure message. Owned
        diagnostic transport does not add rendering or catch callback failures. *)
@@ -1409,7 +1452,7 @@ and interpret_task session exec ~frames (task : Lang.task) =
     in
     interpret_task session exec ~frames:(catch_frame :: frames) (nested next_task)
   | Lang.TPerform eff ->
-    (match dispatch_effect session exec ~spawned:false eff with
+    (match dispatch_effect ?site:task.site session exec ~spawned:false eff with
      | Error msg -> continue_with_error session exec ~frames (failure msg)
      | Ok (Effect_value value) -> continue_with_value session exec ~frames value
      | Ok (Effect_suspend request) -> Ok (Task_suspend { exec; frames; request }))
@@ -1419,19 +1462,101 @@ and interpret_task session exec ~frames (task : Lang.task) =
        continue_with_error session exec ~frames (failure "ChatML task limit exceeded")
      | remaining ->
        exec.remaining_tasks <- Option.map remaining ~f:(fun remaining -> remaining - 1);
-       (match dispatch_effect session exec ~spawned:true eff with
+       (match dispatch_effect ?site:task.site session exec ~spawned:true eff with
         | Error msg -> continue_with_error session exec ~frames (failure msg)
         | Ok (Effect_value value) -> continue_with_value session exec ~frames value
         | Ok (Effect_suspend _) -> assert false))
 ;;
 
-let standalone_operations (config : runtime_config) ~prepare_result =
+let standalone_operations
+      (config : runtime_config)
+      ~prepare_result
+      ~scoped_async_operation
+  =
   List.filter config.operations ~f:(fun operation ->
     match operation.kind with
     | Diagnostic | External_sync -> true
     | Local_transactional_with_result _ -> Option.is_some prepare_result
-    | Local_transactional | External_async -> false)
+    | Local_transactional -> false
+    | External_async ->
+      (match scoped_async_operation with
+       | None -> false
+       | Some Model_spawn -> String.equal operation.name model_spawn_operation_name))
   |> operations_map
+;;
+
+let run_initialized_task
+      ?limits
+      ?prepare_result
+      ?on_event
+      env
+      ~source_text
+      ~operations
+      ~start_task
+      ~validate_result
+      ~check_now
+  =
+  let failure message = Error (Failure.plain message) in
+  let open Result.Let_syntax in
+  let exec =
+    { phase = "standalone"
+    ; local_effects_rev = []
+    ; emitted_rev = []
+    ; end_session_requested = None
+    ; fuel = Option.map limits ~f:(fun (limits : execution_limits) -> limits.fuel)
+    ; remaining_tasks = Option.map limits ~f:(fun limits -> limits.max_tasks)
+    ; trace_final_failure_emitted = false
+    }
+  in
+  let session =
+    create_session
+      ?on_event
+      env
+      ~state:Lang.VUnit
+      ~operations
+      ~source_text
+      ~current_exec:(Some exec)
+  in
+  Chatml_trace.Scope.observe_unlocated
+    ~kind:(Chatml_trace.Event.Kind.Phase_started Chatml_trace.Event.Phase.Evaluation)
+    ~correlation:None;
+  let result =
+    Exn.protect
+      ~finally:(fun () -> session.current_exec <- None)
+      ~f:(fun () ->
+        let%bind task = start_task () in
+        let%bind outcome = interpret_task session exec ~frames:[] task in
+        match outcome with
+        | Task_value value ->
+          let () = validate_result value in
+          let%map install =
+            match prepare_result with
+            | None -> Ok ignore
+            | Some prepare ->
+              prepare ~value ~local_effects:(List.rev exec.local_effects_rev)
+              |> host_result
+          in
+          validate_result value;
+          Option.iter session.env.control ~f:(fun control -> control.allocate 0);
+          check_now ();
+          install ();
+          value
+        | Task_suspend _ -> failure "Standalone execution cannot suspend for UI input")
+  in
+  (match result with
+   | Ok _ ->
+     Chatml_trace.Scope.observe_unlocated
+       ~kind:(Chatml_trace.Event.Kind.Phase_finished Chatml_trace.Event.Phase.Evaluation)
+       ~correlation:None
+   | Error failure ->
+     if not exec.trace_final_failure_emitted
+     then
+       Chatml_trace.Scope.observe_site
+         ~kind:
+           (Chatml_trace.Event.Kind.Unrecovered_failure Chatml_trace.Event.Failure.Runtime)
+         ~site:(Failure.diagnostic failure).site
+         ~correlation:None);
+  result
 ;;
 
 let run_initialized_entrypoint
@@ -1443,49 +1568,60 @@ let run_initialized_entrypoint
       fn
       ~arguments
   =
-  let failure message = Error (Failure.plain message) in
-  let open Result.Let_syntax in
-  let exec =
-    { phase = "standalone"
-    ; local_effects_rev = []
-    ; emitted_rev = []
-    ; end_session_requested = None
-    ; fuel = Option.map limits ~f:(fun (limits : execution_limits) -> limits.fuel)
-    ; remaining_tasks = Option.map limits ~f:(fun limits -> limits.max_tasks)
-    }
-  in
-  let session =
-    create_session
-      env
-      ~state:Lang.VUnit
-      ~on_event:fn
-      ~operations
-      ~source_text
-      ~current_exec:(Some exec)
-  in
-  Exn.protect
-    ~finally:(fun () -> session.current_exec <- None)
-    ~f:(fun () ->
+  run_initialized_task
+    ?limits
+    ?prepare_result
+    ~on_event:fn
+    env
+    ~source_text
+    ~operations
+    ~start_task:(fun () ->
+      let open Result.Let_syntax in
       let%bind value =
         Eval.apply_value_result fn arguments |> Result.map_error ~f:Failure.runtime
       in
-      let%bind task = expect_task_value value |> host_result in
-      let%bind outcome = interpret_task session exec ~frames:[] task in
-      match outcome with
-      | Task_value value ->
-        let%map install =
-          match prepare_result with
-          | None -> Ok ignore
-          | Some prepare ->
-            prepare ~value ~local_effects:(List.rev exec.local_effects_rev) |> host_result
-        in
-        install ();
-        value
-      | Task_suspend _ -> failure "Standalone execution cannot suspend for UI input")
+      expect_task_value value |> host_result)
+    ~validate_result:(fun _ -> ())
+    ~check_now:(fun () -> if Option.is_some env.control then Eio.Fiber.check ())
+;;
+
+let run_retained_task_detailed
+      ?control
+      ?scoped_async_operation
+      ?limits
+      ?prepare_result
+      (config : runtime_config)
+      ~(environment : Lang.env)
+      ~task
+      ~source
+      ~check_now
+      ()
+  =
+  match standalone_operations config ~prepare_result ~scoped_async_operation with
+  | Error message -> Error (Diagnostic.create message)
+  | Ok operations ->
+    let env =
+      { environment with
+        control = Option.first_some control environment.control
+      ; source = Some source
+      }
+    in
+    run_initialized_task
+      ?limits
+      ?prepare_result
+      env
+      ~source_text:(Captured.contents source)
+      ~operations
+      ~start_task:(fun () -> Ok task)
+      ~validate_result:(fun value ->
+        Option.iter env.control ~f:(fun control -> control.check_value value))
+      ~check_now
+    |> Result.map_error ~f:Failure.diagnostic
 ;;
 
 let run_entrypoint_internal
       ?control
+      ?scoped_async_operation
       ?limits
       ?prepare_result
       (config : runtime_config)
@@ -1502,7 +1638,9 @@ let run_entrypoint_internal
       ~runtime_surface:config.surface
     |> host_result
   in
-  let%bind operations = standalone_operations config ~prepare_result |> host_result in
+  let%bind operations =
+    standalone_operations config ~prepare_result ~scoped_async_operation |> host_result
+  in
   let env = Builtin_modules.create_env_with_surface ?control config.surface in
   let env = { env with source = compiled.source } in
   try
@@ -1521,11 +1659,18 @@ let run_entrypoint_internal
       fn
       ~arguments
   with
-  | Lang.Runtime_error error -> Error (Failure.runtime error)
+  | Lang.Runtime_error error ->
+    Chatml_trace.Scope.observe_site
+      ~kind:
+        (Chatml_trace.Event.Kind.Unrecovered_failure Chatml_trace.Event.Failure.Runtime)
+      ~site:error.site
+      ~correlation:None;
+    Error (Failure.runtime error)
 ;;
 
 let run_entrypoint_detailed
       ?control
+      ?scoped_async_operation
       ?limits
       ?prepare_result
       config
@@ -1536,6 +1681,7 @@ let run_entrypoint_detailed
   =
   run_entrypoint_internal
     ?control
+    ?scoped_async_operation
     ?limits
     ?prepare_result
     config
@@ -1548,6 +1694,7 @@ let run_entrypoint_detailed
 
 let run_entrypoint
       ?control
+      ?scoped_async_operation
       ?limits
       ?prepare_result
       config
@@ -1558,6 +1705,7 @@ let run_entrypoint
   =
   run_entrypoint_internal
     ?control
+    ?scoped_async_operation
     ?limits
     ?prepare_result
     config
@@ -1708,6 +1856,7 @@ let handle_event_impl_detailed
         ; end_session_requested = None
         ; fuel = Option.map limits ~f:(fun (limits : execution_limits) -> limits.fuel)
         ; remaining_tasks = Option.map limits ~f:(fun limits -> limits.max_tasks)
+        ; trace_final_failure_emitted = false
         }
       in
       let old_state = session.state in
@@ -1728,16 +1877,27 @@ let handle_event_impl_detailed
                   | Context_state_event -> [ context; execution_state; event ]
                   | Event_state -> [ event; execution_state ]
                 in
-                match Eval.apply_value_result session.on_event arguments with
-                | Error err -> Error (Failure.runtime err)
-                | Ok value ->
-                  (match expect_task_value value with
-                   | Error msg -> Error (Failure.plain msg)
-                   | Ok task -> interpret_task session exec ~frames:[] task))
+                match session.on_event with
+                | None -> Error (Failure.plain "Session has no event handler")
+                | Some on_event ->
+                  (match Eval.apply_value_result on_event arguments with
+                   | Error err -> Error (Failure.runtime err)
+                   | Ok value ->
+                     (match expect_task_value value with
+                      | Error msg -> Error (Failure.plain msg)
+                      | Ok task -> interpret_task session exec ~frames:[] task)))
               ~finally:(fun () -> session.current_exec <- None)
           in
           match result with
           | Error msg ->
+            if not exec.trace_final_failure_emitted
+            then
+              Chatml_trace.Scope.observe_site
+                ~kind:
+                  (Chatml_trace.Event.Kind.Unrecovered_failure
+                     Chatml_trace.Event.Failure.Runtime)
+                ~site:(Failure.diagnostic msg).site
+                ~correlation:None;
             Debug_log.emit (fun () ->
               Printf.sprintf
                 "[chatml-runtime] handle_event_error phase=%s state=%s event=%s error=%s"
@@ -1923,6 +2083,9 @@ let resume_ui_request_internal
     let%bind response_value =
       response_value_of_request suspended_exec.request ~response |> host_result
     in
+    Chatml_trace.Scope.observe_unlocated
+      ~kind:Chatml_trace.Event.Kind.Host_wait_resumed
+      ~correlation:None;
     session.suspended_exec <- None;
     session.ui_resume_active <- true;
     session.current_exec <- Some suspended_exec.exec;
@@ -1939,7 +2102,16 @@ let resume_ui_request_internal
             response_value)
     in
     (match result with
-     | Error msg -> Error msg
+     | Error msg ->
+       if not suspended_exec.exec.trace_final_failure_emitted
+       then
+         Chatml_trace.Scope.observe_site
+           ~kind:
+             (Chatml_trace.Event.Kind.Unrecovered_failure
+                Chatml_trace.Event.Failure.Runtime)
+           ~site:(Failure.diagnostic msg).site
+           ~correlation:None;
+       Error msg
      | Ok (Task_value new_state) ->
        let%bind () = validate_state new_state |> host_result in
        let%map commit_host =
@@ -2085,6 +2257,7 @@ let run_prepared_entrypoint_detailed
       ~entrypoint
       ~arguments
       ?control
+      ?scoped_async_operation
       ?limits
       ?prepare_result
       ()
@@ -2104,7 +2277,8 @@ let run_prepared_entrypoint_detailed
       ~checkpoint
   in
   let%bind operations =
-    standalone_operations config ~prepare_result |> Result.map_error ~f:Diagnostic.create
+    standalone_operations config ~prepare_result ~scoped_async_operation
+    |> Result.map_error ~f:Diagnostic.create
   in
   let%bind instance =
     Chatml_linked_runtime.instantiate

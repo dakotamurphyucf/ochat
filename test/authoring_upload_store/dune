@@ -1,0 +1,33 @@
+(library
+ (name authoring_upload_store_test)
+ (wrapped false)
+ (modules authoring_upload_store_test publication_tests)
+ (libraries
+  core
+  eio
+  eio_main
+  eio.mock
+  mirage-crypto-rng.unix
+  ochat.agent_store
+  ochat.agent_server
+  ochat.operator_authorization
+  ochat.agent_protocol
+  ochat.chatml_source
+  ochat.chatml_project
+  ochat.chatml_authoring_context
+  ochat.chatml_authoring_analysis
+  ochat.chatml_semantics
+  ochat.chatml_typechecker
+  ochat.chatml_compilation
+  ochat.chatml_authoring_bundle_project
+  ochat.chatml_authoring_bundle_document
+  ochat.chatml_prompt_binding
+  ochat.chatml_project_build
+  ochat.chatml_prepared_program
+  ochat.chatml_developer_capture
+  ochat.chatml
+  chatml_project_build_tests
+  chatmd)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

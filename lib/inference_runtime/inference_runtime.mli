@@ -1,5 +1,26 @@
 open! Core
 
+(** Trusted per-attempt application-submission checkpoint. A guard contains a
+    host-owned [refresh] callback, not authority created by this module. Refresh
+    may yield to read the real owner/Claim and returns a fresh, attempt-local
+    final check closure. The returned closure must not yield and must validate
+    the current actor, owner, parent, selection and deadline after all such
+    reads. Composition keeps both guards: every refresh runs before every
+    nonyielding final check. No refreshed witness is stored on a shared Context,
+    so concurrent sibling attempts cannot overwrite one another. Exceptions
+    and cancellation retain their original cause.
+    The selected backend invokes [check] after auth/transport waits and immediately
+    before entering model-request submission. A later revocation may race an
+    already admitted request. *)
+module Submission_guard : sig
+  type t
+
+  val empty : t
+  val create : refresh:(unit -> unit -> unit) -> t
+  val compose : t -> t -> t
+  val check : t -> unit
+end
+
 (** Effectful inference boundary. A prepared value owns its actual adapter and
     host credential resolver; callers cannot pair it with another backend or
     account at dispatch. No canonical history or tool execution lives here. *)
@@ -123,7 +144,9 @@ module Plan : sig
       It delivers callbacks serially in this attempt's dynamic lifetime; none may
       escape after return. When policy is explicitly captured, normal submitted
       receipts require exactly one matching transport selection before response
-      evidence. Concurrent or detached callbacks violate ownership. *)
+      evidence. Concurrent or detached callbacks violate ownership.
+      [submission_guard] is forwarded to the actual backend application-effect
+      boundary; it is never inferred from transport observations. *)
   val create
     :  request:Inference.Request.t
     -> configuration:Inference.Observation.Configuration.t
@@ -135,6 +158,7 @@ module Plan : sig
           -> note_delivery:(Inference.Event.Terminal.delivery -> unit)
           -> on_event:(Inference.Event.t -> unit)
           -> on_observation:(Inference.Observation.t -> unit)
+          -> submission_guard:Submission_guard.t
           -> Receipt.t)
     -> (t, Preparation_error.t) Result.t
 end
@@ -217,7 +241,8 @@ module Attempt : sig
       observer, not another consumption increment. No local Source_finished,
       canonical commit, tool effect or host-turn completion occurs here. *)
   val run
-    :  t
+    :  ?submission_guard:Submission_guard.t
+    -> t
     -> sw:Eio.Switch.t
     -> on_event:(Inference.Event.t -> unit)
     -> on_observation:(Inference.Observation.t -> unit)
@@ -262,6 +287,12 @@ module Context : sig
 
   val target : t -> Inference.Request.Target.t
   val transport_policy : t -> Inference.Observation.Transport_policy.t
+
+  (** Comparison/configuration data from this context's actual immutable
+      adapter. It does not authorize a provider, actor, credential or effect.
+      A physical host can use the admitted candidate ceiling when bounding
+      retained call provenance without accepting a caller-supplied integer. *)
+  val limits : t -> Limits.t
 
   (** Retains requested policy when detaching. Auxiliary/child execution uses an
       ephemeral per-attempt WS owner where supported; require never becomes SSE. *)

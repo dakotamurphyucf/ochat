@@ -49,7 +49,8 @@ val policy_identity : t -> Sexp.t
     No filesystem access, native setup or initializer. The borrowed startup owner
     covers the complete phase; original callback failures propagate unchanged. *)
 val plan
-  :  t
+  :  ?tool_contract:Chatml_compilation.Tool_contract.t
+  -> t
   -> startup:Chat_response.Startup_compilation.t
   -> parsed:Prompt.Chat_markdown.Parsed.t
   -> invocation:Invocation.t
@@ -73,6 +74,7 @@ val plan
 val with_revision
   :  t option
   -> ?startup:Chat_response.Startup_compilation.t
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
   -> Prompt_revision.t
   -> env:Eio_unix.Stdenv.base
   -> invocation:Invocation.t
@@ -88,9 +90,20 @@ val with_revision
     immutable plan used to authenticate the restored programs. No second parser
     or planning traversal. [None] plan means genuine legacy custody absence, not
     evidence that the captured revision contains no moderator. Borrowed startup,
-    callback and original exception rules are identical to [with_revision]. *)
+    callback and original exception rules are identical to [with_revision].
+    [tool_contract] selects the captured managed Tool surface; omission keeps
+    the existing Standard session fingerprint. Developer Live passes
+    Developer_model_spawn and uses the same choice for managed registry
+    preparation. That explicit choice must select the corresponding genuine
+    binding/compiler-contract records from the revision's immutable inventory
+    through Retained_selection before graph restoration. Missing or ambiguous
+    Developer records reject; a Standard graph is never relabelled or compiled
+    from current files on resume. The authored bundle comes from the verified
+    revision artifact, not a caller-selected source. This is compiler identity,
+    not provider authority. *)
 val with_revision_plan
-  :  t option
+  :  ?tool_contract:Chatml_compilation.Tool_contract.t
+  -> t option
   -> ?startup:Chat_response.Startup_compilation.t
   -> Prompt_revision.t
   -> env:Eio_unix.Stdenv.base
@@ -120,6 +133,7 @@ val with_revision_plan
     the callback. Original callback exceptions and cancellation propagate. *)
 val with_authored_child
   :  ?startup:Chat_response.Startup_compilation.t
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
   -> t option
   -> parent:Prompt_revision.t
   -> tool_name:string
@@ -148,6 +162,7 @@ val with_authored_child
 val with_captured_child
   :  t
   -> ?startup:Chat_response.Startup_compilation.t
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
   -> Prompt_revision.t
   -> reference:Prompt.Chat_markdown.Agent_reference.t
   -> invocation:Invocation.t
@@ -161,6 +176,41 @@ val with_captured_child
         -> programs:Chatml_prompt_programs.Restored.t option
         -> ('a, Agent_protocol.Error.t) Result.t)
   -> ('a, Agent_protocol.Error.t) Result.t
+
+(** The Model-request counterpart of [with_captured_child]. The selected
+    portable member came from an authenticated Content_source port, not a
+    parser Agent occurrence. Require it in the parent's complete immutable
+    authored inventory, retain its actual captured Root and program/content
+    custody, then use the same headless role selection and restoration. No
+    current-file read, invented Agent_reference or runtime activation occurs.
+    The result passes observed retained source bytes to [f]. The enclosing
+    Prompt_child_source counts all charged preparation/publication checkpoints
+    through its bounded callback, including those inside [f]. [f] may
+    publish/verify immutable artifact
+    custody, but must not initialize native/managed resources, start a provider
+    or run a child while the upper aggregate budget gate is held. [f] and the
+    borrowed startup expire with this call. *)
+val with_captured_selected_member
+  :  t
+  -> ?startup:Chat_response.Startup_compilation.t
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
+  -> Prompt_revision.t
+  -> member:Source.Portable_path.t
+  -> invocation:Invocation.t
+  -> content_limits:Chatmd_prompt_content.Limits.t option
+  -> max_input_bytes:int
+  -> max_work_steps:int
+  -> env:Eio_unix.Stdenv.base
+  -> checkpoint:(unit -> unit)
+  -> on_acquire:(unit -> unit)
+  -> f:
+       (Chat_response.Startup_compilation.t
+        -> revision:Prompt_revision.t
+        -> compilation_limits:Chatml_compilation.limits
+        -> programs:Chatml_prompt_programs.Restored.t option
+        -> input_bytes:int
+        -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
 
 (** Compile the exact retained revision through [with_revision] and the same shell
     preparation used at activation, without tools/native setup or initialization.

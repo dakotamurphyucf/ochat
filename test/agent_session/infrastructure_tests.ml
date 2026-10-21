@@ -155,6 +155,176 @@ let%expect_test "workspace leases allow shared holders and exclude exclusive hol
   [%expect {| ((exclusive_blocked true) (shared_blocked true)) |}]
 ;;
 
+let%test_unit "developer and conversation holders share one physical lease ledger" =
+  Eio_main.run (fun _env ->
+    let leases = Agent_session.Workspace_lease.create () in
+    let owner =
+      match
+        Agent_protocol.Execution_owner.developer
+          ~host_id:(Agent_protocol.Id.Server.create ())
+          ~run_id:(Agent_protocol.Id.Developer_run.create ())
+          ~epoch:0
+          ~principal_id:(Agent_protocol.Id.Principal.create ())
+        |> protocol_ok
+      with
+      | Developer owner -> owner
+      | Conversation _ -> failwith "developer owner constructor changed"
+    in
+    let developer =
+      Agent_session.Workspace_lease.acquire_developer
+        leases
+        ~conflict_domain:"same"
+        ~owner
+        ~mode:Exclusive
+      |> protocol_ok
+    in
+    assert (Agent_session.Workspace_lease.is_active leases developer);
+    assert (
+      Result.is_error
+        (Agent_session.Workspace_lease.acquire
+           leases
+           ~conflict_domain:"same"
+           ~session_id
+           ~mode:Shared));
+    let independent =
+      Agent_session.Workspace_lease.acquire
+        leases
+        ~conflict_domain:"other"
+        ~session_id
+        ~mode:Exclusive
+      |> protocol_ok
+    in
+    assert (
+      not
+        (Agent_session.Workspace_lease.active_other_than
+           leases
+           developer
+           ~conflict_domain:"same"));
+    Agent_session.Workspace_lease.release leases developer;
+    assert (not (Agent_session.Workspace_lease.is_active leases developer));
+    assert (
+      Agent_session.Workspace_lease.active_other_than
+        leases
+        developer
+        ~conflict_domain:"same");
+    Agent_session.Workspace_lease.release leases independent)
+;;
+
+let%test_unit "bounded owned temporary cleanup unlinks inner links under its lease" =
+  with_temp_directory (fun env temporary ->
+    Eio.Switch.run (fun sw ->
+      let managed_root = Filename.concat temporary "managed" in
+      let session_directory = Filename.concat temporary "live" in
+      let outside = Filename.concat temporary "outside" in
+      Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / managed_root);
+      Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / session_directory);
+      Eio.Path.save
+        ~create:(`Exclusive 0o600)
+        Eio.Path.(Eio.Stdenv.fs env / outside)
+        "keep";
+      let definition =
+        Agent_session.Workspace_definition.create
+          ~id:workspace_id
+          ~config_name:"developer-temp"
+          ~source:
+            (Temporary
+               { location = System_tmp
+               ; cleanup = On_session_stop
+               ; managed_root = Some managed_root
+               })
+          ~access:Exclusive
+          ~conflict_domain:None
+          ~prompt_limits:[]
+        |> store_ok
+      in
+      let leases = Agent_session.Workspace_lease.create () in
+      let held = ref None in
+      let release_count = ref 0 in
+      let fail_cleanup = ref false in
+      let cleanup_polls = ref 0 in
+      let exception Interrupted in
+      let owned =
+        Agent_session.Workspace_resolver.resolve_owned
+          ~cleanup_limits:
+            (Agent_session.Workspace_cleanup.Limits.create
+               ~max_entries:64
+               ~max_bytes:4096
+               ~max_work_steps:256
+             |> Or_error.ok_exn)
+          ~cleanup_checkpoint:(fun () ->
+            if !fail_cleanup
+            then (
+              Int.incr cleanup_polls;
+              if !cleanup_polls = 3 then raise Interrupted))
+          ~cleanup_has_active_lease:(fun ~conflict_domain ->
+            match !held with
+            | None -> Agent_session.Workspace_lease.active leases ~conflict_domain > 0
+            | Some lease ->
+              Agent_session.Workspace_lease.active_other_than
+                leases
+                lease
+                ~conflict_domain)
+          ~cleanup_on_complete:(fun () ->
+            Int.incr release_count;
+            Option.iter !held ~f:(Agent_session.Workspace_lease.release leases);
+            held := None)
+          ~sw
+          ~env
+          ~physical_roots:[]
+          ~instance_id
+          ~session_directory
+          definition
+        |> store_ok
+      in
+      let instance = Agent_session.Workspace_resolver.Owned.instance owned in
+      let owner =
+        match
+          Agent_protocol.Execution_owner.developer
+            ~host_id:(Agent_protocol.Id.Server.create ())
+            ~run_id:(Agent_protocol.Id.Developer_run.create ())
+            ~epoch:0
+            ~principal_id:(Agent_protocol.Id.Principal.create ())
+          |> protocol_ok
+        with
+        | Developer owner -> owner
+        | Conversation _ -> failwith "unexpected conversation owner"
+      in
+      let lease =
+        Agent_session.Workspace_lease.acquire_developer
+          leases
+          ~conflict_domain:instance.conflict_domain
+          ~owner
+          ~mode:Exclusive
+        |> protocol_ok
+      in
+      held := Some lease;
+      let inside = Filename.concat instance.canonical_root.native_path "outside-link" in
+      Core_unix.symlink ~target:outside ~link_name:inside;
+      fail_cleanup := true;
+      (match Agent_session.Workspace_resolver.Owned.close owned with
+       | exception Interrupted -> ()
+       | Ok () | Error _ -> failwith "owned cleanup did not reach interruption");
+      assert (Agent_session.Workspace_lease.is_active leases lease);
+      assert (Int.equal !release_count 0);
+      assert (
+        Result.is_error
+          (Agent_session.Workspace_lease.acquire
+             leases
+             ~conflict_domain:instance.conflict_domain
+             ~session_id
+             ~mode:Exclusive));
+      fail_cleanup := false;
+      Agent_session.Workspace_resolver.Owned.close owned |> store_ok;
+      assert (
+        not
+          (Eio.Path.is_directory
+             Eio.Path.(Eio.Stdenv.fs env / instance.canonical_root.native_path)));
+      assert (String.equal (Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / outside)) "keep");
+      assert (not (Agent_session.Workspace_lease.is_active leases lease));
+      Agent_session.Workspace_resolver.Owned.close owned |> store_ok;
+      assert (Int.equal !release_count 1)))
+;;
+
 let%expect_test "quota acquisition enforces limits and releases construction separately" =
   Eio_main.run (fun _env ->
     let workspace_leases = Agent_session.Workspace_lease.create () in

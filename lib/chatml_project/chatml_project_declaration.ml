@@ -285,6 +285,88 @@ type t =
   }
 
 let source t = t.source
+
+module Environment_names = struct
+  module Error = struct
+    type t =
+      | Invalid_limit
+      | Too_many
+    [@@deriving equal, sexp_of]
+  end
+
+  let list t ~max_names ~checkpoint =
+    checkpoint ();
+    if max_names <= 0
+    then Error Error.Invalid_limit
+    else if Map.length t.environments > max_names
+    then Error Error.Too_many
+    else
+      Ok
+        (Map.fold t.environments ~init:[] ~f:(fun ~key:name ~data:_ names ->
+           checkpoint ();
+           name :: names)
+         |> List.rev)
+  ;;
+end
+
+module Declared_paths = struct
+  type role =
+    | Source_directory
+    | Module_implementation
+    | Module_interface
+    | Entry_source
+    | Local_dependency_project
+  [@@deriving equal, sexp_of]
+
+  module Error = struct
+    type t =
+      | Invalid_limit
+      | Too_many
+    [@@deriving equal, sexp_of]
+  end
+
+  exception Limit_exceeded
+
+  let contains t ~role ~member ~max_entries ~checkpoint =
+    if max_entries <= 0
+    then Error Error.Invalid_limit
+    else (
+      let visited = ref 0 in
+      let found = ref false in
+      let visit actual_role path =
+        if !visited >= max_entries then raise Limit_exceeded;
+        checkpoint ();
+        Int.incr visited;
+        if equal_role role actual_role && Source.Portable_path.equal path member
+        then found := true
+      in
+      try
+        List.iter t.source_dirs ~f:(fun source_dir ->
+          match Source_dir.directory source_dir with
+          | Root ->
+            if !visited >= max_entries then raise Limit_exceeded;
+            checkpoint ();
+            Int.incr visited
+          | Relative path -> visit Source_directory path);
+        List.iter t.module_overrides ~f:(fun override ->
+          visit Module_implementation (Module_override.implementation override);
+          match Module_override.interface_selection override with
+          | Companion -> ()
+          | Explicit path -> visit Module_interface path);
+        Map.iter t.entries ~f:(fun (entry, _) -> visit Entry_source (Entry.source entry));
+        List.iter t.dependencies ~f:(fun dependency ->
+          match Dependency.source dependency with
+          | Local _ -> visit Local_dependency_project (Dependency.project dependency)
+          | Git _ ->
+            if !visited >= max_entries then raise Limit_exceeded;
+            checkpoint ();
+            Int.incr visited);
+        Ok !found
+      with
+      | Limit_exceeded -> Error Error.Too_many)
+  ;;
+end
+
 let declared_at t = t.declared_at
 let namespace t = t.namespace
 let source_dirs t = t.source_dirs

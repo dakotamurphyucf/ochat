@@ -275,6 +275,7 @@ let prepare t ~sources ~sw ~env ~mode ~created_at ~checkpoint definitions =
         in
         let%map prepared =
           Capture.capture
+            ~tool_contract:(Owner.Capture.tool_contract captured)
             t.policy.source_preparation
             ~mode
             ~snapshot
@@ -548,6 +549,7 @@ let prepare_child_programs
       t
       ~sources
       ~startup
+      ~tool_contract
       ~invocation
       ~scope
       ~capture
@@ -568,6 +570,7 @@ let prepare_child_programs
        in
        let%map prepared =
          Capture.capture_child
+           ~tool_contract
            t.policy.source_preparation
            ~startup
            ~mode:Capture.Mode.Build

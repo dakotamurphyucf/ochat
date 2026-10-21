@@ -135,6 +135,355 @@ let%test_unit "callback origin, closed context and caller cancellation are prese
       assert (phys_equal actual identity))
 ;;
 
+let%test_unit "Model requests retain parent accounting and independent source ceilings" =
+  Eio_main.run (fun env ->
+    let first = Fixture.graph "let value = \"first\"" in
+    let changed = Fixture.graph "let value = \"other\"" in
+    let bytes graph = P.Accounting.input_bytes (P.accounting graph) in
+    List.iter
+      [ (fun request -> Budget.admit_text request "e")
+      ; (fun request -> Budget.admit_prepared request changed)
+      ]
+      ~f:(fun exhaust ->
+        context
+          ~max_distinct_text_bytes:4
+          ~max_distinct_graph_input_bytes:(bytes first)
+          env
+          ~checkpoint:ignore
+          (fun owner ->
+             let ledger = Budget.ledger owner |> ok in
+             let request f =
+               Budget.with_invocation
+                 ledger
+                 ~limits
+                 ~checkpoint:ignore
+                 ~map_error:Fn.id
+                 ~f
+             in
+             request (fun request ->
+               Budget.admit_text request "ab" |> ok;
+               Budget.admit_prepared request first |> ok;
+               Budget.with_source_accounting
+                 request
+                 ~max_distinct_text_bytes:6
+                 ~max_distinct_graph_input_bytes:(bytes changed)
+                 ~checkpoint:ignore
+                 ~map_error:Fn.id
+                 ~f:(fun source ->
+                   Budget.admit_text source "source" |> ok;
+                   Budget.admit_prepared source changed |> ok;
+                   Budget.admit_text source "!")
+                 ()
+               |> error_code "chatml.definition_limit";
+               (* Source exhaustion neither debits nor poisons the parent ledger. *)
+               Budget.admit_text request "cd")
+             |> ok;
+             request (fun request ->
+               Budget.admit_text request (String.concat [ "a"; "b" ]) |> ok;
+               Budget.admit_prepared request first |> ok;
+               exhaust request)
+             |> error_code "chatml.definition_limit";
+             request (fun request -> Budget.admit_text request "ab")
+             |> error_code "chatml.definition_limit";
+             Ok ())
+        |> ok))
+;;
+
+let%test_unit "Model source and restoration share one fresh invocation deadline" =
+  Eio_main.run (fun env ->
+    let clock = Clock.create () in
+    let env =
+      Startup_budget_support.environment
+        clock
+        env
+        ~on_domain_start:ignore
+        ~completed:(Atomic.make 0)
+    in
+    context env ~checkpoint:ignore (fun owner ->
+      let ledger = Budget.ledger owner |> ok in
+      Clock.advance clock ~seconds:3.;
+      let request f =
+        Budget.with_invocation ledger ~limits ~checkpoint:ignore ~map_error:Fn.id ~f
+      in
+      let phase request seconds =
+        Budget.within request ~map_error:Fn.id ~f:(fun () ->
+          Clock.advance clock ~seconds;
+          Ok ())
+      in
+      request (fun request ->
+        [%test_eq: float] (Budget.remaining_limits request |> ok).wall_seconds 2.5;
+        Budget.with_source_accounting
+          request
+          ~checkpoint:ignore
+          ~map_error:Fn.id
+          ~f:(fun source -> phase source 1.)
+          ()
+        |> ok;
+        [%test_eq: float] (Budget.remaining_limits request |> ok).wall_seconds 1.5;
+        phase request 1. |> ok;
+        phase request 1.)
+      |> error_code "chatml.compile_timeout";
+      List.iter [ 1.; 120. ] ~f:(fun source_seconds ->
+        let source_limits =
+          Compiler.{ wall_seconds = source_seconds; max_source_bytes = 64 }
+        in
+        request (fun request ->
+          let source_result =
+            Budget.with_source_accounting
+              request
+              ~limits:source_limits
+              ~checkpoint:ignore
+              ~map_error:Fn.id
+              ~f:(fun source ->
+                (* Borrow the actual source policy, which need not equal the request's. *)
+                Budget.with_context
+                  ~startup:source
+                  ~limits:source_limits
+                  ~env
+                  ~checkpoint:ignore
+                  ~map_error:Fn.id
+                  ~f:(fun source ->
+                    let remaining = Budget.remaining_limits source |> ok in
+                    [%test_eq: int] remaining.max_source_bytes 64;
+                    [%test_eq: float]
+                      remaining.wall_seconds
+                      (Float.min source_seconds limits.wall_seconds);
+                    phase source 0.5 |> ok;
+                    (* One source cap spans both phases; it is never refreshed. *)
+                    phase source 0.75)
+                  ())
+              ()
+          in
+          if Float.(source_seconds < limits.wall_seconds)
+          then (
+            source_result |> error_code "chatml.compile_timeout";
+            (* Source timeout poisons this request, not the next decoded request. *)
+            Budget.remaining_limits request |> error_code "chatml.compile_timeout";
+            Ok ())
+          else (
+            source_result |> ok;
+            [%test_eq: float] (Budget.remaining_limits request |> ok).wall_seconds 1.25;
+            Ok ()))
+        |> ok);
+      request (fun request ->
+        Budget.admit_text request "prepared" |> ok;
+        (* Activation is outside preparation; returning does not repoll its clock. *)
+        Clock.advance clock ~seconds:3.;
+        Ok ())
+      |> ok;
+      Ok ())
+    |> ok)
+;;
+
+let%test_unit "Model source callbacks compose lexically and preserve exception identity" =
+  Eio_main.run (fun env ->
+    let parent_polls = ref 0 in
+    let source_polls = ref 0 in
+    let escaped = ref None in
+    let identity = ref 459 in
+    context env ~checkpoint:ignore (fun owner ->
+      let ledger = Budget.ledger owner |> ok in
+      Budget.with_invocation
+        ledger
+        ~limits
+        ~checkpoint:(fun () -> Int.incr parent_polls)
+        ~map_error:Fn.id
+        ~f:(fun request ->
+          let source checkpoint f =
+            Budget.with_source_accounting request ~checkpoint ~map_error:Fn.id ~f ()
+          in
+          source
+            (fun () -> Int.incr source_polls)
+            (fun view ->
+               let parent_before = !parent_polls in
+               let source_before = !source_polls in
+               Budget.checkpoint view;
+               [%test_eq: int] !parent_polls (parent_before + 1);
+               [%test_eq: int] !source_polls (source_before + 1);
+               escaped := Some view;
+               Budget.within view ~map_error:Fn.id ~f:(fun () ->
+                 Budget.admit_text view (String.make 8193 'x')))
+          |> ok;
+          assert (!parent_polls > 0 && !source_polls > 0);
+          let before = !source_polls in
+          Budget.admit_text (Option.value_exn !escaped) "closed"
+          |> error_code "chatml.invalid_context";
+          Budget.admit_text request "outer" |> ok;
+          [%test_eq: int] !source_polls before;
+          (match
+             source
+               (fun () -> raise (Callback_failed identity))
+               (fun view -> Budget.admit_text view "exception")
+           with
+           | _ -> failwith "source callback exception swallowed"
+           | exception Callback_failed actual -> assert (phys_equal actual identity));
+          (match
+             source
+               (fun () -> raise Eio.Time.Timeout)
+               (fun view -> Budget.admit_text view "timeout")
+           with
+           | _ -> failwith "source callback Timeout became compiler policy error"
+           | exception Eio.Time.Timeout -> ());
+          (match
+             Eio.Cancel.sub (fun cancel ->
+               Eio.Cancel.cancel cancel (Callback_failed identity);
+               source ignore (fun view -> Budget.admit_text view "cancelled"))
+           with
+           | _ -> failwith "source view swallowed caller cancellation"
+           | exception Eio.Cancel.Cancelled (Callback_failed actual) ->
+             assert (phys_equal actual identity));
+          Ok ()))
+    |> ok)
+;;
+
+let%test_unit "Model ledger loans reject closed ancestors and foreign domains" =
+  Eio_main.run (fun env ->
+    let escaped = ref None in
+    context env ~checkpoint:ignore (fun owner ->
+      let ledger = Budget.ledger owner |> ok in
+      escaped := Some ledger;
+      Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () ->
+        Budget.with_invocation
+          ledger
+          ~limits
+          ~checkpoint:(fun () -> failwith "foreign ledger polled")
+          ~map_error:Fn.id
+          ~f:(fun _ -> failwith "foreign ledger entered"))
+      |> error_code "chatml.invalid_context";
+      let module Closure_timing = struct
+        type t =
+          | Loan_escape
+          | Ancestor_callback
+          | Source_callback
+      end
+      in
+      List.iter
+        Closure_timing.[ Loan_escape; Ancestor_callback; Source_callback ]
+        ~f:(fun timing ->
+          Eio.Switch.run (fun sw ->
+            let entered, entered_u = Eio.Promise.create () in
+            let release, release_u = Eio.Promise.create () in
+            let released = ref false in
+            let child = ref None in
+            let child_entered = ref false in
+            let polls = ref 0 in
+            let source_polls = ref 0 in
+            let armed = ref false in
+            let enter () =
+              child_entered := true;
+              Eio.Promise.resolve entered_u ()
+            in
+            let release_child () =
+              if not !released
+              then (
+                released := true;
+                Eio.Promise.resolve release_u ())
+            in
+            let checkpoint () =
+              Int.incr polls;
+              if !armed
+              then (
+                armed := false;
+                enter ();
+                Eio.Promise.await release)
+            in
+            let fork f =
+              child
+              := Some
+                   (Eio.Fiber.fork_promise ~sw (fun () ->
+                      Exn.protect
+                        ~finally:(fun () ->
+                          if not !child_entered then Eio.Promise.resolve entered_u ())
+                        ~f))
+            in
+            let await_entered () =
+              Eio.Promise.await entered;
+              assert !child_entered
+            in
+            let finish_child () =
+              let before = !polls in
+              let source_before = !source_polls in
+              release_child ();
+              Eio.Promise.await_exn (Option.value_exn !child)
+              |> error_code "chatml.invalid_context";
+              [%test_eq: int] !polls before;
+              [%test_eq: int] !source_polls source_before
+            in
+            Exn.protect ~finally:release_child ~f:(fun () ->
+              Budget.with_invocation
+                ledger
+                ~limits
+                ~checkpoint:
+                  (match timing with
+                   | Source_callback -> checkpoint
+                   | Loan_escape | Ancestor_callback -> ignore)
+                ~map_error:Fn.id
+                ~f:(fun parent ->
+                  match timing with
+                  | Source_callback ->
+                    Budget.with_source_accounting
+                      parent
+                      ~checkpoint:(fun () -> Int.incr source_polls)
+                      ~map_error:Fn.id
+                      ~f:(fun source ->
+                        (* Close this source view while its still-live parent's
+                           checkpoint is suspended, then resume the same view. *)
+                        armed := true;
+                        fork (fun () -> Budget.admit_text source "closing source");
+                        await_entered ();
+                        Ok ())
+                      ()
+                    |> ok;
+                    finish_child ();
+                    Budget.admit_text parent "parent still live"
+                  | Loan_escape | Ancestor_callback ->
+                    let loan = Budget.ledger parent |> ok in
+                    fork (fun () ->
+                      Budget.with_invocation
+                        loan
+                        ~limits
+                        ~checkpoint
+                        ~map_error:Fn.id
+                        ~f:(fun descendant ->
+                          match timing with
+                          | Ancestor_callback ->
+                            Budget.with_source_accounting
+                              descendant
+                              ~checkpoint:(fun () -> Int.incr source_polls)
+                              ~map_error:Fn.id
+                              ~f:(fun source ->
+                                (* Close the ancestor while a real source
+                                   checkpoint is inside its parent callback. *)
+                                armed := true;
+                                Budget.admit_text source "yielding parent")
+                              ()
+                          | Loan_escape ->
+                            enter ();
+                            Eio.Promise.await release;
+                            Budget.admit_text descendant "closed ancestor"
+                          | Source_callback -> assert false));
+                    await_entered ();
+                    Ok ())
+              |> ok;
+              match timing with
+              | Source_callback -> ()
+              | Loan_escape | Ancestor_callback -> finish_child ())));
+      Budget.with_invocation
+        ledger
+        ~limits
+        ~checkpoint:ignore
+        ~map_error:Fn.id
+        ~f:(fun request -> Budget.admit_text request "owner still live"))
+    |> ok;
+    Budget.with_invocation
+      (Option.value_exn !escaped)
+      ~limits
+      ~checkpoint:(fun () -> failwith "closed owner polled")
+      ~map_error:Fn.id
+      ~f:(fun _ -> failwith "closed owner entered")
+    |> error_code "chatml.invalid_context")
+;;
+
 let%test_unit "three real startup compilers share one deadline before activation" =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();

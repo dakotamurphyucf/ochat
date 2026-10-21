@@ -67,7 +67,13 @@ let map_diagnostics result ~to_string =
     List.map diagnostics ~f:to_string |> String.concat ~sep:"\n" |> failure)
 ;;
 
-let plan t ~startup ~parsed ~invocation =
+let plan
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
+      t
+      ~startup
+      ~parsed
+      ~invocation
+  =
   Startup.within startup ~map_error:compilation_error ~f:(fun () ->
     let open Result.Let_syntax in
     let%bind shell =
@@ -84,6 +90,7 @@ let plan t ~startup ~parsed ~invocation =
     in
     let moderator_surface = Invocation.moderator_surface invocation in
     Plan.create
+      ~tool_contract
       parsed
       ~moderator_invocation
       ~moderator_surface
@@ -117,7 +124,52 @@ let restore_programs t ~startup ~plan ~custody =
     Error (failure "script custody restoration exceeds host work allowance")
 ;;
 
-let restore_with_plan policy ~startup ~revision ~invocation =
+let authored_of_revision ~startup revision =
+  let artifact = Prompt_revision.artifact revision in
+  Startup.checkpoint startup;
+  Prompt_program_custody.authored
+    ~root_file:artifact.root_relative_path
+    ~sources:
+      ((artifact.root_relative_path, artifact.root_chatmd)
+       :: List.map artifact.sources ~f:(fun source ->
+         Startup.checkpoint startup;
+         source.relative_path, source.contents))
+  |> Result.map_error ~f:(fun _ ->
+    failure "retained script selection lacks its verified authored inventory")
+;;
+
+let select_contract policy ~startup ~revision ~plan ~custody =
+  let open Result.Let_syntax in
+  let%bind authored = authored_of_revision ~startup revision in
+  Chat_response.Retained_selection.select
+    plan
+    ~custody
+    ~authored
+    ~limits:policy.restoration
+    ~max_work_steps:policy.max_custody_work_steps
+    ~checkpoint:(fun () -> Startup.checkpoint startup)
+  |> map_diagnostics ~to_string:Chatmd_shell_spec.Diagnostic.to_string
+;;
+
+let selected_custody = function
+  | Chat_response.Retained_selection.Legacy custody | Selected custody -> custody
+;;
+
+let restored_selection_matches selected programs =
+  match selected, programs with
+  | Chat_response.Retained_selection.Legacy _, None
+  | Chat_response.Retained_selection.Selected _, Some _ -> true
+  | Chat_response.Retained_selection.Legacy _, Some _
+  | Chat_response.Retained_selection.Selected _, None -> false
+;;
+
+let restore_with_plan
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
+      policy
+      ~startup
+      ~revision
+      ~invocation
+  =
   let artifact = Prompt_revision.artifact revision in
   if
     Option.is_some artifact.content_bundle
@@ -138,10 +190,25 @@ let restore_with_plan policy ~startup ~revision ~invocation =
          Error (failure "owned script custody requires explicit host preparation policy")
        | Some policy ->
          let open Result.Let_syntax in
-         let%bind plan = plan policy ~startup ~parsed ~invocation in
-         let%map programs =
+         let%bind plan = plan ~tool_contract policy ~startup ~parsed ~invocation in
+         let%bind selected =
+           match tool_contract with
+           | Chatml_compilation.Tool_contract.Standard -> Ok None
+           | Chatml_compilation.Tool_contract.Developer_model_spawn ->
+             select_contract policy ~startup ~revision ~plan ~custody
+             |> Result.map ~f:Option.some
+         in
+         let custody = Option.value_map selected ~default:custody ~f:selected_custody in
+         let%bind programs =
            Startup.within startup ~map_error:compilation_error ~f:(fun () ->
              restore_programs policy ~startup ~plan ~custody)
+         in
+         let%map () =
+           match selected with
+           | None -> Ok ()
+           | Some selected when restored_selection_matches selected programs -> Ok ()
+           | Some _ ->
+             Error (failure "selected script custody does not match restored programs")
          in
          Some plan, programs)
     | None, Some _ | Some _, None ->
@@ -149,11 +216,21 @@ let restore_with_plan policy ~startup ~revision ~invocation =
         (failure "script custody is missing its matching original parser or inventory"))
 ;;
 
-let restore policy ~startup ~revision ~invocation =
-  restore_with_plan policy ~startup ~revision ~invocation |> Result.map ~f:snd
+let restore ?tool_contract policy ~startup ~revision ~invocation =
+  restore_with_plan ?tool_contract policy ~startup ~revision ~invocation
+  |> Result.map ~f:snd
 ;;
 
-let with_revision_plan policy ?startup revision ~env ~invocation ~checkpoint ~f =
+let with_revision_plan
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
+      policy
+      ?startup
+      revision
+      ~env
+      ~invocation
+      ~checkpoint
+      ~f
+  =
   let compilation_limits =
     Option.value_map policy ~default:Compiler.default_limits ~f:compilation
   in
@@ -165,15 +242,18 @@ let with_revision_plan policy ?startup revision ~env ~invocation ~checkpoint ~f 
     ~map_error:compilation_error
     ~f:(fun startup ->
       let open Result.Let_syntax in
-      let%bind plan, programs = restore_with_plan policy ~startup ~revision ~invocation in
+      let%bind plan, programs =
+        restore_with_plan ~tool_contract policy ~startup ~revision ~invocation
+      in
       f startup ~compilation_limits ~plan ~programs)
     ()
 ;;
 
-let with_revision policy ?startup revision ~env ~invocation ~checkpoint ~f =
+let with_revision policy ?startup ?tool_contract revision ~env ~invocation ~checkpoint ~f =
   with_revision_plan
     policy
     ?startup
+    ?tool_contract
     revision
     ~env
     ~invocation
@@ -182,12 +262,12 @@ let with_revision policy ?startup revision ~env ~invocation ~checkpoint ~f =
       f startup ~compilation_limits ~programs)
 ;;
 
-let select_child_role policy ~startup ~invocation ~revision ~authored =
+let select_child_role ?tool_contract policy ~startup ~invocation ~revision ~authored =
   let open Result.Let_syntax in
   match Prompt_revision.parser_context revision, Prompt_revision.programs revision with
   | None, None ->
     let%map (_ : Chatml_prompt_programs.Restored.t option) =
-      restore policy ~startup ~revision ~invocation
+      restore ?tool_contract policy ~startup ~revision ~invocation
     in
     None
   | Some parsed, Some custody ->
@@ -195,7 +275,7 @@ let select_child_role policy ~startup ~invocation ~revision ~authored =
      | None ->
        Error (failure "owned child custody requires explicit host preparation policy")
      | Some policy ->
-       let%bind plan = plan policy ~startup ~parsed ~invocation in
+       let%bind plan = plan ?tool_contract policy ~startup ~parsed ~invocation in
        let%map selected =
          Chat_response.Retained_selection.select
            plan
@@ -211,11 +291,7 @@ let select_child_role policy ~startup ~invocation ~revision ~authored =
     Error (failure "child custody is missing its matching original parser or inventory")
 ;;
 
-let selected_custody = function
-  | Chat_response.Retained_selection.Legacy custody | Selected custody -> custody
-;;
-
-let select_child policy ~startup ~parent source =
+let select_child ?tool_contract policy ~startup ~parent source =
   let open Result.Let_syntax in
   let checkpoint () = Startup.checkpoint startup in
   let%bind revision =
@@ -223,6 +299,7 @@ let select_child policy ~startup ~parent source =
   in
   let%bind selected =
     select_child_role
+      ?tool_contract
       policy
       ~startup
       ~invocation:Delegated_ui
@@ -243,6 +320,7 @@ let select_child policy ~startup ~parent source =
 
 let with_authored_child
       ?startup
+      ?tool_contract
       policy
       ~parent
       ~tool_name
@@ -272,7 +350,7 @@ let with_authored_child
               ~tool_name
               ()
           in
-          select_child policy ~startup ~parent source)
+          select_child ?tool_contract policy ~startup ~parent source)
       in
       f startup ~source ~revision)
     ()
@@ -296,15 +374,15 @@ let child_preparation_id parent source =
   Agent_protocol.Id.Prompt_revision.of_string ("prv_captured_" ^ digest)
 ;;
 
-let with_captured_child
+let with_captured_source
       policy
       ?startup
+      ?tool_contract
       parent
-      ~reference
       ~invocation
-      ~content_limits
       ~env
       ~checkpoint
+      ~capture
       ~f
   =
   let compilation_limits = compilation policy in
@@ -317,11 +395,10 @@ let with_captured_child
     ~f:(fun startup ->
       let checkpoint () = Startup.checkpoint startup in
       let open Result.Let_syntax in
-      let%bind revision, programs =
+      let%bind revision, programs, input_bytes =
         Startup.within startup ~map_error:compilation_error ~f:(fun () ->
-          let%bind source =
-            Captured_child_source.capture ~parent ~reference ~content_limits ~checkpoint
-          in
+          let%bind source = capture ~checkpoint in
+          let input_bytes = Captured_child_source.selected_source_bytes source in
           let%bind revision_id = child_preparation_id parent source in
           let%bind revision =
             Captured_child_source.resource_revision
@@ -332,6 +409,7 @@ let with_captured_child
           in
           let%bind selected =
             select_child_role
+              ?tool_contract
               (Some policy)
               ~startup
               ~invocation
@@ -361,14 +439,75 @@ let with_captured_child
             in
             (match selected, programs with
              | Chat_response.Retained_selection.Legacy _, None | Selected _, Some _ ->
-               Ok (revision, programs)
+               Ok (revision, programs, input_bytes)
              | Legacy _, Some _ | Selected _, None ->
                Error
                  (failure
                     "captured child role restoration changed its admitted selection")))
       in
-      f startup ~revision ~compilation_limits ~programs)
+      f startup ~revision ~compilation_limits ~programs ~input_bytes)
     ()
+;;
+
+let with_captured_child
+      policy
+      ?startup
+      ?tool_contract
+      parent
+      ~reference
+      ~invocation
+      ~content_limits
+      ~env
+      ~checkpoint
+      ~f
+  =
+  with_captured_source
+    policy
+    ?startup
+    ?tool_contract
+    parent
+    ~invocation
+    ~env
+    ~checkpoint
+    ~capture:(fun ~checkpoint ->
+      Captured_child_source.capture ~parent ~reference ~content_limits ~checkpoint)
+    ~f:(fun startup ~revision ~compilation_limits ~programs ~input_bytes:_ ->
+      f startup ~revision ~compilation_limits ~programs)
+;;
+
+let with_captured_selected_member
+      policy
+      ?startup
+      ?tool_contract
+      parent
+      ~member
+      ~invocation
+      ~content_limits
+      ~max_input_bytes
+      ~max_work_steps
+      ~env
+      ~checkpoint
+      ~on_acquire
+      ~f
+  =
+  with_captured_source
+    policy
+    ?startup
+    ?tool_contract
+    parent
+    ~invocation
+    ~env
+    ~checkpoint
+    ~capture:(fun ~checkpoint ->
+      Captured_child_source.capture_selected_member
+        ~parent
+        ~member
+        ~content_limits
+        ~max_input_bytes
+        ~max_work_steps
+        ~checkpoint
+        ~on_acquire)
+    ~f
 ;;
 
 let inspect_shell t ?startup revision ~env ~invocation ~checkpoint =

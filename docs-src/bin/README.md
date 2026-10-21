@@ -8,6 +8,7 @@ targets described in each reference.
 | Command | Purpose | Reference |
 |---|---|---|
 | `chat-tui` | Native local, daemon-connected, or legacy file-backed terminal UI | [CLI](chat_tui.doc.md), [controls](../guide/chat_tui.md) |
+| `chatml-repl` | Separate Eio/Notty Developer REPL over an explicitly selected capture and local stdio or authenticated remote host | [Captured workflow](../guide/chatml-development-workflow.md), [policy and flags](../design/chatml-developer-runtime.md#chatml-developer-runtest-and-repl-design) |
 | `ochat` | Provider administration, managed headless completion, shell management and indexing | [Command overview](main.doc.md), [providers](../lib/provider_operator.doc.md), [completion](../cli/chat-completion.md), [shell management](../cli/shell-runtime-management.md) |
 | `ochat-agent-server` | Durable daemon over private Unix sockets and optional HTTP | [Server CLI](ochat_agent_server.doc.md) |
 | `ochat-agent-stdio` | Local subprocess agent host or daemon gateway | [Stdio CLI](ochat_agent_stdio.doc.md) |

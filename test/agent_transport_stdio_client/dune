@@ -1,0 +1,14 @@
+(library
+ (name agent_transport_stdio_client_tests)
+ (modules client_tests)
+ (libraries
+  core
+  eio
+  eio_main
+  ochat.agent_protocol
+  ochat.agent_client
+  ochat.agent_transport_ndjson
+  ochat.agent_transport_stdio)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

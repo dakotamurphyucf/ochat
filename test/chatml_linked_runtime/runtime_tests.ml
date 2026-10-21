@@ -264,7 +264,12 @@ let%test_unit "installer metadata and unselected names reject before initializer
   reject { surface with modules } [ "main" ];
   reject { surface with type_aliases = [] } [ "main" ];
   List.iter
-    [ C.Target.One_off_v1; Tool_v1; Moderator_v1; Delegated_moderator_v1 ]
+    [ C.Target.One_off_v1
+    ; Tool_v1
+    ; Developer_tool_v1
+    ; Moderator_v1
+    ; Delegated_moderator_v1
+    ]
     ~f:(fun target ->
       let contract = C.for_target target ~checkpoint:(fun () -> ()) in
       let module X = Chatml.Chatml_extension_surface in
@@ -272,6 +277,7 @@ let%test_unit "installer metadata and unselected names reject before initializer
         match target with
         | One_off_v1 -> X.one_off_v1
         | Tool_v1 -> X.tool_v1
+        | Developer_tool_v1 -> X.developer_tool_v1
         | Moderator_v1 -> X.moderator_v1
         | Delegated_moderator_v1 -> X.delegated_moderator_v1
       in

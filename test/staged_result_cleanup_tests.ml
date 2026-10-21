@@ -10,23 +10,40 @@ let reader env session ?(max_entries = 1024) ?(max_bytes = 262144) () =
 (* This fixture owns all roots and has no executing worker. Production integration
    must also supply actor/history/cache/replay roots and exclude active owners. *)
 let collect env blobs session ~roots =
-  Blob.with_retention blobs ~f:(fun scope ->
+  Blob.with_collection_proof blobs ~f:(fun scope ->
     let open Result.Let_syntax in
     let reader = reader env session () in
     let%bind intents = Intent.list_with_reader ~reader ~session ~max_count:16 in
-    let%bind graph =
-      Retention.scan ~scope ~session ~reader ~intents ~max_file_bytes:16384
-    in
-    let%bind retained = Retention.references graph ~roots in
-    List.fold_result intents ~init:0 ~f:(fun count intent ->
-      match
-        List.mem retained (Intent.reference intent).blob.id ~equal:P.Id.Blob.equal
-      with
-      | true -> Ok count
-      | false ->
-        let%map () = Intent.discard_unreferenced ~env ~scope ~reader ~session intent in
-        count + 1))
-  |> Result.map ~f:(fun value -> Option.value_exn value)
+    Blob.with_developer_retention
+      scope
+      ~session
+      ~reader
+      ~checkpoint:(fun () -> ())
+      ~f:(fun developer ->
+        let%bind graph =
+          Retention.scan
+            ~scope
+            ~developer
+            ~session
+            ~reader
+            ~checkpoint:(fun () -> ())
+            ~intents
+            ~max_file_bytes:16384
+        in
+        let%bind retained =
+          Retention.references graph ~checkpoint:(fun () -> ()) ~roots
+        in
+        List.fold_result intents ~init:0 ~f:(fun count intent ->
+          match
+            List.mem retained (Intent.reference intent).blob.id ~equal:P.Id.Blob.equal
+          with
+          | true -> Ok count
+          | false ->
+            let%map () =
+              Intent.discard_unreferenced ~env ~scope ~reader ~session intent
+            in
+            count + 1)))
+  |> Result.map ~f:(fun value -> Option.value_exn (Option.join value))
 ;;
 
 let stage_path env session id suffix =

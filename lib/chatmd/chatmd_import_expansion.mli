@@ -7,6 +7,8 @@ type sourced_node =
   ; source : Chatmd_shell_spec.Source_ref.t
   ; source_node : Source_loader.source
   ; range : Chatmd_parser_input.Range.t option
+  ; text_fragments : Chatmd_parser_builder.Text_fragment.t list
+  ; input : Chatmd_parser_input.t option
   ; children : sourced_node list option
   }
 

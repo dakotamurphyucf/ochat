@@ -1,0 +1,35 @@
+{
+  "name": "ChatML",
+  "scopeName": "source.chatml",
+  "fileTypes": ["chatml", "chatmli"],
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#string" },
+    { "match": "`[A-Za-z0-9_]+", "name": "constant.other.variant.chatml" },
+    { "match": "'[a-z_][A-Za-z0-9_]*", "name": "variable.other.type.chatml" },
+    { "match": "\\b(?:true|false)\\b", "name": "constant.language.boolean.chatml" },
+    { "match": "\\b[0-9]+\\.[0-9]+\\b", "name": "constant.numeric.float.chatml" },
+    { "match": "\\b[0-9]+\\b", "name": "constant.numeric.integer.chatml" },
+    { "match": "\\blet[+*]", "name": "keyword.control.binding.chatml" },
+    { "match": "\\b(?:fun|if|then|else|while|do|done|let|in|match|with|module|struct|end|open|ref|rec|and|type|sig|val|where)\\b", "name": "keyword.control.chatml" },
+    { "match": "(?:<=\\.|>=\\.|->|<-|:=|!=|==|<=|>=|<\\.|>\\.|\\+\\+|\\+\\.|-\\.|\\*\\.|/\\.|;;|\\(\\||\\|\\))", "name": "keyword.operator.chatml" },
+    { "match": "[+*/<>=!:-]", "name": "keyword.operator.chatml" },
+    { "match": "[(){}\\[\\];,.|]", "name": "punctuation.chatml" }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.block.chatml",
+      "begin": "\\(\\*",
+      "end": "\\*\\)",
+      "patterns": [{ "include": "#comment" }]
+    },
+    "string": {
+      "name": "string.quoted.double.chatml",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        { "match": "\\[nt\\\"]", "name": "constant.character.escape.chatml" }
+      ]
+    }
+  }
+}

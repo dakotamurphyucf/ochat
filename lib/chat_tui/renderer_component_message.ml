@@ -305,6 +305,25 @@ module Render_context = struct
   ;;
 end
 
+let portable_source_language (ctx : Render_context.t) lang =
+  let open Highlight_source_code in
+  match Language.of_hint lang, Render_job.Runtime.source_grammar_baseline ctx.runtime with
+  | Some language, Some baseline ->
+    let grammar_language =
+      match language with
+      | Language.Chatml -> `Chatml
+      | Language.Chatmd -> `Chatmd
+    in
+    if
+      Highlight_registry.Baseline.uses_bundled_grammar
+        baseline
+        (Render_job.Runtime.hi_engine ctx.runtime)
+        ~language:grammar_language
+    then Some language
+    else None
+  | None, _ | _, None -> None
+;;
+
 let lang_of_path = Renderer_lang.lang_of_path
 let has_scope_prefix scopes ~prefix = List.exists scopes ~f:(String.is_prefix ~prefix)
 
@@ -724,13 +743,30 @@ module Paint = struct
   and highlight_lines (ctx : t) ~(lang : string option) ~(text : string) =
     let theme_generation = Render_job.Runtime.theme_generation ctx.runtime in
     let grammar_generation = Render_job.Runtime.grammar_generation ctx.runtime in
+    let compute () =
+      match portable_source_language ctx lang with
+      | Some language ->
+        (match
+           Highlight_source_code.highlight
+             language
+             ~text
+             ~theme:(Highlight_tm_engine.theme (Render_job.Runtime.hi_engine ctx.runtime))
+             ~is_cancelled:(Render_job.Runtime.is_cancelled ctx.runtime)
+         with
+         | Ok lines -> lines
+         | Error _ ->
+           Highlight_source_code.plain_preview
+             ~text
+             ~is_cancelled:(Render_job.Runtime.is_cancelled ctx.runtime))
+      | None ->
+        Highlight_tm_engine.highlight_text_interruptible
+          (Render_job.Runtime.hi_engine ctx.runtime)
+          ~is_cancelled:(Render_job.Runtime.is_cancelled ctx.runtime)
+          ~lang
+          ~text
+    in
     match Render_job.Runtime.highlight_cache ctx.runtime with
-    | None ->
-      Highlight_tm_engine.highlight_text_interruptible
-        (Render_job.Runtime.hi_engine ctx.runtime)
-        ~is_cancelled:(Render_job.Runtime.is_cancelled ctx.runtime)
-        ~lang
-        ~text
+    | None -> compute ()
     | Some cache ->
       (match
          Highlight_cache.find_plain
@@ -742,13 +778,7 @@ module Paint = struct
        with
        | Some lines -> lines
        | None ->
-         let lines =
-           Highlight_tm_engine.highlight_text_interruptible
-             (Render_job.Runtime.hi_engine ctx.runtime)
-             ~is_cancelled:(Render_job.Runtime.is_cancelled ctx.runtime)
-             ~lang
-             ~text
-         in
+         let lines = compute () in
          Highlight_cache.set_plain
            cache
            ~theme_generation
@@ -767,11 +797,14 @@ module Paint = struct
   ;;
 
   let code_lines (ctx : t) ~(lang : string option) ~(code : string) =
-    String.split_lines code
-    |> List.map ~f:(fun line ->
-      if String.is_empty line
-      then []
-      else highlight_lines ctx ~lang ~text:line |> List.concat)
+    match portable_source_language ctx lang with
+    | Some _ -> highlight_lines ctx ~lang ~text:code
+    | None ->
+      String.split_lines code
+      |> List.map ~f:(fun line ->
+        if String.is_empty line
+        then []
+        else highlight_lines ctx ~lang ~text:line |> List.concat)
   ;;
 
   let render_paragraph
@@ -1266,6 +1299,7 @@ let render_synchronously ~hi_engine (job : Render_job.t) =
       ~hi_engine
       ~theme_generation:job.Render_job.key.theme_generation
       ~grammar_generation:job.key.grammar_generation
+      ?source_grammar_baseline:(Highlight_registry.current_baseline ())
       ~code_cache:shared_code_cache
       ~highlight_cache:shared_highlight_cache
       ~prepared_cache:shared_prepared_cache

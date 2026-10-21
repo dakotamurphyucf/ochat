@@ -31,6 +31,21 @@ of `--local` and `--connect` is required.
 
 ## Subprocess integration
 
+OCaml embeddings can use `Agent_transport_stdio.Client.with_spawned` to own a
+trusted stdio child and its typed `Agent_client.Connection` in one Eio bracket.
+Configure finite line, notification, stderr-tail and shutdown-grace limits.
+The client keeps stderr out of NDJSON, correlates ordinary, Developer and REPL
+responses through the same bounded engine as the Unix socket client, and
+closes pending requests without replay after EOF or a partial write. The
+borrowed connection is closed when the bracket ends. Normal close gives the
+child one grace after stdin closes, then TERM and KILL with one grace each;
+callback cancellation releases the Eio process switch and joins its exact
+child through the switch's kill-and-reap hook.
+
+This library client does not install a Developer policy or grant permissions.
+The launched server still needs its normal explicit startup configuration and
+the connection must initialize and negotiate the methods it uses.
+
 1. Spawn with separate stdin/stdout/stderr pipes. Do not merge stderr into stdout.
 2. Send and flush one complete NDJSON initialization envelope. Keep stdin open.
 3. Correlate response IDs and verify negotiated version/features/limits.

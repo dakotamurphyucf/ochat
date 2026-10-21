@@ -202,6 +202,89 @@ let%expect_test "manager snapshots, restores, and drains internal events" =
     |}]
 ;;
 
+let%expect_test "bounded entry drain distinguishes exact empty from queued overflow" =
+  let drain manager max_events =
+    ok_or_fail
+      (Manager.drain_internal_events_entries_bounded
+         ~max_events
+         manager
+         ~session_id:"session-1"
+         ~now_ms:2
+         ~history:[]
+         ~available_tools:[]
+         ~session_meta:`Null)
+  in
+  let stop = function
+    | Manager.Bounded_drain.Empty -> "empty"
+    | Manager.Bounded_drain.Halted -> "halted"
+    | Manager.Bounded_drain.Waiting_for_ui _ -> "ui"
+    | Manager.Bounded_drain.Limit_reached -> "limit"
+  in
+  let started () =
+    let _, compiled =
+      Manager.Registry.compile_script Manager.Registry.empty script |> ok_or_fail
+    in
+    let allocator =
+      History_entry.Allocator.create ~namespace:"bounded-drain" ~next_sequence:0
+      |> ok_or_fail
+    in
+    let manager =
+      ok_or_fail (Manager.create_entries ~artifact:compiled ~capabilities ~allocator ())
+    in
+    ignore
+      (ok_or_fail
+         (Manager.handle_event_entries
+            manager
+            ~session_id:"session-1"
+            ~now_ms:1
+            ~history:[]
+            ~available_tools:[]
+            ~session_meta:`Null
+            ~event:Moderation.Event.Session_start)
+       : Moderation.Outcome.t);
+    manager
+  in
+  let exact = started () in
+  let zero = drain exact 0 in
+  let one = drain exact 1 in
+  print_s
+    [%sexp
+      ([ stop zero.stop, List.length zero.outcomes
+       ; stop one.stop, List.length one.outcomes
+       ]
+       : (string * int) list)];
+  let overflow = started () in
+  Manager.enqueue_internal_event
+    overflow
+    (Chatml.Chatml_lang.VVariant ("Internal_done", [ Chatml.Chatml_lang.VString "extra" ]))
+  |> ok_or_fail;
+  let one = drain overflow 1 in
+  print_s [%sexp ((stop one.stop, List.length one.outcomes) : string * int)];
+  print_s
+    [%sexp
+      (Result.is_error
+         (Manager.drain_internal_events_entries_bounded
+            ~max_events:(-1)
+            overflow
+            ~session_id:"session-1"
+            ~now_ms:2
+            ~history:[]
+            ~available_tools:[]
+            ~session_meta:`Null)
+       : bool)];
+  let after_negative = drain overflow 0 in
+  print_s
+    [%sexp
+      ((stop after_negative.stop, List.length after_negative.outcomes) : string * int)];
+  [%expect
+    {|
+    ((limit 0) (empty 1))
+    (limit 1)
+    true
+    (limit 0)
+    |}]
+;;
+
 let%expect_test "manager rejects mismatched persisted script metadata" =
   let artifact =
     ok_or_fail (Manager.Registry.compile_script Manager.Registry.empty script) |> snd

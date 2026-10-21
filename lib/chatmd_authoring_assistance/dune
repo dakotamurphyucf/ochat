@@ -1,0 +1,26 @@
+(library
+ (name chatmd_authoring_assistance)
+ (public_name ochat.chatmd_authoring_assistance)
+ (modules
+  authoring_assistance_work
+  authoring_assistance_input
+  authoring_assistance_candidates
+  chatmd_authoring_assistance)
+ (private_modules
+  authoring_assistance_work
+  authoring_assistance_input
+  authoring_assistance_candidates)
+ (libraries
+  core
+  source
+  ochat.agent_protocol
+  ochat.chatmd
+  ochat.chatmd_source_input
+  ochat.chatmd_shell_spec
+  ochat.language_highlighting
+  ochat.chatml_source
+  chatml_prepared_program
+  chatml_project
+  chatml_project_build
+  builtin_instructions)
+ (preprocess (pps ppx_jane)))

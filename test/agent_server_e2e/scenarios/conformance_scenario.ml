@@ -4258,8 +4258,18 @@ let method_coverage =
   ]
 ;;
 
-let require_complete_method_coverage () =
-  let expected = String.Set.of_list Agent_protocol.Command.supported_methods in
+let require_core_method_coverage () =
+  (* This scenario initializes the core protocol without Authoring features.
+     Opt-in Authoring handlers are qualified separately by the configured
+     installation and authored workflow suites; semantic/source invariants also
+     have direct service tests. This inventory checks core scenario ownership,
+     not every Authoring method on every transport. The independent full method
+     inventory in agent_protocol_test checks codec dispatch completeness. *)
+  let expected =
+    Set.diff
+      (String.Set.of_list Agent_protocol.Command.supported_methods)
+      (String.Set.of_list Agent_protocol.Authoring.Wire.Request.supported_methods)
+  in
   let covered = String.Set.of_list (List.map method_coverage ~f:fst) in
   let missing = Set.diff expected covered |> Set.to_list in
   let unknown = Set.diff covered expected |> Set.to_list in
@@ -4267,7 +4277,7 @@ let require_complete_method_coverage () =
   then
     raise_s
       [%sexp
-        "conformance method coverage differs from the closed protocol"
+        "core conformance method coverage differs from the closed protocol"
       , { missing : string list; unknown : string list }]
 ;;
 
@@ -4281,7 +4291,7 @@ let select case =
 ;;
 
 let run env ~case =
-  require_complete_method_coverage ();
+  require_core_method_coverage ();
   Temporary_environment.with_
     ~scenario:"cross-transport-conformance"
     ~env

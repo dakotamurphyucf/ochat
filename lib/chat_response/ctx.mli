@@ -34,6 +34,10 @@ type 'env t = private
   ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
   ; on_inference_completion : Inference_client.Completion.t -> unit
   ; on_inference_observation : Inference.Observation.t -> unit
+  ; on_admitted_call : In_memory_stream.Admitted_call.t -> unit
+  ; submission_guard : Inference_runtime.Submission_guard.t
+  ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
+  ; agent_prompt_v1_recipe : Moderation.Capabilities.model_recipe option
   ; env : 'env (** Underlying Eio standard environment. *)
   ; dir : Eio.Fs.dir_ty Eio.Path.t
     (** Base directory used when a function needs to access the
@@ -45,7 +49,17 @@ type 'env t = private
   ; cache : Cache.t (** Shared TTL-LRU instance for memoising results. *)
   }
 
-(** [create ~env ~dir ~tool_dir ~cache] creates a fresh context from its
+(** The optional [before_inference_dispatch] is inherited into every actual
+    inference Execution and stream, including nested/Fork and auxiliary
+    requests; its default is a no-op. [agent_prompt_v1_recipe] is an immutable
+    carrier for that one canonical recipe; when absent, Driver retains its
+    existing local Model_executor lifecycle. A supplied recipe is not a grant
+    of actor, provider, Claim or effect authority: a developer host must issue
+    closures bound to its exact physical scope and recheck them at use.
+    Context derivation/copies preserve both fields, and no setter can replace
+    an inherited dispatch guard.
+
+    [create ~env ~dir ~tool_dir ~cache] creates a fresh context from its
     constituents.  No validation is performed beyond structural typing
     of [env]; the caller is responsible for ensuring that the provided
     directories remain valid for the desired lifetime. *)
@@ -56,6 +70,9 @@ val create
   -> on_inference_completion:(Inference_client.Completion.t -> unit)
   -> ?inference_relation:Transcript.Scope.relation
   -> ?on_inference_observation:(Inference.Observation.t -> unit)
+  -> ?on_admitted_call:(In_memory_stream.Admitted_call.t -> unit)
+  -> ?before_inference_dispatch:(Inference_runtime.Prepared.t -> unit)
+  -> ?agent_prompt_v1_recipe:Moderation.Capabilities.model_recipe
   -> env:'env
   -> dir:Eio.Fs.dir_ty Eio.Path.t
   -> tool_dir:Eio.Fs.dir_ty Eio.Path.t
@@ -77,6 +94,9 @@ val of_env
   -> on_inference_completion:(Inference_client.Completion.t -> unit)
   -> ?inference_relation:Transcript.Scope.relation
   -> ?on_inference_observation:(Inference.Observation.t -> unit)
+  -> ?on_admitted_call:(In_memory_stream.Admitted_call.t -> unit)
+  -> ?before_inference_dispatch:(Inference_runtime.Prepared.t -> unit)
+  -> ?agent_prompt_v1_recipe:Moderation.Capabilities.model_recipe
   -> env:(< fs : Eio.Fs.dir_ty Eio.Path.t ; cwd : Eio.Fs.dir_ty Eio.Path.t ; .. > as 'env)
   -> cache:Cache.t
   -> unit
@@ -95,6 +115,13 @@ val with_inference_attempt_guard
   -> before_attempt:(Inference_runtime.Attempt.t -> unit)
   -> 'env t
 
+(** Append a physically issued application-submit guard without removing
+    inherited parent checks. Context copies, nested inference and auxiliary
+    requests retain the composed guard. The default is empty for ordinary
+    conversation execution. Constructing a guard does not itself authorize
+    provider selection, an actor, a Claim or a tool effect. *)
+val with_submission_guard : 'env t -> Inference_runtime.Submission_guard.t -> 'env t
+
 (** Rebind only the explicitly selected inference context, retaining host identity
     and observers. Call Context.derive or the host resolver/policy first; this
     operation neither authorizes a target change nor recaptures stored selection. *)
@@ -104,6 +131,15 @@ val with_inference : 'env t -> inference_context:Inference_runtime.Context.t -> 
     parent must come from Invocation.inference_parent or another actual owner;
     absent correlation must never be fabricated from a call alias. *)
 val with_inference_parent : 'env t -> parent:Transcript.Scope.parent -> 'env t
+
+(** Replace only the selected child's canonical Model recipe before
+    Driver.Prepared_inputs copies this immutable Context. The trusted host
+    binds it to an active child; the recipe value itself grants no source or
+    provider authority. Inherited attempt/submission guards, observations,
+    identity and inference parent are unchanged. An expired child rejects when
+    the recipe is later invoked. Ordinary contexts keep their constructor's
+    existing recipe behavior. *)
+val with_agent_prompt_v1_recipe : 'env t -> Moderation.Capabilities.model_recipe -> 'env t
 
 (** Selected inference ports for auxiliary requests owned by this invocation.
     Attempt admission remains the supplied host identity and acknowledgement;

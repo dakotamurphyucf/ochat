@@ -9,6 +9,7 @@ type t =
   ; receipt : Receipt.t
   ; member : Path.t
   ; origin : string * string * int * int
+  ; selected_parent : (Agent_protocol.Id.Prompt_revision.t * string) option
   ; work_steps : int
   }
 
@@ -16,6 +17,14 @@ let definition t = t.definition
 let receipt t = t.receipt
 let member { member; origin = _; _ } = member
 let work_steps t = t.work_steps
+
+let matches_selected_parent t parent =
+  match t.selected_parent with
+  | None -> false
+  | Some (revision_id, manifest_sha256) ->
+    Agent_protocol.Id.Prompt_revision.equal revision_id (Prompt_revision.id parent)
+    && String.equal manifest_sha256 (Prompt_revision.artifact parent).manifest_sha256
+;;
 
 let of_reference ~parent reference ~max_work_steps ~checkpoint =
   let open Or_error.Let_syntax in
@@ -97,6 +106,59 @@ let of_reference ~parent reference ~max_work_steps ~checkpoint =
         , declaring_identity
         , Input.Range.start_byte range
         , Input.Range.end_byte range )
+    ; selected_parent = None
+    ; work_steps = !used
+    })
+;;
+
+let of_selected_member ~parent ~member ~max_work_steps ~checkpoint =
+  let open Or_error.Let_syntax in
+  if max_work_steps <= 0
+  then Or_error.error_string "Selected-member admission work allowance exhausted"
+  else (
+    let used = ref 0 in
+    let charge () =
+      if !used >= max_work_steps
+      then Or_error.error_string "Selected-member admission work allowance exhausted"
+      else (
+        checkpoint ();
+        Int.incr used;
+        Ok ())
+    in
+    let%bind () = charge () in
+    let%bind parsed =
+      Prompt_revision.parser_context parent
+      |> Or_error.of_option
+           ~error:(Error.of_string "Selected Model member requires owned parser input")
+    in
+    let artifact = Prompt_revision.artifact parent in
+    let%bind receipt =
+      artifact.source_receipt
+      |> Or_error.of_option
+           ~error:(Error.of_string "Selected Model member requires original source")
+    in
+    let definition = Prompt_revision.definition parent in
+    let%bind () = charge () in
+    let%bind () =
+      if
+        Agent_protocol.Id.Prompt_definition.equal
+          definition.id
+          (Receipt.definition_id receipt)
+        && String.equal definition.root_file (Receipt.root_file receipt)
+      then Ok ()
+      else Or_error.error_string "Selected Model member has foreign original selection"
+    in
+    let root = CM.Parsed.root_input parsed in
+    let%bind () = charge () in
+    let%bind _root_path = Path.create (Input.path root) in
+    let%bind () = charge () in
+    let root_identity = Input.identity_digest root ~checkpoint in
+    let%map () = charge () in
+    { definition
+    ; receipt
+    ; member
+    ; origin = root_identity, root_identity, 0, 0
+    ; selected_parent = Some (artifact.revision_id, artifact.manifest_sha256)
     ; work_steps = !used
     })
 ;;

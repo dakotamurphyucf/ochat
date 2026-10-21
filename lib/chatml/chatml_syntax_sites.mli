@@ -80,6 +80,12 @@ val name_bytes : t -> int
 module type Sink = sig
   val enabled : bool
   val add : Role.t -> name:string -> span:Source.span -> Id.t
+
+  (** Parser-owned top-level program reductions. Ordinary site collection is a
+      no-op; a dedicated prefix observer can retain one completed boundary. *)
+  val completed_program_statement : end_byte:int -> unit
+
+  val completed_program_separator : end_byte:int -> unit
 end
 
 (** Shared parameter for the legacy parser and fixed generated token module.

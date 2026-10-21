@@ -5,6 +5,7 @@ module Target = struct
   type t =
     | One_off_v1
     | Tool_v1
+    | Developer_tool_v1
     | Moderator_v1
     | Delegated_moderator_v1
   [@@deriving equal, sexp]
@@ -28,6 +29,7 @@ let for_target target ~checkpoint =
     match target with
     | Target.One_off_v1 -> X.one_off_v1, X.one_off_entrypoints
     | Tool_v1 -> X.tool_v1, X.tool_entrypoints
+    | Developer_tool_v1 -> X.developer_tool_v1, X.tool_entrypoints
     | Moderator_v1 -> X.moderator_v1, X.moderator_entrypoints
     | Delegated_moderator_v1 -> X.delegated_moderator_v1, X.moderator_entrypoints
   in
@@ -49,6 +51,7 @@ let target_name t =
   match t.kind with
   | Standard One_off_v1 -> "one_off_v1"
   | Standard Tool_v1 -> "tool_v1"
+  | Standard Developer_tool_v1 -> "developer_tool_v1"
   | Standard Moderator_v1 -> "moderator_v1"
   | Standard Delegated_moderator_v1 -> "delegated_moderator_v1"
   | Native -> "native"
@@ -99,13 +102,35 @@ let identity t ~checkpoint =
     [ Sexp.Atom (compiler_family t); target; globals; modules; aliases; requirements ]
 ;;
 
-let input_bytes t ~checkpoint ~allocate =
+module Identity_summary = struct
+  type t =
+    { encoded_bytes : int
+    ; fingerprint : Chatml_source.Digest.t
+    }
+
+  let encoded_bytes t = t.encoded_bytes
+  let fingerprint t = t.fingerprint
+end
+
+let encode_identity t ~checkpoint ~allocate =
   let converted_checkpoint () =
     checkpoint ();
     allocate 512
   in
   let identity = identity t ~checkpoint:converted_checkpoint in
-  Chatml_contract_encoding.to_string identity ~checkpoint ~allocate |> String.length
+  Chatml_contract_encoding.to_string identity ~checkpoint ~allocate
+;;
+
+let summarize_identity t ~checkpoint ~allocate =
+  let encoded = encode_identity t ~checkpoint ~allocate in
+  Identity_summary.
+    { encoded_bytes = String.length encoded
+    ; fingerprint = Chatml_source.Digest.of_contents encoded ~checkpoint
+    }
+;;
+
+let input_bytes t ~checkpoint ~allocate =
+  encode_identity t ~checkpoint ~allocate |> String.length
 ;;
 
 let fingerprint t ~checkpoint =
@@ -178,7 +203,7 @@ module Invocation = struct
         if String.equal entrypoint "main"
         then Ok ()
         else reject "One-off host invocation requires the compiled main role"
-      | Standard Tool_v1 ->
+      | Standard (Tool_v1 | Developer_tool_v1) ->
         if String.equal entrypoint "run"
         then Ok ()
         else reject "Tool host invocation requires the compiled run role"
@@ -236,7 +261,7 @@ module Invocation = struct
         else
           reject
             "Moderator host invocation requires the compiled initial_state/on_event roles"
-      | Standard (One_off_v1 | Tool_v1) ->
+      | Standard (One_off_v1 | Tool_v1 | Developer_tool_v1) ->
         reject "Standalone compiler contracts cannot instantiate a moderator session"
       | Native -> Ok ()
     in
@@ -266,7 +291,12 @@ module Invocation = struct
     let%bind () =
       match contract.kind with
       | Native -> Ok ()
-      | Standard (One_off_v1 | Tool_v1 | Moderator_v1 | Delegated_moderator_v1) ->
+      | Standard
+          ( One_off_v1
+          | Tool_v1
+          | Developer_tool_v1
+          | Moderator_v1
+          | Delegated_moderator_v1 ) ->
         reject "Event/state hooks require an authentic native compiler contract"
     in
     let%bind state = requirement contract initial_state ~checkpoint in

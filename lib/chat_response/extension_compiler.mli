@@ -17,6 +17,7 @@ val validate_script
 
 val prepare
   :  ?max_source_bytes:int
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
   -> scripts:Spec.script list
   -> capabilities:Tool_capability.t
   -> Spec.tool
@@ -38,6 +39,12 @@ val source_revision : t -> string
 val execution_limits : t -> Chatmd_shell_spec.Chatmd_script_spec.limits
 
 val program : t -> Program.t
+
+(** Exact static compiler target retained by the selected, already checked
+    implementation for both single-file and linked programs. This coordinate
+    grants no host operation or provider authority. *)
+val compiler_target : t -> Chatml_compilation.target
+
 val capabilities : t -> Tool_capability.t
 val fingerprint : t -> string
 val input_schema : t -> Chatmd_shell_spec.Tool_schema.t
@@ -49,6 +56,7 @@ val completion_schema : t -> Chatmd_shell_spec.Tool_schema.t option
     still apply. Does not expose a tool or authorize generated native config. *)
 val prepare_in_domain
   :  ?limits:Chatml_compilation.limits
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
   -> env:Eio_unix.Stdenv.base
   -> scripts:Spec.script list
   -> capabilities:Tool_capability.t
@@ -87,6 +95,7 @@ val prepare_definition_in_domain
   :  ?startup:Startup_compilation.t
   -> ?limits:Chatml_compilation.limits
   -> ?delegated_moderator:bool
+  -> ?tool_contract:Chatml_compilation.Tool_contract.t
   -> ?programs:Chatml_prompt_programs.Restored.t
   -> env:Eio_unix.Stdenv.base
   -> capabilities:Tool_capability.t

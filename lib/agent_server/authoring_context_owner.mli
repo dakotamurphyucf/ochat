@@ -1,0 +1,175 @@
+open! Core
+open Authoring_context_service_core
+
+(** Current owner/grant/selection checks live outside the short ledger gate.
+    The final variants are bounded and nonyielding; the full variants may
+    perform joined Store verification and must complete before publication. *)
+val source_host_error : Sources.Error.t -> Error.t
+
+val upload_host_error : Upload.Error.t -> Error.t
+
+(** A Host Project's first successful full check may attach immutable
+    [verified_project_contract] comparison evidence to that exact context
+    entry. Later checks still prove physical source/Root, original and current
+    actors and fresh configured selection. They skip re-encoding only when
+    both newly selected contracts physically equal the admitted source
+    contract and the current Ledger view retains its verified fingerprint.
+    Distinct contracts use the existing bounded semantic comparison. Failed
+    context publication does not install evidence in another entry. *)
+val check_context_owner
+  :  ?ledger:Ledger.t
+  -> t
+  -> context_entry
+  -> actor:Operator_authorization.t
+  -> checkpoint:(unit -> unit)
+  -> (unit, Error.t) result
+
+val check_context_selection_now
+  :  ?ledger:Ledger.t
+  -> t
+  -> context_entry
+  -> actor:Operator_authorization.t
+  -> (unit, Error.t) result
+
+module Candidate_pin : sig
+  type t
+
+  (** Freeze only comparison evidence while a genuine [Current] borrow is
+      live: the physical Core/connection/negotiation/context entries, exact
+      Expected identity+basis+generation, and a Document's retained Parsed
+      capture head. No Current borrow, live read grant or mutable cache owner
+      escapes. Unrelated analysis result heads need not remain unchanged. *)
+  val of_current
+    :  Authoring_context_service_core.t
+    -> Authoring_context_service_core.Current.t
+    -> connection:Connection_context.t
+    -> (t, Error.t) result
+
+  (** Called within each later [with_current] full check; rejects a replacement
+      context or Parsed head even when a label/digest happens to match. *)
+  val matches_current
+    :  t
+    -> Authoring_context_service_core.Current.t
+    -> (unit, Error.t) result
+
+  (** Bounded NONYIELDING final check on the creating domain. Core.try_with_gate
+      compares the active physical connection/negotiation lease, context object,
+      Expected generation/basis and relevant Document capture head. A busy gate
+      rejects instead of waiting. After releasing that short gate, the existing
+      original/current actor and source/upload/supplied selection checks run,
+      followed by the host's exact developer target-policy comparison. No
+      native read, Store I/O, callback or wait occurs under the Core gate. *)
+  val check_now : t -> actor:Operator_authorization.t -> (unit, Error.t) result
+end
+
+module Retained_selection : sig
+  type t
+
+  (** Transfer exactly one authenticated Candidate_pin from its still-current
+      editor context into a run-owned selection. The caller has completed the
+      source/contract full check; this function repeats the physical pin,
+      original/current actor and context policy checks before transfer and
+      after any yielding upload verification. A Host project/document owner
+      reserves one Source_host context slot before yielding; an Uploaded
+      selection retains its actual Store-backed Context_capture; a supplied
+      document retains its original actor and policy. Only the selected
+      bounded immutable context view/identity is copied: no whole Core ledger,
+      unrelated cache head, Current token, editor connection or negotiation
+      survives as execution authority. Failure or cancellation releases any
+      newly reserved slot without changing the editor context. *)
+  val acquire
+    :  Candidate_pin.t
+    -> actor:Operator_authorization.t
+    -> checkpoint:(unit -> unit)
+    -> (t, Error.t) result
+
+  (** Full check of the retained ORIGINAL selected source and immutable
+      context-policy snapshot plus current actor. The snapshot is bounded by
+      the creating Authoring context's admitted source/view limits. Ordinary
+      editor edits/replacement/close do not reinterpret it. Genuine root,
+      supplied policy, upload Store pin/deadline and daemon lifetime remain
+      current requirements. A retained Host Project copies only its verified
+      contract comparison evidence from the published editor context.
+      Rechecking it never replaces source/Root, actor or policy checks; an
+      unattested or distinctly selected contract uses the full bounded
+      fingerprint path. May yield for the upload Store proof. *)
+  val check_current
+    :  t
+    -> actor:Operator_authorization.t
+    -> checkpoint:(unit -> unit)
+    -> (unit, Error.t) result
+
+  (** Immediate nonyielding exact physical-owner/actor suffix after the latest
+      full check. Any intervening yield requires a fresh full check unless
+      the caller's separate retained Store custody proves that yield cannot
+      change the pin. It repeats current policy and the upload pin/deadline
+      comparison; an old full check cannot authorize an effect after
+      revocation. The upper
+      Source_selection.Shared checked receipt binds each full check to the
+      same physical retained selection and actor, including concurrent reads. *)
+  val check_now : t -> actor:Operator_authorization.t -> (unit, Error.t) result
+
+  (** Idempotent joined release. Ordinary connection close never calls it;
+      the retained REPL instance releases after its callbacks and Root-owned
+      work join, or Create releases on every failed publication path. *)
+  val close_and_wait : t -> unit
+end
+
+(** [feature] chooses the negotiated sibling; absent means Core authoring.
+    [final_check] adds a bounded nonyielding current host selection check
+    immediately before the final gate, after the ordinary actor/source/context
+    recheck. [publish] runs inside that gate only after the exact connection,
+    context and expected generation are compared again. It may perform a pure
+    compare-and-swap of already prepared immutable values only after comparing
+    BOTH analysis cache heads, the certified analysis-index head, the
+    provisional-index head, checked-template head and retained document-capture
+    head borrowed
+    at request admission; any changed head rejects the result. It constructs
+    no new graph, parser result or wire response. The borrowed [Current] token
+    has expired by then; neither callback may use it or perform I/O, wait or
+    invoke a yielding checkpoint. An error publishes nothing. *)
+val with_current
+  :  ?feature:Selected_feature.t
+  -> ?final_check:(unit -> (unit, Error.t) result)
+  -> ?publish:('a -> ('a, Error.t) result)
+  -> t
+  -> actor:Operator_authorization.t
+  -> connection:Connection_context.t
+  -> expected:P.Authoring.Context.Expected.t
+  -> checkpoint:(unit -> unit)
+  -> f:(Current.t -> checkpoint:(unit -> unit) -> ('a, Error.t) result)
+  -> ('a, Error.t) result
+
+(** Borrow a parent from the SAME registered physical Core connection and
+    context as [with_current], with Bundle_upload negotiated. [expected] is a
+    lookup coordinate only: the issuer checks the actual Current and owner,
+    then freezes a live operation scope for [f]. Project Inputs.base or one
+    physically associated retained Document row set supplies prior-Build
+    evidence when the manifest requires a previous lock. A Document parent
+    without a required prior remains available before Analyze or after
+    unrelated retained-capture eviction; an uploaded Project parent supplies its exact current
+    Inputs.base plus the verified Context_capture Store pin. The scope
+    expires before this function returns.
+    Core's outer final actor/selection/head/context CAS remains in force after
+    all yielding Host/Store work. No Core gate is held across [f]. *)
+val with_parent_scope
+  :  ?script_selection:Authoring_script_selection.Policy.t
+  -> t
+  -> actor:Operator_authorization.t
+  -> connection:Connection_context.t
+  -> expected:P.Authoring.Context.Expected.t
+  -> operation:Authoring_parent_scope.Operation.t
+  -> checkpoint:(unit -> unit)
+  -> f:(Authoring_parent_scope.t -> checkpoint:(unit -> unit) -> ('a, Error.t) result)
+  -> ('a, Error.t) result
+
+val view_of_context
+  :  t
+  -> Ledger.t
+  -> id:P.Id.Authoring_context.t
+  -> identity:Ledger.Identity.t
+  -> origin:P.Authoring.Context.origin
+  -> checkpoint:(unit -> unit)
+  -> (P.Authoring.Context.t, Error.t) result
+
+val checked_response : t -> W.Response.t -> (W.Response.t, Error.t) result

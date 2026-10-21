@@ -11,7 +11,16 @@ exception Parse_error of D.t
 let raise_error diagnostic = raise_notrace (Parse_error diagnostic)
 let fail source path code message = raise_error (D.error ~source ~path ~code message)
 
-let attributes source path allowed values =
+let attributes source path values =
+  let schema_path =
+    match path with
+    | [ "tool"; "read"; _index ] -> [ "tool"; "read" ]
+    | [ "tool" ] -> [ "tool" ]
+    | _ -> failwith "missing read-file attribute schema context"
+  in
+  let allowed =
+    Chatmd_shell_schema.allowed_for_parser_path_exn ~root:Tool_read_file ~path:schema_path
+  in
   match A.create ~source ~path ~allowed values with
   | Ok attributes -> attributes
   | Error diagnostic -> raise_error diagnostic
@@ -52,9 +61,7 @@ let parse_path source path value =
 let parse_root source index = function
   | Ast.Element (Ast.Shell_element E.Read, raw_attributes, children) ->
     let path = [ "tool"; "read"; Int.to_string index ] in
-    let attributes =
-      attributes source path [ "id"; "path"; "description" ] raw_attributes
-    in
+    let attributes = attributes source path raw_attributes in
     no_children source path children;
     let id = required attributes "id" |> String.strip in
     if String.is_empty id
@@ -88,9 +95,7 @@ let roots source children =
 
 let parse_exn source = function
   | Ast.Element (Ast.Tool, raw_attributes, children) ->
-    let attributes =
-      attributes source [ "tool" ] [ "name"; "description" ] raw_attributes
-    in
+    let attributes = attributes source [ "tool" ] raw_attributes in
     let name = required attributes "name" in
     if not (String.equal name "read_file" || String.equal name "get_contents")
     then fail source [ "tool"; "name" ] "read_file.invalid_name" "expected read_file";

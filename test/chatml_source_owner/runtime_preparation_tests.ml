@@ -5,6 +5,71 @@ module Revision = Agent_session.Prompt_revision
 module Prepared_source = Agent_session.Authored_source_preparation
 module Startup = Chat_response.Startup_compilation
 module P = Agent_protocol
+module Claimed_owner = Agent_session.Developer_claimed_resource_owner
+
+let%test_unit "claimed resource owner joins children and preserves caller failures" =
+  List.iter
+    [ `Return; `Raise; `Cancel; `Cleanup_failure; `Resource_failure ]
+    ~f:(fun mode ->
+      Eio_main.run (fun env ->
+        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+          let entered, entered_u = Eio.Promise.create () in
+          let never, _ = Eio.Promise.create () in
+          let finalized = ref false in
+          let original = Failure "claimed owner callback" in
+          let secondary = Failure "claimed owner cleanup" in
+          let run action =
+            Claimed_owner.with_switch (fun sw ->
+              Eio.Fiber.fork ~sw (fun () ->
+                Exn.protect
+                  ~finally:(fun () ->
+                    finalized := true;
+                    match mode with
+                    | `Cleanup_failure | `Resource_failure -> raise secondary
+                    | `Return | `Raise | `Cancel -> ())
+                  ~f:(fun () ->
+                    Eio.Promise.resolve entered_u ();
+                    Eio.Promise.await never));
+              Eio.Promise.await entered;
+              action ())
+          in
+          let result =
+            Result.try_with (fun () ->
+              match mode with
+              | `Return -> run (fun () -> 7)
+              | `Raise | `Cleanup_failure -> run (fun () -> raise original)
+              | `Resource_failure -> run (fun () -> 7)
+              | `Cancel ->
+                Eio.Cancel.sub (fun context ->
+                  run (fun () ->
+                    Eio.Cancel.cancel context original;
+                    Eio.Fiber.yield ();
+                    7)))
+          in
+          assert !finalized;
+          match mode, result with
+          | `Return, Ok 7 -> ()
+          | (`Raise | `Cleanup_failure), Error exn when phys_equal exn original -> ()
+          | `Resource_failure, Error (Exn.Finally (Eio.Cancel.Cancelled _, exn))
+            when phys_equal exn secondary -> ()
+          | `Cancel, Error (Eio.Cancel.Cancelled reason) when phys_equal reason original
+            -> ()
+          | (`Return | `Raise | `Cancel | `Cleanup_failure | `Resource_failure), _ ->
+            let mode_name =
+              match mode with
+              | `Return -> "return"
+              | `Raise -> "raise"
+              | `Cancel -> "cancel"
+              | `Cleanup_failure -> "cleanup failure"
+              | `Resource_failure -> "resource failure"
+            in
+            let outcome =
+              match result with
+              | Ok value -> Int.to_string value
+              | Error exn -> Exn.to_string exn
+            in
+            failwith ("claimed resource owner " ^ mode_name ^ ": " ^ outcome))))
+;;
 
 let policy ?(max_custody_work_steps = 1_000_000) () =
   let planning =

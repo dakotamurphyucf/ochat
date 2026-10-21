@@ -269,6 +269,123 @@ val restore
   -> checkpoint:(unit -> unit)
   -> (t, Error.t) Result.t
 
+module Effective : sig
+  (** Recompose one complete, already captured source closure without a native
+      acquisition owner. This is the pure project gate shared by uploaded source
+      revisions and host-authorized editor overlays. It does not depend on
+      authoring protocol DTOs, Eio, a connection or a storage receipt. *)
+
+  module Route : sig
+    (** A caller-supplied association for one captured project declaration.
+        [declaration] names its exact qualified Source.Id in [sources]; [origin]
+        is supplied routing intent that must pass admission, never inferred
+        from the namespace.
+        [dependencies] map each selected owner-local authored dependency name
+        to an exact qualified captured declaration ID. This is routing intent,
+        not native path, Git or source-acquisition authority. The composer
+        checks every route against the decoded declaration and selected scopes,
+        the existing owner-relative resolver and selection gate; it rejects
+        absent, surplus, duplicate or ambiguous routes. *)
+    type t
+
+    val create
+      :  declaration:Chatml_source.Id.t
+      -> origin:Chatml_project.Lock.Catalog.origin
+      -> dependencies:Chatml_project.Lock.Dependency_selection.t list
+      -> t
+
+    val declaration : t -> Chatml_source.Id.t
+  end
+
+  (** [root_project] must occur exactly once in [sources]. [sources] contains
+      every supplied project/dependency declaration and member exactly once;
+      it excludes the old/generated lock. An uploaded captured entry may occur
+      there once even when standalone: the existing selected catalog plan alone
+      decides whether that exact candidate is a member. A captured entry may
+      overlap a member only at the same exact source ID and revision; a changed
+      revision rejects, and no other surplus source is filtered. The selected [entry] and
+      [selection] must agree: Declared requires an Entry selection; Captured
+      requires Library. A host-selected captured entry may be a derived script
+      body outside every catalog and is then passed separately through [entry],
+      not duplicated in [sources]. Both are charged to the input/work ceiling
+      and included once in the completed Build.
+
+      [routes] includes exactly one route for [root_project] and each selected
+      dependency catalog. The root route's origin is supplied by the admitting
+      host: an initial captured-only upload can admit Local, while an overlay
+      obtains its prior root association from [previous]. A package namespace
+      is never an origin or a lookup key. Dependency targets are selected by
+      exact owner/name -> qualified declaration ID associations, not basename
+      or a namespace search. A no-prior call cannot select Git; a prior call
+      checks every incoming association against the prior selection gate.
+
+      The implementation decodes actual declarations and reuses the existing
+      catalog discovery planner, owner-relative dependency selection, and
+      [Selection_gate] before composition. Every supplied source must be
+      selected by the resulting catalog closure;
+      missing, surplus, duplicate, conflicting namespace/path, and unselected
+      sources reject. There is no file/Git/network/package lookup or fallback.
+
+      [previous] is an already admitted Build, not a decoded client lock claim
+      or authority to read its former native roots. Its complete inventory and
+      associations are traversed under the same budget. A caller-provided
+      route can only be admitted after current declaration/selection validation.
+      The captured-only path requires its root Source.Id to equal the prior
+      Build's root: it cannot authenticate a Local root rename or re-root.
+      With [Some previous], the existing Build gate preserves pinned Git code
+      selections and checks all current/prior owner-local routes while local
+      captured source bytes and selected environments may change. With [None],
+      [Build_without_previous] admits only Local selected roots/dependencies;
+      a selected Git source requiring provenance/update fails closed. Use outer
+      [restore] for an unchanged exact supplied lock instead of treating a
+      mismatching lock as permission to regenerate one.
+
+      [lock_id] must differ from every supplied/entry/previous lock source ID.
+      One invocation-owned work/input budget covers enumeration of the
+      supplied captured set, bounded JSON decode, catalog planning, dependency
+      traversal, selection checks, canonical lock generation and final Prepared
+      admission. No helper resets the allowance. Checkpoint exceptions retain
+      their original identity; an error returns no partial Build. The generated
+      lock belongs to the completed Build, not to the caller's input capture
+      inventory. The host still owns authorization, authentic contract choice,
+      and comparison against an upload manifest or overlay generation. *)
+  val compose
+    :  root_project:Chatml_source.Id.t
+    -> selection:Chatml_project.Selection.request
+    -> entry:Entry.t
+    -> sources:Chatml_source.t list
+    -> routes:Route.t list
+    -> previous:t option
+    -> lock_id:Chatml_source.Id.t
+    -> contract:Chatml.Chatml_compiler_contract.t
+    -> limits:Limits.t
+    -> checkpoint:(unit -> unit)
+    -> (t, Error.t) Result.t
+
+  (** Recompose an editor generation from the exact complete effective source
+      inventory, including the previous Build's unchanged lock source exactly
+      once. Derive root, selected entry/environment, catalog origins and every
+      owner-local dependency route from that admitted previous lock inside the
+      SAME work/input budget as [compose]. Remove only the exact old lock before
+      planning; a missing/changed/duplicated lock rejects. A captured Library
+      entry is a catalog member only if the prior lock says its exact source ID
+      is one; otherwise it is separately admitted as a standalone derived
+      entry, even when it shares a catalog namespace. Duplicate/missing entry
+      captures reject. Current project and
+      member captures may have new bytes but retain their qualified source IDs.
+      A new route or root identity needs a new authorized host capture; this
+      operation never invents one from a path/namespace. The result gets a new
+      generated lock at [lock_id]. No editor metadata grants authorization. *)
+  val recompose
+    :  t
+    -> sources:Chatml_source.t list
+    -> lock_id:Chatml_source.Id.t
+    -> contract:Chatml.Chatml_compiler_contract.t
+    -> limits:Limits.t
+    -> checkpoint:(unit -> unit)
+    -> (t, Error.t) Result.t
+end
+
 (** Recompose an admitted captured-entry library for an authentic compiler
     contract, retaining its exact entry, sources, catalogs, scopes, environments
     and dependency selections. Declared entry builds are rejected. Authored target

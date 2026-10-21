@@ -35,6 +35,37 @@ module Handle : sig
 
   val session_id : t -> Agent_protocol.Id.Session.t
   val directory : t -> string
+
+  (** Exact live daemon-root layout for a conservative developer-evidence scan.
+      Rechecks this Handle, its original filesystem capability and the bound
+      Blob_store locations; returns a comparison path, not a result-root grant. *)
+  val developer_evidence_directory
+    :  t
+    -> env:Eio_unix.Stdenv.base
+    -> temporary_directory:string
+    -> durable_directory:string
+    -> (string, Store_error.t) result
+
+  (** The sibling private result-intent namespace under the same checked root
+      and filesystem capability. Presence is evidence, not a result grant. *)
+  val developer_result_intents_directory
+    :  t
+    -> env:Eio_unix.Stdenv.base
+    -> temporary_directory:string
+    -> durable_directory:string
+    -> (string, Store_error.t) result
+
+  (** Hold the issuing daemon's developer-root gate through [f]. This must be
+      called inside the Blob_store retention coordinator, before any reference
+      proof or deletion. A live developer-root owner returns [Ok None], leaving
+      conversation collection deferred. With no owner, new developer claims and
+      leases cannot enter until [f] returns. Rejects stale Handles and recursive
+      entry; preserves callback exceptions and cancellation. *)
+  val with_developer_root_collection
+    :  t
+    -> f:(unit -> ('a, Store_error.t) result)
+    -> ('a option, Store_error.t) result
+
   val snapshot_directory : t -> string
   val journal_directory : t -> string
   val cache_directory : t -> string
@@ -55,6 +86,21 @@ val current_metadata_schema_version : int
 val data_root : t -> Data_root.t
 val server_id : t -> Agent_protocol.Id.Server.t
 val session_index : t -> Session_index.t
+
+(** Open one durable authoring-upload child using THIS Store's live exclusive
+    daemon lock and Data_root. The lock remains privately owned here; no caller
+    may reacquire it or supply an unrelated root. Reject a closed Store and a
+    second live child before opening; register the child only after successful
+    bounded recovery. The caller transfers it to one Authoring_upload_host.
+    [close] refuses to release the daemon lock until that child reports
+    [fully_closed], after all read leases and its root reservation are gone.
+    A failed/cancelled open publishes no child slot. *)
+val open_authoring_upload_store
+  :  t
+  -> sw:Eio.Switch.t
+  -> limits:Authoring_upload_store.Limits.t
+  -> checkpoint:(unit -> unit)
+  -> (Authoring_upload_store.t, Authoring_upload_store.Error.t) result
 
 (** Shared private child-creation ledger under this store's exclusive ownership. *)
 val delegations : t -> Delegation_store.t
@@ -77,6 +123,40 @@ val complete_index_recovery : t -> (unit, Store_error.t) result
 
 (** [is_closed t] reports whether [close] released the daemon-store lock. *)
 val is_closed : t -> bool
+
+(** Host-only affinity check for joining the existing Blob_store to this
+    daemon-owned data root. Checks the live original daemon lock, the exact
+    Eio filesystem capability and both canonical Data_root blob directories;
+    equal native path strings in different filesystems are insufficient. This
+    returns no new storage handle or authority. *)
+val validate_blob_storage
+  :  t
+  -> env:Eio_unix.Stdenv.base
+  -> temporary_directory:string
+  -> durable_directory:string
+  -> (unit, Store_error.t) result
+
+(** One developer-run document owner under this store's existing daemon lock.
+    The physical claim is unique per live Session_store. Every lease serializes
+    developer-run I/O, checks the original lock and coordinates with [close],
+    which waits for an active lease before releasing the daemon lock. A claim
+    grants storage access only; it does not authenticate a run or principal. *)
+module Developer_root : sig
+  type owner
+
+  val claim : t -> (owner, Store_error.t) result
+  val issued_by : owner -> t -> bool
+
+  val with_lease
+    :  owner
+    -> f:(env:Eio_unix.Stdenv.base -> root:Data_root.t -> 'a)
+    -> ('a, Store_error.t) result
+
+  (** Reject a same-fiber close before mutating the claimant. *)
+  val check_not_active : owner -> (unit, Store_error.t) result
+
+  val release : owner -> unit
+end
 
 (** [check_writable t] creates and removes an exclusive Eio-owned probe file
     beneath the data root. *)

@@ -56,7 +56,7 @@ module Agent_source_runner : sig
     { revision : Chatml_source.Digest.t
     ; prepare :
         (declaration:Prompt.Chat_markdown.agent_tool
-         -> owner:Agent_protocol.Job.launch_owner
+         -> launch:Source_launch.t
          -> checkpoint:(unit -> unit)
          -> (Background_request.Agent_artifact.t, Agent_protocol.Error.t) Result.t)
           option
@@ -79,6 +79,43 @@ module Agent_source_runner : sig
         -> ctx:Eio_unix.Stdenv.base Ctx.t
         -> string
     }
+end
+
+module Deferred_agent : sig
+  (** One genuine Agent declaration's ordinary native function, constructed
+      before a developer Root or inference Ctx exists. The supplied runner is
+      the already bound captured-source port for the SAME actual parser
+      declaration. This function never uses Fetch or manufactures a Session.
+
+      [with_context] is trusted host code installed while constructing the
+      function. It must reject until the exact physical Root/model owner has
+      been bound and after that owner closes. At invocation it must enter the
+      selected saved-Agent source/native/Worker proof, borrow that Root's
+      Model_inference scope, and lend its genuine Ctx only to the callback.
+      The callback forwards the same function identity, declaration, source,
+      observer and parsed input items to [Agent_source_runner.run]. The normal
+      Ochat_function invocation parent is applied to the borrowed Ctx, never
+      inferred from the source string. Trusted host code must not retain that
+      Ctx; physical scope and effect guards reject use after expiry.
+      Failure/cancellation cannot fall back to
+      the legacy file runner or turn a denied effect into a successful output.
+
+      This low-level constructor grants neither source nor provider authority;
+      the owner must register [implementation] with an exact
+      Native_source_registration and its selected Root binding. *)
+  type t
+
+  val create
+    :  declaration:Prompt.Chat_markdown.agent_tool
+    -> runner:Agent_source_runner.t
+    -> with_context:
+         (implementation:Ochat_function.t
+          -> invocation:Ochat_function.Invocation.t
+          -> (Eio_unix.Stdenv.base Ctx.t -> string)
+          -> string)
+    -> t
+
+  val implementation : t -> Ochat_function.t
 end
 
 (** Validate configured read-file roots through the same source-relative host
@@ -134,3 +171,29 @@ val of_declaration
         -> string (* assistant answer *))
   -> Prompt.Chat_markdown.tool
   -> Ochat_function.t list
+
+module Native_error : sig
+  type t =
+    { code : string
+    ; message : string
+    }
+  [@@deriving sexp, compare, equal]
+end
+
+(** Construct a provider-independent declaration from the ordinary Eio and
+    filesystem resources of this exact shell host. This path has no Ctx,
+    inference Adapter, Target or nested-agent callback. An ordinary Agent or
+    [meta_refine] declaration therefore returns a typed inference-required
+    error; the pool may instead select an already admitted exact native
+    registration before calling this function. Existing restrictions on
+    Persistent_agent, Inherited and Extension remain in force. Configured
+    Read_file still resolves roots through [host]. MCP clients and listeners
+    remain owned by [sw]. Unexpected exceptions and cancellation propagate;
+    this constructor returns typed errors only for expected missing inference. *)
+val of_declaration_without_inference
+  :  ?shell_registry:Shell_runtime.Registry.t
+  -> ?check_preparation_now:(unit -> (unit, Native_error.t) result)
+  -> sw:Eio.Switch.t
+  -> host:Shell_runtime.Host.t
+  -> Prompt.Chat_markdown.tool
+  -> (Ochat_function.t list, Native_error.t) result

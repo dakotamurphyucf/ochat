@@ -1,0 +1,474 @@
+open! Core
+module P = Agent_protocol
+module Config = Developer_startup_configuration
+module D = Document_schema
+module Store = Agent_store.Developer_run_store
+module Dev = Developer_daemon_configuration
+
+type t =
+  { capture : Authoring_context_service.Developer.Limits.t
+  ; host : Dev.Limits.t
+  ; publisher : Agent_store.Developer_result_publisher.Limits.t
+  ; approvals : Developer_approval_owner.Limits.t option
+  ; repl : Dev.Repl.t option
+  ; traces : Dev.Traces.t option
+  ; portable : Dev.Portable.t option
+  }
+
+let capture t = t.capture
+let host t = t.host
+let publisher t = t.publisher
+let approvals t = t.approvals
+let repl t = t.repl
+let traces t = t.traces
+let portable t = t.portable
+let invalid () = P.Error.invalid_request "invalid developer startup capacity"
+let admitted result = Result.map_error result ~f:(fun _ -> invalid ())
+let repl_compact_receipt_bytes = 4096
+let repl_type_output_bytes = 32768
+
+let json ~bytes ~depth ~fields ~nodes =
+  D.Limits.create ~max_bytes:bytes ~max_depth:depth ~max_fields:fields ~max_nodes:nodes
+  |> admitted
+;;
+
+let create_base (capacity : Config.Capacity.t) =
+  let open Result.Let_syntax in
+  let mib = 1024 * 1024 in
+  let%bind document = json ~bytes:mib ~depth:32 ~fields:8192 ~nodes:16384 in
+  let%bind receipt = json ~bytes:65536 ~depth:16 ~fields:1024 ~nodes:2048 in
+  let%bind commands =
+    Agent_store.Developer_command_limits.create
+      ~max_commands:1024
+      ~max_bytes:mib
+      ~max_terminal_bytes:65536
+    |> admitted
+  in
+  let%bind store =
+    Store.Limits.create
+      ~max_runs:capacity.max_runs
+      ~max_epochs_per_run:128
+      ~max_jobs_per_run:256
+      ~max_invocations_per_run:1024
+      ~max_inference_attempts_per_run:256
+      ~max_inference_bytes_per_run:65536
+      ~commands
+      ~max_selected_per_commit:32
+      ~max_job_payload_bytes:65536
+      ~max_document_bytes:mib
+      ~max_recovery_entries:((2 * capacity.max_runs) + 1)
+      ~max_recovery_bytes:(capacity.max_runs * mib)
+      ~max_work_steps:1_000_000
+      ~document
+    |> admitted
+  in
+  let%bind roots =
+    Developer_root_owner.Limits.create
+      ~max_active_runs:(Int.min capacity.max_runs capacity.max_active_commands)
+      ~max_staged_jobs:256
+      ~max_native_occupancy:capacity.max_native_bindings
+      ~max_active_workers:capacity.max_active_agent_calls
+      ~max_quarantined_workers:capacity.max_active_agent_calls
+      ~max_active_inference_attempts:64
+      ~max_admitted_call_bindings:capacity.max_native_bindings
+    |> admitted
+  in
+  let%bind disclosure =
+    Developer_result_disclosure.Limits.create ~max_result_bytes:65536 ~json:receipt
+  in
+  let%bind workspace_cleanup =
+    Agent_session.Workspace_cleanup.Limits.create
+      ~max_entries:256
+      ~max_bytes:mib
+      ~max_work_steps:1_000_000
+    |> admitted
+  in
+  let%bind host =
+    Dev.Limits.create
+      ~store
+      ~roots
+      ~max_active_commands:capacity.max_active_commands
+      ~disclosure
+      ~compilation:(Bounded Chatml_compilation.default_limits)
+      ~max_dependency_depth:32
+      ~execution:Chatml_execution.default_limits
+      ~max_output_bytes:65536
+      ~receipt
+      ~max_agent_sources:capacity.max_agent_sources
+      ~max_agent_source_work_steps:1_000_000
+      ~max_native_bindings:capacity.max_native_bindings
+      ~workspace_cleanup
+      ~max_agent_cache_entries:32
+  in
+  let%bind host =
+    Dev.Limits.with_max_active_agent_calls
+      host
+      ~max_active_calls:capacity.max_active_agent_calls
+  in
+  let%bind build =
+    Chatml_project_build.Limits.create
+      ~max_work_steps:1_000_000
+      ~max_input_bytes:(Some mib)
+      ~document
+    |> admitted
+  in
+  let%bind capture =
+    Authoring_context_service.Developer.Limits.create
+      ~max_prepared_input_bytes:Chatmd_source_bundle.default_limits.max_source_bytes
+      ~max_document_origin_bytes:65536
+      ~max_editor_versions:32
+      ~build
+    |> admitted
+  in
+  let%map publisher =
+    Agent_store.Developer_result_publisher.Limits.create
+      ~inline_bytes:1024
+      ~max_result_bytes:65536
+      ~max_pending:(Int.min capacity.max_active_agent_calls 64)
+  in
+  capture, host, publisher, receipt
+;;
+
+let repl_preset (capacity : Config.Capacity.t) =
+  let open Result.Let_syntax in
+  let retained = capacity.max_retained_tasks in
+  if retained > 1024
+  then Error (invalid ())
+  else (
+    let%bind sites =
+      Chatml.Chatml_syntax_sites.Limits.create ~max_sites:4096 ~max_name_bytes:16384
+      |> admitted
+    in
+    let%bind parse =
+      Chatml.Chatml_parse.Submission.Limits.create
+        ~max_source_bytes:capacity.max_repl_source_bytes
+        ~max_tokens:65536
+        ~max_work_steps:100_000
+        ~sites
+      |> admitted
+    in
+    let%bind display =
+      Chatml_typechecker.Type_snapshot.Limits.create
+        ~max_nodes:4096
+        ~max_edges:4096
+        ~max_label_bytes:16384
+      |> admitted
+    in
+    let%bind root_copy =
+      Chatml_typechecker.Repl_type_roots.Limits.create
+        ~max_bindings:128
+        ~max_type_roots:256
+        ~max_type_nodes:4096
+        ~max_variable_cells:1024
+        ~max_type_edges:4096
+        ~max_copy_work:100_000
+        ~max_copy_depth:128
+        ~max_name_work:100_000
+        ~max_name_bytes:16384
+      |> admitted
+    in
+    let%bind typing_limits =
+      Chatml_repl_typing.Limits.create
+        ~parse
+        ~display
+        ~max_display_name_bytes:4096
+        ~max_statements:16
+        ~root_copy
+      |> admitted
+    in
+    let%bind scope_limits =
+      Chatml_configured_lookup.Repl_scope.Limits.create
+        ~max_snippets:capacity.max_repl_submissions_per_epoch
+        ~max_identity_bytes:4096
+      |> admitted
+    in
+    let%bind root_limits =
+      Chatml_dependency_session.Roots.Limits.create
+        ~max_checked_modules:16
+        ~max_edges:64
+        ~max_dependency_depth:16
+      |> admitted
+    in
+    let%bind evaluator_limits =
+      Chatml_repl_execution.Limits.create
+        ~max_preview_bytes:4096
+        ~max_preview_nodes:1024
+        ~max_preview_depth:16
+        ~max_diagnostic_bytes:1024
+        ~max_retained_tasks:retained
+      |> admitted
+    in
+    let%bind type_display_limits =
+      Chatml_type_display.Limits.create
+        ~max_nodes:4096
+        ~max_edges:8192
+        ~max_depth:32
+        ~max_work_steps:131072
+        ~max_text_bytes:4096
+        ~max_output_bytes:repl_type_output_bytes
+      |> admitted
+    in
+    Dev.Repl.create
+      ~scope_limits
+      ~root_limits
+      ~typing_limits
+      ~evaluator_limits
+      ~execution_policy:(Bounded Chatml_execution.default_limits)
+      ~type_display_limits
+      ~max_instances:capacity.max_repl_instances
+      ~max_keys_per_instance:capacity.max_repl_keys_per_instance
+      ~max_submissions_per_epoch:capacity.max_repl_submissions_per_epoch
+      ~max_source_bytes:capacity.max_repl_source_bytes
+      ~max_receipt_bytes:repl_compact_receipt_bytes
+      ~max_total_receipt_bytes:(1024 * 1024)
+      ~max_total_type_detail_bytes:(1024 * 1024)
+      ~max_task_origins:retained
+      ~max_reference_page_bytes:(Int.max 4096 (retained * 512)))
+;;
+
+let bounded_product value factor extra =
+  if value <= 0 || factor <= 0 || extra < 0 || value > (Int.max_value - extra) / factor
+  then Error (invalid ())
+  else Ok ((value * factor) + extra)
+;;
+
+let repl_wire_preset (repl : Dev.Repl.t) ~task_receipt initialize =
+  let open Result.Let_syntax in
+  let owner = Developer_repl_epoch.Configuration.limits repl in
+  let source_bytes = Developer_repl_epoch.Limits.max_source_bytes owner in
+  let receipt_bytes = Developer_repl_epoch.Limits.max_receipt_bytes owner in
+  let page_items = Developer_repl_epoch.Limits.max_task_origins owner in
+  let reference_bytes = Developer_repl_epoch.Task_reference.max_encoded_bytes in
+  let%bind registry_entries =
+    Developer_repl_epoch.Limits.registry_required_entries owner
+  in
+  let%bind request_bytes = bounded_product source_bytes 6 1024 in
+  let%bind summary_bytes = bounded_product receipt_bytes 6 2048 in
+  let%bind reference_result_bytes = bounded_product page_items reference_bytes 0 in
+  let%bind summary_result_bytes =
+    bounded_product 1 summary_bytes reference_result_bytes
+  in
+  (* Inspect_type can return both an independently escaped binding name and
+     rendered type. Its wire ceiling is separate from the compact receipt. *)
+  let%bind inspect_result_bytes = bounded_product repl_type_output_bytes 12 2048 in
+  let%bind task_result_bytes = bounded_product 1 (D.Limits.max_bytes task_receipt) 2048 in
+  let result_bytes =
+    List.fold
+      [ summary_result_bytes; inspect_result_bytes; task_result_bytes ]
+      ~init:1
+      ~f:Int.max
+  in
+  let max_summaries = receipt_bytes / 64 in
+  let%bind reference_nodes = bounded_product page_items 2 64 in
+  let%bind summary_nodes = bounded_product max_summaries 32 reference_nodes in
+  let%bind summary_fields = bounded_product max_summaries 24 64 in
+  let%bind summary_fields = bounded_product 1 summary_fields page_items in
+  let%bind task_result_nodes = bounded_product 1 (D.Limits.max_nodes task_receipt) 32 in
+  let%bind task_result_fields = bounded_product 1 (D.Limits.max_fields task_receipt) 32 in
+  let result_nodes = Int.max summary_nodes task_result_nodes in
+  let result_fields = Int.max summary_fields task_result_fields in
+  let%bind page_items_with_cursor = bounded_product 1 page_items 1 in
+  let%bind page_bytes = bounded_product page_items_with_cursor reference_bytes 512 in
+  let%bind page_nodes = bounded_product 1 page_items 8 in
+  let%bind response_result_bytes = bounded_product 1 result_bytes 1024 in
+  let%bind response_page_bytes = bounded_product 1 page_bytes 1024 in
+  let%bind response_result_nodes = bounded_product 1 result_nodes 16 in
+  let%bind response_page_nodes = bounded_product 1 page_nodes 16 in
+  let%bind response_result_fields = bounded_product 1 result_fields 16 in
+  let%bind response_page_fields = bounded_product 1 8 16 in
+  let%bind request = json ~bytes:request_bytes ~depth:24 ~fields:2048 ~nodes:4096 in
+  let%bind result =
+    json
+      ~bytes:result_bytes
+      ~depth:(Int.max 6 (D.Limits.max_depth task_receipt + 3))
+      ~fields:result_fields
+      ~nodes:result_nodes
+  in
+  let%bind page = json ~bytes:page_bytes ~depth:8 ~fields:8 ~nodes:page_nodes in
+  let%bind response =
+    json
+      ~bytes:(Int.max response_result_bytes response_page_bytes)
+      ~depth:(Int.max (D.Limits.max_depth result + 2) 10)
+      ~fields:(Int.max response_result_fields response_page_fields)
+      ~nodes:(Int.max response_result_nodes response_page_nodes)
+  in
+  let%bind limits =
+    P.Developer_repl_wire.Limits.create
+      ~request
+      ~result
+      ~page
+      ~response
+      ~max_source_bytes:source_bytes
+      ~max_reference_bytes:reference_bytes
+      ~max_output_bytes:(Int.max receipt_bytes repl_type_output_bytes)
+      ~max_page_items:page_items
+      ~max_event_bytes:4096
+      ~max_registry_entries:registry_entries
+  in
+  if
+    Document_schema.Limits.max_bytes request
+    > initialize.P.Initialize.Limits.max_request_bytes
+  then Error (invalid ())
+  else Ok limits
+;;
+
+let portable_preset
+      (capacity : Config.Capacity.t)
+      initialize_limits
+      ~pending
+      ~stored_receipt
+  =
+  let open Result.Let_syntax in
+  let request_bytes =
+    Int.min initialize_limits.P.Initialize.Limits.max_request_bytes (1024 * 1024)
+  in
+  (* Mirrors the actual portable admission's conservative per-pending
+     display/framing reserve; excess configured capacity rejects before an
+     Endpoint or broker is constructed. *)
+  let%bind page_bytes = bounded_product pending ((6 * 256) + (12 * 1024)) 256 in
+  let%bind page_nodes = bounded_product pending 32 16 in
+  let%bind page_fields = bounded_product pending 24 8 in
+  let%bind response_page_bytes = bounded_product 1 page_bytes 512 in
+  let%bind response_page_nodes = bounded_product 1 page_nodes 8 in
+  let%bind response_page_fields = bounded_product 1 page_fields 8 in
+  let%bind receipt =
+    Developer_command_wire_receipt.required_limits ~stored:stored_receipt
+  in
+  let%bind response_receipt_bytes = bounded_product 1 (D.Limits.max_bytes receipt) 4096 in
+  let%bind response_receipt_nodes = bounded_product 1 (D.Limits.max_nodes receipt) 32 in
+  let%bind response_receipt_fields = bounded_product 1 (D.Limits.max_fields receipt) 32 in
+  let%bind response_receipt_depth = bounded_product 1 (D.Limits.max_depth receipt) 3 in
+  let%bind request = json ~bytes:request_bytes ~depth:24 ~fields:2048 ~nodes:4096 in
+  let%bind page = json ~bytes:page_bytes ~depth:8 ~fields:page_fields ~nodes:page_nodes in
+  let%bind response =
+    json
+      ~bytes:(Int.max response_receipt_bytes response_page_bytes)
+      ~depth:(Int.max response_receipt_depth 24)
+      ~fields:(Int.max response_receipt_fields response_page_fields)
+      ~nodes:(Int.max response_receipt_nodes response_page_nodes)
+  in
+  let%bind wire_limits =
+    P.Developer_common.Limits.create
+      ~request
+      ~receipt
+      ~response
+      ~approval_page:page
+      ~max_output_bytes:65536
+      ~max_fixture_steps:64
+      ~max_fixture_bytes:65536
+      ~max_approval_display_bytes:256
+      ~max_approval_decision_reason_bytes:256
+      ~max_approval_page:pending
+      ~max_event_bytes:4096
+  in
+  let%bind policy =
+    Dev.Portable.create
+      ~wire_limits
+      ~max_connections:128
+      ~max_watches_per_connection:capacity.max_watches_per_connection
+      ~max_pending_hints_per_connection:64
+  in
+  Ok policy
+;;
+
+(* Observational tracing has its own finite retention and output budgets. It
+   does not reserve an execution slot for every configured command: when the
+   table is full, execution proceeds without a recording. *)
+let trace_preset_mode mode =
+  let open Result.Let_syntax in
+  let%bind recorder =
+    Chatml_trace.Recorder.Limits.create
+      ~max_events:256
+      ~max_normal_bytes:65_536
+      ~max_terminal_bytes:1_024
+    |> admitted
+  in
+  let%map limits =
+    Dev.Traces.Limits.create
+      ~max_traces:16
+      ~max_retained_bytes:(2 * 1024 * 1024)
+      ~max_source_refs_per_trace:8
+      ~max_provenance_bytes_per_trace:4_096
+      ~max_expired_tombstones:16
+      ~max_age_seconds:60.
+      ~max_header_bytes:4_096
+      ~recorder
+  in
+  Some (Dev.Traces.create ~mode ~limits)
+;;
+
+let trace_preset = function
+  | Config.No_traces -> Ok None
+  | Trace_summary -> trace_preset_mode Chatml_trace.Recorder.Mode.Summary
+  | Trace_full -> trace_preset_mode Chatml_trace.Recorder.Mode.Full
+;;
+
+let trace_wire_preset () =
+  let open Result.Let_syntax in
+  let%bind request = json ~bytes:4_096 ~depth:12 ~fields:128 ~nodes:256 in
+  let%bind page = json ~bytes:80_000 ~depth:12 ~fields:256 ~nodes:256 in
+  let%bind response = json ~bytes:96_000 ~depth:16 ~fields:300 ~nodes:300 in
+  P.Developer_trace_wire.Limits.create
+    ~request
+    ~page
+    ~response
+    ~max_page_items:16
+    ~max_cursor_bytes:2_048
+;;
+
+let create
+      ~capacity
+      ~(approvals : Config.approvals)
+      ~(repl : Config.repl)
+      ~portable
+      ~traces
+      ~initialize_limits
+  =
+  let open Result.Let_syntax in
+  let%bind () = Config.Capacity.validate capacity in
+  let%bind capture, host, publisher, receipt = create_base capacity in
+  let%bind approvals =
+    match approvals with
+    | Config.Disabled -> Ok None
+    | Once ->
+      Developer_approval_owner.Limits.create
+        ~max_pending:capacity.max_pending_approvals
+        ~max_request_bytes:4096
+        ~max_display_bytes:256
+        ~max_decision_reason_bytes:256
+        ~wait_seconds:30.
+      |> Result.map ~f:Option.some
+  in
+  let%bind repl =
+    match repl with
+    | Config.Disabled -> Ok None
+    | Standard_v1 -> repl_preset capacity |> Result.map ~f:Option.some
+  in
+  let%bind traces = trace_preset traces in
+  let%bind portable =
+    if portable
+    then
+      portable_preset
+        capacity
+        initialize_limits
+        ~pending:(if Option.is_some approvals then capacity.max_pending_approvals else 1)
+        ~stored_receipt:receipt
+      |> Result.map ~f:Option.some
+    else Ok None
+  in
+  let%bind portable =
+    match portable, repl with
+    | Some policy, Some repl ->
+      let%bind wire = repl_wire_preset repl ~task_receipt:receipt initialize_limits in
+      Dev.Portable.with_repl_wire policy wire |> Result.map ~f:Option.some
+    | Some _, None | None, Some _ | None, None -> Ok portable
+  in
+  let%map portable =
+    match portable, traces with
+    | Some policy, Some _ ->
+      let%bind wire = trace_wire_preset () in
+      Dev.Portable.with_trace_wire policy wire |> Result.map ~f:Option.some
+    | Some _, None | None, Some _ | None, None -> Ok portable
+  in
+  { capture; host; publisher; approvals; repl; traces; portable }
+;;

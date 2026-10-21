@@ -12,6 +12,7 @@ type t =
   ; authority_fingerprint : string
   ; original_elements : CM.top_level_elements list
   ; execution_revisions : (Agent_protocol.Id.Capability.t * string) list option
+  ; tool_contract : Chatml_compilation.Tool_contract.t
   }
 
 let capabilities t = t.capabilities
@@ -22,6 +23,7 @@ let prepare
       ?startup
       ?(limits = Chatml_compilation.default_limits)
       ?(delegated_moderator = false)
+      ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
       ?programs
       ~env
       ~owner
@@ -206,7 +208,9 @@ let prepare
           , (List.map tools ~f:compact_tool : Spec.tool list)
           , (helps : Spec.authoring_help list)
           , (base_permissions : (string * string) list)
-          , (Chatml_compilation.contract Tool_v1 : Sexp.t)
+          , (Chatml_compilation.contract
+               (Chatml_compilation.Tool_contract.target tool_contract)
+             : Sexp.t)
           , (Chatml_compilation.contract
                (match delegated_moderator with
                 | false -> Moderator_v1
@@ -288,6 +292,7 @@ let prepare
             ~startup
             ~limits
             ~delegated_moderator
+            ~tool_contract
             ?programs
             ~env
             ~capabilities
@@ -308,6 +313,7 @@ let prepare
         ; authority_fingerprint
         ; original_elements = elements
         ; execution_revisions = None
+        ; tool_contract
         }))
     ()
 ;;
@@ -382,6 +388,7 @@ let rebind_code
       ~startup
       ~limits
       ~delegated_moderator
+      ~tool_contract:t.tool_contract
       ?programs
       ~env
       ~capabilities:t.capabilities
@@ -492,7 +499,15 @@ let delegate_standalone t ~selected =
   { registry = { t with capabilities; definition; tools }; selected; exposed_definition }
 ;;
 
-let delegated_invocation_dependencies delegation invocation =
+let delegated_dependencies
+      delegation
+      ~tool_name
+      ~origin
+      ~implementation_revision
+      ~capability_fingerprint
+      ~status
+      ~valid
+  =
   let module I = Agent_protocol.Invocation in
   let open Result.Let_syntax in
   let fail () =
@@ -503,19 +518,16 @@ let delegated_invocation_dependencies delegation invocation =
         }
   in
   let registry = delegation.registry in
-  let%bind binding = C.find registry.capabilities ~name:invocation.I.context.tool_name in
+  let%bind binding = C.find registry.capabilities ~name:tool_name in
   let%bind prepared = resolve registry binding in
   let reference = C.reference binding in
-  let context = invocation.context in
-  match invocation.status, (EC.declaration prepared).implementation with
-  | Dispatching, Standalone _ when Result.is_ok (I.validate invocation) ->
+  match status, (EC.declaration prepared).implementation with
+  | I.Dispatching, Standalone _ when valid ->
     let matches =
-      match context.origin with
-      | Model ->
-        String.equal context.implementation_revision (EC.fingerprint prepared)
-        && String.equal
-             context.capability_fingerprint
-             (C.fingerprint (EC.capabilities prepared))
+      match origin with
+      | I.Model ->
+        String.equal implementation_revision (EC.fingerprint prepared)
+        && String.equal capability_fingerprint (C.fingerprint (EC.capabilities prepared))
         && Result.is_ok
              (C.resolve
                 delegation.selected
@@ -525,7 +537,7 @@ let delegated_invocation_dependencies delegation invocation =
         Result.is_ok
           (execution_revision registry binding
            |> Result.bind ~f:(fun expected ->
-             if String.equal context.implementation_revision expected
+             if String.equal implementation_revision expected
              then Ok ()
              else
                Error
@@ -541,17 +553,62 @@ let delegated_invocation_dependencies delegation invocation =
   | _ -> fail ()
 ;;
 
+let delegated_invocation_dependencies delegation invocation =
+  let context = invocation.Agent_protocol.Invocation.context in
+  delegated_dependencies
+    delegation
+    ~tool_name:context.tool_name
+    ~origin:context.origin
+    ~implementation_revision:context.implementation_revision
+    ~capability_fingerprint:context.capability_fingerprint
+    ~status:invocation.status
+    ~valid:(Result.is_ok (Agent_protocol.Invocation.validate invocation))
+;;
+
+let delegated_owned_invocation_dependencies delegation invocation =
+  let module H = Agent_protocol.Host_invocation in
+  let context = H.context invocation in
+  delegated_dependencies
+    delegation
+    ~tool_name:context.tool_name
+    ~origin:context.origin
+    ~implementation_revision:context.implementation_revision
+    ~capability_fingerprint:context.capability_fingerprint
+    ~status:(H.status invocation)
+    ~valid:(Result.is_ok (H.validate invocation))
+;;
+
 type execution =
   { prepared : EC.t
   ; binding : C.binding
   ; invocation : Agent_protocol.Invocation.t
   }
 
+type owned_execution =
+  { owned_prepared : EC.t
+  ; owned_binding : C.binding
+  ; owned_invocation : Agent_protocol.Host_invocation.t
+  }
+
 let prepared execution = execution.prepared
 let binding execution = execution.binding
 let invocation execution = execution.invocation
+let owned_prepared execution = execution.owned_prepared
+let owned_binding execution = execution.owned_binding
+let owned_invocation execution = execution.owned_invocation
 
-let admit t ~current ~selected ~(reference : C.reference) ~invocation =
+let admit_context
+      t
+      ~current
+      ~selected
+      ~(reference : C.reference)
+      ~tool_name
+      ~implementation_revision
+      ~capability_fingerprint
+      ~status
+      ~function_call
+      ~valid
+  =
   let module I = Agent_protocol.Invocation in
   let open Result.Let_syntax in
   let%bind () = revalidate t ~current in
@@ -564,24 +621,65 @@ let admit t ~current ~selected ~(reference : C.reference) ~invocation =
     C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
   in
   let%bind prepared = resolve t binding in
-  let%bind implementation_revision = execution_revision t binding in
-  let context = invocation.I.context in
-  let function_call =
-    match invocation.routing with
-    | None | Some { kind = Function; _ } -> true
-    | Some { kind = Custom; _ } -> false
-  in
-  match invocation.status with
-  | Dispatching
+  let%bind expected_revision = execution_revision t binding in
+  match status with
+  | I.Dispatching
     when function_call
-         && String.equal context.tool_name reference.name
-         && String.equal context.implementation_revision implementation_revision
-         && String.equal context.capability_fingerprint (C.fingerprint selected)
-         && Result.is_ok (I.validate invocation) -> Ok { prepared; binding; invocation }
+         && String.equal tool_name reference.name
+         && String.equal implementation_revision expected_revision
+         && String.equal capability_fingerprint (C.fingerprint selected)
+         && valid -> Ok (prepared, binding)
   | _ ->
     Error
       C.
         { code = "capability.stale_context"
         ; message = "invocation does not match the selected managed capability"
         }
+;;
+
+let conversation_function_call invocation =
+  let module I = Agent_protocol.Invocation in
+  match invocation.I.routing with
+  | None | Some { kind = I.Function; _ } -> true
+  | Some { kind = I.Custom; _ } -> false
+;;
+
+let admit t ~current ~selected ~reference ~invocation =
+  let module I = Agent_protocol.Invocation in
+  let context = invocation.I.context in
+  admit_context
+    t
+    ~current
+    ~selected
+    ~reference
+    ~tool_name:context.tool_name
+    ~implementation_revision:context.implementation_revision
+    ~capability_fingerprint:context.capability_fingerprint
+    ~status:invocation.status
+    ~function_call:(conversation_function_call invocation)
+    ~valid:(Result.is_ok (I.validate invocation))
+  |> Result.map ~f:(fun (prepared, binding) -> { prepared; binding; invocation })
+;;
+
+let admit_owned t ~current ~selected ~reference ~invocation =
+  let module H = Agent_protocol.Host_invocation in
+  let context = H.context invocation in
+  let function_call =
+    match H.to_conversation invocation with
+    | Some conversation -> conversation_function_call conversation
+    | None -> true
+  in
+  admit_context
+    t
+    ~current
+    ~selected
+    ~reference
+    ~tool_name:context.tool_name
+    ~implementation_revision:context.implementation_revision
+    ~capability_fingerprint:context.capability_fingerprint
+    ~status:(H.status invocation)
+    ~function_call
+    ~valid:(Result.is_ok (H.validate invocation))
+  |> Result.map ~f:(fun (owned_prepared, owned_binding) ->
+    { owned_prepared; owned_binding; owned_invocation = invocation })
 ;;

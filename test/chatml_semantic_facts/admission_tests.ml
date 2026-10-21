@@ -63,6 +63,7 @@ let%test_unit "host module metadata admits limits before deep descent" =
         frame
         (Chatml_typechecker.Value_scope.of_schemes
            (Inferred.Env.singleton "Catalog" nested))
+        ~surface:(Chatml.Chatml_compiler_contract.static_surface contract)
         ~globals:[]
         ~modules:[ "Catalog", nested ]
         ~checkpoint)
