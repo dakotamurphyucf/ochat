@@ -88,9 +88,14 @@ val captured
     reused; no separate source walker or retry after a denied read. The
     Builder Capture reports actual authored root/dependency bytes; the outer
     bounded checkpoint counts selection, custody and publication work once.
-    Existing program/project source and compiler limits remain independent. *)
+    Existing program/project source and compiler limits remain independent.
+    Borrow the admitted Model request's [startup] through one lexical callback
+    view that preserves charged compile polls and exact current-capture checks.
+    The source view preserves its old independent accounting ceilings, shares
+    the request deadline, and never clears the parent's shared accounting. *)
 val file_selected_member
-  :  parent:Prompt_revision.t
+  :  startup:Chat_response.Startup_compilation.t
+  -> parent:Prompt_revision.t
   -> entry:Prompt_source_entry.t
   -> source_lease:Prompt_source_lease.t
   -> artifact_store:Agent_store.Prompt_artifact_store.t
@@ -118,9 +123,12 @@ val file_selected_member
     instead of changing to File after capture, and repeated selection preserves
     the verified retained publication identity. The returned byte count comes
     from the retained authored inventory; the outer charged checkpoint counts
-    replay/publication work once. *)
+    replay/publication work once. Borrow [startup] from this actual Model
+    request, composing charged replay checks in its original independent source
+    ledger without a fresh clock or loss of the original callback. The lexical view closes before returning. *)
 val captured_selected_member
-  :  parent:Prompt_revision.t
+  :  startup:Chat_response.Startup_compilation.t
+  -> parent:Prompt_revision.t
   -> member:Source.Portable_path.t
   -> artifact_store:Agent_store.Prompt_artifact_store.t
   -> policy:Runtime_script_preparation.t

@@ -534,8 +534,18 @@ is denied before network I/O; a document/image read permission does not grant it
 The selected member receives a distinct Model target, with its exact parent and
 expiring source port, rather than a fabricated parser Agent occurrence.
 
-The child restores its own retained programs under the configured script policy and
-borrowed startup budget. It cannot substitute its parent's programs. Saved, content
+The child restores its own retained programs under the configured script policy.
+Each decoded Model request gets one preparation deadline before member lookup,
+shared through source capture, installation, role restoration and resource setup.
+Time spent in an earlier provider response does not consume the new preparation
+allowance; the original parent runtime deadline and cancellation still apply.
+Restoration keeps the parent's aggregate exact-text and canonical-graph accounting.
+Source capture retains its independent compiler policy and accounting ceilings;
+its original source-local wall cap also applies under that same request deadline.
+All source work and capture checks compose without refreshing a phase allowance. Lexical loans
+expire when any owning preparation scope closes, and runtime activation remains
+outside the preparation timer. The child cannot substitute its parent's programs.
+Saved, content
 and Model descendants retain the same aggregate content budget: executable source
 acquisition and its observed byte/work debit run under one short gate, which closes
 before runtime initialization, provider work or nested execution. A proven denial

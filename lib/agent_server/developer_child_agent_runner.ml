@@ -295,7 +295,6 @@ let rec run_child
           ~budget
           ~target
           ~caller_revision
-          ~startup
           ~ctx
           ~input
           ~observer
@@ -500,7 +499,7 @@ let rec run_child
                 ~prepared
                 ~child
                 ~budget
-                ~startup
+                ~checkpoint
             in
             let selected =
               Model_executor.create_selected
@@ -549,7 +548,7 @@ and selected_model_source
       ~prepared
       ~child
       ~budget
-      ~startup
+      ~checkpoint
   =
   Model_executor.Selected_source.create ~with_selected:(fun request ~f ->
     if not (Model_request.is_local request)
@@ -562,8 +561,8 @@ and selected_model_source
           ~side:Content_source.Declaring
           ~reference:(Model_request.prompt request)
           ~mode:(Model_request.source_mode request)
-          ~checkpoint:(fun () -> Chat_response.Startup_compilation.checkpoint startup)
-          ~f:(fun target ->
+          ~checkpoint
+          ~f:(fun ~startup target ->
             let config =
               Chat_response.Config.of_elements
                 (Revision.elements (Model_target.revision target))
@@ -601,7 +600,6 @@ and selected_model_source
                            ~budget
                            ~target:(Content_target.Model target)
                            ~caller_revision:(Model_target.caller_revision target)
-                           ~startup
                            ~ctx
                            ~input
                            ~observer:None
@@ -664,7 +662,6 @@ let run_selected
           ~budget
           ~target:(Content_target.Saved target)
           ~caller_revision:(Saved.Target.caller_revision target)
-          ~startup
           ~ctx
           ~input
           ~observer
@@ -741,7 +738,6 @@ let create_content
                    ~budget:parent.budget
                    ~target:(Content_target.Content target)
                    ~caller_revision:(Content_target.caller_revision target)
-                   ~startup
                    ~ctx
                    ~input
                    ~observer:None
@@ -857,7 +853,6 @@ let create_tool ~live ~root ~native ~runtime_policy ~authorize_for_runtime ~prep
               ~budget:parent.budget
               ~target:(Content_target.Tool target)
               ~caller_revision:(Tool_target.caller_revision target)
-              ~startup
               ~ctx
               ~input
               ~observer

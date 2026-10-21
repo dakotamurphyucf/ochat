@@ -708,9 +708,15 @@ module Source_binding : sig
       through to the other mode. This operation does not mint a Content target
       or new native scope; [Content_ports.with_selected_model_target] brackets
       that separate selected-parent proof. [on_acquire] belongs to the ONE
-      shared upper budget and fires before possible File I/O. *)
+      shared upper budget and fires before possible File I/O. [startup] is the
+      already admitted Model request's preparation context, never the parent's
+      aged invocation. Source acquisition adds its charged capture checks in a
+      lexical source-accounting view with the original independent source ledger
+      and this exact request deadline;
+      it neither starts another clock nor drops a source callback on borrowing. *)
   val select_model_member
     :  t
+    -> startup:Chat_response.Startup_compilation.t
     -> source:Content_source.t
     -> member:Content_source.Selected_member.t
     -> script_preparation:Runtime_script_preparation.t

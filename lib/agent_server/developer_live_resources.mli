@@ -347,7 +347,15 @@ module Child_prepared : sig
     -> (string, P.Error.t) result
 
   (** Admit a local Model member under this exact active child and ONE shared
-      child Budget. The explicit File/Captured choice is fixed before source
+      child Budget. Start one new compilation invocation before lookup using
+      this preparation's physically retained accounting ledger and unchanged
+      compiler policy. Lend its SAME [startup] through source acquisition,
+      installation, role restoration and child resource setup; runtime activation
+      never consumes this preparation deadline. Source work/capture callbacks
+      compose in one lexical source-accounting view with the existing independent
+      source ceilings. Parent restoration/resource quotas remain shared and are
+      never reset; source preparation shares the request clock.
+      The explicit File/Captured choice is fixed before source
       acquisition; File uses the original retained lease and Captured the
       immutable selected inventory, with no fallback. The Budget's short gate
       covers bounded source acquisition and actual lower byte/work debit only.
@@ -364,7 +372,8 @@ module Child_prepared : sig
     -> mode:Agent_protocol.Model_spawn_request.Source_mode.t
     -> checkpoint:(unit -> unit)
     -> f:
-         (Agent_session.Captured_agent_runner.Selected_model_target.t
+         (startup:Chat_response.Startup_compilation.t
+          -> Agent_session.Captured_agent_runner.Selected_model_target.t
           -> ('a, P.Error.t) result)
     -> ('a, P.Error.t) result
 
@@ -471,7 +480,8 @@ val with_selected_tool_child
 (** Prepare a Model-selected member beneath the exact active Saved, Content,
     Model or Tool child. The target was minted from a bounded selected source member,
     installed/replayed child revision and actual parent Port. Restore that
-    immutable revision under the SAME borrowed [startup], live script policy
+    immutable revision under the SAME per-Model-request [startup] lent by
+    [Child_prepared.with_selected_model_member], live script policy
     and tool contract; only that restoration lends the child's compilation
     limits and programs to [with_child]. The caller cannot substitute its
     parent's programs or re-read an ambient path. [with_child] repeats

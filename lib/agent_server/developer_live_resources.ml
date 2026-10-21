@@ -14,6 +14,7 @@ module Saved = Agent_session.Captured_agent_runner.Claimed_developer.Selected
 module Target = Saved.Target
 module Content_target = Agent_session.Captured_agent_runner.Selected_content_target
 module Model_target = Agent_session.Captured_agent_runner.Selected_model_target
+module Startup = Chat_response.Startup_compilation
 module Source_binding = Agent_session.Captured_agent_runner.Source_binding
 module Tool_target = Agent_session.Captured_agent_runner.Selected_tool_target
 
@@ -1052,6 +1053,8 @@ type child_prepared =
   ; entry_borrowed : Agent_session.Native_tool_invocation.selected_borrowed
   ; agent_depth : Agent_session.Selected_agent_depth.Active.t
   ; content_ports : Source_binding.Content_ports.t
+  ; startup_ledger : Startup.Ledger.t
+  ; compilation_limits : Chatml_compilation.limits
   ; revision : Revision.t
   ; switch : Eio.Switch.t
   ; active : bool ref
@@ -1311,55 +1314,75 @@ module Child_prepared = struct
       |> Result.of_option ~error:(invalid "selected Model has no original source binding")
     in
     let%bind source = content_source t in
-    let%bind member =
-      Source_binding.Content_source.select_local_member
-        source
-        ~side
-        ~reference
-        ~mode
-        ~checkpoint
+    let map_error (error : Chatml_compilation.error) =
+      P.Error.create
+        Prompt_unavailable
+        ~message:(error.code ^ ": " ^ error.message)
+        ~retryable:false
+        ()
     in
-    let%bind script_preparation =
-      t.live.host.script_preparation
-      |> Result.of_option
-           ~error:(invalid "selected Model script preparation is unavailable")
-    in
-    let%bind selected =
-      Developer_child_content_projection.Budget.with_executable_source_read
-        budget
-        ~f:(fun ~max_input_bytes ~max_work_steps ~on_acquire ->
-          let open Result.Let_syntax in
-          let%bind admission = refresh t in
-          let%bind () = Admission.check_now admission in
-          let%bind selected =
-            Source_binding.select_model_member
-              binding
-              ~source
-              ~member
-              ~script_preparation
-              ~env:t.live.host.env
-              ~max_input_bytes
-              ~max_work_steps
-              ~checkpoint
-              ~on_acquire
-          in
-          let%bind after = refresh t in
-          let%bind () = Admission.check_now after in
-          let%bind cost =
-            Developer_child_content_projection.Budget.Executable_cost.create
-              ~input_bytes:(Source_binding.Selected_model_source.input_bytes selected)
-              ~work_steps:(Source_binding.Selected_model_source.work_steps selected)
-            |> Result.map_error ~f:(fun _ ->
-              invalid "selected Model source reported invalid cost")
-          in
-          Ok (selected, cost))
-    in
-    Source_binding.Content_ports.with_selected_model_target
-      t.content_ports
-      ~source
-      ~member
-      ~selected
-      ~f
+    Startup.with_invocation
+      t.startup_ledger
+      ~limits:t.compilation_limits
+      ~checkpoint
+      ~map_error
+      ~f:(fun startup ->
+        let%bind member, selected =
+          Startup.within startup ~map_error ~f:(fun () ->
+            let%bind member =
+              Source_binding.Content_source.select_local_member
+                source
+                ~side
+                ~reference
+                ~mode
+                ~checkpoint:(fun () -> Startup.checkpoint startup)
+            in
+            let%bind script_preparation =
+              t.live.host.script_preparation
+              |> Result.of_option
+                   ~error:(invalid "selected Model script preparation is unavailable")
+            in
+            let%bind selected =
+              Developer_child_content_projection.Budget.with_executable_source_read
+                budget
+                ~f:(fun ~max_input_bytes ~max_work_steps ~on_acquire ->
+                  let open Result.Let_syntax in
+                  let%bind admission = refresh t in
+                  let%bind () = Admission.check_now admission in
+                  let%bind selected =
+                    Source_binding.select_model_member
+                      binding
+                      ~startup
+                      ~source
+                      ~member
+                      ~script_preparation
+                      ~env:t.live.host.env
+                      ~max_input_bytes
+                      ~max_work_steps
+                      ~checkpoint
+                      ~on_acquire
+                  in
+                  let%bind after = refresh t in
+                  let%bind () = Admission.check_now after in
+                  let%bind cost =
+                    Developer_child_content_projection.Budget.Executable_cost.create
+                      ~input_bytes:
+                        (Source_binding.Selected_model_source.input_bytes selected)
+                      ~work_steps:
+                        (Source_binding.Selected_model_source.work_steps selected)
+                    |> Result.map_error ~f:(fun _ ->
+                      invalid "selected Model source reported invalid cost")
+                  in
+                  Ok (selected, cost))
+            in
+            Ok (member, selected))
+        in
+        Source_binding.Content_ports.with_selected_model_target
+          t.content_ports
+          ~source
+          ~member
+          ~selected
+          ~f:(f ~startup))
   ;;
 end
 
@@ -1593,6 +1616,11 @@ let with_child
         let%bind entry_borrowed =
           Agent_session.Native_tool_invocation.borrow_selected ()
         in
+        let%bind startup_ledger =
+          Startup.ledger startup
+          |> Result.map_error ~f:(fun _ ->
+            invalid "child compilation accounting is unavailable")
+        in
         let active = ref true in
         let prepared =
           { live
@@ -1602,6 +1630,8 @@ let with_child
           ; entry_borrowed
           ; agent_depth
           ; content_ports
+          ; startup_ledger
+          ; compilation_limits
           ; revision
           ; switch = sw
           ; active

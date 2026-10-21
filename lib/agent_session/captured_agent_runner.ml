@@ -2322,6 +2322,7 @@ module Source_binding = struct
 
   let select_model_member
         t
+        ~startup
         ~source
         ~member
         ~script_preparation
@@ -2374,6 +2375,7 @@ module Source_binding = struct
               |> P.Timestamp.of_time_ns
             in
             Prompt_child_source.file_selected_member
+              ~startup
               ~parent
               ~entry
               ~source_lease:t.source_lease
@@ -2398,6 +2400,7 @@ module Source_binding = struct
               ~on_acquire
           | Captured ->
             Prompt_child_source.captured_selected_member
+              ~startup
               ~parent
               ~member:selected_member
               ~artifact_store:t.artifact_store

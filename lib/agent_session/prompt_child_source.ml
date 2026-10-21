@@ -103,6 +103,7 @@ let restore ~artifact_store ~definition ~content_limits reference ~checkpoint =
 ;;
 
 let file_with_selection
+      ~startup
       ~parent
       ~source_lease
       ~artifact_store
@@ -146,93 +147,105 @@ let file_with_selection
         | Error error -> raise (Abort.Source error));
       Eio.Fiber.check ()
     in
+    let with_startup ~f =
+      match startup with
+      | None ->
+        Startup.with_context
+          ~limits:compilation
+          ~env
+          ~checkpoint:charge_and_check
+          ~map_error:compilation_error
+          ~f
+          ()
+      | Some startup ->
+        Startup.with_source_accounting
+          startup
+          ~limits:compilation
+          ~checkpoint:charge_and_check
+          ~map_error:compilation_error
+          ~f
+          ()
+    in
     try
-      Startup.with_context
-        ~limits:compilation
-        ~env
-        ~checkpoint:charge_and_check
-        ~map_error:compilation_error
-        ~f:(fun startup ->
-          (* Every borrower of this SAME Startup calls the charged callback,
-             including compilation polls inside the supplied host preparation. *)
-          let poll () = Startup.checkpoint startup in
-          Startup.within startup ~map_error:compilation_error ~f:(fun () ->
-            let open Result.Let_syntax in
-            poll ();
-            let%bind entry =
-              select_entry ~remaining:(max_work_steps - !used) ~checkpoint:poll
-              |> Result.map_error ~f:(fun error ->
-                unavailable (Error.to_string_hum error))
-            in
-            let%bind result =
-              Prompt_source_lease.with_scope source_lease ~f:(fun scope ->
-                let%map capture =
-                  capture_selected
-                    scope
-                    entry
-                    ~env
-                    ~preprocess
-                    ~limits:parser_limits
-                    ~checkpoint:poll
-                in
-                current_capture := Some (scope, capture);
-                Fun.protect
-                  ~finally:(fun () -> current_capture := None)
-                  (fun () ->
-                     let value = Owner.Capture.value capture in
-                     let input_bytes = Builder.Capture.source_bytes value in
-                     let same_capture supplied =
-                       if not (phys_equal supplied value)
-                       then invalid_arg "Prompt_child_source: foreign Builder capture"
-                     in
-                     let prepare_programs supplied =
+      with_startup ~f:(fun startup ->
+        (* Every borrower of this SAME Startup calls the charged callback,
+           including compilation polls inside the supplied host preparation. *)
+        let poll () = Startup.checkpoint startup in
+        Startup.within startup ~map_error:compilation_error ~f:(fun () ->
+          let open Result.Let_syntax in
+          poll ();
+          let%bind entry =
+            select_entry ~remaining:(max_work_steps - !used) ~checkpoint:poll
+            |> Result.map_error ~f:(fun error -> unavailable (Error.to_string_hum error))
+          in
+          let%bind result =
+            Prompt_source_lease.with_scope source_lease ~f:(fun scope ->
+              let%map capture =
+                capture_selected
+                  scope
+                  entry
+                  ~env
+                  ~preprocess
+                  ~limits:parser_limits
+                  ~checkpoint:poll
+              in
+              current_capture := Some (scope, capture);
+              Fun.protect
+                ~finally:(fun () -> current_capture := None)
+                (fun () ->
+                   let value = Owner.Capture.value capture in
+                   let input_bytes = Builder.Capture.source_bytes value in
+                   let same_capture supplied =
+                     if not (phys_equal supplied value)
+                     then invalid_arg "Prompt_child_source: foreign Builder capture"
+                   in
+                   let prepare_programs supplied =
+                     same_capture supplied;
+                     poll ();
+                     prepare_programs startup ~tool_contract scope capture
+                   in
+                   let prepare_content =
+                     Option.map content_limits ~f:(fun limits supplied ->
                        same_capture supplied;
                        poll ();
-                       prepare_programs startup ~tool_contract scope capture
-                     in
-                     let prepare_content =
-                       Option.map content_limits ~f:(fun limits supplied ->
-                         same_capture supplied;
-                         poll ();
-                         Owner.Scope.capture_documents
-                           scope
-                           ~capture
-                           ~limits
-                           ~checkpoint:poll
-                         |> Result.map_error ~f:(fun error ->
-                           match Owner.Error.capture_diagnostics error with
-                           | Some diagnostics -> diagnostics
-                           | None ->
-                             [ Builder.Diagnostic.
-                                 { code = "prompt.child_content"
-                                 ; message =
-                                     Sexp.to_string_hum (Owner.Error.sexp_of_t error)
-                                 ; source =
-                                     Some
-                                       (Source.Portable_path.to_string
-                                          (Prompt_source_entry.member entry))
-                                 }
-                             ]))
-                     in
-                     Builder.build_captured_entry
-                       ~checkpoint:poll
-                       ~prepare_programs
-                       ?prepare_content
-                       ~entry
-                       ~capture:value
-                       ~artifact_store
-                       ~transaction_id:(P.Id.Transaction.create ())
-                       ~created_at
-                       ()
-                     |> Result.map_error ~f:diagnostics
-                     |> Result.map ~f:(fun revision -> revision, input_bytes)))
-              |> Result.map_error ~f:owner_error
-            in
-            let%bind revision, input_bytes = result in
-            poll ();
-            let%map source = admit revision ~checkpoint:poll in
-            source, input_bytes, !used))
-        ()
+                       Owner.Scope.capture_documents
+                         scope
+                         ~capture
+                         ~limits
+                         ~checkpoint:poll
+                       |> Result.map_error ~f:(fun error ->
+                         match Owner.Error.capture_diagnostics error with
+                         | Some diagnostics -> diagnostics
+                         | None ->
+                           [ Builder.Diagnostic.
+                               { code = "prompt.child_content"
+                               ; message =
+                                   Sexp.to_string_hum (Owner.Error.sexp_of_t error)
+                               ; source =
+                                   Some
+                                     (Source.Portable_path.to_string
+                                        (Prompt_source_entry.member entry))
+                               }
+                           ]))
+                   in
+                   Builder.build_captured_entry
+                     ~checkpoint:poll
+                     ~prepare_programs
+                     ?prepare_content
+                     ~entry
+                     ~capture:value
+                     ~artifact_store
+                     ~transaction_id:(P.Id.Transaction.create ())
+                     ~created_at
+                     ()
+                   |> Result.map_error ~f:diagnostics
+                   |> Result.map ~f:(fun revision -> revision, input_bytes)))
+            |> Result.map_error ~f:owner_error
+          in
+          let%bind revision, input_bytes = result in
+          poll ();
+          let%map source = admit revision ~checkpoint:poll in
+          source, input_bytes, !used))
     with
     | Abort.Source error -> Error (owner_error error)
     | Abort.Limit ->
@@ -261,6 +274,7 @@ let file
       ~checkpoint
   =
   file_with_selection
+    ~startup:None
     ~parent
     ~source_lease
     ~artifact_store
@@ -286,6 +300,7 @@ let file
 ;;
 
 let file_selected_member
+      ~startup
       ~parent
       ~entry
       ~source_lease
@@ -307,6 +322,7 @@ let file_selected_member
   then Error (unavailable "Selected Model entry has a foreign parent")
   else
     file_with_selection
+      ~startup:(Some startup)
       ~parent
       ~source_lease
       ~artifact_store
@@ -388,6 +404,7 @@ let captured
 ;;
 
 let captured_selected_member
+      ~startup
       ~parent
       ~member
       ~artifact_store
@@ -421,42 +438,50 @@ let captured_selected_member
       checkpoint ()
     in
     try
-      Runtime_script_preparation.with_captured_selected_member
-        policy
-        ~tool_contract
-        parent
-        ~member
-        ~invocation
-        ~content_limits
-        ~max_input_bytes
-        ~max_work_steps
-        ~env
+      Startup.with_source_accounting
+        startup
+        ~limits:(Runtime_script_preparation.compilation policy)
         ~checkpoint:poll
-        ~on_acquire
-        ~f:(fun startup ~revision ~compilation_limits:_ ~programs:_ ~input_bytes ->
-          let poll () = Startup.checkpoint startup in
-          let open Result.Let_syntax in
-          poll ();
-          let artifact = Prompt_revision.artifact revision in
-          let%bind retained =
-            Store.install_or_reuse
-              artifact_store
-              ~transaction_id:(P.Id.Transaction.create ())
-              artifact
-              ~checkpoint:poll
-            |> Result.map_error ~f:store_error
-          in
-          poll ();
-          let%bind reference = reference_of_artifact retained ~checkpoint:poll in
-          let%map source =
-            restore
-              ~artifact_store
-              ~definition:(Prompt_revision.definition parent)
-              ~content_limits
-              reference
-              ~checkpoint:poll
-          in
-          source, input_bytes)
+        ~map_error:compilation_error
+        ~f:(fun startup ->
+          Runtime_script_preparation.with_captured_selected_member
+            policy
+            ~startup
+            ~tool_contract
+            parent
+            ~member
+            ~invocation
+            ~content_limits
+            ~max_input_bytes
+            ~max_work_steps
+            ~env
+            ~checkpoint:poll
+            ~on_acquire
+            ~f:(fun startup ~revision ~compilation_limits:_ ~programs:_ ~input_bytes ->
+              let poll () = Startup.checkpoint startup in
+              let open Result.Let_syntax in
+              poll ();
+              let artifact = Prompt_revision.artifact revision in
+              let%bind retained =
+                Store.install_or_reuse
+                  artifact_store
+                  ~transaction_id:(P.Id.Transaction.create ())
+                  artifact
+                  ~checkpoint:poll
+                |> Result.map_error ~f:store_error
+              in
+              poll ();
+              let%bind reference = reference_of_artifact retained ~checkpoint:poll in
+              let%map source =
+                restore
+                  ~artifact_store
+                  ~definition:(Prompt_revision.definition parent)
+                  ~content_limits
+                  reference
+                  ~checkpoint:poll
+              in
+              source, input_bytes))
+        ()
       |> Result.map ~f:(fun (selected_child, selected_bytes) ->
         Model_selection.
           { source = selected_child; input_bytes = selected_bytes; work_steps = !used })

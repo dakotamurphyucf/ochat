@@ -1498,6 +1498,15 @@ let on_event : context -> state -> event -> state task =
                    , (P.Developer_job.state (job ~run:model_run_id model_job)
                       : P.Developer_job.State.t)
                    , (!requests - requests_before_model : int)]);
+              (* The content child and first File Model call have completed.
+                 Advance runtime while the prepared parent awaits its provider;
+                 the next Captured Model call must get its own compilation
+                 deadline while retaining aggregate preparation accounting. *)
+              [%test_eq: int] (!requests - requests_before_model) 3;
+              let before = Eio.Time.Mono.now mono_clock in
+              Runtime_elapsed_clock.advance elapsed_clock ~seconds:6.;
+              let elapsed = Mtime.span before (Eio.Time.Mono.now mono_clock) in
+              assert (Float.(Mtime.Span.to_float_ns elapsed >= 6e9));
               Eio.Path.unlink Eio.Path.(Eio.Stdenv.fs env / model_grand);
               selected_parent_released := true;
               Eio.Promise.resolve release_selected_parent_u ();

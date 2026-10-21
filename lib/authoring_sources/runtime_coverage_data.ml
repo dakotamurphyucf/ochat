@@ -748,7 +748,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_background_job_runner.ml"
     , "9450ea610c424f91480b70ca733226137fa0b18325f07bf789da3e582e8d1876" )
   ; ( "lib/agent_server/developer_child_agent_runner.ml"
-    , "379e6ee1a98e25875c780023d5acf5b6062589ec1c3eb717b3ff60ca4dbb7204" )
+    , "09bb4a77257188b362bcf474d367e17bf44fc786e0761cd894c2cb5c72158573" )
   ; ( "lib/agent_server/developer_child_content_projection.ml"
     , "17dbb6bc0891ad5bb5c3879a2b1e946c05a01d13db32a15d220faa531cb82ba8" )
   ; ( "lib/agent_server/developer_child_selection.ml"
@@ -758,7 +758,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_agent_source_runtime.ml"
     , "9a4e50dd8f52dee6f5b9171f416d01078f79c257e563e66d1ad1623493b6f7e3" )
   ; ( "lib/agent_server/developer_live_resources.ml"
-    , "7dcdb1c031b7fb173a5e55ea7590645725b3904550d6aac056599b580a9b6315" )
+    , "cb88d63f805aaff22b8c4aec2310b66ef8c85ecce3d2017309f35de1d42584b6" )
   ; ( "lib/agent_server/developer_managed_tool_executor.ml"
     , "e7931b4f548e321069c442029d71c6cca47db54af468d7d30957ae6cdbd4a909" )
   ; ( "lib/agent_server/developer_native_executor.ml"
@@ -776,7 +776,7 @@ let implementation_sources =
   ; ( "lib/agent_session/background_execution.ml"
     , "2149c979ce81c6c851c8d8cbe749c622334f3c43d05b72b17ae89873e5d563c3" )
   ; ( "lib/agent_session/captured_agent_runner.ml"
-    , "de47f87c561f5470e4a5c9fd49632228f91d3e005d138f2c6c71a1e0eee4b0c4" )
+    , "a85950beba627accb5793b7de60a874428b6e1d15a3aae32916e2fa403e22b50" )
   ; ( "lib/agent_session/selected_agent_depth.ml"
     , "a5c52ff1391956f08af2cdb1651db530ab66abea394d7a7599885bcfc778c412" )
   ; ( "lib/agent_session/developer_child_preflight.ml"
@@ -872,7 +872,7 @@ let implementation_sources =
   ; ( "lib/chatml_sources/chatml_diagnostic.ml"
     , "cd4f59d52868eff58a8eaabd2cc8222d8c65f677066b3d8ab16c7b5c7a81fde5" )
   ; ( "lib/chat_response/startup_compilation.ml"
-    , "0f60a1f036408809e5618f3310fbc2213e9f7fe99788fb785951bd31c7b96bb1" )
+    , "a78731095144187a36d482b808ac48c62cfdbb226715ff0ce9858e911ff33534" )
   ; ( "lib/agent_session/runtime_script_preparation.ml"
     , "27d9b620bf6cfa39a7aa42ca700b4095125bf596bd63b06de79f4f161c8edba4" )
   ; ( "lib/chat_response/script_contract_plan.ml"
