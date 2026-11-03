@@ -3,8 +3,10 @@
 Status: accepted engineering design with a pure timing foundation. The
 `ochat.recurrence_rules` library implements validated timing rules, finite zone
 models, clock arithmetic and resumable cursors. Durable recurrence definitions,
-execution admission, target dispatch, timezone loading and user controls remain
-integration work. Passing the pure timing suite does not qualify those features.
+execution admission, target dispatch and user controls remain integration work.
+The retained-root timezone loader supplies bounded acquisition; host root policy
+and schedule integration remain explicit owners. Passing the pure timing suite
+does not qualify those features.
 
 A recurrence belongs to a durable controller session. Finishing an occurrence or
 disconnecting a client leaves future occurrences enabled. Explicitly stopping the
@@ -175,13 +177,31 @@ name. The library retains bounded parsed data, performs no IO and grants no
 execution authority. Its fixture suite uses committed bytes generated from
 pinned IANA source/reference tooling and independent calendar/offset oracles.
 
-The Eio host loader remains integration work. It must reuse the qualified
-`Chatml_local_source` retained-root/componentwise no-follow reader rather than
-relying on `Eio.Path` confinement flags: some supported backend fallbacks can
-follow symlinks. The initial policy requires canonical regular files and rejects
-all symlink aliases, including internal ones. Acquisition must preserve exact
-byte bounds, cancellation and resource ownership. Pure decoder validation does
-not qualify that host boundary.
+`Agent_session.Recurrence_zone_loader.load` supplies the Eio acquisition boundary.
+It borrows an already-open, explicitly admitted closeable directory with an empty
+Eio path; the caller keeps that root alive. Name, source label and ordered finite
+coverage are validated before acquisition or checkpoints. It reads once using
+the decoder's shared byte cap through `Chatml_local_source.with_root` and `read`,
+then closes its joined native duplicate before pure decoding. The caller's
+original root remains usable, and a returned zone contains no native resource.
+The final checkpoint and cancellation check precede result publication.
+
+The reader opens every directory component and final file with no-follow checks
+and verifies a regular file before reading. The loader requires canonical files:
+it rejects all symlink aliases, including aliases whose targets lie inside the
+root. Deploy canonical copies of the selected zone files beneath an admitted root;
+there is no alias resolver or fallback to another path. This boundary does not
+rely on `Eio.Path` confinement flags, because some supported backend fallbacks can
+follow symlinks. Original finite filesystem operation/code errors are retained,
+while decoding and coverage errors remain distinct. Cancellation/checkpoint
+failures return no partial zone and preserve resource ownership.
+
+The reader observes file identity/revision changes around the exact bounded read;
+it does not promise an atomic snapshot against metadata-preserving concurrent
+rewrites. An explicit later load can select new bytes and provenance. An earlier
+returned immutable zone and already materialized deadlines retain their selected
+values. Actor scheduling, root admission policy and refresh selection remain
+integration responsibilities; the loader creates no schedule, cache or registry.
 
 Persist selected UTC time, nominal label, fold/adjustment and admitted zone
 provenance with a materialized occurrence. Updated data may affect future

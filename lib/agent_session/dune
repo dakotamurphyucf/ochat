@@ -8,6 +8,7 @@
   workspace_resolver
   workspace_ownership
   runtime_paths
+  recurrence_zone_loader
   workspace_lease
   workspace_cleanup
   prompt_definition
@@ -232,6 +233,9 @@
   ochat.chatmd_content_capture
   ochat.chatmd_prompt_content
   ochat.chatml_local_source
+  ochat.source
+  ochat.recurrence_rules
+  ochat.recurrence_zone_data
   ochat.chatml_source
   ochat.chatml_project_prepare
   ochat.chatml_local_roots
