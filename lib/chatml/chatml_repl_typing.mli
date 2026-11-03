@@ -11,6 +11,7 @@ module Contract = Chatml.Chatml_compiler_contract
 module Public = Chatml_typechecker.Configured_resolution.Public_module
 module Root_copy = Chatml_typechecker.Repl_type_roots
 module Snapshot = Chatml_typechecker.Type_snapshot
+module Completion = Chatml_repl_completion
 
 module Limits : sig
   type t
@@ -50,6 +51,7 @@ module Error : sig
     | Busy_executing
     | Conflicting_finalization
     | Accounting_overflow
+    | Invalid_completion
   [@@deriving sexp_of]
 end
 
@@ -74,6 +76,22 @@ type typing_owner = t
 val prepared : t -> Prepared.t
 
 val contract : t -> Contract.t
+
+(** Read-only current committed environment, including contract builtins and
+    shadowing. No source admission, checker invocation, generalization, runtime
+    initializer, snippet allocation or generation advance. Qualified configured
+    members require an already committed checked public module; otherwise the
+    result explicitly reports Unavailable. Names never certify draft validity.
+    At most 16 path components and results, each name/prefix at most 128 ASCII
+    bytes; work and frozen graph limits are documented by Completion.query. *)
+val complete
+  :  t
+  -> path:string list
+  -> prefix:string
+  -> limit:int
+  -> max_bytes:int
+  -> checkpoint:(unit -> unit)
+  -> (Completion.t, Error.t) result
 
 val create
   :  prepared:Prepared.t

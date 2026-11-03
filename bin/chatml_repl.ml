@@ -144,180 +144,234 @@ let run
              "chatml-repl requires terminal stdin and stdout; redirected input/output is \
               unsupported")
     in
-    let%bind target =
-      target
-        ~local
-        ~connect
-        ~stdio_executable
-        ~developer_policy
-        ~prompt_file
-        ~workspace
-        ~data_root
-        ~transient
-        ~bearer_token_file
-        ~expected_server
+    let standalone =
+      (not local)
+      && Option.is_none connect
+      && List.for_all
+           [ developer_policy
+           ; prompt_file
+           ; workspace
+           ; data_root
+           ; bearer_token_file
+           ; expected_server
+           ; source
+           ; project
+           ; entry
+           ; environment
+           ; prompt_definition
+           ; workspace_definition
+           ]
+           ~f:Option.is_none
+      && root_index = 0
+      && List.is_empty dependency_root_indices
     in
-    T.Client_adapter.with_connection
-      ~env
-      ~target
-      ~notification_capacity:256
-      ~f:(fun session ->
-        let client = T.Client_adapter.client session in
-        let limits =
-          Agent_client.Developer_repl_connection.capabilities client
-          |> W.Capabilities.limits
-        in
-        let%bind route =
-          route
-            ~limits
-            ~root_index
-            ~dependency_root_indices
-            ~source
-            ~project
-            ~entry
-            ~environment
-        in
-        let%bind prompt_definition, workspace_definition =
-          match local, prompt_definition, workspace_definition with
-          | true, None, None -> Ok ("embedded.prompt", "embedded.workspace")
-          | _, Some prompt, Some workspace -> Ok (prompt, workspace)
-          | _ ->
-            Error
-              (P.Error.invalid_request
-                 "remote REPL requires --prompt-definition and --workspace-definition")
-        in
-        let%bind key =
-          P.Id.Attachment.create ()
-          |> P.Id.Attachment.to_string
-          |> P.Idempotency_key.of_string
-        in
-        let%bind create =
-          W.Create.create
-            ~limits
-            ~run_id:(P.Id.Developer_run.create ())
-            ~key
-            ~route
-            ~target:D.Target.One_off_v1
-            ~prompt:(Agent_server.Catalog_identity.prompt_definition prompt_definition)
-            ~workspace:
-              (Agent_server.Catalog_identity.workspace_definition workspace_definition)
-            ~requested_execution:None
-            ~requested_max_output_bytes:None
-        in
-        let%bind editor_limits =
-          T.State.Limits.create
-            ~max_source_bytes:(Int.min 65_536 (W.Limits.max_source_bytes limits))
-            ~max_source_lines:4_096
-            ~max_history_entries:128
-            ~max_history_bytes:1_048_576
-            ~max_notice_bytes:16_384
-        in
-        let selection =
-          match source, project, entry with
-          | Some member, None, None -> "source=" ^ member
-          | None, Some project, Some entry ->
-            Printf.sprintf
-              "project=%s entry=%s environment=%s"
-              project
-              entry
-              (Option.value environment ~default:"(project default)")
-          | _ -> "invalid selection"
-        in
-        let context =
-          Printf.sprintf
-            "One_off_v1 root=%d %s\nprompt=%s workspace=%s\n%s"
-            root_index
-            selection
-            prompt_definition
-            workspace_definition
-            (T.Client_adapter.description session)
-        in
-        let%bind initial = T.State.create ~limits:editor_limits ~context in
-        let%bind renderer = T.Render.create ~max_display_bytes:32_768 in
-        let%bind input = T.Controller.Input_queue.create ~capacity:256 in
-        let paste = ref None in
-        let offer = T.Controller.Input_queue.offer input in
-        let add_paste text =
-          match !paste with
-          | None -> ()
-          | Some buffer ->
-            if
-              String.length text
-              > T.State.Limits.max_source_bytes editor_limits
-                - Stdlib.Buffer.length buffer
-            then (
-              paste := None;
-              T.Controller.Input_queue.fail
-                input
-                ~message:"Bracketed paste exceeds editor byte limit")
-            else Stdlib.Buffer.add_string buffer text
-        in
-        let unicode uchar =
-          let buffer = Stdlib.Buffer.create 4 in
-          Stdlib.Buffer.add_utf_8_uchar buffer uchar;
-          Stdlib.Buffer.contents buffer
-        in
-        let on_event =
-          let open T.Controller.Input in
-          function
-          | `Resize -> offer Resize
-          | `Paste `Start -> paste := Some (Stdlib.Buffer.create 256)
-          | `Paste `End ->
-            (match !paste with
-             | None -> ()
-             | Some buffer ->
-               paste := None;
-               offer (Paste (Stdlib.Buffer.contents buffer)))
-          | `Mouse _ -> ()
-          | `Key (key, mods) ->
-            (match !paste with
-             | Some _ ->
-               (match key with
-                | `ASCII char -> add_paste (String.of_char char)
-                | `Uchar uchar -> add_paste (unicode uchar)
-                | `Enter -> add_paste "\n"
-                | `Tab -> add_paste "\t"
-                | _ ->
-                  paste := None;
-                  T.Controller.Input_queue.fail
-                    input
-                    ~message:"Unsupported control in bracketed paste")
-             | None ->
-               (match key, mods with
-                | `ASCII char, [ `Ctrl ] ->
-                  (match Char.lowercase char with
-                   | 's' -> offer Submit
-                   | 'c' -> offer Cancel
-                   | 'q' -> offer Quit
-                   | _ -> ())
-                | `ASCII char, [] -> offer (Text (String.of_char char))
-                | `Uchar uchar, [] -> offer (Text (unicode uchar))
-                | `Enter, _ -> offer Enter
-                | `Tab, _ -> offer (Text "\t")
-                | `Backspace, _ -> offer Backspace
-                | `Delete, _ -> offer Delete
-                | `Home, _ -> offer (Move Home)
-                | `End, _ -> offer (Move End)
-                | `Arrow `Left, _ -> offer (Move Left)
-                | `Arrow `Right, _ -> offer (Move Right)
-                | `Arrow `Up, _ -> offer History_previous
-                | `Arrow `Down, _ -> offer History_next
-                | _ -> ()))
-        in
-        Notty_eio.Term.run
-          ~nosig:true
-          ~mouse:false
-          ~bpaste:true
-          ~input:terminal_input
-          ~output:terminal_output
-          ~on_event
-          (fun term ->
-             let present state =
-               let width, height = Notty_eio.Term.size term in
-               let image, cursor = T.Render.image renderer state ~width ~height in
-               Notty_eio.Term.present term ~image ~cursor
-             in
-             T.Controller.run ~session ~create ~initial ~input ~present)))
+    let with_defaults f =
+      if standalone
+      then Chatml_repl_standalone.with_environment ~env ~f:(fun config -> f (Some config))
+      else f None
+    in
+    with_defaults (fun defaults ->
+      let local = local || Option.is_some defaults in
+      let developer_policy =
+        Option.first_some
+          developer_policy
+          (Option.map defaults ~f:(fun c -> c.policy_file))
+      in
+      let prompt_file =
+        Option.first_some prompt_file (Option.map defaults ~f:(fun c -> c.prompt_file))
+      in
+      let workspace =
+        Option.first_some workspace (Option.map defaults ~f:(fun c -> c.workspace))
+      in
+      let source =
+        Option.first_some source (Option.map defaults ~f:(fun c -> c.source))
+      in
+      let transient = transient || Option.is_some defaults in
+      let%bind target =
+        target
+          ~local
+          ~connect
+          ~stdio_executable
+          ~developer_policy
+          ~prompt_file
+          ~workspace
+          ~data_root
+          ~transient
+          ~bearer_token_file
+          ~expected_server
+      in
+      T.Client_adapter.with_connection
+        ~env
+        ~target
+        ~notification_capacity:256
+        ~f:(fun session ->
+          let client = T.Client_adapter.client session in
+          let limits =
+            Agent_client.Developer_repl_connection.capabilities client
+            |> W.Capabilities.limits
+          in
+          let%bind route =
+            route
+              ~limits
+              ~root_index
+              ~dependency_root_indices
+              ~source
+              ~project
+              ~entry
+              ~environment
+          in
+          let%bind prompt_definition, workspace_definition =
+            match local, prompt_definition, workspace_definition with
+            | true, None, None -> Ok ("embedded.prompt", "embedded.workspace")
+            | _, Some prompt, Some workspace -> Ok (prompt, workspace)
+            | _ ->
+              Error
+                (P.Error.invalid_request
+                   "remote REPL requires --prompt-definition and --workspace-definition")
+          in
+          let%bind key =
+            P.Id.Attachment.create ()
+            |> P.Id.Attachment.to_string
+            |> P.Idempotency_key.of_string
+          in
+          let%bind create =
+            W.Create.create
+              ~limits
+              ~run_id:(P.Id.Developer_run.create ())
+              ~key
+              ~route
+              ~target:D.Target.One_off_v1
+              ~prompt:(Agent_server.Catalog_identity.prompt_definition prompt_definition)
+              ~workspace:
+                (Agent_server.Catalog_identity.workspace_definition workspace_definition)
+              ~requested_execution:None
+              ~requested_max_output_bytes:None
+          in
+          let%bind editor_limits =
+            T.State.Limits.create
+              ~max_source_bytes:(Int.min 65_536 (W.Limits.max_source_bytes limits))
+              ~max_source_lines:4_096
+              ~max_history_entries:128
+              ~max_history_bytes:1_048_576
+              ~max_notice_bytes:16_384
+          in
+          let selection =
+            match source, project, entry with
+            | Some member, None, None -> "source=" ^ member
+            | None, Some project, Some entry ->
+              Printf.sprintf
+                "project=%s entry=%s environment=%s"
+                project
+                entry
+                (Option.value environment ~default:"(project default)")
+            | _ -> "invalid selection"
+          in
+          let context =
+            if standalone
+            then
+              "Standalone ChatML (temporary)\n\
+               Standard API; no model or shell access\n\
+               :help for commands and shortcuts"
+            else
+              Printf.sprintf
+                "One_off_v1 root=%d %s\nprompt=%s workspace=%s\n%s"
+                root_index
+                selection
+                prompt_definition
+                workspace_definition
+                (T.Client_adapter.description session)
+          in
+          let%bind initial = T.State.create ~limits:editor_limits ~context in
+          let%bind renderer = T.Render.create ~max_display_bytes:32_768 in
+          let%bind input = T.Controller.Input_queue.create ~capacity:256 in
+          let paste = ref None in
+          let offer = T.Controller.Input_queue.offer input in
+          let add_paste text =
+            match !paste with
+            | None -> ()
+            | Some buffer ->
+              if
+                String.length text
+                > T.State.Limits.max_source_bytes editor_limits
+                  - Stdlib.Buffer.length buffer
+              then (
+                paste := None;
+                T.Controller.Input_queue.fail
+                  input
+                  ~message:"Bracketed paste exceeds editor byte limit")
+              else Stdlib.Buffer.add_string buffer text
+          in
+          let unicode uchar =
+            let buffer = Stdlib.Buffer.create 4 in
+            Stdlib.Buffer.add_utf_8_uchar buffer uchar;
+            Stdlib.Buffer.contents buffer
+          in
+          let on_event =
+            let open T.Controller.Input in
+            function
+            | `Resize -> offer Resize
+            | `Paste `Start -> paste := Some (Stdlib.Buffer.create 256)
+            | `Paste `End ->
+              (match !paste with
+               | None -> ()
+               | Some buffer ->
+                 paste := None;
+                 offer (Paste (Stdlib.Buffer.contents buffer)))
+            | `Mouse _ -> ()
+            | `Key (key, mods) ->
+              (match !paste with
+               | Some _ ->
+                 (match key with
+                  | `ASCII char -> add_paste (String.of_char char)
+                  | `Uchar uchar -> add_paste (unicode uchar)
+                  | `Enter -> add_paste "\n"
+                  | `Tab -> add_paste "\t"
+                  | _ ->
+                    paste := None;
+                    T.Controller.Input_queue.fail
+                      input
+                      ~message:"Unsupported control in bracketed paste")
+               | None ->
+                 (match key, mods with
+                  | `ASCII char, [ `Ctrl ] ->
+                    (match Char.lowercase char with
+                     | 's' -> offer Submit
+                     | 'c' -> offer Cancel
+                     | 'q' -> offer Quit
+                     | 'r' -> offer History_search
+                     | _ -> ())
+                  | `ASCII char, [] -> offer (Text (String.of_char char))
+                  | `Uchar uchar, [] -> offer (Text (unicode uchar))
+                  | `Enter, [ `Meta ] | `Enter, [ `Shift ] -> offer Newline
+                  | `Enter, _ -> offer Enter
+                  | `Tab, [ `Shift ] -> offer Completion_previous
+                  | `Tab, _ -> offer Complete
+                  | `Escape, _ -> offer Dismiss
+                  | `Backspace, _ -> offer Backspace
+                  | `Delete, _ -> offer Delete
+                  | `Home, _ -> offer (Move Home)
+                  | `End, _ -> offer (Move End)
+                  | `Arrow `Left, _ -> offer (Move Left)
+                  | `Arrow `Right, _ -> offer (Move Right)
+                  | `Arrow `Up, _ -> offer History_previous
+                  | `Arrow `Down, _ -> offer History_next
+                  | _ -> ()))
+          in
+          Notty_eio.Term.run
+            ~nosig:true
+            ~mouse:false
+            ~bpaste:true
+            ~modified_enter_clock:(Eio.Stdenv.mono_clock env)
+            ~input:terminal_input
+            ~output:terminal_output
+            ~on_event
+            (fun term ->
+               let present state =
+                 let width, height = Notty_eio.Term.size term in
+                 let image, cursor = T.Render.image renderer state ~width ~height in
+                 Notty_eio.Term.present term ~image ~cursor
+               in
+               T.Controller.run ~session ~create ~initial ~input ~present))))
   |> of_protocol
 ;;
 

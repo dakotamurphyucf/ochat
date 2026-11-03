@@ -151,6 +151,7 @@ let feature = function
   | Observe _
   | Cancel_submission _
   | Inspect_type _
+  | Complete _
   | Task_references_page _
   | Task_submit _
   | Task_observe _
@@ -578,6 +579,12 @@ let task_references_page t request =
   read t (R.Request.Task_references_page request) ~decode:(function
     | R.Response.Task_references_page value -> Ok value
     | _ -> Error (incompatible "REPL reference page response changed method"))
+;;
+
+let complete t request =
+  read t (R.Request.Complete request) ~decode:(function
+    | R.Response.Complete value -> Ok value
+    | _ -> Error (incompatible "REPL Complete response changed method"))
 ;;
 
 let task_observe t lookup =

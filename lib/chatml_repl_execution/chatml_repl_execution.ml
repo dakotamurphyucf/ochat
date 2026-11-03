@@ -1,4 +1,5 @@
 open Core
+module Value_preview = Value_preview
 module Typing = Chatml_repl_typing
 module Modules = Chatml_linked_runtime.Repl_modules
 module Execution = Chatml_execution
@@ -6,14 +7,11 @@ module Surface = Chatml.Chatml_builtin_surface
 module Snapshot = Chatml_typechecker.Type_snapshot
 module Lang = Chatml.Chatml_lang
 module Eval = Chatml.Chatml_eval
-module Builtins = Chatml.Chatml_builtin_spec
 module Runtime = Chatml_host_runtime
 
 module Limits = struct
   type t =
-    { max_preview_bytes : int
-    ; max_preview_nodes : int
-    ; max_preview_depth : int
+    { preview : Value_preview.Limits.t
     ; max_diagnostic_bytes : int
     ; max_retained_tasks : int
     }
@@ -36,13 +34,13 @@ module Limits = struct
     else if max_retained_tasks <= 0 || max_retained_tasks > 256
     then Or_error.error_string "REPL retained tasks must be in 1..256"
     else
-      Ok
-        { max_preview_bytes
-        ; max_preview_nodes
-        ; max_preview_depth
-        ; max_diagnostic_bytes
-        ; max_retained_tasks
-        }
+      Value_preview.Limits.create
+        ~max_bytes:max_preview_bytes
+        ~max_nodes:max_preview_nodes
+        ~max_depth:max_preview_depth
+        ~columns:76
+      |> Or_error.map ~f:(fun preview ->
+        { preview; max_diagnostic_bytes; max_retained_tasks })
   ;;
 
   let max_retained_tasks t = t.max_retained_tasks
@@ -177,12 +175,7 @@ let utf8_prefix text max_bytes =
 ;;
 
 let preview (limits : Limits.t) value =
-  Builtins.value_to_debug_string
-    ~max_bytes:limits.Limits.max_preview_bytes
-    ~max_nodes:limits.max_preview_nodes
-    ~max_depth:limits.max_preview_depth
-    value
-  |> fun rendered -> utf8_prefix rendered limits.max_preview_bytes
+  Value_preview.to_string ~limits:limits.preview value
 ;;
 
 let bounded_text (limits : Limits.t) text = utf8_prefix text limits.max_diagnostic_bytes

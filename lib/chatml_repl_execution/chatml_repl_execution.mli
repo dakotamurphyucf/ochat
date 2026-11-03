@@ -8,6 +8,7 @@
     joins any execution before close/reset. *)
 
 open Core
+module Value_preview = Value_preview
 module Typing = Chatml_repl_typing
 module Modules = Chatml_linked_runtime.Repl_modules
 module Execution = Chatml_execution

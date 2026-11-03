@@ -1,4 +1,5 @@
 open! Core
+module Inferred_bindings = Inferred_bindings
 
 (** Bounded, transport-free terminal presentation state. The portable client
     remains the owner of exact pending requests and retry handles. *)
@@ -78,6 +79,44 @@ type activity =
 
 type t
 
+module Submission_source : sig
+  (** Captured append request and exact aggregate bytes. Only [suffix] goes on
+      the wire; [combined] is the server's acknowledged prefix plus that suffix.
+      Both are immutable and remain valid for exact-key retries. *)
+  type t
+
+  val suffix : t -> string
+  val combined : t -> string
+end
+
+(** Server-acknowledged incomplete bytes, displayed read-only. The editor owns
+    only the unsent suffix. Reset and a terminal submission clear this prefix. *)
+val continuation_source : t -> string option
+
+(** Validate exact prefix+suffix UTF-8, byte and line bounds before any request.
+    Does not mutate the acknowledged prefix or consume the editor. *)
+val submission_source
+  :  t
+  -> suffix:string
+  -> (Submission_source.t, Agent_protocol.Error.t) result
+
+(** Acknowledgement transition for the captured request. Need_more stores its
+    aggregate as the read-only prefix; Enter starts a new suffix with a newline.
+    A terminal receipt records aggregate history/diagnostic bytes once and clears
+    the prefix. On Need_more, an exact retry consumes the captured suffix from an
+    append-only edited draft and preserves its unsent tail literally. Other
+    rewritten drafts remain intact with review/reset guidance. The caller must
+    remove its command line and block editing until acknowledgement. If the
+    retained draft exceeds the remaining aggregate budget, admission fails until
+    it is shortened or reset. Observation must not repeat this transition. *)
+val acknowledge_source
+  :  t
+  -> source:Submission_source.t
+  -> preserve_editor:bool
+  -> continue_line:bool
+  -> Agent_protocol.Developer_repl_wire.Submission.t
+  -> t
+
 val create : limits:Limits.t -> context:string -> (t, Agent_protocol.Error.t) result
 val limits : t -> Limits.t
 val context : t -> string
@@ -85,6 +124,31 @@ val editor : t -> Editor.t
 val activity : t -> activity
 val view : t -> Agent_protocol.Developer_repl_wire.View.t option
 val submission : t -> Agent_protocol.Developer_repl_wire.Submission.t option
+val submitted_source : t -> string option
+val submitted_source_digest : t -> Chatml_source.Digest.t option
+val inferred_bindings : t -> Inferred_bindings.t
+val completion : t -> Completion.t option
+val completion_notice : t -> string option
+val with_session_completion : t -> names:string list -> notice:string option -> t
+val dismiss_completion : t -> t
+val complete : t -> t
+val completion_next : t -> t
+val completion_previous : t -> t
+val accept_completion : t -> (t, Agent_protocol.Error.t) result
+
+(** Search only starts from Ready, captures the exact draft, and never submits.
+    Completion and search modes are mutually exclusive. *)
+val history_search : t -> History_search.t option
+
+val start_history_search : t -> t
+
+val edit_history_search
+  :  t
+  -> f:(History_search.t -> History_search.t Or_error.t)
+  -> t Or_error.t
+
+val cancel_history_search : t -> t
+val accept_history_search : t -> t
 val current_revision : t -> Agent_protocol.Developer_repl_wire.Wire_id.Revision.t option
 val reference_page : t -> Agent_protocol.Developer_repl_wire.Reference_page.t option
 val task : t -> Agent_protocol.Developer_repl_wire.Task_view.t option
@@ -114,6 +178,12 @@ val with_submission
   -> Agent_protocol.Developer_repl_wire.Submission.t
   -> (t, Agent_protocol.Error.t) result
 
+(** The owning controller validates the exact captured instance, epoch,
+    submission key and revision before applying these read results. Observation
+    of the same immutable receipt preserves them; a new revision or reset clears
+    them. *)
+val with_inferred_bindings : t -> Inferred_bindings.t -> t
+
 (** Replaces only the displayed reference page for the current epoch/revision.
     The controller checks the request's captured epoch/revision again after its
     yielding read before calling this function. *)
@@ -124,6 +194,11 @@ val with_task : t -> Agent_protocol.Developer_repl_wire.Task_view.t -> t
 val with_activity : t -> activity -> t
 val with_pending : t -> Agent_client.Developer_repl_connection.pending -> t
 val with_notice : t -> string -> t
+
+(** Exact acknowledged bytes for diagnostic source matching, independently of
+    local history. Invalid or out-of-bounds source is omitted. Reset clears it.
+    Ordinary observation must not replace these bytes with an editor draft. *)
+val with_submitted_source : t -> source:string -> t
 
 (** Records a source in bounded local history when it satisfies this state's
     editor limits; an unrelated oversized or malformed source is omitted.

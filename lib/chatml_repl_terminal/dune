@@ -1,7 +1,7 @@
 (library
  (name chatml_repl_terminal)
  (public_name ochat.chatml_repl_terminal)
- (modules state render client_adapter controller)
+ (modules diagnostic_excerpt history_search help completion inferred_bindings state render client_adapter controller)
  (libraries
   core
   eio
@@ -13,7 +13,9 @@
   ochat.agent_client
   ochat.agent_transport_stdio
   ochat.agent_transport_client
-  ochat.terminal_highlighting)
+  ochat.terminal_highlighting
+  ochat.language_highlighting
+  ochat.chatml_source)
  (preprocess (pps ppx_jane))
  (inline_tests
   (libraries eio_main mirage-crypto-rng.unix)))

@@ -16,8 +16,8 @@ import termios
 import time
 from pathlib import Path
 
-TERMINAL = sys.argv[1]
-STDIO = sys.argv[2]
+TERMINAL = str(Path(sys.argv[1]).resolve())
+STDIO = str(Path(sys.argv[2]).resolve())
 TIMEOUT = 12.0
 MAX_TRANSCRIPT = 1_000_000
 ANSI_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -163,15 +163,15 @@ class Session:
 
     def await_bytes(self, wanted):
         deadline = time.monotonic() + TIMEOUT
-        while wanted not in self.output and time.monotonic() < deadline:
+        while wanted not in self.output and wanted.decode("utf-8") not in rendered_text(self.output) and time.monotonic() < deadline:
             self.drain(0.05)
-        check(wanted in self.output, f"PTY did not show {wanted!r}", self.output)
+        check(wanted in self.output or wanted.decode("utf-8") in rendered_text(self.output), f"PTY did not show {wanted!r}", self.output)
 
     def await_any_after(self, offset, choices):
         deadline = time.monotonic() + TIMEOUT
         while time.monotonic() < deadline:
             for choice in choices:
-                if choice in self.output[offset:]:
+                if choice in self.output[offset:] or choice.decode("utf-8") in rendered_text(self.output[offset:]):
                     return choice
             self.drain(0.05)
         raise AssertionError(f"PTY did not show {choices!r}: {self.output[-500:]!r}")
@@ -291,9 +291,115 @@ with tempfile.TemporaryDirectory(prefix="och255-terminal-") as tmp:
     check(help_result.returncode == 0, "redirected --help failed", help_result.stderr)
     check(b"--local" in help_result.stdout, "redirected --help omitted usage", help_result.stdout)
 
+    # Default startup owns an isolated transient host and removes its bootstrap.
+    before_defaults = set(Path("/tmp").glob("ochat-repl-*"))
+    with Session([TERMINAL, "--stdio-executable", STDIO]) as default:
+        default.await_bytes(b"Standalone ChatML (temporary)")
+        default.await_bytes(b"[ready]")
+        default.write(b"40 + 2\r")
+        default.await_bytes(b"- : int = 42")
+        default.await_quiescence()
+        # Authoritative completion is read-only, survives dismissal/reopening,
+        # and inserts the selected module member without submitting it.
+        offset = len(default.output)
+        default.write(b"Task.p")
+        default.await_any_after(offset, (b"session:  pure",))
+        default.await_quiescence()
+        check(b"[busy (Keyed Submit)]" not in default.output[offset:], "completion submitted source", default.output)
+        default.write(b"\x1b")
+        default.await_quiescence()
+        offset = len(default.output)
+        default.write(b"\t")
+        default.await_any_after(offset, (b"session:  pure",))
+        default.await_quiescence()
+        default.write(b"\t")
+        default.await_any_after(offset, (b"# Task.pure",))
+        default.write(b"(7)\r")
+        default.await_bytes(b"Task 1:")
+        check(b"Task succeeded" not in default.output, "default session auto-ran Task", default.output)
+        default.await_quiescence()
+        default.write(b":run 1\r")
+        default.await_bytes(b"Task succeeded 7")
+        default.await_quiescence()
+        for source, expected in (
+            (b'[1, 2, 3]', b'- : int array = [1, 2, 3]'),
+            (b'(|8, "eight"|)', b'- : (int * string) = (|8, "eight"|)'),
+            (b'1 + true', b'1 | 1 + true'),
+        ):
+            offset = len(default.output)
+            default.write(source + b"\r")
+            default.await_any_after(offset, (expected,))
+            default.await_quiescence()
+        check("    ^^^^^^^^" in rendered_text(default.output[offset:]), "diagnostic lost its byte-range marker", default.output)
+        offset = len(default.output)
+        default.write(b":help history\r")
+        default.await_any_after(offset, (b"Ctrl-R searches captured local history",))
+        default.await_quiescence()
+        offset = len(default.output)
+        default.write(b"\x1240 +")
+        default.await_any_after(offset, (b"reverse-search 40 +: 40 + 2",))
+        default.await_quiescence()
+        default.write(b"\r")
+        default.await_any_after(offset, (b"# 40 + 2",))
+        default.await_quiescence()
+        check(b"[busy (Keyed Submit)]" not in default.output[offset:], "history search executed source", default.output)
+        # Cancelling a new search restores the loaded draft exactly.
+        offset = len(default.output)
+        default.write(b"\x12missing\x03")
+        default.await_any_after(offset, (b"# 40 + 2",))
+        default.await_quiescence()
+        default.write(b"\r")
+        default.await_any_after(offset, (b"- : int = 42",))
+        default.await_quiescence()
+        default.write(b"\x11")
+        default.finish(0)
+    check(
+        not set(Path("/tmp").glob("ochat-repl-*")) - before_defaults,
+        "default session left bootstrap files",
+    )
+
     with Session(command("normal-data")) as normal:
         normal.await_bytes(b"[ready]")
-        normal.write(b"Task.pure(8)\r:submit\r")
+        # Enter submits a complete expression and shows its compiler type.
+        offset = len(normal.output)
+        normal.write(b"40 + 2\r")
+        normal.await_any_after(offset, (b"- : int = 42",))
+        normal.await_quiescence()
+        # Bracketed paste remains literal, including embedded newlines.
+        offset = len(normal.output)
+        normal.write(b"\x1b[200~let saved = 8\nlet named = saved + 1\x1b[201~")
+        normal.drain(0.15)
+        check(b"[busy (Keyed Submit)]" not in normal.output[offset:], "paste executed source", normal.output)
+        normal.write(b"\r")
+        normal.await_any_after(offset, (b"val saved : int",))
+        normal.await_any_after(offset, (b"val named : int",))
+        normal.await_quiescence()
+        # Incomplete source continues in the same buffer without a partial binding.
+        offset = len(normal.output)
+        normal.write(b"let continued =\r")
+        normal.await_any_after(offset, (b"need more input",))
+        normal.await_quiescence()
+        offset = len(normal.output)
+        normal.write(b"10\r")
+        normal.await_any_after(offset, (b"val continued : int",))
+        normal.await_quiescence()
+        # Explicit newline preserves a multi-statement buffer until Enter.
+        offset = len(normal.output)
+        normal.write(b"let another = 3\x1b\r")
+        normal.drain(0.15)
+        check(b"[busy (Keyed Submit)]" not in normal.output[offset:], "Alt+Enter submitted source", normal.output)
+        normal.write(b"another + 1\r")
+        normal.await_any_after(offset, (b"- : int = 4",))
+        normal.await_quiescence()
+        for encoded in (b"\x1b[13;2u", b"\x1b[27;2;13~"):
+            offset = len(normal.output)
+            normal.write(b"let shifted = 11" + encoded)
+            normal.drain(0.15)
+            check(b"[busy (Keyed Submit)]" not in normal.output[offset:], "Shift+Enter submitted source", normal.output)
+            normal.write(b"shifted + 1\r")
+            normal.await_any_after(offset, (b"- : int = 12",))
+            normal.await_quiescence()
+        normal.write(b"Task.pure(8)\r")
         normal.await_bytes(b"Task 1:")
         check(b"Task succeeded" not in normal.output, "Submit auto-ran Task", normal.output)
         normal.await_quiescence()
@@ -317,8 +423,8 @@ with tempfile.TemporaryDirectory(prefix="och255-terminal-") as tmp:
         check(page.count("Task 1:") == 2, "Task execution lost submission reference page", normal.output)
         check("submission key not found" not in page, "Task execution lost reference-page key", normal.output)
         offset = len(normal.output)
-        normal.write(b"617\r:submit\r")
-        normal.await_any_after(offset, (b"1. ok 617",))
+        normal.write(b"617\r")
+        normal.await_any_after(offset, (b"- : int = 617",))
         normal.await_quiescence()
         submitted = rendered_text(normal.output[offset:]).rpartition("[ready]")[2]
         check("Task succeeded" not in submitted, "new submission retained previous Task result", normal.output)
@@ -332,8 +438,8 @@ with tempfile.TemporaryDirectory(prefix="och255-terminal-") as tmp:
             "type inspection lost the stored submission key", normal.output,
         )
         offset = len(normal.output)
-        normal.write(b"618\r:submit\r")
-        normal.await_any_after(offset, (b"1. ok 618",))
+        normal.write(b"618\r")
+        normal.await_any_after(offset, (b"- : int = 618",))
         normal.await_quiescence()
         submitted = rendered_text(normal.output[offset:]).rpartition("[ready]")[2]
         check("int" not in {line.strip() for line in submitted.splitlines()}, "new submission retained old type notice", normal.output)
@@ -353,8 +459,8 @@ with tempfile.TemporaryDirectory(prefix="och255-terminal-") as tmp:
         reset_frame = rendered_text(normal.output[offset:]).rpartition("[ready]")[2]
         check("int" not in {line.strip() for line in reset_frame.splitlines()}, "reset retained old type notice", normal.output)
         offset = len(normal.output)
-        normal.write(b"619\r:submit\r")
-        normal.await_any_after(offset, (b"1. ok 619",))
+        normal.write(b"619\r")
+        normal.await_any_after(offset, (b"- : int = 619",))
         normal.await_quiescence()
         normal.write(b"\x11")  # Ctrl+Q
         normal.finish(0)
@@ -362,7 +468,7 @@ with tempfile.TemporaryDirectory(prefix="och255-terminal-") as tmp:
     with Session(command("project-data", project=True)) as project:
         project.await_bytes(b"[ready]")
         project.await_bytes(b"environment=workflow")
-        project.write(b"Task.pure(Util.value)\r:submit\r")
+        project.write(b"Task.pure(Util.value)\r")
         project.await_bytes(b"Task 1:")
         check(b"Task succeeded" not in project.output, "Project Submit auto-ran Task", project.output)
         project.write(b":run 1\r")
@@ -372,7 +478,7 @@ with tempfile.TemporaryDirectory(prefix="och255-terminal-") as tmp:
 
     with Session(command("cancel-data")) as cancelled:
         cancelled.await_bytes(b"[ready]")
-        cancelled.write(b"Task.pure(9)\r:submit\r")
+        cancelled.write(b"Task.pure(9)\r")
         cancelled.await_bytes(b"Task 1:")
         cancelled.write(b"\x03")  # Ctrl+C, explicit exact-key cancel
         cancelled.await_bytes(b"busy Cancel")
@@ -383,7 +489,7 @@ with tempfile.TemporaryDirectory(prefix="och255-terminal-") as tmp:
         held.await_bytes(b"[ready]")
         # Queue Ctrl+C with Submit so the UI can issue control before the
         # bounded interpreter reaches its fuel limit.
-        held.write(b"let rec loop x = loop(x)\rlet never = loop(0)\r:submit\r\x03")
+        held.write(b"\x1b[200~let rec loop x = loop(x)\nlet never = loop(0)\x1b[201~\r\x03")
         for _attempt in range(4):
             offset = len(held.output)
             if _attempt > 0:

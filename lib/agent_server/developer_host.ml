@@ -2692,6 +2692,7 @@ module Repl = struct
   module Task_reference = Repl_epoch.Task_reference
   module Type_selector = Repl_epoch.Type_selector
   module Type_inspection = Repl_epoch.Type_inspection
+  module Completion = Chatml_repl_typing.Completion
   module Task_reference_page = Repl_epoch.Task_reference_page
 
   type borrowed = Repl_epoch.borrowed
@@ -2771,6 +2772,32 @@ module Repl = struct
   let task_references_page t ~actor ~instance ~epoch ~key ~after ~limit =
     with_owner t ~f:(fun repl ->
       Repl_epoch.task_references_page repl ~actor ~instance ~epoch ~key ~after ~limit)
+  ;;
+
+  let complete
+        t
+        ~actor
+        ~instance
+        ~epoch
+        ~expected_revision
+        ~path
+        ~prefix
+        ~limit
+        ~max_bytes
+        ~request_current
+    =
+    with_owner t ~f:(fun repl ->
+      Repl_epoch.complete
+        repl
+        ~actor
+        ~instance
+        ~epoch
+        ~expected_revision
+        ~path
+        ~prefix
+        ~limit
+        ~max_bytes
+        ~request_current)
   ;;
 
   let cancel_and_wait_with_request t ~actor ~instance ~key ~request_current =

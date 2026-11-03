@@ -186,6 +186,11 @@ val inspect_type
   -> Agent_protocol.Developer_repl_wire.Inspect.t
   -> (Agent_protocol.Developer_repl_wire.Type_inspection.t, Agent_protocol.Error.t) result
 
+val complete
+  :  t
+  -> Agent_protocol.Developer_repl_wire.Completion_request.t
+  -> (Agent_protocol.Developer_repl_wire.Completion_page.t, Agent_protocol.Error.t) result
+
 val task_references_page
   :  t
   -> Agent_protocol.Developer_repl_wire.Reference_page_request.t

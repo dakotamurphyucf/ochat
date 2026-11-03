@@ -41,6 +41,7 @@ module Repl : sig
   module Task_reference = Developer_repl_epoch.Task_reference
   module Type_selector = Developer_repl_epoch.Type_selector
   module Type_inspection = Developer_repl_epoch.Type_inspection
+  module Completion = Chatml_repl_typing.Completion
   module Task_reference_page = Developer_repl_epoch.Task_reference_page
 
   type borrowed = Developer_repl_epoch.borrowed
@@ -120,6 +121,21 @@ module Repl : sig
     -> after:Task_reference.t option
     -> limit:int
     -> (Task_reference_page.t, P.Error.t) result
+
+  (** Read only against the exact current committed epoch/revision. Repeats
+      actor, source-selection and request lease validation after yielding work. *)
+  val complete
+    :  t
+    -> actor:Operator_authorization.t
+    -> instance:Instance.t
+    -> epoch:Epoch.t
+    -> expected_revision:Revision.t
+    -> path:string list
+    -> prefix:string
+    -> limit:int
+    -> max_bytes:int
+    -> request_current:(unit -> bool)
+    -> (Completion.t, P.Error.t) result
 
   val cancel_and_wait
     :  t

@@ -8,11 +8,16 @@ module Input : sig
     | Text of string
     | Paste of string
     | Enter
+    | Newline
     | Backspace
     | Delete
     | Move of State.Editor.motion
     | History_previous
     | History_next
+    | Complete
+    | Completion_previous
+    | Dismiss
+    | History_search
     | Submit
     | Cancel
     | Resize
@@ -53,7 +58,7 @@ module Command : sig
     | Retry
     | Abandon
     | Quit
-    | Help
+    | Help of string option
   [@@deriving sexp_of]
 
   (** Recognizes only a complete final editor line. The command line is
@@ -70,8 +75,17 @@ end
     this loop. Queue or paste overflow fails the loop before queued input is
     acted on. [present] is called only from the owning terminal fiber.
 
-    Enter inserts a newline; Submit or a whole-line [:submit] sends the bounded
-    source. A displayed Task reference is only a value until explicit Run.
+    Enter, Submit or a whole-line [:submit] sends the bounded source. An Enter
+    submission with authoritative Need_more retains acknowledged bytes read-only
+    and starts the unsent suffix with a continuation newline. Later requests
+    send only that suffix; history and diagnostics use the exact aggregate.
+    Completion and history recall/search pause until the prefix finishes or is
+    discarded with Reset. Newline (Alt+Enter) inserts without submitting. Paste is
+    literal source. Completion reads have a separate lane with one in-flight read
+    and one coalesced latest desired site; edits remain responsive. Exact draft
+    source/cursor and instance/epoch/revision guard publication. Enter never
+    accepts a suggestion implicitly. Search Enter loads an unsubmitted draft;
+    Escape/Cancel restores the captured draft. A displayed Task reference is only a value until explicit Run.
     Only keyed actions can become Uncertain in
     Developer_repl_connection custody and require explicit same-key
     Retry/Abandon; ordinary read errors are diagnostics. Abandon never proves

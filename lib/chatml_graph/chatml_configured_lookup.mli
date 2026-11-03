@@ -233,4 +233,13 @@ module Repl_scope : sig
   val revoke : t -> unit
 
   val input_fingerprint : t -> Captured.Digest.t
+
+  (** Immutable selected configured names for bounded compiler-only completion.
+      Does not resolve a reference or check a module. Returns at most [limit]
+      pairs and whether more bindings were omitted. *)
+  val completion_bindings
+    :  t
+    -> limit:int
+    -> checkpoint:(unit -> unit)
+    -> (string * Prepared.Module_id.t) list * bool
 end

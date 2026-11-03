@@ -16,6 +16,8 @@ module Lookup = Base.Lookup
 module Current_epoch = Base.Current_epoch
 module Type_selector = Base.Type_selector
 module Inspect = Base.Inspect
+module Completion_request = Developer_repl_wire_completion.Request
+module Completion_page = Developer_repl_wire_completion.Page
 module Reference_page_request = Base.Reference_page_request
 module Task_submit = Base.Task_submit
 module View = Developer_repl_wire_result.View
@@ -107,6 +109,7 @@ module Request = struct
     | Observe of Lookup.t
     | Cancel_submission of Lookup.t
     | Inspect_type of Inspect.t
+    | Complete of Completion_request.t
     | Task_references_page of Reference_page_request.t
     | Task_submit of Task_submit.t
     | Task_observe of Common.Lookup.t
@@ -124,6 +127,7 @@ module Request = struct
     | Observe _ -> "developer.repl.observe"
     | Cancel_submission _ -> "developer.repl.cancel_submission"
     | Inspect_type _ -> "developer.repl.inspect_type"
+    | Complete _ -> "developer.repl.complete"
     | Task_references_page _ -> "developer.repl.task_references_page"
     | Task_submit _ -> "developer.repl.task.submit"
     | Task_observe _ -> "developer.repl.task.observe"
@@ -144,6 +148,7 @@ module Request = struct
     | Observe value | Cancel_submission value | Close_and_wait value ->
       Lookup.to_json value
     | Inspect_type value -> Inspect.to_json value
+    | Complete value -> Completion_request.to_json value
     | Task_references_page value -> Reference_page_request.to_json value
     | Task_submit value -> Task_submit.to_json value
     | Task_observe value | Task_await_terminal value | Task_cancel_and_wait value ->
@@ -168,6 +173,8 @@ module Request = struct
       Result.map (Lookup.of_json ~limits params) ~f:(fun x -> Cancel_submission x)
     | "developer.repl.inspect_type" ->
       Result.map (Inspect.of_json ~limits params) ~f:(fun x -> Inspect_type x)
+    | "developer.repl.complete" ->
+      Result.map (Completion_request.of_json ~limits params) ~f:(fun x -> Complete x)
     | "developer.repl.task_references_page" ->
       Result.map (Reference_page_request.of_json ~limits params) ~f:(fun x ->
         Task_references_page x)
@@ -205,6 +212,7 @@ module Response = struct
     | Observe of Submission.t option
     | Cancel_submission of Submission.t
     | Inspect_type of Type_inspection.t
+    | Complete of Completion_page.t
     | Task_references_page of Reference_page.t
     | Task_submit of Task_view.t
     | Task_observe of Task_view.t option
@@ -222,6 +230,7 @@ module Response = struct
     | Observe _ -> "developer.repl.observe"
     | Cancel_submission _ -> "developer.repl.cancel_submission"
     | Inspect_type _ -> "developer.repl.inspect_type"
+    | Complete _ -> "developer.repl.complete"
     | Task_references_page _ -> "developer.repl.task_references_page"
     | Task_submit _ -> "developer.repl.task.submit"
     | Task_observe _ -> "developer.repl.task.observe"
@@ -241,6 +250,7 @@ module Response = struct
     | Observe (Some value) ->
       `Object [ "found", `True; "submission", Submission.to_json value ]
     | Inspect_type value -> Type_inspection.to_json value
+    | Complete value -> Completion_page.to_json value
     | Task_references_page value -> Reference_page.to_json value
     | Task_submit value | Task_await_terminal value | Task_cancel_and_wait value ->
       Task_view.to_json value
@@ -279,6 +289,8 @@ module Response = struct
       Result.map (Submission.of_json ~limits json) ~f:(fun x -> Cancel_submission x)
     | "developer.repl.inspect_type" ->
       Result.map (Type_inspection.of_json ~limits json) ~f:(fun x -> Inspect_type x)
+    | "developer.repl.complete" ->
+      Result.map (Completion_page.of_json ~limits json) ~f:(fun x -> Complete x)
     | "developer.repl.task_references_page" ->
       Result.map (Reference_page.of_json ~limits json) ~f:(fun x ->
         Task_references_page x)

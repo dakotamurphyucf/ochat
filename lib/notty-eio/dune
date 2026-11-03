@@ -1,7 +1,9 @@
 (library
  (name notty_eio)
  (public_name ochat.notty_eio)
- (modules notty_eio)
+ (modules notty_eio modified_enter)
+ (private_modules modified_enter)
  (libraries core notty.unix eio_main)
+ (inline_tests)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))

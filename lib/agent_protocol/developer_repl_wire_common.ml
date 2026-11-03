@@ -25,6 +25,7 @@ let supported_method_names =
   ; "developer.repl.observe"
   ; "developer.repl.cancel_submission"
   ; "developer.repl.inspect_type"
+  ; "developer.repl.complete"
   ; "developer.repl.task_references_page"
   ; "developer.repl.task.submit"
   ; "developer.repl.task.observe"

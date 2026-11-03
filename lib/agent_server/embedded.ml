@@ -331,6 +331,7 @@ let embedded_repl_request dispatcher ~context ~max_request_bytes ~bound request 
     | Observe _
     | Cancel_submission _
     | Inspect_type _
+    | Complete _
     | Task_references_page _
     | Task_submit _
     | Task_observe _

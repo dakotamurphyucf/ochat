@@ -463,6 +463,22 @@ val inspect_type
   -> max_bytes:int
   -> (Type_inspection.t, P.Error.t) result
 
+(** Current committed compiler names only; no checker/runtime action. Exact
+    instance/epoch/revision, original/current actor, source and request lease
+    checks bracket the bounded read under the evaluator gate. *)
+val complete
+  :  t
+  -> actor:Operator_authorization.t
+  -> instance:Instance.t
+  -> epoch:Epoch.t
+  -> expected_revision:Revision.t
+  -> path:string list
+  -> prefix:string
+  -> limit:int
+  -> max_bytes:int
+  -> request_current:(unit -> bool)
+  -> (Chatml_repl_typing.Completion.t, P.Error.t) result
+
 (** Read an exact issuing submission's retained Task origins, even if its
     rich result detail was evicted or the Submit response was lost. [after]
     must be an issued reference of this same physical instance/epoch/key;

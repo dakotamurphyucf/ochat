@@ -3,13 +3,16 @@
     effect capability crosses this module. All constructors and decoders apply
     the installed finite policy; the server reauthorizes every decoded call. *)
 
+module Completion_request = Developer_repl_wire_completion.Request
+module Completion_page = Developer_repl_wire_completion.Page
+
 module Features : sig
   val repl : string
   val events : string
 end
 
 module Limits : sig
-  type t
+  type t = Developer_repl_wire_common.Limits.t
 
   (** [request], [result], [page] and [response] bound complete JSON trees,
       including IDs and framing. [page] counts a cursor repeated in [items]
@@ -45,7 +48,7 @@ end
 
 module Wire_id : sig
   module Instance : sig
-    type t
+    type t = Developer_repl_wire_common.Wire_id.Instance.t
 
     val of_string : string -> (t, Error.t) result
     val to_string : t -> string
@@ -53,7 +56,7 @@ module Wire_id : sig
   end
 
   module Epoch : sig
-    type t
+    type t = Developer_repl_wire_common.Wire_id.Epoch.t
 
     val of_string : string -> (t, Error.t) result
     val to_string : t -> string
@@ -61,7 +64,7 @@ module Wire_id : sig
   end
 
   module Revision : sig
-    type t
+    type t = Developer_repl_wire_common.Wire_id.Revision.t
 
     val of_string : string -> (t, Error.t) result
     val to_string : t -> string
@@ -514,6 +517,7 @@ module Request : sig
     | Observe of Lookup.t
     | Cancel_submission of Lookup.t
     | Inspect_type of Inspect.t
+    | Complete of Completion_request.t
     | Task_references_page of Reference_page_request.t
     | Task_submit of Task_submit.t
     | Task_observe of Developer_common.Lookup.t
@@ -544,6 +548,7 @@ module Response : sig
     | Observe of Submission.t option
     | Cancel_submission of Submission.t
     | Inspect_type of Type_inspection.t
+    | Complete of Completion_page.t
     | Task_references_page of Reference_page.t
     | Task_submit of Task_view.t
     | Task_observe of Task_view.t option

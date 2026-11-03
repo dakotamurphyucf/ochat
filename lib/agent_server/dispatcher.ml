@@ -424,6 +424,7 @@ let dispatch_schedule t = function
                | Create _
                | Observe _
                | Inspect_type _
+               | Complete _
                | Task_references_page _
                | Task_submit _
                | Task_observe _

@@ -77,7 +77,19 @@ let task_reference_line index reference =
   Printf.sprintf "Task %d: :run %d to execute  %s" (index + 1) (index + 1) reference
 ;;
 
-let submission_lines t submission =
+let rendered_type_text rendered =
+  let text = W.Submission.Rendered_type.text rendered in
+  match W.Submission.Rendered_type.completeness rendered with
+  | Complete -> text
+  | Truncated _ -> text ^ " [type truncated]"
+;;
+
+let binding_line inspection =
+  Option.map (W.Type_inspection.binding_name inspection) ~f:(fun name ->
+    "val " ^ name ^ " : " ^ rendered_type_text (W.Type_inspection.rendered inspection))
+;;
+
+let submission_lines t state submission =
   let status =
     match W.Submission.status submission with
     | Need_more _ -> "need more input"
@@ -88,23 +100,61 @@ let submission_lines t submission =
       ^ Option.value_map diagnostic ~default:"" ~f:(fun diagnostic ->
         ": " ^ W.Submission.Diagnostic.message diagnostic)
   in
+  let inferred = State.inferred_bindings state in
   let summaries =
     W.Submission.summaries submission
-    |> List.mapi ~f:(fun index summary ->
-      let outcome =
-        match W.Submission.Summary.outcome summary with
-        | Succeeded -> "ok"
-        | Failed _ -> "failed"
-      in
-      let preview =
-        Option.value (W.Submission.Summary.value_preview summary) ~default:""
-      in
-      Printf.sprintf "%d. %s %s" (index + 1) outcome preview)
+    |> List.concat_mapi ~f:(fun index summary ->
+      match W.Submission.Summary.outcome summary with
+      | Failed _ ->
+        [ Option.value_map
+            (W.Submission.Summary.diagnostic summary)
+            ~default:(Printf.sprintf "%d. failed" (index + 1))
+            ~f:(fun diagnostic -> "Error: " ^ W.Submission.Diagnostic.message diagnostic)
+        ]
+      | Succeeded ->
+        (match W.Submission.Summary.expression_type summary with
+         | Some rendered ->
+           [ "- : "
+             ^ rendered_type_text rendered
+             ^ Option.value_map
+                 (W.Submission.Summary.value_preview summary)
+                 ~default:""
+                 ~f:(fun value -> " = " ^ value)
+           ]
+         | None ->
+           let bindings =
+             State.Inferred_bindings.entries inferred
+             |> List.filter_map ~f:(fun entry ->
+               if entry.statement_index = index
+               then binding_line entry.inspection
+               else None)
+           in
+           if not (List.is_empty bindings)
+           then bindings
+           else if W.Submission.Summary.binding_count summary > 0
+           then [ Printf.sprintf "%d. binding accepted" (index + 1) ]
+           else
+             [ Printf.sprintf
+                 "%d. ok%s"
+                 (index + 1)
+                 (Option.value_map
+                    (W.Submission.Summary.value_preview summary)
+                    ~default:""
+                    ~f:(fun value -> " " ^ value))
+             ]))
+  in
+  let inspection_notice =
+    (if State.Inferred_bindings.limited inferred
+     then [ "Binding type display limited; use :type to inspect more" ]
+     else [])
+    @ Option.to_list
+        (Option.map (State.Inferred_bindings.error inferred) ~f:(fun error ->
+           "Binding type unavailable: " ^ error.message))
   in
   let references =
     W.Submission.task_references submission |> List.mapi ~f:task_reference_line
   in
-  List.map ((status :: summaries) @ references) ~f:(safe_text t)
+  List.map ((status :: summaries) @ inspection_notice @ references) ~f:(safe_text t)
 ;;
 
 let task_lines t task =
@@ -142,7 +192,9 @@ let image t state ~width ~height =
     let row_budget = Int.max 32 (t.max_display_bytes / height) in
     let clean text = safe_text ~max_bytes:row_budget t text in
     let editor = State.editor state in
-    let source = State.Editor.source editor in
+    let accepted_prefix = Option.value (State.continuation_source state) ~default:"" in
+    let source = accepted_prefix ^ State.Editor.source editor in
+    let cursor_byte = String.length accepted_prefix + State.Editor.cursor_byte editor in
     let header = clean ("[" ^ status_text (State.activity state) ^ "]") in
     let context_rows =
       State.context state
@@ -152,13 +204,70 @@ let image t state ~width ~height =
       |> List.map ~f:(fun row ->
         text_row (H.Highlight_styles.fg_hex "#768390") (clean row))
     in
+    let assistance_rows =
+      match State.history_search state, State.completion state with
+      | Some search, _ ->
+        let query = History_search.query search |> clean in
+        let preview =
+          Option.value_map
+            (History_search.matched_source search)
+            ~default:"[no match]"
+            ~f:(fun source ->
+              String.split source ~on:'\n' |> List.hd |> Option.value ~default:"" |> clean)
+        in
+        [ text_row
+            H.Highlight_styles.(fg_hex "#eac55f")
+            (clean ("reverse-search " ^ query ^ ": " ^ preview))
+        ]
+      | None, Some completion ->
+        let selected = Completion.selected_index completion in
+        let first = Int.max 0 (selected - 2) in
+        let items =
+          Completion.items completion
+          |> fun items -> List.drop items first |> fun items -> List.take items 5
+        in
+        let session, local =
+          List.fold items ~init:(false, false) ~f:(fun (session, local) item ->
+            match Completion.Item.origin item with
+            | Session_binding -> true, local
+            | Command | Keyword | Accepted_binding -> session, true)
+        in
+        let origin =
+          match session, local with
+          | true, true -> "session + local: "
+          | true, false -> "session: "
+          | false, (true | false) -> "local: "
+        in
+        let spans =
+          (H.Highlight_styles.fg_hex "#768390", origin)
+          :: List.mapi items ~f:(fun index item ->
+            let attr =
+              if index + first = selected
+              then H.Highlight_styles.(fg_hex "#22272e" ++ bg_hex "#96d0ff" ++ bold)
+              else H.Highlight_styles.fg_hex "#adbac7"
+            in
+            attr, " " ^ clean (Completion.Item.label item) ^ " ")
+        in
+        [ row_of_spans spans ]
+      | None, None -> []
+    in
+    let assistance_rows =
+      assistance_rows
+      @
+      if Option.is_some (State.history_search state)
+      then []
+      else
+        Option.value_map (State.completion_notice state) ~default:[] ~f:(fun notice ->
+          [ text_row (H.Highlight_styles.fg_hex "#eac55f") (clean notice) ])
+    in
+    let assistance_room = List.length assistance_rows in
     let notice =
       Option.to_list (State.notice state)
       |> List.concat_map ~f:(fun text -> String.split text ~on:'\n')
       |> fun lines -> List.take lines 16 |> List.map ~f:clean
     in
     let submission =
-      Option.value_map (State.submission state) ~default:[] ~f:(submission_lines t)
+      Option.value_map (State.submission state) ~default:[] ~f:(submission_lines t state)
     in
     let task = Option.value_map (State.task state) ~default:[] ~f:(task_lines t) in
     let page =
@@ -167,20 +276,67 @@ let image t state ~width ~height =
         |> List.mapi ~f:(fun index reference ->
           safe_text t (task_reference_line index reference)))
     in
-    let output_rows =
+    let output_room =
+      Int.max 0 (height - 3 - List.length context_rows - assistance_room)
+    in
+    let ordinary_output =
       submission @ task @ page @ notice
-      |> List.rev
-      |> fun rows ->
-      List.take rows (Int.max 0 (height - 3 - List.length context_rows))
-      |> List.rev
       |> List.concat_map ~f:(fun row -> String.split row ~on:'\n')
-      |> fun rows ->
-      List.take rows (Int.max 0 (height - 3 - List.length context_rows))
       |> List.map ~f:(fun row ->
-        text_row (H.Highlight_styles.fg_hex "#adbac7") (clean row))
+        let attr =
+          if
+            String.is_prefix row ~prefix:"Error: "
+            || String.is_prefix row ~prefix:"rejected: "
+            || String.is_prefix row ~prefix:"stopped: "
+          then H.Highlight_styles.fg_hex "#f47067"
+          else H.Highlight_styles.fg_hex "#adbac7"
+        in
+        text_row attr (clean row))
+    in
+    let diagnostic_rows =
+      Option.value_map (State.submission state) ~default:[] ~f:(fun submission ->
+        let diagnostics =
+          match W.Submission.status submission with
+          | Rejected diagnostic | Stopped (Some diagnostic) -> [ diagnostic ]
+          | Need_more _ | Finished | Stopped None ->
+            W.Submission.summaries submission
+            |> List.filter_map ~f:W.Submission.Summary.diagnostic
+        in
+        let submitted_source =
+          Option.both (State.submitted_source state) (State.submitted_source_digest state)
+        in
+        diagnostics
+        |> fun diagnostics ->
+        List.take diagnostics 4
+        |> List.concat_map ~f:(fun diagnostic ->
+          let error_attr = H.Highlight_styles.fg_hex "#f47067" in
+          match
+            Diagnostic_excerpt.create
+              diagnostic
+              ~submitted_source
+              ~max_line_bytes:row_budget
+          with
+          | None -> []
+          | Some (Location_only location) -> [ text_row error_attr (clean location) ]
+          | Some (Excerpt { location; prefix; before; marked; after; marker }) ->
+            [ text_row (H.Highlight_styles.fg_hex "#768390") (clean location)
+            ; row_of_spans
+                [ H.Highlight_styles.fg_hex "#768390", prefix
+                ; H.Highlight_styles.fg_hex "#adbac7", before
+                ; ( H.Highlight_styles.(fg_hex "#f47067" ++ bg_hex "#51202a" ++ underline)
+                  , marked )
+                ; H.Highlight_styles.fg_hex "#adbac7", after
+                ]
+            ; text_row error_attr marker
+            ]))
+    in
+    let output_rows =
+      ordinary_output @ diagnostic_rows
+      |> List.rev
+      |> fun rows -> List.take rows output_room |> List.rev
     in
     let lines = String.split source ~on:'\n' in
-    let before_cursor = String.prefix source (State.Editor.cursor_byte editor) in
+    let before_cursor = String.prefix source cursor_byte in
     let cursor_line = String.count before_cursor ~f:(Char.equal '\n') in
     let cursor_in_line =
       match String.rfindi before_cursor ~f:(fun _ char -> Char.equal char '\n') with
@@ -188,7 +344,9 @@ let image t state ~width ~height =
       | Some index -> String.length before_cursor - index - 1
     in
     let editor_room =
-      Int.max 1 (height - List.length context_rows - List.length output_rows - 2)
+      Int.max
+        1
+        (height - List.length context_rows - List.length output_rows - assistance_room - 2)
     in
     let first_line = Int.max 0 (cursor_line - editor_room + 1) in
     let visible_lines =
@@ -219,19 +377,52 @@ let image t state ~width ~height =
       let last = floor (Int.min (String.length line) (first + raw_budget)) in
       String.sub line ~pos:first ~len:(last - first), first
     in
-    let editor_rows =
-      visible_lines
-      |> List.mapi ~f:(fun index line ->
-        let cursor = if index + first_line = cursor_line then cursor_in_line else 0 in
-        let chunk, _ = line_chunk line ~cursor in
-        let source = clean chunk in
+    (* Tokenize the complete lexical context before clipping. Above the bounded
+       highlighting budget, plain spans preserve text without guessing the
+       lexical state of an omitted prefix. Escaping happens after span slicing. *)
+    let highlighted_lines =
+      if String.length source <= t.max_display_bytes
+      then
         H.Highlight_tm_engine.highlight_text
           t.highlighter
           ~lang:(Some "chatml")
           ~text:source
-        |> List.hd
-        |> Option.value ~default:[]
-        |> row_of_spans)
+      else []
+    in
+    let spans_in_chunk spans ~first ~last =
+      let _, spans =
+        List.fold spans ~init:(0, []) ~f:(fun (offset, acc) (attr, text) ->
+          let next = offset + String.length text in
+          let start = Int.max first offset in
+          let stop = Int.min last next in
+          let acc =
+            if start < stop
+            then
+              (attr, clean (String.sub text ~pos:(start - offset) ~len:(stop - start)))
+              :: acc
+            else acc
+          in
+          next, acc)
+      in
+      List.rev spans
+    in
+    let prompt_width = if width >= 3 then 2 else 0 in
+    let source_width = width - prompt_width in
+    let editor_rows =
+      visible_lines
+      |> List.mapi ~f:(fun index line ->
+        let line_index = index + first_line in
+        let cursor = if line_index = cursor_line then cursor_in_line else 0 in
+        let chunk, first = line_chunk line ~cursor in
+        let spans =
+          match List.nth highlighted_lines line_index with
+          | None -> [ Notty.A.empty, clean chunk ]
+          | Some spans -> spans_in_chunk spans ~first ~last:(first + String.length chunk)
+        in
+        let prompt =
+          if prompt_width = 0 then "" else if line_index = 0 then "# " else "  "
+        in
+        prompt, row_of_spans spans)
     in
     let cursor, horizontal =
       match List.nth lines cursor_line with
@@ -247,15 +438,19 @@ let image t state ~width ~height =
           + cursor_line
           - first_line
         in
-        let horizontal = Int.max 0 (x - width + 1) in
-        (if y >= height then None else Some (x - horizontal, y)), horizontal
+        let horizontal = Int.max 0 (x - source_width + 1) in
+        ( (if y >= height then None else Some (prompt_width + x - horizontal, y))
+        , horizontal )
     in
     let editor_rows =
-      List.map editor_rows ~f:(fun image ->
-        Notty.I.hcrop
-          horizontal
-          (Int.max 0 (Notty.I.width image - horizontal - width))
-          image)
+      List.map editor_rows ~f:(fun (prompt, image) ->
+        let source =
+          Notty.I.hcrop
+            horizontal
+            (Int.max 0 (Notty.I.width image - horizontal - source_width))
+            image
+        in
+        Notty.I.(text_row H.Highlight_styles.(fg_hex "#96d0ff" ++ bold) prompt <|> source))
     in
     let rows =
       [ text_row H.Highlight_styles.(fg_hex "#adbac7" ++ bg_hex "#22272e") header ]
@@ -263,12 +458,17 @@ let image t state ~width ~height =
       @ output_rows
       @ [ text_row
             (H.Highlight_styles.fg_hex "#768390")
-            "-- Enter=newline  :submit=send  :help --"
+            (if Option.is_some (State.continuation_source state)
+             then
+               "-- Accepted prefix is read-only; Enter=append suffix; :reset=discard --"
+             else
+               "-- Enter=submit  Alt-Enter=newline  Tab=complete  Ctrl-R=search  :help --")
         ]
       @ editor_rows
+      @ assistance_rows
     in
     let image = stack rows in
     let image = Notty.I.hcrop 0 (Int.max 0 (Notty.I.width image - width)) image in
     let image = Notty.I.vcrop 0 (Int.max 0 (Notty.I.height image - height)) image in
-    image, cursor)
+    image, if Option.is_some (State.history_search state) then None else cursor)
 ;;

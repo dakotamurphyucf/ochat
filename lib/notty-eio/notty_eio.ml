@@ -20,6 +20,7 @@ module Term = struct
     ; input : Eio_unix.source_ty r
     ; ibuf : Cstruct.t (* Scratch buffer for [event] *)
     ; iparse : Unescape.t (* Input parser *)
+    ; modified_enter : (Modified_enter.t * Eio.Time.Mono.ty r) option
     ; output : Eio_unix.sink_ty r
     ; obuf : Buffer.t (* Pending output *)
     ; cleanup : (unit -> unit) Queue.t (* Actions to perform on release *)
@@ -84,13 +85,21 @@ module Term = struct
   let with_cleanup t (`Revert fn) = Queue.add fn t.cleanup
 
   let await_input_or_resize ~input_fd t =
-    Fiber.first
-      (fun () ->
-         Eio.Condition.loop_no_mutex t.resize_changed (fun () ->
-           if t.need_resize then Some `Resize else None))
-      (fun () ->
-         Eio_unix.await_readable input_fd;
-         `Input)
+    let input_or_resize () =
+      Fiber.first
+        (fun () ->
+           Eio.Condition.loop_no_mutex t.resize_changed (fun () ->
+             if t.need_resize then Some `Resize else None))
+        (fun () ->
+           Eio_unix.await_readable input_fd;
+           `Input)
+    in
+    match t.modified_enter with
+    | Some (decoder, clock) when Modified_enter.escape_pending decoder ->
+      Fiber.first input_or_resize (fun () ->
+        Eio.Time.Mono.sleep clock 0.05;
+        `Flush)
+    | Some _ | None -> input_or_resize ()
   ;;
 
   let rec input_events ~input_fd ~on_event t =
@@ -108,14 +117,37 @@ module Term = struct
       | `Await ->
         (match await_input_or_resize ~input_fd t with
          | `Resize -> ()
+         | `Flush ->
+           (match t.modified_enter with
+            | None -> ()
+            | Some (decoder, _) ->
+              let bytes = Bytes.of_string (Modified_enter.flush_escape decoder) in
+              if Bytes.length bytes > 0
+              then Unescape.input t.iparse bytes 0 (Bytes.length bytes))
          | `Input ->
            let len = Eio.Flow.single_read t.input t.ibuf in
            let ibuf = Cstruct.to_bytes t.ibuf ~len in
-           Unescape.input t.iparse ibuf 0 len));
+           (match t.modified_enter with
+            | None -> Unescape.input t.iparse ibuf 0 len
+            | Some (decoder, _) ->
+              let bytes =
+                Modified_enter.feed decoder (Bytes.to_string ibuf) |> Bytes.of_string
+              in
+              if Bytes.length bytes > 0
+              then Unescape.input t.iparse bytes 0 (Bytes.length bytes))));
     input_events ~input_fd ~on_event t
   ;;
 
-  let run ?(nosig = true) ?(mouse = true) ?(bpaste = true) ~input ~output ~on_event fn =
+  let run
+        ?(nosig = true)
+        ?(mouse = true)
+        ?(bpaste = true)
+        ?modified_enter_clock
+        ~input
+        ~output
+        ~on_event
+        fn
+    =
     (* Note: Notty uses [input_fd] during shutdown, so must hold it open until release: *)
     Eio_unix.Fd.use_exn "notty" (Eio_unix.Resource.fd input)
     @@ fun input_fd ->
@@ -128,6 +160,10 @@ module Term = struct
       ; input
       ; ibuf = Cstruct.create 1024
       ; iparse = Unescape.create ()
+      ; modified_enter =
+          Option.map
+            (fun clock -> Modified_enter.create (), (clock :> Eio.Time.Mono.ty r))
+            modified_enter_clock
       ; output
       ; obuf = Buffer.create 4096
       ; hook = Eio.Switch.null_hook

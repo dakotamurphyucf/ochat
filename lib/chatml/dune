@@ -137,6 +137,6 @@
 (library
  (name chatml_repl_typing)
  (public_name ochat.chatml_repl_typing)
- (modules chatml_repl_typing)
+ (modules chatml_repl_typing chatml_repl_completion)
  (libraries core chatml chatml_source chatml_prepared_program chatml_graph chatml_typechecker chatml_configured_check)
  (preprocess (pps ppx_jane)))

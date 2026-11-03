@@ -18,7 +18,9 @@ open Core
 (* VSCode/GitHub-dark truecolor palette. Matches tokens from the supplied
    theme JSON as closely as Notty allows. *)
 let github_dark_rules : rule list =
-  [ { prefix = "comment"; attr = Styles.(fg_hex "#6A737D") } (* Headings – azure, bold. *)
+  [ { prefix = "comment"; attr = Styles.(fg_hex "#6A737D") }
+  ; { prefix = "comment.block.chatml"; attr = Styles.(fg_hex "#6A737D") }
+    (* Headings – azure, bold. *)
   ; { prefix = "heading.1.markdown"; attr = Styles.(fg_hex "#79B8FF" ++ bold) }
   ; { prefix = "heading.2.markdown"; attr = Styles.(fg_hex "#79B8FF" ++ bold) }
   ; { prefix = "heading.3.markdown"; attr = Styles.(fg_hex "#79B8FF" ++ bold) }

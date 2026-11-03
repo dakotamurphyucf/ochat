@@ -2124,9 +2124,10 @@ let run ctx input =
   | `Ok(_) ->
     Task.bind(Job.start_tool("child", `Object([{key="input"; value=`String("go")}])), fun child ->
       Task.bind(Model.spawn("agent_prompt_v1", `Object([{key="prompt"; value=`String(%S)}, {key="input"; value=`String("from Task")}, {key="is_local"; value=`Bool(true)}, {key="source_mode"; value=`String("file")}])), fun model ->
-        Task.pure(`Object([{key="child"; value=`String(child)}, {key="model"; value=`String(model)}]))))
+        Task.pure({%s = `Object([{key="child"; value=`String(child)}, {key="model"; value=`String(model)}])})))
   | `Error(message) -> Task.fail(message))|}
                         (Filename.concat root "model.chatmd")
+                        ("retained_task_result_" ^ String.make 256 'x')
                     in
                     let submission =
                       Repl.submit
@@ -2140,9 +2141,30 @@ let run ctx input =
                       |> required "REPL Task expression"
                     in
                     [%test_eq: int] (Repl.Submission.statement_count submission) 1;
+                    [%test_eq: int] (Repl.Submission.completed_statements submission) 1;
+                    (* The result-record type label exceeds the requested ceiling
+                       independently of the Task's compact opaque value preview.
+                       Keep one receipt so the frozen-detail eviction oracle below
+                       retains its original admission boundary. *)
                     (match Repl.Submission.details submission with
                      | Output_limited -> ()
-                     | Available -> failwith "large frozen Task type was not bounded");
+                     | Available -> failwith "oversized REPL type label was not bounded");
+                    let displayed_bytes =
+                      List.sum
+                        (module Int)
+                        (Repl.Submission.summaries submission)
+                        ~f:(fun summary ->
+                          Option.value_map
+                            (Repl.Submission.Statement_summary.value_preview summary)
+                            ~default:0
+                            ~f:String.length
+                          + Option.value_map
+                              (Repl.Submission.Statement_summary.expression_type summary)
+                              ~default:0
+                              ~f:(fun rendered ->
+                                String.length (Chatml_type_display.text rendered)))
+                    in
+                    assert (displayed_bytes <= 256);
                     [%test_eq: int] (Repl.Submission.task_reference_count submission) 1;
                     let statement_trace =
                       retained_trace
