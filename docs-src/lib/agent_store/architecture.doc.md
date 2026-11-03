@@ -33,3 +33,8 @@ resource ownership, return types and cancellation/error behavior.
 | `snapshot` | [contract](../../../lib/agent_store/snapshot.mli) | [source](../../../lib/agent_store/snapshot.ml) |
 | `store_error` | [contract](../../../lib/agent_store/store_error.mli) | [source](../../../lib/agent_store/store_error.ml) |
 | `transaction` | [contract](../../../lib/agent_store/transaction.mli) | [source](../../../lib/agent_store/transaction.ml) |
+
+Complete captured prompt artifacts can also be retained as immutable pure
+[artifact custody](captured_prompt_artifact.doc.md). This preserves exact original
+manifest bytes, authored sources and private program/content payloads without
+creating publication or execution authority.

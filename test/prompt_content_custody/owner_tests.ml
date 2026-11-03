@@ -248,6 +248,26 @@ let%test_module "actual prompt content custody owners" =
             | Some { availability = Ready revision; _ } -> revision
             | _ -> failwith "captured document catalog entry unavailable")
         in
+        (* Exercise complete artifact custody with the actual captured content
+           owner before any source edits or replay; no authority is restored by
+           the pure storage projection. *)
+        let original = Revision.artifact parent in
+        let captured = Agent_store.Captured_prompt_artifact.create original |> ok in
+        let captured = Agent_store.Captured_prompt_artifact.to_document captured |> ok in
+        let restored =
+          Agent_store.Captured_prompt_artifact.of_document captured
+          |> ok
+          |> Agent_store.Captured_prompt_artifact.value
+        in
+        assert (Option.is_some restored.program_bundle);
+        assert (Option.is_some restored.content_bundle);
+        assert (Store.Artifact.same_content original restored);
+        assert (
+          String.equal
+            (Agent_store.Prompt_manifest_document.Publication.bytes
+               original.manifest_publication)
+            (Agent_store.Prompt_manifest_document.Publication.bytes
+               restored.manifest_publication));
         assert (List.equal String.equal (literals parent) [ "original" ]);
         reject_missing_content env root definition parent;
         let projection = Option.value_exn (Revision.document_projection parent) in

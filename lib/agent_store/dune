@@ -93,6 +93,7 @@
   prompt_manifest_document
   prompt_artifact_staging
   prompt_artifact_store
+  captured_prompt_artifact
   migration)
  (private_modules
   journal_initial_creation
@@ -122,6 +123,7 @@
   cstruct
   bin_prot
   digestif
+  base64
   ochat.document_schema
   ochat.chatml_source
   chatml_prompt_binding

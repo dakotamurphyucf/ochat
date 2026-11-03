@@ -110,9 +110,19 @@ module Artifact = struct
     Manifest.equal (manifest a) { (manifest b) with created_at = a.created_at }
   ;;
 
-  let check_payload_budget ~root_chatmd ~sources ~program_bundle ~content_bundle =
+  let check_inventory_budget ~root_chatmd ~sources ~program_payloads ~content_payloads =
     let module B = Program_bundle in
     let open Result.Let_syntax in
+    let invalid () =
+      Error
+        (Store_error.Document
+           (Document_schema.Error.Limit_exceeded "prompt source inventory"))
+    in
+    let charge (count, bytes) length =
+      if count >= B.max_payload_count || length > B.max_payload_bytes - bytes
+      then invalid ()
+      else Ok (count + 1, bytes + length)
+    in
     let%bind () =
       if String.length root_chatmd > B.max_payload_bytes
       then
@@ -120,40 +130,51 @@ module Artifact = struct
           (Store_error.Document (Document_schema.Error.Limit_exceeded "root prompt bytes"))
       else Ok ()
     in
-    let invalid () =
-      Error
-        (Store_error.Document
-           (Document_schema.Error.Limit_exceeded "prompt source inventory"))
+    let%bind initial = charge (0, 0) (String.length root_chatmd) in
+    let%bind total =
+      List.fold_result sources ~init:initial ~f:(fun total source ->
+        charge total (String.length source.Source.contents))
     in
-    let%bind initial_count, initial_bytes =
-      List.fold_result
-        [ program_bundle; content_bundle ]
-        ~init:(1, String.length root_chatmd)
-        ~f:(fun (count, bytes) bundle ->
-          match bundle with
-          | None -> Ok (count, bytes)
-          | Some bundle ->
-            let manifest = B.manifest bundle in
-            let additional_count = List.length (B.Manifest.payloads manifest) in
-            let additional_bytes = B.Manifest.payload_bytes manifest in
-            if
-              additional_count > B.max_payload_count - count
-              || additional_bytes > B.max_payload_bytes - bytes
-            then invalid ()
-            else Ok (count + additional_count, bytes + additional_bytes))
+    List.fold_result
+      [ program_payloads; content_payloads ]
+      ~init:total
+      ~f:(fun total pool ->
+        List.fold_result pool ~init:total ~f:(fun total payload ->
+          charge total (B.Payload.byte_length payload)))
+    |> Result.map ~f:(fun _ -> ())
+  ;;
+
+  let check_payload_budget ~root_chatmd ~sources ~program_bundle ~content_bundle =
+    check_inventory_budget
+      ~root_chatmd
+      ~sources
+      ~program_payloads:
+        (Option.value_map program_bundle ~default:[] ~f:Program_bundle.payloads)
+      ~content_payloads:
+        (Option.value_map content_bundle ~default:[] ~f:Program_bundle.payloads)
+  ;;
+
+  let restore ~publication ~root_chatmd ~sources ~program_payloads ~content_payloads =
+    let open Result.Let_syntax in
+    let%bind () =
+      check_inventory_budget
+        ~root_chatmd
+        ~sources
+        ~program_payloads:(Option.value program_payloads ~default:[])
+        ~content_payloads:(Option.value content_payloads ~default:[])
     in
-    if initial_count > B.max_payload_count || initial_bytes > B.max_payload_bytes
-    then invalid ()
-    else
-      List.fold_result
-        sources
-        ~init:(initial_count, initial_bytes)
-        ~f:(fun (count, bytes) source ->
-          let length = String.length source.Source.contents in
-          if count >= B.max_payload_count || length > B.max_payload_bytes - bytes
-          then invalid ()
-          else Ok (count + 1, bytes + length))
-      |> Result.map ~f:(fun _ -> ())
+    let known = Prompt_manifest_document.value (Publication.document publication) in
+    let bundle expected actual =
+      match expected, actual with
+      | None, None -> Ok None
+      | Some manifest, Some payloads ->
+        Result.map (Program_bundle.restore manifest payloads) ~f:Option.some
+      | None, Some _ | Some _, None ->
+        Error (Store_error.Corrupt "private payload presence differs from manifest")
+    in
+    let%bind program_bundle = bundle known.program_bundle program_payloads in
+    let%bind content_bundle = bundle known.content_bundle content_payloads in
+    of_publication publication ~root_chatmd ~sources ~program_bundle ~content_bundle
   ;;
 
   let create
