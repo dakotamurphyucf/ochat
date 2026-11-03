@@ -111,7 +111,14 @@ let plan_reset state options =
                ~now:state.identity.updated_at)
             ~f:Option.some
     in
-    let candidate = { candidate with run_state } in
+    let%bind goal_catalog =
+      match state.goal_catalog with
+      | None -> Ok None
+      | Some catalog ->
+        let%map held = Goal_catalog.hold_for_review catalog in
+        Some (Option.value held ~default:catalog)
+    in
+    let candidate = { candidate with run_state; goal_catalog } in
     let%map () =
       Session_state.validate_administration_candidate candidate ~previous:state
     in

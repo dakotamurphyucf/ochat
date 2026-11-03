@@ -13,6 +13,7 @@ module Fields = struct
     ; jobs : Job.t list
     ; extension_status : Extension_status.t list [@sexp.list]
     ; schedules : Schedule.t list
+    ; goals : Goal_projection.t list [@sexp.list]
     ; active_tool_calls : Activity.Tool.summary list
     ; active_agent_calls : Activity.Tool.summary list
     ; halted : bool
@@ -51,6 +52,7 @@ let to_json t =
     ; Some ("jobs", list Job.to_json t.jobs)
     ; Some ("extension_status", list Extension_status.to_json t.extension_status)
     ; Some ("schedules", list Schedule.to_json t.schedules)
+    ; (if List.is_empty t.goals then None else Some ("goals", list Goal.to_json t.goals))
     ; Some ("active_tool_calls", list Activity.Tool.summary_to_json t.active_tool_calls)
     ; Some ("active_agent_calls", list Activity.Tool.summary_to_json t.active_agent_calls)
     ; Some ("halted", if t.halted then `True else `False)
@@ -208,6 +210,12 @@ let validate_relationships t =
       not (same_session s.session_id && bounded s.generation))
   then Error (Protocol_error.invalid_request "snapshot child ownership mismatch")
   else (
+    let%bind () =
+      Goal_projection.validate
+        t.goals
+        ~session_id:t.session.id
+        ~generation:t.session.generation
+    in
     let%bind () = validate_activity t in
     let%bind () =
       Public_history.validate_unique_ids (t.canonical_history.entries @ t.deferred_entries)
@@ -232,6 +240,7 @@ let validate_components t =
   let%bind () = validate t.permissions Permission.to_json Permission.of_json in
   let%bind () = validate t.grants Grant.to_json Grant.of_json in
   let%bind () = validate t.jobs Job.to_json Job.of_json in
+  let%bind () = validate t.goals Goal.to_json Goal.of_json in
   validate t.schedules Schedule.to_json Schedule.of_json
 ;;
 
@@ -269,6 +278,8 @@ let of_json json =
     decode_history fields
   in
   let%bind permissions, grants, jobs, schedules = decode_durable_children fields in
+  let%bind goals = Json_codec.optional_as fields "goals" Goal_projection.list_of_json in
+  let goals = Option.value goals ~default:[] in
   let%bind active_tool_calls, active_agent_calls = decode_active fields in
   let%bind halted, halt_reason, failure = decode_terminal fields in
   let%bind revision = Json_codec.required_as fields "revision" nonnegative_int64 in
@@ -300,6 +311,7 @@ let of_json json =
       ; jobs
       ; extension_status
       ; schedules
+      ; goals
       ; active_tool_calls
       ; active_agent_calls
       ; halted

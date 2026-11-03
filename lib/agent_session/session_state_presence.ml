@@ -10,14 +10,19 @@ end
 
 type t =
   { run_state_absent : bool
+  ; goal_catalog_absent : bool
   ; delivery_bindings : bool Map.M(Delivery_id).t
   }
 
 let authored =
-  { run_state_absent = false; delivery_bindings = Map.empty (module Delivery_id) }
+  { run_state_absent = false
+  ; goal_catalog_absent = false
+  ; delivery_bindings = Map.empty (module Delivery_id)
+  }
 ;;
 
 let run_state_is_absent t = t.run_state_absent
+let goal_catalog_is_absent t = t.goal_catalog_absent
 
 let delivery_binding_is_absent t id =
   Option.value (Map.find t.delivery_bindings id) ~default:false
@@ -37,6 +42,11 @@ let of_document document ~limits =
   let payload = D.Document.payload document in
   let run_state_absent =
     match D.Json.field payload ~name:"run_state" with
+    | Absent -> true
+    | Null | Value _ -> false
+  in
+  let goal_catalog_absent =
+    match D.Json.field payload ~name:"goal_catalog" with
     | Absent -> true
     | Null | Value _ -> false
   in
@@ -74,5 +84,5 @@ let of_document document ~limits =
                ; reason = "duplicate delivery identity in original state"
                }))
   in
-  { run_state_absent; delivery_bindings }
+  { run_state_absent; goal_catalog_absent; delivery_bindings }
 ;;

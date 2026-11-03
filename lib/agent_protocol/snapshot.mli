@@ -12,6 +12,7 @@ type t =
   ; jobs : Job.t list
   ; extension_status : Extension_status.t list [@sexp.list]
   ; schedules : Schedule.t list
+  ; goals : Goal_projection.t list [@sexp.list]
   ; active_tool_calls : Jsonaf.t list
   ; active_agent_calls : Jsonaf.t list
   ; halted : bool

@@ -1050,7 +1050,9 @@ val submit_message
 
 (** Called by the restoring host before any runtime can execute. Durable old
     live runs become Interrupted with immutable Unconfirmed owner evidence and
-    terminal receipts; installation epoch is unchanged and no effect replays. *)
+    terminal receipts; installation epoch is unchanged and no effect replays.
+    The same recovery transaction also holds enabled retained goals for source
+    review without consuming a user command receipt or constructing a runtime. *)
 val reconcile_run_recovery : t -> (unit, Agent_protocol.Error.t) result
 
 (** Native action provider for the exact currently held actor event borrow.
@@ -2188,3 +2190,25 @@ val retire_lifecycle : t -> Lifecycle_fence.t -> (unit, Agent_protocol.Error.t) 
     future execution lifetime. Actual owner/scope installation must revalidate
     under the same admission rules after any waits. *)
 val check_runtime_admission : t -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Actual original operator command proof, current Send_messages and non-yielding
+    host write policy, checked before receipt lookup and fresh commit. The actor
+    computes exact input identity and commits catalog/receipt/source installation
+    atomically through ordinary persistence. Safe Hold/Abandon need no moderator.
+    No Run is enabled, cancelled or scheduled. Saturation fails fresh keys closed;
+    exact retained evidence remains queryable after source/generation changes. *)
+val goal_command
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> session:Agent_protocol.Session_ref.t
+  -> request:Goal_command.t
+  -> (Goal_command_receipt.t, Agent_protocol.Error.t) result
+
+(** Current original View_session_transcript proof and host visibility. Stored
+    creator/principal IDs cannot authorize reads. No runtime is constructed. *)
+val read_goals
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Goal.t list, Agent_protocol.Error.t) result

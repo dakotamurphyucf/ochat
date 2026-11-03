@@ -1,8 +1,9 @@
 # Persistent goals and owned execution
 
-Status: accepted engineering direction for implementation. The persistent goal
-catalog, goal tools and cumulative goal accounting described here are not yet
-implemented. Existing Run lifecycle, actor receipts, bounded inference accounting
+Status: accepted engineering direction with a persistent actor-owned metadata
+catalog and internal authenticated operator commands. Goal tools, execution
+admission, achievement coupling and cumulative goal accounting remain separate
+work. Existing Run lifecycle, actor receipts, bounded inference accounting
 and continuation scheduling are the foundations. This document does not claim a
 passing authored goal workflow or full context-window rollover support.
 
@@ -176,8 +177,16 @@ request or closure.
 
 ### Implemented pure evidence and capacity boundary
 
-The pure protocol/domain and universal carrier foundation is implemented; actor
-commands, tools, continuation and cumulative accounting remain integration work.
+The pure protocol/domain, universal carrier and actor-owned metadata catalog are
+implemented. Internal original-operator commands cover create/read, objective and
+progress edits, hold, permitted budget changes, explicit source adoption and
+abandonment. They never enable or resume execution. Selected native/tool wrappers,
+actual episode admission, achievement coupling, continuation and cumulative
+accounting remain integration work. The
+[metadata command contract](../lib/agent_session/goal_catalog.doc.md) specifies the
+16-goal/256-receipt finite retention policy, source/reset/recovery holds and complete
+host capacity reservation. Internal holds do not consume user receipt slots;
+future actual terminal settlement must preserve that separation.
 `Goal_episode.Settlement` retains an immutable episode and exact Terminal receipt,
 not a copied terminal classification. Live constructors validate the actual Run and
 canonical receipt digest. Achievement additionally hashes canonical

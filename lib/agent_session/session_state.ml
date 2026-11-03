@@ -136,6 +136,7 @@ type 'spec fields =
   ; managed_stops : Managed_stop.t list [@sexp.list]
   ; moderator_executions : Agent_protocol.Moderator_execution.t list [@sexp.list]
   ; run_state : Run_state.t option [@sexp.option]
+  ; goal_catalog : Goal_catalog.t option [@sexp.option]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]
   ; ingress_registrations : External_ingress.t list [@sexp.list]
@@ -431,6 +432,7 @@ let create_fields ~(identity : Identity.t) ~spec ~desired ~initial_history =
   ; managed_stops = []
   ; moderator_executions = []
   ; run_state = None
+  ; goal_catalog = None
   ; subscriptions = []
   ; deliveries = []
   ; ingress_registrations = []
@@ -1042,6 +1044,15 @@ let validate_domain (t : t) =
 let validate (t : t) =
   let open Result.Let_syntax in
   let%bind () =
+    match t.goal_catalog with
+    | None -> Ok ()
+    | Some catalog ->
+      Goal_catalog.validate
+        catalog
+        ~session_id:t.identity.session_id
+        ~generation:t.identity.generation
+  in
+  let%bind () =
     match t.run_state with
     | None -> Ok ()
     | Some runs ->
@@ -1212,6 +1223,7 @@ let snapshot ~now t =
     ; jobs = t.jobs
     ; extension_status = extension_status t
     ; schedules = t.schedules
+    ; goals = Option.value_map t.goal_catalog ~default:[] ~f:Goal_catalog.goals
     ; active_tool_calls = []
     ; active_agent_calls = []
     ; halted = t.halted
