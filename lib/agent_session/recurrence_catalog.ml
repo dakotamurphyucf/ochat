@@ -398,9 +398,26 @@ let validate_internal previous incoming =
          | Enabled | Paused _ ->
            E.equal_control (E.control next.value) (Retired Lifecycle_changed)))
   in
+  let due =
+    let changed =
+      List.filter previous.entries ~f:(fun old ->
+        Option.for_all
+          (stored incoming (E.id old.Stored.value))
+          ~f:(fun next -> not (same_entry old next)))
+    in
+    match changed with
+    | [ old ] ->
+      (match stored incoming (E.id old.value) with
+       | Some next ->
+         E.equal_control (E.control old.value) Enabled
+         && E.equal_control (E.control next.value) Enabled
+         && Int64.equal (E.control_revision old.value) (E.control_revision next.value)
+       | None -> false)
+    | [] | _ :: _ :: _ -> false
+  in
   if List.length previous.entries <> List.length incoming.entries
   then invalid "internal recurrence disposition changed identity inventory"
-  else if disposition Controller_stop || disposition Source_review || retirement
+  else if due || disposition Controller_stop || disposition Source_review || retirement
   then Ok ()
   else invalid "receipt-free recurrence update is not a complete safety disposition"
 ;;
@@ -465,6 +482,32 @@ let commit t ~entry ~(receipt : R.t) =
     in
     let incoming =
       { revision = Int64.succ t.revision; entries; receipts = t.receipts @ [ receipt ] }
+    in
+    let%map () = validate_transition t ~incoming in
+    incoming)
+;;
+
+let apply_due t ~recurrence_id plan =
+  let open Result.Let_syntax in
+  let%bind old =
+    Result.of_option
+      (find t recurrence_id)
+      ~error:(P.Error.invalid_request "due recurrence identity is not retained")
+  in
+  let%bind entry = E.apply_due old plan in
+  let%bind next = Stored.create entry in
+  if Int64.equal t.revision Int64.max_value
+  then full "recurrence due catalog frontier exhausted"
+  else (
+    let incoming =
+      { t with
+        revision = Int64.succ t.revision
+      ; entries =
+          List.map t.entries ~f:(fun old ->
+            if P.Id.Recurrence.equal (E.id old.Stored.value) recurrence_id
+            then next
+            else old)
+      }
     in
     let%map () = validate_transition t ~incoming in
     incoming)

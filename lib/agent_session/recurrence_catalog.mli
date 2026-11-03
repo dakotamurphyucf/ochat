@@ -27,8 +27,19 @@ val commit
   -> receipt:Recurrence_command_receipt.t
   -> (t, Agent_protocol.Error.t) result
 
+(** Pure exact-basis one-entry due candidate. Advances catalog/planning state
+    together without consuming a keyed user command receipt or control revision.
+    The publisher must check actual lifecycle/source/control and preflight the
+    complete shared state/journal before saving or installing its local phase. *)
+val apply_due
+  :  t
+  -> recurrence_id:Agent_protocol.Id.Recurrence.t
+  -> Recurrence_due_plan.t
+  -> (t, Agent_protocol.Error.t) result
+
 (** Internal safe dispositions consume no user receipt slot. They preserve all
-    definitions and cursors and advance changed control/catalog frontiers once.
+    definitions and the sole source cursor, withdraw known unadmitted rows and
+    retire owned alarms while advancing changed control/catalog frontiers once.
     They fence future launches only, never establish external cancellation. *)
 val pause_for_stop : t -> (t option, Agent_protocol.Error.t) result
 
