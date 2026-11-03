@@ -382,7 +382,20 @@ module Prepared = struct
            | Some _ | None -> fail "unsupported tool"))
   ;;
 
-  let of_captured_settings profile ~model ~history ~tools ~settings =
+  let of_captured_settings ?guidance_provenance profile ~model ~history ~tools ~settings =
+    let%bind.Or_error () =
+      match guidance_provenance with
+      | None -> Ok ()
+      | Some label ->
+        if String.length label > 1024 || String.is_empty (String.strip label)
+        then fail "invalid private guidance provenance"
+        else
+          Document_schema.Json.validate
+            ~limits:Document_schema.Limits.default
+            (`String label)
+          |> Result.map_error ~f:(fun _ ->
+            Error.of_string "invalid private guidance provenance")
+    in
     let%bind.Or_error () = require profile ~model Text_input in
     let%bind.Or_error () =
       if List.contains_dup (List.map settings ~f:Setting.name) ~compare:String.compare
@@ -430,23 +443,26 @@ module Prepared = struct
     in
     let identity =
       `Object
-        [ "profile", `String profile.id
-        ; ( "account"
-          , match profile.account with
-            | None -> `Null
-            | Some s -> `String s )
-        ; "endpoint", `String profile.endpoint
-        ; "request", Request.jsonaf_of_t request
-        ; ( "provenance"
-          , `Array
-              (List.map settings ~f:(fun s ->
-                 `Array
-                   [ `String (Setting.name s)
-                   ; `String
-                       (Sexp.to_string
-                          (Setting.sexp_of_provenance (Setting.provenance s)))
-                   ])) )
-        ]
+        ([ "profile", `String profile.id
+         ; ( "account"
+           , match profile.account with
+             | None -> `Null
+             | Some s -> `String s )
+         ; "endpoint", `String profile.endpoint
+         ; "request", Request.jsonaf_of_t request
+         ; ( "provenance"
+           , `Array
+               (List.map settings ~f:(fun s ->
+                  `Array
+                    [ `String (Setting.name s)
+                    ; `String
+                        (Sexp.to_string
+                           (Setting.sexp_of_provenance (Setting.provenance s)))
+                    ])) )
+         ]
+         @ Option.to_list
+             (Option.map guidance_provenance ~f:(fun label ->
+                "guidance_provenance", `String label)))
     in
     let%bind.Or_error () =
       Document_schema.Json.validate ~limits:Document_schema.Limits.default identity

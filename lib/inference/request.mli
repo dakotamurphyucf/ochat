@@ -19,6 +19,9 @@ module Error : sig
   [@@deriving equal, sexp_of]
 end
 
+(** Request-only text; no model-chosen role, history identity or authority. *)
+module Guidance = Request_guidance
+
 module Setting : sig
   type provenance =
     | Execution_override
@@ -256,3 +259,16 @@ val history : t -> History_entry.t list
 val tools : t -> Tool_spec.t list
 val assets : t -> Asset.t list
 val encoded_bytes : t -> int
+
+(** The default constructor has no guidance. This receiver-first replacement
+    re-admits the complete immutable request under [limits], charging escaped
+    guidance and private provenance alongside the existing target/history/tools
+    and assets. None removes guidance; replacement never appends duplicates.
+    No history, target setting or persisted conversation is modified. *)
+val with_guidance
+  :  t
+  -> guidance:Guidance.t option
+  -> limits:Document_schema.Limits.t
+  -> (t, Error.t) Result.t
+
+val guidance : t -> Guidance.t option

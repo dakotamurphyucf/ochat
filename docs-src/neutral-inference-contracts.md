@@ -14,6 +14,15 @@ Target and setting codecs preserve their complete admitted private JSON, includi
 
 Assets contain already resolved immutable bytes and their exact host references. They contain no filesystem or network callbacks. Tool descriptions carry schemas, not execution grants; the existing host registry and admission owner remain responsible for bindings, authorization and execution. Request limits account for the complete neutral representation and base64 body size without encoding asset bodies merely to measure them. Provider wire limits are checked separately by the adapter.
 
+`Request.Guidance` is optional private request text with a bounded provenance
+label and fixed User priority. `Request.create` defaults to absence;
+`Request.with_guidance` replaces or clears it and re-admits the entire request.
+It allocates no history identities and never modifies settings such as
+`instructions`. Its exact text and provenance participate in prepared custody,
+while safe observations omit them. Adapters must explicitly support this
+projection or fail before preparation; source authorization, active session
+selection and context-window policy belong to the host.
+
 ## Provider evidence and host commits
 
 `Inference.Event` admits provisional transcript observations, complete candidate payloads and inference terminals. A provider cannot use it to publish a committed `Item_finalized` or finish the host's local output admission. A candidate retains its actual source, attempt and item identities, but does not allocate a history ID or authorize a tool call. The host publishes finalization only after its existing admission and commit boundary succeeds.
