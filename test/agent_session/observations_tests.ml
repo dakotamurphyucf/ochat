@@ -43,38 +43,42 @@ let%expect_test
                   (M.identity_snapshot manager |> Result.ok_or_failwith)))
           |> protocol_ok;
           let parent = invocation_fixture () in
-          caps.with_invocation ~invocation:parent (fun ~dispatched:_ ->
-            List.iter [ 2; 0; 1; 3 ] ~f:(fun index ->
-              let observer =
-                match index with
-                | 3 -> { observer with script_id = "unrelated" }
-                | _ -> observer
-              in
-              let child =
-                I.create
-                  ~observer
-                  { parent.context with
-                    id =
-                      Agent_protocol.Id.Invocation.of_string
-                        ("inv_queue_" ^ Int.to_string index)
-                      |> protocol_ok
-                  ; origin = Moderator
-                  ; parent_invocation = Some parent.context.id
-                  }
-                |> protocol_ok
-              in
-              caps.with_invocation ~invocation:child (fun ~dispatched:_ ->
-                Int.incr native_calls;
-                Ok (Complete (`Number (Int.to_string index))))
-              |> protocol_ok
-              |> ignore);
-            assert (
-              not
-                (caps.with_next_moderator_observation
-                   ~observer
-                   (fun ~observing:_ ~commit:_ -> assert false)
-                 |> protocol_ok));
-            Ok (Complete `Null))
+          caps.with_invocation
+            ~invocation:parent
+            (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+               List.iter [ 2; 0; 1; 3 ] ~f:(fun index ->
+                 let observer =
+                   match index with
+                   | 3 -> { observer with script_id = "unrelated" }
+                   | _ -> observer
+                 in
+                 let child =
+                   I.create
+                     ~observer
+                     { parent.context with
+                       id =
+                         Agent_protocol.Id.Invocation.of_string
+                           ("inv_queue_" ^ Int.to_string index)
+                         |> protocol_ok
+                     ; origin = Moderator
+                     ; parent_invocation = Some parent.context.id
+                     }
+                   |> protocol_ok
+                 in
+                 caps.with_invocation
+                   ~invocation:child
+                   (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                      Int.incr native_calls;
+                      Ok (Complete (`Number (Int.to_string index))))
+                 |> protocol_ok
+                 |> ignore);
+               assert (
+                 not
+                   (caps.with_next_moderator_observation
+                      ~observer
+                      (fun ~observing:_ ~commit:_ -> assert false)
+                    |> protocol_ok));
+               Ok (Complete `Null))
           |> protocol_ok
           |> ignore;
           let drain max_observations =
@@ -294,24 +298,28 @@ let%expect_test "idle observations own state without starting a model operation"
             in
             caps.commit_moderator snapshot |> protocol_ok;
             let parent = invocation_fixture () in
-            caps.with_invocation ~invocation:parent (fun ~dispatched:_ ->
-              let child =
-                I.create
-                  ~observer
-                  { parent.context with
-                    id =
-                      Agent_protocol.Id.Invocation.of_string "inv_idle_observation"
-                      |> protocol_ok
-                  ; origin = Moderator
-                  ; parent_invocation = Some parent.context.id
-                  }
-                |> protocol_ok
-              in
-              caps.with_invocation ~invocation:child (fun ~dispatched:_ ->
-                Ok (Complete (`String "native result")))
-              |> protocol_ok
-              |> ignore;
-              Ok (Complete `Null))
+            caps.with_invocation
+              ~invocation:parent
+              (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                 let child =
+                   I.create
+                     ~observer
+                     { parent.context with
+                       id =
+                         Agent_protocol.Id.Invocation.of_string "inv_idle_observation"
+                         |> protocol_ok
+                     ; origin = Moderator
+                     ; parent_invocation = Some parent.context.id
+                     }
+                   |> protocol_ok
+                 in
+                 caps.with_invocation
+                   ~invocation:child
+                   (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                      Ok (Complete (`String "native result")))
+                 |> protocol_ok
+                 |> ignore;
+                 Ok (Complete `Null))
             |> protocol_ok
             |> ignore;
             prepared := Some (manager, observer);
@@ -688,18 +696,22 @@ let%test_unit
                 }
               |> protocol_ok
             in
-            caps.with_invocation ~invocation:parent (fun ~dispatched:_ ->
-              caps.with_invocation ~invocation:child (fun ~dispatched:_ ->
-                Int.incr native_calls;
-                Ok (Complete (`String "native result")))
-              |> protocol_ok
-              |> ignore;
-              assert (
-                Result.is_error
-                  (caps.with_moderator_observation
-                     ~invocation_id:child.context.id
-                     (fun ~observing:_ ~commit:_ -> assert false)));
-              Ok (Complete `Null))
+            caps.with_invocation
+              ~invocation:parent
+              (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                 caps.with_invocation
+                   ~invocation:child
+                   (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                      Int.incr native_calls;
+                      Ok (Complete (`String "native result")))
+                 |> protocol_ok
+                 |> ignore;
+                 assert (
+                   Result.is_error
+                     (caps.with_moderator_observation
+                        ~invocation_id:child.context.id
+                        (fun ~observing:_ ~commit:_ -> assert false)));
+                 Ok (Complete `Null))
             |> protocol_ok
             |> ignore;
             let escaped = ref None in
@@ -888,22 +900,26 @@ let%test_unit "cancellation during an idle observation claim releases its runtim
         in
         caps.commit_moderator snapshot |> protocol_ok;
         let parent = invocation_fixture () in
-        caps.with_invocation ~invocation:parent (fun ~dispatched:_ ->
-          let child =
-            I.create
-              ~observer
-              { parent.context with
-                id = child_id
-              ; origin = Moderator
-              ; parent_invocation = Some parent.context.id
-              }
-            |> protocol_ok
-          in
-          caps.with_invocation ~invocation:child (fun ~dispatched:_ ->
-            Ok (Complete (`String "recorded native result")))
-          |> protocol_ok
-          |> ignore;
-          Ok (Complete `Null))
+        caps.with_invocation
+          ~invocation:parent
+          (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+             let child =
+               I.create
+                 ~observer
+                 { parent.context with
+                   id = child_id
+                 ; origin = Moderator
+                 ; parent_invocation = Some parent.context.id
+                 }
+               |> protocol_ok
+             in
+             caps.with_invocation
+               ~invocation:child
+               (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                  Ok (Complete (`String "recorded native result")))
+             |> protocol_ok
+             |> ignore;
+             Ok (Complete `Null))
         |> protocol_ok
         |> ignore;
         Completed

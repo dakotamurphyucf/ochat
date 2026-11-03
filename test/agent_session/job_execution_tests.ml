@@ -50,7 +50,8 @@ let%expect_test
             label
             (execute
                ~invocation:(I.create context |> protocol_ok)
-               (fun ~dispatched:_ -> failwith "invalid background caller reached effects")));
+               (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                  failwith "invalid background caller reached effects")));
       assert_same_session_snapshot before (A.state actor |> protocol_ok);
       A.detach actor writer.id |> protocol_ok;
       (nested
@@ -75,8 +76,9 @@ let%expect_test
     |> protocol_ok;
     reject
       "expired executor"
-      ((Option.value_exn !escaped) ~invocation:(root job) (fun ~dispatched:_ ->
-         failwith "expired callback executed"));
+      ((Option.value_exn !escaped)
+         ~invocation:(root job)
+         (fun ~dispatched:_ ~borrow_agent_actor:_ -> failwith "expired callback executed"));
     complete actor job |> protocol_ok |> ignore;
     let state = Agent_session.Memory_backend.state backend in
     print_s
@@ -127,7 +129,7 @@ let%expect_test "job cancellation and permission cleanup share the durable trans
            let cancelled =
              try
                with_job actor job (fun ~job:_ ~execute ->
-                 execute ~invocation:(root job) (fun ~dispatched ->
+                 execute ~invocation:(root job) (fun ~dispatched ~borrow_agent_actor:_ ->
                    let resolution =
                      A.request_permission
                        actor
@@ -226,7 +228,7 @@ let%expect_test
     (fun _env actor _writer backend ->
        let job = add_claimed_job actor in
        with_job actor job (fun ~job:_ ~execute ->
-         execute ~invocation:(root job) (fun ~dispatched ->
+         execute ~invocation:(root job) (fun ~dispatched ~borrow_agent_actor:_ ->
            Eio.Promise.resolve release_u ();
            let state = await_idle actor in
            assert (List.exists state.invocations ~f:(I.equal dispatched));
@@ -262,7 +264,7 @@ let%expect_test
          Eio.Fiber.fork ~sw (fun () ->
            let cancelled =
              try
-               execute ~invocation:(root job) (fun ~dispatched:_ ->
+               execute ~invocation:(root job) (fun ~dispatched:_ ~borrow_agent_actor:_ ->
                  Eio.Promise.resolve entered_u ();
                  Eio.Promise.await never;
                  failwith "unjoined work resumed")
@@ -314,7 +316,7 @@ let%expect_test
        Eio.Fiber.both
          (fun () ->
             with_job actor job (fun ~job:_ ~execute ->
-              execute ~invocation:(root job) (fun ~dispatched ->
+              execute ~invocation:(root job) (fun ~dispatched ~borrow_agent_actor:_ ->
                 let resolution =
                   A.request_permission
                     actor

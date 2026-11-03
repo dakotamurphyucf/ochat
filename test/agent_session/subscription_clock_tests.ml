@@ -16,49 +16,53 @@ let admit ?(before_create = ignore) actor parent after_create =
     ~attempt:parent.attempt
     ~deadline:(Some deadline)
     (fun services ->
-       services.execute ~invocation:(root parent) (fun ~dispatched:root ->
-         let invocation =
-           I.create
-             { root.context with
-               id = P.Id.Invocation.create ()
-             ; parent_job = None
-             ; parent_invocation = Some root.context.id
-             ; tool_name = "counter"
-             }
-           |> protocol_ok
-         in
-         services.moderator_execute ~invocation (fun ~dispatched ~commit ->
-           let owner = J.Invocation dispatched.context.id in
-           before_create ();
-           let receipt, subscription =
-             A.create_script_subscription
-               actor
-               ~owner
-               ~source:Setup.source
-               ~kind:"elapsed"
-               ~lifetime_ms:1000
-               ~wake:No_wake
-               ~completion_schema:(Some (`Object [ "type", `String "string" ]))
-             |> protocol_ok
-           in
-           captured := Some subscription;
-           after_create ();
-           A.select_subscription_mutations
-             actor
-             ~owner
-             ~source:Setup.source
-             ~receipts:[ receipt ]
-           |> protocol_ok;
-           let resolved =
-             I.resolve
-               dispatched
-               ~session_id
-               ~generation:0
-               (Pending (Subscription subscription.context.id, `String "accepted"))
-             |> protocol_ok
-           in
-           commit ~resolved ~snapshot:Setup.after)
-         |> Result.map ~f:(fun () -> I.Complete `Null)))
+       services.execute
+         ~invocation:(root parent)
+         (fun ~dispatched:root ~borrow_agent_actor:_ ->
+            let invocation =
+              I.create
+                { root.context with
+                  id = P.Id.Invocation.create ()
+                ; parent_job = None
+                ; parent_invocation = Some root.context.id
+                ; tool_name = "counter"
+                }
+              |> protocol_ok
+            in
+            services.moderator_execute
+              ~invocation
+              (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+                 let owner = J.Invocation dispatched.context.id in
+                 before_create ();
+                 let receipt, subscription =
+                   A.create_script_subscription
+                     actor
+                     ~owner
+                     ~source:Setup.source
+                     ~kind:"elapsed"
+                     ~lifetime_ms:1000
+                     ~wake:No_wake
+                     ~completion_schema:(Some (`Object [ "type", `String "string" ]))
+                   |> protocol_ok
+                 in
+                 captured := Some subscription;
+                 after_create ();
+                 A.select_subscription_mutations
+                   actor
+                   ~owner
+                   ~source:Setup.source
+                   ~receipts:[ receipt ]
+                 |> protocol_ok;
+                 let resolved =
+                   I.resolve
+                     dispatched
+                     ~session_id
+                     ~generation:0
+                     (Pending (Subscription subscription.context.id, `String "accepted"))
+                   |> protocol_ok
+                 in
+                 commit ~resolved ~snapshot:Setup.after)
+            |> Result.map ~f:(fun () -> I.Complete `Null)))
   |> protocol_ok
   |> ignore;
   Option.value_exn !captured

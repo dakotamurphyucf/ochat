@@ -82,12 +82,63 @@ let%test_unit
           Exn.protect
             ~finally:(fun () -> Daemon.shutdown daemon |> protocol_ok)
             ~f:(fun () ->
+              let principal = principal () in
+              let context actor =
+                let context =
+                  Agent_server.Connection_context.create_authenticated
+                    ~actor
+                    ~connection_id:(P.Id.Attachment.create () |> P.Id.Attachment.to_string)
+                    ~transport:In_memory
+                    ~publish_notification:ignore
+                    ~max_attachments:8
+                in
+                let implementation =
+                  P.Initialize.Implementation.create
+                    ~name:"authenticated-creation"
+                    ~version:"1"
+                  |> protocol_ok
+                in
+                let request =
+                  P.Initialize.Request.create
+                    ~implementation
+                    ~protocol_min:P.Version.current
+                    ~protocol_max:P.Version.current
+                    ~features:[]
+                    ~event_encodings:[ Json ]
+                    ~max_inbound_event_bytes:1048576
+                    ()
+                  |> protocol_ok
+                in
+                Agent_server.Dispatcher.dispatch_command
+                  (Daemon.dispatcher daemon)
+                  ~context
+                  (Protocol_initialize request)
+                |> protocol_ok
+                |> ignore;
+                context
+              in
+              let expired =
+                Operator_authorization.guarded ~principal ~is_current:(fun () -> false)
+              in
+              let expired_context = context expired in
               (match
-                 Agent_server.Session_factory.create_session
-                   (Daemon.factory daemon)
-                   ~command_audit:None
-                   ~principal:(principal ())
-                   (create_request ())
+                 Agent_server.Dispatcher.dispatch_command
+                   (Daemon.dispatcher daemon)
+                   ~context:expired_context
+                   (Session_create (create_request ~key:"expired-create" ()))
+               with
+               | Error error -> [%test_eq: P.Error.code] Permission_denied error.code
+               | Ok _ -> failwith "expired authenticated Create became principal-only");
+              [%test_eq: int] 0 !callbacks;
+              let current =
+                Operator_authorization.guarded ~principal ~is_current:(fun () -> true)
+              in
+              let authenticated_context = context current in
+              (match
+                 Agent_server.Dispatcher.dispatch_command
+                   (Daemon.dispatcher daemon)
+                   ~context:authenticated_context
+                   (Session_create (create_request ()))
                with
                | exception Exit -> ()
                | exception exn -> raise exn

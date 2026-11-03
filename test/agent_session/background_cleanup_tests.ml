@@ -30,45 +30,49 @@ let%expect_test
              (fun services ->
                 match mode with
                 | `Handler ->
-                  services.execute ~invocation:(root job) (fun ~dispatched:parent ->
-                    let observer : I.observer =
-                      { script_id = before.script_id
-                      ; source_sha256 = before.script_source_hash
-                      }
-                    in
-                    let invocation =
-                      I.create
-                        ~observer
-                        { parent.context with
-                          id = Agent_protocol.Id.Invocation.create ()
-                        ; parent_job = None
-                        ; parent_invocation = Some parent.context.id
-                        ; tool_name = "counter"
-                        }
-                      |> protocol_ok
-                    in
-                    let result =
-                      services.moderator_execute ~invocation (fun ~dispatched ~commit ->
-                        incr effects;
-                        let resolved =
-                          I.resolve
-                            dispatched
-                            ~session_id
-                            ~generation:job.generation
-                            (Complete `Null)
-                          |> protocol_ok
-                        in
-                        let save () = commit ~resolved ~snapshot:after in
-                        escaped := save;
-                        reject_settlement := true;
-                        save ())
-                    in
-                    reject_settlement := false;
-                    assert (Result.is_error (!escaped ()));
-                    reject_settlement := true;
-                    let open Result.Let_syntax in
-                    let%map () = result in
-                    I.Complete `Null)
+                  services.execute
+                    ~invocation:(root job)
+                    (fun ~dispatched:parent ~borrow_agent_actor:_ ->
+                       let observer : I.observer =
+                         { script_id = before.script_id
+                         ; source_sha256 = before.script_source_hash
+                         }
+                       in
+                       let invocation =
+                         I.create
+                           ~observer
+                           { parent.context with
+                             id = Agent_protocol.Id.Invocation.create ()
+                           ; parent_job = None
+                           ; parent_invocation = Some parent.context.id
+                           ; tool_name = "counter"
+                           }
+                         |> protocol_ok
+                       in
+                       let result =
+                         services.moderator_execute
+                           ~invocation
+                           (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+                              incr effects;
+                              let resolved =
+                                I.resolve
+                                  dispatched
+                                  ~session_id
+                                  ~generation:job.generation
+                                  (Complete `Null)
+                                |> protocol_ok
+                              in
+                              let save () = commit ~resolved ~snapshot:after in
+                              escaped := save;
+                              reject_settlement := true;
+                              save ())
+                       in
+                       reject_settlement := false;
+                       assert (Result.is_error (!escaped ()));
+                       reject_settlement := true;
+                       let open Result.Let_syntax in
+                       let%map () = result in
+                       I.Complete `Null)
                   |> Result.map ~f:ignore
                 | `Event ->
                   let event =

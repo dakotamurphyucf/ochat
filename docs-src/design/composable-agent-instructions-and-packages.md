@@ -192,6 +192,39 @@ The final workflow evidence must include real native dispatch, actor persistence
 source replacement/resume and installed resource delivery. A pure helper test,
 successful metadata lookup or research document is not that evidence.
 
+## Original operator custody
+
+Authenticated connection ingress, explicit Run admission and authenticated
+runtime construction carry the original operator proof into the existing actor
+execution owner. Principal-only hosts remain unbound. A stored creating
+principal, replayed invocation or reopened session cannot reconstruct that proof.
+Joined native callbacks borrow through their explicit executor and exact
+invocation; retaining the returned object cannot extend the callback, worker,
+initialization owner or original authentication lifetime. Authenticated runtime
+construction checks the same proof before construction and at actual worker
+installation; initialization completion and queued Start admission also recheck
+it. Expiry closes an uninstalled returned runtime without undoing completed
+external effects or preventing owner cleanup. Worker return revokes
+its custody before terminal persistence, including when that persistence fails.
+
+A single deferred authenticated input may transfer its original custody at
+actual adoption; expired custody rejects before adoption is saved. An ambiguous
+batch of independently admitted inputs carries no selected operator proof.
+Explicit proof-bearing Run ownership is separate from that conservative input
+batch rule. A selected background launch transfers private original custody to
+its acknowledged job owner only after durable publication; an aborted or
+unselected launch publishes none. Job execution still requires the actual claim,
+attempt, generation and existing stop policy.
+
+Authenticated initialization uses the existing actor initialization scope. Its
+explicit borrow and acknowledged model-job transfer preserve the same lifetime
+rules. This does not add native admission to a top-level authored `Tool.call`,
+install a native instruction tool, grant source access, activate retained
+instructions or materialize provider guidance. Those consumers must use the
+actual explicit owner port and perform their own current source/effect checks.
+Independent authored model recipes do not implicitly become agent-conversation
+instruction consumers.
+
 ## Existing implementation reference points
 
 - `lib/builtin_instructions/` and `lib/chatmd_content_capture/`:

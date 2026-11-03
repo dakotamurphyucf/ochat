@@ -32,57 +32,61 @@ let stage_wait actor manager capabilities =
     ~attempt:parent.attempt
     ~deadline:None
     (fun services ->
-       services.execute ~invocation:(Job_fixtures.root parent) (fun ~dispatched:root ->
-         let invocation =
-           P.Invocation.create
-             { root.context with
-               id = P.Id.Invocation.create ()
-             ; parent_job = None
-             ; parent_invocation = Some root.context.id
-             ; tool_name = "counter"
-             }
-           |> protocol_ok
-         in
-         services.moderator_execute ~invocation (fun ~dispatched ~commit ->
-           let owner = P.Job.Invocation dispatched.P.Invocation.context.id in
-           let creation, pending =
-             Actor.create_script_subscription
-               actor
-               ~owner
-               ~source
-               ~kind:"run-wake"
-               ~lifetime_ms:1000
-               ~wake:Request_turn
-               ~completion_schema:None
-             |> protocol_ok
-           in
-           let completion, terminal =
-             Actor.finish_script_subscription
-               actor
-               ~owner
-               ~source
-               ~id:pending.context.id
-               ~expected_epoch:pending.epoch
-               (Succeeded (`String "ready"))
-             |> protocol_ok
-           in
-           Actor.select_subscription_mutations
-             actor
-             ~owner
-             ~source
-             ~receipts:[ creation; completion ]
-           |> protocol_ok;
-           captured := Some terminal;
-           let resolved =
-             P.Invocation.resolve
-               dispatched
-               ~session_id:dispatched.context.session_id
-               ~generation:dispatched.context.generation
-               (Pending (Subscription terminal.context.id, `String "accepted"))
-             |> protocol_ok
-           in
-           commit ~resolved ~snapshot)
-         |> Result.map ~f:(fun () -> P.Invocation.Complete `Null)))
+       services.execute
+         ~invocation:(Job_fixtures.root parent)
+         (fun ~dispatched:root ~borrow_agent_actor:_ ->
+            let invocation =
+              P.Invocation.create
+                { root.context with
+                  id = P.Id.Invocation.create ()
+                ; parent_job = None
+                ; parent_invocation = Some root.context.id
+                ; tool_name = "counter"
+                }
+              |> protocol_ok
+            in
+            services.moderator_execute
+              ~invocation
+              (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+                 let owner = P.Job.Invocation dispatched.P.Invocation.context.id in
+                 let creation, pending =
+                   Actor.create_script_subscription
+                     actor
+                     ~owner
+                     ~source
+                     ~kind:"run-wake"
+                     ~lifetime_ms:1000
+                     ~wake:Request_turn
+                     ~completion_schema:None
+                   |> protocol_ok
+                 in
+                 let completion, terminal =
+                   Actor.finish_script_subscription
+                     actor
+                     ~owner
+                     ~source
+                     ~id:pending.context.id
+                     ~expected_epoch:pending.epoch
+                     (Succeeded (`String "ready"))
+                   |> protocol_ok
+                 in
+                 Actor.select_subscription_mutations
+                   actor
+                   ~owner
+                   ~source
+                   ~receipts:[ creation; completion ]
+                 |> protocol_ok;
+                 captured := Some terminal;
+                 let resolved =
+                   P.Invocation.resolve
+                     dispatched
+                     ~session_id:dispatched.context.session_id
+                     ~generation:dispatched.context.generation
+                     (Pending (Subscription terminal.context.id, `String "accepted"))
+                   |> protocol_ok
+                 in
+                 commit ~resolved ~snapshot)
+            |> Result.map ~f:(fun () -> P.Invocation.Complete `Null)))
   |> protocol_ok
   |> ignore;
   let subscription = Option.value_exn !captured in

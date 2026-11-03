@@ -26,20 +26,24 @@ let with_handler actor parent f =
     ~attempt:parent.attempt
     ~deadline:(Some deadline)
     (fun services ->
-       services.execute ~invocation:(root parent) (fun ~dispatched:root ->
-         let invocation =
-           P.Invocation.create
-             { root.context with
-               id = P.Id.Invocation.create ()
-             ; parent_job = None
-             ; parent_invocation = Some root.context.id
-             ; tool_name = "register_helper"
-             }
-           |> protocol_ok
-         in
-         services.moderator_execute ~invocation (fun ~dispatched ~commit ->
-           f ~owner:(P.Job.Invocation dispatched.context.id) ~dispatched ~commit)
-         |> Result.map ~f:(fun () -> P.Invocation.Complete `Null)))
+       services.execute
+         ~invocation:(root parent)
+         (fun ~dispatched:root ~borrow_agent_actor:_ ->
+            let invocation =
+              P.Invocation.create
+                { root.context with
+                  id = P.Id.Invocation.create ()
+                ; parent_job = None
+                ; parent_invocation = Some root.context.id
+                ; tool_name = "register_helper"
+                }
+              |> protocol_ok
+            in
+            services.moderator_execute
+              ~invocation
+              (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+                 f ~owner:(P.Job.Invocation dispatched.context.id) ~dispatched ~commit)
+            |> Result.map ~f:(fun () -> P.Invocation.Complete `Null)))
 ;;
 
 let%expect_test

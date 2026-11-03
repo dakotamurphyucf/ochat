@@ -95,13 +95,16 @@ let%expect_test
                actor borrow may restore the caller's context here. *)
               assert (Option.is_none (S.capture ()));
               assert (Result.is_error (H.current ()));
-              N.execute_borrowed borrow ~invocation:child (fun ~dispatched:_ ->
-                S.emit [ R.Request_compaction ] |> Result.ok_or_failwith;
-                let current = H.current () |> Result.ok_or_failwith in
-                handler := Some current;
-                assert (
-                  Option.is_none (H.prepare current pre_call |> Result.ok_or_failwith));
-                Ok (I.Complete `Null))
+              N.execute_borrowed
+                borrow
+                ~invocation:child
+                (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                   S.emit [ R.Request_compaction ] |> Result.ok_or_failwith;
+                   let current = H.current () |> Result.ok_or_failwith in
+                   handler := Some current;
+                   assert (
+                     Option.is_none (H.prepare current pre_call |> Result.ok_or_failwith));
+                   Ok (I.Complete `Null))
               |> protocol_ok
               |> fun (_ : I.t) -> ()))
         in

@@ -60,7 +60,7 @@ let%expect_test
          in
          let child = ref None in
          with_job actor parent (fun ~job:_ ~execute ->
-           execute ~invocation (fun ~dispatched ->
+           execute ~invocation (fun ~dispatched ~borrow_agent_actor:_ ->
              let owner = J.Invocation dispatched.context.id in
              let staged =
                Background_transaction_tests.stage actor backend capacity request owner

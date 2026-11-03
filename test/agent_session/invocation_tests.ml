@@ -704,10 +704,12 @@ let%test_unit "worker cancellation publishes an interrupted handler result exact
           let call, invocation = publication_call caps ~custom () in
           caps.commit_entry call |> protocol_ok;
           ignore
-            (caps.with_moderator_invocation ~invocation (fun ~dispatched:_ ~commit:_ ->
-               Int.incr calls;
-               Eio.Promise.resolve ready_u ();
-               Eio.Promise.await never)
+            (caps.with_moderator_invocation
+               ~invocation
+               (fun ~dispatched:_ ~borrow_agent_actor:_ ~commit:_ ->
+                  Int.incr calls;
+                  Eio.Promise.resolve ready_u ();
+                  Eio.Promise.await never)
              : (unit, Agent_protocol.Error.t) result);
           assert false))
       (fun _env actor writer backend ->
@@ -996,7 +998,7 @@ let%test_unit "independent ordinary invocations run concurrently outside the act
             |> protocol_ok
           in
           let result =
-            caps.with_invocation ~invocation (fun ~dispatched:_ ->
+            caps.with_invocation ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ ->
               Int.incr started;
               if !started = 2 then Eio.Promise.resolve ready_u ();
               Eio.Promise.await ready;
@@ -1031,41 +1033,43 @@ let%test_unit "native nested invocation persists without reentering a borrowed m
           let actor = Eio.Promise.await actor_ready in
           let parent = invocation_fixture () in
           let result =
-            caps.with_moderator_invocation ~invocation:parent (fun ~dispatched ~commit ->
-              let reference, child =
-                native_context
-                  registry
-                  (Agent_protocol.Invocation.create
-                     { parent.context with
-                       id = Agent_protocol.Id.Invocation.create ()
-                     ; origin = Moderator
-                     ; parent_invocation = Some dispatched.context.id
-                     }
-                   |> protocol_ok)
-              in
-              let child_result =
-                Agent_session.Native_tool_invocation.run
-                  ~is_halted:(fun () -> false)
-                  ~capabilities:caps
-                  ~registry:(fun () -> registry)
-                  ~reference
-                  ~invocation:child
-                  ~authorize:(fun _ _ -> Ok ())
-                  ~prepare_output:(fun _ -> Ok `Null)
-                |> protocol_ok
-              in
-              assert (Poly.equal child_result.status (Resolved (Complete `Null)));
-              let resolved =
-                Agent_protocol.Invocation.resolve
-                  dispatched
-                  ~session_id:input.session_id
-                  ~generation:input.session_generation
-                  (Complete `Null)
-                |> protocol_ok
-              in
-              if parent_fails
-              then Error (handoff_error "parent handler failed after native effect")
-              else commit ~resolved ~snapshot:(handoff_snapshot 1))
+            caps.with_moderator_invocation
+              ~invocation:parent
+              (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+                 let reference, child =
+                   native_context
+                     registry
+                     (Agent_protocol.Invocation.create
+                        { parent.context with
+                          id = Agent_protocol.Id.Invocation.create ()
+                        ; origin = Moderator
+                        ; parent_invocation = Some dispatched.context.id
+                        }
+                      |> protocol_ok)
+                 in
+                 let child_result =
+                   Agent_session.Native_tool_invocation.run
+                     ~is_halted:(fun () -> false)
+                     ~capabilities:caps
+                     ~registry:(fun () -> registry)
+                     ~reference
+                     ~invocation:child
+                     ~authorize:(fun _ _ -> Ok ())
+                     ~prepare_output:(fun _ -> Ok `Null)
+                   |> protocol_ok
+                 in
+                 assert (Poly.equal child_result.status (Resolved (Complete `Null)));
+                 let resolved =
+                   Agent_protocol.Invocation.resolve
+                     dispatched
+                     ~session_id:input.session_id
+                     ~generation:input.session_generation
+                     (Complete `Null)
+                   |> protocol_ok
+                 in
+                 if parent_fails
+                 then Error (handoff_error "parent handler failed after native effect")
+                 else commit ~resolved ~snapshot:(handoff_snapshot 1))
           in
           assert (Bool.equal (Result.is_error result) parent_fails);
           let stale_child =
@@ -1078,8 +1082,9 @@ let%test_unit "native nested invocation persists without reentering a borrowed m
           in
           assert (
             Result.is_error
-              (caps.with_invocation ~invocation:stale_child (fun ~dispatched:_ ->
-                 assert false)));
+              (caps.with_invocation
+                 ~invocation:stale_child
+                 (fun ~dispatched:_ ~borrow_agent_actor:_ -> assert false)));
           let state = Agent_session.Session_actor.state actor |> protocol_ok in
           Completed
             { final_history = input.history
@@ -1132,7 +1137,7 @@ let%test_unit
               else input.history, invocation_fixture ()
             in
             let result =
-              caps.with_invocation ~invocation (fun ~dispatched ->
+              caps.with_invocation ~invocation (fun ~dispatched ~borrow_agent_actor:_ ->
                 Int.incr calls;
                 let live = Agent_session.Session_actor.state actor |> protocol_ok in
                 assert (List.mem live.invocations dispatched ~equal:Poly.equal);
@@ -1151,7 +1156,9 @@ let%test_unit
                        [ Invocation replacement ]));
                 assert (
                   Result.is_error
-                    (caps.with_invocation ~invocation (fun ~dispatched:_ -> assert false)));
+                    (caps.with_invocation
+                       ~invocation
+                       (fun ~dispatched:_ ~borrow_agent_actor:_ -> assert false)));
                 Eio.Promise.resolve ready_u ();
                 match mode with
                 | `Cancel -> Eio.Promise.await never
@@ -1174,8 +1181,9 @@ let%test_unit
             in
             assert (
               Result.is_error
-                (caps.with_invocation ~invocation:stale_child (fun ~dispatched:_ ->
-                   assert false)));
+                (caps.with_invocation
+                   ~invocation:stale_child
+                   (fun ~dispatched:_ ~borrow_agent_actor:_ -> assert false)));
             match result with
             | Error failure -> Failed failure
             | Ok _ ->

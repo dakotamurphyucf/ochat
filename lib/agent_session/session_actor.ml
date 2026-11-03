@@ -44,12 +44,38 @@ module Inference_owner = struct
     }
 end
 
+let equal_agent_entry = Agent_protocol.History.equal_entry
+
+type agent_custody =
+  { authority : Agent_authority_scope.t
+  ; live : bool Atomic.t
+  }
+
+let create_agent_custody actor =
+  let live = Atomic.make true in
+  { authority =
+      Agent_authority_scope.create ~actor ~is_current:(fun () -> Atomic.get live)
+  ; live
+  }
+;;
+
+let transfer_agent_custody custody =
+  let live = Atomic.make true in
+  Result.map
+    (Agent_authority_scope.transfer custody.authority ~is_current:(fun () ->
+       Atomic.get live))
+    ~f:(fun authority -> { authority; live })
+;;
+
+let retire_agent_custody custody = Atomic.set custody.live false
+
 module Initialization_scope = struct
   type t =
     { owner : unit ref
     ; expected : Session_state.t
     ; mutable jobs : Agent_protocol.Id.Job.t list
     ; run_preparation : Run_preparation.t option
+    ; agent_custody : agent_custody option
     }
 end
 
@@ -125,6 +151,7 @@ type job_scope =
   ; mutable active : bool
   ; mutable cancel_requested : bool
   ; mutable unfinished_on_return : bool
+  ; authority_live : bool Atomic.t
   ; mutable cancel : (unit -> unit) option
   }
 
@@ -140,6 +167,7 @@ type moderator_borrow =
   ; mutable committed : bool
   ; mutable accepts_children : bool
   ; mutable callback_finished : bool
+  ; authority_live : bool Atomic.t
   ; mutable cancel : (unit -> unit) option
   ; mutable cancel_requested : bool
   }
@@ -156,6 +184,7 @@ type queued_event_borrow =
   ; event : Session.Snapshot.t
   ; retirement_reason : string option
   ; mutable callback_active : bool
+  ; authority_live : bool Atomic.t
   ; mutable run_actions : Run_action_service.t option
   ; mutable committed : bool
   ; mutable cancel : (unit -> unit) option
@@ -177,6 +206,7 @@ type invocation_execution =
   { owner : invocation_owner
   ; dispatched : Agent_protocol.Invocation.t
   ; mutable accepts_children : bool
+  ; authority_live : bool Atomic.t
   }
 
 module History_edit_result = struct
@@ -485,16 +515,22 @@ type _ request =
   | Authorize_writer : Agent_protocol.Id.Attachment.t -> unit request
   | Set_operation_worker : Operation_worker.t option -> unit request
   | Set_runtime_worker :
-      Operation_worker.t option * Inference_client.Execution.t option
+      Operator_authorization.t option
+      * Operation_worker.t option
+      * Inference_client.Execution.t option
       -> unit request
   | Check_runtime_admission : unit request
   | Retire_runtime_worker : bool -> Runtime_retirement.t request
   | Set_compaction_inference : Compaction_inference.t option -> unit request
-  | Enable_automatic_turn_budget : Chat_response.Runtime_semantics.policy -> unit request
+  | Enable_automatic_turn_budget :
+      Operator_authorization.t option * Chat_response.Runtime_semantics.policy
+      -> unit request
   | Set_automatic_turn_pauses :
       Chat_response.Runtime_semantics.pause_condition list
       -> unit request
-  | Change_moderator : Jsonaf.t option -> Agent_protocol.Session.t request
+  | Change_moderator :
+      Operator_authorization.t option * Jsonaf.t option
+      -> Agent_protocol.Session.t request
   | Change_workspace : Workspace_instance.t -> Agent_protocol.Session.t request
   | Shell_approval_grants : Session.Shell_state.Approval_grant.persisted list request
   | Replace_shell_approval_grants :
@@ -528,7 +564,21 @@ type _ request =
       * Session_state.Compaction_archive.kind
       * Session_state.t
       -> Agent_protocol.Session.t request
-  | Begin_initialization : Session_state.t -> Initialization_scope.t request
+  | Begin_initialization :
+      Operator_authorization.t option * Session_state.t
+      -> Initialization_scope.t request
+  | Borrow_initialization_agent_actor :
+      Initialization_scope.t
+      -> Operator_authorization.t option request
+  | Borrow_operation_agent_actor :
+      Agent_protocol.Id.Operation.t
+      -> Operator_authorization.t option request
+  | Borrow_invocation_agent_actor :
+      invocation_execution * Agent_protocol.Invocation.t
+      -> Operator_authorization.t option request
+  | Borrow_moderator_agent_actor :
+      moderator_borrow * Agent_protocol.Invocation.t
+      -> Operator_authorization.t option request
   | Begin_run_initialization :
       Run_preparation.t * Session_state.t
       -> Initialization_scope.t request
@@ -540,7 +590,7 @@ type _ request =
       Initialization_scope.t * Agent_protocol.Error.t
       -> Agent_protocol.Session.t request
   | Start :
-      Agent_protocol.Id.Attachment.t * int64 option
+      Operator_authorization.t option * Agent_protocol.Id.Attachment.t * int64 option
       -> Agent_protocol.Session.t request
   | Start_initial_delegated :
       Agent_store.Delegation_store.Reference.t * int64 option
@@ -589,7 +639,8 @@ type _ request =
       Agent_protocol.Id.Attachment.t * Agent_protocol.History.entry list
       -> Agent_protocol.Session.t request
   | Submit_message :
-      Agent_protocol.Id.Attachment.t
+      Operator_authorization.t option
+      * Agent_protocol.Id.Attachment.t
       * Agent_protocol.Id.Principal.t
       * Agent_protocol.Pending_input.Timing.t
       * Agent_protocol.History.entry
@@ -653,7 +704,8 @@ type _ request =
       * Agent_protocol.History.entry option
       -> Run_admission_outcome.t request
   | Begin_run_preparation :
-      (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+      Operator_authorization.t option
+      * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
       * Agent_protocol.Id.Principal.t
       * Agent_protocol.Run_start.t
       * string
@@ -963,6 +1015,10 @@ type t =
   ; mutable idle_moderator_borrowed : bool
   ; mutable moderator_borrow : moderator_borrow option
   ; mutable queued_event_borrow : queued_event_borrow option
+  ; mutable operation_agent_custody :
+      (Agent_protocol.Id.Operation.t * agent_custody) option
+  ; mutable pending_agent_custody : (Agent_protocol.History.entry * agent_custody) list
+  ; mutable job_agent_custody : (Agent_protocol.Job.t * agent_custody) list
   ; mutable run_authorities : Run_authorities.t
   ; run_preparation_owner : Run_preparation.Owner.t
   ; mutable run_preparation : Run_preparation.t option
@@ -990,6 +1046,44 @@ type t =
   }
 
 let error code message = Agent_protocol.Error.create code ~message ~retryable:false ()
+
+let retained_agent_custody t =
+  let operation_current id =
+    (not t.stopped)
+    && Option.exists t.state.active_operation ~f:(fun operation ->
+      Agent_protocol.Id.Operation.equal operation.id id
+      &&
+      match operation.state with
+      | Starting | Running -> true
+      | Cancelling | Completed | Failed _ | Cancelled | Interrupted _ -> false)
+  in
+  (match t.operation_agent_custody with
+   | Some (id, custody) when not (operation_current id) ->
+     retire_agent_custody custody;
+     t.operation_agent_custody <- None
+   | Some _ | None -> ());
+  t.job_agent_custody
+  <- List.filter t.job_agent_custody ~f:(fun (original, custody) ->
+       let current =
+         (not t.stopped)
+         && List.exists t.state.jobs ~f:(fun job ->
+           Agent_protocol.Id.Job.equal original.id job.id
+           && Int.equal original.generation job.generation
+           &&
+           match job.status with
+           | Queued | Running | Waiting_permission _ | Waiting_completion _ -> true
+           | Succeeded | Failed _ | Cancelled | Interrupted _ -> false)
+       in
+       if not current then retire_agent_custody custody;
+       current)
+;;
+
+let operation_agent_actor t id =
+  match t.operation_agent_custody with
+  | Some (owner, custody) when Agent_protocol.Id.Operation.equal owner id ->
+    Result.map (Agent_authority_scope.actor custody.authority) ~f:Option.some
+  | Some _ | None -> Ok None
+;;
 
 let job_scope_current t scope =
   match
@@ -1034,6 +1128,7 @@ let signal_job_scope scope =
 
 let cancel_job_scope (scope : job_scope) =
   scope.cancel_requested <- true;
+  Atomic.set scope.authority_live false;
   signal_job_scope scope;
   Option.iter scope.cancel ~f:(fun cancel -> cancel ())
 ;;
@@ -1045,6 +1140,7 @@ let cancel_job_moderators t scope =
     | true ->
       borrow.cancel_requested <- true;
       borrow.accepts_children <- false;
+      Atomic.set borrow.authority_live false;
       Option.iter borrow.cancel ~f:(fun cancel -> cancel ()));
   Option.iter t.queued_event_borrow ~f:(fun borrow ->
     match Option.exists borrow.job_scope ~f:(phys_equal scope) with
@@ -1143,6 +1239,32 @@ let check_run_preparation t preparation =
     Error (error Conflict "run preparation is not this actor's live admission")
 ;;
 
+let install_live_run_agent_custody t =
+  match t.operation_agent_custody, t.state.active_operation, t.state.run_state with
+  | None, Some operation, Some index
+    when match operation.state with
+         | Starting | Running -> true
+         | Cancelling | Completed | Failed _ | Cancelled | Interrupted _ -> false ->
+    let owners =
+      List.filter (Run_state.runs index) ~f:(fun run ->
+        List.exists run.owned_work ~f:(fun work ->
+          Int.equal work.Agent_protocol.Run_work.generation operation.generation
+          &&
+          match work.key with
+          | Operation id -> Agent_protocol.Id.Operation.equal operation.id id
+          | Retained _ -> false))
+    in
+    (match owners with
+     | [ run ] ->
+       Option.iter (Run_authorities.find t.run_authorities run.id) ~f:(fun binding ->
+         Option.iter
+           (Run_admission.Scope.original_actor (Run_authorities.scope binding))
+           ~f:(fun actor ->
+             t.operation_agent_custody <- Some (operation.id, create_agent_custody actor)))
+     | [] | _ :: _ :: _ -> ())
+  | Some _, _, _ | None, None, _ | None, Some _, (Some _ | None) -> ()
+;;
+
 let persist_transition t transition =
   t.persistence.commit ~command_audit:t.command_audit ~previous:t.state transition
 ;;
@@ -1168,6 +1290,8 @@ let install_committed_transition ?run_preparation t (transition : Session_transi
        t.run_authorities
        ~index:t.state.run_state
        ~generation:t.state.identity.generation;
+  retained_agent_custody t;
+  install_live_run_agent_custody t;
   Atomic.set t.event_sequence t.state.counters.event_sequence
 ;;
 
@@ -2103,6 +2227,8 @@ let retire_runtime_worker t ~closing =
       Option.map t.state.active_operation ~f:(fun operation -> operation.id)
     in
     t.runtime_retirement <- Some { finished; finish; pending_operation; closing };
+    Option.iter t.operation_agent_custody ~f:(fun (_, custody) ->
+      retire_agent_custody custody);
     Option.iter t.active_cancel ~f:(fun cancel -> cancel ());
     if Option.is_none pending_operation then Eio.Promise.resolve finish (Ok (Ok ()));
     Ok finished
@@ -2971,7 +3097,7 @@ let validate_initialization_scope t scope =
   | Some preparation -> check_run_preparation t preparation
 ;;
 
-let begin_initialization ?run_preparation t expected =
+let begin_initialization ?run_preparation ?original_actor t expected =
   let open Result.Let_syntax in
   let%bind () = validate_initialization_basis t expected in
   let%bind () =
@@ -2985,7 +3111,12 @@ let begin_initialization ?run_preparation t expected =
   | None ->
     let scope =
       Initialization_scope.
-        { owner = t.initialization_owner; expected; jobs = []; run_preparation }
+        { owner = t.initialization_owner
+        ; expected
+        ; jobs = []
+        ; run_preparation
+        ; agent_custody = Option.map original_actor ~f:create_agent_custody
+        }
     in
     t.initialization_scope <- Some scope;
     Ok scope
@@ -2995,13 +3126,22 @@ let end_initialization t scope =
   let open Result.Let_syntax in
   let%map () = validate_initialization_owner t scope in
   match t.initialization_scope with
-  | Some active when phys_equal active scope -> t.initialization_scope <- None
+  | Some active when phys_equal active scope ->
+    Option.iter active.agent_custody ~f:retire_agent_custody;
+    t.initialization_scope <- None
   | Some _ | None -> ()
+;;
+
+let check_initialization_agent_actor scope =
+  match scope.Initialization_scope.agent_custody with
+  | None -> Ok ()
+  | Some custody -> Agent_authority_scope.actor custody.authority |> Result.map ~f:ignore
 ;;
 
 let complete_initialization t scope (candidate : Session_state.t) =
   let open Result.Let_syntax in
   let%bind () = validate_initialization_scope t scope in
+  let%bind () = check_initialization_agent_actor scope in
   let expected = scope.Initialization_scope.expected in
   let projection =
     { candidate with
@@ -3284,6 +3424,41 @@ let commit_invocation_call t operation_id (invocation : Agent_protocol.Invocatio
     |> Result.map ~f:(fun _ -> ())
 ;;
 
+let job_agent_custody t scope =
+  Option.map
+    (List.find t.job_agent_custody ~f:(fun (job, _) ->
+       Agent_protocol.Id.Job.equal job.id scope.job.id
+       && Int.equal job.generation scope.job.generation))
+    ~f:snd
+;;
+
+let operation_agent_custody t id =
+  Option.bind t.operation_agent_custody ~f:(fun (owner, custody) ->
+    Option.some_if (Agent_protocol.Id.Operation.equal owner id) custody)
+;;
+
+let moderator_agent_custody t (borrow : moderator_borrow) =
+  match borrow.job_scope, borrow.operation_id with
+  | Some scope, _ -> job_agent_custody t scope
+  | None, Some id -> operation_agent_custody t id
+  | None, None -> None
+;;
+
+let event_agent_custody t (borrow : queued_event_borrow) =
+  match borrow.job_scope, borrow.receipt.context.operation_id with
+  | Some scope, _ -> job_agent_custody t scope
+  | None, Some id -> operation_agent_custody t id
+  | None, None -> None
+;;
+
+let execution_agent_custody t (execution : invocation_execution) =
+  match execution.owner with
+  | Foreground id -> operation_agent_custody t id
+  | Invocation_moderator borrow -> moderator_agent_custody t borrow
+  | Event_moderator borrow -> event_agent_custody t borrow
+  | Background_job scope -> job_agent_custody t scope
+;;
+
 let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
   let open Result.Let_syntax in
   let%bind _ = running_operation t operation_id in
@@ -3345,7 +3520,9 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
       ~delta:(Session_delta.Batch (admission @ [ Invocation_changed dispatched ]))
       ~payloads:[]
   in
-  let execution = { owner; dispatched; accepts_children = true } in
+  let execution =
+    { owner; dispatched; accepts_children = true; authority_live = Atomic.make true }
+  in
   t.invocation_executions <- execution :: t.invocation_executions;
   Ok execution
 ;;
@@ -3423,6 +3600,7 @@ let finish_invocation t execution outcome requests commit_starts authoring_refer
   (* The callback has returned. Even when outcome persistence fails and the
      execution stays registered for cleanup, it cannot authorize new children. *)
   execution.accepts_children <- false;
+  Atomic.set execution.authority_live false;
   (match commit_starts && not cancelled, outcome with
    | true, (Complete _ | Fail _ | Pending _) -> ()
    | false, _ | true, Cancelled _ -> abort_staged_work t ~owner);
@@ -3524,6 +3702,7 @@ let claim_moderator_invocation t operation_id (invocation : Agent_protocol.Invoc
       ; committed = false
       ; accepts_children = true
       ; callback_finished = false
+      ; authority_live = Atomic.make true
       ; cancel = None
       ; cancel_requested = false
       }
@@ -3628,6 +3807,7 @@ let claim_queued_event t id operation_id snapshot =
       ; retirement_reason
       ; run_actions = None
       ; callback_active = true
+      ; authority_live = Atomic.make true
       ; committed = false
       ; cancel = None
       ; cancel_requested = false
@@ -3675,6 +3855,7 @@ let claim_ordinary_event t id operation_id snapshot event =
       ; retirement_reason = None
       ; run_actions = None
       ; callback_active = true
+      ; authority_live = Atomic.make true
       ; committed = false
       ; cancel = None
       ; cancel_requested = false
@@ -3720,6 +3901,7 @@ let claim_delegated_event t id delegation snapshot event =
           ; retirement_reason = None
           ; run_actions = None
           ; callback_active = true
+          ; authority_live = Atomic.make true
           ; committed = false
           ; cancel = None
           ; cancel_requested = false
@@ -3760,6 +3942,7 @@ let claim_job_event t scope id snapshot event =
     ; retirement_reason = None
     ; run_actions = None
     ; callback_active = true
+    ; authority_live = Atomic.make true
     ; committed = false
     ; cancel = None
     ; cancel_requested = false
@@ -3824,6 +4007,7 @@ let claim_queued_retirement t id snapshot reason =
       ; retirement_reason = Some reason
       ; run_actions = None
       ; callback_active = true
+      ; authority_live = Atomic.make true
       ; committed = false
       ; cancel = None
       ; cancel_requested = false
@@ -3971,7 +4155,11 @@ let claim_event_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
       ~payloads:[]
   in
   let execution =
-    { owner = Event_moderator borrow; dispatched; accepts_children = true }
+    { owner = Event_moderator borrow
+    ; dispatched
+    ; accepts_children = true
+    ; authority_live = Atomic.make true
+    }
   in
   t.invocation_executions <- execution :: t.invocation_executions;
   Ok execution
@@ -4236,6 +4424,7 @@ let finish_queued_event t borrow interrupted =
   Option.iter borrow.run_actions ~f:Run_action_service.close;
   borrow.run_actions <- None;
   borrow.callback_active <- false;
+  Atomic.set borrow.authority_live false;
   abort_staged_work t ~owner:(Moderator_event borrow.receipt.context.id);
   borrow.cancel <- None;
   let children =
@@ -4249,6 +4438,7 @@ let finish_queued_event t borrow interrupted =
   let%bind children_deltas =
     List.map children ~f:(fun execution ->
       execution.accepts_children <- false;
+      Atomic.set execution.authority_live false;
       abort_staged_work t ~owner:(Invocation execution.dispatched.context.id);
       Agent_protocol.Invocation.cancel
         execution.dispatched
@@ -4378,6 +4568,7 @@ let claim_moderator_observation t operation_id invocation_id =
     ; committed = false
     ; accepts_children = Option.is_some operation_id
     ; callback_finished = false
+    ; authority_live = Atomic.make true
     ; cancel = None
     ; cancel_requested = false
     }
@@ -4459,6 +4650,7 @@ let claim_job_moderator t scope invocation =
     ; committed = false
     ; accepts_children = true
     ; callback_finished = false
+    ; authority_live = Atomic.make true
     ; cancel = None
     ; cancel_requested = false
     }
@@ -5372,6 +5564,43 @@ let stage_background_job_internal t (job : Agent_protocol.Job.t) capacity =
       | true -> Error (error Conflict "background job already exists")
       | false -> Ok ()
     in
+    let parent =
+      match launch.owner with
+      | Invocation id ->
+        (match
+           List.find t.invocation_executions ~f:(fun execution ->
+             Agent_protocol.Id.Invocation.equal execution.dispatched.context.id id)
+         with
+         | Some execution -> execution_agent_custody t execution
+         | None ->
+           Option.bind t.moderator_borrow ~f:(fun borrow ->
+             if Agent_protocol.Id.Invocation.equal borrow.invocation.context.id id
+             then moderator_agent_custody t borrow
+             else None))
+      | Moderator_event id ->
+        Option.bind t.queued_event_borrow ~f:(fun borrow ->
+          if Agent_protocol.Id.Moderator_execution.equal borrow.receipt.context.id id
+          then event_agent_custody t borrow
+          else None)
+    in
+    let%bind child =
+      match parent with
+      | None -> Ok None
+      | Some parent -> Result.map (transfer_agent_custody parent) ~f:Option.some
+    in
+    let capacity =
+      Staged_jobs.
+        { publish =
+            (fun () ->
+              Option.iter child ~f:(fun custody ->
+                t.job_agent_custody <- (job, custody) :: t.job_agent_custody);
+              capacity.publish ())
+        ; abort =
+            (fun () ->
+              Option.iter child ~f:retire_agent_custody;
+              capacity.abort ())
+        }
+    in
     Staged_jobs.stage t.staged_jobs ~job ~capacity
   in
   match result with
@@ -5443,7 +5672,11 @@ let claim_idle_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
       ~payloads:[]
   in
   let execution =
-    { owner = Invocation_moderator borrow; dispatched; accepts_children = true }
+    { owner = Invocation_moderator borrow
+    ; dispatched
+    ; accepts_children = true
+    ; authority_live = Atomic.make true
+    }
   in
   t.invocation_executions <- execution :: t.invocation_executions;
   Ok execution
@@ -5584,6 +5817,7 @@ let finish_moderator_invocation t borrow failure =
   abort_staged_work t ~owner:(Invocation borrow.invocation.context.id);
   borrow.cancel <- None;
   borrow.accepts_children <- false;
+  Atomic.set borrow.authority_live false;
   let was_committed = borrow.committed in
   let unfinished =
     List.filter t.invocation_executions ~f:(invocation_execution_owned_by borrow)
@@ -5597,6 +5831,7 @@ let finish_moderator_invocation t borrow failure =
   let%bind children =
     List.map unfinished ~f:(fun execution ->
       execution.accepts_children <- false;
+      Atomic.set execution.authority_live false;
       abort_staged_work t ~owner:(Invocation execution.dispatched.context.id);
       Agent_protocol.Invocation.cancel
         execution.dispatched
@@ -5681,7 +5916,7 @@ let prepare_authoring_input t operation_id materialization history effective =
   let%bind () =
     let committed = t.state.conversation.canonical_history in
     let supplied = History_codec.all_to_protocol ~previous:committed history in
-    match List.equal Agent_protocol.History.equal_entry committed supplied with
+    match List.equal equal_agent_entry committed supplied with
     | true -> Ok ()
     | false -> Error (error Conflict "authoring input uses stale canonical history")
   in
@@ -5814,11 +6049,7 @@ let publish_invocation_output t operation_id invocation_id entry =
       let%bind () =
         Chat_response.Authoring_publication.validate_output invocation entry
       in
-      (match
-         Agent_protocol.History.equal_entry
-           entry
-           { raw_entry with provenance = entry.provenance }
-       with
+      (match equal_agent_entry entry { raw_entry with provenance = entry.provenance } with
        | true -> Ok entry
        | false ->
          Error (error Conflict "output occurrence has a different canonical payload"))
@@ -7063,6 +7294,7 @@ let worker_terminal t operation_id outcome =
     let%bind unfinished =
       List.map foreground ~f:(fun execution ->
         execution.accepts_children <- false;
+        Atomic.set execution.authority_live false;
         abort_staged_work t ~owner:(Invocation execution.dispatched.context.id);
         Agent_protocol.Invocation.cancel
           execution.dispatched
@@ -7139,6 +7371,7 @@ let worker_terminal t operation_id outcome =
     Option.iter borrow ~f:(fun _ -> t.moderator_borrow <- None);
     Option.iter event_borrow ~f:(fun borrow ->
       borrow.callback_active <- false;
+      Atomic.set borrow.authority_live false;
       borrow.cancel <- None);
     Option.iter event_borrow ~f:(fun _ -> t.queued_event_borrow <- None);
     t.foreground_moderator <- None;
@@ -7272,16 +7505,88 @@ let request_permission_with_review_internal
   | (false | true), _, _ -> Ok (Eio.Promise.await response)
 ;;
 
+let invocation_agent_actor t execution invocation =
+  let open Result.Let_syntax in
+  let%bind () =
+    if
+      execution.accepts_children
+      && Atomic.get execution.authority_live
+      && List.mem t.invocation_executions execution ~equal:phys_equal
+      && Agent_protocol.Invocation.equal execution.dispatched invocation
+    then Ok ()
+    else
+      Error
+        (error
+           Permission_denied
+           "agent authority belongs to another or expired invocation")
+  in
+  let%bind owner_current =
+    match execution.owner with
+    | Foreground id ->
+      let%map _ = running_operation t id in
+      fun () -> true
+    | Background_job scope ->
+      let%map () = job_scope_can_execute t scope in
+      fun () -> Atomic.get scope.authority_live
+    | Invocation_moderator borrow ->
+      let%bind () = validate_moderator_borrow t borrow in
+      let%map () =
+        match borrow.job_scope with
+        | Some scope -> job_scope_can_execute t scope
+        | None ->
+          (match borrow.operation_id with
+           | None -> Ok ()
+           | Some id -> Result.map (running_operation t id) ~f:ignore)
+      in
+      fun () ->
+        Atomic.get borrow.authority_live
+        && Option.for_all borrow.job_scope ~f:(fun scope ->
+          Atomic.get scope.authority_live)
+    | Event_moderator borrow ->
+      let%bind () = validate_queued_event_borrow t borrow in
+      let%map () =
+        match borrow.job_scope with
+        | Some scope -> job_scope_can_execute t scope
+        | None ->
+          (match borrow.receipt.context.operation_id with
+           | None -> Ok ()
+           | Some id -> Result.map (running_operation t id) ~f:ignore)
+      in
+      fun () ->
+        Atomic.get borrow.authority_live
+        && Option.for_all borrow.job_scope ~f:(fun scope ->
+          Atomic.get scope.authority_live)
+  in
+  let%bind actor =
+    match execution_agent_custody t execution with
+    | None -> Ok None
+    | Some custody ->
+      Result.map (Agent_authority_scope.actor custody.authority) ~f:Option.some
+  in
+  Ok
+    (Option.map actor ~f:(fun actor ->
+       Operator_authorization.guarded
+         ~principal:(Operator_authorization.principal actor)
+         ~is_current:(fun () ->
+           Atomic.get execution.authority_live
+           && owner_current ()
+           && Operator_authorization.is_current actor)))
+;;
+
 let with_invocation_claim t claim f =
   let open Result.Let_syntax in
   Eio.Fiber.yield ();
   let%bind execution = Eio.Cancel.protect (fun () -> call t claim) in
   let finish ?requests ?(commit_starts = false) ?authoring_reference outcome =
+    Atomic.set execution.authority_live false;
     Eio.Cancel.protect (fun () ->
       call
         t
         (Finish_invocation
            (execution, outcome, requests, commit_starts, authoring_reference)))
+  in
+  let borrow_agent_actor ~invocation =
+    call t (Borrow_invocation_agent_actor (execution, invocation))
   in
   let failed =
     Agent_protocol.Invocation.Fail
@@ -7295,9 +7600,9 @@ let with_invocation_claim t claim f =
     match execution.owner with
     | Background_job _ ->
       Chat_response.Runtime_request_scope.collect (fun () ->
-        f ~dispatched:execution.dispatched)
+        f ~dispatched:execution.dispatched ~borrow_agent_actor)
     | Foreground _ | Invocation_moderator _ | Event_moderator _ ->
-      f ~dispatched:execution.dispatched, []
+      f ~dispatched:execution.dispatched ~borrow_agent_actor, []
   in
   match Authoring_reference_scope.collect execution.dispatched.context run with
   | (Ok outcome, collected), references ->
@@ -7365,7 +7670,7 @@ let with_job_scope t ~job_id ~generation ~attempt ~deadline f =
       with_invocation_claim
         t
         (Claim_job_invocation (scope, invocation))
-        (fun ~dispatched ->
+        (fun ~dispatched ~borrow_agent_actor ->
            match Atomic.get active with
            | false -> Error (error Conflict "background invocation scope has ended")
            | true ->
@@ -7374,7 +7679,7 @@ let with_job_scope t ~job_id ~generation ~attempt ~deadline f =
               | Some () -> raise (Eio.Cancel.Cancelled Exit)
               | None ->
                 Eio.Fiber.first
-                  (fun () -> callback ~dispatched)
+                  (fun () -> callback ~dispatched ~borrow_agent_actor)
                   (fun () ->
                      Eio.Promise.await scope.cancelled;
                      raise (Eio.Cancel.Cancelled Exit))))
@@ -7420,7 +7725,11 @@ let run_moderator_callback t borrow f =
       call t (Commit_moderator_invocation (borrow, resolved, snapshot)))
   in
   let finish failure =
+    Atomic.set borrow.authority_live false;
     Eio.Cancel.protect (fun () -> call t (Finish_moderator_invocation (borrow, failure)))
+  in
+  let borrow_agent_actor ~invocation =
+    call t (Borrow_moderator_agent_actor (borrow, invocation))
   in
   let failed message =
     let message =
@@ -7433,14 +7742,14 @@ let run_moderator_callback t borrow f =
   in
   let run () =
     match borrow.kind with
-    | Observation -> f ~dispatched:borrow.invocation ~commit
+    | Observation -> f ~dispatched:borrow.invocation ~borrow_agent_actor ~commit
     | Invocation ->
       Authoring_reference_scope.with_scope borrow.invocation.context (fun scope ->
         let commit ~resolved ~snapshot =
           let%bind resolved = Authoring_reference_scope.annotate scope resolved in
           commit ~resolved ~snapshot
         in
-        f ~dispatched:borrow.invocation ~commit)
+        f ~dispatched:borrow.invocation ~borrow_agent_actor ~commit)
   in
   match run () with
   | result ->
@@ -7469,7 +7778,7 @@ let run_moderator_borrow t (borrow : moderator_borrow) f =
   | None ->
     (* A protected claim can return into a cancelled parent. Enter completion
        handling before [sub], which can reject that parent before running its body. *)
-    run_moderator_callback t borrow (fun ~dispatched ~commit ->
+    run_moderator_callback t borrow (fun ~dispatched ~borrow_agent_actor ~commit ->
       Eio.Cancel.sub (fun context ->
         let active = ref true in
         (* Completion clears the actor's cancel callback after this context ends. *)
@@ -7483,7 +7792,7 @@ let run_moderator_borrow t (borrow : moderator_borrow) f =
                 (Set_idle_moderator_cancel
                    (borrow, fun () -> if !active then Eio.Cancel.cancel context Exit))
             in
-            f ~dispatched ~commit)))
+            f ~dispatched ~borrow_agent_actor ~commit)))
 ;;
 
 let with_moderator_borrow_unlocked t ~claim f =
@@ -7632,9 +7941,9 @@ let with_delegated_moderator_event
               with_invocation_claim
                 t
                 (Claim_event_invocation (borrow, invocation))
-                (fun ~dispatched ->
+                (fun ~dispatched ~borrow_agent_actor ->
                    let%bind () = check () in
-                   callback ~dispatched)
+                   callback ~dispatched ~borrow_agent_actor)
             in
             (* Keep the native outcome even if the delegated caller loses access
                while it runs. Rechecking inside the callback after the effect
@@ -7825,7 +8134,7 @@ let with_moderator_observation t operation_id ~invocation_id f =
     with_moderator_borrow_unlocked
       t
       ~claim:(Claim_moderator_observation (operation_id, invocation_id))
-      (fun ~dispatched ~commit -> f ~observing:dispatched ~commit))
+      (fun ~dispatched ~borrow_agent_actor:_ ~commit -> f ~observing:dispatched ~commit))
 ;;
 
 let with_selected_moderator_observation t claim f =
@@ -7837,7 +8146,7 @@ let with_selected_moderator_observation t claim f =
     | None -> Ok false
     | Some borrow ->
       let%map () =
-        run_moderator_borrow t borrow (fun ~dispatched ~commit ->
+        run_moderator_borrow t borrow (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
           f ~observing:dispatched ~commit)
       in
       true)
@@ -7876,7 +8185,7 @@ let with_idle_moderator_observation_tools t ~observer f =
           with_invocation_claim t (Claim_idle_invocation (borrow, invocation)) callback
       in
       let%map () =
-        run_moderator_borrow t borrow (fun ~dispatched ~commit ->
+        run_moderator_borrow t borrow (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
           Exn.protect
             ~f:(fun () -> f ~observing:dispatched ~execute ~commit)
             ~finally:(fun () -> Atomic.set active false))
@@ -7892,6 +8201,8 @@ let worker_capabilities t operation_id id_source buffer =
             Result.map (call t State) ~f:(fun state ->
               state.conversation.reserved_history_through))
           id_source
+    ; original_agent_actor =
+        (fun () -> call t (Borrow_operation_agent_actor operation_id))
     ; commit_entry = (fun entry -> call t (Commit_worker_entry (operation_id, entry)))
     ; prepare_authoring_input =
         (fun materialization ~history ~effective ->
@@ -8012,6 +8323,13 @@ let run_worker t worker operation history =
 
 let launch_worker t operation =
   let operation_id = operation.Agent_protocol.Operation.id in
+  (* Capture the physical worker's cell, not a later operation's mutable slot.
+     A failed terminal save cannot extend the callback that already returned. *)
+  let custody =
+    Option.bind t.operation_agent_custody ~f:(fun (owner, custody) ->
+      Option.some_if (Agent_protocol.Id.Operation.equal owner operation_id) custody)
+  in
+  let retire_authority () = Option.iter custody ~f:retire_agent_custody in
   let history =
     let open Result.Let_syntax in
     let%bind () = reconcile_foreground_invocations t in
@@ -8019,6 +8337,7 @@ let launch_worker t operation =
   in
   match history with
   | Error failure ->
+    retire_authority ();
     Eio.Fiber.fork ~sw:t.sw (fun () ->
       ignore
         (call t ~priority:Priority (Worker_terminal (operation_id, Failed failure))
@@ -8026,11 +8345,12 @@ let launch_worker t operation =
   | Ok history ->
     Eio.Fiber.fork ~sw:t.sw (fun () ->
       let outcome =
-        match t.operation_worker with
-        | Some worker -> run_worker t worker operation history
-        | None ->
-          Operation_worker.Failed
-            (error Invalid_state "session has no foreground operation worker")
+        Exn.protect ~finally:retire_authority ~f:(fun () ->
+          match t.operation_worker with
+          | Some worker -> run_worker t worker operation history
+          | None ->
+            Operation_worker.Failed
+              (error Invalid_state "session has no foreground operation worker"))
       in
       ignore
         (call t ~priority:Priority (Worker_terminal (operation_id, outcome))
@@ -8049,7 +8369,64 @@ let create_turn_operation t reason =
     }
 ;;
 
+let prune_pending_agent_custody t =
+  t.pending_agent_custody
+  <- List.filter t.pending_agent_custody ~f:(fun (entry, custody) ->
+       let retained =
+         List.exists t.state.conversation.deferred_user_entries ~f:(fun pending ->
+           equal_agent_entry entry (Pending_input_document.entry pending))
+       in
+       if not retained then retire_agent_custody custody;
+       retained)
+;;
+
+let remember_pending_agent_actor t entry original_actor =
+  prune_pending_agent_custody t;
+  Option.iter original_actor ~f:(fun actor ->
+    if
+      List.exists t.state.conversation.deferred_user_entries ~f:(fun pending ->
+        equal_agent_entry entry (Pending_input_document.entry pending))
+    then
+      t.pending_agent_custody
+      <- (entry, create_agent_custody actor) :: t.pending_agent_custody)
+;;
+
+let pending_adoption_agent_custody t entries =
+  match entries with
+  | [ entry ] ->
+    (match
+       List.find t.pending_agent_custody ~f:(fun (pending, _) ->
+         equal_agent_entry entry pending)
+     with
+     | None -> Ok None
+     | Some (_, custody) -> Result.map (transfer_agent_custody custody) ~f:Option.some)
+  | [] | _ :: _ :: _ -> Ok None
+;;
+
+let admission_agent_custody t admission =
+  Turn_admission.payloads admission
+  |> List.concat_map ~f:(function
+    | Agent_protocol.Event.Durable.Payload.History_appended entries -> entries
+    | _ -> [])
+  |> pending_adoption_agent_custody t
+;;
+
+let adopted_agent_custody t entries incoming original_actor =
+  match entries with
+  | [ entry ] when equal_agent_entry entry incoming ->
+    Ok (Option.map original_actor ~f:create_agent_custody)
+  | _ -> pending_adoption_agent_custody t entries
+;;
+
+let install_operation_agent_custody t operation custody =
+  Option.iter t.operation_agent_custody ~f:(fun (_, custody) ->
+    retire_agent_custody custody);
+  t.operation_agent_custody
+  <- Option.map custody ~f:(fun custody -> operation.Agent_protocol.Operation.id, custody)
+;;
+
 let submit_idle_message
+      ?original_actor
       ?run_preparation
       ?commit_attempted
       ?(extra_deltas = [])
@@ -8076,6 +8453,11 @@ let submit_idle_message
       ~limits:Session_delta.native_limits
   in
   let entries = Pending_plan.adopted_entries (Pending_transition.plan adoption) in
+  let%bind operation_custody =
+    match operation, original_actor with
+    | Some _, Some actor -> Ok (Some (create_agent_custody actor))
+    | Some _, None | None, _ -> adopted_agent_custody t entries entry original_actor
+  in
   let accepted =
     List.exists entries ~f:(fun candidate ->
       Agent_protocol.History.Id.equal candidate.id entry.id)
@@ -8102,6 +8484,7 @@ let submit_idle_message
         ~delta:(Session_delta.Batch (extra_deltas @ [ Pending_transition.delta enqueue ]))
         ~payloads:deferred_payloads
     in
+    remember_pending_agent_actor t entry original_actor;
     { session; history_id = entry.id; disposition = Deferred; operation_id = None })
   else (
     let operation =
@@ -8127,6 +8510,8 @@ let submit_idle_message
         ]
     in
     let%map session = transition ?run_preparation ?commit_attempted t ~delta ~payloads in
+    install_operation_agent_custody t operation operation_custody;
+    remember_pending_agent_actor t entry original_actor;
     launch_worker t operation;
     { session
     ; history_id = entry.id
@@ -8136,6 +8521,7 @@ let submit_idle_message
 ;;
 
 let submit_deferred_message
+      ?original_actor
       ?(extra_deltas = [])
       ?(owner = Pending_input_document.Owner.Host_internal)
       ?(timing = Agent_protocol.Pending_input.Timing.Safe_boundary)
@@ -8144,10 +8530,12 @@ let submit_deferred_message
   =
   let open Result.Let_syntax in
   let%map session = defer_history ~extra_deltas ~owner ~timing t [ entry ] in
+  remember_pending_agent_actor t entry original_actor;
   { session; history_id = entry.id; disposition = Deferred; operation_id = None }
 ;;
 
 let submit_authorized_message
+      ?original_actor
       ?(extra_deltas = [])
       ?(owner = Pending_input_document.Owner.Host_internal)
       ?(timing = Agent_protocol.Pending_input.Timing.Safe_boundary)
@@ -8167,20 +8555,23 @@ let submit_authorized_message
     match
       t.idle_moderator_borrowed, t.state.active_operation, t.state.lifecycle.observed
     with
-    | true, _, _ -> submit_deferred_message ~extra_deltas ~owner ~timing t entry
+    | true, _, _ ->
+      submit_deferred_message ?original_actor ~extra_deltas ~owner ~timing t entry
     | false, Some _, _
     | false, None, (Running_turn _ | Compacting _ | Waiting_for_permission _) ->
-      submit_deferred_message ~extra_deltas ~owner ~timing t entry
-    | false, None, Idle -> submit_idle_message ~extra_deltas ~owner ~timing t entry
+      submit_deferred_message ?original_actor ~extra_deltas ~owner ~timing t entry
+    | false, None, Idle ->
+      submit_idle_message ?original_actor ~extra_deltas ~owner ~timing t entry
     | ( false
       , None
       , (Stopped | Queued_for_slot | Starting | Recovering | Stopping | Failed _) ) ->
       Error (error Invalid_state "session is not ready to accept a turn"))
 ;;
 
-let submit_message t attachment_id submitting_principal timing entry =
+let submit_message ?original_actor t attachment_id submitting_principal timing entry =
   Result.bind (write_attachment t attachment_id) ~f:(fun _ ->
     submit_authorized_message
+      ?original_actor
       ~owner:(Submitting_principal submitting_principal)
       ~timing
       t
@@ -8197,7 +8588,14 @@ let check_run_caller ?preparation t caller =
      | None -> Error (error Permission_denied "headless admission requires actor custody"))
 ;;
 
-let begin_run_preparation_internal t ~authorize ~principal_id ~request ~request_sha256 =
+let begin_run_preparation_internal
+      ?original_actor
+      t
+      ~authorize
+      ~principal_id
+      ~request
+      ~request_sha256
+  =
   let open Result.Let_syntax in
   let%bind () = authorize t.state in
   let%bind () =
@@ -8227,7 +8625,17 @@ let begin_run_preparation_internal t ~authorize ~principal_id ~request ~request_
      | Some _ -> Error (error Conflict "another run admission is being prepared")
      | None ->
        let%map preparation =
-         Run_preparation.create_request
+         (match original_actor with
+          | None -> Run_preparation.create_request
+          | Some actor ->
+            fun ~owner ~state ~principal_id:_ ~request ~request_sha256 ~authorize ->
+              Run_preparation.create_authenticated_request
+                ~owner
+                ~state
+                ~actor
+                ~request
+                ~request_sha256
+                ~authorize)
            ~owner:t.run_preparation_owner
            ~state:t.state
            ~principal_id
@@ -8332,6 +8740,7 @@ let admit_run
       match operation, entry with
       | Some operation, Some entry ->
         submit_idle_message
+          ?original_actor:(Run_admission.Scope.original_actor scope)
           ?run_preparation:preparation
           ?commit_attempted
           ~extra_deltas:[ delta ]
@@ -9308,6 +9717,7 @@ let claim_job_scope t job_id generation attempt deadline =
     ; active = true
     ; cancel_requested = false
     ; unfinished_on_return = false
+    ; authority_live = Atomic.make true
     ; cancel = None
     }
   in
@@ -9368,7 +9778,13 @@ let claim_job_invocation t scope (invocation : Agent_protocol.Invocation.t) =
       ~delta:(Session_delta.Batch (admission @ [ Invocation_changed dispatched ]))
       ~payloads:[]
   in
-  let execution = { owner = Background_job scope; dispatched; accepts_children = true } in
+  let execution =
+    { owner = Background_job scope
+    ; dispatched
+    ; accepts_children = true
+    ; authority_live = Atomic.make true
+    }
+  in
   t.invocation_executions <- execution :: t.invocation_executions;
   Ok execution
 ;;
@@ -9381,6 +9797,7 @@ let finish_job_scope t scope =
     | false -> Error (error Conflict "background execution scope has ended")
   in
   scope.active <- false;
+  Atomic.set scope.authority_live false;
   scope.cancel <- None;
   let%bind () =
     match t.moderator_borrow with
@@ -9417,6 +9834,7 @@ let finish_job_scope t scope =
   let%bind deltas =
     List.map children ~f:(fun execution ->
       execution.accepts_children <- false;
+      Atomic.set execution.authority_live false;
       abort_staged_work t ~owner:(Invocation execution.dispatched.context.id);
       Agent_protocol.Invocation.cancel
         execution.dispatched
@@ -9478,9 +9896,16 @@ let add_initialization_model_job t scope (job : Agent_protocol.Job.t) =
     | _ ->
       Error (error Invalid_request "initialization requires a fresh queued model job")
   in
+  let%bind custody =
+    match scope.Initialization_scope.agent_custody with
+    | None -> Ok None
+    | Some parent -> Result.map (transfer_agent_custody parent) ~f:Option.some
+  in
   let%map job =
     add_job ?run_preparation:scope.Initialization_scope.run_preparation t job
   in
+  Option.iter custody ~f:(fun custody ->
+    t.job_agent_custody <- (job, custody) :: t.job_agent_custody);
   scope.Initialization_scope.jobs <- job.id :: scope.jobs;
   job
 ;;
@@ -9509,7 +9934,7 @@ let start_initialization_model_job t scope (job : Agent_protocol.Job.t) =
     ~error:(error Conflict "initialization job could not be claimed")
 ;;
 
-let initialization_model_job_is_current t scope job_id generation attempt =
+let initialization_model_job_is_owned t scope job_id generation attempt =
   let open Result.Let_syntax in
   let%bind () = validate_initialization_owner t scope in
   match validate_initialization_scope t scope with
@@ -9532,6 +9957,12 @@ let initialization_model_job_is_current t scope job_id generation attempt =
          | Failed _
          | Cancelled
          | Interrupted _ -> false))
+;;
+
+let initialization_model_job_is_current t scope job_id generation attempt =
+  let open Result.Let_syntax in
+  let%map owned = initialization_model_job_is_owned t scope job_id generation attempt in
+  owned && Result.is_ok (check_initialization_agent_actor scope)
 ;;
 
 let validate_initialization_model_job t scope job_id generation attempt =
@@ -9559,7 +9990,14 @@ let capture_initialization_recipe_target t scope job_id generation attempt targe
 
 let complete_initialization_model_job t scope job_id generation attempt outcome =
   let open Result.Let_syntax in
-  let%bind () = validate_initialization_model_job t scope job_id generation attempt in
+  (* Acknowledging an already completed attempt remains cleanup after original
+     expiry. New provider admission/target capture uses the currentness guard. *)
+  let%bind owned = initialization_model_job_is_owned t scope job_id generation attempt in
+  let%bind () =
+    if owned
+    then Ok ()
+    else Error (error Conflict "initialization does not own this running model attempt")
+  in
   complete_job
     ?run_preparation:scope.Initialization_scope.run_preparation
     t
@@ -10644,6 +11082,7 @@ let start_idle_turn_unchecked
       ~notification_wakes
       ~adopt_deferred
   in
+  let%bind agent_custody = admission_agent_custody t admission in
   let leading_deltas, turn_deltas =
     match Turn_admission.deltas admission with
     | (Pending_inputs_changed _ as delta) :: rest -> [ delta ], rest
@@ -10672,18 +11111,30 @@ let start_idle_turn_unchecked
     drain_payloads drain @ leading_payloads @ extra_payloads @ turn_payloads
   in
   let%map _ = transition t ~delta:(Session_delta.Batch deltas) ~payloads in
+  if Option.is_none t.operation_agent_custody
+  then install_operation_agent_custody t operation agent_custody;
+  prune_pending_agent_custody t;
   launch_worker t operation
 ;;
 
 let commit_history_transition t ~delta ~payloads ~admission =
   let open Result.Let_syntax in
+  let%bind agent_custody =
+    match admission with
+    | None -> Ok None
+    | Some admission -> admission_agent_custody t admission
+  in
   let%bind prepared = prepare_transition t ~delta ~payloads in
   Eio.Cancel.protect (fun () ->
     let%map () = persist_transition t prepared in
     install_committed_transition t prepared;
     publish_committed_transition t prepared;
     Option.iter admission ~f:(fun admission ->
-      launch_worker t (Turn_admission.operation admission));
+      let operation = Turn_admission.operation admission in
+      if Option.is_none t.operation_agent_custody
+      then install_operation_agent_custody t operation agent_custody;
+      prune_pending_agent_custody t;
+      launch_worker t operation);
     Session_state.summary t.state)
 ;;
 
@@ -11678,10 +12129,10 @@ let enable_automatic_turn_budget ?run_preparation t policy =
 
 let lifecycle_request_allowed : type a. a request -> bool = function
   | Set_operation_worker None
-  | Set_runtime_worker (None, _)
+  | Set_runtime_worker (_, None, _)
   | Set_compaction_inference None -> true
   | Set_operation_worker (Some _)
-  | Set_runtime_worker (Some _, _)
+  | Set_runtime_worker (_, Some _, _)
   | Set_compaction_inference (Some _) -> false
   | Acknowledge_inference _
   | Observe_inference _
@@ -11829,6 +12280,10 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Validate_administration_basis _
   | Commit_reconciled_administration _
   | Begin_initialization _
+  | Borrow_initialization_agent_actor _
+  | Borrow_operation_agent_actor _
+  | Borrow_invocation_agent_actor _
+  | Borrow_moderator_agent_actor _
   | Begin_run_initialization _
   | Capture_run_constructor_model_source _
   | Capture_run_constructor_recipe_target _
@@ -12012,6 +12467,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        | false -> Error (error Conflict "background execution scope has ended")
        | true ->
          scope.active <- false;
+         Atomic.set scope.authority_live false;
          scope.unfinished_on_return
          <- job_has_moderator t scope
             || List.exists t.invocation_executions ~f:(job_execution_owned_by scope);
@@ -12273,13 +12729,30 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Snapshot -> Ok (current_snapshot t)
     | Observe -> Ok (t.state, current_snapshot t)
     | Set_operation_worker worker -> set_operation_worker t worker
-    | Set_runtime_worker (worker, inference) -> set_runtime_worker t worker inference
+    | Set_runtime_worker (original_actor, worker, inference) ->
+      let open Result.Let_syntax in
+      let%bind () =
+        match original_actor with
+        | None -> Ok ()
+        | Some actor when Operator_authorization.is_current actor -> Ok ()
+        | Some _ ->
+          Error (error Permission_denied "runtime installation authentication expired")
+      in
+      set_runtime_worker t worker inference
     | Check_runtime_admission -> require_runtime_admission t
     | Retire_runtime_worker closing -> retire_runtime_worker t ~closing
     | Set_compaction_inference port ->
       t.compaction_inference <- port;
       Ok ()
-    | Enable_automatic_turn_budget policy -> enable_automatic_turn_budget t policy
+    | Enable_automatic_turn_budget (original_actor, policy) ->
+      let open Result.Let_syntax in
+      let%bind () =
+        match original_actor with
+        | None -> Ok ()
+        | Some actor when Operator_authorization.is_current actor -> Ok ()
+        | Some _ -> Error (error Permission_denied "turn budget authentication expired")
+      in
+      enable_automatic_turn_budget t policy
     | Enable_run_constructor_turn_budget (preparation, policy) ->
       enable_automatic_turn_budget ~run_preparation:preparation t policy
     | Set_automatic_turn_pauses conditions ->
@@ -12307,7 +12780,16 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        | _ ->
          Error
            (error Conflict "pause changes wait for active moderator or foreground work"))
-    | Change_moderator moderator -> change_moderator t moderator
+    | Change_moderator (original_actor, moderator) ->
+      let open Result.Let_syntax in
+      let%bind () =
+        match original_actor with
+        | None -> Ok ()
+        | Some actor when Operator_authorization.is_current actor -> Ok ()
+        | Some _ ->
+          Error (error Permission_denied "moderator checkpoint authentication expired")
+      in
+      change_moderator t moderator
     | Change_workspace workspace -> change_workspace t workspace
     | Shell_approval_grants -> Ok t.state.shell.approval_grants
     | Replace_shell_approval_grants (run_preparation, approval_grants) ->
@@ -12327,16 +12809,74 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       validate_administration_basis t attachment_id expected
     | Commit_reconciled_administration (attachment_id, expected, kind, candidate) ->
       commit_reconciled_administration t attachment_id expected kind candidate
-    | Begin_initialization expected -> begin_initialization t expected
+    | Begin_initialization (original_actor, expected) ->
+      let open Result.Let_syntax in
+      let%bind () =
+        match original_actor with
+        | None -> Ok ()
+        | Some actor ->
+          if Operator_authorization.is_current actor
+          then Ok ()
+          else Error (error Permission_denied "initialization authentication expired")
+      in
+      begin_initialization ?original_actor t expected
+    | Borrow_initialization_agent_actor scope ->
+      let open Result.Let_syntax in
+      let%bind () = validate_initialization_scope t scope in
+      (match scope.agent_custody with
+       | None -> Ok None
+       | Some custody ->
+         Result.map (Agent_authority_scope.actor custody.authority) ~f:Option.some)
+    | Borrow_operation_agent_actor id ->
+      let open Result.Let_syntax in
+      let%bind _ = running_operation t id in
+      operation_agent_actor t id
+    | Borrow_invocation_agent_actor (execution, invocation) ->
+      invocation_agent_actor t execution invocation
+    | Borrow_moderator_agent_actor (borrow, invocation) ->
+      let open Result.Let_syntax in
+      let%bind () = validate_moderator_borrow t borrow in
+      let%bind () =
+        if
+          Agent_protocol.Invocation.equal borrow.invocation invocation
+          && Atomic.get borrow.authority_live
+        then Ok ()
+        else
+          Error
+            (error
+               Permission_denied
+               "agent authority belongs to another or expired moderator")
+      in
+      (match moderator_agent_custody t borrow with
+       | None -> Ok None
+       | Some custody ->
+         Result.map (Agent_authority_scope.actor custody.authority) ~f:(fun actor ->
+           Some
+             (Operator_authorization.guarded
+                ~principal:(Operator_authorization.principal actor)
+                ~is_current:(fun () ->
+                  Atomic.get borrow.authority_live
+                  && Operator_authorization.is_current actor))))
     | Begin_run_initialization (preparation, expected) ->
       let open Result.Let_syntax in
       let%bind () = check_run_preparation t preparation in
-      begin_initialization ~run_preparation:preparation t expected
+      begin_initialization
+        ~run_preparation:preparation
+        ?original_actor:(Run_preparation.original_actor preparation)
+        t
+        expected
     | End_initialization scope -> end_initialization t scope
     | Complete_initialization (scope, candidate) ->
       complete_initialization t scope candidate
     | Fail_initialization (scope, failure) -> fail_initialization t scope failure
-    | Start (attachment_id, expected_parent_stop_epoch) ->
+    | Start (original_actor, attachment_id, expected_parent_stop_epoch) ->
+      let open Result.Let_syntax in
+      let%bind () =
+        match original_actor with
+        | None -> Ok ()
+        | Some actor when Operator_authorization.is_current actor -> Ok ()
+        | Some _ -> Error (error Permission_denied "start authentication expired")
+      in
       with_writer t attachment_id (fun () -> start_internal ?expected_parent_stop_epoch t)
     | Start_initial_delegated (reference, expected_parent_stop_epoch) ->
       (match t.state.spec.delegation with
@@ -12493,8 +13033,26 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
            (error Permission_denied "delegation.stop: child relationship does not match"))
     | Defer_history (attachment_id, entries) ->
       with_writer t attachment_id (fun () -> defer_history t entries)
-    | Submit_message (attachment_id, submitting_principal, timing, entry) ->
-      submit_message t attachment_id submitting_principal timing entry
+    | Submit_message (original_actor, attachment_id, submitting_principal, timing, entry)
+      ->
+      let open Result.Let_syntax in
+      let%bind () =
+        match original_actor with
+        | None -> Ok ()
+        | Some actor ->
+          let principal = Operator_authorization.principal actor in
+          if
+            Operator_authorization.is_current actor
+            && Agent_protocol.Principal.has_scope principal Send_messages
+            && Agent_protocol.Id.Principal.equal principal.id submitting_principal
+          then Ok ()
+          else
+            Error
+              (error
+                 Permission_denied
+                 "message authentication expired or differs from submitter")
+      in
+      submit_message ?original_actor t attachment_id submitting_principal timing entry
     | Control_pending (principal, project, request, replacement) ->
       control_pending_internal t principal project request replacement
     | Capture_run_constructor_model_source
@@ -12610,8 +13168,10 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
                    (if !attempted
                     then Run_admission_outcome.Uncertain failure
                     else Run_admission_outcome.Rejected failure)))
-    | Begin_run_preparation (authorize, principal_id, request, request_sha256) ->
+    | Begin_run_preparation
+        (original_actor, authorize, principal_id, request, request_sha256) ->
       begin_run_preparation_internal
+        ?original_actor
         t
         ~authorize
         ~principal_id
@@ -12623,7 +13183,13 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       let principal_id = (Operator_authorization.principal actor).id in
       let request = Run_admission_request.of_headless request in
       let%bind request_sha256 = Run_admission_request.request_sha256 request in
-      begin_run_preparation_internal t ~authorize ~principal_id ~request ~request_sha256
+      begin_run_preparation_internal
+        ~original_actor:actor
+        t
+        ~authorize
+        ~principal_id
+        ~request
+        ~request_sha256
     | Close_run_preparation preparation ->
       if not (Run_preparation.belongs_to preparation ~owner:t.run_preparation_owner)
       then Error (error Conflict "run preparation belongs to another actor")
@@ -12871,6 +13437,15 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       finish_inference_owner ?run_preparation t owner
     | Reconcile_inference_recovery -> reconcile_inference_recovery t
     | Shutdown ->
+      Option.iter t.operation_agent_custody ~f:(fun (_, custody) ->
+        retire_agent_custody custody);
+      List.iter t.pending_agent_custody ~f:(fun (_, custody) ->
+        retire_agent_custody custody);
+      List.iter t.job_agent_custody ~f:(fun (_, custody) -> retire_agent_custody custody);
+      Option.iter t.initialization_scope ~f:(fun scope ->
+        Option.iter scope.agent_custody ~f:retire_agent_custody);
+      List.iter t.invocation_executions ~f:(fun execution ->
+        Atomic.set execution.authority_live false);
       close_run_preparation t;
       t.initialization_scope <- None;
       abort_all_staged_work t;
@@ -12881,6 +13456,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       List.iter t.job_scopes ~f:cancel_job_scope;
       Option.iter t.queued_event_borrow ~f:(fun borrow ->
         borrow.callback_active <- false;
+        Atomic.set borrow.authority_live false;
         borrow.cancel_requested <- true;
         Option.iter borrow.cancel ~f:(fun cancel -> cancel ()));
       Eio.Mutex.use_rw ~protect:true t.subscriber_mutex (fun () ->
@@ -12987,6 +13563,9 @@ let create_with_owner_lease_duration
     ; idle_moderator_borrowed = false
     ; moderator_borrow = None
     ; queued_event_borrow = None
+    ; operation_agent_custody = None
+    ; pending_agent_custody = []
+    ; job_agent_custody = []
     ; run_authorities = Run_authorities.empty
     ; run_preparation_owner = Run_preparation.Owner.create ()
     ; run_preparation = None
@@ -13056,15 +13635,18 @@ let commit_extensions t ~generation ~expected_revision changes =
   call t (Commit_extensions (generation, expected_revision, changes))
 ;;
 
-let enable_automatic_turn_budget t policy = call t (Enable_automatic_turn_budget policy)
+let enable_automatic_turn_budget ?actor t policy =
+  call t (Enable_automatic_turn_budget (actor, policy))
+;;
+
 let set_automatic_turn_pauses t conditions = call t (Set_automatic_turn_pauses conditions)
 
 let set_operation_worker t worker =
   call t ~priority:Priority (Set_operation_worker worker)
 ;;
 
-let set_runtime_worker t ~worker ~inference =
-  call t ~priority:Priority (Set_runtime_worker (worker, inference))
+let set_runtime_worker ?actor t ~worker ~inference =
+  call t ~priority:Priority (Set_runtime_worker (actor, worker, inference))
 ;;
 
 let retire_runtime_worker t ~closing =
@@ -13075,7 +13657,7 @@ let set_compaction_inference t port =
   call t ~priority:Priority (Set_compaction_inference port)
 ;;
 
-let change_moderator t moderator = call t (Change_moderator moderator)
+let change_moderator ?actor t moderator = call t (Change_moderator (actor, moderator))
 let shell_approval_grants t = call t Shell_approval_grants
 
 let replace_shell_approval_grants t approval_grants =
@@ -13196,7 +13778,13 @@ module Constructor_mutations = struct
 end
 
 let reconcile_inference_recovery t = call t Reconcile_inference_recovery
-let begin_initialization t ~expected = call t (Begin_initialization expected)
+let begin_initialization t ~expected = call t (Begin_initialization (None, expected))
+
+let begin_initialization_authenticated t ~actor ~expected =
+  call t (Begin_initialization (Some actor, expected))
+;;
+
+let initialization_agent_actor t ~scope = call t (Borrow_initialization_agent_actor scope)
 
 let begin_run_initialization t ~preparation ~expected =
   call t (Begin_run_initialization (preparation, expected))
@@ -13243,8 +13831,8 @@ let upgrade_prompt_with_command_audit
     (Upgrade_prompt (attachment_id, expected_revision, target_revision))
 ;;
 
-let start ?expected_parent_stop_epoch t ~attachment_id =
-  call t (Start (attachment_id, expected_parent_stop_epoch))
+let start ?actor ?expected_parent_stop_epoch t ~attachment_id =
+  call t (Start (actor, attachment_id, expected_parent_stop_epoch))
 ;;
 
 let start_initial_delegated ?expected_parent_stop_epoch t ~reference =
@@ -13258,8 +13846,14 @@ let fail_initial_delegated t ~reference failure =
 let replace_workspace t workspace = call t ~priority:Priority (Change_workspace workspace)
 let queue_start t ~attachment_id = call t (Queue_start attachment_id)
 
-let start_with_command_audit ?expected_parent_stop_epoch t ~command_audit ~attachment_id =
-  call t ~command_audit (Start (attachment_id, expected_parent_stop_epoch))
+let start_with_command_audit
+      ?actor
+      ?expected_parent_stop_epoch
+      t
+      ~command_audit
+      ~attachment_id
+  =
+  call t ~command_audit (Start (actor, attachment_id, expected_parent_stop_epoch))
 ;;
 
 let queue_start_with_command_audit t ~command_audit ~attachment_id =
@@ -13303,7 +13897,7 @@ let submit_message
       ~attachment_id
       entry
   =
-  call t (Submit_message (attachment_id, submitting_principal, timing, entry))
+  call t (Submit_message (None, attachment_id, submitting_principal, timing, entry))
 ;;
 
 let enable_run_constructor_turn_budget t ~preparation policy =
@@ -13381,7 +13975,19 @@ let admit_prepared_run t ~command_audit ~preparation ~scope ~session ~entry =
 ;;
 
 let begin_run_preparation t ~authorize ~principal_id ~request ~request_sha256 =
-  call t (Begin_run_preparation (authorize, principal_id, request, request_sha256))
+  call t (Begin_run_preparation (None, authorize, principal_id, request, request_sha256))
+;;
+
+let begin_run_preparation_authenticated t ~actor ~authorize ~request ~request_sha256 =
+  let principal_id = (Operator_authorization.principal actor).id in
+  call
+    t
+    (Begin_run_preparation
+       ( Some actor
+       , Run_command_authorization.check actor ~authorize
+       , principal_id
+       , request
+       , request_sha256 ))
 ;;
 
 let begin_headless_run_preparation t ~actor ~authorize ~request =
@@ -13426,6 +14032,32 @@ let submit_managed_message
          (reference, key, request_sha256, generation, max_receipts, entry)))
 ;;
 
+let submit_message_authenticated
+      t
+      ~actor
+      ?(timing = Agent_protocol.Pending_input.Timing.Safe_boundary)
+      ~attachment_id
+      entry
+  =
+  let submitting_principal = (Operator_authorization.principal actor).id in
+  call t (Submit_message (Some actor, attachment_id, submitting_principal, timing, entry))
+;;
+
+let submit_message_authenticated_with_command_audit
+      t
+      ~actor
+      ?(timing = Agent_protocol.Pending_input.Timing.Safe_boundary)
+      ~command_audit
+      ~attachment_id
+      entry
+  =
+  let submitting_principal = (Operator_authorization.principal actor).id in
+  call
+    t
+    ~command_audit
+    (Submit_message (Some actor, attachment_id, submitting_principal, timing, entry))
+;;
+
 let submit_message_with_command_audit
       t
       ?(timing = Agent_protocol.Pending_input.Timing.Safe_boundary)
@@ -13437,7 +14069,7 @@ let submit_message_with_command_audit
   call
     t
     ~command_audit
-    (Submit_message (attachment_id, submitting_principal, timing, entry))
+    (Submit_message (None, attachment_id, submitting_principal, timing, entry))
 ;;
 
 let cancel_pending t ?command_audit ~principal ~project request =

@@ -325,17 +325,19 @@ let%expect_test
              Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
                let invocation = invocation_fixture () in
                let _ =
-                 caps.with_invocation ~invocation (fun ~dispatched:_ ->
-                   Eio.Promise.resolve enter ();
-                   Exn.protect
-                     ~finally:(fun () ->
-                       Eio.Cancel.protect (fun () ->
-                         Eio.Promise.resolve clean ();
-                         Eio.Promise.await release;
-                         cleaned := true))
-                     ~f:(fun () ->
-                       Eio.Promise.await never;
-                       Ok (P.Invocation.Complete `Null)))
+                 caps.with_invocation
+                   ~invocation
+                   (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                      Eio.Promise.resolve enter ();
+                      Exn.protect
+                        ~finally:(fun () ->
+                          Eio.Cancel.protect (fun () ->
+                            Eio.Promise.resolve clean ();
+                            Eio.Promise.await release;
+                            cleaned := true))
+                        ~f:(fun () ->
+                          Eio.Promise.await never;
+                          Ok (P.Invocation.Complete `Null)))
                  |> protocol_ok
                in
                match completed_worker_result input caps with

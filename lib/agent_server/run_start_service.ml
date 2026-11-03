@@ -11,7 +11,7 @@ let create ~server_id ~authorize = { server_id; authorize }
 
 let start_attempt
       t
-      ~principal_id
+      ~actor
       ~authorize
       ~begin_preparation
       ~(entry : Session_registry.entry)
@@ -56,8 +56,8 @@ let start_attempt
                     ~f:(fun activation -> activation.startup_pending ())
                 in
                 let%bind scope =
-                  A.Run_admission.Scope.create
-                    ~principal_id
+                  A.Run_admission.Scope.create_authenticated
+                    ~actor
                     ~observer
                     ~startup_pending
                     ~authorize
@@ -128,7 +128,6 @@ let outcome = function
 ;;
 
 let start t ~actor ~entry ~request ~command_audit =
-  let principal_id = (Operator_authorization.principal actor).id in
   let authorize state =
     if Operator_authorization.is_current actor
     then t.authorize actor state
@@ -146,13 +145,13 @@ let start t ~actor ~entry ~request ~command_audit =
     let%bind request_sha256 = A.Run_admission_request.request_sha256 normalized in
     start_attempt
       t
-      ~principal_id
+      ~actor
       ~authorize
       ~begin_preparation:(fun () ->
-        A.Session_actor.begin_run_preparation
+        A.Session_actor.begin_run_preparation_authenticated
           entry.Session_registry.actor
           ~authorize
-          ~principal_id
+          ~actor
           ~request
           ~request_sha256)
       ~entry
@@ -163,12 +162,11 @@ let start t ~actor ~entry ~request ~command_audit =
 ;;
 
 let start_headless_command t ~actor ~entry ~request ~command_audit =
-  let principal_id = (Operator_authorization.principal actor).id in
   let host_policy = t.authorize actor in
   let authorize = A.Run_command_authorization.check actor ~authorize:host_policy in
   start_attempt
     t
-    ~principal_id
+    ~actor
     ~authorize
     ~begin_preparation:(fun () ->
       A.Session_actor.begin_headless_run_preparation
