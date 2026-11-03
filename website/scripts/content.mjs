@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { stringify } from 'yaml';
 import { bundledLanguages } from 'shiki';
+import { replLanguageName } from './repl-highlighting.mjs';
 import {
   repoRoot,
   repository,
@@ -190,6 +191,8 @@ export async function generate({
         'scripts/search-index.mjs',
         'package-lock.json',
         'scripts/code-accessibility.mjs',
+        'scripts/repl-highlighting.mjs',
+        '../lib/terminal_highlighting/grammars/chatml.json',
         'scripts/rehype-reading.mjs',
       ];
       const renderFingerprint = digest(
@@ -231,7 +234,9 @@ export async function generate({
           if (
             languageAliases[fence.lang] ||
             (!bundledLanguages[fence.lang] &&
-              !['text', 'txt', 'plaintext'].includes(fence.lang))
+              !['text', 'txt', 'plaintext', replLanguageName].includes(
+                fence.lang,
+              ))
           )
             languageFallbacks.push({
               source: e.source,

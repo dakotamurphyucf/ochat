@@ -13,6 +13,7 @@ module Public = Checker.Configured_resolution.Public_module
 module Root_copy = Checker.Repl_type_roots
 module Snapshot = Chatml_typechecker.Type_snapshot
 module Diagnostic = Chatml_diagnostic
+module Completion = Chatml_repl_completion
 
 module Limits = struct
   type t =
@@ -53,6 +54,7 @@ module Error = struct
     | Busy_executing
     | Conflicting_finalization
     | Accounting_overflow
+    | Invalid_completion
   [@@deriving sexp_of]
 end
 
@@ -215,6 +217,46 @@ let with_activity t ~f =
   else (
     t.busy <- true;
     Exn.protect ~f ~finally:(fun () -> t.busy <- false))
+;;
+
+let complete t ~path ~prefix ~limit ~max_bytes ~checkpoint =
+  with_activity t ~f:(fun () ->
+    if
+      List.length path > 16
+      || List.exists path ~f:(fun name -> not (Chatml_repl_completion.valid_name name))
+      || (not (String.is_empty prefix || Chatml_repl_completion.valid_name prefix))
+      || limit < 1
+      || limit > 16
+      || max_bytes < 0
+      || max_bytes > 65_536
+    then Error Error.Invalid_completion
+    else (
+      let bindings, configured_limited =
+        Lookup.Repl_scope.completion_bindings t.scope ~limit:4096 ~checkpoint
+      in
+      let checked = List.take (Session.Roots.checked_in_order t.modules) 4097 in
+      let configured_limited = configured_limited || List.length checked > 4096 in
+      let checked =
+        List.take checked 4096 |> Map.of_alist_exn (module Prepared.Module_id)
+      in
+      let configured =
+        List.map bindings ~f:(fun (name, id) ->
+          checkpoint ();
+          name, Map.find checked id |> Option.map ~f:Public.value_scheme)
+      in
+      let result =
+        Completion.query
+          t.lexical
+          ~configured
+          ~configured_limited
+          ~path
+          ~prefix
+          ~limit
+          ~max_bytes
+          ~checkpoint
+      in
+      checkpoint ();
+      if t.closed then Error Error.Closed else Ok result))
 ;;
 
 let create ~prepared ~scope ~contract ~root_limits ~limits ~checkpoint =

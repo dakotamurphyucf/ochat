@@ -1882,6 +1882,53 @@ let inspect_type t ~actor ~instance ~epoch ~key ~statement_index ~selector ~max_
           }))
 ;;
 
+let complete
+      t
+      ~actor
+      ~instance
+      ~epoch
+      ~expected_revision
+      ~path
+      ~prefix
+      ~limit:requested_limit
+      ~max_bytes
+      ~request_current
+  =
+  let open Result.Let_syntax in
+  let%bind () = check_host t in
+  let%bind state =
+    find_instance t instance
+    |> Result.of_option ~error:(stale "developer REPL instance not found")
+  in
+  let%bind () = check_instance t state ~actor in
+  let%bind () = check_selection state ~actor ~checkpoint:t.checkpoint in
+  with_gate state.gate (fun () ->
+    let current () =
+      Epoch.equal state.epoch epoch
+      && Revision.equal state.revision expected_revision
+      && Option.is_none state.control
+      && request_current ()
+    in
+    if not (current ())
+    then Error (stale "developer REPL completion revision is not current")
+    else (
+      let%bind result =
+        Typing.complete
+          state.typing
+          ~path
+          ~prefix
+          ~limit:requested_limit
+          ~max_bytes
+          ~checkpoint:t.checkpoint
+        |> Result.map_error ~f:(fun _ -> limit "developer REPL completion unavailable")
+      in
+      let%bind () = check_instance t state ~actor in
+      let%bind () = check_selection state ~actor ~checkpoint:t.checkpoint in
+      if current ()
+      then Ok result
+      else Error (stale "developer REPL completion revision changed")))
+;;
+
 let task_references_page t ~actor ~instance ~epoch ~key ~after ~limit:requested_limit =
   let open Result.Let_syntax in
   let%bind () = check_host t in

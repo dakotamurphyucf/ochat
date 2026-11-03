@@ -329,6 +329,21 @@ module Repl_scope = struct
 
   let input_fingerprint t = input_fingerprint t.anchor
 
+  let completion_bindings t ~limit ~checkpoint =
+    if limit < 0
+    then [], true
+    else
+      Map.fold_until
+        t.anchor.bindings
+        ~init:([], 0)
+        ~f:(fun ~key:name ~data:binding (reversed, count) ->
+          checkpoint ();
+          if count >= limit
+          then Stop (List.rev reversed, true)
+          else Continue ((name, binding.dependency) :: reversed, count + 1))
+        ~finish:(fun (reversed, _) -> List.rev reversed, false)
+  ;;
+
   let create prepared ~anchor_owner ~anchor_implementation ~limits ~checkpoint =
     match
       create_lookup prepared ~owner:anchor_owner ~source:anchor_implementation ~checkpoint

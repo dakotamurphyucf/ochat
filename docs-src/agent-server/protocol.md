@@ -217,6 +217,20 @@ epoch or revision wire ID is comparison data for this process only. Reset
 issues new IDs while retaining authorized historical keyed observations.
 `developer.repl.inspect_type` and `developer.repl.task_references_page` expose
 bounded projections, never the retained type graph or a runnable Task handle.
+`developer.repl.complete` reads names from the exact current instance, epoch
+and revision. Its validated request selects an identifier prefix and at most
+16 module-path components; the response carries at most 16 sorted names and a
+`complete`, `limited` or `unavailable` status. Selected contract builtins,
+committed lexical bindings and qualified module values are available without
+source admission, inference, replay or runtime initialization. Configured root
+names come from the pinned source selection; their members are `unavailable`
+until an ordinary submission has committed that module's checked
+public information. Completion never speculatively checks an unused configured
+module. A stale revision, reset epoch, revoked actor/source permission or
+expired connection negotiation rejects the read. Work, frozen graph and name
+byte limits remain separate from result count; `limited` does not claim an
+exhaustive match set. Returned names describe committed scope, not whether an
+unfinished editor draft typechecks.
 `developer.repl.task.submit` explicitly starts a retained Task under the
 durable Task owner; its observe, await and cancel methods use the Task row's
 run/key and remain separate from Developer command receipts. REPL and Task

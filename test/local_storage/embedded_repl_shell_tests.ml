@@ -204,6 +204,25 @@ let%test_module "embedded local REPL native Shell grant" =
                 Agent_client.Developer_repl_connection.create_instance repl request
                 |> protocol
               in
+              let completion_request =
+                R.Completion_request.create
+                  ~limits
+                  ~instance:(R.View.instance created)
+                  ~epoch:(R.View.epoch created)
+                  ~expected_revision:(R.View.revision created)
+                  ~path:[ "Task" ]
+                  ~prefix:"p"
+                  ~limit:1
+                |> protocol
+              in
+              let completed =
+                Agent_client.Developer_repl_connection.complete repl completion_request
+                |> protocol
+              in
+              if
+                not
+                  (List.equal String.equal (R.Completion_page.names completed) [ "pure" ])
+              then failwith "live REPL startup completion did not read selected contract";
               let submitted =
                 R.Submit.create
                   ~limits
@@ -216,6 +235,13 @@ let%test_module "embedded local REPL native Shell grant" =
                 |> Agent_client.Developer_repl_connection.submit repl
                 |> protocol
               in
+              if
+                not
+                  (Result.is_error
+                     (Agent_client.Developer_repl_connection.complete
+                        repl
+                        completion_request))
+              then failwith "live REPL completion accepted a stale pre-submit revision";
               let task_key = key "embedded-native-denied-task" in
               let task_request =
                 R.Task_submit.create
@@ -430,6 +456,259 @@ let%test_module "embedded local REPL native Shell grant" =
             [%test_eq: string list] effects [ "ran"; "ran" ])
           ~finally:(fun () ->
             Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root)))
+    ;;
+
+    let%test_unit
+        "live completion isolates actor, connection lease, instance and reset epoch"
+      =
+      Eio_main.run (fun env ->
+        Mirage_crypto_rng_unix.use_default ();
+        let root = Agent_server_test_support.temporary_root env in
+        Exn.protect
+          ~finally:(fun () ->
+            Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+          ~f:(fun () ->
+            let workspace = Filename.concat root "workspace" in
+            Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
+            let prompt_file = Filename.concat root "agent.chatmd" in
+            Eio.Path.save
+              ~create:(`Exclusive 0o600)
+              Eio.Path.(Eio.Stdenv.fs env / prompt_file)
+              "<developer>Completion isolation fixture.</developer>";
+            Eio.Path.save
+              ~create:(`Exclusive 0o600)
+              Eio.Path.(Eio.Stdenv.fs env / Filename.concat root "count.chatml")
+              "let main input = Task.pure(input)";
+            let policy_file = Filename.concat root "local-policy.sexp" in
+            Eio.Path.save
+              ~create:(`Exclusive 0o600)
+              Eio.Path.(Eio.Stdenv.fs env / policy_file)
+              (policy root ());
+            let local_policy =
+              V.load ~env ~path:policy_file
+              |> Result.map_error ~f:(fun diagnostics ->
+                Sexp.to_string_hum
+                  ([%sexp_of: Agent_server.Config.Diagnostic.t list] diagnostics))
+              |> Result.ok_or_failwith
+            in
+            let options : E.options =
+              { prompt_file
+              ; workspace
+              ; tool_dir = root
+              ; home = Some root
+              ; storage = Transient
+              ; start_immediately = false
+              ; permission_profile = E.default_permission_profile
+              ; attachment_mode = Read_write
+              ; event_capacity = 32
+              }
+            in
+            Eio.Switch.run (fun sw ->
+              let host = E.open_local_host ~sw ~env ~local_policy options |> protocol in
+              Exn.protect
+                ~finally:(fun () -> E.close_host host)
+                ~f:(fun () ->
+                  let repl =
+                    Agent_client.Developer_repl_connection.create (E.host_connection host)
+                    |> protocol
+                  in
+                  let limits =
+                    Agent_client.Developer_repl_connection.capabilities repl
+                    |> R.Capabilities.limits
+                  in
+                  let route =
+                    C.Route.local_source
+                      ~limits:(R.Limits.request limits)
+                      ~root_index:0
+                      ~member:
+                        (Source.Portable_path.create "count.chatml" |> Or_error.ok_exn)
+                    |> protocol
+                  in
+                  let create name =
+                    R.Create.create
+                      ~limits
+                      ~run_id:(P.Id.Developer_run.create ())
+                      ~key:(key name)
+                      ~route
+                      ~target:One_off_v1
+                      ~prompt:
+                        (Agent_server.Catalog_identity.prompt_definition
+                           "embedded.prompt")
+                      ~workspace:
+                        (Agent_server.Catalog_identity.workspace_definition
+                           "embedded.workspace")
+                      ~requested_execution:None
+                      ~requested_max_output_bytes:None
+                    |> protocol
+                    |> Agent_client.Developer_repl_connection.create_instance repl
+                    |> protocol
+                  in
+                  let first = create "completion-isolation-first" in
+                  let request ~instance ~epoch ~revision =
+                    R.Completion_request.create
+                      ~limits
+                      ~instance
+                      ~epoch
+                      ~expected_revision:revision
+                      ~path:[ "Task" ]
+                      ~prefix:"p"
+                      ~limit:1
+                    |> protocol
+                  in
+                  let for_view view =
+                    request
+                      ~instance:(R.View.instance view)
+                      ~epoch:(R.View.epoch view)
+                      ~revision:(R.View.revision view)
+                  in
+                  let first_request = for_view first in
+                  let assert_page result =
+                    let page = result |> protocol in
+                    if
+                      not
+                        (List.equal
+                           String.equal
+                           (R.Completion_page.names page)
+                           [ "pure" ])
+                    then failwith "completion isolation fixture lacked a valid baseline"
+                  in
+                  assert_page
+                    (Agent_client.Developer_repl_connection.complete repl first_request);
+                  let dispatcher = E.host_dispatcher host in
+                  let reject_after_guard_revocation ~name ~revoke =
+                    let current = ref true in
+                    let armed = ref false in
+                    let watching = ref false in
+                    let guard_checks = ref 0 in
+                    let revoked = ref false in
+                    let revoke_now = ref (fun () -> ()) in
+                    let actor =
+                      Operator_authorization.guarded
+                        ~principal:(E.host_principal host)
+                        ~is_current:(fun () ->
+                          if !watching then Int.incr guard_checks;
+                          let checked_current = !current in
+                          if !armed
+                          then (
+                            armed := false;
+                            revoked := true;
+                            !revoke_now ());
+                          checked_current)
+                    in
+                    let context =
+                      Agent_server.Connection_context.create_authenticated
+                        ~actor
+                        ~connection_id:name
+                        ~transport:In_memory
+                        ~publish_notification:ignore
+                        ~max_attachments:8
+                    in
+                    Exn.protect
+                      ~finally:(fun () -> E.host_close_connection host context)
+                      ~f:(fun () ->
+                        let initialize =
+                          P.Initialize.Request.create
+                            ~implementation:
+                              (P.Initialize.Implementation.create ~name ~version:"1"
+                               |> protocol)
+                            ~protocol_min:P.Version.current
+                            ~protocol_max:P.Version.current
+                            ~features:[ R.Features.repl ]
+                            ~event_encodings:[ Json ]
+                            ~max_inbound_event_bytes:(2 * 1024 * 1024)
+                            ()
+                          |> protocol
+                        in
+                        ignore
+                          (Agent_server.Dispatcher.dispatch_command
+                             dispatcher
+                             ~context
+                             (Protocol_initialize initialize)
+                           |> protocol
+                           : P.Public.Result.t);
+                        let dispatch () =
+                          Agent_server.Dispatcher.dispatch_developer_repl
+                            dispatcher
+                            ~context
+                            (R.Request.Complete first_request)
+                        in
+                        (match dispatch () |> protocol with
+                         | R.Response.Complete page -> assert_page (Ok page)
+                         | _ -> failwith "completion baseline changed response method");
+                        (* The first armed guard runs after the endpoint captured
+                           and compared its lease. Returning its just-checked true
+                           result models revocation immediately after that check;
+                           later host/request checks must fail closed. This private
+                           context's lease mutex is uncontended, so revocation is
+                           nonyielding and needs no scheduler/timing assumption. *)
+                        (revoke_now := fun () -> revoke current context);
+                        watching := true;
+                        armed := true;
+                        let result = dispatch () in
+                        if (not !revoked) || !guard_checks < 2
+                        then failwith "completion omitted the post-revocation guard";
+                        match result with
+                        | Error { code = Permission_denied | Lease_stale; _ } -> ()
+                        | Error error ->
+                          raise_s
+                            [%sexp
+                              "completion revocation rejected for another reason"
+                            , (error : P.Error.t)]
+                        | Ok _ ->
+                          failwith
+                            "completion published after authority or lease revocation")
+                  in
+                  reject_after_guard_revocation
+                    ~name:"completion-actor-revocation"
+                    ~revoke:(fun current _ -> current := false);
+                  reject_after_guard_revocation
+                    ~name:"completion-lease-revocation"
+                    ~revoke:(fun _ context ->
+                      Agent_server.Connection_context.close_authoring context);
+                  let second = create "completion-isolation-second" in
+                  assert_page
+                    (Agent_client.Developer_repl_connection.complete
+                       repl
+                       (for_view second));
+                  let mixed =
+                    request
+                      ~instance:(R.View.instance second)
+                      ~epoch:(R.View.epoch first)
+                      ~revision:(R.View.revision first)
+                  in
+                  let assert_stale request =
+                    match
+                      Agent_client.Developer_repl_connection.complete repl request
+                    with
+                    | Error { code = Lease_stale; _ } -> ()
+                    | Error error ->
+                      raise_s
+                        [%sexp
+                          "completion identity rejected for another reason"
+                        , (error : P.Error.t)]
+                    | Ok _ ->
+                      failwith "completion accepted another instance or reset epoch"
+                  in
+                  assert_stale mixed;
+                  let reset =
+                    Agent_client.Developer_repl_connection.reset_and_wait
+                      repl
+                      (R.Current_epoch.create
+                         ~instance:(R.View.instance first)
+                         ~epoch:(R.View.epoch first)
+                         ~key:(key "completion-isolation-reset"))
+                    |> protocol
+                  in
+                  assert_stale first_request;
+                  assert_stale
+                    (request
+                       ~instance:(R.View.instance reset)
+                       ~epoch:(R.View.epoch first)
+                       ~revision:(R.View.revision reset));
+                  assert_page
+                    (Agent_client.Developer_repl_connection.complete
+                       repl
+                       (for_view reset))))))
     ;;
   end)
 ;;

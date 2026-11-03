@@ -244,3 +244,30 @@ site-search button[data-open-modal] {
   padding-top: 2rem;
   border-top: 1px solid var(--ochat-line);
 }
+
+/* Paired exact source and display-only REPL results use native code controls.
+   Keep grouping subtle in both themes and preserve horizontal keyboard scroll. */
+.sl-markdown-content .repl-example {
+  margin-block: 1.5rem 2rem;
+  padding: 1rem;
+  border: 1px solid var(--ochat-line);
+  border-inline-start: 3px solid var(--ochat-accent);
+  border-radius: var(--ochat-radius-panel);
+  background: var(--ochat-panel);
+}
+.sl-markdown-content .repl-example > :first-child {
+  margin-block-start: 0;
+}
+.sl-markdown-content .repl-example > :last-child {
+  margin-block-end: 0;
+}
+@media (max-width: 30rem) {
+  .sl-markdown-content .repl-example {
+    padding: 0.65rem;
+  }
+}
+@media (forced-colors: active) {
+  .sl-markdown-content .repl-example {
+    border-color: CanvasText;
+  }
+}

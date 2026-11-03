@@ -4,6 +4,7 @@ import sitemap from '@astrojs/sitemap';
 import searchIndex from './scripts/search-index.mjs';
 import readingAccessibility from './scripts/rehype-reading.mjs';
 import codeAccessibility from './scripts/code-accessibility.mjs';
+import { replLanguage } from './scripts/repl-highlighting.mjs';
 import { unified } from '@astrojs/markdown-remark';
 import { readFileSync } from 'node:fs';
 import { sitemapIncluded } from './config/presentation.mjs';
@@ -60,6 +61,7 @@ export default defineConfig({
         plugins: [codeAccessibility],
         themes: ['github-dark', 'github-light'],
         shiki: {
+          langs: [replLanguage],
           langAlias: {
             chatml: 'ocaml',
             console: 'shellsession',

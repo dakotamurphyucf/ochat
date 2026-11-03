@@ -784,6 +784,49 @@ let handle_repl t ?actor ~connection request =
       in
       Developer_repl_registry.project_submission registry ~instance submission
       |> Result.map ~f:(fun value -> Repl_wire.Response.Cancel_submission value)
+    | Complete request ->
+      let%bind instance =
+        repl_instance registry (Repl_wire.Completion_request.instance request)
+      in
+      let%bind epoch =
+        Developer_repl_registry.resolve_epoch
+          registry
+          ~instance
+          (Repl_wire.Completion_request.epoch request)
+      in
+      let%bind expected_revision =
+        Developer_repl_registry.resolve_revision
+          registry
+          ~instance
+          ~epoch
+          (Repl_wire.Completion_request.expected_revision request)
+      in
+      let%bind result =
+        Developer_host.Repl.complete
+          t.host
+          ~actor
+          ~instance
+          ~epoch
+          ~expected_revision
+          ~path:(Repl_wire.Completion_request.path request)
+          ~prefix:(Repl_wire.Completion_request.prefix request)
+          ~limit:(Repl_wire.Completion_request.limit request)
+          ~max_bytes:(Int.min 65_536 (Repl_wire.Limits.max_output_bytes limits))
+          ~request_current:(fun () ->
+            request_current_now t ~connection ~lease ~actor ~method_)
+      in
+      let status =
+        match Developer_host.Repl.Completion.status result with
+        | Complete -> Repl_wire.Completion_page.Complete
+        | Limited -> Limited
+        | Unavailable -> Unavailable
+      in
+      Repl_wire.Completion_page.create
+        ~limits
+        ~revision:(Repl_wire.Completion_request.expected_revision request)
+        ~names:(Developer_host.Repl.Completion.names result)
+        ~status
+      |> Result.map ~f:(fun page -> Repl_wire.Response.Complete page)
     | Inspect_type inspect ->
       let current = Repl_wire.Inspect.current inspect in
       let%bind instance, epoch = repl_current registry current in

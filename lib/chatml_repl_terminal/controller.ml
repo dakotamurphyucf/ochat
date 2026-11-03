@@ -8,11 +8,16 @@ module Input = struct
     | Text of string
     | Paste of string
     | Enter
+    | Newline
     | Backspace
     | Delete
     | Move of State.Editor.motion
     | History_previous
     | History_next
+    | Complete
+    | Completion_previous
+    | Dismiss
+    | History_search
     | Submit
     | Cancel
     | Resize
@@ -36,7 +41,7 @@ module Command = struct
     | Retry
     | Abandon
     | Quit
-    | Help
+    | Help of string option
   [@@deriving sexp_of]
 
   let positive text =
@@ -70,18 +75,36 @@ module Command = struct
     | [ ":retry" ] -> Some Retry
     | [ ":abandon" ] -> Some Abandon
     | [ ":quit" ] -> Some Quit
-    | [ ":help" ] -> Some Help
+    | [ ":help" ] -> Some (Help None)
+    | [ ":help"; topic ] -> Some (Help (Some topic))
     | _ -> None
   ;;
 end
 
+let retry_preserves_editor editor source =
+  let suffix = State.Submission_source.suffix source in
+  (* A command can occupy an existing empty final line or follow a newly
+     inserted separator. In either case, an unchanged acknowledged suffix is
+     consumed once; the command's placement must not turn it into a new draft. *)
+  not
+    (String.equal (State.Editor.source_before_final_line editor) suffix
+     || String.equal (State.Editor.source (State.Editor.without_final_line editor)) suffix
+    )
+;;
+
 type completion =
   | Created of (W.View.t, P.Error.t) result
   | Submitted of
-      { source : string
+      { source : State.Submission_source.t
       ; key : P.Idempotency_key.t
-      ; retried : bool
+      ; preserve_editor : bool
+      ; continue_line : bool
       ; result : (W.Submission.t, P.Error.t) result
+      }
+  | Inferred_bindings_done of
+      { current : W.Current_epoch.t
+      ; revision : W.Wire_id.Revision.t
+      ; inferred_bindings : State.Inferred_bindings.t
       }
   | Task_started of
       { key : P.Idempotency_key.t
@@ -124,10 +147,30 @@ let revision_unknown = function
   | Unknown _ -> true
 ;;
 
+type completion_snapshot =
+  { context : Completion.Context.t
+  ; instance : W.Wire_id.Instance.t
+  ; epoch : W.Wire_id.Epoch.t
+  ; revision : W.Wire_id.Revision.t
+  }
+
+let equal_completion_snapshot left right =
+  Completion.Context.equal left.context right.context
+  && W.Wire_id.Instance.equal left.instance right.instance
+  && W.Wire_id.Epoch.equal left.epoch right.epoch
+  && W.Wire_id.Revision.equal left.revision right.revision
+;;
+
+type completion_read =
+  { snapshot : completion_snapshot
+  ; result : (W.Completion_page.t, P.Error.t) result
+  }
+
 type event =
   | Input of Input.t
   | Completed of completion
   | Control_completed of control_completion
+  | Completion_read of completion_read
   | Notification
   | Notification_error of P.Error.t
   | Input_overflow
@@ -146,6 +189,7 @@ module Input_queue = struct
     ; mutable notification_error : P.Error.t option
     ; mutable completed : completion option
     ; mutable control_completed : control_completion option
+    ; mutable completion_read : completion_read option
     }
 
   let create ~capacity =
@@ -164,6 +208,7 @@ module Input_queue = struct
         ; notification_error = None
         ; completed = None
         ; control_completed = None
+        ; completion_read = None
         }
   ;;
 
@@ -206,6 +251,7 @@ module Input_queue = struct
     (match event with
      | Completed completion -> t.completed <- Some completion
      | Control_completed completion -> t.control_completed <- Some completion
+     | Completion_read completed -> t.completion_read <- Some completed
      | Notification_error error ->
        if Option.is_none t.notification_error then t.notification_error <- Some error
      | Input _ | Notification | Input_overflow | Input_closed ->
@@ -236,22 +282,27 @@ module Input_queue = struct
            t.completed <- None;
            Ok (Completed completed)
          | None ->
-           (match t.notification_error with
-            | Some error ->
-              t.notification_error <- None;
-              Ok (Notification_error error)
+           (match t.completion_read with
+            | Some completed ->
+              t.completion_read <- None;
+              Ok (Completion_read completed)
             | None ->
-              if t.notification_pending
-              then (
-                t.notification_pending <- false;
-                Ok Notification)
-              else (
-                match Queue.dequeue t.inputs with
-                | Some input -> Ok (Input input)
-                | None ->
-                  Eio.Stream.take t.wake;
-                  t.wake_pending <- false;
-                  take t))))
+              (match t.notification_error with
+               | Some error ->
+                 t.notification_error <- None;
+                 Ok (Notification_error error)
+               | None ->
+                 if t.notification_pending
+                 then (
+                   t.notification_pending <- false;
+                   Ok Notification)
+                 else (
+                   match Queue.dequeue t.inputs with
+                   | Some input -> Ok (Input input)
+                   | None ->
+                     Eio.Stream.take t.wake;
+                     t.wake_pending <- false;
+                     take t)))))
   ;;
 end
 
@@ -294,13 +345,79 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
         let latest_task = ref None in
         let active_watch : W.Watch_key.t option ref = ref None in
         let pending_submit_source = ref None in
+        let pending_submit_continuation = ref false in
+        let pending_inferred_bindings = ref None in
         let revision_knowledge = ref Known in
         let inflight_submit_lookup : W.Lookup.t option ref = ref None in
         let inflight_task_lookup : P.Developer_common.Lookup.t option ref = ref None in
+        let completion_enabled = ref true in
+        let completion_inflight = ref None in
+        let completion_desired = ref None in
+        let completion_last = ref None in
+        let refresh_completion_read = ref (fun () -> ()) in
         let show next =
           state := next;
-          present next
+          present next;
+          !refresh_completion_read ()
         in
+        let snapshot () =
+          if
+            (not !completion_enabled)
+            || !worker_active
+            || !control_active
+            || Option.is_some (State.history_search !state)
+            || Option.is_some (State.continuation_source !state)
+          then None
+          else (
+            match
+              State.activity !state, State.view !state, State.current_revision !state
+            with
+            | Ready, Some view, Some revision ->
+              let task_idle =
+                match State.task !state with
+                | None -> true
+                | Some task -> not (Transition.task_active (W.Task_view.phase task))
+              in
+              if not task_idle
+              then None
+              else
+                Completion.context
+                  ~source:(State.Editor.source (State.editor !state))
+                  ~cursor_byte:(State.Editor.cursor_byte (State.editor !state))
+                |> Option.map ~f:(fun context ->
+                  { context
+                  ; instance = W.View.instance view
+                  ; epoch = W.View.epoch view
+                  ; revision
+                  })
+            | (Ready | Busy _ | Needs_reset | Uncertain _ | Closed), _, _ -> None)
+        in
+        let request_completion () =
+          let desired = snapshot () in
+          completion_desired := desired;
+          match !completion_inflight, desired with
+          | None, Some snapshot
+            when not (Option.equal equal_completion_snapshot !completion_last desired) ->
+            completion_inflight := desired;
+            completion_last := desired;
+            Eio.Fiber.fork_daemon ~sw (fun () ->
+              let limits = W.Capabilities.limits (Client.capabilities client) in
+              let result =
+                W.Completion_request.create
+                  ~limits
+                  ~instance:snapshot.instance
+                  ~epoch:snapshot.epoch
+                  ~expected_revision:snapshot.revision
+                  ~path:(Completion.Context.path snapshot.context)
+                  ~prefix:(Completion.Context.prefix snapshot.context)
+                  ~limit:(Int.min 16 (W.Limits.max_page_items limits))
+                |> Result.bind ~f:(Client.complete client)
+              in
+              Input_queue.post input (Completion_read { snapshot; result });
+              `Stop_daemon)
+          | Some _, _ | None, (None | Some _) -> ()
+        in
+        refresh_completion_read := request_completion;
         let notice message = show (State.with_notice !state message) in
         let pending () = State.with_pending !state (Client.pending client) in
         let busy operation run_worker =
@@ -394,11 +511,45 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
               if not background then notice "No exact submission or Task key to observe";
               false)
         in
+        let inferred_is_current current revision =
+          Option.value_map (State.view !state) ~default:false ~f:(fun view ->
+            W.Wire_id.Instance.equal
+              (W.Current_epoch.instance current)
+              (W.View.instance view)
+            && W.Wire_id.Epoch.equal (W.Current_epoch.epoch current) (W.View.epoch view))
+          && Option.value_map !latest_submission ~default:false ~f:(fun lookup ->
+            W.Wire_id.Instance.equal
+              (W.Lookup.instance lookup)
+              (W.Current_epoch.instance current)
+            && P.Idempotency_key.equal (W.Lookup.key lookup) (W.Current_epoch.key current))
+          && Option.value_map
+               (State.current_revision !state)
+               ~default:false
+               ~f:(W.Wire_id.Revision.equal revision)
+        in
         let after_completion () =
-          if !notification_dirty
+          if not (!worker_active || !control_active)
           then (
-            notification_dirty := false;
-            ignore (observe_current ~background:true () : bool))
+            (match !pending_inferred_bindings with
+             | None -> ()
+             | Some (current, submission) ->
+               pending_inferred_bindings := None;
+               let revision = W.Submission.revision submission in
+               if inferred_is_current current revision
+               then
+                 ignore
+                   (busy Inspect_type (fun () ->
+                      Inferred_bindings_done
+                        { current
+                        ; revision
+                        ; inferred_bindings =
+                            State.Inferred_bindings.read client ~current ~submission
+                        })
+                    : bool));
+            if !notification_dirty && not (!worker_active || !control_active)
+            then (
+              notification_dirty := false;
+              ignore (observe_current ~background:true () : bool)))
         in
         let pending_activity pending =
           match
@@ -508,7 +659,8 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
             revision_knowledge := Known;
             ready (State.with_view !state view)
           | Created (Error error) -> failure Create error
-          | Submitted { source; key; retried; result = Ok submission } ->
+          | Submitted
+              { source; key; preserve_editor; continue_line; result = Ok submission } ->
             (match State.with_submission !state submission with
              | Error error -> failure Submit error
              | Ok state ->
@@ -520,9 +672,26 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
                   := Some (W.Lookup.create ~instance:(W.View.instance view) ~key);
                   inflight_submit_lookup := None;
                   pending_submit_source := None;
-                  ready (State.submitted state ~source ~preserve_editor:retried);
-                  ignore (observe_current () : bool)))
+                  pending_inferred_bindings
+                  := Some
+                       ( W.Current_epoch.create
+                           ~instance:(W.View.instance view)
+                           ~epoch:(W.View.epoch view)
+                           ~key
+                       , submission );
+                  ready
+                    (State.acknowledge_source
+                       state
+                       ~source
+                       ~preserve_editor
+                       ~continue_line
+                       submission);
+                  notification_dirty := true))
           | Submitted { result = Error error; _ } -> failure Submit error
+          | Inferred_bindings_done { current; revision; inferred_bindings } ->
+            if inferred_is_current current revision
+            then ready (State.with_inferred_bindings !state inferred_bindings)
+            else ready !state
           | Task_started { key; result = Ok task } ->
             (match State.view !state with
              | None -> failure Run_task (P.Error.invalid_request "missing REPL view")
@@ -535,6 +704,7 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
                ignore (observe_current () : bool))
           | Task_started { result = Error error; _ } -> failure Run_task error
           | Reset_done (Ok view) ->
+            pending_inferred_bindings := None;
             revision_knowledge := Known;
             latest_submission := None;
             latest_task := None;
@@ -543,6 +713,7 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
             ready (State.with_view !state view)
           | Reset_done (Error error) -> failure Reset error
           | Close_done (Ok ()) ->
+            pending_inferred_bindings := None;
             revision_knowledge := Known;
             latest_submission := None;
             latest_task := None;
@@ -598,7 +769,7 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
           notice message;
           false
         in
-        let submit_source source =
+        let submit_source ?(continue_line = false) source =
           match
             State.activity !state, State.view !state, State.current_revision !state
           with
@@ -612,30 +783,35 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
             else if String.is_empty (String.strip source)
             then reject "Source is empty"
             else (
-              match key () with
+              match State.submission_source !state ~suffix:source with
               | Error error -> reject (error_message error)
-              | Ok key ->
-                (match
-                   W.Submit.create
-                     ~limits:(W.Capabilities.limits (Client.capabilities client))
-                     ~instance:(W.View.instance view)
-                     ~epoch:(W.View.epoch view)
-                     ~expected_revision:revision
-                     ~key
-                     ~source
-                 with
+              | Ok source ->
+                (match key () with
                  | Error error -> reject (error_message error)
-                 | Ok request ->
-                   pending_submit_source := Some source;
-                   inflight_submit_lookup
-                   := Some (W.Lookup.create ~instance:(W.View.instance view) ~key);
-                   busy (Keyed Submit) (fun () ->
-                     Submitted
-                       { source
-                       ; key
-                       ; retried = false
-                       ; result = Client.submit client request
-                       })))
+                 | Ok key ->
+                   (match
+                      W.Submit.create
+                        ~limits:(W.Capabilities.limits (Client.capabilities client))
+                        ~instance:(W.View.instance view)
+                        ~epoch:(W.View.epoch view)
+                        ~expected_revision:revision
+                        ~key
+                        ~source:(State.Submission_source.suffix source)
+                    with
+                    | Error error -> reject (error_message error)
+                    | Ok request ->
+                      pending_submit_source := Some source;
+                      pending_submit_continuation := continue_line;
+                      inflight_submit_lookup
+                      := Some (W.Lookup.create ~instance:(W.View.instance view) ~key);
+                      busy (Keyed Submit) (fun () ->
+                        Submitted
+                          { source
+                          ; key
+                          ; preserve_editor = false
+                          ; continue_line
+                          ; result = Client.submit client request
+                          }))))
           | Busy _, _, _ -> reject "Finish or cancel the current request first"
           | Uncertain _, _, _ -> reject "Resolve the pending action before new work"
           | Closed, _, _ -> reject "This instance is closed"
@@ -909,13 +1085,20 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
               busy (Keyed Create) (fun () -> Created (Client.retry_create client create))
             | [], submit :: _, _, _, _ ->
               let identity = Client.Pending_submit.identity submit in
-              busy (Keyed Submit) (fun () ->
-                Submitted
-                  { source = Option.value !pending_submit_source ~default:""
-                  ; key = identity.key
-                  ; retried = true
-                  ; result = Client.retry_submit client submit
-                  })
+              (match !pending_submit_source with
+               | None -> reject "Exact Submit source is unavailable; reset is required"
+               | Some source ->
+                 let preserve_editor =
+                   retry_preserves_editor (State.editor !state) source
+                 in
+                 busy (Keyed Submit) (fun () ->
+                   Submitted
+                     { source
+                     ; key = identity.key
+                     ; preserve_editor
+                     ; continue_line = !pending_submit_continuation
+                     ; result = Client.retry_submit client submit
+                     }))
             | [], [], task :: _, _, _ ->
               let identity = Client.Pending_task.identity task in
               busy (Keyed Run_task) (fun () ->
@@ -940,13 +1123,12 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
           | Retry -> retry ()
           | Abandon -> abandon ()
           | Quit -> true
-          | Help ->
-            notice
-              ":submit :run N :type N [binding M] :refs :observe :cancel :reset :close \
-               :retry :abandon :quit";
+          | Help topic ->
+            notice (Help.text ~topic);
             true
         in
         let edit f =
+          completion_enabled := true;
           match State.activity !state with
           | Ready | Needs_reset | Uncertain _ ->
             (match f (State.editor !state) with
@@ -982,6 +1164,45 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
             control_finished completion;
             if not !worker_active then after_completion ();
             loop ()
+          | Ok (Completion_read completed) ->
+            completion_inflight := None;
+            if
+              Option.value_map
+                !completion_desired
+                ~default:false
+                ~f:(equal_completion_snapshot completed.snapshot)
+              && Option.value_map
+                   (snapshot ())
+                   ~default:false
+                   ~f:(equal_completion_snapshot completed.snapshot)
+            then (
+              completion_last := Some completed.snapshot;
+              let names, notice =
+                match completed.result with
+                | Error _ -> [], Some "Session completion unavailable"
+                | Ok page ->
+                  if
+                    not
+                      (W.Wire_id.Revision.equal
+                         (W.Completion_page.revision page)
+                         completed.snapshot.revision)
+                  then [], Some "Session completion unavailable"
+                  else
+                    ( W.Completion_page.names page
+                    , (match W.Completion_page.status page with
+                       | Complete -> None
+                       | Limited -> Some "Session completion limited"
+                       | Unavailable -> Some "Session completion unavailable") )
+              in
+              show (State.with_session_completion !state ~names ~notice))
+            else if
+              Option.value_map
+                !completion_last
+                ~default:false
+                ~f:(equal_completion_snapshot completed.snapshot)
+            then completion_last := None;
+            request_completion ();
+            loop ()
           | Ok (Completed completion) ->
             worker_active := false;
             finish completion;
@@ -998,60 +1219,160 @@ let run_on_connection ~client ~connection ~create ~initial ~input ~present =
           | Ok (Input Quit) -> Ok ()
           | Ok (Input input_event) ->
             let quit =
-              match input_event with
-              | Text text | Paste text ->
-                edit (fun editor ->
-                  State.Editor.insert editor ~limits:(State.limits !state) text);
-                false
-              | Enter ->
-                (match Command.parse (State.Editor.final_line (State.editor !state)) with
-                 | Some Quit -> true
-                 | Some command_ ->
-                   let accepted = command command_ in
-                   if accepted
-                   then (
-                     match
-                       State.with_editor
-                         !state
-                         (State.Editor.without_final_line (State.editor !state))
-                     with
-                     | Ok state -> show state
-                     | Error error -> notice (error_message error));
+              match State.history_search !state with
+              | Some _ ->
+                (match input_event with
+                 | Text text | Paste text ->
+                   (match
+                      State.edit_history_search !state ~f:(fun search ->
+                        History_search.insert search text)
+                    with
+                    | Ok state -> show state
+                    | Error error -> notice (Error.to_string_hum error));
                    false
-                 | None ->
+                 | Backspace ->
+                   show
+                     (State.edit_history_search !state ~f:(fun search ->
+                        Ok (History_search.backspace search))
+                      |> Or_error.ok_exn);
+                   false
+                 | History_search | History_previous | History_next ->
+                   show (State.start_history_search !state);
+                   false
+                 | Enter ->
+                   show (State.accept_history_search !state);
+                   false
+                 | Cancel | Dismiss ->
+                   show (State.cancel_history_search !state);
+                   false
+                 | Resize ->
+                   present !state;
+                   false
+                 | Quit -> true
+                 | Newline | Delete | Move _ | Complete | Completion_previous | Submit ->
+                   false)
+              | None ->
+                (match input_event with
+                 | Text text | Paste text ->
+                   edit (fun editor ->
+                     State.Editor.insert editor ~limits:(State.limits !state) text);
+                   false
+                 | Enter ->
+                   completion_enabled := false;
+                   completion_desired := None;
+                   (match
+                      Command.parse (State.Editor.final_line (State.editor !state))
+                    with
+                    | Some Quit -> true
+                    | Some command_ ->
+                      let accepted = command command_ in
+                      if accepted
+                      then (
+                        match
+                          State.with_editor
+                            !state
+                            (State.Editor.without_final_line (State.editor !state))
+                        with
+                        | Ok state -> show state
+                        | Error error -> notice (error_message error));
+                      false
+                    | None ->
+                      ignore
+                        (submit_source
+                           ~continue_line:true
+                           (State.Editor.source (State.editor !state))
+                         : bool);
+                      false)
+                 | Newline ->
                    edit (fun editor ->
                      State.Editor.insert editor ~limits:(State.limits !state) "\n");
-                   false)
-              | Backspace ->
-                edit (fun editor -> Ok (State.Editor.backspace editor));
-                false
-              | Delete ->
-                edit (fun editor -> Ok (State.Editor.delete editor));
-                false
-              | Move motion ->
-                edit (fun editor -> Ok (State.Editor.move editor motion));
-                false
-              | History_previous ->
-                (match State.activity !state with
-                 | Ready | Needs_reset | Uncertain _ ->
-                   show (State.history_previous !state)
-                 | Busy _ | Closed -> notice "History is unavailable during a request");
-                false
-              | History_next ->
-                (match State.activity !state with
-                 | Ready | Needs_reset | Uncertain _ -> show (State.history_next !state)
-                 | Busy _ | Closed -> notice "History is unavailable during a request");
-                false
-              | Submit ->
-                ignore (submit_source (State.Editor.source (State.editor !state)) : bool);
-                false
-              | Cancel ->
-                ignore (cancel () : bool);
-                false
-              | Resize ->
-                present !state;
-                false
-              | Quit -> true
+                   false
+                 | Backspace ->
+                   edit (fun editor -> Ok (State.Editor.backspace editor));
+                   false
+                 | Delete ->
+                   edit (fun editor -> Ok (State.Editor.delete editor));
+                   false
+                 | Move motion ->
+                   edit (fun editor -> Ok (State.Editor.move editor motion));
+                   false
+                 | History_previous ->
+                   if Option.is_some (State.continuation_source !state)
+                   then
+                     notice "Finish the pending source or :reset before recalling history"
+                   else (
+                     match State.completion !state with
+                     | Some _ -> show (State.completion_previous !state)
+                     | None ->
+                       completion_enabled := false;
+                       completion_desired := None;
+                       (match State.activity !state with
+                        | Ready | Needs_reset | Uncertain _ ->
+                          show (State.history_previous !state)
+                        | Busy _ | Closed ->
+                          notice "History is unavailable during a request"));
+                   false
+                 | History_next ->
+                   if Option.is_some (State.continuation_source !state)
+                   then
+                     notice "Finish the pending source or :reset before recalling history"
+                   else (
+                     match State.completion !state with
+                     | Some _ -> show (State.completion_next !state)
+                     | None ->
+                       completion_enabled := false;
+                       completion_desired := None;
+                       (match State.activity !state with
+                        | Ready | Needs_reset | Uncertain _ ->
+                          show (State.history_next !state)
+                        | Busy _ | Closed ->
+                          notice "History is unavailable during a request"));
+                   false
+                 | Complete ->
+                   completion_enabled := Option.is_none (State.completion !state);
+                   if !completion_enabled then completion_last := None;
+                   if not !completion_enabled then completion_desired := None;
+                   (match State.activity !state with
+                    | Ready | Needs_reset | Uncertain _ ->
+                      (match State.accept_completion !state with
+                       | Ok state -> show state
+                       | Error error -> notice (error_message error))
+                    | Busy _ | Closed ->
+                      notice "Completion is unavailable during a request");
+                   false
+                 | Completion_previous ->
+                   show (State.completion_previous !state);
+                   false
+                 | Dismiss ->
+                   completion_enabled := false;
+                   completion_desired := None;
+                   show (State.dismiss_completion !state);
+                   false
+                 | History_search ->
+                   completion_enabled := false;
+                   completion_desired := None;
+                   if Option.is_some (State.continuation_source !state)
+                   then
+                     notice "Finish the pending source or :reset before searching history"
+                   else (
+                     match State.activity !state with
+                     | Ready -> show (State.start_history_search !state)
+                     | Busy _ | Needs_reset | Uncertain _ | Closed ->
+                       notice "History search requires an idle, current session");
+                   false
+                 | Submit ->
+                   completion_enabled := false;
+                   completion_desired := None;
+                   ignore
+                     (submit_source (State.Editor.source (State.editor !state)) : bool);
+                   false
+                 | Cancel ->
+                   ignore (cancel () : bool);
+                   false
+                 | Resize ->
+                   present !state;
+                   false
+                 | Quit -> true)
             in
             if quit then Ok () else loop ()
         in
@@ -1202,19 +1523,19 @@ let%test_unit "real portable client keeps retry, Task, and abandoned-read custod
     in
     let view_one = view epoch_one revision_one in
     let view_two = view epoch_two revision_two in
-    let retained_summary =
+    let retained_summary ~binding_count =
       W.Submission.Summary.create
         ~limits
         ~outcome:Succeeded
         ~value_preview:(Some "Task")
         ~diagnostic:None
         ~expression_type:None
-        ~binding_count:0
+        ~binding_count
         ~task_retention:Retained
         ~text_limited:false
       |> must
     in
-    let submission epoch revision ~task =
+    let submission epoch revision ~task ~bindings =
       W.Submission.create
         ~limits
         ~status:Finished
@@ -1223,14 +1544,14 @@ let%test_unit "real portable client keeps retry, Task, and abandoned-read custod
         ~statement_count:1
         ~epoch
         ~revision
-        ~summaries:(if task then [ retained_summary ] else [])
+        ~summaries:(if task then [ retained_summary ~binding_count:bindings ] else [])
         ~task_reference_count:(if task then 1 else 0)
         ~task_references:(if task then [ "opaque-terminal-reference" ] else [])
       |> must
     in
-    let first_submission = submission epoch_one revision_one ~task:true in
-    let second_submission = submission epoch_two revision_two ~task:true in
-    let third_submission = submission epoch_two revision_three ~task:false in
+    let first_submission = submission epoch_one revision_one ~task:true ~bindings:1 in
+    let second_submission = submission epoch_two revision_two ~task:true ~bindings:0 in
+    let third_submission = submission epoch_two revision_three ~task:false ~bindings:0 in
     let owner =
       P.Developer_common.Owner.create ~host_id:server_id ~run_id ~epoch:0 ~principal_id
       |> must
@@ -1269,10 +1590,15 @@ let%test_unit "real portable client keeps retry, Task, and abandoned-read custod
     let observe_count = ref 0 in
     let watch_count = ref 0 in
     let inspection_count = ref 0 in
+    let automatic_inspection_count = ref 0 in
     let reference_page_count = ref 0 in
     let foreign_observation = ref false in
     let reset_count = ref 0 in
     let task_submit_count = ref 0 in
+    let completion_prefixes = ref [] in
+    let completion_started, completion_started_u = Eio.Promise.create () in
+    let completion_release, completion_release_u = Eio.Promise.create () in
+    let stale_completion_notice = ref false in
     let response value = W.Response.to_json value ~limits in
     let public_initialized =
       P.Public.Result.Non_history.of_internal (Protocol_initialize initialized)
@@ -1290,6 +1616,22 @@ let%test_unit "real portable client keeps retry, Task, and abandoned-read custod
           match request with
           | W.Request.Capabilities -> Ok (W.Capabilities.to_json capabilities)
           | Create _ -> response (Create view_one)
+          | Complete request ->
+            let prefix = W.Completion_request.prefix request in
+            completion_prefixes := prefix :: !completion_prefixes;
+            let first = Int.equal (List.length !completion_prefixes) 1 in
+            if first
+            then (
+              Eio.Promise.resolve completion_started_u ();
+              Eio.Promise.await completion_release);
+            response
+              (Complete
+                 (W.Completion_page.create
+                    ~limits
+                    ~revision:(W.Completion_request.expected_revision request)
+                    ~names:(if first then [] else [ prefix ^ "_session" ])
+                    ~status:(if first then Unavailable else Complete)
+                  |> must))
           | Submit submit ->
             Int.incr submit_count;
             (match !submit_count with
@@ -1317,7 +1659,7 @@ let%test_unit "real portable client keeps retry, Task, and abandoned-read custod
                     ~retryable:true
                     ())
              | 2 ->
-               if not (String.equal (W.Submit.source submit) "Task.pure(8)")
+               if not (String.equal (W.Submit.source submit) "let saved = Task.pure(8)")
                then Error (P.Error.invalid_request "retry changed original source")
                else response (Submit first_submission)
              | _ -> response (Submit second_submission))
@@ -1372,7 +1714,16 @@ let%test_unit "real portable client keeps retry, Task, and abandoned-read custod
             response (Task_submit (task_view (W.Task_submit.key request)))
           | Task_observe _ -> response (Task_observe (Option.map !task_key ~f:task_view))
           | Inspect_type request ->
-            Int.incr inspection_count;
+            let binding_name =
+              match W.Inspect.selector request with
+              | Expression ->
+                Int.incr inspection_count;
+                None
+              | Binding_index 0 ->
+                Int.incr automatic_inspection_count;
+                Some "saved"
+              | Binding_index _ -> failwith "automatic binding selection was not bounded"
+            in
             let current = W.Inspect.current request in
             if
               not
@@ -1385,7 +1736,7 @@ let%test_unit "real portable client keeps retry, Task, and abandoned-read custod
                    (W.Type_inspection.create
                       ~limits
                       ~revision:revision_one
-                      ~binding_name:None
+                      ~binding_name
                       ~rendered:
                         (W.Submission.Rendered_type.create
                            ~limits
@@ -1467,6 +1818,207 @@ let%test_unit "real portable client keeps retry, Task, and abandoned-read custod
       |> must
     in
     let initial = State.create ~limits:state_limits ~context:"fixture" |> must in
+    let incomplete =
+      W.Submission.create
+        ~limits
+        ~status:(Need_more (Parser_eof, None))
+        ~details:Available
+        ~completed_statements:0
+        ~statement_count:0
+        ~epoch:epoch_one
+        ~revision:revision_one
+        ~summaries:[]
+        ~task_reference_count:0
+        ~task_references:[]
+      |> must
+    in
+    let continued =
+      State.acknowledge_source
+        initial
+        ~source:(State.submission_source initial ~suffix:"let continued = (" |> must)
+        ~preserve_editor:false
+        ~continue_line:true
+        incomplete
+    in
+    if
+      (not (String.equal (State.Editor.source (State.editor continued)) "\n"))
+      || (not
+            (Option.value_map
+               (State.continuation_source continued)
+               ~default:false
+               ~f:(String.equal "let continued = (")))
+      || not (List.is_empty (State.history continued))
+    then failwith "Need_more lost exact source or entered incomplete history";
+    let draft =
+      State.Editor.insert (State.editor initial) ~limits:state_limits "newer draft"
+      |> must
+      |> State.with_editor initial
+      |> must
+    in
+    let preserve_editor_incomplete =
+      State.acknowledge_source
+        draft
+        ~source:(State.submission_source initial ~suffix:"let continued = (" |> must)
+        ~preserve_editor:true
+        ~continue_line:true
+        incomplete
+    in
+    if
+      not
+        (String.equal
+           (State.Editor.source (State.editor preserve_editor_incomplete))
+           "newer draft")
+    then failwith "incomplete retry replaced a newer editor draft";
+    let append state text =
+      State.Editor.insert (State.editor state) ~limits:state_limits text
+      |> must
+      |> State.with_editor state
+      |> must
+    in
+    let first = State.submission_source initial ~suffix:"let continued =" |> must in
+    List.iter
+      [ "let continued ="; "let continued =\n"; "let continued =\n\n" ]
+      ~f:(fun suffix ->
+        let captured = State.submission_source initial ~suffix |> must in
+        let editor =
+          State.Editor.insert
+            (State.editor initial)
+            ~limits:state_limits
+            (suffix
+             ^ (if String.is_suffix suffix ~suffix:"\n" then "" else "\n")
+             ^ ":retry")
+          |> must
+        in
+        if retry_preserves_editor editor captured
+        then failwith "unchanged retry would duplicate its acknowledged suffix");
+    let after_first =
+      State.acknowledge_source
+        initial
+        ~source:first
+        ~preserve_editor:false
+        ~continue_line:true
+        incomplete
+    in
+    let second =
+      let state = append after_first "10" in
+      State.submission_source state ~suffix:(State.Editor.source (State.editor state))
+      |> must
+    in
+    let server_source =
+      State.Submission_source.suffix first ^ State.Submission_source.suffix second
+    in
+    if
+      (not (String.equal (State.Submission_source.suffix second) "\n10"))
+      || (not (String.equal server_source "let continued =\n10"))
+      || not (String.equal server_source (State.Submission_source.combined second))
+    then failwith "continuation replayed an acknowledged source prefix";
+    let completed =
+      State.acknowledge_source
+        (append after_first "10")
+        ~source:second
+        ~preserve_editor:false
+        ~continue_line:true
+        first_submission
+    in
+    if
+      Option.is_some (State.continuation_source completed)
+      || (not (List.equal String.equal (State.history completed) [ server_source ]))
+      || not
+           (Option.value_map
+              (State.submitted_source_digest completed)
+              ~default:false
+              ~f:
+                (Chatml_source.Digest.equal
+                   (Chatml_source.Digest.of_contents server_source ~checkpoint:Fn.id)))
+    then failwith "terminal continuation history/digest did not use the exact aggregate";
+    let after_second =
+      State.acknowledge_source
+        after_first
+        ~source:second
+        ~preserve_editor:false
+        ~continue_line:true
+        incomplete
+    in
+    let third = State.submission_source after_second ~suffix:"\n+ 1" |> must in
+    if
+      not
+        (String.equal (State.Submission_source.combined third) (server_source ^ "\n+ 1"))
+    then failwith "repeated Need_more duplicated an earlier suffix";
+    let newer = append after_first "newer draft" in
+    let retry_ack =
+      State.acknowledge_source
+        newer
+        ~source:second
+        ~preserve_editor:true
+        ~continue_line:true
+        incomplete
+    in
+    if
+      (not (String.equal (State.Submission_source.combined second) server_source))
+      || (not
+            (String.equal (State.Editor.source (State.editor retry_ack)) "\nnewer draft"))
+      || not
+           (Option.value_map
+              (State.continuation_source retry_ack)
+              ~default:false
+              ~f:(String.equal server_source))
+    then
+      failwith
+        "retry acknowledgement changed its captured source or replaced the newer suffix";
+    if
+      not
+        (Option.value_map (State.notice retry_ack) ~default:false ~f:(fun notice ->
+           String.is_substring notice ~substring:"Review it before appending"))
+    then failwith "rewritten retry draft was retained without reconciliation guidance";
+    let append_only_ack =
+      State.acknowledge_source
+        (append after_first "10 + 1\n")
+        ~source:second
+        ~preserve_editor:true
+        ~continue_line:true
+        incomplete
+    in
+    let append_only_request =
+      State.submission_source
+        append_only_ack
+        ~suffix:(State.Editor.source (State.editor append_only_ack))
+      |> must
+    in
+    if
+      (not (String.equal (State.Submission_source.suffix append_only_request) " + 1\n"))
+      || not
+           (String.equal
+              (State.Submission_source.combined append_only_request)
+              (server_source ^ " + 1\n"))
+    then failwith "append-only retry draft replayed an acknowledged wire suffix";
+    if
+      Result.is_ok (State.submission_source after_first ~suffix:(String.make 512 'x'))
+      || Result.is_ok (State.submission_source after_first ~suffix:(String.make 16 '\n'))
+      || Option.is_some (State.completion (State.complete (append after_first "Tas")))
+      || Option.is_some (State.history_search (State.start_history_search after_first))
+      || Option.is_some (State.continuation_source (State.with_view after_first view_two))
+    then
+      failwith "continuation limits, assistance suspension or Reset invalidation failed";
+    let continued_renderer = Render.create ~max_display_bytes:4_096 |> must in
+    let continued_image, continued_cursor =
+      Render.image continued_renderer after_first ~width:100 ~height:30
+    in
+    let continued_buffer = Buffer.create 256 in
+    Notty.Render.to_buffer
+      continued_buffer
+      Notty.Cap.dumb
+      (0, 0)
+      (100, 30)
+      continued_image;
+    let rendered_continuation = Buffer.contents continued_buffer in
+    if
+      (not (String.is_substring rendered_continuation ~substring:"let continued ="))
+      || (not
+            (String.is_substring rendered_continuation ~substring:"prefix is read-only"))
+      || not
+           (Option.value_map continued_cursor ~default:false ~f:(fun (x, _) ->
+              Int.equal x 2))
+    then failwith "read-only continuation source or suffix cursor was not rendered";
     let input = Input_queue.create ~capacity:32 |> must in
     let shown = ref initial in
     let await label predicate =
@@ -1500,9 +2052,50 @@ let%test_unit "real portable client keeps retry, Task, and abandoned-read custod
             ~create
             ~initial
             ~input
-            ~present:(fun state -> shown := state))
+            ~present:(fun state ->
+              if
+                String.equal (State.Editor.source (State.editor state)) "maxy"
+                && Option.is_some (State.completion_notice state)
+              then stale_completion_notice := true;
+              shown := state))
       in
       await "Create" (fun state -> Option.is_some (State.view state));
+      Input_queue.offer input (Text "ma");
+      Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+        Eio.Promise.await completion_started);
+      Input_queue.offer input (Text "x");
+      Input_queue.offer input (Text "y");
+      await "editing while completion read waits" (fun state ->
+        State.equal_activity (State.activity state) Ready
+        && String.equal (State.Editor.source (State.editor state)) "maxy");
+      Eio.Promise.resolve completion_release_u ();
+      await "coalesced current completion" (fun state ->
+        Option.value_map (State.completion state) ~default:false ~f:(fun completion ->
+          List.exists (Completion.items completion) ~f:(fun item ->
+            String.equal (Completion.Item.label item) "maxy_session")));
+      if not (List.equal String.equal !completion_prefixes [ "maxy"; "ma" ])
+      then failwith "completion queued intermediate edits instead of coalescing latest";
+      if !stale_completion_notice
+      then failwith "obsolete completion read changed current editor assistance";
+      if not (Int.equal !submit_count 0) then failwith "completion executed source";
+      Input_queue.offer input Dismiss;
+      await "completion dismissed without automatic reread" (fun state ->
+        Option.is_none (State.completion state));
+      if List.length !completion_prefixes <> 2
+      then failwith "dismiss immediately reread same completion";
+      Input_queue.offer input Complete;
+      await "explicit Tab reopens same remote completion" (fun state ->
+        List.length !completion_prefixes = 3
+        && Option.value_map (State.completion state) ~default:false ~f:(fun completion ->
+          List.exists (Completion.items completion) ~f:(fun item ->
+            String.equal (Completion.Item.label item) "maxy_session")));
+      Input_queue.offer input Dismiss;
+      Input_queue.offer input Resize;
+      for _ = 1 to 4 do
+        Input_queue.offer input Backspace
+      done;
+      await "completion fixture draft cleared" (fun state ->
+        String.is_empty (State.Editor.source (State.editor state)));
       command ":type 1";
       await "inspection requires a stored submission" (fun state ->
         Option.value_map (State.notice state) ~default:false ~f:(fun text ->
@@ -1523,7 +2116,7 @@ let%test_unit "real portable client keeps retry, Task, and abandoned-read custod
       for _ = 1 to String.length ":refs" do
         Input_queue.offer input Backspace
       done;
-      command "Task.pure(8)\n:submit";
+      command "let saved = Task.pure(8)";
       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
         Eio.Promise.await first_submit_started);
       Input_queue.offer input Cancel;
@@ -1547,12 +2140,34 @@ let%test_unit "real portable client keeps retry, Task, and abandoned-read custod
       then failwith "retry did not retain one original Submit";
       await "initial observation settled" (fun state ->
         State.equal_activity (State.activity state) Ready);
+      if
+        (not (Int.equal !automatic_inspection_count 1))
+        || not
+             (Int.equal
+                (List.length
+                   (State.Inferred_bindings.entries (State.inferred_bindings !shown)))
+                1)
+      then failwith "acknowledged Enter did not automatically read compiler binding type";
+      let renderer = Render.create ~max_display_bytes:4_096 |> must in
+      let image, _ = Render.image renderer !shown ~width:100 ~height:30 in
+      let buffer = Buffer.create 256 in
+      Notty.Render.to_buffer buffer Notty.Cap.dumb (0, 0) (100, 30) image;
+      let rendered = Buffer.contents buffer in
+      if
+        (not (String.is_substring rendered ~substring:"val saved : Task Int"))
+        || String.is_substring rendered ~substring:"val saved : Task Int ="
+      then failwith "binding rendering guessed a binding value from the statement result";
       let before_hint_watch = !watch_count in
       let before_hint_observe = !observe_count in
       Input_queue.notify input;
       await "same-key hint reads without registering" (fun state ->
         !observe_count > before_hint_observe
         && State.equal_activity (State.activity state) Ready);
+      if
+        (not (Int.equal !automatic_inspection_count 1))
+        || List.is_empty
+             (State.Inferred_bindings.entries (State.inferred_bindings !shown))
+      then failwith "observation retried or discarded same-receipt compiler types";
       if not (Int.equal !watch_count before_hint_watch)
       then failwith "same-key hint registered another Watch";
       command "\n:observe";
@@ -1613,7 +2228,12 @@ let%test_unit "real portable client keeps retry, Task, and abandoned-read custod
       await "Reset" (fun state ->
         Option.value_map (State.view state) ~default:false ~f:(fun view ->
           W.Wire_id.Epoch.equal (W.View.epoch view) epoch_two));
-      if Option.is_some (State.notice !shown) || Option.is_some (State.task !shown)
+      if
+        Option.is_some (State.notice !shown)
+        || Option.is_some (State.task !shown)
+        || not
+             (List.is_empty
+                (State.Inferred_bindings.entries (State.inferred_bindings !shown)))
       then failwith "Reset retained the previous Task or inspection notice";
       command ":type 1";
       await "reset discards inspection custody" (fun state ->
@@ -1720,4 +2340,37 @@ let%test_unit "real portable client keeps retry, Task, and abandoned-read custod
       | Ok (Error error) -> raise_s [%sexp (error : P.Error.t)]
       | Error exn -> raise exn);
     Agent_client.Connection.close physical)
+;;
+
+let%test_unit "completion snapshots bind exact draft cursor instance epoch and revision" =
+  let must = function
+    | Ok value -> value
+    | Error error -> raise_s [%sexp (error : P.Error.t)]
+  in
+  let context source cursor_byte =
+    Completion.context ~source ~cursor_byte |> Option.value_exn
+  in
+  let original =
+    { context = context "List.ma" 7
+    ; instance = W.Wire_id.Instance.of_string "ri_completion_one" |> must
+    ; epoch = W.Wire_id.Epoch.of_string "re_completion_one" |> must
+    ; revision = W.Wire_id.Revision.of_string "rv_completion_one" |> must
+    }
+  in
+  List.iter
+    [ { original with context = context "List.ma" 6 }
+    ; { original with context = context "x = List.ma" 11 }
+    ; { original with
+        instance = W.Wire_id.Instance.of_string "ri_completion_two" |> must
+      }
+    ; { original with epoch = W.Wire_id.Epoch.of_string "re_completion_two" |> must }
+    ; { original with
+        revision = W.Wire_id.Revision.of_string "rv_completion_two" |> must
+      }
+    ]
+    ~f:(fun changed ->
+      if equal_completion_snapshot original changed
+      then failwith "obsolete completion snapshot compared current");
+  if not (equal_completion_snapshot original original)
+  then failwith "identical completion snapshot compared stale"
 ;;

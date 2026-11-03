@@ -165,7 +165,11 @@ and S-expression files use appropriate grammars; highlighting does not execute o
 these languages. The importer decodes the exact download bytes as strict UTF-8
 into `files[].content`; malformed text fails generation. Astro escapes source
 tags. The reader uses both site themes and keyboard-scrollable code regions.
-Markdown `chatml` fences also use the OCaml grammar. Astro’s snippet highlighter
+Markdown `chatml` fences also use the OCaml grammar. The terminal REPL
+walkthrough uses the narrowly scoped `chatml-repl` language, loaded directly from
+`lib/terminal_highlighting/grammars/chatml.json` through Expressive Code. Its
+source panels keep exact copying; result panels titled `Display only` have no
+copy action and are labeled as output for keyboard/screen-reader navigation. Astro’s snippet highlighter
 removes a final newline; the reader restores the original full-file text through
 Shiki’s preprocessing hook so selecting code preserves its contents.
 Source bodies are excluded from Pagefind to avoid duplicating tutorial prose.

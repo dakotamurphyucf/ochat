@@ -601,6 +601,7 @@ let repl_feature = function
   | Observe _
   | Cancel_submission _
   | Inspect_type _
+  | Complete _
   | Task_references_page _
   | Task_submit _
   | Task_observe _
@@ -635,6 +636,13 @@ let repl_response_matches initialization request response =
     P.Id.Developer_run.equal (R.Create.run_id create) (R.View.run_id view)
   | Submit submit, Submit submission ->
     R.Wire_id.Epoch.equal (R.Submit.epoch submit) (R.Submission.epoch submission)
+  | Complete request, Complete page ->
+    R.Wire_id.Revision.equal
+      (R.Completion_request.expected_revision request)
+      (R.Completion_page.revision page)
+    && List.length (R.Completion_page.names page) <= R.Completion_request.limit request
+    && List.for_all (R.Completion_page.names page) ~f:(fun name ->
+      String.is_prefix name ~prefix:(R.Completion_request.prefix request))
   | Observe _, Observe _
   | Cancel_submission _, Cancel_submission _
   | Inspect_type _, Inspect_type _
@@ -655,6 +663,7 @@ let repl_response_matches initialization request response =
   | Observe _, _
   | Cancel_submission _, _
   | Inspect_type _, _
+  | Complete _, _
   | Task_references_page _, _
   | Task_submit _, _
   | Task_observe _, _

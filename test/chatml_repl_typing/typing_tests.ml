@@ -563,3 +563,140 @@ let%expect_test
     ()
     |}]
 ;;
+
+let%expect_test
+    "live completion reads committed globals and module members without admission"
+  =
+  let owner = owner () in
+  let complete ?(limit = 16) path prefix =
+    let result =
+      Typing.complete owner ~path ~prefix ~limit ~max_bytes:4096 ~checkpoint |> ok
+    in
+    print_s
+      [%sexp
+        (path : string list)
+      , (prefix : string)
+      , (Typing.Completion.names result : string list)
+      , (Typing.Completion.status result : Typing.Completion.status)]
+  in
+  complete [ "Task" ] "p";
+  complete [] "Catalog";
+  complete [ "Catalog" ] "";
+  let first =
+    ready
+      owner
+      "completion-first.chatml"
+      "let completion_closure = fun x -> x let completion_value = 1"
+  in
+  ignore (finish owner (prepare owner first) Typing.Published.After_success);
+  ignore (finish owner (prepare owner first) Typing.Published.After_success);
+  complete [] "completion_";
+  complete [ "completion_value" ] "";
+  let shadow = ready owner "completion-shadow.chatml" "let completion_value = Task" in
+  ignore (finish owner (prepare owner shadow) Typing.Published.After_success);
+  complete [ "completion_value" ] "p";
+  let failed = ready owner "completion-failed.chatml" "let completion_failed = 1" in
+  ignore
+    (finish
+       owner
+       (prepare owner failed)
+       Typing.Published.Constrained_before_runtime_failure);
+  complete [] "completion_";
+  let selected = ready owner "completion-configured.chatml" "open Catalog" in
+  ignore (finish owner (prepare owner selected) Typing.Published.After_success);
+  complete [ "Catalog" ] "c";
+  complete [] "completion_" ~limit:1;
+  let pending = ready owner "completion-pending.chatml" "let still_pending = 1" in
+  let candidate = prepare owner pending in
+  complete [ "Task" ] "p";
+  (* A read neither consumes a candidate nor advances its typing generation. *)
+  ignore (finish owner candidate Typing.Published.After_success);
+  complete [] "still_pending";
+  [%expect
+    {|
+    ((Task) p (pure) Complete)
+    (() Catalog (Catalog) Complete)
+    ((Catalog) "" () Unavailable)
+    (() completion_ (completion_closure completion_value) Complete)
+    ((completion_value) "" () Complete)
+    ((completion_value) p (pure) Complete)
+    (() completion_ (completion_closure completion_value) Complete)
+    ((Catalog) c (cells) Complete)
+    (() completion_ (completion_closure) Limited)
+    ((Task) p (pure) Complete)
+    (() still_pending (still_pending) Complete)
+  |}]
+;;
+
+let%test_unit "live completion cancellation leaves checked candidate usable" =
+  let owner = owner () in
+  let ready = ready owner "completion-cancel.chatml" "let completion_survives = 1" in
+  let candidate = prepare owner ready in
+  let exception Cancel_read in
+  (match
+     Typing.complete
+       owner
+       ~path:[ "Task" ]
+       ~prefix:""
+       ~limit:16
+       ~max_bytes:4096
+       ~checkpoint:(fun () -> raise Cancel_read)
+   with
+   | exception Cancel_read -> ()
+   | Ok _ | Error _ -> failwith "completion swallowed callback cancellation");
+  ignore (finish owner candidate Typing.Published.After_success)
+;;
+
+let%expect_test "completion bounded graph and row shadowing matrix" =
+  let module C = Typing.Completion in
+  let module T = Chatml_typechecker in
+  let module Scope = T.Value_scope in
+  let query label lexical path =
+    let result =
+      C.query
+        lexical
+        ~configured:[]
+        ~configured_limited:false
+        ~path
+        ~prefix:""
+        ~limit:16
+        ~max_bytes:4096
+        ~checkpoint
+    in
+    print_s
+      [%sexp
+        (label : string), (C.names result : string list), (C.status result : C.status)]
+  in
+  let members fields tail = T.Module (T.Row (T.Env.of_list fields, tail)) in
+  let shadow =
+    members
+      [ "nested", members [ "visible", T.TInt ] T.Empty_row ]
+      (T.Row (T.Env.of_list [ "nested", T.TInt ], T.Empty_row))
+  in
+  query
+    "outer-row-wins"
+    (Scope.add_local Scope.empty ~name:"M" ~scheme:shadow)
+    [ "M"; "nested" ];
+  let cell = ref (T.Bound T.Empty_row) in
+  cell := T.Bound (T.Row (T.Env.of_list [ "cycle_member", T.TInt ], T.Var cell));
+  query
+    "cycle"
+    (Scope.add_local Scope.empty ~name:"M" ~scheme:(T.Module (T.Var cell)))
+    [ "M" ];
+  let long = String.make 129 'x' in
+  query "overlong-name" (Scope.add_local Scope.empty ~name:long ~scheme:T.TInt) [];
+  let many = List.init 4097 ~f:(fun index -> "name_" ^ Int.to_string index, T.TInt) in
+  query "binding-count" (Scope.of_schemes (T.Env.of_list many)) [];
+  query
+    "graph-work"
+    (Scope.add_local Scope.empty ~name:"M" ~scheme:(members many T.Empty_row))
+    [ "M" ];
+  [%expect
+    {|
+    (outer-row-wins (visible) Complete)
+    (cycle (cycle_member) Limited)
+    (overlong-name () Limited)
+    (binding-count () Limited)
+    (graph-work () Limited)
+  |}]
+;;

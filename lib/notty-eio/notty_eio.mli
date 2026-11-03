@@ -65,6 +65,13 @@ module Term : sig
          (** Enable {i bracketed-paste} mode so that large pastes arrive
              as a pair of [`Paste `Start] / [`Paste `End] events.
              Defaults to [true]. *)
+    -> ?modified_enter_clock:_ Eio.Time.Mono.t
+         (** Opt in to Shift+Enter CSI-u (13;2u) and modifyOtherKeys
+             (27;2;13~) decoding as Meta+Enter. Retains at most nine prefix
+             bytes across reads, with a 50ms Escape timeout. Bracketed paste
+             is not rewritten; no terminal keyboard protocol is enabled.
+             Legacy terminals that send plain Enter for Shift+Enter remain
+             indistinguishable. Omission preserves ordinary Notty decoding. *)
     -> input:_ Eio_unix.source
          (** Raw byte stream coming from the terminal – e.g.
              [Eio.Stdenv.stdin env]. *)

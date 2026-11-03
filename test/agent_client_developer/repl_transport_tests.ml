@@ -427,3 +427,131 @@ let%expect_test "framed stdio gateway dispatches the closed REPL family" =
         "stdio REPL capabilities and Observe dispatched through typed Connection"));
   [%expect {| stdio REPL capabilities and Observe dispatched through typed Connection |}]
 ;;
+
+let%expect_test "live completion codecs bind revisions and bound names" =
+  let instance = R.Wire_id.Instance.of_string "ri_complete" |> T.must in
+  let epoch = R.Wire_id.Epoch.of_string "re_complete" |> T.must in
+  let revision = R.Wire_id.Revision.of_string "rv_complete" |> T.must in
+  let request path prefix limit =
+    R.Completion_request.create
+      ~limits
+      ~instance
+      ~epoch
+      ~expected_revision:revision
+      ~path
+      ~prefix
+      ~limit
+  in
+  let valid = request [ "Task" ] "p" 2 |> T.must in
+  let roundtrip =
+    R.Request.of_method_and_params
+      ~limits
+      ~method_:"developer.repl.complete"
+      ~params:(R.Completion_request.to_json valid)
+    |> T.must
+  in
+  print_endline (R.Request.method_name roundtrip);
+  let page =
+    R.Completion_page.create ~limits ~revision ~names:[ "pure" ] ~status:Complete
+    |> T.must
+  in
+  let decoded =
+    R.Completion_page.of_json ~limits (R.Completion_page.to_json page) |> T.must
+  in
+  print_s
+    [%sexp
+      (R.Completion_page.names decoded : string list)
+    , (R.Completion_page.status decoded : R.Completion_page.status)];
+  print_s
+    [%sexp
+      (Result.is_error (request [ "Task.bad" ] "p" 1) : bool)
+    , (Result.is_error (request [] (String.make 129 'x') 1) : bool)
+    , (Result.is_error (request [] "" 3) : bool)
+    , (Result.is_error
+         (R.Completion_page.create
+            ~limits
+            ~revision
+            ~names:[ "pure" ]
+            ~status:Unavailable)
+       : bool)
+    , (Result.is_error
+         (R.Completion_page.create ~limits ~revision ~names:[ "z"; "a" ] ~status:Complete)
+       : bool)];
+  [%expect
+    {|
+    developer.repl.complete
+    ((pure) Complete)
+    (true true true true true)
+  |}]
+;;
+
+let%expect_test "portable completion rejects stale, over-count and foreign-prefix replies"
+  =
+  Eio_main.run (fun _ ->
+    let initialized = T.initialization ~repl:true () in
+    let instance = R.Wire_id.Instance.of_string "ri_complete" |> T.must in
+    let epoch = R.Wire_id.Epoch.of_string "re_complete" |> T.must in
+    let revision = R.Wire_id.Revision.of_string "rv_complete" |> T.must in
+    let other_revision = R.Wire_id.Revision.of_string "rv_other" |> T.must in
+    let capabilities =
+      R.Capabilities.create
+        ~methods:[ "developer.repl.capabilities"; "developer.repl.complete" ]
+        ~limits
+      |> T.must
+    in
+    let page ~revision names =
+      R.Completion_page.create ~limits ~revision ~names ~status:Complete |> T.must
+    in
+    let reply = ref (page ~revision [ "pure" ]) in
+    let calls = ref 0 in
+    let physical =
+      Agent_client.In_memory.create_with_developer_repl
+        ~request:(function
+          | P.Command.Protocol_initialize _ -> Ok (public_initialized initialized)
+          | _ -> Error (P.Error.invalid_request "unexpected public command"))
+        ~request_developer:(fun ~bound:_ _ ->
+          Error (P.Error.invalid_request "unexpected Developer request"))
+        ~request_repl:(fun ~max_request_bytes:_ ~bound:_ -> function
+           | R.Request.Capabilities -> Ok (R.Capabilities.to_json capabilities)
+           | Complete _ ->
+             Int.incr calls;
+             R.Response.to_json (Complete !reply) ~limits
+           | _ -> Error (P.Error.invalid_request "completion attempted a non-read method"))
+        ~notifications:(Eio.Stream.create 8)
+        ~close:Fn.id
+    in
+    T.initialize ~repl:true physical initialized;
+    let client = Agent_client.Developer_repl_connection.create physical |> T.must in
+    let request =
+      R.Completion_request.create
+        ~limits:
+          (R.Capabilities.limits
+             (Agent_client.Developer_repl_connection.capabilities client))
+        ~instance
+        ~epoch
+        ~expected_revision:revision
+        ~path:[ "Task" ]
+        ~prefix:"p"
+        ~limit:1
+      |> T.must
+    in
+    let attempt () =
+      Result.is_error (Agent_client.Developer_repl_connection.complete client request)
+    in
+    let valid = attempt () in
+    reply := page ~revision:other_revision [ "pure" ];
+    let stale = attempt () in
+    reply := page ~revision [ "pure"; "purify" ];
+    let over_count = attempt () in
+    reply := page ~revision [ "bind" ];
+    let foreign_prefix = attempt () in
+    print_s
+      [%sexp
+        (valid : bool)
+      , (stale : bool)
+      , (over_count : bool)
+      , (foreign_prefix : bool)
+      , (!calls : int)];
+    Agent_client.Connection.close physical);
+  [%expect {| (false true true true 4) |}]
+;;

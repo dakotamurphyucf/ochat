@@ -686,7 +686,7 @@ let%expect_test "portable REPL stages names, preserves old cells and keeps Tasks
      (succeeded (9) none) (succeeded (42) none) (succeeded () none)
      (succeeded ("ref(0)") none) (succeeded ("()") none)
      (succeeded ("ref(5)") none) (succeeded () none) (runtime () none)
-     (succeeded ("fail(deferred)") retained) (succeeded ("pure(8)") limit) true
+     (succeeded ("<Task fail>") retained) (succeeded ("<Task pure>") limit) true
      false true true true)
     false
     |}]
@@ -1024,7 +1024,7 @@ let%test_unit "retained Task keeps catch rollback and prepares one surviving res
     in
     let admitted = drive ~prepare_result () in
     (match Repl.Task_result.outcome admitted, Repl.Task_result.value_preview admitted with
-     | Succeeded, Some "ticket-2" -> ()
+     | Succeeded, Some "\"ticket-2\"" -> ()
      | _ -> failwith "retained result transaction was not installed");
     [%test_eq: int] !issued 2;
     [%test_eq: string list] !rolled_back [ "ticket-1" ];

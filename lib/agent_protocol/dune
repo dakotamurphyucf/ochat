@@ -53,6 +53,7 @@
   developer_approval
   developer_wire
   developer_repl_wire_common
+  developer_repl_wire_completion
   developer_repl_wire_result
   developer_repl_wire_task
   developer_repl_wire
