@@ -42,6 +42,21 @@ module Artifact : sig
     -> created_at:Agent_protocol.Timestamp.t
     -> (t, Store_error.t) result
 
+  (** Pure exact-publication restoration, without reauthoring known or unknown
+      manifest metadata. Optional private pools must match manifest presence and
+      exact payload inventories. The root, authored sources and both pools share
+      the existing 256-item/8 MiB inventory, checked before hashing root/source
+      bytes or restoring bundles. [publication], [sources] and [Payload.t] values
+      must already come from their validating constructors. This grants no file,
+      compiler, native or execution authority and performs no I/O. *)
+  val restore
+    :  publication:Prompt_manifest_document.Publication.t
+    -> root_chatmd:string
+    -> sources:Source.t list
+    -> program_payloads:Prompt_program_bundle.Payload.t list option
+    -> content_payloads:Prompt_program_bundle.Payload.t list option
+    -> (t, Store_error.t) result
+
   (** Authors one exact named manifest publication. Its complete inventory is
       limited to 262144 bytes, including metadata and envelope, before IO.
       Authored and private program and content payloads share the 256-file/8 MiB inventory

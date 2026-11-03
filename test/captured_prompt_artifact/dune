@@ -1,0 +1,5 @@
+(library
+ (name captured_prompt_artifact_tests)
+ (libraries core base64 digestif jsonaf expect_test_helpers_core ochat.agent_store ochat.agent_protocol ochat.document_schema)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
