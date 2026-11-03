@@ -33,6 +33,8 @@ let initial definition =
 ;;
 
 let ready t = List.map (value t).ready ~f:V.Stored_nominal.value
+let protected_children t = (value t).protected_children
+let pending_count t = List.length (value t).ready + List.length (protected_children t)
 
 let candidates t =
   Option.value_map (value t).batch ~default:[] ~f:(fun b ->
@@ -117,6 +119,14 @@ let withdrawal_probe (s : S.t) =
              (match json with
               | `Array old -> `Array (rows @ old)
               | _ -> assert false)
+           | "protected_children" ->
+             (* These are storage-only wrappers, never installed/decoded proof. *)
+             `Array
+               (List.map
+                  s.protected_children
+                  ~f:
+                    Recurrence_child_reservation.Association_capacity
+                    .reservation_projection)
            | "marks" ->
              (match json with
               | `Array marks ->
@@ -147,22 +157,49 @@ let probe_codec =
     ~kind:"ochat.recurrence_frontier"
     ~version:1
     ~shape:Codec.shape
-    ~supported_semantics:[]
+    ~supported_semantics:[ "recurrence.child-reservation.v1" ]
     ~decode:(fun j -> Ok j)
     ~encode:(fun j -> Ok j)
   |> Result.map_error ~f:(fun e -> Sexp.to_string_hum (D.Error.sexp_of_t e))
   |> Result.ok_or_failwith
 ;;
 
+let require_creation_semantics t document =
+  if List.is_empty (protected_children t)
+  then Ok document
+  else (
+    let json = D.Document.json document in
+    match json with
+    | `Object fields ->
+      let semantics =
+        "recurrence.child-reservation.v1"
+        :: List.filter (D.Document.required_semantics document) ~f:(fun text ->
+          not (String.equal text "recurrence.child-reservation.v1"))
+      in
+      D.Document.inspect
+        ~limits
+        (`Object
+            (List.filter fields ~f:(fun (name, _) ->
+               not (String.equal name "required_semantics"))
+             @ [ ( "required_semantics"
+                 , `Array (List.map semantics ~f:(fun text -> `String text)) )
+               ]))
+    | _ -> assert false)
+;;
+
 let capacity_projection t =
-  Result.map
-    (D.Domain_codec.encode probe_codec (C.with_value t (withdrawal_probe (value t))))
-    ~f:D.Document.json
+  let open Result.Let_syntax in
+  let%bind document =
+    D.Domain_codec.encode probe_codec (C.with_value t (withdrawal_probe (value t)))
+  in
+  let%map document = require_creation_semantics t document in
+  D.Document.json document
 ;;
 
 let reserved_growth t =
   let open Result.Let_syntax in
   let%bind current = D.Domain_codec.encode Codec.codec t |> protocol in
+  let%bind current = require_creation_semantics t current |> protocol in
   let%bind future = capacity_projection t |> protocol in
   let%bind current = Capacity_growth.measure (D.Document.json current) ~limits in
   let%map future = Capacity_growth.measure future ~limits in
@@ -172,6 +209,7 @@ let reserved_growth t =
 let to_document t =
   let open Result.Let_syntax in
   let%bind document = D.Domain_codec.encode Codec.codec t in
+  let%bind document = require_creation_semantics t document in
   let%bind growth = reserved_growth t |> X.document_result in
   let%bind remaining =
     Capacity_growth.remaining_limits growth limits |> X.document_result
@@ -183,6 +221,17 @@ let to_document t =
 let of_document document =
   let open Result.Let_syntax in
   let%bind t = D.Domain_codec.decode Codec.codec document in
+  let%bind () =
+    if
+      List.is_empty (protected_children t)
+      || List.mem
+           (D.Document.required_semantics document)
+           "recurrence.child-reservation.v1"
+           ~equal:String.equal
+    then Ok ()
+    else
+      Error (D.Error.Required_semantics_unknown "missing recurrence.child-reservation.v1")
+  in
   let%map _ = to_document t in
   t
 ;;
@@ -194,8 +243,67 @@ let admit previous state =
 ;;
 
 let bump (state : S.t) =
-  let%map.Result revision = V.add state.revision 1L in
-  { state with revision }
+  let%bind.Result revision = V.add state.revision 1L in
+  if Int64.(revision > max_value - of_int (List.length state.protected_children))
+  then invalid "frontier lacks reserved control and child association revisions"
+  else Ok { state with revision }
+;;
+
+let reserve_child
+      t
+      ~definition
+      ~control_revision
+      ~principal_id
+      ~child_session_id
+      ~transaction_id
+      ~occurrence
+  =
+  let open Result.Let_syntax in
+  match
+    List.find (protected_children t) ~f:(fun row ->
+      I.Occurrence.equal occurrence (Recurrence_child_reservation.occurrence row))
+  with
+  | Some row ->
+    let%map () = Recurrence_child_reservation.validate row ~definition in
+    t, row
+  | None ->
+    let state = value t in
+    let%bind nominal =
+      Result.of_option
+        (List.find state.ready ~f:(fun nominal ->
+           I.Occurrence.equal
+             occurrence
+             (Recurrence_nominal.key (V.Stored_nominal.value nominal))))
+        ~error:(P.Error.invalid_request "creation occurrence is not Ready")
+    in
+    let%bind row =
+      Recurrence_child_reservation.create
+        ~definition
+        ~control_revision
+        ~principal_id
+        ~child_session_id
+        ~transaction_id
+        ~nominal_json:(V.Stored_nominal.json nominal)
+    in
+    let%bind state =
+      bump
+        { state with
+          ready =
+            List.filter state.ready ~f:(fun other ->
+              not (V.Stored_nominal.equal nominal other))
+        ; protected_children = state.protected_children @ [ row ]
+        }
+    in
+    let%bind () =
+      if
+        Int64.(
+          state.revision
+          <= max_value - of_int Int.(2 + List.length state.protected_children))
+      then Ok ()
+      else invalid "creation frontier lacks independent control/association credits"
+    in
+    let%map t = admit t state in
+    t, row
 ;;
 
 let withdraw t ~definition =
@@ -410,7 +518,10 @@ module Work = struct
     then Ok t.original
     else (
       let%bind state = bump t.state in
-      if Int64.(state.revision > max_value - 2L)
+      if
+        Int64.(
+          state.revision
+          > max_value - of_int Int.(2 + List.length state.protected_children))
       then invalid "due frontier lacks reserved control revision steps"
       else admit t.original state)
   ;;
@@ -467,9 +578,53 @@ let validate_transition previous ~incoming ~definitions ~cursor =
         List.find (rows n) ~f:(fun row ->
           I.Occurrence.equal key (Recurrence_nominal.key (V.Stored_nominal.value row)))
       with
-      | None -> Ok ()
+      | None ->
+        (match
+           List.find n.protected_children ~f:(fun row ->
+             I.Occurrence.equal key (Recurrence_child_reservation.occurrence row))
+         with
+         | None -> Ok ()
+         | Some row ->
+           if
+             D.Json.equal
+               (Recurrence_child_reservation.nominal_json row)
+               (V.Stored_nominal.json old)
+           then Ok ()
+           else invalid "protected nominal lost immutable original custody")
       | Some row when V.Stored_nominal.equal old row -> Ok ()
       | Some _ -> invalid "retained selected nominal changed immutable bytes")
+  in
+  let%bind () =
+    List.fold_result n.protected_children ~init:() ~f:(fun () row ->
+      match
+        List.find p.protected_children ~f:(fun old ->
+          I.Occurrence.equal
+            (Recurrence_child_reservation.occurrence old)
+            (Recurrence_child_reservation.occurrence row))
+      with
+      | Some _ -> Ok ()
+      | None ->
+        if
+          List.exists p.ready ~f:(fun old ->
+            I.Occurrence.equal
+              (Recurrence_nominal.key (V.Stored_nominal.value old))
+              (Recurrence_child_reservation.occurrence row)
+            && D.Json.equal
+                 (V.Stored_nominal.json old)
+                 (Recurrence_child_reservation.nominal_json row))
+        then Ok ()
+        else invalid "new protected creation did not consume exact prior Ready")
+  in
+  let%bind () =
+    List.fold_result p.protected_children ~init:() ~f:(fun () old ->
+      match
+        List.find n.protected_children ~f:(fun row ->
+          I.Occurrence.equal
+            (Recurrence_child_reservation.occurrence old)
+            (Recurrence_child_reservation.occurrence row))
+      with
+      | Some row when Recurrence_child_reservation.equal old row -> Ok ()
+      | None | Some _ -> invalid "protected creation evidence was erased or replaced")
   in
   let%bind () =
     List.fold_result p.history ~init:() ~f:(fun () old ->

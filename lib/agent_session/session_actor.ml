@@ -8,6 +8,30 @@ module Recurrence_planning_read = struct
   [@@deriving sexp_of]
 end
 
+module Recurrence_creation = struct
+  module Checked = struct
+    type t =
+      { definition : Recurrence_definition.t
+      ; check_current : unit -> (unit, Agent_protocol.Error.t) result
+      }
+
+    let definition t = t.definition
+    let check_current t = t.check_current ()
+  end
+
+  type t =
+    { owner : unit ref
+    ; actor : Operator_authorization.t
+    ; authorize :
+        Session_state.t
+        -> Recurrence_definition.t
+        -> (unit, Agent_protocol.Error.t) result
+    ; reservation : Recurrence_child_reservation.t
+    }
+
+  let reservation t = t.reservation
+end
+
 module Runtime_retirement = struct
   type outcome =
     ((unit, Agent_protocol.Error.t) result, exn * Stdlib.Printexc.raw_backtrace) result
@@ -624,6 +648,17 @@ type _ request =
       * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
       * Recurrence_command.t
       -> Recurrence_command_receipt.t request
+  | Reserve_recurrence_child :
+      Operator_authorization.t
+      * (Session_state.t
+         -> Recurrence_definition.t
+         -> (unit, Agent_protocol.Error.t) result)
+      * Recurrence_identity.Occurrence.t
+      * int64
+      -> Recurrence_creation.t request
+  | Check_recurrence_creation :
+      Recurrence_creation.t
+      -> Recurrence_creation.Checked.t request
   | Read_recurrences :
       Operator_authorization.t
       * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
@@ -1031,6 +1066,7 @@ type t =
   ; mutable configuration_policy : Configuration_policy.t option
   ; mutable recurrence_controller : Recurrence_controller.t option
   ; recurrence_runtime : Recurrence_runtime.t
+  ; recurrence_creation_owner : unit ref
   ; configuration_update_owner : Configuration_update.Owner.t
   ; configuration_capture : Configuration_capture.t
   ; mutable operation_worker : Operation_worker.t option
@@ -12484,6 +12520,8 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Finish_recurrence_due _
   | Read_recurrence_planning _
   | Apply_recurrence_command _
+  | Reserve_recurrence_child _
+  | Check_recurrence_creation _
   | Read_recurrences _
   | Update_metadata _
   | Stop _
@@ -12537,6 +12575,54 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Apply_observation_follow_up
   | Attach _
   | Renew_owner _ -> false
+;;
+
+let check_recurrence_creation_admission t prepared =
+  let open Result.Let_syntax in
+  let%bind () =
+    if Option.is_none (Eio.Promise.peek t.finished)
+    then Ok ()
+    else Error (error Server_shutting_down "recurrence actor has terminated")
+  in
+  let%bind () = require_runtime_admission t in
+  let%bind moderator_halted =
+    Runtime_builder.moderator_snapshot_is_halted t.state.moderator
+  in
+  let%bind () =
+    match t.state.lifecycle.desired, t.state.runtime_initialization, t.state.failure with
+    | Running, Ready, None when not (t.stopped || t.state.halted || moderator_halted) ->
+      Ok ()
+    | (Running | Stopped), (Ready | Pending _), (Some _ | None) ->
+      Error (error Conflict "recurrence creation controller runtime is unavailable")
+  in
+  let%bind () = Recurrence_creation_admission.check_current prepared t.state in
+  let%bind snapshot =
+    Recurrence_runtime.snapshot
+      t.recurrence_runtime
+      ~wall:(t.services.now ())
+      ~monotonic:(t.services.monotonic_now ())
+  in
+  let entry = Recurrence_creation_admission.entry prepared in
+  let%bind late =
+    Recurrence_runtime.selection_lateness
+      t.recurrence_runtime
+      ~entry
+      ~nominal:(Recurrence_creation_admission.nominal prepared)
+      ~snapshot
+  in
+  let%bind () =
+    match late with
+    | Some late
+      when Int64.(
+             late
+             <= Recurrence_policy.grace_ns
+                  (Recurrence_definition.policy (Recurrence_entry.current entry))) ->
+      Ok ()
+    | None | Some _ ->
+      Error (error Conflict "recurrence creation nominal is outside current grace")
+  in
+  let%bind () = require_runtime_admission t in
+  Recurrence_creation_admission.check_current prepared t.state
 ;;
 
 let check_lifecycle_fence t fence =
@@ -13158,6 +13244,113 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         | None ->
           t.recurrence_controller <- Some controller;
           Ok ())
+    | Reserve_recurrence_child (actor, authorize, occurrence, expected_control_revision)
+      ->
+      let open Result.Let_syntax in
+      let%bind () = require_runtime_admission t in
+      let%bind controller = require_recurrence_controller t in
+      let prepare () =
+        Recurrence_creation_admission.prepare
+          t.state
+          ~controller
+          ~actor
+          ~authorize
+          ~occurrence
+          ~expected_control_revision
+      in
+      let%bind prepared = prepare () in
+      let%bind () = check_recurrence_creation_admission t prepared in
+      let catalog =
+        Option.value t.state.recurrence_catalog ~default:Recurrence_catalog.empty
+      in
+      let child_session_id, transaction_id =
+        match Recurrence_creation_admission.reservation prepared with
+        | Some row ->
+          ( Recurrence_child_reservation.child_session_id row
+          , Recurrence_child_reservation.transaction_id row )
+        | None ->
+          Agent_protocol.Id.Session.create (), Agent_protocol.Id.Transaction.create ()
+      in
+      let%bind next, reservation =
+        Recurrence_catalog.reserve_child
+          catalog
+          ~recurrence_id:
+            (Recurrence_entry.id (Recurrence_creation_admission.entry prepared))
+          ~principal_id:(Operator_authorization.principal actor).id
+          ~child_session_id
+          ~transaction_id
+          ~occurrence
+      in
+      let%bind () =
+        if
+          Int64.equal
+            (Recurrence_catalog.revision next)
+            (Recurrence_catalog.revision catalog)
+        then Ok ()
+        else (
+          let%bind candidate =
+            prepare_transition
+              t
+              ~delta:(Session_delta.Recurrence_catalog_changed next)
+              ~payloads:[]
+          in
+          let%bind () = check_recurrence_creation_admission t prepared in
+          let%bind () = persist_transition t candidate in
+          install_committed_transition t candidate;
+          publish_committed_transition t candidate;
+          Ok ())
+      in
+      let%bind refreshed = prepare () in
+      let%bind () = check_recurrence_creation_admission t refreshed in
+      let%bind () =
+        match Recurrence_creation_admission.reservation refreshed with
+        | Some row when Recurrence_child_reservation.equal row reservation -> Ok ()
+        | None | Some _ ->
+          Error (error Conflict "committed creation reservation changed before permit")
+      in
+      let permit : Recurrence_creation.t =
+        { owner = t.recurrence_creation_owner; actor; authorize; reservation }
+      in
+      Ok permit
+    | Check_recurrence_creation permit ->
+      let open Result.Let_syntax in
+      let%bind () =
+        if phys_equal permit.Recurrence_creation.owner t.recurrence_creation_owner
+        then Ok ()
+        else Error (error Conflict "recurrence creation permit belongs to another actor")
+      in
+      let%bind () = require_runtime_admission t in
+      let%bind controller = require_recurrence_controller t in
+      let%bind prepared =
+        Recurrence_creation_admission.prepare
+          t.state
+          ~controller
+          ~actor:permit.actor
+          ~authorize:permit.authorize
+          ~occurrence:(Recurrence_child_reservation.occurrence permit.reservation)
+          ~expected_control_revision:
+            (Recurrence_child_reservation.control_revision permit.reservation)
+      in
+      let%bind () = check_recurrence_creation_admission t prepared in
+      let%bind () =
+        match Recurrence_creation_admission.reservation prepared with
+        | Some row when Recurrence_child_reservation.equal row permit.reservation -> Ok ()
+        | None | Some _ ->
+          Error
+            (error Conflict "recurrence creation permit lost exact durable reservation")
+      in
+      let definition =
+        Recurrence_entry.current (Recurrence_creation_admission.entry prepared)
+      in
+      let check_current () =
+        let%bind () = check_recurrence_creation_admission t prepared in
+        (* The trusted policy callback is nonyielding. Repeat the original proof
+           and actual owner-state checks after it before the caller's effect. *)
+        let%bind () = permit.authorize t.state definition in
+        check_recurrence_creation_admission t prepared
+      in
+      let checked : Recurrence_creation.Checked.t = { definition; check_current } in
+      Ok checked
     | Read_recurrences (actor, authorize) ->
       let open Result.Let_syntax in
       let%bind controller = require_recurrence_controller t in
@@ -13881,6 +14074,7 @@ let create_with_owner_lease_duration
     ; configuration_policy = None
     ; recurrence_controller = None
     ; recurrence_runtime = Recurrence_runtime.create ~origin:(services.monotonic_now ())
+    ; recurrence_creation_owner = ref ()
     ; configuration_update_owner = Configuration_update.Owner.create ()
     ; configuration_capture = Configuration_capture.create ()
     ; operation_worker
@@ -14900,6 +15094,16 @@ let recurrence_call t ?(priority = Mailbox.Normal) request =
       (fun () ->
          Eio.Promise.await t.finished;
          unavailable ())
+;;
+
+let reserve_recurrence_child t ~actor ~authorize ~occurrence ~expected_control_revision =
+  recurrence_call
+    t
+    (Reserve_recurrence_child (actor, authorize, occurrence, expected_control_revision))
+;;
+
+let check_recurrence_creation t permit =
+  recurrence_call t (Check_recurrence_creation permit)
 ;;
 
 let sweep_recurrences t =

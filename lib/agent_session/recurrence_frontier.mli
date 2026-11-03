@@ -40,6 +40,27 @@ end
 val initial : Recurrence_definition.t -> (t, Agent_protocol.Error.t) result
 
 val ready : t -> Recurrence_nominal.t list
+
+(** Protected rows remain retained through controls/history pruning. All are
+    unsettled in this schema and count against pending capacity; the actual
+    terminal owner must separately classify settled associations in a later
+    schema without erasing their immutable evidence. *)
+val protected_children : t -> Recurrence_child_reservation.t list
+
+val pending_count : t -> int
+
+(** Pure exact Ready-to-protected disposition. Retried occurrence returns its
+    original identities; actor authentication and ACK remain separate. *)
+val reserve_child
+  :  t
+  -> definition:Recurrence_definition.t
+  -> control_revision:int64
+  -> principal_id:Agent_protocol.Id.Principal.t
+  -> child_session_id:Agent_protocol.Id.Session.t
+  -> transaction_id:Agent_protocol.Id.Transaction.t
+  -> occurrence:Recurrence_identity.Occurrence.t
+  -> (t * Recurrence_child_reservation.t, Agent_protocol.Error.t) result
+
 val candidates : t -> Recurrence_nominal.t list
 val calendar_cutoff : t -> Time_ns.Alternate_sexp.t option
 val lookahead : t -> Recurrence_nominal.t option

@@ -17,12 +17,21 @@ type binding =
   ; anchor : anchor
   }
 
+type grace_binding =
+  { definition_sha256 : string
+  ; source : P.Run_source.t
+  ; birth : P.Session_lifecycle.Revision.t
+  ; control_revision : int64
+  ; anchor : Recurrence_selection_grace.t
+  }
+
 type t =
   { owner : unit ref
   ; origin : Mtime.t
   ; mutable host : Recurrence_planning_host.t option
   ; mutable bindings : binding String.Map.t
   ; mutable active : unit ref option
+  ; mutable grace : grace_binding list
   }
 
 type preparation =
@@ -54,7 +63,13 @@ type validation =
 let conflict message = Error (P.Error.create Conflict ~message ~retryable:false ())
 
 let create ~origin =
-  { owner = ref (); origin; host = None; bindings = String.Map.empty; active = None }
+  { owner = ref ()
+  ; origin
+  ; host = None
+  ; bindings = String.Map.empty
+  ; active = None
+  ; grace = []
+  }
 ;;
 
 let set_host (t : t) host =
@@ -85,18 +100,7 @@ let ids state =
     | Paused _ | Retired _ -> None)
 ;;
 
-let source (state : Session_state.t) =
-  let open Result.Let_syntax in
-  let%bind observer = Moderator_checkpoint.observer state.moderator in
-  match state.run_state, observer with
-  | Some index, Some observer ->
-    let installed = Run_state.installation index in
-    (match installed.source with
-     | Some current when P.Invocation.equal_observer current observer ->
-       Run_source_installation.captured installed ~generation:state.identity.generation
-     | Some _ | None -> conflict "recurrence source installation is unavailable")
-  | None, _ | Some _, None -> conflict "recurrence source installation is unavailable"
-;;
+let source = Recurrence_source.installed
 
 let binding_matches (binding : binding) entry =
   E.equal_control (E.control entry) Enabled
@@ -105,8 +109,37 @@ let binding_matches (binding : binding) entry =
   && Recurrence_cursor.equal binding.cursor (E.cursor entry)
 ;;
 
+let grace_matches (binding : grace_binding) entry =
+  let definition = E.current entry in
+  E.equal_control (E.control entry) Enabled
+  && Int64.equal binding.control_revision (E.control_revision entry)
+  && String.equal binding.definition_sha256 (F.digest definition)
+  && P.Run_source.equal binding.source (F.source definition)
+  && P.Session_lifecycle.Revision.equal
+       binding.birth
+       (F.birth_lifecycle_revision definition)
+  &&
+  match E.frontier entry with
+  | Error _ -> false
+  | Ok frontier ->
+    let key = Recurrence_selection_grace.occurrence binding.anchor in
+    List.exists (H.ready frontier) ~f:(fun nominal ->
+      Recurrence_identity.Occurrence.equal key (Recurrence_nominal.key nominal))
+    || List.exists (H.protected_children frontier) ~f:(fun row ->
+      Recurrence_identity.Occurrence.equal
+        key
+        (Recurrence_child_reservation.occurrence row))
+;;
+
 let retain_committed (t : t) state =
   let installed = source state |> Result.ok in
+  t.grace
+  <- List.filter t.grace ~f:(fun binding ->
+       List.exists
+         (Recurrence_catalog.entries (catalog state))
+         ~f:(fun entry ->
+           grace_matches binding entry
+           && Option.exists installed ~f:(P.Run_source.equal binding.source)));
   t.bindings
   <- Map.filteri t.bindings ~f:(fun ~key ~data ->
        match
@@ -369,6 +402,20 @@ let check_current t (validation : validation) ~state =
 let install_phase t (validation : validation) ~state =
   let prepared = validation.prepared in
   let id = prepared.preparation.recurrence_id in
+  (match prepared.decision, Recurrence_catalog.find (catalog state) id with
+   | Candidate plan, Some entry ->
+     let definition = E.current entry in
+     let added =
+       List.map (Recurrence_due_plan.selection_grace plan) ~f:(fun anchor ->
+         { definition_sha256 = F.digest definition
+         ; source = F.source definition
+         ; birth = F.birth_lifecycle_revision definition
+         ; control_revision = E.control_revision entry
+         ; anchor
+         })
+     in
+     t.grace <- t.grace @ added
+   | Unchanged _, _ | Candidate _, None -> ());
   let phase =
     match prepared.decision with
     | Unchanged phase -> phase
@@ -381,3 +428,29 @@ let install_phase t (validation : validation) ~state =
 ;;
 
 let release t preparation = if owns t preparation then t.active <- None
+
+let selection_lateness (t : t) ~entry ~nominal ~snapshot =
+  match
+    List.find t.grace ~f:(fun binding ->
+      grace_matches binding entry
+      && Recurrence_identity.Occurrence.equal
+           (Recurrence_selection_grace.occurrence binding.anchor)
+           (Recurrence_nominal.key nominal))
+  with
+  | Some binding ->
+    Recurrence_selection_grace.lateness_ns binding.anchor ~snapshot
+    |> Result.map ~f:Option.some
+  | None ->
+    (* No process-local selected anchor survives restart. The admitted immutable
+       wall nominal is the explicit reconciliation basis, never fake elapsed time. *)
+    let now = Phase.Snapshot.wall snapshot in
+    let due = Recurrence_nominal.at nominal in
+    if Time_ns.compare now due < 0
+    then Ok None
+    else
+      Ok
+        (Some
+           Int64.(
+             (Time_ns.to_int63_ns_since_epoch now |> Int63.to_int64)
+             - (Time_ns.to_int63_ns_since_epoch due |> Int63.to_int64)))
+;;

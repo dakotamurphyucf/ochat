@@ -127,7 +127,17 @@ let reservation t =
   let open Result.Let_syntax in
   let steps =
     List.fold t.entries ~init:0 ~f:(fun n e ->
-      Int.max n (E.required_transition_steps e.Stored.value))
+      Int.max
+        n
+        (E.required_transition_steps e.Stored.value
+         - E.pending_child_associations e.Stored.value))
+  in
+  let steps =
+    steps
+    + List.sum
+        (module Int)
+        t.entries
+        ~f:(fun e -> E.pending_child_associations e.Stored.value)
   in
   let%bind growth =
     if steps = 0
@@ -166,6 +176,23 @@ let validate_structure t =
   if List.length t.entries > 16 || List.length t.receipts > 256 || Int64.(t.revision < 0L)
   then full "recurrence catalog retention capacity exhausted"
   else (
+    let%bind () =
+      let rows =
+        List.concat_map t.entries ~f:(fun entry ->
+          match E.frontier entry.Stored.value with
+          | Error _ -> []
+          | Ok frontier -> Recurrence_frontier.protected_children frontier)
+      in
+      if
+        List.contains_dup
+          (List.map rows ~f:Recurrence_child_reservation.child_session_id)
+          ~compare:P.Id.Session.compare
+        || List.contains_dup
+             (List.map rows ~f:Recurrence_child_reservation.transaction_id)
+             ~compare:P.Id.Transaction.compare
+      then invalid "protected creation identities are not unique"
+      else Ok ()
+    in
     let%bind reserve = reservation t in
     let%bind () =
       if Int64.(t.revision > max_value - of_int reserve.required_transition_steps)
@@ -511,6 +538,44 @@ let apply_due t ~recurrence_id plan =
     in
     let%map () = validate_transition t ~incoming in
     incoming)
+;;
+
+let reserve_child
+      t
+      ~recurrence_id
+      ~principal_id
+      ~child_session_id
+      ~transaction_id
+      ~occurrence
+  =
+  let open Result.Let_syntax in
+  let%bind old =
+    Result.of_option
+      (find t recurrence_id)
+      ~error:(P.Error.invalid_request "creation recurrence identity is not retained")
+  in
+  let%bind entry, row =
+    E.reserve_child old ~principal_id ~child_session_id ~transaction_id ~occurrence
+  in
+  let%bind next = Stored.create entry in
+  match stored t recurrence_id with
+  | Some previous when same_entry previous next -> Ok (t, row)
+  | Some _ | None ->
+    if Int64.equal t.revision Int64.max_value
+    then full "recurrence creation catalog frontier exhausted"
+    else (
+      let incoming =
+        { t with
+          revision = Int64.succ t.revision
+        ; entries =
+            List.map t.entries ~f:(fun previous ->
+              if P.Id.Recurrence.equal (E.id previous.Stored.value) recurrence_id
+              then next
+              else previous)
+        }
+      in
+      let%map () = validate_transition t ~incoming in
+      incoming, row)
 ;;
 
 let disposition t ~f =

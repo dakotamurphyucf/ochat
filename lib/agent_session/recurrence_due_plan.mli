@@ -33,6 +33,11 @@ val cursor : t -> Recurrence_cursor.t
 val frontier : t -> Recurrence_frontier.t
 val next_phase : t -> Recurrence_phase.t option
 
+(** Bounded process-local anchors for newly selected interval rows. Derived from
+    live elapsed lateness, or explicit wall reconciliation with no surviving phase.
+    They are installed only after ACK; never serialized or used as authority. *)
+val selection_grace : t -> Recurrence_selection_grace.t list
+
 (** Exact old definition/cursor/frontier basis, not just scalar revisions. The
     owning entry/catalog uses this before accepting the pair as one transition. *)
 val matches
