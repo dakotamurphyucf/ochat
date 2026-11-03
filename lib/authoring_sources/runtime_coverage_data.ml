@@ -796,7 +796,7 @@ let implementation_sources =
   ; ( "lib/agent_store/developer_command_row.ml"
     , "c7fe85fb222c80450fdc512732c9ad9fc2fd8ab8e12e65eeb64302e4904a5809" )
   ; ( "lib/agent_server/authoring_source_host.ml"
-    , "eb5183c8659d25c59a480875548ef2e1b038126786266b58b5ad88b241e86035" )
+    , "52567ed5c8b6cdb56119581f8bebb943dffcc28475cf54d86376edbad9ab0f41" )
   ; ( "lib/agent_server/authoring_context_owner.ml"
     , "ddd01bf4bbeb53c562bce7f6935acaf990ca1031c62818d277c9282a674e0df7" )
   ; ( "lib/agent_server/developer_capture_host.ml"
@@ -844,7 +844,7 @@ let implementation_sources =
   ; ( "lib/agent_session/script_subscription_service.ml"
     , "54c775836b551733687e907ff46a2a7a0cc26bd46ff915cc6fd5f0cf5116f069" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "714a16a81a32a77e8f52614509b8ff82b20ccdbce524317859d5b5ab1b30c880" )
+    , "1a0416b20f53582a7ae674efd8295012d3bfe60bced39a7ff7312050bb565ea5" )
   ; ( "lib/agent_session/staged_jobs.ml"
     , "7731a0fc9f021188e3856041fe493f3044556bc7a15364815c47299fe968603b" )
   ; ( "lib/agent_session/staged_notifications.ml"

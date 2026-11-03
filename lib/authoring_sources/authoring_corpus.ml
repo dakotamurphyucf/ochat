@@ -3647,6 +3647,51 @@ let runtime_foundation ~sources =
        ]
      @ runtime
      @ children
+     @ [ { id = "instructions.sources"
+         ; title = "Admitted instruction discovery and exact retained content"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/admitted-instructions.md"
+               ; heading = "# Admitted instruction sources"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "3d7ab433dd365f6979ccfd7cbbd368e340129a7eb99b8c8b84d891d0420170bd" ]
+               ; evidence =
+                   [ "test/instruction_sources/metadata_tests.ml"
+                   ; "test/instruction_sources/snapshot_tests.ml"
+                   ; "test/instruction_sources/source_tests.ml"
+                   ]
+               }
+         }
+       ]
+     @ [ { id = "libraries.installed"
+         ; title = "Installed ordinary capability sources and explicit export"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/chatml-installed-libraries.md"
+               ; heading = "# Installed ChatML libraries"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "cde14cf26810a295b4ef27ede2787a58b46d4417f21491ec26989206d783c4de" ]
+               ; evidence =
+                   [ "test/capability_sources/inventory_tests.ml"
+                   ; "test/capability_sources/export_tests.ml"
+                   ; "test/capability_sources/closure_tests.ml"
+                   ; "lib/capability_sources/capability_source_inventory_tests.ml"
+                   ]
+               }
+         }
+       ]
      @ [ { id = "runtime.runs"
          ; title = "Scoped run decisions and transactional receipt custody"
          ; prerequisites = []

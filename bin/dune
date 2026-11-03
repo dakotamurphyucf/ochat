@@ -44,12 +44,19 @@
   ochat.history_entry ochat.transcript)
  (preprocess (pps ppx_jane)))
 
+(library
+ (name capability_libraries_command)
+ (modules capability_libraries_command)
+ (libraries core core_unix.command_unix eio eio.unix eio_main jsonaf ochat.source
+  ochat.chatml_source ochat.capability_sources ochat.capability_source_export)
+ (preprocess (pps ppx_jane)))
+
 (executable
  (package ochat)
  (public_name ochat)
  (name main)
  (modules main)
- (libraries inference_composition shell_inspection_cli managed_completion_command ochat.provider_runtime_host
+ (libraries inference_composition shell_inspection_cli managed_completion_command capability_libraries_command ochat.provider_runtime_host
   lwt_eio
   io
   dune_describe
