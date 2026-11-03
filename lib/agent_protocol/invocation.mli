@@ -174,6 +174,10 @@ type t = private
   ; authoring_reference : Authoring_reference.t option [@sexp.option]
     (** Host-produced receipt bound to the successful disclosed output. Its
         existence alone does not mean documentation reached provider history. *)
+  ; inference_origin : Inference_origin.t option [@sexp.option]
+    (** Immutable original attribution, outside the authored context ABI. Missing
+        historical evidence is unavailable; terminal Runs stay named. This field
+        grants no live ownership or execution permission. *)
   }
 [@@deriving equal, sexp]
 
@@ -197,6 +201,13 @@ val record_handler_intent : t -> requests:follow_up -> (t, Error.t) result
 val apply_handler_intent : t -> (t, Error.t) result
 val accept_handler_compaction : t -> operation_id:Id.Operation.t -> (t, Error.t) result
 val discard_handler_intent : t -> reason:string -> (t, Error.t) result
+
+(** Capture evidence on a fresh, unclassified admitted DTO. The actor must
+    authenticate its actual admitting owner and reject caller-supplied claims;
+    this validated transformation alone grants no authority. Existing records,
+    including historical absence, cannot be retrospectively reclassified. *)
+val capture_inference_origin : t -> Inference_origin.t -> (t, Error.t) result
+
 val dispatch : t -> (t, Error.t) result
 
 (** Records one outcome for a dispatched invocation after checking its owner

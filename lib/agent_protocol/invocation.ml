@@ -143,6 +143,7 @@ type t =
   ; handler_intent : handler_intent option [@sexp.option]
   ; completion_contract : Completion_contract.t option [@sexp.option]
   ; authoring_reference : Authoring_reference.t option [@sexp.option]
+  ; inference_origin : Inference_origin.t option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
@@ -268,6 +269,9 @@ let validate_handler_intent (intent : handler_intent) =
 let validate t =
   let open Result.Let_syntax in
   let%bind () = validate_context t.context in
+  let%bind () =
+    Option.value_map t.inference_origin ~default:(Ok ()) ~f:Inference_origin.validate
+  in
   let%bind () =
     match t.handler_intent, t.status with
     | None, _ -> Ok ()
@@ -490,6 +494,7 @@ let create ?routing ?observer ?completion_contract ?parent_event context =
     ; handler_intent = None
     ; completion_contract
     ; authoring_reference = None
+    ; inference_origin = None
     ; publication_discarded = None
     ; observation =
         Option.map observer ~f:(fun observer ->
@@ -501,6 +506,16 @@ let create ?routing ?observer ?completion_contract ?parent_event context =
     }
   in
   Result.map (validate t) ~f:(fun () -> t)
+;;
+
+let capture_inference_origin t origin =
+  let open Result.Let_syntax in
+  let%bind () = validate t in
+  let%bind () = Inference_origin.validate origin in
+  match t.status, t.inference_origin with
+  | Admitted, None -> Ok { t with inference_origin = Some origin }
+  | (Admitted | Dispatching | Resolved _ | Published _), _ ->
+    failure Conflict "invocation inference origin can only be captured at fresh admission"
 ;;
 
 let dispatch t =
@@ -844,6 +859,15 @@ let validate_transition ~previous next =
      | _ -> failure Invalid_state "new invocation must be admitted")
   | Some previous ->
     let%bind () = validate previous in
+    let%bind () =
+      if
+        Option.equal
+          Inference_origin.equal
+          previous.inference_origin
+          next.inference_origin
+      then Ok ()
+      else failure Conflict "invocation inference origin is immutable"
+    in
     let%bind () = validate_observation_transition previous next in
     let%bind () = validate_handler_transition previous next in
     let%bind () =
@@ -1357,7 +1381,9 @@ let to_json t =
   `Object
     ([ ( "schema_version"
        , `Number
-           (if Option.is_some t.authoring_reference
+           (if Option.is_some t.inference_origin
+            then "13"
+            else if Option.is_some t.authoring_reference
             then "12"
             else if Option.is_some t.completion_contract
             then "11"
@@ -1399,7 +1425,8 @@ let to_json t =
      @ optional "parent_event" t.parent_event Id.Moderator_execution.to_json
      @ optional "handler_intent" t.handler_intent handler_intent_to_json
      @ optional "completion_contract" t.completion_contract Completion_contract.to_json
-     @ optional "authoring_reference" t.authoring_reference Authoring_reference.to_json)
+     @ optional "authoring_reference" t.authoring_reference Authoring_reference.to_json
+     @ optional "inference_origin" t.inference_origin Inference_origin.to_json)
 ;;
 
 let of_json json =
@@ -1414,7 +1441,7 @@ let of_json json =
   in
   let%bind () =
     match version with
-    | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 -> Ok ()
+    | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 -> Ok ()
     | _ -> failure Incompatible_protocol "unsupported invocation schema version"
   in
   let%bind () =
@@ -1428,7 +1455,8 @@ let of_json json =
        @ (if version >= 9 then [ "parent_event" ] else [])
        @ (if version >= 10 then [ "handler_intent" ] else [])
        @ (if version >= 11 then [ "completion_contract" ] else [])
-       @ if version >= 12 then [ "authoring_reference" ] else [])
+       @ (if version >= 12 then [ "authoring_reference" ] else [])
+       @ if version >= 13 then [ "inference_origin" ] else [])
   in
   let%bind context = Json_codec.required_as fields "context" (context_of_json ~version) in
   let%bind () =
@@ -1471,7 +1499,7 @@ let of_json json =
   in
   let%bind completion_contract =
     match version with
-    | 12 ->
+    | 12 | 13 ->
       Json_codec.optional_as fields "completion_contract" Completion_contract.of_json
     | 11 ->
       Json_codec.required_as fields "completion_contract" Completion_contract.of_json
@@ -1480,10 +1508,19 @@ let of_json json =
   in
   let%bind authoring_reference =
     match version with
+    | 13 ->
+      Json_codec.optional_as fields "authoring_reference" Authoring_reference.of_json
     | 12 ->
       Json_codec.required_as fields "authoring_reference" Authoring_reference.of_json
       |> Result.map ~f:Option.some
     | _ -> Ok None
+  in
+  let%bind inference_origin =
+    if version >= 13
+    then
+      Json_codec.required_as fields "inference_origin" Inference_origin.of_json
+      |> Result.map ~f:Option.some
+    else Ok None
   in
   let t =
     { context
@@ -1496,11 +1533,12 @@ let of_json json =
     ; handler_intent
     ; completion_contract
     ; authoring_reference
+    ; inference_origin
     }
   in
   let%bind t =
     match version with
-    | 10 | 11 | 12 ->
+    | 10 | 11 | 12 | 13 ->
       Json_codec.optional_as fields "parent_event" Id.Moderator_execution.of_json
       |> Result.map ~f:(fun parent_event -> { t with parent_event })
     | 9 ->
@@ -1533,6 +1571,7 @@ module Storage = struct
       ; "handler_intent", option handler_intent_to_json t.handler_intent
       ; "completion_contract", option Completion_contract.to_json t.completion_contract
       ; "authoring_reference", option Authoring_reference.to_json t.authoring_reference
+      ; "inference_origin", option Inference_origin.to_json t.inference_origin
       ]
   ;;
 
@@ -1566,6 +1605,10 @@ module Storage = struct
     let%bind authoring_reference =
       get "authoring_reference" (nullable Authoring_reference.of_json)
     in
+    let%bind inference_origin =
+      Json_codec.optional_as fields "inference_origin" (nullable Inference_origin.of_json)
+      |> Result.map ~f:Option.join
+    in
     let t =
       { context
       ; status
@@ -1577,6 +1620,7 @@ module Storage = struct
       ; handler_intent
       ; completion_contract
       ; authoring_reference
+      ; inference_origin
       }
     in
     let%map () = validate t in

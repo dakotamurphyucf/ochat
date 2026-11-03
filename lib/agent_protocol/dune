@@ -5,6 +5,7 @@
   protocol_error
   error
   id
+  inference_origin
   execution_owner
   version
   timestamp

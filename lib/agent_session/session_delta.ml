@@ -215,6 +215,11 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
         ~previous:state.jobs
         ~incoming:created.jobs
     in
+    let%bind () =
+      Invocation_inference_provenance.validate_transition
+        ~previous:state.invocations
+        ~incoming:created.invocations
+    in
     let%map () =
       match state.run_state, created.run_state with
       | None, _ -> Ok ()

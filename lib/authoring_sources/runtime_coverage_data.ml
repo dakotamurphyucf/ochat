@@ -740,7 +740,7 @@ let implementation_sources =
   ; ( "lib/agent_protocol/developer_agent_artifact.ml"
     , "9fa006b7103cab22b7de2f290c808ed9deb3f9ed968cf7a036767444d7531de2" )
   ; ( "lib/agent_protocol/job.ml"
-    , "c7f6b8cddb99c88536d971f2d1384b5033dbe697452fcb395ede91e894bd5a21" )
+    , "7c2757e15bf13ca1dcc082d3a4a63add2238e4e6bc59b7617529ee646abdfa55" )
   ; ( "lib/agent_protocol/stored_completion.ml"
     , "b9ff461aa95893621570bb499e1b676d2cebe9828c6082a53c4ae22de15cd761" )
   ; ( "lib/agent_protocol/subscription.ml"
@@ -844,7 +844,7 @@ let implementation_sources =
   ; ( "lib/agent_session/script_subscription_service.ml"
     , "54c775836b551733687e907ff46a2a7a0cc26bd46ff915cc6fd5f0cf5116f069" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "4ef2e59f86d58a82e40a733bcd4a3b1a9c1e25deb2ff30d2ed8454e86a1014f2" )
+    , "839feff1ad18d2311dc69fcf2a31b2f94651713e657e6b1bad1f2a195ad221fd" )
   ; ( "lib/agent_session/staged_jobs.ml"
     , "7731a0fc9f021188e3856041fe493f3044556bc7a15364815c47299fe968603b" )
   ; ( "lib/agent_session/staged_notifications.ml"

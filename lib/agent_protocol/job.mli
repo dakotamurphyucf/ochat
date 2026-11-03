@@ -95,16 +95,7 @@ type launch =
     resolved through its exact retained occurrence; it is not a Goal selector or
     execution permission. Missing historical evidence is represented by the
     enclosing optional field, never by [Unbound]. *)
-module Inference_origin : sig
-  type t =
-    | Unbound
-    | Run of Id.Run.t
-  [@@deriving equal, sexp]
-
-  val validate : t -> (unit, Error.t) result
-  val to_json : t -> Jsonaf.t
-  val of_json : Jsonaf.t -> (t, Error.t) result
-end
+module Inference_origin = Inference_origin
 
 type t =
   { id : Id.Job.t

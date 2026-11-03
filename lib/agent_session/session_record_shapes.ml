@@ -270,6 +270,15 @@ let authoring_reference =
     ]
 ;;
 
+let inference_origin =
+  n
+    (tag
+       "type"
+       [ "unbound", f [ "schema_version"; "type" ]
+       ; "run", f [ "schema_version"; "type"; "run_id" ]
+       ])
+;;
+
 let invocation =
   o
     [ "id", v
@@ -290,6 +299,7 @@ let invocation =
     ; "handler_intent", n (o [ "follow_up", follow_up; "compaction_operation_id", v ])
     ; "completion_contract", n completion_contract
     ; "authoring_reference", n authoring_reference
+    ; "inference_origin", inference_origin
     ]
 ;;
 

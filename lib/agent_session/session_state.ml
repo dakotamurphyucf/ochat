@@ -1050,6 +1050,13 @@ let validate_domain (t : t) =
 let validate (t : t) =
   let open Result.Let_syntax in
   let%bind () = Job_inference_provenance.validate ~jobs:t.jobs ~runs:t.run_state in
+  let%bind () =
+    Invocation_inference_provenance.validate
+      ~invocations:t.invocations
+      ~jobs:t.jobs
+      ~events:t.moderator_executions
+      ~runs:t.run_state
+  in
   let%bind () = Goal_run_evidence.validate ~catalog:t.goal_catalog ~runs:t.run_state in
   let%bind () =
     match t.goal_accounts with

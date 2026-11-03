@@ -66,6 +66,8 @@
   job_delivery_tests
   job_fixtures
   job_inference_provenance_tests
+  invocation_inference_provenance_tests
+  invocation_inference_persistence_tests
   job_inference_persistence_tests
   job_dependency_tests
   subscription_dependency_tests

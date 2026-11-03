@@ -3432,23 +3432,75 @@ let running_operation
     Error (error Invalid_state "foreground operation is not running at a tool safe point")
 ;;
 
-let invocation_admission_deltas t (invocation : Agent_protocol.Invocation.t) =
+let invocation_origin t (invocation : Agent_protocol.Invocation.t) ~fallback =
+  match invocation.context.parent_invocation with
+  | None -> fallback ()
+  | Some id ->
+    (match
+       List.find t.state.invocations ~f:(fun parent ->
+         Agent_protocol.Id.Invocation.equal parent.context.id id)
+     with
+     | Some parent -> Ok parent.inference_origin
+     | None -> Error (error Conflict "original parent invocation is unavailable"))
+;;
+
+let operation_invocation_origin t operation_id invocation =
+  invocation_origin t invocation ~fallback:(fun () ->
+    let open Result.Let_syntax in
+    let%bind operation = current_operation t operation_id in
+    Invocation_inference_provenance.of_operation ~runs:t.state.run_state operation
+    |> Result.map ~f:Option.some)
+;;
+
+let event_invocation_origin t (receipt : Agent_protocol.Moderator_execution.t) invocation =
+  invocation_origin t invocation ~fallback:(fun () ->
+    match receipt.context.job with
+    | Some _ ->
+      Invocation_inference_provenance.of_event
+        ~runs:t.state.run_state
+        ~jobs:t.state.jobs
+        receipt
+    | None ->
+      let open Result.Let_syntax in
+      let%bind selected = Run_event_scope.select t.state ~executing:receipt in
+      (match selected with
+       | Some run -> Ok (Some (Agent_protocol.Inference_origin.Run run.id))
+       | None ->
+         Invocation_inference_provenance.of_event
+           ~runs:t.state.run_state
+           ~jobs:t.state.jobs
+           receipt))
+;;
+
+let invocation_admission_deltas t (invocation : Agent_protocol.Invocation.t) ~origin =
+  let open Result.Let_syntax in
+  let%bind () =
+    if Option.is_none invocation.inference_origin
+    then Ok ()
+    else Error (error Invalid_request "invocation inference origin is actor captured")
+  in
+  let%bind () = Agent_protocol.Invocation.validate invocation in
+  let%bind captured =
+    match origin with
+    | None -> Ok invocation
+    | Some origin -> Agent_protocol.Invocation.capture_inference_origin invocation origin
+  in
   match
     List.find t.state.invocations ~f:(fun current ->
-      Agent_protocol.Id.Invocation.compare current.context.id invocation.context.id = 0)
+      Agent_protocol.Id.Invocation.equal current.context.id invocation.context.id)
   with
-  | None -> Ok [ Session_delta.Invocation_changed invocation ]
+  | None -> Ok (captured, [ Session_delta.Invocation_changed captured ])
   | Some current
     when Agent_protocol.Invocation.equal_origin invocation.context.origin Model
          && Option.is_some invocation.context.call_entry_id
-         && Agent_protocol.Invocation.equal current invocation -> Ok []
+         && Agent_protocol.Invocation.equal current captured -> Ok (current, [])
   | Some _ -> Error (error Conflict "invocation identity is already admitted")
 ;;
 
 let commit_invocation_call t operation_id (invocation : Agent_protocol.Invocation.t) entry
   =
   let open Result.Let_syntax in
-  let%bind _ = current_operation t operation_id in
+  let%bind operation = current_operation t operation_id in
   let%bind () =
     Extension_invariants.owner
       ~session_id:t.state.identity.session_id
@@ -3471,6 +3523,17 @@ let commit_invocation_call t operation_id (invocation : Agent_protocol.Invocatio
       Error
         (error Invalid_request "call intent requires an admitted root model invocation")
   in
+  let%bind () =
+    if Option.is_none invocation.inference_origin
+    then Ok ()
+    else Error (error Invalid_request "call intent inference origin is actor captured")
+  in
+  let%bind origin =
+    Invocation_inference_provenance.of_operation ~runs:t.state.run_state operation
+  in
+  let%bind invocation =
+    Agent_protocol.Invocation.capture_inference_origin invocation origin
+  in
   let encoded =
     History_codec.canonical_encoder ~previous:t.state.conversation.canonical_history entry
   in
@@ -3491,6 +3554,10 @@ let commit_invocation_call t operation_id (invocation : Agent_protocol.Invocatio
     | None -> Ok [ Session_delta.Invocation_changed invocation ]
     | Some current
       when List.is_empty entries
+           && Option.equal
+                Agent_protocol.Inference_origin.equal
+                current.inference_origin
+                invocation.inference_origin
            && Agent_protocol.Invocation.equal_context current.context invocation.context
            && Option.equal
                 Agent_protocol.Invocation.equal_routing
@@ -3572,7 +3639,6 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
            "foreground invocation cannot borrow background-job ownership")
     else Ok ()
   in
-  let%bind admission = invocation_admission_deltas t invocation in
   let%bind owner =
     match invocation.context.parent_invocation with
     | None -> Ok (Foreground operation_id)
@@ -3605,6 +3671,8 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
           | None ->
             Error (error Conflict "parent invocation is not executing in this operation")))
   in
+  let%bind origin = operation_invocation_origin t operation_id invocation in
+  let%bind invocation, admission = invocation_admission_deltas t invocation ~origin in
   let%bind dispatched = Agent_protocol.Invocation.dispatch invocation in
   let%bind _ =
     transition
@@ -3778,7 +3846,8 @@ let claim_moderator_invocation t operation_id (invocation : Agent_protocol.Invoc
       | None ->
         Error (error Conflict "foreground moderator cannot borrow background ownership")
     in
-    let%bind admission = invocation_admission_deltas t invocation in
+    let%bind origin = operation_invocation_origin t operation_id invocation in
+    let%bind invocation, admission = invocation_admission_deltas t invocation ~origin in
     let%bind dispatched = Agent_protocol.Invocation.dispatch invocation in
     let%bind _ =
       transition
@@ -4238,7 +4307,8 @@ let claim_event_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
       ~events:t.state.moderator_executions
       invocation
   in
-  let%bind admission = invocation_admission_deltas t invocation in
+  let%bind origin = event_invocation_origin t borrow.receipt invocation in
+  let%bind invocation, admission = invocation_admission_deltas t invocation ~origin in
   let%bind dispatched = Agent_protocol.Invocation.dispatch invocation in
   let%bind _ =
     transition
@@ -4726,7 +4796,10 @@ let claim_job_moderator t scope invocation =
     | _ -> Error (error Conflict "moderator is already borrowed")
   in
   let%bind () = active_script_parent t ~owns:(job_execution_owned_by scope) invocation in
-  let%bind admission = invocation_admission_deltas t invocation in
+  let%bind origin =
+    invocation_origin t invocation ~fallback:(fun () -> Ok scope.job.inference_origin)
+  in
+  let%bind invocation, admission = invocation_admission_deltas t invocation ~origin in
   let%bind dispatched = Agent_protocol.Invocation.dispatch invocation in
   let%bind _ =
     transition
@@ -5756,7 +5829,11 @@ let claim_idle_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
       compatible_script_observer observed.observer invocation
     | _ -> Error (error Conflict "idle invocation must belong to its observing moderator")
   in
-  let%bind admission = invocation_admission_deltas t invocation in
+  let%bind origin =
+    invocation_origin t invocation ~fallback:(fun () ->
+      Ok borrow.invocation.inference_origin)
+  in
+  let%bind invocation, admission = invocation_admission_deltas t invocation ~origin in
   let%bind dispatched = Agent_protocol.Invocation.dispatch invocation in
   let%bind _ =
     transition
@@ -9863,7 +9940,10 @@ let claim_job_invocation t scope (invocation : Agent_protocol.Invocation.t) =
       Error (error Conflict "job invocation deadline has elapsed")
     | _ -> Ok ()
   in
-  let%bind admission = invocation_admission_deltas t invocation in
+  let%bind origin =
+    invocation_origin t invocation ~fallback:(fun () -> Ok scope.job.inference_origin)
+  in
+  let%bind invocation, admission = invocation_admission_deltas t invocation ~origin in
   let%bind dispatched = Agent_protocol.Invocation.dispatch invocation in
   let%bind _ =
     transition
