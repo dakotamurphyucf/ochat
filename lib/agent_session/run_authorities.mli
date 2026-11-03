@@ -15,11 +15,18 @@ val add
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> (t, Agent_protocol.Error.t) result
 
+val add_for_caller
+  :  t
+  -> run:Agent_protocol.Run.t
+  -> scope:Run_admission.Scope.t
+  -> caller:Run_admission_request.Caller.t
+  -> (t, Agent_protocol.Error.t) result
+
 val scope : binding -> Run_admission.Scope.t
 
 (** Admission provenance only; transport detach/lease expiry does not revoke the
     host-owned workflow. Current scope authorization decides continuation rights. *)
-val attachment_id : binding -> Agent_protocol.Id.Attachment.t
+val caller : binding -> Run_admission_request.Caller.t
 
 (** Release closures after every successful durable actor installation. Only
     current-generation live runs keep their binding; terminal, retired source and

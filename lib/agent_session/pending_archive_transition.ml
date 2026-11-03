@@ -43,6 +43,7 @@ let collect state ~delta ~limits =
       | Parent_stop_epoch_changed _
       | Workspace_changed _
       | Canonical_entries_appended _
+      | Goal_catalog_changed _
       | Run_state_changed _
       | Canonical_history_replaced _
       | Authoring_references_forgotten _

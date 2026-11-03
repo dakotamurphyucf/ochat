@@ -36,6 +36,19 @@ val prepare
   -> now:Agent_protocol.Timestamp.t
   -> (t, Agent_protocol.Error.t) result
 
+(** Normalized actor-internal request. Headless callers still require exact
+    actor-issued preparation and genuine command authorization. *)
+val prepare_request
+  :  Session_state.t
+  -> scope:Scope.t
+  -> request:Run_admission_request.t
+  -> session:Agent_protocol.Session_ref.t
+  -> run_id:Agent_protocol.Id.Run.t
+  -> operation:Agent_protocol.Operation.t option
+  -> request_sha256:string
+  -> now:Agent_protocol.Timestamp.t
+  -> (t, Agent_protocol.Error.t) result
+
 (** Only the exact actor's checked ephemeral preparation permits acknowledged
     owned constructor/history advances. The original request and digest come
     directly from custody; no public raw revision override or replacement input. *)

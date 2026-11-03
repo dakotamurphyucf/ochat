@@ -703,6 +703,7 @@ let snapshot =
   o
     [ "session", session_summary
     ; "canonical_history", history_window
+    ; "goals", v
     ; "archived_revisions", v
     ; "effective_history", n history_window
     ; "deferred_entries", a ~identity_field:"id" history_entry

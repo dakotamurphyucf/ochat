@@ -106,6 +106,14 @@
   run_receipt
   run_start
   run_query
+  goal_text
+  goal_budget
+  goal_episode
+  goal_achievement
+  goal_state
+  goal_capacity
+  goal
+  goal_projection
   session_activity_summary
   session_activity
   activity_query

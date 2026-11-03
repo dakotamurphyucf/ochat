@@ -716,7 +716,7 @@ let implementation_sources =
   ; ( "lib/chatml_trace/chatml_trace.mli"
     , "8ebf49b2e1858f86daadf6fb687cce0436edec79bdb46935fd7ae2647e1e8f7b" )
   ; ( "lib/agent_session/administration.ml"
-    , "00ae2dcdef80bd0552e6a7dded2e3872ed547b82b2ee85297ca5eb7d3ccd9f8a" )
+    , "e6952c3df582b119012ef6629298d3e1e05f0e0a578464535d848dfa67ca36cb" )
   ; ( "lib/agent_server/command_handler.ml"
     , "895cc7c1e6cc706adc39f6b98c71e1c994aab20814cd86f642d244bb17a06a59" )
   ; ( "lib/agent_server/runtime_owner.ml"
@@ -844,7 +844,7 @@ let implementation_sources =
   ; ( "lib/agent_session/script_subscription_service.ml"
     , "54c775836b551733687e907ff46a2a7a0cc26bd46ff915cc6fd5f0cf5116f069" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "714a16a81a32a77e8f52614509b8ff82b20ccdbce524317859d5b5ab1b30c880" )
+    , "8bf6abfad01ab3b70f86067cda893ed43d43fb0f2f52c97951622d482201a7b1" )
   ; ( "lib/agent_session/staged_jobs.ml"
     , "7731a0fc9f021188e3856041fe493f3044556bc7a15364815c47299fe968603b" )
   ; ( "lib/agent_session/staged_notifications.ml"

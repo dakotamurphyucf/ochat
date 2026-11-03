@@ -117,6 +117,7 @@ let snapshot principal (snapshot : P.Snapshot.t) =
     ; jobs = (if writer then snapshot.jobs else [])
     ; extension_status = (if security then snapshot.extension_status else [])
     ; schedules = (if writer then snapshot.schedules else [])
+    ; goals = (if transcript then snapshot.goals else [])
     ; active_tool_calls
     ; active_agent_calls
     ; halted = snapshot.halted
