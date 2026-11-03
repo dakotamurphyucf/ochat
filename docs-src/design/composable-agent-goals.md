@@ -341,6 +341,36 @@ the accounting view of a closed objective while canonical rows remain retained;
 they cannot reopen the goal or clear an operator hold. Goal creation begins a new
 scope and does not retroactively attribute unrelated historical session attempts.
 
+### Stored invocation inference provenance
+
+Invocation records retain original inference attribution outside the authored
+context ABI. The optional claim is either positively unbound or the exact
+originating Run ID. The host captures it when the genuine operation, registered
+Job, event, or parent invocation admits the call. Supplied positive claims are
+rejected at native admission. A retained model-call intent compares its original
+identity, body, and classification rather than acquiring a later operation's
+origin.
+
+Retained invocation records preserve the claim through outcomes, observation,
+publication, recovery, and source replacement. In particular, an idle
+`Tool_observed` callback inherits the original invocation's classification after
+its foreground operation or Run has finished.
+A terminal Run remains named. Final carrier validation checks the Run's session
+and source generation, known observer/parent evidence, and any actual retained
+Invocation work. This evidence adds no live Run-work obligation and grants no
+execution or inference permission.
+
+Historical absence remains unavailable. Native work under a genuine admitted
+parent with unavailable classification can preserve that absence; it does not
+become positively unbound. Missing or mismatched parents still reject. Model
+attribution requires positive evidence and the separate current physical owner,
+authentication, source, and accounting gates. Unknown invocation and nested origin
+fields remain protected by the universal carrier, including journal replay and
+snapshot restoration; replacements cannot erase or change a retained row’s
+optional claim. Reset can remove current invocation rows under the existing
+lifecycle policy. Any retained archive preserves the original classification
+without restoring its live authority.
+
 ### Stored background inference provenance
 
 A background Job can retain a versioned inference origin: positively unbound work,
