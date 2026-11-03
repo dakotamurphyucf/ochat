@@ -7,17 +7,23 @@ type t =
   }
 
 let check actor ~scope ~authorize state =
-  if
-    Operator_authorization.is_current actor
-    && P.Principal.has_scope (Operator_authorization.principal actor) scope
-  then authorize state
-  else
-    Error
-      (P.Error.create
-         Permission_denied
-         ~message:"goal command original authority expired, was revoked or lacks scope"
-         ~retryable:false
-         ())
+  let current () =
+    if
+      Operator_authorization.is_current actor
+      && P.Principal.has_scope (Operator_authorization.principal actor) scope
+    then Ok ()
+    else
+      Error
+        (P.Error.create
+           Permission_denied
+           ~message:"goal command original authority expired, was revoked or lacks scope"
+           ~retryable:false
+           ())
+  in
+  let open Result.Let_syntax in
+  let%bind () = current () in
+  let%bind () = authorize state in
+  current ()
 ;;
 
 let check_write actor ~authorize state = check actor ~scope:Send_messages ~authorize state

@@ -381,6 +381,28 @@ let%expect_test
             List.length
               (A.Session_actor.read_goals actor ~actor:proof ~authorize |> protocol_ok)
             = 1);
+          (* A host policy callback may invalidate the original proof while
+             deciding access. Neither a retained receipt nor a read can escape
+             the final authentication check. *)
+          let revoke _ =
+            current := false;
+            Ok ()
+          in
+          let saved = !saves in
+          assert (
+            Result.is_error
+              (A.Session_actor.read_goals actor ~actor:proof ~authorize:revoke));
+          current := true;
+          assert (
+            Result.is_error
+              (A.Session_actor.goal_command
+                 actor
+                 ~actor:proof
+                 ~authorize:revoke
+                 ~session
+                 ~request:command));
+          assert (!saves = saved);
+          current := true;
           let no_scope = Operator_authorization.trusted_local (principal []) in
           assert (
             Result.is_error
