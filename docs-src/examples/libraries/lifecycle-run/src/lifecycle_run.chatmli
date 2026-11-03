@@ -1,0 +1,18 @@
+type compose_error = [ `Composition(Lifecycle.error) | `Wake_limit_exceeded ]
+type 'a composed = [ `Ok('a) | `Error(compose_error) ]
+
+(* Moderator-only explicit task adapter. Before equality, preflight ALL Wait
+   values under aggregate limits of 4096 nodes, 65536 string/key bytes and
+   32 nested edges.
+   Cycles exceed this finite traversal; there is no physical-identity policy.
+   Equality is structural, preserving array/object field order and duplicates.
+   Actual wake decoding and authorization still belong to the Run owner. *)
+val compose : fun((json Lifecycle.component) array) -> (json Lifecycle.plan) composed
+
+(* Stages zero or one action in the actual callback transaction. No retries,
+   receipt replay, permission grants or independent scheduling. *)
+val stage : fun(json Lifecycle.action) -> unit task
+
+(* Separate root gate then one Run.finish task. Success means staged decision,
+   not achieved terminal status; actual worker settlement may still be pending. *)
+val finish : fun(json Lifecycle.plan, json) -> (unit Lifecycle.checked) task

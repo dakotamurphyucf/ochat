@@ -1,0 +1,18 @@
+(rule
+ (target docs_project_bundle.ml)
+ (deps ../agent_docs/docs_project_bundle.ml)
+ (action (copy %{deps} %{target})))
+
+(library
+ (name capability_sources_tests)
+ (modules support inventory_tests export_tests restore_diagnostics closure_tests docs_project_bundle)
+ (libraries core eio eio.unix eio_main mirage-crypto-rng.unix jsonaf cstruct
+  agent_server_test_support ochat.capability_sources ochat.capability_source_export
+  ochat.source ochat.chatml_source ochat.chatml_prepared_program ochat.chatml
+  ochat.chatml_prompt_programs ochat.chatml_project_build ochat.document_schema
+  ochat.agent_server ochat.agent_session ochat.agent_store ochat.agent_protocol
+  ochat.chatmd ochat.chatml_project ochat.chat_response ochat.chatmd_shell_spec
+  ochat.chatml_program_document ochat.chatml_catalog)
+ (inline_tests)
+ (preprocessor_deps ../../docs-src/examples/libraries/lifecycle/src/lifecycle.chatml)
+ (preprocess (pps ppx_jane ppx_expect ppx_blob)))
