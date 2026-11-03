@@ -23,6 +23,7 @@ let () =
     ; "guide/chatmd-shell-extensions.md"
     ; "guide/chatml-authoring-background.md"
     ; "guide/chatml-authoring-children.md"
+    ; "guide/chatml-authoring-goals.md"
     ; "guide/chatml-authoring-language.md"
     ; "guide/chatml-authoring-primer.md"
     ; "guide/chatml-authoring-runs.md"

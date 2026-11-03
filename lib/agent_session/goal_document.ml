@@ -116,6 +116,59 @@ let codec =
   | Error error -> failwith (Sexp.to_string_hum (D.Error.sexp_of_t error))
 ;;
 
+(* This private codec probes only preservation compatibility of future variant
+   shapes. Its JSON is never decoded as a Goal/receipt or admitted to state. The
+   actual carrier always uses the validated domain codec above. Reusing merge
+   keeps extension ownership rules identical to real eventual settlement. *)
+let settlement_shape_codec =
+  match
+    D.Domain_codec.create
+      ~limits
+      ~kind:"ochat.goal"
+      ~version:1
+      ~shape
+      ~supported_semantics:[]
+      ~decode:(fun json -> Ok json)
+      ~encode:(fun json -> Ok json)
+  with
+  | Ok codec -> codec
+  | Error error -> failwith (Sexp.to_string_hum (D.Error.sexp_of_t error))
+;;
+
+let preflight_settlement carrier =
+  let goal = value carrier in
+  let open Result.Let_syntax in
+  let probe state =
+    let projected =
+      match G.to_json goal with
+      | `Object fields ->
+        `Object
+          (List.map fields ~f:(fun (name, json) ->
+             name, if String.equal name "state" then state else json))
+      | _ -> assert false
+    in
+    D.Domain_codec.encode settlement_shape_codec (C.with_value carrier projected)
+    |> Result.map ~f:(fun _ -> ())
+  in
+  let%bind () =
+    match G.state goal with
+    | Open Enabled ->
+      probe
+        (`Object
+            [ "kind", `String "open"
+            ; ( "admission"
+              , `Object
+                  [ "kind", `String "held"
+                  ; "reason", `Object [ "kind", `String "source_review" ]
+                  ] )
+            ])
+    | Open (Held _) | Closed _ -> Ok ()
+  in
+  match G.state goal, G.achievement_request goal, G.request_settlement goal with
+  | Open _, Some _, None -> probe (`Object [ "kind", `String "achieved" ])
+  | (Open _ | Closed _), (None | Some _), (None | Some _) -> Ok ()
+;;
+
 let validate_capacity document goal =
   let open Result.Let_syntax in
   let%bind occupied = domain (G.Capacity.measure (D.Document.json document)) in
@@ -133,12 +186,14 @@ let validate_capacity document goal =
 let of_document document =
   let open Result.Let_syntax in
   let%bind carrier = D.Domain_codec.decode codec document in
+  let%bind () = preflight_settlement carrier in
   let%map () = validate_capacity document (value carrier) in
   carrier
 ;;
 
 let to_document carrier =
   let open Result.Let_syntax in
+  let%bind () = preflight_settlement carrier in
   let%bind document = D.Domain_codec.encode codec carrier in
   let%map () = validate_capacity document (value carrier) in
   document

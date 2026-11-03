@@ -27,6 +27,19 @@ val commit
   -> receipt:Goal_command_receipt.t
   -> (t, Agent_protocol.Error.t) result
 
+(** Checked existing-goal internal transition, independent of user receipt
+    capacity. Cannot introduce a goal or discard any retained command evidence.
+    This is pure structural validation; the actor must authenticate Run evidence. *)
+val advance_existing : t -> goal:Goal_document.t -> (t, Agent_protocol.Error.t) result
+
+(** At most sixteen distinct existing goals, each validated once, share one
+    catalog revision. Empty or exact unchanged input returns None. No new goal,
+    duplicate identity or user receipt can be introduced. *)
+val advance_existing_many
+  :  t
+  -> goals:Goal_document.t list
+  -> (t option, Agent_protocol.Error.t) result
+
 (** Internal source/recovery disposition, independent of user receipt capacity.
     Enabled goals become held for source review; existing holds remain exact.
     Adopted source and all request/episode evidence are retained. No-op is None. *)

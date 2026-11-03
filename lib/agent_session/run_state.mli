@@ -12,6 +12,15 @@ val installation : t -> Run_source_installation.t
 val runs : t -> Agent_protocol.Run.t list
 val intents : t -> Run_intent.t list
 val receipts : t -> Agent_protocol.Run_receipt.t list
+val goal_links : t -> Run_goal_link.t list
+val goal_link : t -> Agent_protocol.Id.Run.t -> Run_goal_link.t option
+
+(** Pure association candidate, never authority. Exact actual retained Workflow
+    admission is required; final transition validation additionally requires that
+    the Run itself is newly admitted in that same transition. Immutable links
+    survive terminal/source/reset/recovery and cannot be reassigned or removed. *)
+val bind_goal : t -> Run_goal_link.t -> (t, Agent_protocol.Error.t) result
+
 val job_deliveries : t -> Run_job_delivery.t list
 val find_job_delivery : t -> Run_job_delivery.Key.t -> Run_job_delivery.t option
 

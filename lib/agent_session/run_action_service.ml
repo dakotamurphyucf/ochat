@@ -1,14 +1,24 @@
 open! Core
 module P = Agent_protocol
 
+type selection =
+  { action : P.Run_action.t option
+  ; goal_finish : P.Goal_achievement.Intent.t option
+  }
+
+type staged =
+  { action : P.Run_action.t
+  ; goal_finish : P.Goal_achievement.Intent.t option
+  }
+
 type preparation =
   | Open
-  | Prepared of P.Run_action.t option
+  | Prepared of selection
   | Invalidated
 
 type t =
   { scope : Run_scope.t
-  ; mutable staged : P.Run_action.t Int.Map.t
+  ; mutable staged : staged Int.Map.t
   ; mutable preparation : preparation
   }
 
@@ -39,7 +49,7 @@ let alive t =
   if Run_scope.is_open t.scope then Ok () else Error "run callback scope is closed"
 ;;
 
-let stage t action =
+let stage_selection t action ~goal_finish =
   let open Result.Let_syntax in
   let%bind () = alive t in
   let%bind () =
@@ -65,8 +75,14 @@ let stage t action =
   then Error "run callback action bound exceeded"
   else (
     let%bind receipt = allocate_receipt () in
-    t.staged <- Map.set t.staged ~key:receipt ~data:action;
+    t.staged <- Map.set t.staged ~key:receipt ~data:{ action; goal_finish };
     Ok receipt)
+;;
+
+let stage t action = stage_selection t action ~goal_finish:None
+
+let stage_goal_finish t intent =
+  stage_selection t (P.Goal_achievement.Intent.action intent) ~goal_finish:(Some intent)
 ;;
 
 let rollback t receipt =
@@ -92,28 +108,46 @@ let prepare t receipts =
       || List.contains_dup receipts ~compare:Int.compare
     then Error "invalid surviving run action receipts"
     else
-      List.fold_result receipts ~init:None ~f:(fun selected receipt ->
-        let%bind action =
-          Map.find t.staged receipt
-          |> Result.of_option ~error:"foreign or rolled-back run action receipt"
-        in
-        P.Run_action.combine selected (Some action)
-        |> Result.map_error ~f:(fun error -> error.P.Error.message))
+      List.fold_result
+        receipts
+        ~init:({ action = None; goal_finish = None } : selection)
+        ~f:(fun (selected : selection) receipt ->
+          let%bind (staged : staged) =
+            Map.find t.staged receipt
+            |> Result.of_option ~error:"foreign or rolled-back run action receipt"
+          in
+          let%bind action =
+            P.Run_action.combine selected.action (Some staged.action)
+            |> Result.map_error ~f:(fun error -> error.P.Error.message)
+          in
+          let%map goal_finish =
+            match selected.goal_finish, staged.goal_finish with
+            | Some _, Some _ -> Error "multiple surviving goal finish requests"
+            | None, intent | intent, None -> Ok intent
+          in
+          ({ action; goal_finish } : selection))
   in
   match result with
-  | Error _ as result ->
+  | Error message ->
     close t;
-    result
+    Error message
   | Ok selected ->
     t.preparation <- Prepared selected;
-    Ok selected
+    Ok selected.action
 ;;
 
 let prepared t =
   let open Result.Let_syntax in
   let%bind () = alive t in
   match t.preparation with
-  | Prepared selected -> Ok selected
+  | Prepared selected -> Ok selected.action
+  | Open | Invalidated -> Error "run callback has no prepared action selection"
+;;
+
+let prepared_goal_finish t =
+  let%bind.Result () = alive t in
+  match t.preparation with
+  | Prepared selected -> Ok selected.goal_finish
   | Open | Invalidated -> Error "run callback has no prepared action selection"
 ;;
 
@@ -125,7 +159,10 @@ let verify t selected =
 ;;
 
 let transaction t : Chat_response.Run_operations.transaction =
-  { handlers = { stage = stage t; rollback = rollback t }; prepare = prepare t }
+  { handlers =
+      { stage = stage t; stage_goal_finish = stage_goal_finish t; rollback = rollback t }
+  ; prepare = prepare t
+  }
 ;;
 
 let compose_requests t ~action ~(requests : P.Invocation.follow_up) =

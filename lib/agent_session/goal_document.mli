@@ -3,11 +3,13 @@
     fields, is bounded to 256 KiB, depth64. A valid Goal projection close to its
     own bound can therefore fail carrier admission. Every entry/update/adoption
     charges unknown fields and complete JSON overhead plus reserved known-owned
-    byte/field/node growth for an open request. Preflight this carrier before
-    staging its Run Finish; preserved unknowns cannot consume that reservation.
-    Existing variant/container extension conflicts remain explicit guards. The
-    actor must also preflight future-schema compatibility before effects; quota
-    reservation never grants permission to discard protected future fields. *)
+    byte/field/node growth for an unresolved request and every Enabled goal's
+    promised review hold. Admission probes the same preservation codec for future
+    hold and achievement shapes, without constructing evidence or admitting those
+    probes as Goal values. Preflight this carrier before staging its Run Finish;
+    preserved unknowns cannot consume the reservation or block the promised
+    disposition. Variant/container extension conflicts remain explicit guards;
+    quota reservation never grants permission to discard protected future fields. *)
 type t
 
 val create : Agent_protocol.Goal.t -> (t, Document_schema.Error.t) result

@@ -1,5 +1,23 @@
 (** Achievement requests retain action receipt associations, never another Run
     lifecycle. Constructors validate evidence relationships, not host authority. *)
+module Intent : sig
+  (** Untrusted scoped native input, not a receipt or authorization. The actor
+      resolves the goal from its actual Run association, never a supplied ID. *)
+  type t [@@deriving equal, sexp_of]
+
+  val create
+    :  expected_goal_revision:int64
+    -> evidence:Goal_text.Reason.t
+    -> action:Run_action.t
+    -> (t, Error.t) result
+
+  val expected_goal_revision : t -> int64
+  val evidence : t -> Goal_text.Reason.t
+  val action : t -> Run_action.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
 module Request : sig
   type t [@@deriving equal, sexp_of]
 

@@ -89,6 +89,7 @@ let%expect_test "two checked components stage one scoped action then an explicit
             (fun action ->
               incr stages;
               dynamic.stage action)
+        ; stage_goal_finish = dynamic.stage_goal_finish
         ; rollback = dynamic.rollback
         }
       in
@@ -279,4 +280,76 @@ let%test_unit "neutral staging and an active peer finish gate make no native req
       |> get;
       [%test_eq: int] !calls 0;
       assert (L.equal_value (H.current_state session) (L.VBool true)))
+;;
+
+let%expect_test
+    "authored Goal.finish uses checked native staging and transactional Catch rollback"
+  =
+  let intent =
+    P.Goal_achievement.Intent.create
+      ~expected_goal_revision:3L
+      ~evidence:(P.Goal.Reason.of_string "Explicit completion evidence" |> protocol_get)
+      ~action:(Finish { terminal = Completed None; relinquish = [] })
+    |> protocol_get
+  in
+  List.iter
+    [ ( Chatml.Chatml_compiler_contract.Target.Moderator_v1
+      , Chatml.Chatml_extension_surface.moderator_v1 )
+    ; Delegated_moderator_v1, Chatml.Chatml_extension_surface.delegated_moderator_v1
+    ]
+    ~f:(fun (target, surface) ->
+      List.iter [ false; true ] ~f:(fun rollback ->
+        let body =
+          if rollback
+          then
+            "Task.catch(Task.bind(Goal.finish(intent), fun ignored -> \
+             Task.fail(\"discard\")), fun message -> Task.pure(true))"
+          else "Task.map(Goal.finish(intent), fun ignored -> true)"
+        in
+        let entry =
+          sprintf
+            "let initial_state = false\n\
+             let on_event ctx state event =\n\
+            \  let intent = Json.parse(%S) in\n\
+            \  %s"
+            (P.Goal_achievement.Intent.to_json intent |> Jsonaf.to_string)
+            body
+        in
+        let _, program = Support.build ~target ~entry ~example_modules:false in
+        let owner = service () in
+        Exn.protect
+          ~finally:(fun () -> A.Run_action_service.close owner)
+          ~f:(fun () ->
+            let transaction = A.Run_action_service.transaction owner in
+            let session =
+              instantiate
+                program
+                (Chat_response.Run_operations.install
+                   ~handlers:transaction.handlers
+                   (Support.runtime surface))
+            in
+            H.handle_event
+              session
+              ~context:(context M.Event.Session_start)
+              ~event:(M.Event.to_value M.Event.Session_start)
+              ~prepare_transaction:(fun proposed ->
+                let receipts, ordinary =
+                  Chat_response.Run_operations.split_actions proposed.local_effects |> get
+                in
+                assert (List.is_empty ordinary);
+                [%test_eq: int] (List.length receipts) (if rollback then 0 else 1);
+                ignore (transaction.prepare receipts |> get : P.Run_action.t option);
+                assert (
+                  Option.equal
+                    P.Goal_achievement.Intent.equal
+                    (A.Run_action_service.prepared_goal_finish owner |> get)
+                    (if rollback then None else Some intent));
+                Ok ignore)
+            |> get;
+            assert (L.equal_value (H.current_state session) (L.VBool true)))));
+  print_endline
+    "both moderator surfaces: checked Goal.finish; Catch discards staged intent; no \
+     completion claim";
+  [%expect
+    {| both moderator surfaces: checked Goal.finish; Catch discards staged intent; no completion claim |}]
 ;;

@@ -168,8 +168,28 @@ let validate_host_capacity t raw ~limits = validate_capacity t raw ~limits
 
 let validate_structure t =
   let open Result.Let_syntax in
+  let pending =
+    List.count t.entries ~f:(fun entry ->
+      let goal = Entry.value entry in
+      match G.state goal, G.achievement_request goal, G.request_settlement goal with
+      | Open _, Some _, None -> true
+      | (Open _ | Closed _), (None | Some _), (None | Some _) -> false)
+  in
+  let enabled =
+    List.exists t.entries ~f:(fun entry ->
+      match G.state (Entry.value entry) with
+      | Open Enabled -> true
+      | Open (Held _) | Closed _ -> false)
+  in
+  (* A source/recovery hold changes all Enabled goals in one catalog revision,
+     even if the Enabled goal itself has no pending request. Each request then
+     needs its own immutable terminal association. Unrelated commands cannot
+     consume those promised internal transitions. *)
+  let reserve = pending + if enabled then 1 else 0 in
   if Int64.(t.revision < 0L) || List.length t.entries > 16 || List.length t.receipts > 256
   then full "goal catalog or retained command receipt capacity exhausted"
+  else if Int64.(t.revision > max_value - of_int reserve)
+  then full "goal catalog revision lacks reserved pending settlement headroom"
   else if
     List.count t.entries ~f:(fun e ->
       match G.state (Entry.value e) with
@@ -369,6 +389,58 @@ let commit t ~goal ~(receipt : R.t) =
   in
   let%map () = validate_transition t ~incoming in
   incoming
+;;
+
+let advance_existing_many t ~goals =
+  let open Result.Let_syntax in
+  let%bind () =
+    if List.length goals > 16
+    then full "internal goal update exceeds catalog bound"
+    else Ok ()
+  in
+  let%bind _, changes =
+    List.fold_result goals ~init:([], []) ~f:(fun (seen, changes) goal ->
+      let id = G.id (Goal_document.value goal) in
+      let%bind () =
+        if List.mem seen id ~equal:P.Id.Goal.equal
+        then invalid "duplicate internal goal update"
+        else Ok ()
+      in
+      let%bind old =
+        Result.of_option
+          (entry t id)
+          ~error:
+            (P.Error.invalid_request "internal goal update requires an existing goal")
+      in
+      let%bind goal = Goal_document.adopt old.goal ~incoming:goal |> domain in
+      let%map next = Entry.create goal in
+      ( id :: seen
+      , if D.Json.equal old.encoded next.encoded then changes else next :: changes ))
+  in
+  match changes with
+  | [] -> Ok None
+  | _ :: _ ->
+    let%bind () =
+      if Int64.equal t.revision Int64.max_value
+      then full "goal catalog revision exhausted during internal update"
+      else Ok ()
+    in
+    let incoming =
+      { t with
+        revision = Int64.succ t.revision
+      ; entries =
+          List.map t.entries ~f:(fun retained ->
+            List.find changes ~f:(fun next ->
+              P.Id.Goal.equal (G.id (Entry.value retained)) (G.id (Entry.value next)))
+            |> Option.value ~default:retained)
+      }
+    in
+    let%map () = validate_transition t ~incoming in
+    Some incoming
+;;
+
+let advance_existing t ~goal =
+  Result.map (advance_existing_many t ~goals:[ goal ]) ~f:(Option.value ~default:t)
 ;;
 
 let hold_for_review t =

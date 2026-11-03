@@ -1045,6 +1045,7 @@ let validate_domain (t : t) =
 
 let validate (t : t) =
   let open Result.Let_syntax in
+  let%bind () = Goal_run_evidence.validate ~catalog:t.goal_catalog ~runs:t.run_state in
   let%bind () =
     match t.instruction_selection with
     | None -> Ok ()

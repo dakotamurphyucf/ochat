@@ -146,6 +146,21 @@ let%expect_test
     "achievement request waits for actual Completed and adverse evidence stays unachieved"
   =
   let goal, request = requested () in
+  let changed_objective = G.Objective.of_string "Different pending objective" |> ok in
+  (match G.revise_objective goal changed_objective with
+   | Error error -> [%test_eq: P.Error.code] error.code Conflict
+   | Ok _ -> assert false);
+  let edited =
+    G.of_json
+      (set
+         (set (G.to_json goal) "objective" (G.Objective.to_json changed_objective))
+         "revision"
+         (`String (Int64.to_string (Int64.succ (G.revision goal)))))
+    |> ok
+  in
+  assert (Result.is_error (G.validate_update goal ~incoming:edited));
+  assert (
+    Result.is_ok (G.record_progress goal (G.Progress.of_string "Still pending" |> ok)));
   assert (
     match G.state goal with
     | Open _ -> true
@@ -415,6 +430,29 @@ let%expect_test
   in
   assert (
     Result.is_error (Store.update protected (G.resume (Store.value protected) |> ok)));
+  (* A promised future hold/closure must remain compatible at every pending or
+     Enabled carrier admission, not merely at the original Finish request. *)
+  List.iter
+    [ G.resume (goal ()) |> ok; fst (requested ()) ]
+    ~f:(fun goal ->
+      let original =
+        Store.create goal |> stored |> Store.to_document |> stored |> D.Document.json
+      in
+      let payload = field original "payload" in
+      let state = field payload "state" in
+      let protected_state =
+        set
+          state
+          "admission"
+          (set (field state "admission") "future_variant" (`String "protected"))
+      in
+      let incoming =
+        D.Document.inspect
+          ~limits:Store.limits
+          (set original "payload" (set payload "state" protected_state))
+        |> stored
+      in
+      assert (Result.is_error (Store.of_document incoming)));
   print_endline
     "nested/envelope unknowns survive progress edit; required absence and unsafe variant \
      change reject";
@@ -735,7 +773,7 @@ let%expect_test "request admission reserves settlement, metadata and carrier cap
       ~session:extreme_session
       ~creator:principal_id
       ~source:initial_source
-      ~objective:(G.Objective.of_string "Capacity" |> ok)
+      ~objective:(G.Objective.of_string (String.make G.Objective.max_bytes '"') |> ok)
       ~budget:G.Budget.unlimited
     |> ok
     |> fun goal -> G.bind_episode goal episode ~previous:None |> ok
@@ -772,6 +810,26 @@ let%expect_test "request admission reserves settlement, metadata and carrier cap
   assert (
     String.length (Jsonaf.to_string (G.Achievement_request.to_json near)) > 30 * 1024);
   let requested_goal = G.request_achievement bound_goal near |> ok in
+  let with_revision goal revision =
+    G.of_json (set (G.to_json goal) "revision" (`String (Int64.to_string revision)))
+  in
+  let held_edge = with_revision requested_goal (Int64.pred Int64.max_value) |> ok in
+  assert (Result.is_error (with_revision requested_goal Int64.max_value));
+  assert (Result.is_error (G.resume held_edge));
+  assert (Result.is_ok (G.abandon held_edge reason));
+  let enabled = G.resume requested_goal |> ok in
+  let enabled_edge = with_revision enabled Int64.(max_value - 2L) |> ok in
+  assert (Result.is_error (with_revision enabled (Int64.pred Int64.max_value)));
+  let held_edge = G.hold enabled_edge Source_review |> ok in
+  let adverse_edge =
+    extreme_run ~relinquished_work:work Int64.max_value (Terminal Interrupted)
+  in
+  assert (
+    Result.is_ok
+      (G.retire_request
+         held_edge
+         ~run:adverse_edge
+         ~receipt:(extreme_receipt adverse_edge Terminal)));
   let reserved = G.reserved_capacity requested_goal |> ok in
   let within_reservation goal =
     let actual = G.Capacity.measure (G.to_json goal) |> ok in
@@ -806,13 +864,8 @@ let%expect_test "request admission reserves settlement, metadata and carrier cap
     |> ok
   in
   let sized =
-    G.revise_objective
-      requested_goal
-      (G.Objective.of_string (String.make G.Objective.max_bytes '"') |> ok)
-    |> ok
-    |> fun goal ->
     G.record_progress
-      goal
+      requested_goal
       (G.Progress.of_string (String.make G.Progress.max_bytes '"') |> ok)
     |> ok
     |> fun goal ->

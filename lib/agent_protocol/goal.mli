@@ -77,7 +77,11 @@ val request_settlement : t -> Episode.Settlement.t option
 val previous_episode_settlement : t -> Episode.Settlement.t option
 
 val revision : t -> int64
+
+(** An unresolved achievement request freezes the objective whose completion
+    was requested. Progress, holds, budgets and abandonment remain available. *)
 val revise_objective : t -> Objective.t -> (t, Error.t) result
+
 val record_progress : t -> Progress.t -> (t, Error.t) result
 val change_budget : t -> Budget.t -> (t, Error.t) result
 val hold : t -> Hold.t -> (t, Error.t) result

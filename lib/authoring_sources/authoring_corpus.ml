@@ -2374,6 +2374,39 @@ module Coverage = struct
           }))
   ;;
 
+  let goal_mappings =
+    List.concat_map
+      [ ( "moderator_v1"
+        , "d0eaeacfbd5bc8d003a8374ff4babf89bbab20f5cf18006fa43c423de4049815"
+        , [ ( "module/Goal"
+            , "ae3986a7e62a9ab0300c1ce8382da73f6cd455fe920fdf0b159d5355780041bf" )
+          ; ( "module_export/Goal.finish"
+            , "4ac7320a107a1a30e184c8cf78d2e8f424ca6f1c0e909d66c8d28860154ee194" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "cfbc6c1c2e197cdf8a0723010231a9d5580b30f4b6db6f0dc2ef81b528b6ca3b"
+        , [ ( "module/Goal"
+            , "8803a36e3d21a566bf06c43e8f8bbd17db9611457ee0b015eeaf755a76928ce9" )
+          ; ( "module_export/Goal.finish"
+            , "2fd98518fbe3a506896cfd2fd769236e54731cb5e69f4a9e306a64d72db5defc" )
+          ] )
+      ]
+      ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
+        List.map contracts ~f:(fun (name, contract_sha256) ->
+          { target_id = surface_id ^ "/" ^ name
+          ; contract_sha256
+          ; topic_id = "runtime.goals"
+          ; topic_closure_sha256
+          ; evidence =
+              [ "test/lifecycle_helpers/staging_tests.ml"
+              ; "test/agent_session/run_action_scope_tests.ml"
+              ; "test/agent_session/goal_run_tests.ml"
+              ; "lib/chat_response/run_operations.ml"
+              ; "lib/agent_session/goal_run_transition.ml"
+              ]
+          }))
+  ;;
+
   let background_mappings =
     List.concat_map
       [ ( "one_off_v1"
@@ -2761,6 +2794,7 @@ module Coverage = struct
     @ host_effect_mappings
     @ runtime_control_mappings
     @ run_mappings
+    @ goal_mappings
     @ background_mappings
     @ invocation_context_mappings
   ;;
@@ -3713,6 +3747,30 @@ let runtime_foundation ~sources =
                    ; "test/capability_sources/export_tests.ml"
                    ; "test/capability_sources/closure_tests.ml"
                    ; "lib/capability_sources/capability_source_inventory_tests.ml"
+                   ]
+               }
+         }
+       ]
+     @ [ { id = "runtime.goals"
+         ; title = "Scoped goal completion and exact Run terminal evidence"
+         ; prerequisites = []
+         ; surfaces = moderators
+         ; excerpts =
+             [ { path = "guide/chatml-authoring-goals.md"
+               ; heading = "# Scoped goal completion"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "f08e193a20c118cf2b5a01b72dff9a0f31f1e5b31cf14d1345e600997bb0f311" ]
+               ; evidence =
+                   [ "test/lifecycle_helpers/staging_tests.ml"
+                   ; "test/agent_session/run_action_scope_tests.ml"
+                   ; "test/agent_session/goal_run_tests.ml"
+                   ; "lib/chat_response/run_operations.ml"
+                   ; "lib/agent_session/goal_run_transition.ml"
                    ]
                }
          }

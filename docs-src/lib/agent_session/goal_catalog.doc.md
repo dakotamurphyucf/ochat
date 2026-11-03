@@ -72,11 +72,12 @@ There is no receipt eviction, silent goal deletion or unbounded retention. At
 saturation, fresh user-command keys fail closed, including fresh Hold/Abandon
 keys. Exact retained retries and authorized reads remain available, and the
 existing session stop remains callable. Internal source/reset/recovery holds do
-not consume user-command receipt slots. Future authenticated terminal settlement
-must likewise use a receipt-independent internal transition, preserving the
-existing Run proof and child reservation. Automatic metadata holds can still fail
-explicitly on exhausted revision or incompatible forward-schema protection;
-evidence must never be dropped to force admission.
+not consume user-command receipt slots. Authenticated terminal settlement likewise uses a receipt-independent internal
+transition, preserving existing Run proof and child reservation. Enabled goals
+reserve review-hold headroom; unresolved requests also reserve settlement
+headroom. Carrier admission checks future disposition compatibility before work
+can start; evidence must never be dropped to force admission. See the
+[episode settlement contract](goal_runs.doc.md).
 
 ## Source changes, reset and recovery
 
@@ -94,8 +95,11 @@ defaulting to empty. Principal projection discloses them only with transcript
 visibility. Private receipts and protected carrier extensions stay with the
 session owner.
 
-The remaining execution integration owns actual enable/resume, episode binding,
-achievement settlement, cumulative accounting and model/native control policy.
+The remaining controller integration owns actual enable/resume and authenticated
+episode admission, cumulative accounting and full model/native control policy.
+The settlement foundation supplies reciprocal association planning and exact
+terminal convergence; complete controller-admitted authored execution remains a
+combined integration gate.
 Explicit session-stop to active-goal pause belongs to that control boundary.
 Neither this catalog nor a stored goal reference grants a second scheduler or an
 execution permit.

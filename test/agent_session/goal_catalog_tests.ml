@@ -231,6 +231,22 @@ let%expect_test
   let held = C.hold_for_review enabled |> protocol_ok |> Option.value_exn in
   assert (List.length (C.receipts held) = 256);
   assert (Option.is_none (C.hold_for_review held |> protocol_ok));
+  let near_max =
+    C.to_jsonaf enabled
+    |> protocol_ok
+    |> fun raw ->
+    set raw "revision" (`String (Int64.to_string (Int64.pred Int64.max_value)))
+    |> C.of_jsonaf
+    |> protocol_ok
+  in
+  let last_hold = C.hold_for_review near_max |> protocol_ok |> Option.value_exn in
+  [%test_eq: int64] (C.revision last_hold) Int64.max_value;
+  assert (
+    Result.is_error
+      (C.to_jsonaf enabled
+       |> protocol_ok
+       |> fun raw ->
+       C.of_jsonaf (set raw "revision" (`String (Int64.to_string Int64.max_value)))));
   let sixteen =
     List.fold (List.init 16 ~f:Fn.id) ~init:C.empty ~f:(fun catalog n ->
       create catalog ("bounded" ^ Int.to_string n) |> fun (catalog, _, _) -> catalog)
