@@ -1,8 +1,14 @@
 open! Core
 
+type sweep =
+  { entry : Session_registry.entry
+  ; mutable cancel : Eio.Cancel.t option
+  }
+
 type t =
   { closed : bool Atomic.t
   ; mutable busy : Session_registry.entry list
+  ; mutable sweeps : sweep list
   ; idle : Eio.Condition.t
   }
 
@@ -146,6 +152,41 @@ let dispatch_entry t sw entry =
           if List.is_empty t.busy then Eio.Condition.broadcast t.idle)))
 ;;
 
+let dispatch_recurrences t sw entry =
+  if
+    (not (Atomic.get t.closed))
+    && not (List.exists t.sweeps ~f:(fun sweep -> phys_equal sweep.entry entry))
+  then (
+    let sweep = { entry; cancel = None } in
+    t.sweeps <- sweep :: t.sweeps;
+    let release () =
+      sweep.cancel <- None;
+      t.sweeps <- List.filter t.sweeps ~f:(fun active -> not (phys_equal active sweep));
+      Eio.Condition.broadcast t.idle
+    in
+    match
+      Eio.Fiber.fork ~sw (fun () ->
+        Exn.protect
+          ~f:(fun () ->
+            try
+              Eio.Cancel.sub (fun cancel ->
+                sweep.cancel <- Some cancel;
+                if not (Atomic.get t.closed)
+                then
+                  ignore
+                    (Agent_session.Session_actor.sweep_recurrences entry.actor
+                     : (unit, Agent_protocol.Error.t) result))
+            with
+            | Eio.Cancel.Cancelled _ as exn -> if not (Atomic.get t.closed) then raise exn)
+          ~finally:release)
+    with
+    | () -> ()
+    | exception exn ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      release ();
+      Exn.raise_with_original_backtrace exn backtrace)
+;;
+
 let process t sw registry =
   Session_registry.entries registry
   |> List.iter ~f:(fun entry ->
@@ -155,6 +196,7 @@ let process t sw registry =
     ignore
       (Agent_session.Session_actor.expire_subscriptions entry.Session_registry.actor
        : (int, Agent_protocol.Error.t) result);
+    dispatch_recurrences t sw entry;
     dispatch_entry t sw entry)
 ;;
 
@@ -168,18 +210,34 @@ let rec run t sw clock registry =
 
 let start_controlled ~enabled ~sw ~clock ~registry =
   let t =
-    { closed = Atomic.make (not enabled); busy = []; idle = Eio.Condition.create () }
+    { closed = Atomic.make (not enabled)
+    ; busy = []
+    ; sweeps = []
+    ; idle = Eio.Condition.create ()
+    }
   in
   if enabled then Eio.Fiber.fork ~sw (fun () -> run t sw clock registry);
   t
 ;;
 
 let start ~sw ~clock ~registry = start_controlled ~enabled:true ~sw ~clock ~registry
-let close t = Atomic.set t.closed true
+
+let close t =
+  Atomic.set t.closed true;
+  List.iter t.sweeps ~f:(fun sweep ->
+    Option.iter sweep.cancel ~f:(fun cancel -> Eio.Cancel.cancel cancel Exit))
+;;
+
+let rec await_recurrences_idle t =
+  if not (List.is_empty t.sweeps)
+  then (
+    Eio.Condition.await_no_mutex t.idle;
+    await_recurrences_idle t)
+;;
 
 let rec await_idle t =
-  match t.busy with
-  | [] -> ()
+  match t.busy, t.sweeps with
+  | [], [] -> ()
   | _ ->
     Eio.Condition.await_no_mutex t.idle;
     await_idle t

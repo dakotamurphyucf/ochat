@@ -14,6 +14,12 @@ val check_write
   -> Session_state.t
   -> (unit, Agent_protocol.Error.t) result
 
+val check_read
+  :  Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> Session_state.t
+  -> (unit, Agent_protocol.Error.t) result
+
 val check_current : t -> (unit, Agent_protocol.Error.t) result
 
 val prepare

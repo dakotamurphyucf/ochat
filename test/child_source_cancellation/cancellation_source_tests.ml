@@ -152,6 +152,7 @@ let%expect_test "File cancellation before reservation preserves source and Facto
                         (Chatml_source.Digest.of_contents
                            "fixture.cancel-runtime.v1"
                            ~checkpoint:ignore)))
+              ~recurrence_planning_host:None
               ~durability:Agent_store.Journal_segment.Flush
               ~limits:options.factory_limits
           in

@@ -1285,12 +1285,120 @@ let parse_developer context path sexp =
     ])
 ;;
 
+let parse_recurrence_automation context path sexp =
+  let module C = Recurrence_automation_configuration in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let invalid () =
+    fail
+      context
+      ~code:"config.recurrence_automation"
+      ~path
+      ~message:"invalid or unbounded recurrence automation configuration"
+      ~remediation:
+        "Use a principal, at most 256 distinct controller IDs, optional UTC expiry, and \
+         a bounded canonical directory with finite UTC coverage."
+  in
+  let rec bounded depth nodes bytes = function
+    | _ when depth > 16 || nodes <= 0 -> Error ()
+    | Sexp.Atom text ->
+      let length = String.length text in
+      if length > bytes then Error () else Ok (nodes - 1, bytes - length)
+    | List values ->
+      List.fold_result
+        values
+        ~init:(nodes - 1, bytes)
+        ~f:(fun (nodes, bytes) value -> bounded (depth + 1) nodes bytes value)
+  in
+  let%bind () =
+    match bounded 0 2048 65536 sexp with
+    | Ok _ -> Ok ()
+    | Error () -> invalid ()
+  in
+  let from_protocol result = Result.map_error result ~f:(fun _ -> ()) in
+  let admitted result =
+    match result with
+    | Ok value -> Ok value
+    | Error () -> invalid ()
+  in
+  let timestamp name value =
+    let%bind value = atom context (path ^ "." ^ name) value in
+    P.Timestamp.of_string value |> from_protocol |> admitted
+  in
+  let%bind fields = record context path sexp in
+  let%bind () =
+    ensure_allowed
+      context
+      path
+      fields
+      [ "principal_id"; "controllers"; "expires_at"; "zone_directory" ]
+  in
+  let%bind principal_id =
+    required context path fields "principal_id"
+    >>= atom context (path ^ ".principal_id")
+    >>= fun value -> P.Id.Principal.of_string value |> from_protocol |> admitted
+  in
+  let%bind controllers =
+    required context path fields "controllers"
+    >>= list context (path ^ ".controllers")
+    >>= fun values ->
+    if List.length values > 256
+    then invalid ()
+    else
+      List.map values ~f:(fun value ->
+        atom context (path ^ ".controllers[]") value
+        >>= fun value -> P.Id.Session.of_string value |> from_protocol |> admitted)
+      |> Result.all
+  in
+  let%bind expires_at =
+    match field fields "expires_at" with
+    | None -> Ok None
+    | Some value -> timestamp "expires_at" value |> Result.map ~f:Option.some
+  in
+  let%bind zone_directory =
+    match field fields "zone_directory" with
+    | None -> Ok None
+    | Some value ->
+      let zone_path = path ^ ".zone_directory" in
+      let%bind fields = record context zone_path value in
+      let%bind () =
+        ensure_allowed context zone_path fields [ "directory"; "source"; "from"; "until" ]
+      in
+      let%bind directory =
+        required context zone_path fields "directory"
+        >>= atom context (zone_path ^ ".directory")
+      in
+      let directory =
+        if Filename.is_absolute directory
+        then directory
+        else Filename.concat context.source_directory directory
+      in
+      let%bind source =
+        required context zone_path fields "source" >>= atom context (zone_path ^ ".source")
+      in
+      let%bind from = required context zone_path fields "from" >>= timestamp "from" in
+      let%bind until = required context zone_path fields "until" >>= timestamp "until" in
+      C.Zone_directory.create
+        ~directory
+        ~source
+        ~from:(P.Timestamp.to_time_ns from)
+        ~until:(P.Timestamp.to_time_ns until)
+      |> from_protocol
+      |> admitted
+      |> Result.map ~f:Option.some
+  in
+  C.create ~principal_id ~controllers ~expires_at ~zone_directory
+  |> from_protocol
+  |> admitted
+;;
+
 let parse_server context sexp =
   let path = "server" in
   let open Result.Let_syntax in
   let%bind fields = record context path sexp in
   let allowed =
     [ "data_dir"
+    ; "recurrence_automation"
     ; "project_sources"
     ; "authoring_project_access"
     ; "authoring_upload_access"
@@ -1312,6 +1420,13 @@ let parse_server context sexp =
   let%bind () = ensure_allowed context path fields allowed in
   let%bind data_dir =
     required context path fields "data_dir" >>= resolve_path context "server.data_dir"
+  in
+  let%bind recurrence_automation =
+    match field fields "recurrence_automation" with
+    | None -> Ok None
+    | Some value ->
+      parse_recurrence_automation context "server.recurrence_automation" value
+      |> Result.map ~f:Option.some
   in
   let%bind project_sources =
     optional_value
@@ -1492,6 +1607,7 @@ let parse_server context sexp =
   in
   Config.Server.
     { data_dir
+    ; recurrence_automation
     ; project_sources
     ; authoring_project_access
     ; authoring_upload_access

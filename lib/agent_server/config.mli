@@ -66,6 +66,11 @@ module Server : sig
 
   type t =
     { data_dir : string
+    ; recurrence_automation : Recurrence_automation_configuration.t option [@sexp.option]
+      (** Explicit restart-bound planning principal/controller grants and optional
+          finite no-follow timezone directory. Absence disables automatic due
+          publication while metadata and safety controls remain usable. This
+          grants no target visibility, child creation or Run admission. *)
     ; project_sources : Project_source_configuration.t option [@sexp.option]
     ; authoring_project_access : Authoring_project_access_configuration.t option
           [@sexp.option]
