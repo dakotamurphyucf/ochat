@@ -53,6 +53,7 @@ let run_child env ~root ~boundary ~recover =
          ; parent_revision_id = P.Id.Prompt_revision.create ()
          ; parent_stop_epoch = Some 0L
          ; authored_tool = None
+         ; captured_recurrence = None
          ; authority_sha256 = Chatmd_shell_spec.Source_ref.digest "deleted parent"
          ; capability_pins = []
          ; lifetime = Owned

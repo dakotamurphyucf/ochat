@@ -83,6 +83,7 @@ let with_fixture ?(lifetime = D.Admission.Owned) ?(reject_transition = fun _ -> 
                 ; parent_revision_id = prompt_revision_id
                 ; parent_stop_epoch = None
                 ; authored_tool = None
+                ; captured_recurrence = None
                 ; authority_sha256 = digest "parent authority"
                 ; capability_pins = []
                 ; lifetime

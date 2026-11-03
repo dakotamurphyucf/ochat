@@ -172,13 +172,16 @@ let reader t ~max_entries ~max_bytes =
   Retention_reader.create ~env:t.env ~root:(directory t) ~max_entries ~max_bytes
 ;;
 
-let read reader name =
+let read_sized reader name =
   let open Result.Let_syntax in
   let%bind contents =
     Retention_reader.read reader ~path:name ~max_bytes:(max_payload_length + 4096)
   in
-  decode ~name contents
+  let%map record = decode ~name contents in
+  record, String.length contents
 ;;
+
+let read reader name = Result.map (read_sized reader name) ~f:fst
 
 let find_locked t key =
   let open Result.Let_syntax in
@@ -251,7 +254,14 @@ let validate_record_identities records =
     |> Result.map ~f:ignore)
 ;;
 
-let records_locked t ~max_records ~max_bytes =
+module Scan = struct
+  type t =
+    { records : (record * int) list
+    ; remaining_bytes : int
+    }
+end
+
+let scan_locked t ~max_records ~max_bytes =
   let open Result.Let_syntax in
   let%bind () =
     match
@@ -262,7 +272,7 @@ let records_locked t ~max_records ~max_bytes =
   in
   let%bind present = exists t in
   match present with
-  | false -> Ok []
+  | false -> Ok Scan.{ records = []; remaining_bytes = max_bytes }
   | true ->
     let%bind reader = reader t ~max_entries:((max_records * 4) + 16) ~max_bytes in
     let%bind names = Retention_reader.list reader ~directory:"." in
@@ -285,9 +295,14 @@ let records_locked t ~max_records ~max_bytes =
       | true -> Ok ()
       | false -> corrupt "delegation scan exceeds its record budget"
     in
-    let%bind records = List.map names ~f:(read reader) |> Result.all in
-    let%map () = validate_record_identities records in
-    records
+    let%bind records = List.map names ~f:(read_sized reader) |> Result.all in
+    let%map () = validate_record_identities (List.map records ~f:fst) in
+    Scan.{ records; remaining_bytes = Retention_reader.remaining_bytes reader }
+;;
+
+let records_locked t ~max_records ~max_bytes =
+  Result.map (scan_locked t ~max_records ~max_bytes) ~f:(fun scan ->
+    List.map scan.Scan.records ~f:fst)
 ;;
 
 let with_records t ~max_records ~max_bytes ~f =
@@ -409,6 +424,32 @@ let same_invocation_scope left right =
   | (Owned | Independent _), (Owned | Independent _) -> true
 ;;
 
+let reserved_frame_bytes record =
+  let open Result.Let_syntax in
+  let%bind document = C.of_record record |> F.store in
+  let%map payload = C.reserved_payload_bytes document |> F.store in
+  payload + Frame.header_length + Frame.checksum_length
+;;
+
+let admit_candidate (scan : Scan.t) candidate =
+  let open Result.Let_syntax in
+  let charge remaining bytes =
+    if bytes > remaining
+    then corrupt "delegation admission exceeds known-disposition scan allowance"
+    else Ok (remaining - bytes)
+  in
+  let%bind remaining =
+    List.fold_result
+      scan.records
+      ~init:scan.remaining_bytes
+      ~f:(fun remaining (record, actual_frame_bytes) ->
+        let%bind reserved = reserved_frame_bytes record in
+        charge remaining (Int.max 0 (reserved - actual_frame_bytes)))
+  in
+  let%bind candidate_bytes = reserved_frame_bytes candidate in
+  Result.map (charge remaining candidate_bytes) ~f:ignore
+;;
+
 let reserve t ~key ~request_sha256 ~admission ~max_records ~max_bytes =
   locked t (fun () ->
     let open Result.Let_syntax in
@@ -423,7 +464,8 @@ let reserve t ~key ~request_sha256 ~admission ~max_records ~max_bytes =
       }
     in
     let%bind () = validate candidate in
-    let%bind records = records_locked t ~max_records ~max_bytes in
+    let%bind scan = scan_locked t ~max_records ~max_bytes in
+    let records = List.map scan.records ~f:fst in
     match List.find records ~f:(fun r -> Key.equal key r.key) with
     | Some record
       when String.equal request_sha256 record.request_sha256
@@ -431,6 +473,10 @@ let reserve t ~key ~request_sha256 ~admission ~max_records ~max_bytes =
                 Admission.equal_authored_tool
                 admission.authored_tool
                 record.admission.authored_tool
+           && Option.equal
+                Delegation_captured_origin.equal
+                admission.captured_recurrence
+                record.admission.captured_recurrence
            && same_invocation_scope admission.lifetime record.admission.lifetime ->
       let%map () = save t record in
       Replay record
@@ -442,6 +488,7 @@ let reserve t ~key ~request_sha256 ~admission ~max_records ~max_bytes =
         | false -> corrupt "delegation reservation exceeds capacity"
       in
       let%bind () = validate_record_identities (candidate :: records) in
+      let%bind () = admit_candidate scan candidate in
       let%map () = save t candidate in
       New candidate)
 ;;

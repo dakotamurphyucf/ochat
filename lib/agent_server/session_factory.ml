@@ -7852,6 +7852,7 @@ let create_delegated_session
         ; parent_revision_id = before.spec.prompt_revision_id
         ; parent_stop_epoch = Some before.stop_epoch
         ; authored_tool = source.authored_tool
+        ; captured_recurrence = None
         ; authority_sha256
         ; capability_pins = source.capability_pins
         ; lifetime = admitted_lifetime

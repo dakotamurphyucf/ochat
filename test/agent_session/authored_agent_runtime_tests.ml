@@ -210,6 +210,7 @@ let on_event ctx state event = match event with
                   { name = "researcher"
                   ; source_sha256 = Source.fingerprint prepared.source
                   }
+            ; captured_recurrence = None
             ; authority_sha256 = Authority.fingerprint parent |> protocol_ok
             ; capability_pins =
                 Chat_response.Background_request.capability_pins private_caps

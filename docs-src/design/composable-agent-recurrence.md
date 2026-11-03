@@ -502,6 +502,45 @@ before activation. The existing restricted generated-definition path does not
 accept every authored program or captured project closure. Ordinary creation
 cannot bypass these protected admission requirements.
 
+The lower delegation ledger can retain a bounded immutable captured origin:
+the exact original reservation and prompt-definition JSON plus the initial
+session Spec digest with only its delegation locator normalized to absent.
+The locator separately binds the full admission digest, avoiding a hash cycle.
+This custody does not validate upper recurrence or prompt semantics, authorize
+creation, install an artifact, link a child or initialize execution. The creation
+owner must validate those original values with their actual domains and perform
+fresh current-authority checks. Artifact payloads remain with the existing
+artifact owner rather than being duplicated in each ledger record.
+
+A fresh child is a new session and transaction; its captured source may be
+identical to the controller's source. Only the captured-recurrence source kind
+permits the same parent and child artifact revision. The creation owner must
+verify that exact admitted revision and complete manifest, rather than fork or
+replace the already reserved artifact. Session identities remain distinct.
+
+Captured origins require the supported
+`delegation.captured-recurrence.v1` document semantics marker. Older readers must
+reject that meaning instead of treating it as ordinary generated creation.
+Retry cannot substitute generated, authored-tool and captured recurrence source
+kinds or replace the exact captured origin. Compatible unknowns, original field
+presence and numeric lexemes remain immutable through stage/revocation updates.
+An absent captured origin is omitted from newly authored admissions, preserving
+the existing generated/authored admission encoding and reference hashes.
+
+The existing 256 KiB complete delegation-record profile also bounds the captured
+origin and its metadata; this is an explicit admission limit, not support for
+every possible full prompt-definition size. Under the existing ledger mutex, a
+new key charges its complete framed candidate and all retained records' positive
+remaining known stage/revocation/collection growth beyond actual framed bytes
+read. The preflight includes every preserved unknown byte and rejects a candidate
+without room for those later known dispositions. With exclusive ownership,
+supported schema and the same or larger scan policy, this preserves the admitted
+future scan allowance. It is not a disk quota or a guarantee against external
+mutation, arbitrary future schema growth or policy reduction. Atomic temporary
+names still consume the existing scan entry budget. A matching historical retry
+reflushes its original identities without a new candidate debit or a retroactive
+claim that old records reserved missing headroom.
+
 Both target kinds need one shared actor-authorized headless Run admission path.
 Its typed caller binds host-issued current scope and original principal/key/digest,
 while preserving normal preparation, CAS, custody and receipt semantics. It must

@@ -88,14 +88,26 @@ val resolve : t -> Reference.t -> (record, Store_error.t) result
 (** The request digest must cover all user-selected creation inputs. Admission
     comes from trusted validation and may contain fresh candidate IDs on retry;
     only a New result accepts those candidates. A changed authored-tool identity
-    conflicts even if the request digest is unchanged; a generated reservation
-    cannot be relabeled as authored. Replay reestablishes durability
+    or exact captured recurrence origin conflicts even if the request digest is
+    unchanged; generated, authored-tool and captured recurrence source kinds
+    cannot be relabeled on retry. Replay reestablishes durability
     after a potentially ambiguous prior write acknowledgement.
     A new key can share an admitted revision under the ownership/digest invariant
     above; child and transaction IDs remain fresh. This does not load or authorize
     the artifact. A revoked replay remains revoked and cannot authorize a new
     side effect. Scan budgets include every existing intent and atomic temporary
-    entry, including released historical records. *)
+    entry, including released historical records.
+
+    For a new key, under this same mutex, [max_bytes] also admits the complete
+    framed candidate plus positive known remaining disposition growth of every
+    retained record beyond its actual bytes read. Each future payload must fit
+    the existing per-record profile. This preserves a future scan allowance for
+    those known dispositions under this same or a larger byte policy, exclusive
+    owner and supported schema. It is not a filesystem quota: temporary names
+    consume entry budget, and unrelated external bytes are not reserved.
+    A matching replay reflushes its original record without charging a new
+    candidate or allocating replacement identities; historical replay does not
+    retroactively promise unavailable disposition headroom. *)
 val reserve
   :  t
   -> key:Key.t

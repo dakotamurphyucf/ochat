@@ -94,6 +94,7 @@ let install_child
     ; parent_revision_id = parent.spec.prompt_revision_id
     ; parent_stop_epoch = Some parent.stop_epoch
     ; authored_tool = None
+    ; captured_recurrence = None
     ; inference_target
     ; authority_sha256 =
         (let moderator =
