@@ -56,11 +56,39 @@ type control =
   | Retired of Retirement.t
 [@@deriving equal, sexp_of]
 
+module Stored_frontier = struct
+  type t =
+    { value : Recurrence_frontier.t
+    ; encoded : Jsonaf.t
+    }
+
+  let create value =
+    Recurrence_frontier.to_document value
+    |> Result.map_error ~f:(fun e ->
+      P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t e)))
+    |> Result.map ~f:(fun document -> { value; encoded = D.Document.json document })
+  ;;
+
+  let of_json encoded =
+    let convert result =
+      Result.map_error result ~f:(fun e ->
+        P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t e)))
+    in
+    let open Result.Let_syntax in
+    let%bind document =
+      D.Document.inspect ~limits:Recurrence_frontier.limits encoded |> convert
+    in
+    let%map value = Recurrence_frontier.of_document document |> convert in
+    { value; encoded }
+  ;;
+end
+
 type projection =
   { definitions : F.t list
   ; control : control
   ; control_revision : int64
   ; cursor : Recurrence_cursor.t
+  ; frontier : Stored_frontier.t option
   }
 
 type t = projection C.t
@@ -73,6 +101,16 @@ let controller t = I.Definition.controller (F.key (current t))
 let control t = (C.value t).control
 let control_revision t = (C.value t).control_revision
 let cursor t = (C.value t).cursor
+
+let frontier t =
+  match (C.value t).frontier with
+  | Some frontier -> Ok frontier.value
+  | None ->
+    Error
+      (P.Error.invalid_request
+         "historical recurrence lacks planning frontier; create a new identity")
+;;
+
 let invalid message = Error (P.Error.invalid_request message)
 
 let protocol result =
@@ -137,6 +175,7 @@ let raw_json p =
     ; "control", control_json p.control
     ; "control_revision", X.int64_json p.control_revision
     ; "cursor", Recurrence_cursor.to_json p.cursor
+    ; "frontier", X.option_json (fun f -> f.Stored_frontier.encoded) p.frontier
     ]
 ;;
 
@@ -193,6 +232,23 @@ let validate_projection p =
   let%bind () =
     Recurrence_cursor.validate p.cursor ~rule:(F.Schedule.rule (F.schedule current))
   in
+  let%bind () =
+    match p.frontier with
+    | None -> Ok ()
+    | Some frontier ->
+      let%bind () =
+        Recurrence_frontier.validate
+          frontier.value
+          ~definitions:p.definitions
+          ~cursor:p.cursor
+      in
+      if
+        Int64.(
+          Recurrence_frontier.revision frontier.value
+          > max_value - of_int (steps p.control))
+      then invalid "planning frontier lacks reserved control steps"
+      else Ok ()
+  in
   if not (I.Definition.equal (Recurrence_cursor.definition p.cursor) (F.key current))
   then invalid "recurrence cursor belongs to another definition"
   else if
@@ -248,7 +304,12 @@ let decode json =
     X.required f "cursor" (fun json ->
       Recurrence_cursor.of_json json ~rule:(F.Schedule.rule (F.schedule current)))
   in
-  let p = { definitions; control; control_revision; cursor } in
+  let%bind frontier =
+    match P.Json_codec.optional f "frontier" with
+    | None | Some `Null -> Ok None
+    | Some json -> Result.map (Stored_frontier.of_json json) ~f:Option.some
+  in
+  let p = { definitions; control; control_revision; cursor; frontier } in
   let%map () = validate_projection p in
   p
 ;;
@@ -269,6 +330,7 @@ let shape =
           ] )
     ; "control_revision", v
     ; "cursor", Recurrence_cursor.shape
+    ; "frontier", v
     ]
 ;;
 
@@ -315,7 +377,7 @@ let owned_control control revision =
   `Object [ "control", control_json control; "control_revision", X.int64_json revision ]
 ;;
 
-let reserved_growth t =
+let control_growth t =
   if required_transition_steps t = 0
   then Ok Capacity_growth.zero
   else
@@ -335,6 +397,17 @@ let reserved_growth t =
           Capacity_growth.maximum maximum candidate)
     in
     Capacity_growth.positive_difference maximum ~previous:current
+;;
+
+let reserved_growth t =
+  let open Result.Let_syntax in
+  let%bind control = control_growth t in
+  let%bind frontier =
+    match (C.value t).frontier with
+    | None -> Ok Capacity_growth.zero
+    | Some frontier -> Recurrence_frontier.reserved_growth frontier.value
+  in
+  Capacity_growth.add control frontier
 ;;
 
 let to_document t =
@@ -380,15 +453,48 @@ let admit p =
 ;;
 
 let create definition =
+  let open Result.Let_syntax in
+  let%bind frontier = Recurrence_frontier.initial definition in
+  let%bind frontier = Stored_frontier.create frontier in
   admit
     { definitions = [ definition ]
     ; control = Paused Operator_pause
     ; control_revision = 0L
     ; cursor = F.initial_cursor definition
+    ; frontier = Some frontier
     }
 ;;
 
 let same_definition a b = String.equal (F.digest a) (F.digest b)
+
+let same_frontier a b =
+  Option.equal
+    (fun a b -> D.Json.equal a.Stored_frontier.encoded b.Stored_frontier.encoded)
+    a
+    b
+;;
+
+let control_frontier p ~definitions ~control =
+  let open Result.Let_syntax in
+  match p.frontier with
+  | None -> Ok None
+  | Some old ->
+    let current = current_projection p in
+    let%bind next =
+      if List.length definitions = List.length p.definitions + 1
+      then
+        Recurrence_frontier.adopt_definition
+          old.value
+          ~previous:current
+          ~definition:(List.last_exn definitions)
+      else (
+        match control with
+        | Enabled -> Ok old.value
+        | Paused _ | Retired _ ->
+          Recurrence_frontier.withdraw old.value ~definition:current)
+    in
+    Result.map (Stored_frontier.create next) ~f:Option.some
+;;
 
 let validate_transition previous ~incoming =
   let open Result.Let_syntax in
@@ -407,6 +513,14 @@ let validate_transition previous ~incoming =
     List.is_empty added
     && equal_control p.control n.control
     && Recurrence_cursor.equal p.cursor n.cursor
+    && same_frontier p.frontier n.frontier
+  in
+  let due =
+    List.is_empty added
+    && equal_control p.control Enabled
+    && equal_control n.control Enabled
+    && Int64.equal p.control_revision n.control_revision
+    && not unchanged
   in
   let%bind () =
     if unchanged
@@ -414,25 +528,52 @@ let validate_transition previous ~incoming =
       if Int64.equal p.control_revision n.control_revision
       then Ok ()
       else invalid "unchanged recurrence advanced control"
+    else if due
+    then (
+      match p.frontier, n.frontier with
+      | Some old, Some next ->
+        let%bind () =
+          Recurrence_frontier.validate_transition
+            old.value
+            ~incoming:next.value
+            ~definitions:n.definitions
+            ~cursor:n.cursor
+        in
+        if
+          Int64.(Recurrence_frontier.revision old.value < max_value)
+          && Int64.equal
+               (Recurrence_frontier.revision next.value)
+               (Int64.succ (Recurrence_frontier.revision old.value))
+        then Ok ()
+        else invalid "due transition must advance planning frontier once"
+      | None, (None | Some _) | Some _, None ->
+        invalid "due transition lacks prior planning custody")
     else if
       Int64.equal p.control_revision Int64.max_value
       || not (Int64.equal n.control_revision (Int64.succ p.control_revision))
     then invalid "recurrence control revision did not advance exactly once"
     else (
-      match p.control, added with
-      | Retired _, _ -> invalid "retired recurrence cannot be changed"
-      | (Enabled | Paused _), [] ->
-        if Recurrence_cursor.equal p.cursor n.cursor
-        then Ok ()
-        else invalid "metadata control cannot advance a recurrence cursor"
-      | (Enabled | Paused _), [ definition ] ->
-        if
-          equal_control n.control (Paused Operator_pause)
-          && Recurrence_cursor.equal n.cursor (F.initial_cursor definition)
-        then Ok ()
-        else invalid "edited recurrence must start paused with its initial cursor"
-      | (Enabled | Paused _), _ ->
-        invalid "recurrence edit introduced multiple immutable revisions")
+      let%bind () =
+        match p.control, added with
+        | Retired _, _ -> invalid "retired recurrence cannot be changed"
+        | (Enabled | Paused _), [] ->
+          if Recurrence_cursor.equal p.cursor n.cursor
+          then Ok ()
+          else invalid "metadata control cannot advance recurrence cursor"
+        | (Enabled | Paused _), [ definition ] ->
+          if
+            equal_control n.control (Paused Operator_pause)
+            && Recurrence_cursor.equal n.cursor (F.initial_cursor definition)
+          then Ok ()
+          else invalid "edited recurrence must start paused with initial cursor"
+        | (Enabled | Paused _), _ -> invalid "recurrence edit added multiple revisions"
+      in
+      let%bind expected =
+        control_frontier p ~definitions:n.definitions ~control:n.control
+      in
+      if same_frontier expected n.frontier
+      then Ok ()
+      else invalid "control transition changed or discarded planning custody")
   in
   let%bind adopted = D.Domain_codec.adopt codec ~previous ~incoming |> protocol in
   let%bind adopted = to_document adopted |> protocol in
@@ -451,16 +592,48 @@ let change t ~definitions ~control ~cursor =
   then Ok t
   else if Int64.equal p.control_revision Int64.max_value
   then invalid "recurrence control frontier exhausted"
-  else (
+  else
+    let open Result.Let_syntax in
+    let%bind frontier = control_frontier p ~definitions ~control in
     let candidate =
       C.with_value
         t
-        { definitions; control; control_revision = Int64.succ p.control_revision; cursor }
+        { definitions
+        ; control
+        ; control_revision = Int64.succ p.control_revision
+        ; cursor
+        ; frontier
+        }
     in
-    let open Result.Let_syntax in
     let%bind () = validate_transition t ~incoming:candidate in
     let%map _ = to_document candidate |> protocol in
-    candidate)
+    candidate
+;;
+
+let apply_due t plan =
+  let open Result.Let_syntax in
+  let%bind frontier = frontier t in
+  let%bind () =
+    if
+      equal_control (control t) Enabled
+      && Recurrence_due_plan.matches
+           plan
+           ~definition:(current t)
+           ~cursor:(cursor t)
+           ~frontier
+    then Ok ()
+    else invalid "due plan is stale or recurrence is not enabled"
+  in
+  let%bind frontier = Stored_frontier.create (Recurrence_due_plan.frontier plan) in
+  let p = C.value t in
+  let candidate =
+    C.with_value
+      t
+      { p with cursor = Recurrence_due_plan.cursor plan; frontier = Some frontier }
+  in
+  let%bind () = validate_transition t ~incoming:candidate in
+  let%map _ = to_document candidate |> protocol in
+  candidate
 ;;
 
 let edit t definition =
@@ -524,20 +697,28 @@ let effective_control t ~current_revision ~archived =
 
 let capacity_projection t =
   let open Result.Let_syntax in
+  let p = C.value t in
+  let%bind frontier =
+    match p.frontier with
+    | None -> Ok `Null
+    | Some frontier -> Recurrence_frontier.capacity_projection frontier.value
+  in
+  let json =
+    raw_json
+      { p with control = Retired Lifecycle_changed; control_revision = Int64.max_value }
+  in
+  let json =
+    match json with
+    | `Object fields ->
+      `Object
+        (List.map fields ~f:(fun (name, value) ->
+           name, if String.equal name "frontier" then frontier else value))
+    | _ -> assert false
+  in
   let%map document =
     if required_transition_steps t = 0
     then D.Domain_codec.encode codec t
-    else (
-      let p = C.value t in
-      D.Domain_codec.encode
-        probe_codec
-        (C.with_value
-           t
-           (raw_json
-              { p with
-                control = Retired Lifecycle_changed
-              ; control_revision = Int64.max_value
-              })))
+    else D.Domain_codec.encode probe_codec (C.with_value t json)
   in
   D.Document.json document
 ;;

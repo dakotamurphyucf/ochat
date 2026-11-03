@@ -83,6 +83,78 @@ let domain result =
     P.Error.invalid_request (Sexp.to_string_hum (R.Timing_error.sexp_of_t error)))
 ;;
 
+type interval_step =
+  { consumed : R.Cursor.Interval.due_range
+  ; next : t
+  }
+
+let consume_interval t ~rule ~count =
+  match t.position with
+  | Interval cursor ->
+    let%map.Result consumed =
+      R.Cursor.Interval.consume_count cursor ~rule ~count |> domain
+    in
+    let position =
+      Option.value_map consumed.next ~default:Exhausted ~f:(fun cursor -> Interval cursor)
+    in
+    { consumed; next = { t with position } }
+  | Calendar _ | Awaiting_completion _ | Exhausted ->
+    invalid "fixed-rate consumption requires interval cursor"
+;;
+
+type calendar_search =
+  | Found of R.Cursor.Calendar.Occurrence.t * t
+  | Continue of t
+  | End of t
+
+let search_calendar t ~rule ~zone ~max_steps =
+  match t.position with
+  | Calendar { cursor; next_slot } ->
+    let%map.Result result = R.Cursor.Calendar.next cursor ~rule ~zone ~max_steps in
+    (match result with
+     | Found (occurrence, cursor) ->
+       Found (occurrence, { t with position = Calendar { cursor; next_slot } })
+     | Continue cursor -> Continue { t with position = Calendar { cursor; next_slot } }
+     | End -> End { t with position = Exhausted })
+  | Interval _ | Awaiting_completion _ | Exhausted ->
+    Error (R.Timing_error.Invalid "calendar search requires calendar cursor")
+;;
+
+let consume_calendar t ~occurrence ~nominal_at =
+  match t.position with
+  | Calendar { cursor; next_slot } ->
+    if
+      (not (I.Definition.equal t.definition (I.Occurrence.definition occurrence)))
+      || (not (Int64.equal next_slot (I.Occurrence.slot occurrence)))
+      || not
+           (Option.equal
+              Time_ns.equal
+              (R.Cursor.Calendar.last_at cursor)
+              (Some nominal_at))
+    then invalid "calendar consumption differs from selected cursor/nominal"
+    else (
+      let position =
+        if Int64.equal next_slot Int64.max_value
+        then Exhausted
+        else Calendar { cursor; next_slot = Int64.succ next_slot }
+      in
+      Ok { t with position })
+  | Interval _ | Awaiting_completion _ | Exhausted ->
+    invalid "calendar consumption requires calendar cursor"
+;;
+
+let consume_initial_delay t ~rule =
+  let open Result.Let_syntax in
+  match t.position with
+  | Interval cursor
+    when R.Rule.Interval.equal_mode (R.Rule.Interval.mode rule) Fixed_delay
+         && Int64.equal (R.Cursor.Interval.slot cursor) 0L ->
+    let%map occurrence = I.Occurrence.create ~definition:t.definition ~slot:0L in
+    { t with position = Awaiting_completion occurrence }
+  | Interval _ | Calendar _ | Awaiting_completion _ | Exhausted ->
+    invalid "fixed-delay initial selection cannot rearm execution"
+;;
+
 let of_json json ~rule =
   let open Result.Let_syntax in
   let%bind () =

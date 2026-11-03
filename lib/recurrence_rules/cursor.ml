@@ -19,6 +19,23 @@ module Interval = struct
   let slot t = t.slot
   let due_at t = t.due_at
 
+  let at_slot t ~rule ~slot =
+    if Int64.(slot < 0L || slot < t.slot)
+    then Codec.invalid "nominal slot precedes interval cursor"
+    else (
+      match Rule.Interval.mode rule with
+      | Fixed_delay ->
+        if Int64.equal slot t.slot
+        then Ok t.due_at
+        else Codec.invalid "fixed-delay nominal requires actual completion"
+      | Fixed_rate ->
+        let count = Int64.(slot - t.slot) in
+        let period = Rule.Period.nanoseconds (Rule.Interval.period rule) in
+        if Int64.(count > max_value / period)
+        then Error (Timing_error.Out_of_range "interval nominal slot")
+        else Time_arithmetic.add_ns t.due_at Int64.(count * period))
+  ;;
+
   let consume_count t ~rule ~count =
     match Rule.Interval.mode rule with
     | Fixed_delay -> Codec.invalid "fixed-delay cursor requires actual completion"
@@ -138,6 +155,7 @@ module Calendar = struct
   [@@deriving sexp_of]
 
   let create rule = { last_at = None; scan = Fresh (Rule.Calendar.start_date rule) }
+  let last_at t = t.last_at
 
   let restart_date rule last_at =
     match last_at with

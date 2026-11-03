@@ -20,6 +20,11 @@ val recover : snapshot -> deadline:Time_ns.t -> (t, Timing_error.t) Result.t
 val deadline : t -> Time_ns.t
 val is_due : t -> snapshot -> bool
 
+(** Elapsed nanoseconds since this live deadline, including zero at equality.
+    Returns None before the deadline. This does not consult the wall projection;
+    restart lateness must be reconciled explicitly from retained wall metadata. *)
+val lateness_ns : t -> snapshot -> int64 option
+
 (** Number of fixed-rate deadlines due at this elapsed snapshot, including the
     anchor itself. Uses arithmetic, independent of current wall time. Return zero
     before the anchor. Combine with Cursor.Interval.consume_count, then advance

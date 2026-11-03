@@ -45,6 +45,12 @@ let recover snapshot ~deadline =
 let deadline t = t.deadline
 let is_due t snapshot = Int64.(snapshot.elapsed_ns >= t.elapsed_deadline_ns)
 
+let lateness_ns t snapshot =
+  if is_due t snapshot
+  then Some Int64.(snapshot.elapsed_ns - t.elapsed_deadline_ns)
+  else None
+;;
+
 let due_count t ~period snapshot =
   if not (is_due t snapshot)
   then 0L
