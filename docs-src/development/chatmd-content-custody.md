@@ -1,6 +1,6 @@
 # Captured document custody
 
-`<doc src="./guide.md" local capture />` captures bounded local content at explicit source preparation. `<doc src="builtin:chatml" />` captures the reviewed build-time ChatML starter. Other builtin identifiers, including `skills`, reject until real supported instruction content is curated. Unmarked document imports preserve their existing dynamic behavior; remote content is never captured automatically.
+`<doc src="./guide.md" local capture />` captures bounded local content at explicit source preparation. `<doc src="builtin:chatml" />` captures the reviewed build-time ChatML starter. The [reviewed instruction catalog](../guide/builtin-instructions.md) also supplies goals, recurrence, skills, project guidance, recovery policy, packages and lifecycle instructions. Recovery is policy text only; imports activate no capability. Unknown IDs reject without fallback. Unmarked document imports preserve their existing dynamic behavior; remote content is never captured automatically.
 
 Document acquisition borrows the same retained original-source owner that captured the prompt. Its actual parser-owned occurrence and declaring input determine the portable member path. Display `source_context`, artifact filenames and working-directory lookup never supply native authority. Immutable acquisition results retain no native owner, preprocessor or callback.
 

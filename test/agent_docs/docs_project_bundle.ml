@@ -34,7 +34,7 @@ let stage directory ~sources =
     Eio.Path.save ~create:(`Exclusive 0o600) Eio.Path.(directory / name) contents)
 ;;
 
-let admission env ~home_parent ~bundle ~entry =
+let admission ?project_sources env ~home_parent ~bundle ~entry =
   let suffix = Agent_protocol.Id.Transaction.(create () |> to_string) in
   let home = Eio.Path.(home_parent / ("project-check-" ^ suffix)) in
   Eio.Path.mkdir ~perm:0o700 home;
@@ -46,6 +46,9 @@ let admission env ~home_parent ~bundle ~entry =
         home_name
         bundle_name
         (Eio.Path.native_exn Eio.Path.(bundle / Path.to_string entry))
+    in
+    let configuration =
+      { configuration with server = { configuration.server with project_sources } }
     in
     let daemon =
       Daemon.start
@@ -92,9 +95,9 @@ let admission env ~home_parent ~bundle ~entry =
          | [] | _ :: _ -> failwith "tutorial needs exactly one enabled catalog prompt"))
 ;;
 
-let check ~env ~home_parent ~bundle ~entry ~required =
+let check_with_sources project_sources ~env ~home_parent ~bundle ~entry ~required =
   require (not (List.is_empty required)) "project check needs reachable required members";
-  let ready () = admission env ~home_parent ~bundle ~entry in
+  let ready () = admission ?project_sources env ~home_parent ~bundle ~entry in
   require (ready ()) ("configured bundle preparation failed: " ^ Path.to_string entry);
   List.iter (List.dedup_and_sort required ~compare:Path.compare) ~f:(fun member ->
     let path = Eio.Path.(bundle / Path.to_string member) in
@@ -106,4 +109,13 @@ let check ~env ~home_parent ~bundle ~entry ~required =
          require
            (not (ready ()))
            ("missing project companion unexpectedly resolved: " ^ Path.to_string member)))
+;;
+
+let check ~env ~home_parent ~bundle ~entry ~required =
+  check_with_sources None ~env ~home_parent ~bundle ~entry ~required
+;;
+
+let check_with_project_sources ~project_sources ~env ~home_parent ~bundle ~entry ~required
+  =
+  check_with_sources (Some project_sources) ~env ~home_parent ~bundle ~entry ~required
 ;;

@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "namespace": "ochat.capabilities.lifecycle",
+  "modules": {
+    "Lifecycle": {
+      "implementation": "src/lifecycle.chatml",
+      "interface": "src/lifecycle.chatmli"
+    }
+  },
+  "environments": {
+    "pure": {
+      "modules": {
+        "Lifecycle": "self.Lifecycle"
+      }
+    }
+  },
+  "default_environment": "pure"
+}

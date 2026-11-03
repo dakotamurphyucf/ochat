@@ -35,3 +35,20 @@ val start
   -> request:Agent_protocol.Run_start.t
   -> command_audit:Document_schema.Document.t option
   -> Agent_session.Run_admission_outcome.t
+
+(** Internal host command through the same retained runtime, parser, exclusive
+    actor preparation and persistence-before-worker boundary. Requires the real
+    original [actor], current Send_messages and [create]'s current host policy;
+    no client attachment is created or borrowed. Retained retries return before
+    runtime/parser work, after current authorization. Intent is data, not authority.
+
+    This is not a controller-ID permit: actual goal/recurrence command owners
+    must separately implement durable origin, current policy, atomic association
+    and stop/edit admission fencing before using automation. *)
+val start_headless_command
+  :  t
+  -> actor:Operator_authorization.t
+  -> entry:Session_registry.entry
+  -> request:Agent_session.Run_admission_request.Headless.t
+  -> command_audit:Document_schema.Document.t option
+  -> Agent_session.Run_admission_outcome.t

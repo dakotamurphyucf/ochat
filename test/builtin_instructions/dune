@@ -1,5 +1,14 @@
 (library
  (name builtin_instructions_tests)
- (libraries core expect_test_helpers_core builtin_instructions chatml_host_runtime chatml)
+ (libraries core digestif expect_test_helpers_core builtin_instructions chatml_host_runtime chatml)
  (inline_tests)
- (preprocess (pps ppx_jane ppx_expect)))
+ (preprocessor_deps
+  ../../lib/builtin_instructions/assets/chatml.md
+  ../../lib/builtin_instructions/assets/goals.md
+  ../../lib/builtin_instructions/assets/recurrence.md
+  ../../lib/builtin_instructions/assets/skills.md
+  ../../lib/builtin_instructions/assets/project-instructions.md
+  ../../lib/builtin_instructions/assets/context-recovery.md
+  ../../lib/builtin_instructions/assets/packages.md
+  ../../lib/builtin_instructions/assets/lifecycle.md)
+ (preprocess (pps ppx_jane ppx_expect ppx_blob)))

@@ -14,7 +14,10 @@ let () =
   let sources = Sources.installed () |> Result.ok_or_failwith in
   let expected =
     [ "agent-server/extensibility-foundations.md"
+    ; "design/composable-agent-instructions-and-packages.md"
+    ; "guide/admitted-instructions.md"
     ; "guide/authoring-context-tool.md"
+    ; "guide/builtin-instructions.md"
     ; "guide/chatmd-authoring-capabilities.md"
     ; "guide/chatmd-authoring-definitions.md"
     ; "guide/chatmd-shell-extensions.md"
@@ -31,6 +34,7 @@ let () =
     ; "guide/chatml-global-helpers.md"
     ; "guide/chatml-host-effects.md"
     ; "guide/chatml-inference.md"
+    ; "guide/chatml-installed-libraries.md"
     ; "guide/chatml-invocation-context.md"
     ; "guide/chatml-json.md"
     ; "guide/chatml-language-spec.md"

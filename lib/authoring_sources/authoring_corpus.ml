@@ -2960,7 +2960,7 @@ let runtime_foundation ~sources =
       ; review =
           Audited
             { excerpt_sha256 =
-                [ "467099991d41d1e93499aa3bdde4928cbd8c644b36af1f5fc2cec87f9926923d" ]
+                [ "ad4f87bcab01491f8d8a08ca820ac7438223644db56c175a7ce368f1c810f41a" ]
             ; evidence =
                 [ "lib/chatmd/prompt.ml"
                 ; "lib/chat_response/generated_admission.ml"
@@ -3647,6 +3647,74 @@ let runtime_foundation ~sources =
        ]
      @ runtime
      @ children
+     @ [ { id = "instructions.builtin"
+         ; title = "Builtin instruction assets and exact captured editions"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/builtin-instructions.md"
+               ; heading = "# Builtin instruction assets"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "6e6ec03ec819715129d26b68a3dcd196f358845e110aa754acd893157fac5abf" ]
+               ; evidence =
+                   [ "test/builtin_instructions/builtin_instructions_tests.ml"
+                   ; "test/chatmd_prompt_content/content_tests.ml"
+                   ; "test/prompt_content_custody/owner_tests.ml"
+                   ; "test/chatmd_authoring_assistance/assistance_tests.ml"
+                   ]
+               }
+         }
+       ]
+     @ [ { id = "instructions.sources"
+         ; title = "Admitted instruction discovery and exact retained content"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/admitted-instructions.md"
+               ; heading = "# Admitted instruction sources"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "3d7ab433dd365f6979ccfd7cbbd368e340129a7eb99b8c8b84d891d0420170bd" ]
+               ; evidence =
+                   [ "test/instruction_sources/metadata_tests.ml"
+                   ; "test/instruction_sources/snapshot_tests.ml"
+                   ; "test/instruction_sources/source_tests.ml"
+                   ]
+               }
+         }
+       ]
+     @ [ { id = "libraries.installed"
+         ; title = "Installed ordinary capability sources and explicit export"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/chatml-installed-libraries.md"
+               ; heading = "# Installed ChatML libraries"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "cde14cf26810a295b4ef27ede2787a58b46d4417f21491ec26989206d783c4de" ]
+               ; evidence =
+                   [ "test/capability_sources/inventory_tests.ml"
+                   ; "test/capability_sources/export_tests.ml"
+                   ; "test/capability_sources/closure_tests.ml"
+                   ; "lib/capability_sources/capability_source_inventory_tests.ml"
+                   ]
+               }
+         }
+       ]
      @ [ { id = "runtime.runs"
          ; title = "Scoped run decisions and transactional receipt custody"
          ; prerequisites = []
