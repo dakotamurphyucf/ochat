@@ -11,39 +11,27 @@ let create ~server_id ~authorize = { server_id; authorize }
 
 let start_attempt
       t
-      ~actor
+      ~principal_id
+      ~authorize
+      ~begin_preparation
       ~(entry : Session_registry.entry)
-      ~(request : P.Run_start.t)
+      ~(request : A.Run_admission_request.t)
       ~command_audit
   =
   let open Result.Let_syntax in
-  let principal = Operator_authorization.principal actor in
-  let authorize state =
-    if Operator_authorization.is_current actor
-    then t.authorize actor state
-    else
-      Error
-        (P.Error.create
-           Permission_denied
-           ~retryable:false
-           ~message:"run authority expired or was revoked"
-           ())
-  in
-  let%bind encoded = P.Json_codec.canonical_string (P.Run_start.to_json request) in
-  let request_sha256 = Digestif.SHA256.(digest_string encoded |> to_hex) in
-  let%bind decision =
-    A.Session_actor.begin_run_preparation
-      entry.actor
-      ~authorize
-      ~principal_id:principal.id
-      ~request
-      ~request_sha256
-  in
+  (* Enqueue and await form one acquisition. Cancellation must not abandon a
+     permit which the actor can install after this caller has gone away. *)
+  let%bind decision = Eio.Cancel.protect begin_preparation in
   match decision with
-  | Retained receipt -> Ok (A.Run_admission_outcome.Admitted receipt)
-  | Prepare preparation ->
+  | A.Run_preparation.Decision.Retained receipt ->
+    Eio.Fiber.check ();
+    Ok (A.Run_admission_outcome.Admitted receipt)
+  | A.Run_preparation.Decision.Prepare preparation ->
     let result =
       try
+        (* Cleanup below is established before observing pending cancellation.
+           Do not let a cancelled acquisition enter cold constructor effects. *)
+        Eio.Fiber.check ();
         Ok
           (Runtime_owner.with_prepared_run_runtime
              entry.runtime
@@ -69,7 +57,7 @@ let start_attempt
                 in
                 let%bind scope =
                   A.Run_admission.Scope.create
-                    ~principal_id:principal.id
+                    ~principal_id
                     ~observer
                     ~startup_pending
                     ~authorize
@@ -134,8 +122,62 @@ let start_attempt
        Exn.raise_with_original_backtrace exn backtrace)
 ;;
 
-let start t ~actor ~entry ~request ~command_audit =
-  match start_attempt t ~actor ~entry ~request ~command_audit with
+let outcome = function
   | Ok outcome -> outcome
   | Error failure -> A.Run_admission_outcome.Rejected failure
+;;
+
+let start t ~actor ~entry ~request ~command_audit =
+  let principal_id = (Operator_authorization.principal actor).id in
+  let authorize state =
+    if Operator_authorization.is_current actor
+    then t.authorize actor state
+    else
+      Error
+        (P.Error.create
+           Permission_denied
+           ~retryable:false
+           ~message:"run authority expired or was revoked"
+           ())
+  in
+  let result =
+    let open Result.Let_syntax in
+    let normalized = A.Run_admission_request.of_writer request in
+    let%bind request_sha256 = A.Run_admission_request.request_sha256 normalized in
+    start_attempt
+      t
+      ~principal_id
+      ~authorize
+      ~begin_preparation:(fun () ->
+        A.Session_actor.begin_run_preparation
+          entry.Session_registry.actor
+          ~authorize
+          ~principal_id
+          ~request
+          ~request_sha256)
+      ~entry
+      ~request:normalized
+      ~command_audit
+  in
+  outcome result
+;;
+
+let start_headless_command t ~actor ~entry ~request ~command_audit =
+  let principal_id = (Operator_authorization.principal actor).id in
+  let host_policy = t.authorize actor in
+  let authorize = A.Run_command_authorization.check actor ~authorize:host_policy in
+  start_attempt
+    t
+    ~principal_id
+    ~authorize
+    ~begin_preparation:(fun () ->
+      A.Session_actor.begin_headless_run_preparation
+        entry.Session_registry.actor
+        ~actor
+        ~authorize:host_policy
+        ~request)
+    ~entry
+    ~request:(A.Run_admission_request.of_headless request)
+    ~command_audit
+  |> outcome
 ;;

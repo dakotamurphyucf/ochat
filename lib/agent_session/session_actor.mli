@@ -1177,6 +1177,19 @@ val begin_run_preparation
   -> request_sha256:string
   -> (Run_preparation.Decision.t, Agent_protocol.Error.t) result
 
+(** Internal authorized host command, without a client attachment. The actual
+    original authentication must be current and carry Send_messages. [authorize]
+    is additional non-yielding current host policy, not a substitute for proof.
+    The actor computes the disjoint canonical digest and retains the original
+    proof/policy in its ephemeral preparation through final commit. No controller
+    ID, decoded record or durable receipt grants this custody. *)
+val begin_headless_run_preparation
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> request:Run_admission_request.Headless.t
+  -> (Run_preparation.Decision.t, Agent_protocol.Error.t) result
+
 val end_run_preparation : t -> Run_preparation.t -> (unit, Agent_protocol.Error.t) result
 
 (** Current host policy, target and writer are checked in one mailbox read before
