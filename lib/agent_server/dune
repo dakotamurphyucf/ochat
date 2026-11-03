@@ -1,7 +1,7 @@
 (library
  (name agent_server)
  (public_name ochat.agent_server)
- (modules
+ (modules instruction_sources
   developer_startup_configuration
   developer_startup_limits
   developer_startup_tests
@@ -238,6 +238,7 @@
   ochat.chat_response
   ochat.chatml
   ochat.chatml_project_prepare
+  ochat.instruction_content
   ochat.chatml_local_capture
   ochat.chatml_developer_capture
   ochat.chatml_developer_test

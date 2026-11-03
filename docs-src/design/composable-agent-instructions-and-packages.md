@@ -197,6 +197,10 @@ successful metadata lookup or research document is not that evidence.
   `lib/chatml_project_prepare/`: executable declarations, acquisition, checked
   graph construction and capture-only restoration.
 - `lib/chatml_local_source/`: retained filesystem source access.
+- `lib/instruction_content/` and `lib/agent_server/instruction_sources.*`:
+  admitted discovery, exact loaded revisions and immutable captured instruction
+  content. See [Admitted instruction sources](../guide/admitted-instructions.md)
+  for the bounded metadata profile and current library-only boundary.
 - `lib/capability_sources/` and `lib/capability_source_export/`: the immutable
   installed ordinary-source inventory and explicit create-only Eio export.
   `ochat libraries` exposes list, exact member read and export without preparing

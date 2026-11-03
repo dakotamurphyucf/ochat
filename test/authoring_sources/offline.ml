@@ -15,6 +15,7 @@ let () =
   let expected =
     [ "agent-server/extensibility-foundations.md"
     ; "design/composable-agent-instructions-and-packages.md"
+    ; "guide/admitted-instructions.md"
     ; "guide/authoring-context-tool.md"
     ; "guide/chatmd-authoring-capabilities.md"
     ; "guide/chatmd-authoring-definitions.md"

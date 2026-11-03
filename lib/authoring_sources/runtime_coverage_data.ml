@@ -796,7 +796,7 @@ let implementation_sources =
   ; ( "lib/agent_store/developer_command_row.ml"
     , "c7fe85fb222c80450fdc512732c9ad9fc2fd8ab8e12e65eeb64302e4904a5809" )
   ; ( "lib/agent_server/authoring_source_host.ml"
-    , "eb5183c8659d25c59a480875548ef2e1b038126786266b58b5ad88b241e86035" )
+    , "52567ed5c8b6cdb56119581f8bebb943dffcc28475cf54d86376edbad9ab0f41" )
   ; ( "lib/agent_server/authoring_context_owner.ml"
     , "ddd01bf4bbeb53c562bce7f6935acaf990ca1031c62818d277c9282a674e0df7" )
   ; ( "lib/agent_server/developer_capture_host.ml"

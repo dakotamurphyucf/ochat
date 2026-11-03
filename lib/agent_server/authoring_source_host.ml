@@ -535,12 +535,13 @@ let with_local_root context root ~actor ~checkpoint f =
     |> Result.bind ~f:Fn.id)
 ;;
 
-let list_directory_with_owner host owner ~policy ~directory ~poll =
+let list_directory_with_owner ?max_entries host owner ~policy ~directory ~poll =
   let maximum =
     Int.min
       host.limits.max_browse_entries
       (Chatml_local_capture.Limits.directory_entries (Project.Policy.local_limits policy))
   in
+  let maximum = Option.value_map max_entries ~default:maximum ~f:(Int.min maximum) in
   let entries =
     Local.fold_directory
       owner
@@ -1723,34 +1724,41 @@ let with_root_owner host ~actor ~root ~checkpoint f =
     | Revoked error -> Error error)
 ;;
 
-let list_root_directory host ~actor ~root ~directory ~checkpoint =
-  with_root_owner host ~actor ~root ~checkpoint (fun owner ~policy ~poll ->
-    list_directory_with_owner host owner ~policy ~directory ~poll)
+let list_root_directory ?max_entries host ~actor ~root ~directory ~checkpoint =
+  if Option.value_map max_entries ~default:false ~f:(fun value -> value < 0)
+  then Error Error.Result_limit
+  else
+    with_root_owner host ~actor ~root ~checkpoint (fun owner ~policy ~poll ->
+      list_directory_with_owner ?max_entries host owner ~policy ~directory ~poll)
 ;;
 
-let read_root_member host ~actor ~root ~member ~checkpoint =
-  with_root_owner host ~actor ~root ~checkpoint (fun owner ~policy ~poll ->
-    let maximum =
-      Int.min
-        host.limits.max_read_bytes
-        (Chatml_local_capture.Limits.source_bytes (Project.Policy.local_limits policy))
-    in
-    let open Result.Let_syntax in
-    let%bind contents =
-      Local.read owner ~member ~max_bytes:maximum ~checkpoint:poll
-      |> Result.map_error ~f:(fun error -> Error.Local error)
-    in
-    let%bind id = Document_context.mint_source_id member in
-    let%map source =
-      Captured.create
-        id
-        ~contents
-        ~expected_digest:None
-        ~max_bytes:(Some maximum)
-        ~checkpoint:poll
-      |> Result.map_error ~f:(fun error -> Error.Source_capture error)
-    in
-    { Document_capture.source })
+let read_root_member ?max_bytes host ~actor ~root ~member ~checkpoint =
+  if Option.value_map max_bytes ~default:false ~f:(fun value -> value <= 0)
+  then Error Error.Result_limit
+  else
+    with_root_owner host ~actor ~root ~checkpoint (fun owner ~policy ~poll ->
+      let maximum =
+        Int.min
+          host.limits.max_read_bytes
+          (Chatml_local_capture.Limits.source_bytes (Project.Policy.local_limits policy))
+      in
+      let maximum = Option.value_map max_bytes ~default:maximum ~f:(Int.min maximum) in
+      let open Result.Let_syntax in
+      let%bind contents =
+        Local.read owner ~member ~max_bytes:maximum ~checkpoint:poll
+        |> Result.map_error ~f:(fun error -> Error.Local error)
+      in
+      let%bind id = Document_context.mint_source_id member in
+      let%map source =
+        Captured.create
+          id
+          ~contents
+          ~expected_digest:None
+          ~max_bytes:(Some maximum)
+          ~checkpoint:poll
+        |> Result.map_error ~f:(fun error -> Error.Source_capture error)
+      in
+      { Document_capture.source })
 ;;
 
 let close_and_wait = close_all_and_wait
