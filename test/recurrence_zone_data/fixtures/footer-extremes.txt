@@ -1,0 +1,8 @@
+raw_signed_seconds=-9223372036854775808; equivalent_UTC=2143-01-27T08:29:52+00:00; equivalent_seconds=5461633792
+
+TZ="STD0DST,J1/-167,J200/167"
+-	-	+01	DST	1
+raw_signed_seconds=9223372036854775807; equivalent_UTC=2196-12-04T15:30:07+00:00; equivalent_seconds=7161147007
+
+TZ="STD0DST,J1/-167,J200/167"
+-	-	+00	STD
