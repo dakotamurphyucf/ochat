@@ -82,3 +82,15 @@ val install_phase : t -> validation -> state:Session_state.t -> unit
 (** Idempotent issuer/token-bound cleanup; an old token cannot release a newer
     preparation. Safe while lifecycle/runtime admission is closed. *)
 val release : t -> preparation -> unit
+
+(** Admission-time grace for an exact retained selected row. Live interval
+    anchors follow elapsed time across cursor advance and Ready-to-protected
+    moves. Calendar, or recovered intervals lacking such an anchor, explicitly
+    reconcile the current wall against the retained UTC nominal. A failed live
+    anchor never falls back to wall/zero. No authority is granted. *)
+val selection_lateness
+  :  t
+  -> entry:Recurrence_entry.t
+  -> nominal:Recurrence_nominal.t
+  -> snapshot:Recurrence_phase.Snapshot.t
+  -> (int64 option, Agent_protocol.Error.t) result

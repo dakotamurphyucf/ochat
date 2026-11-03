@@ -237,6 +237,7 @@ module State = struct
     { revision : int64
     ; marks : Mark.t list
     ; ready : Stored_nominal.t list
+    ; protected_children : Recurrence_child_reservation.t list
     ; batch : Batch.t option
     ; lookahead : Stored_nominal.t option
     ; alarm : Stored_alarm.t option
@@ -249,6 +250,7 @@ module State = struct
     { revision = 0L
     ; marks = [ Mark.initial definition ]
     ; ready = []
+    ; protected_children = []
     ; batch = None
     ; lookahead = None
     ; alarm = None

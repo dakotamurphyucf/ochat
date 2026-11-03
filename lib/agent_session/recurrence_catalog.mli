@@ -31,6 +31,15 @@ val commit
     together without consuming a keyed user command receipt or control revision.
     The publisher must check actual lifecycle/source/control and preflight the
     complete shared state/journal before saving or installing its local phase. *)
+val reserve_child
+  :  t
+  -> recurrence_id:Agent_protocol.Id.Recurrence.t
+  -> principal_id:Agent_protocol.Id.Principal.t
+  -> child_session_id:Agent_protocol.Id.Session.t
+  -> transaction_id:Agent_protocol.Id.Transaction.t
+  -> occurrence:Recurrence_identity.Occurrence.t
+  -> (t * Recurrence_child_reservation.t, Agent_protocol.Error.t) result
+
 val apply_due
   :  t
   -> recurrence_id:Agent_protocol.Id.Recurrence.t
@@ -70,7 +79,10 @@ module Reservation : sig
   val required_transition_steps : t -> int
 end
 
-(** Known durable control growth only. Sum these independent obligations at the
+(** Known durable control and unfinished child-association growth. Numeric
+    credits combine the maximum bulk-control sequence with one independent step
+    per protected child reservation, including paused/retired definitions. Sum
+    these independent obligations at the
     shared actual state/document/journal admission seam; never independently
     spend the same host headroom promised to other owners. Exact journal and
     persistence preflight remains required before effects. *)

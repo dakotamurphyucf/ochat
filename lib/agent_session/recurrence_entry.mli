@@ -42,6 +42,17 @@ val cursor : t -> Recurrence_cursor.t
     No history is inferred from an initial-looking current cursor. *)
 val frontier : t -> (Recurrence_frontier.t, Agent_protocol.Error.t) result
 
+(** Move an exact Ready nominal into immutable protected creation custody while
+    Enabled. No actor authority is supplied; an existing reservation must match
+    the original control frontier. Repeated exact data preserves all IDs. *)
+val reserve_child
+  :  t
+  -> principal_id:Agent_protocol.Id.Principal.t
+  -> child_session_id:Agent_protocol.Id.Session.t
+  -> transaction_id:Agent_protocol.Id.Transaction.t
+  -> occurrence:Recurrence_identity.Occurrence.t
+  -> (t * Recurrence_child_reservation.t, Agent_protocol.Error.t) result
+
 (** Apply one exact-basis opaque pure plan while Enabled. Cursor/frontier advance
     together; control revision and immutable definitions stay unchanged. This is
     not lifecycle/source authorization or a persistence/dispatch operation. *)
@@ -87,6 +98,11 @@ val effective_control
 val reserved_growth : t -> (Capacity_growth.t, Agent_protocol.Error.t) result
 
 val required_transition_steps : t -> int
+
+(** Each immutable reservation currently needs one later real association. These
+    independent steps add to bulk control obligations even after pause/retirement.
+    This count conveys no proof that a child exists or is linked. *)
+val pending_child_associations : t -> int
 
 (** Private capacity-only future wire witness with bounded known control and
     decimal growth. Never decode it as an entry, install it, or treat it as

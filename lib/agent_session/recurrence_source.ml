@@ -1,4 +1,5 @@
 open! Core
+module P = Agent_protocol
 
 let installation = Option.map ~f:Run_state.installation
 
@@ -41,4 +42,29 @@ let prepare_change (state : Session_state.t) ~delta =
               replacement
               { candidate with recurrence_catalog = Some catalog })
        | None -> Ok (Session_delta.Batch [ delta; Recurrence_catalog_changed catalog ]))
+;;
+
+let installed (state : Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind observer = Moderator_checkpoint.observer state.moderator in
+  match state.run_state, observer with
+  | Some index, Some observer ->
+    let installed = Run_state.installation index in
+    (match installed.source with
+     | Some current when P.Invocation.equal_observer current observer ->
+       Run_source_installation.captured installed ~generation:state.identity.generation
+     | Some _ | None ->
+       Error
+         (P.Error.create
+            Conflict
+            ~message:"recurrence source installation is unavailable"
+            ~retryable:false
+            ()))
+  | None, _ | Some _, None ->
+    Error
+      (P.Error.create
+         Conflict
+         ~message:"recurrence source installation is unavailable"
+         ~retryable:false
+         ())
 ;;
