@@ -52,6 +52,7 @@ type t =
   | Delivery_committed of Agent_protocol.Delivery.t * Agent_protocol.History.entry
   | Delivery_wake_changed of Agent_protocol.Delivery.t
   | Goal_catalog_changed of Goal_catalog.t
+  | Goal_accounts_changed of (Goal_accounts.t[@sexp.opaque])
   | Instruction_selection_changed of Instruction_selection.t
   | Recurrence_catalog_changed of Recurrence_catalog.t
   | Run_state_changed of Run_state.t
@@ -197,6 +198,17 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
         Error
           (Agent_protocol.Error.invalid_request
              "replacement discarded durable recurrences")
+    in
+    let%bind () =
+      match state.goal_accounts, created.goal_accounts with
+      | None, None -> Ok ()
+      | None, Some incoming ->
+        Goal_accounts.adopt Goal_accounts.empty ~incoming |> Result.map ~f:ignore
+      | Some previous, Some incoming ->
+        Goal_accounts.adopt previous ~incoming |> Result.map ~f:ignore
+      | Some _, None ->
+        Error
+          (Agent_protocol.Error.invalid_request "replacement discarded goal accounting")
     in
     let%map () =
       match state.run_state, created.run_state with
@@ -1194,6 +1206,11 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
           state.moderator_executions
           ~id_of:(fun e -> e.E.context.id)
     }
+  | Goal_accounts_changed incoming ->
+    let open Result.Let_syntax in
+    let previous = Option.value state.goal_accounts ~default:Goal_accounts.empty in
+    let%map accounts = Goal_accounts.adopt previous ~incoming in
+    { state with goal_accounts = Some accounts }
   | Goal_catalog_changed catalog ->
     let open Result.Let_syntax in
     let previous = Option.value state.goal_catalog ~default:Goal_catalog.empty in

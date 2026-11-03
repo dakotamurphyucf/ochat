@@ -1,6 +1,7 @@
-(** Pure local-source accounting partition for one stable Goal identity. The
-    canonical ledger alone owns provider observations. No IO, durable codec,
-    permission, descendant attribution or second provider event store. *)
+(** Pure local-source accounting plans for one stable Goal identity. The
+    canonical ledger alone owns provider observations. [Stored] separately encodes
+    bounded durable claims and resolves exact canonical handles. Neither layer
+    performs IO, grants execution permission or owns another provider event store. *)
 module Usage = Goal_usage
 
 module Error : sig
@@ -58,7 +59,7 @@ val equal : t -> t -> bool
 
 (** Initial new-scope state, zero charges and fences at the supplied actual
     ledger. The actor must reject duplicate scope creation; this is not a reset
-    API for an existing scope. Binding limit is positive, at most256, default256.
+    API for an existing scope. Binding limit is positive, at most 256, default 256.
     Metadata edits, pause/resume and source adoption never reset this value. *)
 val create
   :  ?max_bindings:int
@@ -104,8 +105,9 @@ module Plan : sig
   (** Ephemeral shared immutable canonical candidates, not durable copied rows.
       The actor publishes candidate accounting and canonical after-ledger in one
       persistence/CAS transaction, then acknowledges actual admission. *)
-  val before_ledger : t -> Inference_ledger.t
+  val before_accounting : t -> accounting
 
+  val before_ledger : t -> Inference_ledger.t
   val after_ledger : t -> Inference_ledger.t
 end
 
@@ -138,3 +140,44 @@ val plan
   -> after:Inference_ledger.t
   -> admission:Admission.t option
   -> (Plan.t, Error.t) result
+
+(** Context-free compact durable claims. These values contain no Handle and do
+    not authorize attribution or execution. Resolution requires exact canonical
+    membership; stored strings never allocate a missing ledger occurrence. *)
+module Stored : sig
+  type accounting = t
+  type t
+
+  val capture : accounting -> t
+  val equal : t -> t -> bool
+  val goal_id : t -> Agent_protocol.Id.Goal.t
+  val session : t -> Agent_protocol.Session_ref.t
+  val revision : t -> int64
+  val admitted_attempts : t -> int64
+  val admitted_turns : t -> int64
+  val untracked_attempts : t -> int64
+  val untracked_turns : t -> int64
+  val ordinals : t -> int64 list
+  val run_bindings : t -> (Agent_protocol.Id.Run.t * Agent_protocol.Run_source.t) list
+  val shape : Document_schema.Shape.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Agent_protocol.Error.t) result
+
+  val resolve
+    :  t
+    -> goal:Agent_protocol.Goal.t
+    -> ledger:Inference_ledger.t
+    -> (accounting, Error.t) result
+
+  val validate_update : t -> incoming:t -> (unit, Agent_protocol.Error.t) result
+
+  val validate_transition
+    :  t
+    -> incoming:t
+    -> before:Inference_ledger.t
+    -> after:Inference_ledger.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Shape/capacity probes only, never decoded as accounting evidence. *)
+  val retirement_projection : t -> ordinal:int64 option -> Jsonaf.t
+end

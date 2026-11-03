@@ -43,3 +43,14 @@ val component : t -> Component.t -> Metric.t
 val add_record : t -> Inference.Observation.Attempt_record.t -> (t, Counter.error) result
 
 val add_untracked : t -> (t, Counter.error) result
+
+(** Bounded durable aggregate projection, never provider evidence or permission.
+    Decode validates every component's contribution counts against attempts. *)
+module Persistence : sig
+  val shape : Document_schema.Shape.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Agent_protocol.Error.t) result
+
+  (** Private capacity witness; not a valid Usage value or imported evidence. *)
+  val capacity_projection : t -> Jsonaf.t
+end

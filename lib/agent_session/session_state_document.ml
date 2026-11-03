@@ -656,6 +656,17 @@ let project_fields_with_presence
       Goal_catalog.to_jsonaf catalog
       |> Result.map ~f:(fun json -> [ "goal_catalog", json ])
   in
+  let%bind goal_accounts_fields =
+    match t.goal_accounts with
+    | None ->
+      Ok
+        (if Session_state_presence.goal_accounts_is_absent presence
+         then []
+         else [ "goal_accounts", `Null ])
+    | Some accounts ->
+      Goal_accounts.to_jsonaf accounts
+      |> Result.map ~f:(fun raw -> [ "goal_accounts", raw ])
+  in
   let%bind instruction_selection_fields =
     match t.instruction_selection with
     | None ->
@@ -703,6 +714,7 @@ let project_fields_with_presence
      ]
      @ run_state_fields run_state_field t.run_state
      @ goal_catalog_fields
+     @ goal_accounts_fields
      @ instruction_selection_fields
      @ recurrence_catalog_fields
      @ [ ( "moderator_executions"
@@ -826,6 +838,10 @@ let state_fields_of_jsonaf ?capture ~limits json =
     J.optional_as fields "goal_catalog" (X.nullable Goal_catalog.of_jsonaf)
     |> Result.map ~f:Option.join
   in
+  let%bind goal_accounts =
+    J.optional_as fields "goal_accounts" (X.nullable Goal_accounts.of_jsonaf)
+    |> Result.map ~f:Option.join
+  in
   let%bind instruction_selection =
     J.optional_as
       fields
@@ -888,6 +904,7 @@ let state_fields_of_jsonaf ?capture ~limits json =
     ; moderator_executions
     ; run_state
     ; goal_catalog
+    ; goal_accounts
     ; instruction_selection
     ; recurrence_catalog
     ; subscriptions
@@ -936,6 +953,7 @@ let state_shape =
       , X.array_shape_exn ~identity_field:"history_id" Managed_submission.shape )
     ; "run_state", X.nullable_shape Run_state.shape
     ; "goal_catalog", X.nullable_shape Goal_catalog.shape
+    ; "goal_accounts", D.Shape.value
     ; "instruction_selection", X.nullable_shape Instruction_selection.shape
     ; "recurrence_catalog", X.nullable_shape Recurrence_catalog.shape
     ; "managed_stops", X.array_shape_exn ~identity_field:"id" Managed_stop.shape
@@ -1013,6 +1031,13 @@ let validate_run_capacity (state : S.t) document ~limits =
         |> X.document_result
       in
       Instruction_selection.remaining_host_limits selection limits
+  in
+  let%bind limits =
+    match state.goal_accounts with
+    | None -> Ok limits
+    | Some accounts ->
+      let%bind growth = Goal_accounts.reserved_growth accounts |> X.document_result in
+      Capacity_growth.remaining_limits growth limits |> X.document_result
   in
   let%bind terminal =
     Run_terminal_document.capture state ~shape:state_shape ~document ~limits
@@ -1636,11 +1661,75 @@ let validate_recurrence_carrier t =
     validate_recurrence_update previous (value t).recurrence_catalog
 ;;
 
+let validate_accounts_update (previous : S.t) (incoming : S.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    Goal_accounts.validate_transition
+      ~previous:previous.goal_accounts
+      ~incoming:incoming.goal_accounts
+      ~before:previous.inference_ledger
+      ~after:incoming.inference_ledger
+      ~previous_catalog:previous.goal_catalog
+      ~catalog:incoming.goal_catalog
+    |> X.document_result
+  in
+  match previous.goal_accounts, incoming.goal_accounts with
+  | Some old, Some candidate ->
+    let%bind merged = Goal_accounts.adopt old ~incoming:candidate |> X.document_result in
+    let%bind merged = Goal_accounts.to_jsonaf merged |> X.document_result in
+    let%bind actual = Goal_accounts.to_jsonaf candidate |> X.document_result in
+    if D.Json.equal merged actual
+    then Ok ()
+    else Error (D.Error.Extension_conflict [ "goal_accounts" ])
+  | None, None | None, Some _ -> Ok ()
+  | Some _, None ->
+    Error
+      (D.Error.Invalid_field
+         { path = [ "goal_accounts" ]; reason = "accounting cannot be discarded" })
+;;
+
+let validate_accounts_carrier t ~limits =
+  match t.original with
+  | None -> Ok ()
+  | Some original ->
+    let open Result.Let_syntax in
+    let payload = D.Document.payload original.template in
+    let%bind goal_accounts =
+      match D.Json.field payload ~name:"goal_accounts" with
+      | Absent | Null -> Ok None
+      | Value raw ->
+        Goal_accounts.of_jsonaf raw |> X.document_result |> Result.map ~f:Option.some
+    in
+    (match goal_accounts, (value t).goal_accounts with
+     | None, None -> Ok ()
+     | _ ->
+       let%bind goal_catalog =
+         match D.Json.field payload ~name:"goal_catalog" with
+         | Absent | Null -> Ok None
+         | Value raw ->
+           Goal_catalog.of_jsonaf raw |> X.document_result |> Result.map ~f:Option.some
+       in
+       let%bind inference_ledger =
+         match D.Json.field payload ~name:"inference_ledger" with
+         | Value raw -> ledger_of_jsonaf ~limits raw |> X.document_result
+         | Absent | Null ->
+           Error
+             (D.Error.Invalid_field
+                { path = [ "inference_ledger" ]
+                ; reason = "missing original canonical ledger"
+                })
+       in
+       validate_accounts_update
+         { (value t) with goal_accounts; goal_catalog; inference_ledger }
+         (value t))
+;;
+
 let encode t ~limits =
   let open Result.Let_syntax in
   let%bind () = validate_goal_carrier t in
   let%bind () = validate_instruction_carrier t in
   let%bind () = validate_recurrence_carrier t in
+  let%bind () = validate_accounts_carrier t ~limits in
   let%bind () = validate_ledger_carrier t ~limits in
   let%bind document =
     match t.original with
@@ -1674,6 +1763,7 @@ let adopt previous ~limits incoming =
       (value previous).recurrence_catalog
       (value incoming).recurrence_catalog
   in
+  let%bind () = validate_accounts_update (value previous) (value incoming) in
   let%bind () = validate_goal_carrier previous in
   let%bind () = validate_goal_carrier incoming in
   let%bind () = validate_instruction_carrier previous in

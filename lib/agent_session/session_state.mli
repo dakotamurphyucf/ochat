@@ -177,6 +177,7 @@ type 'spec fields =
   ; moderator_executions : Agent_protocol.Moderator_execution.t list [@sexp.list]
   ; run_state : Run_state.t option [@sexp.option]
   ; goal_catalog : Goal_catalog.t option [@sexp.option]
+  ; goal_accounts : (Goal_accounts.t option[@sexp.opaque])
   ; instruction_selection : Instruction_selection.t option [@sexp.option]
     (** Exact inert captured instruction custody and immutable mutation receipts.
         No transcript entry, source grant or provider activation is implied. *)

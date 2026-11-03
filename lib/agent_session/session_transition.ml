@@ -208,6 +208,15 @@ let apply ~now state ~delta ~payloads =
       ~runs:state.run_state
   in
   let%bind state, delta = track_host_turns ~previous state delta payloads in
+  let%bind () =
+    Goal_accounts.validate_transition
+      ~previous:previous.goal_accounts
+      ~incoming:state.goal_accounts
+      ~before:previous.inference_ledger
+      ~after:state.inference_ledger
+      ~previous_catalog:previous.goal_catalog
+      ~catalog:state.goal_catalog
+  in
   let%bind state, delta =
     Managed_submission_tracking.apply ~previous ~state ~delta ~payloads ~now
   in

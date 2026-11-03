@@ -70,6 +70,7 @@ type t =
       requires the matching active Turn, generation and running lifecycle in this checkpoint.
       Repeating the same disposition remains valid after that turn has ended. *)
   | Goal_catalog_changed of Goal_catalog.t
+  | Goal_accounts_changed of (Goal_accounts.t[@sexp.opaque])
   | Instruction_selection_changed of Instruction_selection.t
   | Recurrence_catalog_changed of Recurrence_catalog.t
   | Run_state_changed of Run_state.t

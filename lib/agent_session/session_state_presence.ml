@@ -11,6 +11,7 @@ end
 type t =
   { run_state_absent : bool
   ; goal_catalog_absent : bool
+  ; goal_accounts_absent : bool
   ; instruction_selection_absent : bool
   ; recurrence_catalog_absent : bool
   ; delivery_bindings : bool Map.M(Delivery_id).t
@@ -19,6 +20,7 @@ type t =
 let authored =
   { run_state_absent = false
   ; goal_catalog_absent = false
+  ; goal_accounts_absent = false
   ; instruction_selection_absent = false
   ; recurrence_catalog_absent = false
   ; delivery_bindings = Map.empty (module Delivery_id)
@@ -27,6 +29,7 @@ let authored =
 
 let run_state_is_absent t = t.run_state_absent
 let goal_catalog_is_absent t = t.goal_catalog_absent
+let goal_accounts_is_absent t = t.goal_accounts_absent
 let instruction_selection_is_absent t = t.instruction_selection_absent
 let recurrence_catalog_is_absent t = t.recurrence_catalog_absent
 
@@ -53,6 +56,11 @@ let of_document document ~limits =
   in
   let goal_catalog_absent =
     match D.Json.field payload ~name:"goal_catalog" with
+    | Absent -> true
+    | Null | Value _ -> false
+  in
+  let goal_accounts_absent =
+    match D.Json.field payload ~name:"goal_accounts" with
     | Absent -> true
     | Null | Value _ -> false
   in
@@ -102,6 +110,7 @@ let of_document document ~limits =
   in
   { run_state_absent
   ; goal_catalog_absent
+  ; goal_accounts_absent
   ; instruction_selection_absent
   ; recurrence_catalog_absent
   ; delivery_bindings
