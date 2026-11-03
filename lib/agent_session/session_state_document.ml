@@ -656,7 +656,7 @@ let project_fields_with_presence
       Goal_catalog.to_jsonaf catalog
       |> Result.map ~f:(fun json -> [ "goal_catalog", json ])
   in
-  let%map instruction_selection_fields =
+  let%bind instruction_selection_fields =
     match t.instruction_selection with
     | None ->
       Ok
@@ -666,6 +666,17 @@ let project_fields_with_presence
     | Some selection ->
       Instruction_selection.to_jsonaf selection
       |> Result.map ~f:(fun raw -> [ "instruction_selection", raw ])
+  in
+  let%map recurrence_catalog_fields =
+    match t.recurrence_catalog with
+    | None ->
+      Ok
+        (if Session_state_presence.recurrence_catalog_is_absent presence
+         then []
+         else [ "recurrence_catalog", `Null ])
+    | Some catalog ->
+      Recurrence_catalog.to_jsonaf catalog
+      |> Result.map ~f:(fun json -> [ "recurrence_catalog", json ])
   in
   `Object
     ([ "identity", identity_to_jsonaf t.identity
@@ -693,6 +704,7 @@ let project_fields_with_presence
      @ run_state_fields run_state_field t.run_state
      @ goal_catalog_fields
      @ instruction_selection_fields
+     @ recurrence_catalog_fields
      @ [ ( "moderator_executions"
          , (X.list_json P.Moderator_execution.to_json) t.moderator_executions )
        ; "subscriptions", (X.list_json P.Subscription.Storage.to_json) t.subscriptions
@@ -821,6 +833,10 @@ let state_fields_of_jsonaf ?capture ~limits json =
       (X.nullable Instruction_selection.of_jsonaf)
     |> Result.map ~f:Option.join
   in
+  let%bind recurrence_catalog =
+    J.optional_as fields "recurrence_catalog" (X.nullable Recurrence_catalog.of_jsonaf)
+    |> Result.map ~f:Option.join
+  in
   let%bind moderator_executions =
     X.required
       fields
@@ -873,6 +889,7 @@ let state_fields_of_jsonaf ?capture ~limits json =
     ; run_state
     ; goal_catalog
     ; instruction_selection
+    ; recurrence_catalog
     ; subscriptions
     ; deliveries
     ; ingress_registrations
@@ -920,6 +937,7 @@ let state_shape =
     ; "run_state", X.nullable_shape Run_state.shape
     ; "goal_catalog", X.nullable_shape Goal_catalog.shape
     ; "instruction_selection", X.nullable_shape Instruction_selection.shape
+    ; "recurrence_catalog", X.nullable_shape Recurrence_catalog.shape
     ; "managed_stops", X.array_shape_exn ~identity_field:"id" Managed_stop.shape
     ; ( "moderator_executions"
       , X.array_shape_exn ~identity_field:"id" Shapes.moderator_execution )
@@ -1016,6 +1034,27 @@ let validate_run_capacity (state : S.t) document ~limits =
            (D.Error.Invalid_field
               { path = [ "goal_catalog" ]; reason = "admitted goal catalog is missing" }))
   in
+  let%bind () =
+    match state.recurrence_catalog with
+    | None -> Ok ()
+    | Some catalog ->
+      (match D.Json.field (D.Document.payload document) ~name:"recurrence_catalog" with
+       | Value raw ->
+         Recurrence_catalog.validate_encoded_capacity catalog raw |> X.document_result
+       | Absent | Null ->
+         Error
+           (D.Error.Invalid_field
+              { path = [ "recurrence_catalog" ]
+              ; reason = "admitted recurrence catalog is missing"
+              }))
+  in
+  let%bind recurrence =
+    Recurrence_control_capacity.capture state ~shape:state_shape ~document ~limits
+  in
+  let%bind growth =
+    Capacity_growth.add growth (Recurrence_control_capacity.growth recurrence)
+    |> X.document_result
+  in
   let%bind remaining =
     Capacity_growth.remaining_limits growth limits |> X.document_result
   in
@@ -1054,6 +1093,10 @@ let shape = state_shape
 
 let terminal_capacity t ~document ~limits =
   Run_terminal_document.capture (value t) ~shape ~document ~limits
+;;
+
+let recurrence_capacity t ~document ~limits =
+  Recurrence_control_capacity.capture (value t) ~shape:state_shape ~document ~limits
 ;;
 
 let unresolved_json = `Object [ "state", `String "unresolved" ]
@@ -1561,10 +1604,43 @@ let validate_instruction_carrier t =
     validate_instruction_update previous (value t).instruction_selection
 ;;
 
+let validate_recurrence_update previous incoming =
+  match previous, incoming with
+  | None, None -> Ok ()
+  | None, Some incoming ->
+    Recurrence_catalog.validate_transition Recurrence_catalog.empty ~incoming
+    |> X.document_result
+  | Some previous, Some incoming ->
+    Recurrence_catalog.validate_transition previous ~incoming |> X.document_result
+  | Some _, None ->
+    Error
+      (D.Error.Invalid_field
+         { path = [ "recurrence_catalog" ]
+         ; reason = "durable recurrences cannot be discarded"
+         })
+;;
+
+let validate_recurrence_carrier t =
+  match t.original with
+  | None -> Ok ()
+  | Some original ->
+    let open Result.Let_syntax in
+    let%bind previous =
+      match
+        D.Json.field (D.Document.payload original.template) ~name:"recurrence_catalog"
+      with
+      | Absent | Null -> Ok None
+      | Value raw ->
+        Recurrence_catalog.of_jsonaf raw |> X.document_result |> Result.map ~f:Option.some
+    in
+    validate_recurrence_update previous (value t).recurrence_catalog
+;;
+
 let encode t ~limits =
   let open Result.Let_syntax in
   let%bind () = validate_goal_carrier t in
   let%bind () = validate_instruction_carrier t in
+  let%bind () = validate_recurrence_carrier t in
   let%bind () = validate_ledger_carrier t ~limits in
   let%bind document =
     match t.original with
@@ -1591,6 +1667,13 @@ let encode t ~limits =
 
 let adopt previous ~limits incoming =
   let open Result.Let_syntax in
+  let%bind () = validate_recurrence_carrier previous in
+  let%bind () = validate_recurrence_carrier incoming in
+  let%bind () =
+    validate_recurrence_update
+      (value previous).recurrence_catalog
+      (value incoming).recurrence_catalog
+  in
   let%bind () = validate_goal_carrier previous in
   let%bind () = validate_goal_carrier incoming in
   let%bind () = validate_instruction_carrier previous in

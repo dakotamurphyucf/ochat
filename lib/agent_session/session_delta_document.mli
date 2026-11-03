@@ -7,8 +7,9 @@ type t
 (** Private capacity projection of this owner's real retirement delta encoding.
     Inputs are JSON witnesses only, never decoded/applied as Session_delta. *)
 val project_run_retirement
-  :  run:Jsonaf.t
+  :  run:Jsonaf.t option
   -> goal:Jsonaf.t option
+  -> recurrence:Jsonaf.t option
   -> limits:Document_schema.Limits.t
   -> (Document_schema.Document.t, Document_schema.Error.t) result
 

@@ -1,0 +1,7 @@
+(copy_files ../agent_session/fixtures.ml)
+
+(library
+ (name recurrence_owner_tests)
+ (libraries core eio eio_main mirage-crypto-rng.unix expect_test_helpers_core ochat.agent_session ochat.agent_server ochat.agent_store)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

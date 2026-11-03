@@ -86,11 +86,92 @@ let pad_run document target =
   |> document_ok
 ;;
 
+(* Constructor-validated historical metadata only, never operator/target authority.
+   Composes the actual Run+Goal fixture with the recurrence owner in one frame. *)
+let with_recurrence (state : A.Session_state.t) =
+  let run = Option.value_exn state.run_state |> A.Run_state.runs |> List.hd_exn in
+  let target =
+    A.Recurrence_target.create_existing
+      ~session:run.session
+      ~source:run.source
+      ~configuration_revision:state.spec.configuration_revision
+      ~input:
+        P.Session.Message_content.
+          { kind = Plain_text; text = "capacity"; attachments = [] }
+    |> protocol_ok
+  in
+  let period =
+    Recurrence_rules.Rule.Period.create_ms 1000L
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Recurrence_rules.Timing_error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  let capture : A.Recurrence_command.Capture.t =
+    { schedule =
+        Interval
+          { rule = Recurrence_rules.Rule.Interval.create ~mode:Fixed_rate ~period
+          ; first_due = P.Timestamp.to_time_ns timestamp
+          }
+    ; target
+    ; policy = A.Recurrence_policy.default
+    }
+  in
+  let id = P.Id.Recurrence.of_string "rec_joint_terminal" |> protocol_ok in
+  let apply catalog text mutation =
+    let request =
+      A.Recurrence_command.create
+        ~session_id:state.identity.session_id
+        ~generation:state.identity.generation
+        ~source:(Some run.source)
+        ~expected_lifecycle_revision:(Some P.Session_lifecycle.Revision.zero)
+        ~expected_catalog_revision:(A.Recurrence_catalog.revision catalog)
+        ~expected_control_revision:
+          (Option.map
+             (A.Recurrence_catalog.find catalog id)
+             ~f:A.Recurrence_entry.control_revision)
+        ~key:(P.Idempotency_key.of_string text |> protocol_ok)
+        ~mutation
+      |> protocol_ok
+    in
+    A.Recurrence_command_transition.prepare
+      catalog
+      ~request
+      ~principal_id:run.principal_id
+      ~session:run.session
+      ~generation:state.identity.generation
+      ~current_source:(Some run.source)
+      ~current_lifecycle_revision:(Some P.Session_lifecycle.Revision.zero)
+      ~now:timestamp
+    |> protocol_ok
+    |> function
+    | A.Recurrence_command_transition.Commit { catalog; _ } -> catalog
+    | Retained _ -> assert false
+  in
+  let catalog = apply A.Recurrence_catalog.empty "joint-create" (Create (id, capture)) in
+  let catalog = apply catalog "joint-enable" (Enable id) in
+  { state with recurrence_catalog = Some catalog }
+;;
+
 let recovery state =
   let delta =
     A.Goal_catalog_source.recovery_delta state ~now:timestamp
     |> protocol_ok
     |> Option.value_exn
+  in
+  let recurrence =
+    Option.bind state.A.Session_state.recurrence_catalog ~f:(fun catalog ->
+      A.Recurrence_catalog.retire_stale_births
+        catalog
+        ~current_revision:P.Session_lifecycle.Revision.one
+        ~archived:false
+      |> protocol_ok)
+  in
+  let delta =
+    A.Session_delta.Batch
+      (delta
+       :: Option.to_list
+            (Option.map recurrence ~f:(fun catalog ->
+               A.Session_delta.Recurrence_catalog_changed catalog)))
   in
   A.Session_transition.apply ~now:timestamp state ~delta ~payloads:[] |> protocol_ok
 ;;
@@ -100,7 +181,9 @@ let%expect_test
   =
   Goal_run_tests.with_model (fun ~basis:_ ~held:_ ~admission:_ ~intent:_ ~delta:_ state ->
     let no_request = state in
-    let state = Goal_run_tests.request_achievement state |> historical in
+    let state =
+      Goal_run_tests.request_achievement state |> with_recurrence |> historical
+    in
     let index = Option.value_exn state.run_state in
     let old =
       A.Run_job_capacity.bookkeeping_reserve index ~jobs:state.jobs |> protocol_ok
@@ -120,6 +203,14 @@ let%expect_test
     assert (D.Json.equal (D.Document.json incoming) (D.Document.json encoded));
     let state = A.Session_state_document.value original in
     let transition = recovery state in
+    assert (
+      List.for_all
+        (A.Recurrence_catalog.entries
+           (Option.value_exn transition.state.recurrence_catalog))
+        ~f:(fun entry ->
+          A.Recurrence_entry.equal_control
+            (A.Recurrence_entry.control entry)
+            (Retired Lifecycle_changed)));
     let goal = Goal_run_tests.current_goal transition.state in
     assert (Option.is_some (P.Goal.request_settlement goal));
     assert (
@@ -265,6 +356,9 @@ let%expect_test
       |> A.Run_terminal_capacity.remaining_steps
     in
     [%test_eq: int] steps 201;
+    (* The enabled recurrence independently reserves bulk pause and retirement.
+       Instruction Clear below must add its own credit to both owners. *)
+    let steps = steps + 2 in
     let counters = state.counters in
     let near =
       { state with
@@ -345,11 +439,13 @@ let%expect_test
           (A.Session_terminal_journal.validate
              initial
              ~terminal
+             ~recurrence:None
              ~limits
              ~max_payload_length:4096));
       A.Session_terminal_journal.validate
         initial
         ~terminal
+        ~recurrence:None
         ~limits
         ~max_payload_length:1_048_576
       |> protocol_ok;

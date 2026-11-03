@@ -5190,6 +5190,17 @@ let configuration_policy t : Agent_session.Configuration_policy.t =
   }
 ;;
 
+let install_recurrence_controller t handle actor =
+  let open Result.Let_syntax in
+  let%bind controller =
+    Agent_session.Recurrence_controller.create
+      t.store
+      ~handle
+      ~entry_projection:index_entry
+  in
+  Agent_session.Session_actor.set_recurrence_controller actor controller
+;;
+
 let create_loaded_entry
       t
       handle
@@ -5248,6 +5259,7 @@ let create_loaded_entry
   actor_ref := Some actor;
   match
     let open Result.Let_syntax in
+    let%bind () = install_recurrence_controller t handle actor in
     let%bind () = Agent_session.Session_actor.reconcile_run_recovery actor in
     let%bind () =
       Agent_session.Session_actor.set_organization_admission
@@ -5450,6 +5462,7 @@ let create_unloaded_entry
         ~services
     in
     Session_recovery_owner.adopt_actor_exn owner actor;
+    let%bind () = install_recurrence_controller t handle actor in
     let%bind () = Agent_session.Session_actor.reconcile_run_recovery actor in
     let%bind () =
       Agent_session.Session_actor.set_organization_admission
@@ -6188,6 +6201,7 @@ let recovery_attachment_deltas (state : Agent_session.Session_state.t) ~now =
 ;;
 
 let recovery_transition
+      ~recurrence_delta
       ~parent_stop
       ~inference_target
       ~pending_retention
@@ -6265,7 +6279,8 @@ let recovery_transition
     state
     ~delta:
       (Batch
-         (operation_delta
+         (Option.to_list recurrence_delta
+          @ operation_delta
           @ [ Agent_session.Session_delta.History_block_reserved reserved_history_through
             ; Lifecycle_changed lifecycle
             ]
@@ -6325,6 +6340,7 @@ let create_recovery_writer t journal recovery session_id =
 ;;
 
 let commit_recovery_boundary
+      ~recurrence_recovery
       ~parent_stop
       ~inference_target
       t
@@ -6338,6 +6354,7 @@ let commit_recovery_boundary
   let pending_retention = Agent_session.Pending_disposition.Retention.default in
   let%bind transition =
     recovery_transition
+      ~recurrence_delta:(Agent_session.Recurrence_recovery.delta recurrence_recovery)
       ~parent_stop
       ~inference_target
       ~pending_retention
@@ -6347,6 +6364,7 @@ let commit_recovery_boundary
       ~observed
       ~invocations
   in
+  let%bind () = Agent_session.Recurrence_recovery.check recurrence_recovery in
   let%map () =
     Agent_session.Session_persistence.commit
       persistence
@@ -6448,11 +6466,13 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
   Session_registry.with_recovery_owner t.registry owner (fun () ->
     let%bind () = require_seed_success t handle in
     let%bind parent_policy = prepare_parent_policy () in
-    let%bind lifecycle =
+    let%bind lifecycle_observation =
       Agent_store.Session_store.read_lifecycle t.store handle
       |> Result.map_error ~f:protocol_of_store
     in
-    let lifecycle = Agent_store.Session_store.Lifecycle.Observation.value lifecycle in
+    let lifecycle =
+      Agent_store.Session_store.Lifecycle.Observation.value lifecycle_observation
+    in
     let%bind () =
       if
         Agent_store.Session_archive_record.Status.equal
@@ -6473,25 +6493,12 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
         ~store:t.idempotency_store
         ~server_id:(Agent_store.Session_store.server_id t.store)
     in
-    let%bind () =
-      List.fold_result
-        (Agent_store.Session_archive_record.receipts lifecycle)
-        ~init:()
-        ~f:(fun () receipt ->
-          if receipt.Agent_store.Session_archive_record.Receipt.completion_acknowledged
-          then Ok ()
-          else
-            Agent_store.Session_store.complete_lifecycle_outcome
-              t.store
-              handle
-              ~key:receipt.key
-              ~request_digest:receipt.request_digest
-              ~complete:
-                (Session_lifecycle_receipts.complete
-                   receipts
-                   ~key:receipt.key
-                   ~request_digest:receipt.request_digest)
-            |> Result.map_error ~f:protocol_of_store)
+    let%bind lifecycle_observation =
+      Agent_session.Recurrence_recovery.reconcile_lifecycle_receipts
+        lifecycle_observation
+        ~store:t.store
+        ~handle
+        ~complete:(Session_lifecycle_receipts.complete receipts)
     in
     let%bind journal, recovery = open_recovery t handle in
     let%bind () = reconcile_command_audits t recovery in
@@ -6624,8 +6631,16 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
     Agent_session.Session_persistence.restore_replay_documents
       persistence
       recovered_event_documents;
+    let%bind recurrence_recovery =
+      Agent_session.Recurrence_recovery.prepare
+        state
+        ~store:t.store
+        ~handle
+        ~observation:lifecycle_observation
+    in
     match
       commit_recovery_boundary
+        ~recurrence_recovery
         ~parent_stop
         ~inference_target
         t

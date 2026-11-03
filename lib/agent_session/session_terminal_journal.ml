@@ -18,9 +18,29 @@ let replace json changes =
   | _ -> assert false
 ;;
 
-let validate (state : Session_state.t) ~terminal ~limits ~max_payload_length =
+let validate (state : Session_state.t) ~terminal ~recurrence ~limits ~max_payload_length =
   let open Result.Let_syntax in
-  match Run_terminal_document.projections terminal with
+  let recurrence =
+    Option.bind recurrence ~f:Recurrence_control_capacity.projected_catalog
+  in
+  let%bind () =
+    match state.recurrence_catalog, recurrence with
+    | None, _ -> Ok ()
+    | Some catalog, None ->
+      let%bind reserve = Recurrence_catalog.reservation catalog in
+      if Recurrence_catalog.Reservation.required_transition_steps reserve = 0
+      then Ok ()
+      else Error (P.Error.invalid_request "missing admitted recurrence capacity witness")
+    | Some _, Some _ -> Ok ()
+  in
+  let projections = Run_terminal_document.projections terminal in
+  let projections =
+    match projections, recurrence with
+    | [], Some _ -> [ None ]
+    | [], None -> []
+    | _ :: _, _ -> List.map projections ~f:Option.some
+  in
+  match projections with
   | [] -> Ok ()
   | projections ->
     let%bind goal =
@@ -53,36 +73,39 @@ let validate (state : Session_state.t) ~terminal ~limits ~max_payload_length =
        emits exactly this existing session.updated payload. It changes neither
        moderator projection nor extension statuses. No worker output is assumed. *)
     let%bind event =
-      D.Document.create
-        ~limits
-        ~kind:"session.event"
-        ~version:2
-        ~payload:
-          (`Object
-              [ "session_id", P.Id.Session.to_json state.identity.session_id
-              ; "sequence", decimal
-              ; "revision", decimal
-              ; "timestamp", timestamp
-              ; "kind", `String "session.updated"
-              ; "visibility", `String "full"
-              ; "payload", summary
-              ])
-      |> domain
+      if not (List.exists projections ~f:Option.is_some)
+      then Ok None
+      else
+        D.Document.create
+          ~limits
+          ~kind:"session.event"
+          ~version:2
+          ~payload:
+            (`Object
+                [ "session_id", P.Id.Session.to_json state.identity.session_id
+                ; "sequence", decimal
+                ; "revision", decimal
+                ; "timestamp", timestamp
+                ; "kind", `String "session.updated"
+                ; "visibility", `String "full"
+                ; "payload", summary
+                ])
+        |> domain
+        |> Result.map ~f:Option.some
     in
     List.fold_result projections ~init:() ~f:(fun () projected ->
-      let payload = D.Document.payload projected in
-      let run =
-        match D.Json.field payload ~name:"run_state" with
-        | Value run -> run
-        | Absent | Null -> assert false
+      let payload = Option.map projected ~f:D.Document.payload in
+      let field name =
+        Option.bind payload ~f:(fun payload ->
+          match D.Json.field payload ~name with
+          | Value value -> Some value
+          | Absent | Null -> None)
       in
-      let goal =
-        match D.Json.field payload ~name:"goal_catalog" with
-        | Value goal -> Some goal
-        | Absent | Null -> None
-      in
+      let run = field "run_state" in
+      let goal = field "goal_catalog" in
       let%bind delta =
-        Session_delta_document.project_run_retirement ~run ~goal ~limits |> domain
+        Session_delta_document.project_run_retirement ~run ~goal ~recurrence ~limits
+        |> domain
       in
       let%bind transaction =
         Agent_store.Transaction.Capacity.document
@@ -90,7 +113,7 @@ let validate (state : Session_state.t) ~terminal ~limits ~max_payload_length =
           ~session_id:state.identity.session_id
           ~generation:state.identity.generation
           ~delta
-          ~durable_events:[ event ]
+          ~durable_events:(if Option.is_some run then Option.to_list event else [])
         |> domain
       in
       D.Json.validate ~limits:remaining (D.Document.json transaction) |> domain)
