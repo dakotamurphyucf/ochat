@@ -249,3 +249,21 @@ let%test_unit "parser-input v1 identity preserves independently encoded fixture"
       (I.identity_digest input ~checkpoint:ignore)
       "fb49b15e97a46bd687baabfbea4510337285ea92ee3939889ed1a757e73a1b9f")
 ;;
+
+let%expect_test "builtin doc selectors reject version syntax without dynamic fallback" =
+  let result =
+    Or_error.try_with (fun () ->
+      with_parsed
+        [ "root.chatmd", {|<system><doc src="builtin:goals@2"/></system>|} ]
+        (fun _ _ -> ()))
+  in
+  (match result with
+   | Error error ->
+     assert (
+       String.is_substring
+         (Error.to_string_hum error)
+         ~substring:"builtin identifier must match [a-z][a-z0-9_-]*");
+     print_endline "invalid builtin selector rejected during actual parsing"
+   | Ok () -> failwith "invalid builtin selector admitted");
+  [%expect {| invalid builtin selector rejected during actual parsing |}]
+;;

@@ -3,7 +3,14 @@
  (action
   (with-stdout-to %{targets}
    (run %{exe:../authoring_sources/embed_documents.exe}
-    chatml %{dep:assets/chatml.md}))))
+    chatml %{dep:assets/chatml.md}
+    goals %{dep:assets/goals.md}
+    recurrence %{dep:assets/recurrence.md}
+    skills %{dep:assets/skills.md}
+    project-instructions %{dep:assets/project-instructions.md}
+    context-recovery %{dep:assets/context-recovery.md}
+    packages %{dep:assets/packages.md}
+    lifecycle %{dep:assets/lifecycle.md}))))
 
 (library
  (name builtin_instructions)

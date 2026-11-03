@@ -17,6 +17,7 @@ let () =
     ; "design/composable-agent-instructions-and-packages.md"
     ; "guide/admitted-instructions.md"
     ; "guide/authoring-context-tool.md"
+    ; "guide/builtin-instructions.md"
     ; "guide/chatmd-authoring-capabilities.md"
     ; "guide/chatmd-authoring-definitions.md"
     ; "guide/chatmd-shell-extensions.md"
