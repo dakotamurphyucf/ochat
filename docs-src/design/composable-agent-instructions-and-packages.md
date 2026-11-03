@@ -96,12 +96,17 @@ embedded bytes, hashes and bounded enumeration without filesystem or network
 fallback. Captured ChatMD content retains the selected rendered bytes through
 save and restore, including inactive child definitions.
 
-Add concise reviewed guidance only for implemented capabilities. Goals,
-recurrence, skills and lifecycle composition may each supply such an asset as
-their concrete native/helper interfaces become available. Do not install a
-successful placeholder lookup for future context-management features. A new
-installation affects new explicit captures; it cannot rewrite a saved session's
-instructions. Unknown IDs remain useful errors, not authored paths or URLs.
+The [installed instruction catalog](../guide/builtin-instructions.md) contains
+`chatml`, `goals`, `recurrence`, `skills`, `project-instructions`,
+`context-recovery`, `packages` and `lifecycle`. These concise assets describe policy
+and the use of capabilities actually supplied by the host; they do not provision
+native controls or activate skills. Context recovery supplies local/session and
+explicit-sharing policy only, with no context-management functionality or storage
+claim. Future context-management execution still requires its own integration.
+A new installation affects new explicit captures; it cannot rewrite a saved
+session's instructions. Unknown IDs remain useful errors, not authored paths or
+URLs. Exact captured bytes/hash identify an edition; no new version syntax is
+introduced.
 
 Built-in prompt instructions are distinct from the longer source-pinned
 `Authoring_sources`/`Authoring_corpus` reference documents. Existing

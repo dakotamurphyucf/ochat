@@ -2960,7 +2960,7 @@ let runtime_foundation ~sources =
       ; review =
           Audited
             { excerpt_sha256 =
-                [ "467099991d41d1e93499aa3bdde4928cbd8c644b36af1f5fc2cec87f9926923d" ]
+                [ "ad4f87bcab01491f8d8a08ca820ac7438223644db56c175a7ce368f1c810f41a" ]
             ; evidence =
                 [ "lib/chatmd/prompt.ml"
                 ; "lib/chat_response/generated_admission.ml"
@@ -3647,6 +3647,29 @@ let runtime_foundation ~sources =
        ]
      @ runtime
      @ children
+     @ [ { id = "instructions.builtin"
+         ; title = "Builtin instruction assets and exact captured editions"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/builtin-instructions.md"
+               ; heading = "# Builtin instruction assets"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "6e6ec03ec819715129d26b68a3dcd196f358845e110aa754acd893157fac5abf" ]
+               ; evidence =
+                   [ "test/builtin_instructions/builtin_instructions_tests.ml"
+                   ; "test/chatmd_prompt_content/content_tests.ml"
+                   ; "test/prompt_content_custody/owner_tests.ml"
+                   ; "test/chatmd_authoring_assistance/assistance_tests.ml"
+                   ]
+               }
+         }
+       ]
      @ [ { id = "instructions.sources"
          ; title = "Admitted instruction discovery and exact retained content"
          ; prerequisites = []
