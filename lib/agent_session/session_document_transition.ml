@@ -39,6 +39,7 @@ let admit_encoded previous ~delta ~(next : Session_state.t) ~limits =
       | Workspace_changed _
       | Canonical_entries_appended _
       | Instruction_selection_changed _
+      | Goal_accounts_changed _
       | Goal_catalog_changed _
       | Run_state_changed _
       | Canonical_history_replaced _

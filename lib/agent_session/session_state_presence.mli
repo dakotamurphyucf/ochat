@@ -13,5 +13,6 @@ val of_document
 
 val run_state_is_absent : t -> bool
 val goal_catalog_is_absent : t -> bool
+val goal_accounts_is_absent : t -> bool
 val instruction_selection_is_absent : t -> bool
 val delivery_binding_is_absent : t -> Agent_protocol.Id.Delivery.t -> bool

@@ -159,6 +159,17 @@ let assert_same_session_snapshot expected actual =
     |> Result.ok_or_failwith
     |> Document_schema.Document.json
   in
+  let account_json state =
+    Option.map state.Agent_session.Session_state.goal_accounts ~f:(fun accounts ->
+      Agent_session.Goal_accounts.to_jsonaf accounts |> protocol_ok)
+  in
+  if
+    not
+      (Option.equal
+         Document_schema.Json.equal
+         (account_json expected)
+         (account_json actual))
+  then raise_s [%sexp "session snapshots differ in goal accounting"];
   let expected_json = ledger_json expected in
   let actual_json = ledger_json actual in
   if not (Jsonaf.exactly_equal expected_json actual_json)
