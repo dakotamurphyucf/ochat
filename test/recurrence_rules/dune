@@ -1,0 +1,6 @@
+(library
+ (name recurrence_rules_test)
+ (modules fixtures rules_tests)
+ (libraries core ochat.recurrence_rules)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
