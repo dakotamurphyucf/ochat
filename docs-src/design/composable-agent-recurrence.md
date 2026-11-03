@@ -66,7 +66,10 @@ The checked lifecycle source helpers compose explicit component obligations and
 at most one continuation or exact wait. Their Run adapter stages existing native
 Run decisions from a genuine actor callback. They do not create a headless caller,
 a recurrence ledger, an execution scope or a new Run. Shared actor-authorized
-headless admission is a separate required integration boundary.
+headless controller admission is a separate required integration boundary.
+The shared [Run start service](../lib/agent_server/run_start_service.doc.md) now
+supports an internal authenticated headless host command; it does not yet mint
+authority from a goal or recurrence record.
 
 ## Timing contract
 

@@ -8,7 +8,7 @@ end
 
 type binding =
   { scope : Run_admission.Scope.t
-  ; attachment_id : P.Id.Attachment.t
+  ; caller : Run_admission_request.Caller.t
   }
 
 type t = binding Map.M(Run_id).t
@@ -16,19 +16,23 @@ type t = binding Map.M(Run_id).t
 let empty = Map.empty (module Run_id)
 let find t id = Map.find t id
 let scope t = t.scope
-let attachment_id t = t.attachment_id
+let caller t = t.caller
 
-let add t ~(run : P.Run.t) ~scope ~attachment_id =
+let add_for_caller t ~(run : P.Run.t) ~scope ~caller =
   if
     P.Id.Principal.equal run.principal_id (Run_admission.Scope.principal_id scope)
     && P.Invocation.equal_observer
          run.source.observer
          (Run_admission.Scope.observer scope)
   then (
-    match Map.add t ~key:run.id ~data:{ scope; attachment_id } with
+    match Map.add t ~key:run.id ~data:{ scope; caller } with
     | `Ok t -> Ok t
     | `Duplicate -> Error (P.Error.invalid_request "run already has a host authority"))
   else Error (P.Error.invalid_request "run does not match the host authority")
+;;
+
+let add t ~run ~scope ~attachment_id =
+  add_for_caller t ~run ~scope ~caller:(Writer attachment_id)
 ;;
 
 let retain_current t ~index ~generation =
