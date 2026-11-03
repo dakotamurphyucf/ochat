@@ -645,7 +645,7 @@ let project_fields_with_presence
   let%bind ledger =
     Inference_ledger.to_document t.inference_ledger |> Result.map_error ~f:ledger_error
   in
-  let%map goal_catalog_fields =
+  let%bind goal_catalog_fields =
     match t.goal_catalog with
     | None ->
       Ok
@@ -655,6 +655,17 @@ let project_fields_with_presence
     | Some catalog ->
       Goal_catalog.to_jsonaf catalog
       |> Result.map ~f:(fun json -> [ "goal_catalog", json ])
+  in
+  let%map instruction_selection_fields =
+    match t.instruction_selection with
+    | None ->
+      Ok
+        (if Session_state_presence.instruction_selection_is_absent presence
+         then []
+         else [ "instruction_selection", `Null ])
+    | Some selection ->
+      Instruction_selection.to_jsonaf selection
+      |> Result.map ~f:(fun raw -> [ "instruction_selection", raw ])
   in
   `Object
     ([ "identity", identity_to_jsonaf t.identity
@@ -681,6 +692,7 @@ let project_fields_with_presence
      ]
      @ run_state_fields run_state_field t.run_state
      @ goal_catalog_fields
+     @ instruction_selection_fields
      @ [ ( "moderator_executions"
          , (X.list_json P.Moderator_execution.to_json) t.moderator_executions )
        ; "subscriptions", (X.list_json P.Subscription.Storage.to_json) t.subscriptions
@@ -802,6 +814,13 @@ let state_fields_of_jsonaf ?capture ~limits json =
     J.optional_as fields "goal_catalog" (X.nullable Goal_catalog.of_jsonaf)
     |> Result.map ~f:Option.join
   in
+  let%bind instruction_selection =
+    J.optional_as
+      fields
+      "instruction_selection"
+      (X.nullable Instruction_selection.of_jsonaf)
+    |> Result.map ~f:Option.join
+  in
   let%bind moderator_executions =
     X.required
       fields
@@ -853,6 +872,7 @@ let state_fields_of_jsonaf ?capture ~limits json =
     ; moderator_executions
     ; run_state
     ; goal_catalog
+    ; instruction_selection
     ; subscriptions
     ; deliveries
     ; ingress_registrations
@@ -899,6 +919,7 @@ let state_shape =
       , X.array_shape_exn ~identity_field:"history_id" Managed_submission.shape )
     ; "run_state", X.nullable_shape Run_state.shape
     ; "goal_catalog", X.nullable_shape Goal_catalog.shape
+    ; "instruction_selection", X.nullable_shape Instruction_selection.shape
     ; "managed_stops", X.array_shape_exn ~identity_field:"id" Managed_stop.shape
     ; ( "moderator_executions"
       , X.array_shape_exn ~identity_field:"id" Shapes.moderator_execution )
@@ -962,6 +983,19 @@ let validate_run_capacity_only (state : S.t) document =
 let validate_run_capacity (state : S.t) document ~limits =
   let open Result.Let_syntax in
   let%bind () = validate_run_capacity_only state document in
+  let%bind limits =
+    match state.instruction_selection with
+    | None -> Ok limits
+    | Some selection ->
+      let%bind () =
+        Instruction_selection.validate_host_capacity
+          selection
+          (D.Document.json document)
+          ~limits
+        |> X.document_result
+      in
+      Instruction_selection.remaining_host_limits selection limits
+  in
   match state.goal_catalog with
   | None -> Ok ()
   | Some catalog ->
@@ -1478,9 +1512,44 @@ let validate_goal_carrier t =
     validate_goal_update previous (value t).goal_catalog
 ;;
 
+let validate_instruction_update previous incoming =
+  match previous, incoming with
+  | None, None -> Ok ()
+  | None, Some incoming ->
+    Instruction_selection.validate_update Instruction_selection.empty ~incoming
+    |> X.document_result
+  | Some previous, Some incoming ->
+    Instruction_selection.validate_update previous ~incoming |> X.document_result
+  | Some _, None ->
+    Error
+      (D.Error.Invalid_field
+         { path = [ "instruction_selection" ]
+         ; reason = "durable instruction evidence cannot be discarded"
+         })
+;;
+
+let validate_instruction_carrier t =
+  match t.original with
+  | None -> Ok ()
+  | Some original ->
+    let open Result.Let_syntax in
+    let%bind previous =
+      match
+        D.Json.field (D.Document.payload original.template) ~name:"instruction_selection"
+      with
+      | Absent | Null -> Ok None
+      | Value raw ->
+        Instruction_selection.of_jsonaf raw
+        |> X.document_result
+        |> Result.map ~f:Option.some
+    in
+    validate_instruction_update previous (value t).instruction_selection
+;;
+
 let encode t ~limits =
   let open Result.Let_syntax in
   let%bind () = validate_goal_carrier t in
+  let%bind () = validate_instruction_carrier t in
   let%bind () = validate_ledger_carrier t ~limits in
   let%bind document =
     match t.original with
@@ -1509,6 +1578,13 @@ let adopt previous ~limits incoming =
   let open Result.Let_syntax in
   let%bind () = validate_goal_carrier previous in
   let%bind () = validate_goal_carrier incoming in
+  let%bind () = validate_instruction_carrier previous in
+  let%bind () = validate_instruction_carrier incoming in
+  let%bind () =
+    validate_instruction_update
+      (value previous).instruction_selection
+      (value incoming).instruction_selection
+  in
   let%bind () =
     validate_goal_update (value previous).goal_catalog (value incoming).goal_catalog
   in
@@ -1856,6 +1932,7 @@ module Transaction = struct
     let capture =
       Decode_evidence.Capture.create ?previous:(previous_decode_evidence t) ~limits ()
     in
+    let%bind () = validate_instruction_carrier t in
     let%bind () = validate_ledger_carrier t ~limits in
     let%bind document =
       match t.original with

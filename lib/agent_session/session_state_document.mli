@@ -5,7 +5,7 @@ open! Core
     A decoded original retains its admitted immutable ledger and complete profile.
     Updating the native value never replaces this original preservation basis;
     any different profile re-admits the original child before continuity checks.
-    Historical absent run_state and explicit null remain distinct when its native
+    Historical absent run/goal/instruction carriers and explicit null remain distinct when its native
     value is None, including adoption and unrelated writes. The optional delivery
     subscription binding has the same policy, keyed by its typed delivery ID.
     A newly admitted Some value introduces its known field; wire presence never

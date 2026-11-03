@@ -10,6 +10,8 @@
   run_admission_tests
   headless_run_tests
   goal_catalog_tests
+  instruction_selection_tests
+  instruction_selection_persistence_tests
   run_subscription_wake_tests
   run_persistence_tests
   run_job_delivery_tests
@@ -146,7 +148,7 @@
   standalone_tests
   root_invocation_tests
   state_tests)
- (libraries agent_server_test_support developer_root_owner_test_suite developer_run_store_test_suite inference_fixture ochat.transcript core eio eio_main mirage-crypto-rng.unix ochat.agent_session ochat.agent_server ochat.agent_store)
+ (libraries agent_server_test_support developer_root_owner_test_suite developer_run_store_test_suite inference_fixture ochat.transcript core eio eio_main mirage-crypto-rng.unix ochat.agent_session ochat.instruction_content ochat.agent_server ochat.agent_store)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))

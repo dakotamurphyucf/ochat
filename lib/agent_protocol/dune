@@ -10,6 +10,7 @@
   timestamp
   json_codec
   idempotency_key
+  instruction_status
   session_ref
   session_lifecycle
   prompt_dependency_selection

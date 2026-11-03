@@ -130,6 +130,63 @@ Restore verifies payload membership and digests, identity, byte counts, original
 metadata and body offsets. Missing or corrupted captures fail. Compatible unknown
 document and row fields survive an exact storage round trip. It never reads
 current files, so exact retained content survives source edits and deletion.
-Restored bytes describe custody, not activation or source permission. Combining
-this content with session custody and applying joint session quotas belongs to
-the actor integration.
+Restored bytes describe custody, not activation or source permission.
+
+## Durable selection foundation
+
+`Agent_session.Instruction_selection` stores an inert, optional
+`ochat.instruction-selection` version 1 subdocument inside the sole session
+state. It is separate from editable conversation history. Legacy absence stays
+absent on unrelated writes. A stored selection does not install tools, activate
+provider guidance or preserve a historical source grant. Genuine native
+activation, current source-use authorization and request-context insertion are
+separate host integration work.
+
+The pure `Instruction_capture.project` constructor checks a single root and
+scope, with `AGENTS.md` members in root-to-target order. An explicitly selected
+empty chain is distinct from no project selection; a real host must still prove
+that discovery was complete. `Instruction_capture.skills` keeps distinct
+qualified skills in explicit order. Replacing a group or removing individual
+skills changes references; original manifests, exact bytes and compatible
+unknown fields remain retained. Identical bytes share one payload across the
+retained captures. Refreshing discovery cannot change this selection.
+
+`Instruction_command.create` builds a consistency-only request with session,
+generation, expected selection revision and idempotency key. The internal
+`Instruction_transition.prepare` produces a checked plan over the actual session
+carrier. It authenticates no principal and accepts no grant as data. A genuine
+host owner must authorize before calling it, save through `Session_persistence`,
+and publish the candidate state and receipt only after save acknowledgement.
+Every fresh accepted command, including a semantic no-op, retains one immutable
+principal/key/request-digest receipt. An exact retry returns that same receipt
+without another write; a reused key with different input or stale fresh command
+fails. Deactivation changes references without requiring new instruction bytes.
+
+The fixed session selection profile is 64 selected files and 256 KiB of selected
+raw contents. Its finite lifetime limits are 128 retained captures, 512 file
+memberships, 8 MiB of cumulative membership bytes, 4 MiB of deduplicated payloads,
+2 MiB of encoded capture manifests, 128 receipts, and 8 MiB for the complete
+encoded subdocument. Restore has a ten-million-checkpoint aggregate work bound;
+child snapshot limits still apply. Complete encoding bounds include compatible
+unknown data. The enclosing session's potentially smaller byte, field and node
+limits also apply, with independent component reservations added together.
+
+While a project or skill remains selected, selection and whole-session document
+admission reserve a final Clear receipt and positive document encoding/counter
+headroom, including an empty selected
+project chain. Unrelated commands and new no-op receipts cannot consume that
+reserve. Receipts and captures are never evicted. Saturation rejects fresh
+commands; continuing requires a new session or a future explicit maintenance
+policy. Exact retries remain available. `Instruction_status` exposes only stored
+revision, selection counts and retained counts, without bodies, paths or root
+labels; it does not claim current authorization or activation.
+
+
+This reserve covers the selection and session document profiles. The complete
+transaction and journal frame have independent limits, so document admission
+alone cannot guarantee that a later Clear can be persisted under an arbitrary
+journal configuration. Before exposing actual activation, the genuine host
+integration must also preflight Clear against its actual complete transaction
+and journal limits, including the audit and previous-hash envelope. That gate
+belongs to native activation integration; this foundation provides no public
+activation endpoint.

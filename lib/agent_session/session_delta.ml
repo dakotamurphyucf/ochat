@@ -52,6 +52,7 @@ type t =
   | Delivery_committed of Agent_protocol.Delivery.t * Agent_protocol.History.entry
   | Delivery_wake_changed of Agent_protocol.Delivery.t
   | Goal_catalog_changed of Goal_catalog.t
+  | Instruction_selection_changed of Instruction_selection.t
   | Run_state_changed of Run_state.t
   | Moderator_changed of Jsonaf.t option
   | Shell_changed of Session.Shell_state.t
@@ -161,6 +162,18 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
       |> Result.map_error ~f:(fun error ->
         Agent_protocol.Error.invalid_request
           (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
+    in
+    let%bind () =
+      match state.instruction_selection, created.instruction_selection with
+      | None, None -> Ok ()
+      | None, Some incoming ->
+        Instruction_selection.validate_update Instruction_selection.empty ~incoming
+      | Some previous, Some incoming ->
+        Instruction_selection.validate_update previous ~incoming
+      | Some _, None ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "replacement discarded durable instruction evidence")
     in
     let%bind () =
       match state.goal_catalog, created.goal_catalog with
@@ -1173,6 +1186,13 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     let previous = Option.value state.goal_catalog ~default:Goal_catalog.empty in
     let%map () = Goal_catalog.validate_transition previous ~incoming:catalog in
     { state with goal_catalog = Some catalog }
+  | Instruction_selection_changed selection ->
+    let open Result.Let_syntax in
+    let previous =
+      Option.value state.instruction_selection ~default:Instruction_selection.empty
+    in
+    let%map selection = Instruction_selection.adopt previous ~incoming:selection in
+    { state with instruction_selection = Some selection }
   | Run_state_changed run_state ->
     let open Result.Let_syntax in
     let previous = Option.value state.run_state ~default:Run_state.empty in

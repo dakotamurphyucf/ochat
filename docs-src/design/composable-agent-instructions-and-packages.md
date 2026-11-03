@@ -206,6 +206,11 @@ successful metadata lookup or research document is not that evidence.
   admitted discovery, exact loaded revisions and immutable captured instruction
   content. See [Admitted instruction sources](../guide/admitted-instructions.md)
   for the bounded metadata profile and current library-only boundary.
+- `lib/agent_session/instruction_capture.*`, `instruction_selection*` and
+  `instruction_transition.*`: pure bounded retained selections and receipts in
+  the universal session document, with exact snapshot/payload custody and
+  internal transactional admission. This foundation is inert; it supplies no
+  authenticated native activation port or provider-context insertion.
 - `lib/capability_sources/` and `lib/capability_source_export/`: the immutable
   installed ordinary-source inventory and explicit create-only Eio export.
   `ochat libraries` exposes list, exact member read and export without preparing

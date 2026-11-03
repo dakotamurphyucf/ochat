@@ -137,6 +137,7 @@ type 'spec fields =
   ; moderator_executions : Agent_protocol.Moderator_execution.t list [@sexp.list]
   ; run_state : Run_state.t option [@sexp.option]
   ; goal_catalog : Goal_catalog.t option [@sexp.option]
+  ; instruction_selection : Instruction_selection.t option [@sexp.option]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]
   ; ingress_registrations : External_ingress.t list [@sexp.list]
@@ -433,6 +434,7 @@ let create_fields ~(identity : Identity.t) ~spec ~desired ~initial_history =
   ; moderator_executions = []
   ; run_state = None
   ; goal_catalog = None
+  ; instruction_selection = None
   ; subscriptions = []
   ; deliveries = []
   ; ingress_registrations = []
@@ -1043,6 +1045,30 @@ let validate_domain (t : t) =
 
 let validate (t : t) =
   let open Result.Let_syntax in
+  let%bind () =
+    match t.instruction_selection with
+    | None -> Ok ()
+    | Some selection ->
+      let summary = Instruction_selection.summary selection in
+      if
+        (summary.project_selected || summary.skills > 0)
+        && Int64.(
+             t.counters.revision >= max_value
+             || t.counters.event_sequence >= max_value
+             || t.counters.transaction_sequence >= max_value)
+      then
+        Error
+          (Agent_protocol.Error.create
+             Resource_limit
+             ~message:"active instructions require Clear counter headroom"
+             ~retryable:false
+             ())
+      else
+        Instruction_selection.validate
+          selection
+          ~session_id:t.identity.session_id
+          ~generation:t.identity.generation
+  in
   let%bind () =
     match t.goal_catalog with
     | None -> Ok ()
