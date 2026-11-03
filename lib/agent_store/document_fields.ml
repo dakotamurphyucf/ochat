@@ -93,7 +93,7 @@ let protocol result =
 
 let store result = Result.map_error result ~f:(fun error -> Store_error.Document error)
 
-let expect document ~kind ~version =
+let expect ?(supported_semantics = []) document ~kind ~version =
   if not (String.equal (D.Document.kind document) kind)
   then Error (D.Error.Wrong_kind { expected = kind; actual = D.Document.kind document })
   else if D.Document.version document <> version
@@ -102,9 +102,12 @@ let expect document ~kind ~version =
       (D.Error.Unsupported_version
          { kind; version = D.Document.version document; target = version })
   else (
-    match D.Document.required_semantics document with
-    | [] -> Ok ()
-    | first :: _ -> Error (D.Error.Required_semantics_unknown first))
+    match
+      List.find (D.Document.required_semantics document) ~f:(fun marker ->
+        not (List.mem supported_semantics marker ~equal:String.equal))
+    with
+    | None -> Ok ()
+    | Some marker -> Error (D.Error.Required_semantics_unknown marker))
 ;;
 
 let record_error = function
@@ -133,12 +136,12 @@ let rec iter_strings_with_checkpoint json ~checkpoint ~f =
 
 let iter_strings json ~f = iter_strings_with_checkpoint json ~checkpoint:Fn.id ~f
 
-let expect_versions document ~kind ~versions =
+let expect_versions ?(supported_semantics = []) document ~kind ~versions =
   let version = Document_schema.Document.version document in
   if List.mem versions version ~equal:Int.equal
-  then expect document ~kind ~version
+  then expect ~supported_semantics document ~kind ~version
   else (
     match versions with
-    | first :: _ -> expect document ~kind ~version:first
+    | first :: _ -> expect ~supported_semantics document ~kind ~version:first
     | [] -> Error (D.Error.Invalid_configuration "supported versions must not be empty"))
 ;;

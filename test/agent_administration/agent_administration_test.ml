@@ -470,6 +470,7 @@ let seeded_schedule state =
     ; status = Cancelled
     ; delivery_count = 0
     ; last_delivery_at = None
+    ; inference_provenance = None
     ; delivery_cancellation = None
     ; ownership = None
     }

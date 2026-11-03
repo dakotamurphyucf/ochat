@@ -1183,6 +1183,7 @@ let schedule_services t state actor_ref pending ~run_preparation =
           ; status = Scheduled
           ; delivery_count = 0
           ; last_delivery_at = None
+          ; inference_provenance = None
           ; delivery_cancellation = None
           ; ownership = None
           }

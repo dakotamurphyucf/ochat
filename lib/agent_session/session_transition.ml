@@ -319,6 +319,11 @@ let apply ~now state ~delta ~payloads =
   let identity = { state.identity with updated_at = now } in
   let counters = { state.counters with revision; event_sequence; transaction_sequence } in
   let state = { state with identity; counters } in
+  let%bind () =
+    Queue_provenance_validation.validate_transition
+      ~previous:(Session_state.queue_provenance previous)
+      (Session_state.queue_provenance state)
+  in
   let%bind () = Session_state.validate state in
   let payloads =
     List.map payloads ~f:(function
