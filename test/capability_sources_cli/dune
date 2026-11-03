@@ -1,0 +1,10 @@
+(executable
+ (name main)
+ (modules main)
+ (libraries core eio eio.unix eio_main eio_posix mirage-crypto-rng.unix jsonaf
+  agent_server_test_support ochat.capability_sources ochat.source)
+ (preprocess (pps ppx_jane)))
+
+(rule
+ (alias runtest)
+ (action (run %{exe:main.exe} %{exe:../../bin/main.exe})))

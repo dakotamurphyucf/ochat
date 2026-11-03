@@ -5,7 +5,9 @@ provides checked source helpers. It adds no language syntax, scheduler, mutable
 state store or native registration. Select `Lifecycle` from its `pure` environment
 for pure author policy. The separate [lifecycle-run project](../examples/libraries/lifecycle-run/chatml.project.json)
 exports `Lifecycle_run` from its `moderator` environment and requires `moderator_v1` or `delegated_moderator_v1`.
-These are source projects; installed resource discovery/export is separate work.
+These ordinary source projects are included in the installed `lifecycle` resource.
+Use [installed library discovery/export](chatml-installed-libraries.md) to obtain
+the complete tree without a checkout.
 
 A component returns an explicit ID, its `Active` or `Finished` obligation, and
 `No_action`, `Continue` or `Wait(wake)`. `Lifecycle.compose` preserves authored array
