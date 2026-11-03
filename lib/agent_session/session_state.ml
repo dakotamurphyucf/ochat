@@ -1298,6 +1298,10 @@ let snapshot ~now t =
     ; permissions = t.permissions
     ; grants
     ; jobs = t.jobs
+    ; instruction_status =
+        Some
+          (Instruction_selection.summary
+             (Option.value t.instruction_selection ~default:Instruction_selection.empty))
     ; extension_status = extension_status t
     ; schedules = t.schedules
     ; goals = Option.value_map t.goal_catalog ~default:[] ~f:Goal_catalog.goals

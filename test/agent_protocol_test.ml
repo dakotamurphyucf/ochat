@@ -933,6 +933,7 @@ let%expect_test "client snapshots and typed method results round trip" =
     ; permissions = []
     ; grants = []
     ; jobs = []
+    ; instruction_status = None
     ; extension_status = []
     ; schedules = []
     ; goals = []

@@ -11,6 +11,7 @@ module Fields = struct
     ; permissions : Permission.t list
     ; grants : Grant.t list
     ; jobs : Job.t list
+    ; instruction_status : Instruction_status.t option [@sexp.option]
     ; extension_status : Extension_status.t list [@sexp.list]
     ; schedules : Schedule.t list
     ; goals : Goal_projection.t list [@sexp.list]
@@ -50,6 +51,7 @@ let to_json t =
     ; Some ("permissions", list Permission.to_json t.permissions)
     ; Some ("grants", list Grant.to_json t.grants)
     ; Some ("jobs", list Job.to_json t.jobs)
+    ; optional_field "instruction_status" t.instruction_status Instruction_status.to_json
     ; Some ("extension_status", list Extension_status.to_json t.extension_status)
     ; Some ("schedules", list Schedule.to_json t.schedules)
     ; (if List.is_empty t.goals then None else Some ("goals", list Goal.to_json t.goals))
@@ -271,6 +273,9 @@ let of_json json =
   let%bind archived_revisions =
     Json_codec.optional_as fields "archived_revisions" (Json_codec.list nonnegative_int64)
   in
+  let%bind instruction_status =
+    Json_codec.optional_as fields "instruction_status" Instruction_status.of_json
+  in
   let%bind extension_status =
     Json_codec.optional_as fields "extension_status" Extension_status.list_of_json
   in
@@ -309,6 +314,7 @@ let of_json json =
       ; permissions
       ; grants
       ; jobs
+      ; instruction_status
       ; extension_status
       ; schedules
       ; goals

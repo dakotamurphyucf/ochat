@@ -6679,6 +6679,13 @@ module Durable : sig
   (** [to_json t] encodes the parameters of a [session.event] notification. *)
   val to_json : t -> Jsonaf.t
 
+  (** Counts-only selection state on a visible [Session_updated]. Admission checks
+      session identity and exact revision/sequence anchors. No source authority is
+      conveyed. An absent extra preserves a client's prior summary; null is invalid. *)
+  val with_instruction_status : t -> Instruction_status.t -> (t, Error.t) result
+
+  val instruction_status : t -> (Instruction_status.t option, Error.t) result
+
   (** Optional complete status projection on [Session_updated]. Older clients
       ignore this field; an empty list explicitly clears previously held state. *)
   val with_extension_status : t -> Extension_status.t list -> t
@@ -7847,6 +7854,36 @@ module Response : sig
   val to_json : t -> Jsonaf.t
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
+```
+
+## instruction_status
+
+[implementation](../../lib/agent_protocol/instruction_status.ml) · [interface](../../lib/agent_protocol/instruction_status.mli)
+
+```ocaml
+(** Body-, path-, and root-label-free durable selection summary. Counts describe
+    stored selection only, not current source authority or provider activation. *)
+type t = private
+  { revision : int64
+  ; project_selected : bool
+  ; project_files : int
+  ; skills : int
+  ; retained_captures : int
+  ; retained_receipts : int
+  }
+[@@deriving equal, sexp]
+
+val create
+  :  revision:int64
+  -> project_selected:bool
+  -> project_files:int
+  -> skills:int
+  -> retained_captures:int
+  -> retained_receipts:int
+  -> (t, Error.t) result
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
 ## invocation
@@ -10346,6 +10383,7 @@ type t = private
   ; timestamp : Timestamp.t
   ; kind : Event.Durable.kind
   ; body : body
+  ; instruction_status : Instruction_status.t option
   ; extension_status : Extension_status.t list option
   ; replacement_snapshot : Public_snapshot.t option
   }
@@ -10354,10 +10392,14 @@ type t = private
 (** Copies only the event envelope. Checks kind, counters, payload session
     ownership and replacement anchors. Extension summaries are unique, validated
     and cannot name a future generation of their session update. Hidden events
-    must contain neither status nor snapshot extras. *)
+    must contain neither status nor snapshot extras. Instruction status is an optional
+    counts-only [Session_updated] extra, never an authorization or activation proof.
+    If a replacement snapshot and extra are both present, the snapshot must carry
+    the same Some status; an absent extra leaves the replacement value intact. *)
 val of_internal_envelope
   :  Event.Durable.t
   -> body:body
+  -> instruction_status:Instruction_status.t option
   -> extension_status:Extension_status.t list option
   -> replacement_snapshot:Public_snapshot.t option
   -> (t, Error.t) result
@@ -10568,8 +10610,12 @@ module Fields : sig
     ; permissions : Permission.t list
     ; grants : Grant.t list
     ; jobs : Job.t list
+    ; instruction_status : Instruction_status.t option [@sexp.option]
+      (** None is legacy, unavailable or redacted; a supported empty selection is
+          Some with zero counts. Contains no body, source identity or authority. *)
     ; extension_status : Extension_status.t list
     ; schedules : Schedule.t list
+    ; goals : Goal_projection.t list
     ; active_tool_calls : Activity.Tool.summary list
       (** All currently running foreground tool calls, unique by activity key. *)
     ; active_agent_calls : Activity.Tool.summary list
@@ -12759,8 +12805,12 @@ type t =
   ; permissions : Permission.t list
   ; grants : Grant.t list
   ; jobs : Job.t list
+  ; instruction_status : Instruction_status.t option [@sexp.option]
+    (** None is legacy, unavailable or redacted; a supported empty selection is
+          Some with zero counts. Contains no body, source identity or authority. *)
   ; extension_status : Extension_status.t list [@sexp.list]
   ; schedules : Schedule.t list
+  ; goals : Goal_projection.t list [@sexp.list]
   ; active_tool_calls : Jsonaf.t list
   ; active_agent_calls : Jsonaf.t list
   ; halted : bool

@@ -83,6 +83,7 @@ let snapshot_fields =
     ; permissions = []
     ; grants = []
     ; jobs = []
+    ; instruction_status = None
     ; extension_status = []
     ; schedules = []
     ; goals = []
@@ -125,6 +126,7 @@ let shared sequence payload =
     ~body:
       (Full (Shared (Public.Durable.Shared_payload.of_internal payload |> protocol_ok)))
     ~extension_status:None
+    ~instruction_status:None
     ~replacement_snapshot:None
   |> protocol_ok
 ;;
@@ -142,6 +144,7 @@ let history_event sequence entries =
     internal
     ~body:(Full (History_appended entries))
     ~extension_status:None
+    ~instruction_status:None
     ~replacement_snapshot:None
   |> protocol_ok
 ;;
@@ -289,6 +292,7 @@ let%expect_test
               (Public.Durable.Shared_payload.of_internal (Session_updated session)
                |> protocol_ok)))
       ~extension_status:None
+      ~instruction_status:None
       ~replacement_snapshot:(Some replacement)
     |> protocol_ok
   in
@@ -900,6 +904,7 @@ let%expect_test "replacement snapshot resets transient text but retains receipt 
               (Public.Durable.Shared_payload.of_internal (Session_updated active)
                |> protocol_ok)))
       ~extension_status:None
+      ~instruction_status:None
       ~replacement_snapshot:(Some replacement)
     |> protocol_ok
   in
@@ -1088,6 +1093,7 @@ let%expect_test
               (Public.Durable.Shared_payload.of_internal (Session_updated session)
                |> protocol_ok)))
       ~extension_status:None
+      ~instruction_status:None
       ~replacement_snapshot:(Some replacement)
     |> protocol_ok
   in

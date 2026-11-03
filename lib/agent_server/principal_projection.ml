@@ -115,6 +115,7 @@ let snapshot principal (snapshot : P.Snapshot.t) =
     ; permissions = (if security then snapshot.permissions else [])
     ; grants = (if has principal Manage_grants then snapshot.grants else [])
     ; jobs = (if writer then snapshot.jobs else [])
+    ; instruction_status = (if transcript then snapshot.instruction_status else None)
     ; extension_status = (if security then snapshot.extension_status else [])
     ; schedules = (if writer then snapshot.schedules else [])
     ; goals = (if transcript then snapshot.goals else [])
@@ -179,6 +180,7 @@ let durable principal (event : P.Event.Durable.t) =
     D.of_internal_envelope
       event
       ~body:Hidden
+      ~instruction_status:None
       ~extension_status:None
       ~replacement_snapshot:None
   else (
@@ -212,12 +214,22 @@ let durable principal (event : P.Event.Durable.t) =
       then P.Event.Durable.extension_status event
       else Ok None
     in
+    let%bind instruction_status =
+      if has principal View_session_transcript
+      then P.Event.Durable.instruction_status event
+      else Ok None
+    in
     let body =
       if has principal View_security_state && has principal View_session_transcript
       then D.Full payload
       else D.Filtered payload
     in
-    D.of_internal_envelope event ~body ~extension_status ~replacement_snapshot)
+    D.of_internal_envelope
+      event
+      ~body
+      ~instruction_status
+      ~extension_status
+      ~replacement_snapshot)
 ;;
 
 let recoverable principal event =

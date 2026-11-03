@@ -432,6 +432,7 @@ let public_event sequence payload internal =
     envelope
     ~body:(Full payload)
     ~extension_status:None
+    ~instruction_status:None
     ~replacement_snapshot:None
   |> protocol_ok
 ;;

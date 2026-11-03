@@ -190,3 +190,23 @@ integration must also preflight Clear against its actual complete transaction
 and journal limits, including the audit and previous-hash envelope. That gate
 belongs to native activation integration; this foundation provides no public
 activation endpoint.
+
+## Shared selection inspection
+
+Current session snapshots expose `instruction_status` as the same validated
+counts-only summary produced by `Instruction_selection.summary`. It records the
+stored revision, whether project guidance is selected, and counts of project
+files, skills, retained captures and command receipts. It contains no document
+bodies, paths, root labels or source permission. Reading it never activates or
+refreshes instructions and does not prove that the current host can use them.
+
+The common session get/attach and durable client projection support this optional
+field under transcript-read permission. Legacy, unavailable and redacted values
+are omitted; a supported empty selection has an explicit zero summary. On the
+existing `session.updated` event, a present summary replaces prior counts and an
+absent extra preserves them. A replacement snapshot supplies its own value.
+If it accompanies a present event extra, both must contain the same summary; a
+replacement with no summary cannot be overridden by a present extra. Explicit
+null, contradictory and malformed known values are rejected. Source-use and native
+mutation integrations own when to publish an update; the projection adds no
+mutation route or separate status store.
