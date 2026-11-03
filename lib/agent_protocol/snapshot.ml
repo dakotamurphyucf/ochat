@@ -12,6 +12,7 @@ type t =
   ; jobs : Job.t list
   ; extension_status : Extension_status.t list [@sexp.list]
   ; schedules : Schedule.t list
+  ; goals : Goal_projection.t list [@sexp.list]
   ; active_tool_calls : Jsonaf.t list
   ; active_agent_calls : Jsonaf.t list
   ; halted : bool
@@ -45,6 +46,7 @@ let to_json t =
     ; Some ("jobs", list Job.to_json t.jobs)
     ; Some ("extension_status", list Extension_status.to_json t.extension_status)
     ; Some ("schedules", list Schedule.to_json t.schedules)
+    ; (if List.is_empty t.goals then None else Some ("goals", list Goal.to_json t.goals))
     ; Some ("active_tool_calls", `Array t.active_tool_calls)
     ; Some ("active_agent_calls", `Array t.active_agent_calls)
     ; Some ("halted", if t.halted then `True else `False)
@@ -126,6 +128,11 @@ let of_json json =
     decode_history fields
   in
   let%bind permissions, grants, jobs, schedules = decode_durable_children fields in
+  let%bind goals = Json_codec.optional_as fields "goals" Goal_projection.list_of_json in
+  let goals = Option.value goals ~default:[] in
+  let%bind () =
+    Goal_projection.validate goals ~session_id:session.id ~generation:session.generation
+  in
   let%bind active_tool_calls, active_agent_calls = decode_active fields in
   let%bind halted, halt_reason, failure = decode_terminal fields in
   let%bind revision = Json_codec.required_as fields "revision" nonnegative_int64 in
@@ -159,6 +166,7 @@ let of_json json =
       ; jobs
       ; extension_status
       ; schedules
+      ; goals
       ; active_tool_calls
       ; active_agent_calls
       ; halted

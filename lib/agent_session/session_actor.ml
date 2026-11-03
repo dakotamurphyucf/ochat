@@ -553,6 +553,16 @@ type _ request =
   | Update_organization :
       Agent_protocol.Principal.t * Agent_protocol.Session_organization.Request.t
       -> Agent_protocol.Session.t request
+  | Apply_goal_command :
+      Operator_authorization.t
+      * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+      * Agent_protocol.Session_ref.t
+      * Goal_command.t
+      -> Goal_command_receipt.t request
+  | Read_goals :
+      Operator_authorization.t
+      * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+      -> Agent_protocol.Goal.t list request
   | Update_metadata :
       Agent_protocol.Id.Attachment.t * int64 * Agent_protocol.Session_metadata.Patch.t
       -> Agent_protocol.Session.t request
@@ -1197,6 +1207,7 @@ let prepare_transition ?run_preparation t ~delta ~payloads =
   in
   let now = t.services.now () in
   let%bind delta = Run_source_change.prepare t.state ~delta ~now in
+  let%bind delta = Goal_catalog_source.prepare_change t.state ~delta in
   let%bind prepared = Session_transition.apply ~now t.state ~delta ~payloads in
   let%map () =
     match prepared.state.run_state with
@@ -11700,6 +11711,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Lifecycle_state _
   | Retire_lifecycle _
   | Abort_lifecycle _
+  | Read_goals _
   | State
   | Snapshot
   | Observe
@@ -11824,6 +11836,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Queue_start _
   | Activate_queued_start
   | Update_organization _
+  | Apply_goal_command _
   | Update_metadata _
   | Stop _
   | Stop_managed _
@@ -11947,26 +11960,12 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         commit_queued_event t borrow snapshot requests decision notifications)
     | Reconcile_run_recovery ->
       let open Result.Let_syntax in
-      (match t.state.run_state with
+      let%bind delta =
+        Goal_catalog_source.recovery_delta t.state ~now:(t.services.now ())
+      in
+      (match delta with
        | None -> Ok ()
-       | Some index ->
-         if
-           List.for_all (Run_state.runs index) ~f:(fun run ->
-             match run.Agent_protocol.Run.lifecycle with
-             | Terminal _ -> true
-             | Admitted | Active | Waiting _ -> false)
-         then Ok ()
-         else if Int64.equal t.state.counters.revision Int64.max_value
-         then Error (error Invalid_state "session revision exhausted during run recovery")
-         else (
-           let%bind index =
-             Run_retirement.recover
-               index
-               ~session_revision:(Int64.succ t.state.counters.revision)
-               ~now:(t.services.now ())
-           in
-           transition t ~delta:(Session_delta.Run_state_changed index) ~payloads:[]
-           |> Result.map ~f:ignore))
+       | Some delta -> transition t ~delta ~payloads:[] |> Result.map ~f:ignore)
     | Run_actions executing -> run_actions_internal t executing
     | Finish_queued_event (borrow, interrupted) ->
       finish_queued_event t borrow interrupted
@@ -12412,6 +12411,28 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
             publish_committed_transition t transition)
         in
         Ok (Session_state.summary t.state))
+    | Read_goals (actor, authorize) ->
+      Goal_command_admission.read t.state ~actor ~authorize
+    | Apply_goal_command (actor, authorize, session, request) ->
+      let open Result.Let_syntax in
+      let%bind prepared =
+        Goal_command_admission.prepare
+          t.state
+          ~actor
+          ~authorize
+          ~session
+          ~request
+          ~now:(t.services.now ())
+      in
+      let%map () =
+        match prepared.delta with
+        | None -> Ok ()
+        | Some delta ->
+          let%bind transition = prepare_transition t ~delta ~payloads:[] in
+          let%bind () = Goal_command_admission.check_write actor ~authorize t.state in
+          install t transition
+      in
+      prepared.receipt
     | Update_metadata (attachment_id, expected_metadata_revision, patch) ->
       with_writer t attachment_id (fun () ->
         let open Result.Let_syntax in
@@ -13864,3 +13885,9 @@ let lifecycle_state t fence = call t ~priority:Priority (Lifecycle_state fence)
 let retire_lifecycle t fence = call t ~priority:Priority (Retire_lifecycle fence)
 let abort_lifecycle t fence = call t ~priority:Priority (Abort_lifecycle fence)
 let check_runtime_admission t = call t ~priority:Priority Check_runtime_admission
+
+let goal_command t ~actor ~authorize ~session ~request =
+  call t (Apply_goal_command (actor, authorize, session, request))
+;;
+
+let read_goals t ~actor ~authorize = call t (Read_goals (actor, authorize))

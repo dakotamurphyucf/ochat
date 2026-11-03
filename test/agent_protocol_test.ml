@@ -935,6 +935,7 @@ let%expect_test "client snapshots and typed method results round trip" =
     ; jobs = []
     ; extension_status = []
     ; schedules = []
+    ; goals = []
     ; active_tool_calls = []
     ; active_agent_calls = []
     ; halted = false

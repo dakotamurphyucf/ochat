@@ -113,6 +113,7 @@
   goal_state
   goal_capacity
   goal
+  goal_projection
   session_activity_summary
   session_activity
   activity_query

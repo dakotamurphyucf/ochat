@@ -51,6 +51,7 @@ type t =
   | Ingress_changed of External_ingress.t
   | Delivery_committed of Agent_protocol.Delivery.t * Agent_protocol.History.entry
   | Delivery_wake_changed of Agent_protocol.Delivery.t
+  | Goal_catalog_changed of Goal_catalog.t
   | Run_state_changed of Run_state.t
   | Moderator_changed of Jsonaf.t option
   | Shell_changed of Session.Shell_state.t
@@ -160,6 +161,16 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
       |> Result.map_error ~f:(fun error ->
         Agent_protocol.Error.invalid_request
           (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
+    in
+    let%bind () =
+      match state.goal_catalog, created.goal_catalog with
+      | None, None -> Ok ()
+      | None, Some incoming ->
+        Goal_catalog.validate_transition Goal_catalog.empty ~incoming
+      | Some previous, Some incoming ->
+        Goal_catalog.validate_transition previous ~incoming
+      | Some _, None ->
+        Error (Agent_protocol.Error.invalid_request "replacement discarded durable goals")
     in
     let%map () =
       match state.run_state, created.run_state with
@@ -1157,6 +1168,11 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
           state.moderator_executions
           ~id_of:(fun e -> e.E.context.id)
     }
+  | Goal_catalog_changed catalog ->
+    let open Result.Let_syntax in
+    let previous = Option.value state.goal_catalog ~default:Goal_catalog.empty in
+    let%map () = Goal_catalog.validate_transition previous ~incoming:catalog in
+    { state with goal_catalog = Some catalog }
   | Run_state_changed run_state ->
     let open Result.Let_syntax in
     let previous = Option.value state.run_state ~default:Run_state.empty in

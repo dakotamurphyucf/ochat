@@ -69,6 +69,7 @@ type t =
   (** Settle an existing committed wake without reinserting history. Acceptance
       requires the matching active Turn, generation and running lifecycle in this checkpoint.
       Repeating the same disposition remains valid after that turn has ended. *)
+  | Goal_catalog_changed of Goal_catalog.t
   | Run_state_changed of Run_state.t
   | Moderator_changed of Jsonaf.t option
   | Shell_changed of Session.Shell_state.t

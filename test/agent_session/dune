@@ -9,6 +9,7 @@
   run_replacement_tests
   run_admission_tests
   headless_run_tests
+  goal_catalog_tests
   run_subscription_wake_tests
   run_persistence_tests
   run_job_delivery_tests

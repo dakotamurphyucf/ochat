@@ -261,6 +261,9 @@ let atom_to_jsonaf ~limits ~state_document delta =
           [ "kind", `String "invocation_reconciled"
           ; "value", P.Invocation.Storage.to_json value
           ])
+  | Goal_catalog_changed value ->
+    let%map.Result json = Goal_catalog.to_jsonaf value in
+    `Object [ "kind", `String "goal_catalog_changed"; "value", json ]
   | Run_state_changed value ->
     Ok
       (`Object [ "kind", `String "run_state_changed"; "value", Run_state.to_jsonaf value ])
@@ -570,6 +573,9 @@ let atom_of_jsonaf ~limits json =
   | "invocation_reconciled" ->
     Result.map (X.required fields "value" P.Invocation.Storage.of_json) ~f:(fun value ->
       Delta.Invocation_reconciled value)
+  | "goal_catalog_changed" ->
+    Result.map (X.required fields "value" Goal_catalog.of_jsonaf) ~f:(fun value ->
+      Delta.Goal_catalog_changed value)
   | "run_state_changed" ->
     Result.map (X.required fields "value" Run_state.of_jsonaf) ~f:(fun value ->
       Delta.Run_state_changed value)
@@ -784,6 +790,8 @@ let shape =
              ; ( "invocation_reconciled"
                , X.shape_exn
                    [ "kind", D.Shape.value; "value", Session_record_shapes.invocation ] )
+             ; ( "goal_catalog_changed"
+               , X.shape_exn [ "kind", D.Shape.value; "value", Goal_catalog.shape ] )
              ; ( "run_state_changed"
                , X.shape_exn [ "kind", D.Shape.value; "value", Run_state.shape ] )
              ; ( "moderator_execution_changed"
@@ -1390,6 +1398,7 @@ let apply t ?transaction_metadata ~limits previous =
         in
         let%bind entry = field "entry" in
         patch_history ~limits payload entry
+      | "goal_catalog_changed" -> scalar [ "goal_catalog" ] "value" Goal_catalog.shape
       | "run_state_changed" -> scalar [ "run_state" ] "value" Run_state.shape
       | "lifecycle_changed" ->
         scalar [ "lifecycle" ] "lifecycle" Session_record_shapes.lifecycle

@@ -642,8 +642,19 @@ let project_fields_with_presence
   in
   let open Result.Let_syntax in
   let%bind conversation = conversation_to_jsonaf ~raw_pending ~limits t.conversation in
-  let%map ledger =
+  let%bind ledger =
     Inference_ledger.to_document t.inference_ledger |> Result.map_error ~f:ledger_error
+  in
+  let%map goal_catalog_fields =
+    match t.goal_catalog with
+    | None ->
+      Ok
+        (if Session_state_presence.goal_catalog_is_absent presence
+         then []
+         else [ "goal_catalog", `Null ])
+    | Some catalog ->
+      Goal_catalog.to_jsonaf catalog
+      |> Result.map ~f:(fun json -> [ "goal_catalog", json ])
   in
   `Object
     ([ "identity", identity_to_jsonaf t.identity
@@ -669,6 +680,7 @@ let project_fields_with_presence
      ; "managed_stops", (X.list_json Managed_stop.to_jsonaf) t.managed_stops
      ]
      @ run_state_fields run_state_field t.run_state
+     @ goal_catalog_fields
      @ [ ( "moderator_executions"
          , (X.list_json P.Moderator_execution.to_json) t.moderator_executions )
        ; "subscriptions", (X.list_json P.Subscription.Storage.to_json) t.subscriptions
@@ -786,6 +798,10 @@ let state_fields_of_jsonaf ?capture ~limits json =
     J.optional_as fields "run_state" (X.nullable Run_state.of_jsonaf)
     |> Result.map ~f:Option.join
   in
+  let%bind goal_catalog =
+    J.optional_as fields "goal_catalog" (X.nullable Goal_catalog.of_jsonaf)
+    |> Result.map ~f:Option.join
+  in
   let%bind moderator_executions =
     X.required
       fields
@@ -836,6 +852,7 @@ let state_fields_of_jsonaf ?capture ~limits json =
     ; managed_stops
     ; moderator_executions
     ; run_state
+    ; goal_catalog
     ; subscriptions
     ; deliveries
     ; ingress_registrations
@@ -881,6 +898,7 @@ let state_shape =
     ; ( "managed_submissions"
       , X.array_shape_exn ~identity_field:"history_id" Managed_submission.shape )
     ; "run_state", X.nullable_shape Run_state.shape
+    ; "goal_catalog", X.nullable_shape Goal_catalog.shape
     ; "managed_stops", X.array_shape_exn ~identity_field:"id" Managed_stop.shape
     ; ( "moderator_executions"
       , X.array_shape_exn ~identity_field:"id" Shapes.moderator_execution )
@@ -923,7 +941,7 @@ let authored value =
   { carrier = D.Extension_carrier.of_authored_value value; original = None }
 ;;
 
-let validate_run_capacity (state : S.t) document =
+let validate_run_capacity_only (state : S.t) document =
   match state.run_state with
   | None -> Ok ()
   | Some index ->
@@ -941,6 +959,25 @@ let validate_run_capacity (state : S.t) document =
             { path = [ "run_state" ]; reason = "admitted run index is missing" }))
 ;;
 
+let validate_run_capacity (state : S.t) document ~limits =
+  let open Result.Let_syntax in
+  let%bind () = validate_run_capacity_only state document in
+  match state.goal_catalog with
+  | None -> Ok ()
+  | Some catalog ->
+    (match D.Json.field (D.Document.payload document) ~name:"goal_catalog" with
+     | Value raw ->
+       let%bind () =
+         Goal_catalog.validate_encoded_capacity catalog raw |> X.document_result
+       in
+       Goal_catalog.validate_host_capacity catalog (D.Document.json document) ~limits
+       |> X.document_result
+     | Absent | Null ->
+       Error
+         (D.Error.Invalid_field
+            { path = [ "goal_catalog" ]; reason = "admitted goal catalog is missing" }))
+;;
+
 let decoded ?evidence carrier ~limits =
   let template =
     match D.Extension_carrier.template carrier with
@@ -955,7 +992,7 @@ let decoded ?evidence carrier ~limits =
       ~limits
   in
   let carrier = D.Extension_carrier.with_value carrier state in
-  let%bind () = validate_run_capacity state template in
+  let%bind () = validate_run_capacity state template ~limits in
   let%map presence = Session_state_presence.of_document template ~limits in
   { carrier
   ; original =
@@ -1414,8 +1451,36 @@ let validate_ledger_carrier (t : t) ~limits =
     |> X.document_result
 ;;
 
+let validate_goal_update previous incoming =
+  match previous, incoming with
+  | None, None -> Ok ()
+  | None, Some incoming ->
+    Goal_catalog.validate_transition Goal_catalog.empty ~incoming |> X.document_result
+  | Some previous, Some incoming ->
+    Goal_catalog.validate_transition previous ~incoming |> X.document_result
+  | Some _, None ->
+    Error
+      (D.Error.Invalid_field
+         { path = [ "goal_catalog" ]; reason = "durable goals cannot be discarded" })
+;;
+
+let validate_goal_carrier t =
+  match t.original with
+  | None -> Ok ()
+  | Some original ->
+    let open Result.Let_syntax in
+    let%bind previous =
+      match D.Json.field (D.Document.payload original.template) ~name:"goal_catalog" with
+      | Absent | Null -> Ok None
+      | Value raw ->
+        Goal_catalog.of_jsonaf raw |> X.document_result |> Result.map ~f:Option.some
+    in
+    validate_goal_update previous (value t).goal_catalog
+;;
+
 let encode t ~limits =
   let open Result.Let_syntax in
+  let%bind () = validate_goal_carrier t in
   let%bind () = validate_ledger_carrier t ~limits in
   let%bind document =
     match t.original with
@@ -1436,12 +1501,17 @@ let encode t ~limits =
       let%bind.Result admitted = decode ~limits document in
       D.Domain_codec.encode (codec_for admitted ~limits) admitted.carrier
   in
-  let%map () = validate_run_capacity (value t) document in
+  let%map () = validate_run_capacity (value t) document ~limits in
   document
 ;;
 
 let adopt previous ~limits incoming =
   let open Result.Let_syntax in
+  let%bind () = validate_goal_carrier previous in
+  let%bind () = validate_goal_carrier incoming in
+  let%bind () =
+    validate_goal_update (value previous).goal_catalog (value incoming).goal_catalog
+  in
   let%bind () = validate_ledger_carrier previous ~limits in
   let%bind () = validate_ledger_carrier incoming ~limits in
   let%bind () =
@@ -1824,7 +1894,7 @@ module Transaction = struct
              ~presence:Session_state_presence.authored)
           carrier
     in
-    let%map () = validate_run_capacity (value { staged = t }) document in
+    let%map () = validate_run_capacity (value { staged = t }) document ~limits in
     document
   ;;
 
@@ -1845,7 +1915,7 @@ module Transaction = struct
         ~document
         ~limits
     in
-    let%bind () = validate_run_capacity state document in
+    let%bind () = validate_run_capacity state document ~limits in
     let%map presence = Session_state_presence.of_document document ~limits in
     { carrier = D.Extension_carrier.with_value carrier state
     ; original =
