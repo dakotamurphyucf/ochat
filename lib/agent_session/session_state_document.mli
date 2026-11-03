@@ -45,6 +45,13 @@ val terminal_capacity
   -> limits:Document_schema.Limits.t
   -> (Run_terminal_document.t, Document_schema.Error.t) result
 
+(** Matching capacity-only recurrence control witness for this exact carrier. *)
+val recurrence_capacity
+  :  t
+  -> document:Document_schema.Document.t
+  -> limits:Document_schema.Limits.t
+  -> (Recurrence_control_capacity.t, Document_schema.Error.t) result
+
 val decode
   :  limits:Document_schema.Limits.t
   -> Document_schema.Document.t

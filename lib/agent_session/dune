@@ -19,6 +19,7 @@
   recurrence_view
   recurrence_command_receipt
   recurrence_catalog
+  recurrence_control_capacity
   recurrence_command
   recurrence_controller
   recurrence_command_transition

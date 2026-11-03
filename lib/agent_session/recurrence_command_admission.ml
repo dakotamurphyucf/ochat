@@ -8,17 +8,24 @@ type t =
   }
 
 let check actor ~scope ~authorize state =
-  if
+  let current () =
     Operator_authorization.is_current actor
     && P.Principal.has_scope (Operator_authorization.principal actor) scope
-  then authorize state
-  else
+  in
+  let denied () =
     Error
       (P.Error.create
          Permission_denied
          ~message:"recurrence original authority expired, was revoked or lacks scope"
          ~retryable:false
          ())
+  in
+  if current ()
+  then
+    let open Result.Let_syntax in
+    let%bind () = authorize state in
+    if current () then Ok () else denied ()
+  else denied ()
 ;;
 
 let check_write actor ~authorize state = check actor ~scope:Send_messages ~authorize state
@@ -134,6 +141,7 @@ let read (state : Session_state.t) ~controller ~actor ~authorize =
         Recurrence_view.of_entry entry ~effective_control:control)
     |> Result.all
   in
+  let%bind () = check actor ~scope:View_session_transcript ~authorize state in
   if Recurrence_controller.is_current current
   then Ok entries
   else

@@ -40,12 +40,17 @@ let changes_document changes ~limits =
     ~payload:(`Object [ "changes", `Array changes ])
 ;;
 
-let project_run_retirement ~run ~goal ~limits =
+let project_run_retirement ~run ~goal ~recurrence ~limits =
   changes_document
-    (`Object [ "kind", `String "run_state_changed"; "value", run ]
-     :: Option.to_list
-          (Option.map goal ~f:(fun goal ->
-             `Object [ "kind", `String "goal_catalog_changed"; "value", goal ])))
+    (Option.to_list
+       (Option.map run ~f:(fun run ->
+          `Object [ "kind", `String "run_state_changed"; "value", run ]))
+     @ Option.to_list
+         (Option.map recurrence ~f:(fun recurrence ->
+            `Object [ "kind", `String "recurrence_catalog_changed"; "value", recurrence ]))
+     @ Option.to_list
+         (Option.map goal ~f:(fun goal ->
+            `Object [ "kind", `String "goal_catalog_changed"; "value", goal ])))
     ~limits
 ;;
 

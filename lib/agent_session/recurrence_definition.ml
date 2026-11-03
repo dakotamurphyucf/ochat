@@ -32,8 +32,19 @@ module Schedule = struct
         [ "kind", `String "calendar"; "rule", Recurrence_rules.Rule.to_json (rule t) ]
   ;;
 
+  let limits =
+    D.Limits.create ~max_bytes:65536 ~max_depth:24 ~max_fields:256 ~max_nodes:512
+    |> Result.map_error ~f:(fun error -> Sexp.to_string_hum (D.Error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  ;;
+
   let of_json json =
     let open Result.Let_syntax in
+    let%bind () =
+      D.Json.validate ~limits json
+      |> Result.map_error ~f:(fun error ->
+        P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t error)))
+    in
     let%bind f = X.object_ json in
     let%bind kind = X.required f "kind" P.Json_codec.string in
     let%bind rule =

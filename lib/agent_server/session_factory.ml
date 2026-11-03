@@ -6493,25 +6493,12 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
         ~store:t.idempotency_store
         ~server_id:(Agent_store.Session_store.server_id t.store)
     in
-    let%bind () =
-      List.fold_result
-        (Agent_store.Session_archive_record.receipts lifecycle)
-        ~init:()
-        ~f:(fun () receipt ->
-          if receipt.Agent_store.Session_archive_record.Receipt.completion_acknowledged
-          then Ok ()
-          else
-            Agent_store.Session_store.complete_lifecycle_outcome
-              t.store
-              handle
-              ~key:receipt.key
-              ~request_digest:receipt.request_digest
-              ~complete:
-                (Session_lifecycle_receipts.complete
-                   receipts
-                   ~key:receipt.key
-                   ~request_digest:receipt.request_digest)
-            |> Result.map_error ~f:protocol_of_store)
+    let%bind lifecycle_observation =
+      Agent_session.Recurrence_recovery.reconcile_lifecycle_receipts
+        lifecycle_observation
+        ~store:t.store
+        ~handle
+        ~complete:(Session_lifecycle_receipts.complete receipts)
     in
     let%bind journal, recovery = open_recovery t handle in
     let%bind () = reconcile_command_audits t recovery in

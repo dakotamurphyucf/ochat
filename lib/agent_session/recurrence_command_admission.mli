@@ -26,7 +26,10 @@ val prepare
   -> (t, Agent_protocol.Error.t) result
 
 (** Read-only effective retirement, including archived or old births, never
-    claims reconciliation has persisted and never grants target authority. *)
+    claims reconciliation has persisted and never grants target authority.
+    Rechecks original authorization after observation/projection and after any
+    host policy callback, then checks lifecycle currentness without yielding
+    before returning metadata. *)
 val read
   :  Session_state.t
   -> controller:Recurrence_controller.t

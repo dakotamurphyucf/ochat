@@ -1034,6 +1034,27 @@ let validate_run_capacity (state : S.t) document ~limits =
            (D.Error.Invalid_field
               { path = [ "goal_catalog" ]; reason = "admitted goal catalog is missing" }))
   in
+  let%bind () =
+    match state.recurrence_catalog with
+    | None -> Ok ()
+    | Some catalog ->
+      (match D.Json.field (D.Document.payload document) ~name:"recurrence_catalog" with
+       | Value raw ->
+         Recurrence_catalog.validate_encoded_capacity catalog raw |> X.document_result
+       | Absent | Null ->
+         Error
+           (D.Error.Invalid_field
+              { path = [ "recurrence_catalog" ]
+              ; reason = "admitted recurrence catalog is missing"
+              }))
+  in
+  let%bind recurrence =
+    Recurrence_control_capacity.capture state ~shape:state_shape ~document ~limits
+  in
+  let%bind growth =
+    Capacity_growth.add growth (Recurrence_control_capacity.growth recurrence)
+    |> X.document_result
+  in
   let%bind remaining =
     Capacity_growth.remaining_limits growth limits |> X.document_result
   in
@@ -1072,6 +1093,10 @@ let shape = state_shape
 
 let terminal_capacity t ~document ~limits =
   Run_terminal_document.capture (value t) ~shape ~document ~limits
+;;
+
+let recurrence_capacity t ~document ~limits =
+  Recurrence_control_capacity.capture (value t) ~shape:state_shape ~document ~limits
 ;;
 
 let unresolved_json = `Object [ "state", `String "unresolved" ]

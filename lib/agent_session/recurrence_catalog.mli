@@ -66,3 +66,8 @@ end
 val reservation : t -> (Reservation.t, Agent_protocol.Error.t) result
 
 val validate_encoded_capacity : t -> Jsonaf.t -> (unit, Agent_protocol.Error.t) result
+
+(** Private capacity-only complete control projection. Never decode/install it;
+    it conveys no lifecycle authority or execution evidence. The enclosing
+    universal carrier preserves its own compatible wrapper/envelope fields. *)
+val capacity_projection : t -> (Jsonaf.t, Agent_protocol.Error.t) result

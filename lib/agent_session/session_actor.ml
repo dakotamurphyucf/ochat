@@ -2433,17 +2433,6 @@ let stop_transition
       payloads
   =
   let open Result.Let_syntax in
-  let%bind recurrence_pause =
-    match t.state.recurrence_catalog with
-    | None -> Ok None
-    | Some catalog -> Recurrence_catalog.pause_for_stop catalog
-  in
-  let deltas =
-    deltas
-    @ Option.to_list
-        (Option.map recurrence_pause ~f:(fun catalog ->
-           Session_delta.Recurrence_catalog_changed catalog))
-  in
   let%bind discarded =
     Observation_follow_up.discard t.state.invocations ~reason:"session stopped"
   in
@@ -2519,8 +2508,37 @@ let cancel_independent_moderator t =
       Option.iter borrow.cancel ~f:(fun cancel -> cancel ()))
 ;;
 
+(* This safety disposition is durable before Stop effects. Its commit must not
+   accept the original Stop audit: a later Stop failure leaves recurrences paused
+   without claiming that stopping or external cancellation completed. The same
+   serialized command restores the original audit for its final Stop commit. *)
+let pause_recurrences_before_stop t =
+  let open Result.Let_syntax in
+  let%bind paused =
+    match t.state.recurrence_catalog with
+    | None -> Ok None
+    | Some catalog -> Recurrence_catalog.pause_for_stop catalog
+  in
+  match paused with
+  | None -> Ok false
+  | Some catalog ->
+    let audit = t.command_audit in
+    Exn.protect
+      ~finally:(fun () -> t.command_audit <- audit)
+      ~f:(fun () ->
+        t.command_audit <- None;
+        let%map _ =
+          transition
+            t
+            ~delta:(Session_delta.Recurrence_catalog_changed catalog)
+            ~payloads:[]
+        in
+        true)
+;;
+
 let stop_internal ?parent_stop_epoch ?managed_receipt t mode =
   let open Result.Let_syntax in
+  let%bind recurrence_paused = pause_recurrences_before_stop t in
   let%bind extension_work =
     Extension_stop.prepare ~state:t.state ~mode ~now:(t.services.now ())
   in
@@ -2530,7 +2548,8 @@ let stop_internal ?parent_stop_epoch ?managed_receipt t mode =
     let%map session =
       match t.state.lifecycle.desired, t.state.lifecycle.observed with
       | Stopped, Stopped
-        when (not t.state.pending_initial_start)
+        when (not recurrence_paused)
+             && (not t.state.pending_initial_start)
              && Option.is_none parent_stop_epoch
              && Option.is_none managed_receipt
              && List.is_empty (stopped_jobs t mode)
