@@ -1,11 +1,11 @@
 # Durable recurring automation
 
-Status: accepted engineering design with implemented timing and durable controller
-metadata. The `ochat.recurrence_rules` library implements validated timing rules,
+Status: accepted engineering design with implemented timing, bounded pure due
+planning, and durable controller metadata. The `ochat.recurrence_rules` library implements validated timing rules,
 finite zone models, clock arithmetic and resumable cursors. The session actor owns
 validated captured definitions, keyed control receipts and lifecycle retirement.
-Due planning, execution admission, target dispatch and public user controls remain
-integration work.
+Publishing due plans through the live scheduler, execution admission, target
+dispatch and public user controls remain integration work.
 The retained-root timezone loader supplies bounded acquisition; host root policy
 and schedule integration remain explicit owners. Passing the pure timing suite
 does not qualify those features.
@@ -367,6 +367,71 @@ existing session/blob retention. Protected generated-creation reservations are
 not ordinary history and currently have no automatic TTL: enforce a finite
 creation quota and pause with capacity evidence. Long-lived reclamation requires
 separately qualified tombstone/compaction support.
+
+## Bounded due planning
+
+[Recurrence_due_plan](../../lib/agent_session/recurrence_due_plan.mli) computes a
+candidate from the exact captured definition, entry cursor, planning frontier,
+injected clock pair and optional admitted zone. It performs no IO and launches no
+work. [Recurrence_entry.apply_due](../../lib/agent_session/recurrence_entry.mli)
+accepts that candidate only against its original basis while enabled. Cursor and
+frontier advance together; the control revision stays unchanged. The enclosing
+catalog advances once without manufacturing a user-command receipt. The future
+actor adapter must persist this complete candidate before installing its returned
+process-local phase or exposing selected work to target admission.
+
+For intervals, live due counts and lateness use the original elapsed phase.
+After restart, missed work is reconciled against wall time before a new elapsed
+anchor is established. Long missed ranges use checked arithmetic, not a loop for
+every elapsed slot. Due-time and grace equality are inclusive.
+
+| Missed-work policy | Selection before target admission |
+| --- | --- |
+| `Skip` | Keep existing Ready work; when idle, select only the latest eligible nominal. |
+| `Coalesce` | Replace older unadmitted Ready work with the latest eligible nominal; retain withdrawal evidence. |
+| `Catch_up n` | Select earliest eligible nominals up to the bounded catch-up and remaining pending capacity. |
+
+A calendar pass captures one wall cutoff and performs at most its configured
+number of one-step cursor searches. New candidates remain private until search
+proves that cutoff complete. Existing Ready work remains Ready while a later
+batch is collecting. A committed future nominal retains its exact selected UTC
+time and zone provenance even if subsequently admitted timezone bytes change.
+Only the search for unmaterialized future nominals uses the new zone. Missing zone
+configuration or insufficient coverage produces an inspectable issue; neither
+silently substitutes UTC nor clips coverage. Target dispatch still rechecks current due/grace eligibility and authorization
+after planning; a backward calendar wall correction cannot cause an early launch.
+
+Fixed delay selects its initial occurrence once and waits for actual completion
+ownership to rearm it. If that initial deadline is already outside grace, the
+planner records `Initial_delay_missed` without consuming its slot or inventing a
+completion. An explicit new definition/first due time reschedules it. Repeated
+unchanged ticks leave durable state unchanged.
+
+[Recurrence_frontier](../../lib/agent_session/recurrence_frontier.mli) retains
+per-definition high-water marks and lifetime consumed, omitted and withdrawn
+counts. Ready rows, private candidates and retained nominal details preserve
+complete compatible JSON, including unknown fields. Pausing or retiring the same
+definition withdraws unadmitted work and retires its alarm, but retains any
+unconsumed lookahead as inert cursor-associated metadata. A new definition clears
+that old lookahead together with the old cursor. Re-enabling creates a fresh alarm
+identity; retired definitions cannot be enabled.
+
+Occurrence-detail history and inert control-metadata history each obey the
+captured `max_history` limit (1–256). Unknown fields on retired alarm or batch
+containers move with the complete raw container into that control history.
+Pruning details never resets high-water marks or totals. The complete frontier,
+including unknown data and reserved control growth, is bounded to 2 MiB; enclosing
+entry, catalog, host and journal limits can be stricter. Unsupported execution
+variants reject instead of being interpreted as disposable unadmitted work.
+Historical beta entries without a frontier remain inspectable and can be paused
+or retired, but require a new recurrence identity for planning; an initial-looking
+cursor is not evidence of zero historical consumption.
+
+The pure tests compare bounded interval enumeration with arithmetic planning,
+calendar chunked and whole searches, live wall corrections versus restart, exact
+selected provenance across timezone changes, control dispositions and complete
+carrier growth near the frontier limit. These establish planning/storage
+invariants, not target execution, persistence acknowledgements or host scheduling.
 
 ## Existing and fresh targets
 

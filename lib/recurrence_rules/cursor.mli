@@ -20,6 +20,16 @@ module Interval : sig
   val slot : t -> int64
   val due_at : t -> Time_ns.Alternate_sexp.t
 
+  (** Checked nominal timestamp at a nonnegative slot at or after this cursor.
+      Fixed_rate uses the immutable period without iteration; Fixed_delay accepts
+      only this cursor's current slot. Reject backward slots, multiplication or
+      endpoint overflow. This computes timing metadata, not consumed evidence. *)
+  val at_slot
+    :  t
+    -> rule:Rule.Interval.t
+    -> slot:int64
+    -> (Time_ns.Alternate_sexp.t, Timing_error.t) Result.t
+
   (** Pure fixed-rate consumption plan for a positive count, for example from
       Clock.due_count on the live elapsed phase. No per-missed-slot loop. The owner
       commits cursor and clock-phase advance together. Range.next=None means the
@@ -77,6 +87,10 @@ module Calendar : sig
   [@@deriving sexp_of]
 
   val create : Rule.Calendar.t -> t
+
+  (** Last emitted UTC frontier, excluding a speculative search candidate.
+      The durable owner uses this to associate its retained lookahead/slot. *)
+  val last_at : t -> Time_ns.Alternate_sexp.t option
 
   (** max_steps bounds newly examined dates; a retained speculative candidate is
       separately revalidated against the actual rule/zone. Search retains at most

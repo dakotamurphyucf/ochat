@@ -15,7 +15,9 @@ current wall corrections cannot change this count. Each slot has a monotone
 integer identity. A fixed-delay cursor advances only when the
 caller supplies an actual committed completion time; the helper never treats
 timer delivery as completion. Timestamp endpoints and integer arithmetic are
-checked rather than wrapping.
+checked rather than wrapping. `Cursor.Interval.at_slot` resolves a checked forward
+slot without allocating the intervening range. `Clock.lateness_ns` reads live
+elapsed lateness for grace checks without consulting a corrected wall clock.
 
 `Clock` accepts injected wall and process-elapsed snapshots. Live interval phases
 follow elapsed time through wall-clock corrections. Commit a consumed cursor and
@@ -39,8 +41,10 @@ examines at most the supplied number of new civil dates; a retained candidate is
 separately revalidated against the actual rule and zone before it can be emitted.
 `Continue` retains that single speculative candidate and first unexamined date;
 it must be persisted or resumed and does not mean no future occurrence. A zone
-provenance change discards speculative lookahead and restarts from the last emitted
-instant. Emitted UTC timestamps strictly increase, with equal instants coalescing
+provenance change discards the cursor's speculative lookahead and restarts from the last emitted
+instant. This speculative search candidate differs from an already emitted
+nominal retained by the session due planner: that selected occurrence keeps its
+original time and provenance. Emitted UTC timestamps strictly increase, with equal instants coalescing
 to the earlier nominal local label. Cursor decoding admits days that only partly
 intersect the timestamp domain, plus one explicit exhausted-date sentinel.
 

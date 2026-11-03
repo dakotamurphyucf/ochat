@@ -1,6 +1,6 @@
 (** Durable metadata control for one recurrence ID. Immutable definition revisions
-    and a shape-validated cursor are distinct from control revision. This owner
-    does not yet produce due alarms, occurrences or target execution evidence. *)
+    and a shape-validated cursor are distinct from control revision. The pure due planner owns unadmitted nominal rows/alarms in a separate frontier.
+    This owner creates no target execution evidence. *)
 type t
 
 module Pause : sig
@@ -37,6 +37,16 @@ val control : t -> control
 val control_revision : t -> int64
 val cursor : t -> Recurrence_cursor.t
 
+(** Historical entries without frontier custody remain readable and may be
+    paused/retired, but automatic planning requires a newly created identity.
+    No history is inferred from an initial-looking current cursor. *)
+val frontier : t -> (Recurrence_frontier.t, Agent_protocol.Error.t) result
+
+(** Apply one exact-basis opaque pure plan while Enabled. Cursor/frontier advance
+    together; control revision and immutable definitions stay unchanged. This is
+    not lifecycle/source authorization or a persistence/dispatch operation. *)
+val apply_due : t -> Recurrence_due_plan.t -> (t, Agent_protocol.Error.t) result
+
 (** Pure metadata changes. These functions supply no original operator, source,
     lifecycle or execution authority; the actor validates those separately.
     At most eight immutable revisions are retained; edits reject saturation.
@@ -55,7 +65,8 @@ val hold_for_review : t -> (t option, Agent_protocol.Error.t) result
 val retire_lifecycle : t -> (t option, Agent_protocol.Error.t) result
 
 (** Complete previous immutable revisions and unknowns cannot disappear or be
-    replaced. A changed entry advances control once. Decoded updates must obey the
+    replaced. Control changes advance the control revision once; exact-basis due plans
+    advance the planning revision while leaving control unchanged. Decoded updates obey the
     same fences; historical snapshot admission is separate. *)
 val validate_transition : t -> incoming:t -> (unit, Agent_protocol.Error.t) result
 
