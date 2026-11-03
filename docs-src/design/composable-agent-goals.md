@@ -351,6 +351,15 @@ rejected at native admission. A retained model-call intent compares its original
 identity, body, and classification rather than acquiring a later operation's
 origin.
 
+A queued callback can be drained by an unrelated foreground operation. When an
+exact acknowledged wake retains the moderator execution in a Run, that causal
+Run takes precedence over the drainer for callback actions and invocation
+provenance. The operation still controls the physical worker lifetime. Selection
+finds the causal owner before checking live source and work eligibility; a
+terminal or stale causal Run never falls back to the unrelated drainer. Retained
+terminal evidence still names that original Run for historical validation and
+grants no fresh execution permission.
+
 Retained invocation records preserve the claim through outcomes, observation,
 publication, recovery, and source replacement. In particular, an idle
 `Tool_observed` callback inherits the original invocation's classification after

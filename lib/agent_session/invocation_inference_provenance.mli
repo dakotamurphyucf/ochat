@@ -22,7 +22,10 @@ val of_job
   -> (Agent_protocol.Inference_origin.t, Agent_protocol.Error.t) result
 
 (** Select only this exact actual event's Run, operation or acknowledged Job
-    ancestry. A genuine parent Job may have unavailable evidence; native admission
+    ancestry. Positive retained queued-event evidence takes precedence over its
+    physical drainer operation and remains named after terminal disposition.
+    This is immutable evidence, not permission to execute. A genuine parent Job
+    may have unavailable evidence; native admission
     preserves that absence. The caller authenticates its registered event borrow. *)
 val of_event
   :  runs:Run_state.t option

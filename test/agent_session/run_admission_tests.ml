@@ -1332,317 +1332,585 @@ let%expect_test "captured runtime installation advances only its owned accountin
 ;;
 
 let%expect_test "actual exact job and timer wakes consume once under current authority" =
-  List.iter [ `Job; `Timer ] ~f:(fun kind ->
-    with_startup_actor (fun actor authorized _ request start manager _ _ _ ->
-      ignore (start (request "exact-owned-wake") |> protocol_ok : P.Run_receipt.t);
-      let before =
-        Chat_response.Moderator_manager.identity_snapshot manager |> Result.ok_or_failwith
+  List.iter
+    [ `Job, `Idle
+    ; `Timer, `Idle
+    ; `Job, `Unbound
+    ; `Timer, `Unbound
+    ; `Job, `Single_turn
+    ; `Timer, `Single_turn
+    ]
+    ~f:(fun (kind, drainer) ->
+      let foreground =
+        match drainer with
+        | `Idle -> false
+        | `Unbound | `Single_turn -> true
       in
-      let job = ref None in
-      let timer = ref None in
-      A.Session_actor.with_current_moderator_event
-        actor
-        ~operation_id:None
-        ~event:Session_start
-        ~snapshot:(fun () -> Ok before)
-        (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
-           let service =
-             A.Session_actor.run_actions actor executing
-             |> protocol_ok
-             |> Option.value_exn
-           in
-           let owner = P.Job.Moderator_event executing.context.id in
-           let occurrence =
-             match kind with
-             | `Job ->
-               let registry = native_registry (ref 0) ~raises:false in
-               let request =
-                 Background_execution_tests.capture_tool
-                   registry
-                   { Chat_response.One_off_request.default_policy with
-                     max_output_bytes = 512
-                   }
-               in
-               let staged =
-                 A.Session_actor.prepare_background_job_launch actor ~owner request
-                 |> protocol_ok
-               in
-               job := Some staged;
-               A.Session_actor.stage_background_job
-                 actor
-                 ~job:staged
-                 ~capacity:{ publish = ignore; abort = ignore }
-               |> protocol_ok;
-               A.Session_actor.select_background_jobs actor ~owner ~ids:[ staged.id ]
-               |> protocol_ok;
-               P.Run_wake.Occurrence.Job_completion
-                 { job_id = staged.id; attempt = Int.succ staged.attempt }
-             | `Timer ->
-               let creation, staged =
-                 A.Session_actor.create_script_schedule
-                   actor
-                   ~owner
-                   ~source:executing.context.source
-                   ~delay_ms:0
-                   ~payload:(`String "owned timer")
-                   ~misfire:Deliver_once_immediately
-                 |> protocol_ok
-               in
-               timer := Some staged;
-               A.Session_actor.select_schedule_mutations
-                 actor
-                 ~owner
-                 ~source:executing.context.source
-                 ~receipts:[ creation ]
-               |> protocol_ok;
-               let ownership = Option.value_exn staged.ownership in
-               Delivered_timer
-                 { schedule_id = staged.id
-                 ; delivery_count = Int.succ staged.delivery_count
-                 ; creator = ownership.creator
-                 ; subscription = ownership.subscription
-                 }
-           in
-           let state = A.Session_actor.state actor |> protocol_ok in
-           let run =
-             Option.value_exn state.run_state |> A.Run_state.runs |> List.hd_exn
-           in
-           let wake =
-             P.Run_wake.create ~run_id:run.id ~source:run.source ~occurrence
-             |> protocol_ok
-           in
-           let transaction = A.Run_action_service.transaction service in
-           let ticket = transaction.handlers.stage (Wait wake) |> Result.ok_or_failwith in
-           ignore
-             (transaction.prepare [ ticket ] |> Result.ok_or_failwith
-              : P.Run_action.t option);
-           commit
-             ~snapshot:before
-             ~requests:
-               { request_turn = false; request_compaction = false; end_session = None })
-      |> protocol_ok
-      |> ignore;
-      let queued =
-        let frame, commit_delivery =
-          match kind with
-          | `Job ->
-            let staged = Option.value_exn !job in
-            let claimed =
-              A.Session_actor.claim_job
-                actor
-                ~job_id:staged.id
-                ~generation:staged.generation
-              |> protocol_ok
-              |> Option.value_exn
-            in
-            let completed =
-              A.Session_actor.complete_background_job
-                actor
-                ~job_id:staged.id
-                ~generation:staged.generation
-                ~attempt:claimed.attempt
-                (Succeeded (`String "done"))
-              |> protocol_ok
-            in
-            let state = A.Session_actor.state actor |> protocol_ok in
-            let observer =
-              A.Moderator_checkpoint.observer state.moderator
-              |> protocol_ok
-              |> Option.value_exn
-            in
-            let frame =
-              A.Background_job_event.frame ~state ~observer completed
-              |> protocol_ok
-              |> Chat_response.Background_delivery.capture
-            in
-            ( frame
-            , fun snapshot ->
-                A.Session_actor.deliver_job
-                  ~expected:before
-                  ~expected_job:completed
-                  actor
-                  ~job_id:completed.id
-                  ~generation:completed.generation
-                  ~moderator_snapshot:(Some (A.Moderator_checkpoint.encode snapshot))
-                |> protocol_ok
-                |> ignore )
-          | `Timer ->
-            let staged = Option.value_exn !timer in
-            let claimed =
-              A.Session_actor.claim_schedule
-                actor
-                ~schedule_id:staged.id
-                ~generation:staged.generation
-              |> protocol_ok
-              |> Option.value_exn
-            in
-            let frame =
-              Chat_response.Schedule_delivery.capture claimed |> Result.ok_or_failwith
-            in
-            ( frame
-            , fun snapshot ->
-                A.Session_actor.complete_schedule
-                  ~expected:before
-                  ~expected_schedule:claimed
-                  actor
-                  ~schedule_id:claimed.id
-                  ~generation:claimed.generation
-                  ~moderator_snapshot:(Some (A.Moderator_checkpoint.encode snapshot))
-                |> protocol_ok
-                |> ignore )
-        in
-        let frame = Session.Snapshot.of_value frame |> Result.ok_or_failwith in
-        let snapshot =
-          { before with
-            queued_internal_events = before.queued_internal_events @ [ frame ]
-          }
-        in
-        commit_delivery snapshot;
-        snapshot
+      let foreground_body = ref (fun (_ : A.Operation_worker.Capabilities.t) -> ()) in
+      let finished, finish = Eio.Promise.create () in
+      let bounded = ref (fun f -> f ()) in
+      let make_worker manager =
+        A.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+          Exn.protect
+            ~finally:(fun () -> Eio.Promise.resolve finish ())
+            ~f:(fun () ->
+              !foreground_body caps;
+              A.Operation_worker.Completed
+                { final_history = input.history
+                ; moderator_snapshot =
+                    Some
+                      (A.Moderator_checkpoint.encode
+                         (Chat_response.Moderator_manager.identity_snapshot manager
+                          |> Result.ok_or_failwith))
+                ; runtime_requests = []
+                }))
       in
-      let waiting = A.Session_actor.state actor |> protocol_ok in
-      let run = Option.value_exn waiting.run_state |> A.Run_state.runs |> List.hd_exn in
-      let wake =
-        match run.lifecycle with
-        | Waiting wake -> wake
-        | _ -> failwith "actual wait did not persist"
-      in
-      let candidate, captured =
-        A.Queued_moderator_event.claim
-          ~state:waiting
-          ~id:(P.Id.Moderator_execution.of_string "mex_wake_negative" |> protocol_ok)
-          ~snapshot:queued
-          ~now:timestamp
-        |> protocol_ok
-      in
-      let matches executing wake =
-        match A.Run_wake_owner.claim_matches waiting ~run ~wake ~executing with
-        | Ok matches -> matches
-        | Error _ -> false
-      in
-      let wrong_source =
-        P.Moderator_execution.create
-          { candidate.context with
-            source = { candidate.context.source with source_sha256 = String.make 64 'f' }
-          }
-        |> protocol_ok
-      in
-      let wrong_generation =
-        P.Moderator_execution.create
-          { candidate.context with generation = Int.succ candidate.context.generation }
-        |> protocol_ok
-      in
-      let wrong_occurrence =
-        let occurrence =
-          match wake.occurrence with
-          | Job_completion { job_id; attempt } ->
-            P.Run_wake.Occurrence.Job_completion { job_id; attempt = Int.succ attempt }
-          | Delivered_timer { schedule_id; delivery_count; creator; subscription } ->
-            Delivered_timer
-              { schedule_id
-              ; delivery_count = Int.succ delivery_count
-              ; creator
-              ; subscription
-              }
-          | Subscription_delivery _ -> failwith "fixture unexpectedly used subscription"
-        in
-        P.Run_wake.create ~run_id:run.id ~source:run.source ~occurrence |> protocol_ok
-      in
-      let exact_frame_matches = matches candidate wake in
-      let foreign_source_rejected = not (matches wrong_source wake) in
-      let foreign_generation_rejected = not (matches wrong_generation wake) in
-      let wrong_occurrence_rejected = not (matches candidate wrong_occurrence) in
-      let revision = waiting.counters.revision in
-      let claimed_scope = ref false in
-      let claim () =
-        A.Session_actor.with_idle_queued_moderator_event_tools
-          actor
-          ~snapshot:queued
-          (fun ~executing ~retirement_reason ~event:_ ~execute:_ ~commit ->
-             if Option.is_some retirement_reason then failwith "valid wake retired";
-             let service =
-               A.Session_actor.run_actions actor executing
-               |> protocol_ok
-               |> Option.value_exn
+      with_startup_actor
+        ~prepare:(fun env ->
+          bounded := fun f -> Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. f)
+        ?make_worker:(Option.some_if foreground make_worker)
+        (fun actor authorized _ request start manager scope reference attachment ->
+           !bounded (fun () ->
+             ignore (start (request "exact-owned-wake") |> protocol_ok : P.Run_receipt.t);
+             let before =
+               Chat_response.Moderator_manager.identity_snapshot manager
+               |> Result.ok_or_failwith
              in
-             claimed_scope := true;
-             ignore
-               ((A.Run_action_service.transaction service).prepare []
-                |> Result.ok_or_failwith
-                : P.Run_action.t option);
-             commit
-               ~snapshot:{ queued with queued_internal_events = [] }
-               ~requests:
-                 { request_turn = false; request_compaction = false; end_session = None })
-      in
-      authorized := false;
-      let revoked_rejected = Result.is_error (claim ()) in
-      let rejected_unchanged =
-        Int64.equal
-          revision
-          (A.Session_actor.state actor |> protocol_ok).counters.revision
-      in
-      authorized := true;
-      let actual_callback = claim () |> protocol_ok in
-      let duplicate_rejected = Result.is_error (claim ()) in
-      let state = A.Session_actor.state actor |> protocol_ok in
-      let index = Option.value_exn state.run_state in
-      let run = List.hd_exn (A.Run_state.runs index) in
-      let duplicate_frame_retired =
-        Option.is_some
-          (A.Queued_moderator_event.delivery_retirement_reason
-             ~state
-             ~observer:candidate.context.source
-             ~event:captured
-             ~subscription_expired:(fun _ -> Ok false)
-           |> protocol_ok)
-      in
-      let callback_proof_once =
-        Int.equal
-          1
-          (List.count run.terminal_work ~f:(fun proof ->
-             match proof.work.key, proof.outcome with
-             | Retained (Moderator_execution _), Succeeded -> true
-             | _ -> false))
-      in
-      let consumed_once =
-        Int.equal
-          1
-          (List.count (A.Run_state.intents index) ~f:(fun intent ->
-             match intent.action, intent.disposition with
-             | Wait _, Consumed None -> true
-             | _ -> false))
-      in
-      print_s
-        [%sexp
-          { exact_frame_matches : bool
-          ; foreign_source_rejected : bool
-          ; foreign_generation_rejected : bool
-          ; wrong_occurrence_rejected : bool
-          ; duplicate_frame_retired : bool
-          ; revoked_rejected : bool
-          ; rejected_unchanged : bool
-          ; actual_callback : bool
-          ; claimed_scope = (!claimed_scope : bool)
-          ; duplicate_rejected : bool
-          ; consumed_once : bool
-          ; callback_proof_once : bool
-          ; active = (P.Run.Lifecycle.equal run.lifecycle Active : bool)
-          }]));
+             let job = ref None in
+             let timer = ref None in
+             A.Session_actor.with_current_moderator_event
+               actor
+               ~operation_id:None
+               ~event:Session_start
+               ~snapshot:(fun () -> Ok before)
+               (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
+                  let service =
+                    A.Session_actor.run_actions actor executing
+                    |> protocol_ok
+                    |> Option.value_exn
+                  in
+                  let owner = P.Job.Moderator_event executing.context.id in
+                  let occurrence =
+                    match kind with
+                    | `Job ->
+                      let registry = native_registry (ref 0) ~raises:false in
+                      let request =
+                        Background_execution_tests.capture_tool
+                          registry
+                          { Chat_response.One_off_request.default_policy with
+                            max_output_bytes = 512
+                          }
+                      in
+                      let staged =
+                        A.Session_actor.prepare_background_job_launch actor ~owner request
+                        |> protocol_ok
+                      in
+                      job := Some staged;
+                      A.Session_actor.stage_background_job
+                        actor
+                        ~job:staged
+                        ~capacity:{ publish = ignore; abort = ignore }
+                      |> protocol_ok;
+                      A.Session_actor.select_background_jobs
+                        actor
+                        ~owner
+                        ~ids:[ staged.id ]
+                      |> protocol_ok;
+                      P.Run_wake.Occurrence.Job_completion
+                        { job_id = staged.id; attempt = Int.succ staged.attempt }
+                    | `Timer ->
+                      let creation, staged =
+                        A.Session_actor.create_script_schedule
+                          actor
+                          ~owner
+                          ~source:executing.context.source
+                          ~delay_ms:0
+                          ~payload:(`String "owned timer")
+                          ~misfire:Deliver_once_immediately
+                        |> protocol_ok
+                      in
+                      timer := Some staged;
+                      A.Session_actor.select_schedule_mutations
+                        actor
+                        ~owner
+                        ~source:executing.context.source
+                        ~receipts:[ creation ]
+                      |> protocol_ok;
+                      let ownership = Option.value_exn staged.ownership in
+                      Delivered_timer
+                        { schedule_id = staged.id
+                        ; delivery_count = Int.succ staged.delivery_count
+                        ; creator = ownership.creator
+                        ; subscription = ownership.subscription
+                        }
+                  in
+                  let state = A.Session_actor.state actor |> protocol_ok in
+                  let run =
+                    Option.value_exn state.run_state |> A.Run_state.runs |> List.hd_exn
+                  in
+                  let wake =
+                    P.Run_wake.create ~run_id:run.id ~source:run.source ~occurrence
+                    |> protocol_ok
+                  in
+                  let transaction = A.Run_action_service.transaction service in
+                  let ticket =
+                    transaction.handlers.stage (Wait wake) |> Result.ok_or_failwith
+                  in
+                  ignore
+                    (transaction.prepare [ ticket ] |> Result.ok_or_failwith
+                     : P.Run_action.t option);
+                  commit
+                    ~snapshot:before
+                    ~requests:
+                      { request_turn = false
+                      ; request_compaction = false
+                      ; end_session = None
+                      })
+             |> protocol_ok
+             |> ignore;
+             let queued =
+               let frame, commit_delivery =
+                 match kind with
+                 | `Job ->
+                   let staged = Option.value_exn !job in
+                   let claimed =
+                     A.Session_actor.claim_job
+                       actor
+                       ~job_id:staged.id
+                       ~generation:staged.generation
+                     |> protocol_ok
+                     |> Option.value_exn
+                   in
+                   let completed =
+                     A.Session_actor.complete_background_job
+                       actor
+                       ~job_id:staged.id
+                       ~generation:staged.generation
+                       ~attempt:claimed.attempt
+                       (Succeeded (`String "done"))
+                     |> protocol_ok
+                   in
+                   let state = A.Session_actor.state actor |> protocol_ok in
+                   let observer =
+                     A.Moderator_checkpoint.observer state.moderator
+                     |> protocol_ok
+                     |> Option.value_exn
+                   in
+                   let frame =
+                     A.Background_job_event.frame ~state ~observer completed
+                     |> protocol_ok
+                     |> Chat_response.Background_delivery.capture
+                   in
+                   ( frame
+                   , fun snapshot ->
+                       A.Session_actor.deliver_job
+                         ~expected:before
+                         ~expected_job:completed
+                         actor
+                         ~job_id:completed.id
+                         ~generation:completed.generation
+                         ~moderator_snapshot:
+                           (Some (A.Moderator_checkpoint.encode snapshot))
+                       |> protocol_ok
+                       |> ignore )
+                 | `Timer ->
+                   let staged = Option.value_exn !timer in
+                   let claimed =
+                     A.Session_actor.claim_schedule
+                       actor
+                       ~schedule_id:staged.id
+                       ~generation:staged.generation
+                     |> protocol_ok
+                     |> Option.value_exn
+                   in
+                   let frame =
+                     Chat_response.Schedule_delivery.capture claimed
+                     |> Result.ok_or_failwith
+                   in
+                   ( frame
+                   , fun snapshot ->
+                       A.Session_actor.complete_schedule
+                         ~expected:before
+                         ~expected_schedule:claimed
+                         actor
+                         ~schedule_id:claimed.id
+                         ~generation:claimed.generation
+                         ~moderator_snapshot:
+                           (Some (A.Moderator_checkpoint.encode snapshot))
+                       |> protocol_ok
+                       |> ignore )
+               in
+               let frame = Session.Snapshot.of_value frame |> Result.ok_or_failwith in
+               let snapshot =
+                 { before with
+                   queued_internal_events = before.queued_internal_events @ [ frame ]
+                 }
+               in
+               commit_delivery snapshot;
+               snapshot
+             in
+             let waiting = A.Session_actor.state actor |> protocol_ok in
+             let run =
+               Option.value_exn waiting.run_state |> A.Run_state.runs |> List.hd_exn
+             in
+             let wake =
+               match run.lifecycle with
+               | Waiting wake -> wake
+               | _ -> failwith "actual wait did not persist"
+             in
+             let candidate, captured =
+               A.Queued_moderator_event.claim
+                 ~state:waiting
+                 ~id:
+                   (P.Id.Moderator_execution.of_string "mex_wake_negative" |> protocol_ok)
+                 ~snapshot:queued
+                 ~now:timestamp
+               |> protocol_ok
+             in
+             let matches executing wake =
+               match A.Run_wake_owner.claim_matches waiting ~run ~wake ~executing with
+               | Ok matches -> matches
+               | Error _ -> false
+             in
+             let wrong_source =
+               P.Moderator_execution.create
+                 { candidate.context with
+                   source =
+                     { candidate.context.source with source_sha256 = String.make 64 'f' }
+                 }
+               |> protocol_ok
+             in
+             let wrong_generation =
+               P.Moderator_execution.create
+                 { candidate.context with
+                   generation = Int.succ candidate.context.generation
+                 }
+               |> protocol_ok
+             in
+             let wrong_occurrence =
+               let occurrence =
+                 match wake.occurrence with
+                 | Job_completion { job_id; attempt } ->
+                   P.Run_wake.Occurrence.Job_completion
+                     { job_id; attempt = Int.succ attempt }
+                 | Delivered_timer { schedule_id; delivery_count; creator; subscription }
+                   ->
+                   Delivered_timer
+                     { schedule_id
+                     ; delivery_count = Int.succ delivery_count
+                     ; creator
+                     ; subscription
+                     }
+                 | Subscription_delivery _ ->
+                   failwith "fixture unexpectedly used subscription"
+               in
+               P.Run_wake.create ~run_id:run.id ~source:run.source ~occurrence
+               |> protocol_ok
+             in
+             let exact_frame_matches = matches candidate wake in
+             let foreign_source_rejected = not (matches wrong_source wake) in
+             let foreign_generation_rejected = not (matches wrong_generation wake) in
+             let wrong_occurrence_rejected = not (matches candidate wrong_occurrence) in
+             let exercise
+                   (claim_scope :
+                     A.Operation_worker.Capabilities.event_handler
+                     -> (bool, P.Error.t) result)
+               =
+               let revision =
+                 (A.Session_actor.state actor |> protocol_ok).counters.revision
+               in
+               let claimed_scope = ref false in
+               let expected_callback_run = ref false in
+               let expected_invocation_run = ref false in
+               let claim () =
+                 claim_scope
+                   (fun ~executing ~retirement_reason ~event:_ ~execute ~commit ->
+                      if Option.is_some retirement_reason
+                      then failwith "valid wake retired";
+                      let service =
+                        A.Session_actor.run_actions actor executing |> protocol_ok
+                      in
+                      claimed_scope := Option.is_some service;
+                      expected_callback_run
+                      := Option.exists service ~f:(fun service ->
+                           P.Id.Run.equal
+                             run.id
+                             (A.Run_scope.run_id (A.Run_action_service.scope service)));
+                      let invocation =
+                        P.Invocation.create
+                          ~observer:run.source.observer
+                          ~parent_event:executing.context.id
+                          { (invocation_fixture ()).context with origin = Moderator }
+                        |> protocol_ok
+                      in
+                      let resolved =
+                        execute ~invocation (fun ~dispatched ~borrow_agent_actor:_ ->
+                          expected_invocation_run
+                          := Option.exists
+                               dispatched.P.Invocation.inference_origin
+                               ~f:(function
+                               | P.Inference_origin.Run id -> P.Id.Run.equal id run.id
+                               | Unbound -> false);
+                          Ok (P.Invocation.Complete `Null))
+                        |> protocol_ok
+                      in
+                      assert (
+                        Option.equal
+                          P.Inference_origin.equal
+                          resolved.P.Invocation.inference_origin
+                          (List.hd_exn
+                             (A.Session_actor.state actor |> protocol_ok).invocations)
+                            .inference_origin);
+                      (match kind, drainer with
+                       | `Job, `Single_turn ->
+                         (* Pure historical/recovery projections only: no actor
+                            mutation, execution permission or success proof. *)
+                         let basis = A.Session_actor.state actor |> protocol_ok in
+                         let index = Option.value_exn basis.run_state in
+                         let causal = A.Run_state.find index run.id |> Option.value_exn in
+                         let retired =
+                           A.Run_retirement.interrupt_run
+                             index
+                             ~run_id:run.id
+                             ~session_revision:(Int64.succ basis.counters.revision)
+                             ~now:timestamp
+                           |> protocol_ok
+                         in
+                         assert (
+                           Option.is_none
+                             (A.Run_event_scope.select
+                                { basis with run_state = Some retired }
+                                ~executing
+                              |> protocol_ok));
+                         assert (
+                           Option.equal
+                             P.Inference_origin.equal
+                             (Some (Run run.id))
+                             (A.Invocation_inference_provenance.of_event
+                                ~runs:(Some retired)
+                                ~jobs:basis.jobs
+                                executing
+                              |> protocol_ok));
+                         A.Invocation_inference_provenance.validate
+                           ~invocations:[ resolved ]
+                           ~jobs:basis.jobs
+                           ~events:[ executing ]
+                           ~runs:(Some retired)
+                         |> protocol_ok;
+                         let stale =
+                           P.Moderator_execution.create
+                             { executing.context with
+                               source =
+                                 { executing.context.source with
+                                   source_sha256 = String.make 64 'f'
+                                 }
+                             }
+                           |> protocol_ok
+                         in
+                         assert (
+                           Option.is_none
+                             (A.Run_event_scope.select basis ~executing:stale
+                              |> protocol_ok));
+                         assert (
+                           Result.is_error
+                             (A.Invocation_inference_provenance.validate
+                                ~invocations:[ resolved ]
+                                ~jobs:basis.jobs
+                                ~events:[ stale ]
+                                ~runs:basis.run_state));
+                         let contradictory =
+                           P.Run.create
+                             ~id:
+                               (P.Id.Run.of_string "run_conflicting_event" |> protocol_ok)
+                             ~session:causal.session
+                             ~principal_id:causal.principal_id
+                             ~source:causal.source
+                             ~mode:Single_turn
+                             ~lifecycle:Active
+                             ~revision:causal.revision
+                             ~owned_work:causal.owned_work
+                             ~relinquished_work:causal.relinquished_work
+                             ~terminal_work:causal.terminal_work
+                             ~created_at:causal.created_at
+                             ~updated_at:causal.updated_at
+                           |> protocol_ok
+                         in
+                         assert (
+                           Result.is_error
+                             (A.Run_event_ancestry.find
+                                [ causal; contradictory ]
+                                ~executing))
+                       | (`Job | `Timer), (`Idle | `Unbound) | `Timer, `Single_turn -> ());
+                      Option.iter service ~f:(fun service ->
+                        ignore
+                          ((A.Run_action_service.transaction service).prepare []
+                           |> Result.ok_or_failwith
+                           : P.Run_action.t option));
+                      commit
+                        ~snapshot:{ queued with queued_internal_events = [] }
+                        ~requests:
+                          { request_turn = false
+                          ; request_compaction = false
+                          ; end_session = None
+                          })
+               in
+               authorized := false;
+               let revoked_rejected = Result.is_error (claim ()) in
+               let rejected_unchanged =
+                 Int64.equal
+                   revision
+                   (A.Session_actor.state actor |> protocol_ok).counters.revision
+               in
+               authorized := true;
+               let actual_callback = claim () |> protocol_ok in
+               let duplicate_rejected = Result.is_error (claim ()) in
+               let state = A.Session_actor.state actor |> protocol_ok in
+               let index = Option.value_exn state.run_state in
+               let run = A.Run_state.find index run.id |> Option.value_exn in
+               let duplicate_frame_retired =
+                 Option.is_some
+                   (A.Queued_moderator_event.delivery_retirement_reason
+                      ~state
+                      ~observer:candidate.context.source
+                      ~event:captured
+                      ~subscription_expired:(fun _ -> Ok false)
+                    |> protocol_ok)
+               in
+               let callback_proof_once =
+                 Int.equal
+                   1
+                   (List.count run.terminal_work ~f:(fun proof ->
+                      match proof.work.key, proof.outcome with
+                      | Retained (Moderator_execution _), Succeeded -> true
+                      | _ -> false))
+               in
+               let consumed_once =
+                 Int.equal
+                   1
+                   (List.count (A.Run_state.intents index) ~f:(fun intent ->
+                      match intent.action, intent.disposition with
+                      | Wait _, Consumed None -> true
+                      | _ -> false))
+               in
+               assert (
+                 exact_frame_matches
+                 && foreign_source_rejected
+                 && foreign_generation_rejected
+                 && wrong_occurrence_rejected
+                 && duplicate_frame_retired
+                 && revoked_rejected
+                 && rejected_unchanged
+                 && actual_callback
+                 && duplicate_rejected
+                 && consumed_once
+                 && P.Run.Lifecycle.equal run.lifecycle Active);
+               assert (Bool.equal !claimed_scope !expected_callback_run);
+               print_s
+                 [%sexp
+                   (kind : [ `Job | `Timer ])
+                 , (drainer : [ `Idle | `Unbound | `Single_turn ])
+                 , (!expected_callback_run : bool)
+                 , (!expected_invocation_run : bool)
+                 , (callback_proof_once : bool)]
+             in
+             if foreground
+             then (
+               (foreground_body
+                := fun caps ->
+                     let actual = A.Session_actor.state actor |> protocol_ok in
+                     let operation = Option.value_exn actual.active_operation in
+                     let actual_index = Option.value_exn actual.run_state in
+                     let unchanged =
+                       A.Run_state.find actual_index run.id |> Option.value_exn
+                     in
+                     assert (P.Run.Lifecycle.equal unchanged.lifecycle (Waiting wake));
+                     assert (
+                       not
+                         (List.exists unchanged.owned_work ~f:(fun work ->
+                            match work.P.Run_work.key with
+                            | Operation id -> P.Id.Operation.equal id operation.id
+                            | Retained _ -> false)));
+                     let drainer_runs =
+                       A.Run_state.runs actual_index
+                       |> List.filter ~f:(fun candidate ->
+                         List.exists candidate.P.Run.owned_work ~f:(fun work ->
+                           match work.P.Run_work.key with
+                           | Operation id -> P.Id.Operation.equal id operation.id
+                           | Retained _ -> false))
+                     in
+                     (match drainer, drainer_runs with
+                      | `Unbound, [] -> ()
+                      | `Single_turn, [ drainer_run ] ->
+                        assert (P.Run.Mode.equal drainer_run.mode Single_turn);
+                        assert (not (P.Id.Run.equal drainer_run.id run.id))
+                      | _ -> failwith "actual drainer Run classification differs");
+                     exercise
+                       (caps.with_queued_moderator_event ~snapshot:(fun () -> Ok queued)));
+               let entry =
+                 A.History_codec.user_text
+                   ~id:
+                     (History_entry.Id.create
+                        ~namespace:"unrelated_foreground"
+                        ~sequence:0
+                      |> Result.ok_or_failwith)
+                   "unrelated foreground"
+                 |> A.History_codec.to_protocol
+               in
+               (match drainer with
+                | `Idle -> assert false
+                | `Unbound ->
+                  A.Session_actor.submit_message
+                    ~submitting_principal:principal_id
+                    actor
+                    ~attachment_id:attachment.id
+                    entry
+                  |> protocol_ok
+                  |> ignore
+                | `Single_turn ->
+                  let state = A.Session_actor.state actor |> protocol_ok in
+                  let request =
+                    P.Run_start.create
+                      ~session_id
+                      ~attachment_id:attachment.id
+                      ~generation:state.identity.generation
+                      ~expected_revision:state.counters.revision
+                      ~mode:Single_turn
+                      ~input:
+                        (User_submission
+                           { kind = Plain_text
+                           ; text = "unrelated foreground"
+                           ; attachments = []
+                           })
+                      ~key:(P.Idempotency_key.of_string "single-drainer" |> protocol_ok)
+                    |> protocol_ok
+                  in
+                  A.Session_actor.admit_run
+                    actor
+                    ~scope
+                    ~request
+                    ~session:reference
+                    ~request_sha256:
+                      (P.Run_start.to_json request
+                       |> Jsonaf.to_string
+                       |> Digestif.SHA256.digest_string
+                       |> Digestif.SHA256.to_hex)
+                    ~entry:(Some entry)
+                  |> protocol_ok
+                  |> ignore);
+               Eio.Promise.await finished)
+             else
+               exercise
+                 (A.Session_actor.with_idle_queued_moderator_event_tools
+                    actor
+                    ~snapshot:queued))));
   [%expect
     {|
-    ((exact_frame_matches true) (foreign_source_rejected true)
-     (foreign_generation_rejected true) (wrong_occurrence_rejected true)
-     (duplicate_frame_retired true) (revoked_rejected true)
-     (rejected_unchanged true) (actual_callback true) (claimed_scope true)
-     (duplicate_rejected true) (consumed_once true) (callback_proof_once true)
-     (active true))
-    ((exact_frame_matches true) (foreign_source_rejected true)
-     (foreign_generation_rejected true) (wrong_occurrence_rejected true)
-     (duplicate_frame_retired true) (revoked_rejected true)
-     (rejected_unchanged true) (actual_callback true) (claimed_scope true)
-     (duplicate_rejected true) (consumed_once true) (callback_proof_once true)
-     (active true))
+    (Job Idle true true true)
+    (Timer Idle true true true)
+    (Job Unbound true true true)
+    (Timer Unbound true true true)
+    (Job Single_turn true true true)
+    (Timer Single_turn true true true)
     |}]
 ;;
 
