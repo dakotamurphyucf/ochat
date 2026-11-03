@@ -194,7 +194,7 @@ let implementation_sources =
   [ ( "lib/agent_server/developer_claim_deadline.ml"
     , "04bb3b5eae209fbc7af9b938e65d9896f9838421dbc48ea823ac802fd0803f63" )
   ; ( "lib/agent_protocol/invocation.ml"
-    , "4d5abb95474bcdef6c360b666a3b57d2203a7b378193df5c49266897acac4981" )
+    , "d96de30866cc716a5f8f34315e4ae2585bbfd8e7cf765b77d2b2042836872223" )
   ; ( "lib/agent_server/developer_background_job_runner.ml"
     , "9450ea610c424f91480b70ca733226137fa0b18325f07bf789da3e582e8d1876" )
   ; ( "lib/agent_server/developer_managed_tool_executor.ml"
