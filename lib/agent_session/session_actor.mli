@@ -2212,3 +2212,30 @@ val read_goals
   -> actor:Operator_authorization.t
   -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
   -> (Agent_protocol.Goal.t list, Agent_protocol.Error.t) result
+
+(** Install the actual store/retained Handle owner once during host factory
+    construction. This is metadata custody, never target execution authority. *)
+val set_recurrence_controller
+  :  t
+  -> Recurrence_controller.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Original operator proof and current host write policy precede receipt
+    disclosure and persistence. Capture/enable also require genuine current
+    Active+Automatic lifecycle and actual installed source. Stale births retire
+    durably first; the original CAS then fails if reconciliation changed it.
+    Safe Pause/Retire require no installed moderator. No target is launched. *)
+val recurrence_command
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> request:Recurrence_command.t
+  -> (Recurrence_command_receipt.t, Agent_protocol.Error.t) result
+
+(** Current authorized read with effective lifecycle retirement. No native/script
+    runtime is initialized; stored controls and acceptance receipts grant no work. *)
+val read_recurrences
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> (Recurrence_view.t list, Agent_protocol.Error.t) result

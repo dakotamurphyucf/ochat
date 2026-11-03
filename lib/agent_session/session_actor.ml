@@ -553,6 +553,16 @@ type _ request =
   | Update_organization :
       Agent_protocol.Principal.t * Agent_protocol.Session_organization.Request.t
       -> Agent_protocol.Session.t request
+  | Set_recurrence_controller : Recurrence_controller.t -> unit request
+  | Apply_recurrence_command :
+      Operator_authorization.t
+      * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+      * Recurrence_command.t
+      -> Recurrence_command_receipt.t request
+  | Read_recurrences :
+      Operator_authorization.t
+      * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+      -> Recurrence_view.t list request
   | Apply_goal_command :
       Operator_authorization.t
       * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
@@ -947,6 +957,7 @@ type t =
   ; mutable lifecycle_fence : Lifecycle_fence.t option
   ; mutable organization_admission : Session_organization_admission.t option
   ; mutable configuration_policy : Configuration_policy.t option
+  ; mutable recurrence_controller : Recurrence_controller.t option
   ; configuration_update_owner : Configuration_update.Owner.t
   ; configuration_capture : Configuration_capture.t
   ; mutable operation_worker : Operation_worker.t option
@@ -1209,6 +1220,7 @@ let prepare_transition ?run_preparation t ~delta ~payloads =
   let%bind delta = Run_source_change.prepare t.state ~delta ~now in
   let%bind delta = Goal_catalog_source.prepare_change t.state ~delta in
   let%bind delta = Goal_run_settlement.prepare t.state ~delta in
+  let%bind delta = Recurrence_source.prepare_change t.state ~delta in
   let%bind prepared = Session_transition.apply ~now t.state ~delta ~payloads in
   let%map () =
     match prepared.state.run_state with
@@ -1230,6 +1242,28 @@ let transition ?run_preparation ?commit_attempted t ~delta ~payloads =
   let%bind transition = prepare_transition ?run_preparation t ~delta ~payloads in
   let%map () = install ?run_preparation ?commit_attempted t transition in
   Agent_protocol.Session.(Session_state.summary t.state)
+;;
+
+let require_recurrence_controller t =
+  Result.of_option
+    t.recurrence_controller
+    ~error:(error Invalid_state "recurrence controller lifecycle owner is not installed")
+;;
+
+let reconcile_recurrences_internal t =
+  match t.state.recurrence_catalog with
+  | None -> Ok ()
+  | Some _ ->
+    let open Result.Let_syntax in
+    let%bind controller = require_recurrence_controller t in
+    let%bind prepared = Recurrence_reconciliation.prepare t.state ~controller in
+    let%bind () = Recurrence_reconciliation.check_current prepared in
+    (match prepared.delta with
+     | None -> Ok ()
+     | Some delta ->
+       let%bind candidate = prepare_transition t ~delta ~payloads:[] in
+       let%bind () = Recurrence_reconciliation.check_current prepared in
+       install t candidate)
 ;;
 
 let inference_error _ = error Invalid_state "inference tracking admission failed"
@@ -2399,6 +2433,17 @@ let stop_transition
       payloads
   =
   let open Result.Let_syntax in
+  let%bind recurrence_pause =
+    match t.state.recurrence_catalog with
+    | None -> Ok None
+    | Some catalog -> Recurrence_catalog.pause_for_stop catalog
+  in
+  let deltas =
+    deltas
+    @ Option.to_list
+        (Option.map recurrence_pause ~f:(fun catalog ->
+           Session_delta.Recurrence_catalog_changed catalog))
+  in
   let%bind discarded =
     Observation_follow_up.discard t.state.invocations ~reason:"session stopped"
   in
@@ -2490,6 +2535,12 @@ let stop_internal ?parent_stop_epoch ?managed_receipt t mode =
              && Option.is_none managed_receipt
              && List.is_empty (stopped_jobs t mode)
              && Extension_stop.is_empty extension_work
+             && (not
+                   (Option.exists t.state.recurrence_catalog ~f:(fun catalog ->
+                      List.exists (Recurrence_catalog.entries catalog) ~f:(fun entry ->
+                        match Recurrence_entry.control entry with
+                        | Enabled -> true
+                        | Paused _ | Retired _ -> false))))
              && not
                   (List.exists t.state.invocations ~f:Observation_follow_up.pending
                    || List.exists
@@ -11848,6 +11899,9 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Activate_queued_start
   | Update_organization _
   | Apply_goal_command _
+  | Set_recurrence_controller _
+  | Apply_recurrence_command _
+  | Read_recurrences _
   | Update_metadata _
   | Stop _
   | Stop_managed _
@@ -12422,6 +12476,58 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
             publish_committed_transition t transition)
         in
         Ok (Session_state.summary t.state))
+    | Set_recurrence_controller controller ->
+      if
+        not
+          (Agent_protocol.Id.Session.equal
+             (Agent_protocol.Session_ref.session_id
+                (Recurrence_controller.session controller))
+             t.state.identity.session_id)
+      then Error (error Invalid_request "recurrence controller belongs to another actor")
+      else (
+        match t.recurrence_controller with
+        | Some _ -> Error (error Conflict "recurrence controller is already installed")
+        | None ->
+          t.recurrence_controller <- Some controller;
+          Ok ())
+    | Read_recurrences (actor, authorize) ->
+      let open Result.Let_syntax in
+      let%bind controller = require_recurrence_controller t in
+      Recurrence_command_admission.read t.state ~controller ~actor ~authorize
+    | Apply_recurrence_command (actor, authorize, request) ->
+      let open Result.Let_syntax in
+      let%bind () = Recurrence_command_admission.check_write actor ~authorize t.state in
+      let%bind controller = require_recurrence_controller t in
+      (* Reconciliation is an independently durable safety change. If it changes
+         CAS, the original command must be retried with fresh expectations. *)
+      let%bind () =
+        if Recurrence_command.Mutation.needs_source request.mutation
+        then reconcile_recurrences_internal t
+        else Ok ()
+      in
+      let%bind prepared =
+        Recurrence_command_admission.prepare
+          t.state
+          ~controller
+          ~actor
+          ~authorize
+          ~request
+          ~now:(t.services.now ())
+      in
+      let%bind () = Recurrence_command_admission.check_write actor ~authorize t.state in
+      let%bind () = Recurrence_command_admission.check_current prepared in
+      let%map () =
+        match prepared.delta with
+        | None -> Ok ()
+        | Some delta ->
+          let%bind candidate = prepare_transition t ~delta ~payloads:[] in
+          let%bind () =
+            Recurrence_command_admission.check_write actor ~authorize t.state
+          in
+          let%bind () = Recurrence_command_admission.check_current prepared in
+          install t candidate
+      in
+      prepared.receipt
     | Read_goals (actor, authorize) ->
       Goal_command_admission.read t.state ~actor ~authorize
     | Apply_goal_command (actor, authorize, session, request) ->
@@ -12969,6 +13075,7 @@ let create_with_owner_lease_duration
     ; permission_waiters = ref Map.Poly.empty
     ; organization_admission = None
     ; configuration_policy = None
+    ; recurrence_controller = None
     ; configuration_update_owner = Configuration_update.Owner.create ()
     ; configuration_capture = Configuration_capture.create ()
     ; operation_worker
@@ -13902,3 +14009,10 @@ let goal_command t ~actor ~authorize ~session ~request =
 ;;
 
 let read_goals t ~actor ~authorize = call t (Read_goals (actor, authorize))
+let set_recurrence_controller t controller = call t (Set_recurrence_controller controller)
+
+let recurrence_command t ~actor ~authorize ~request =
+  call t (Apply_recurrence_command (actor, authorize, request))
+;;
+
+let read_recurrences t ~actor ~authorize = call t (Read_recurrences (actor, authorize))

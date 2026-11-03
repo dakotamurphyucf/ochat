@@ -53,6 +53,7 @@ type t =
   | Delivery_wake_changed of Agent_protocol.Delivery.t
   | Goal_catalog_changed of Goal_catalog.t
   | Instruction_selection_changed of Instruction_selection.t
+  | Recurrence_catalog_changed of Recurrence_catalog.t
   | Run_state_changed of Run_state.t
   | Moderator_changed of Jsonaf.t option
   | Shell_changed of Session.Shell_state.t
@@ -184,6 +185,18 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
         Goal_catalog.validate_transition previous ~incoming
       | Some _, None ->
         Error (Agent_protocol.Error.invalid_request "replacement discarded durable goals")
+    in
+    let%bind () =
+      match state.recurrence_catalog, created.recurrence_catalog with
+      | None, None -> Ok ()
+      | None, Some incoming ->
+        Recurrence_catalog.validate_transition Recurrence_catalog.empty ~incoming
+      | Some previous, Some incoming ->
+        Recurrence_catalog.validate_transition previous ~incoming
+      | Some _, None ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "replacement discarded durable recurrences")
     in
     let%map () =
       match state.run_state, created.run_state with
@@ -1193,6 +1206,13 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     in
     let%map selection = Instruction_selection.adopt previous ~incoming:selection in
     { state with instruction_selection = Some selection }
+  | Recurrence_catalog_changed catalog ->
+    let open Result.Let_syntax in
+    let previous =
+      Option.value state.recurrence_catalog ~default:Recurrence_catalog.empty
+    in
+    let%map () = Recurrence_catalog.validate_transition previous ~incoming:catalog in
+    { state with recurrence_catalog = Some catalog }
   | Run_state_changed run_state ->
     let open Result.Let_syntax in
     let previous = Option.value state.run_state ~default:Run_state.empty in

@@ -89,6 +89,7 @@ let created_document transaction ~limits =
   | Delivery_wake_changed _
   | Instruction_selection_changed _
   | Goal_catalog_changed _
+  | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _
   | Shell_changed _

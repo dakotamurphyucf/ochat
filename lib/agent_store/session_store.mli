@@ -338,6 +338,16 @@ val owns_handle : t -> Handle.t -> bool
 
 val read_lifecycle : t -> Handle.t -> (Lifecycle.Observation.t, Store_error.t) Result.t
 
+(** Re-read and compare a previously issued opaque observation under its exact
+    owned Handle and current lifecycle epoch. This can validate recovery-only
+    safety retirement while canonical metadata/index repair is pending. It does
+    not establish a full current scheduling projection or authorize execution. *)
+val check_lifecycle_observation
+  :  t
+  -> Handle.t
+  -> Lifecycle.Observation.t
+  -> (unit, Store_error.t) result
+
 (** Read-only current projection issuance from owned authority, exact full index
     and fenced canonical state. Does not publish, acknowledge receipts, repair or
     authorize execution. Rejects foreign/closed/unavailable owners and stale basis. *)
