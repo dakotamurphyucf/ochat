@@ -865,6 +865,11 @@ val import_legacy
     connection. *)
 val health : t -> include_details:bool -> Agent_protocol.Health.Response.t
 
+(** Finite configured timezone-root availability for the embedding administrator.
+    This discloses no filesystem path or zone bytes and grants no execution
+    authority. An unavailable root does not disable interval planning. *)
+val recurrence_zone_status : t -> Recurrence_automation_host.Zone_status.t
+
 (** Stops accepting semantic work, terminates loaded sessions, and releases
     the durable data-root lock. It is idempotent.
     Close new scheduler admission and cancel running jobs, allowing already-admitted

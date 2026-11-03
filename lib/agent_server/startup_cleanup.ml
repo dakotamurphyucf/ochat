@@ -22,6 +22,8 @@ type t =
   ; mutable developer_close : (unit -> (unit, Agent_protocol.Error.t) result) option
   ; mutable job_scheduler : Job_scheduler.t option
   ; mutable start_scheduler : Start_scheduler.t option
+  ; mutable recurrence_host : Recurrence_automation_host.t option
+  ; mutable schedule_scheduler : Schedule_scheduler.t option
   ; mutable registry_closed : bool
   ; mutable operator_closed : bool
   ; mutable authoring_closed : bool
@@ -29,12 +31,17 @@ type t =
   ; mutable developer_closed : bool
   ; mutable job_scheduler_closed : bool
   ; mutable start_scheduler_closed : bool
+  ; mutable recurrence_host_closed : bool
+  ; mutable schedule_scheduler_closed : bool
   ; mutable store_closed : bool
   ; mutable active : bool
   ; mutable failure : Failure.t option
   }
 
 let close_remaining t =
+  Option.iter t.recurrence_host ~f:Recurrence_automation_host.close;
+  Option.iter t.schedule_scheduler ~f:Schedule_scheduler.close;
+  Option.iter t.schedule_scheduler ~f:Schedule_scheduler.await_recurrences_idle;
   let open Result.Let_syntax in
   let%bind () =
     if t.developer_closed
@@ -67,6 +74,14 @@ let close_remaining t =
   then (
     Option.iter t.registry ~f:Session_registry.shutdown;
     t.registry_closed <- true);
+  if not t.schedule_scheduler_closed
+  then (
+    Option.iter t.schedule_scheduler ~f:Schedule_scheduler.await_idle;
+    t.schedule_scheduler_closed <- true);
+  if not t.recurrence_host_closed
+  then (
+    Option.iter t.recurrence_host ~f:Recurrence_automation_host.close_and_wait;
+    t.recurrence_host_closed <- true);
   if not t.operator_closed
   then (
     Option.iter t.operator ~f:Provider_operator_port.close;
@@ -130,6 +145,8 @@ let create ~sw ~store =
     ; developer_close = None
     ; job_scheduler = None
     ; start_scheduler = None
+    ; recurrence_host = None
+    ; schedule_scheduler = None
     ; registry_closed = false
     ; operator_closed = false
     ; authoring_closed = false
@@ -137,6 +154,8 @@ let create ~sw ~store =
     ; developer_closed = false
     ; job_scheduler_closed = false
     ; start_scheduler_closed = false
+    ; recurrence_host_closed = false
+    ; schedule_scheduler_closed = false
     ; store_closed = false
     ; active = true
     ; failure = None
@@ -206,6 +225,18 @@ let adopt_start_scheduler_exn t scheduler =
   if (not t.active) || t.start_scheduler_closed || Option.is_some t.start_scheduler
   then failwith "startup start scheduler ownership has already transferred";
   t.start_scheduler <- Some scheduler
+;;
+
+let adopt_recurrence_host_exn t host =
+  if (not t.active) || t.recurrence_host_closed || Option.is_some t.recurrence_host
+  then failwith "startup recurrence ownership has already transferred";
+  t.recurrence_host <- Some host
+;;
+
+let adopt_schedule_scheduler_exn t scheduler =
+  if (not t.active) || t.schedule_scheduler_closed || Option.is_some t.schedule_scheduler
+  then failwith "startup schedule ownership has already transferred";
+  t.schedule_scheduler <- Some scheduler
 ;;
 
 let cleanup_after_failure t primary =

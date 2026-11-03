@@ -389,6 +389,7 @@ let%test_module "retained Developer Host policy" =
         ; source_file = Filename.concat root "server.sexp"
         ; server =
             { data_dir = Option.value data_dir ~default:(Filename.concat root "data")
+            ; recurrence_automation = None
             ; session_helpers = []
             ; authoring_packages = []
             ; authoring_budget = None
@@ -821,6 +822,7 @@ let%test_module "retained Developer Host policy" =
           ~script_preparation:options.script_preparation
           ~content_limits:options.content_limits
           ~child_sources
+          ~recurrence_planning_host:None
           ~durability:Flush
           ~limits:options.factory_limits
       in

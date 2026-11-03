@@ -50,6 +50,13 @@ val adopt_job_scheduler_exn : t -> Job_scheduler.t -> unit
 
 val adopt_start_scheduler_exn : t -> Start_scheduler.t -> unit
 
+(** Revoke planning before startup drain, cancel/join recurrence sweeps while
+    their actors still exist, then release the configured root after registry
+    shutdown. These are actual shared owners, not alternate schedulers. *)
+val adopt_recurrence_host_exn : t -> Recurrence_automation_host.t -> unit
+
+val adopt_schedule_scheduler_exn : t -> Schedule_scheduler.t -> unit
+
 (** Preserve original Error or exception/backtrace if ordered cleanup also fails.
     On success the actual host takes ownership; this startup guard stops releasing
     its capabilities. Caller retains the established host shutdown contract. *)

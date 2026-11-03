@@ -2299,3 +2299,38 @@ val read_recurrences
   -> actor:Operator_authorization.t
   -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
   -> (Recurrence_view.t list, Agent_protocol.Error.t) result
+
+module Recurrence_planning_read : sig
+  type t =
+    { entries : Recurrence_view.t list
+    ; planning : Recurrence_planning_status.t
+    }
+  [@@deriving sexp_of]
+end
+
+(** Same original transcript/visibility authorization as read_recurrences,
+    repeated after actual lifecycle IO. Process-local availability is diagnostic,
+    never a permission or persisted issue. Missing host config leaves metadata
+    readable and reports Not_configured. No native/script runtime is initialized. *)
+val read_recurrence_planning
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> (Recurrence_planning_read.t, Agent_protocol.Error.t) result
+
+(** Trusted factory-only installation after the actual controller owner. No
+    principal/creator lookup or target authority follows from this port. *)
+val set_recurrence_planning_host
+  :  t
+  -> Recurrence_planning_host.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** One bounded sweep of retained IDs through the actor, independently of user
+    runtime/callback ownership. Heavy named-zone reads/calendar planning occur
+    outside the mailbox; final source/control/Running/Automatic/current original
+    host proof and lifecycle checks precede the existing atomic persistence.
+    Phase installs only after ACK and before yielding state publication. No
+    target is launched and fixed-delay awaits the actual terminal owner.
+    Cancellation joins preparation cleanup; stale cleanup cannot release a new
+    token. Called by the existing sole daemon scheduler, never a new timer. *)
+val sweep_recurrences : t -> (unit, Agent_protocol.Error.t) result

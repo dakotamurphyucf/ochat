@@ -411,6 +411,7 @@ let config
     ; source_file = Filename.concat root "server.sexp"
     ; server =
         { data_dir = Filename.concat root "data"
+        ; recurrence_automation = None
         ; session_helpers = []
         ; authoring_packages = []
         ; authoring_budget = None

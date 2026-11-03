@@ -187,6 +187,7 @@ val create
   -> script_preparation:Agent_session.Runtime_script_preparation.t option
   -> content_limits:Chatmd_prompt_content.Limits.t option
   -> child_sources:Child_source_policy.t option
+  -> recurrence_planning_host:Agent_session.Recurrence_planning_host.t option
   -> durability:Agent_store.Journal_segment.durability
   -> limits:limits
   -> t

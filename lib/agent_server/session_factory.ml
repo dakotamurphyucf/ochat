@@ -141,6 +141,7 @@ type t =
   ; script_preparation : Agent_session.Runtime_script_preparation.t option
   ; content_limits : Chatmd_prompt_content.Limits.t option
   ; child_sources : Child_source_policy.t option
+  ; recurrence_planning_host : Agent_session.Recurrence_planning_host.t option
   ; generated_creation : Agent_session.Generated_session_request.service
   ; managed_sessions : Agent_session.Managed_session_service.t
   ; managed_output_cursors : Managed_output_cursor.t
@@ -5205,7 +5206,10 @@ let install_recurrence_controller t handle actor =
       ~handle
       ~entry_projection:index_entry
   in
-  Agent_session.Session_actor.set_recurrence_controller actor controller
+  let%bind () = Agent_session.Session_actor.set_recurrence_controller actor controller in
+  match t.recurrence_planning_host with
+  | None -> Ok ()
+  | Some host -> Agent_session.Session_actor.set_recurrence_planning_host actor host
 ;;
 
 let create_loaded_entry
@@ -9443,6 +9447,7 @@ let create
       ~script_preparation
       ~content_limits
       ~child_sources
+      ~recurrence_planning_host
       ~durability
       ~limits
   =
@@ -9490,6 +9495,7 @@ let create
     ; script_preparation
     ; content_limits
     ; child_sources
+    ; recurrence_planning_host
     ; durability
     ; limits
     ; document_limits =

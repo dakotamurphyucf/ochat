@@ -35,6 +35,29 @@ let poll checkpoint =
   Eio.Fiber.check ()
 ;;
 
+let decode bytes ~source ~name ~from ~until ~checkpoint =
+  let open Result.Let_syntax in
+  poll checkpoint;
+  let%bind data =
+    Data.of_string bytes ~source |> Result.map_error ~f:(fun e -> Error.Data e)
+  in
+  let%bind zone =
+    Data.zone data ~name ~from ~until |> Result.map_error ~f:(fun e -> Error.Data e)
+  in
+  poll checkpoint;
+  Ok zone
+;;
+
+let load_local owner ~source ~name ~from ~until ~checkpoint =
+  let open Result.Let_syntax in
+  let%bind member = validate ~source ~name ~from ~until in
+  let%bind bytes =
+    Local.read owner ~member ~max_bytes:Data.maximum_bytes ~checkpoint
+    |> Result.map_error ~f:(fun error -> Error.Filesystem error)
+  in
+  decode bytes ~source ~name ~from ~until ~checkpoint
+;;
+
 let load root ~source ~name ~from ~until ~checkpoint =
   let open Result.Let_syntax in
   let%bind member = validate ~source ~name ~from ~until in
@@ -46,13 +69,5 @@ let load root ~source ~name ~from ~until ~checkpoint =
         Error.Filesystem error)
   in
   (* The native bracket has joined and closed before pure data processing. *)
-  poll checkpoint;
-  let%bind data =
-    Data.of_string bytes ~source |> Result.map_error ~f:(fun e -> Error.Data e)
-  in
-  let%bind zone =
-    Data.zone data ~name ~from ~until |> Result.map_error ~f:(fun e -> Error.Data e)
-  in
-  poll checkpoint;
-  Ok zone
+  decode bytes ~source ~name ~from ~until ~checkpoint
 ;;

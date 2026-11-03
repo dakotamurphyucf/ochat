@@ -17,6 +17,10 @@ let rec has_stop_epoch (delta : Agent_session.Session_delta.t) =
   | Lifecycle_changed _
   | Metadata_changed _
   | Organization_changed _
+  | Goal_catalog_changed _
+  | Goal_accounts_changed _
+  | Instruction_selection_changed _
+  | Recurrence_catalog_changed _
   | Initial_start_consumed
   | Parent_stop_epoch_changed _
   | Workspace_changed _
