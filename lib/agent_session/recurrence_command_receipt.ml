@@ -56,8 +56,8 @@ let create
       ~control_revision
       ~catalog_revision
       ~kind
-      ~birth_lifecycle_revision
       ~source
+      ~birth_lifecycle_revision
       ~accepted_at
   =
   let open Result.Let_syntax in
@@ -123,10 +123,21 @@ let to_json t =
     ]
 ;;
 
+let limits =
+  Document_schema.Limits.create
+    ~max_bytes:262144
+    ~max_depth:32
+    ~max_fields:1024
+    ~max_nodes:2048
+  |> Result.map_error ~f:(fun error ->
+    Sexp.to_string_hum (Document_schema.Error.sexp_of_t error))
+  |> Result.ok_or_failwith
+;;
+
 let of_json json =
   let open Result.Let_syntax in
   let%bind () =
-    Document_schema.Json.validate ~limits:Agent_store.Document_fields.limits json
+    Document_schema.Json.validate ~limits json
     |> Result.map_error ~f:(fun error ->
       P.Error.invalid_request (Sexp.to_string_hum (Document_schema.Error.sexp_of_t error)))
   in

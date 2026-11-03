@@ -511,3 +511,22 @@ let retire_stale_births t ~current_revision ~archived =
     | (Enabled | Paused _), Retired Operator_retire | Retired _, (Enabled | Paused _) ->
       invalid "inconsistent effective recurrence retirement")
 ;;
+
+let capacity_projection t =
+  let open Result.Let_syntax in
+  let%bind reserve = reservation t in
+  let%map entries =
+    List.map t.entries ~f:(fun e ->
+      let%map encoded = E.capacity_projection e.Stored.value |> domain in
+      `Object [ "id", P.Id.Recurrence.to_json (E.id e.value); "document", encoded ])
+    |> Result.all
+  in
+  `Object
+    [ ( "revision"
+      , X.int64_json
+          (if reserve.required_transition_steps = 0 then t.revision else Int64.max_value)
+      )
+    ; "entries", `Array entries
+    ; "receipts", `Array (List.map t.receipts ~f:receipt_json)
+    ]
+;;

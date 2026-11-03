@@ -1,9 +1,11 @@
 # Durable recurring automation
 
-Status: accepted engineering design with a pure timing foundation. The
-`ochat.recurrence_rules` library implements validated timing rules, finite zone
-models, clock arithmetic and resumable cursors. Durable recurrence definitions,
-execution admission, target dispatch and user controls remain integration work.
+Status: accepted engineering design with implemented timing and durable controller
+metadata. The `ochat.recurrence_rules` library implements validated timing rules,
+finite zone models, clock arithmetic and resumable cursors. The session actor owns
+validated captured definitions, keyed control receipts and lifecycle retirement.
+Due planning, execution admission, target dispatch and public user controls remain
+integration work.
 The retained-root timezone loader supplies bounded acquisition; host root policy
 and schedule integration remain explicit owners. Passing the pure timing suite
 does not qualify those features.
@@ -19,7 +21,7 @@ separate concerns.
 ## Execution and ownership
 
 Use the existing actor persistence, one-shot schedule service, shared Run
-lifecycle, job capacity and generated-session factory. Extend the same
+lifecycle, job capacity and session factory. Extend the same
 `Schedule_scheduler` dispatcher; recurrence does not introduce a second scheduler
 or a polling fiber per definition. A scheduling notification is a hint to inspect
 current actor state, rather than authority to execute.
@@ -35,7 +37,7 @@ The following identities must remain distinct:
 | Target session and Run | Actual execution and its custody, admission key and terminal receipt. |
 
 An occurrence has one durable association to its actual Run. A fresh target also
-has its exact generated child and protected creation reservation. A completed
+has its exact captured child and protected creation reservation. A completed
 callback, delivered timer, installed child or disconnected client is not a
 successful occurrence. Only actual Run evidence can establish its outcome.
 
@@ -53,11 +55,13 @@ Existing primitives establish these boundaries:
   [Extension_stop](../../lib/agent_session/extension_stop.mli) owns existing
   graceful-stop and cancellation behavior. Recurrence adds its explicit durable
   controller pause rather than inferring it from UI visibility.
-- [Session_factory](../../lib/agent_server/session_factory.mli),
-  [Generated_definition](../../lib/agent_session/generated_definition.mli) and the
-  [delegation store](../../lib/agent_store/delegation_store.mli) own qualified
-  generated creation, stable reservations and parent linking. Ordinary authored
-  session creation cannot accept a forged generated reference.
+- [Session_factory](../../lib/agent_server/session_factory.mli) owns authored and
+  generated creation; the [delegation store](../../lib/agent_store/delegation_store.mli)
+  owns stable reservations and parent linking. The existing
+  [Generated_definition](../../lib/agent_session/generated_definition.mli) path
+  accepts a restricted generated-child subset. Complete captured authored programs
+  require their actual authored preparation path and a qualified protected
+  recurrence creation/link owner; the subset is not a substitute.
 - [Run_start_service](../../lib/agent_server/run_start_service.mli),
   [Run_start](../../lib/agent_protocol/run_start.mli) and
   [Run_receipt](../../lib/agent_protocol/run_receipt.mli) own execution admission
@@ -209,6 +213,100 @@ unmaterialized planning, while existing materialized occurrences retain their
 selected deadlines. Missing or unsupported data pauses affected planning with an
 inspectable reason. Provenance identifies data; it grants no execution authority.
 
+## Durable controller metadata
+
+The session actor owns one optional `Recurrence_catalog` inside the existing
+session state, delta and snapshot carriers. Absence and explicit null retain
+their historical meaning. Definitions, controls and cursors have separate typed
+identities and revisions; a control command cannot advance a due cursor. The
+initial owner produces no due occurrence, alarm, protected creation or execution
+association. Those require their actual scheduler, factory and Run owners.
+
+Each recurrence retains its immutable captured revisions, creator, controller,
+source installation and lifecycle birth. Edits append one captured revision and
+start it paused with its initial cursor. A retired ID remains a tombstone and
+cannot be edited or enabled. The initial finite limits are 16 retained IDs,
+eight revisions per ID, 256 immutable keyed command receipts and a complete
+32 MiB catalog, including compatible unknown fields and control growth reserve.
+These bounds do not enlarge the enclosing host document or journal profile.
+There is no eviction at saturation. A host can impose smaller limits.
+
+The policy defaults are serial execution, coalescing, a 60,000 ms lateness grace,
+one pending occurrence, 64 detailed history entries and 256 calendar steps per
+planning pass. Supported maxima are 32 pending occurrences, 256 detailed history
+entries, 4096 calendar steps and catch-up counts from 1 through 32. Grace must
+convert exactly to a nonnegative int64 nanosecond duration. These are saved
+constraints; this metadata owner does not implement misfire planning or history
+compaction, and grants no permission to exceed current host ceilings.
+
+Original operator proof and current host write policy precede receipt disclosure
+and fresh mutations. Capture, edit and enable also compare exact catalog/control
+frontiers, current source and lifecycle expectations. They require a genuine
+Active/Automatic observation from the actual store, retained Handle and complete
+current canonical/index projection. Stored IDs, receipts and selectors cannot
+reconstruct this authority. Preparation may yield; the actor rechecks original
+proof and currentness immediately before persistence.
+
+Safe operator pause and retirement remain available without an installed
+moderator. Source replacement or generation reset holds every enabled definition
+for source review while preserving an existing pause. Disconnect and occurrence
+completion do not change controller control. Explicit Stop, in either mode and
+including an already-stopped session, commits a bulk recurrence pause before
+ordinary Stop effects in the same serialized command. If a later Stop step
+fails, the recurrences remain paused; no external cancellation or completed Stop
+is claimed. The pause does not accept the original Stop audit. A successful final
+Stop transaction retains the original audit, including the already-stopped path.
+
+All nonretired definitions share the controller's current birth lifecycle epoch.
+The existing lifecycle publication is authoritative. Archive or deletion changes
+that permanent revision; old definitions are effectively retired immediately,
+including read-only archived projections and failed reconciliation writes.
+Restore and explicit Resume never revive them, even after old command receipts
+expire. Before a new capture/enable can acquire target authority, the actor must
+persist old-birth retirement; changed CAS expectations require a fresh request.
+
+Crash recovery can legitimately have pending canonical metadata/index repair.
+Safe retirement uses the existing genuine opaque lifecycle `Observation` under
+the owned recovery Handle, re-reading and comparing it before planning and
+commit. Reconciliation checks the original observation before acknowledging
+retained lifecycle receipts, then obtains a fresh genuine observation with the
+same session, lifecycle revision, status and admission. Acknowledgement can
+replace receipt documents and invalidate the earlier Handle epoch; it never
+permits a stale observation to authorize recovery. This recovery-only evidence authorizes no create, enable, runtime or
+target admission. Retirement joins the existing recovery transaction before any
+recurrence runtime or target source/execution admission. Normal metadata/index
+repair then permits the stricter `Current` observation. Inert controller artifact
+decoding and eligibility checks need no broad factory reorder.
+
+Known control changes reserve actual complete-carrier growth and numeric
+frontiers before admission. Enabled controls retain two bulk steps, paused
+controls one and retired controls none. The catalog takes the maximum across its
+same-epoch controls; the host adds that obligation to independent Run and other
+owner credits. Compatible unknown fields, JSON overhead and counter growth are
+charged. Private future JSON probes are capacity accounting only and are never
+decoded or installed as lifecycle evidence. The actual persistence owner checks
+combined Run, Goal and recurrence recovery records in its transaction/journal
+profile, including sessions without Runs. General disk failure and unrelated
+future Stop/job payloads remain ordinary persistence errors.
+
+Both target variants are immutable selection data. Existing-session targets pin
+exact session/source/configuration and bounded ordinary user input. Fresh targets
+retain a complete validated `Captured_prompt_artifact`: exact manifest
+publication, authored sources and both private program/content payload pools,
+plus the original bounded prompt definition, parent configuration selectors and
+capability pins. Nested carriers own their compatible unknowns and remain opaque
+to enclosing codecs. Captured `root_file` is provenance and never a request to
+reopen mutable files. Stored permissions, workspace/profile/runtime selectors and
+native pins remain constraints; actual runtime admission rechecks current host
+and native policies before initialization.
+
+Authorized metadata views omit captured input, artifacts, workspace paths and
+runtime configuration. Execution, authenticated target associations, due alarms,
+protected occurrence retention and controller activation remain separate
+integration boundaries. Unknown required semantics or unsupported execution
+variants fail closed; control retirement alone never proves cancellation of
+external work.
+
 ## Durable domain and policy
 
 The durable domain must use validated types for controller scope, definition
@@ -279,12 +377,16 @@ attachment. An optional existing-workflow wake mode needs its own typed target
 constructor and a genuine exact Run wake; it cannot be inferred from a copied
 continuation plan. Current one-unfinished-Workflow-per-source rules remain intact.
 
-A fresh target captures the complete admitted source bundle, entry/environment,
-workspace/profile bindings and selected inference target once per revision.
-Reuse those bytes per occurrence. The generated factory creates a stopped child
-with the exact protected reservation, then establishes current-authorized parent
-link and reciprocal occurrence origin before activation. Do not use ordinary
-session creation or the authored-root seed path to bypass generated admission.
+A fresh target retains the complete validated captured artifact, original prompt
+definition, workspace/profile selectors and selected inference target once per
+revision. The artifact includes exact manifest publication, authored sources and
+program/content payload custody. Reuse that captured closure per occurrence;
+never reopen the definition’s provenance-only root path. The future creation owner
+must use actual authored preparation with protected creation and linking, then
+establish current-authorized parent linkage and reciprocal occurrence origin
+before activation. The existing restricted generated-definition path does not
+accept every authored program or captured project closure. Ordinary creation
+cannot bypass these protected admission requirements.
 
 Both target kinds need one shared actor-authorized headless Run admission path.
 Its typed caller binds host-issued current scope and original principal/key/digest,

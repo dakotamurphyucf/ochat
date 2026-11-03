@@ -174,10 +174,18 @@ let commit t ~command_audit ~(previous : Session_state.t) transition =
       ~limits:t.archive_limits
     |> Result.map_error ~f:(fun error -> protocol_error (document_error error))
   in
+  let%bind recurrence =
+    Session_state_document.recurrence_capacity
+      state_document
+      ~document:(Session_state_document.Admitted.document admitted)
+      ~limits:t.archive_limits
+    |> Result.map_error ~f:(fun error -> protocol_error (document_error error))
+  in
   let%bind () =
     Session_terminal_journal.validate
       transition.state
       ~terminal
+      ~recurrence:(Some recurrence)
       ~limits:t.limits
       ~max_payload_length:(Store.Commit_writer.max_payload_length t.writer)
   in

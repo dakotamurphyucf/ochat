@@ -521,3 +521,23 @@ let effective_control t ~current_revision ~archived =
       then Ok (Retired Lifecycle_changed)
       else Ok (control t))
 ;;
+
+let capacity_projection t =
+  let open Result.Let_syntax in
+  let%map document =
+    if required_transition_steps t = 0
+    then D.Domain_codec.encode codec t
+    else (
+      let p = C.value t in
+      D.Domain_codec.encode
+        probe_codec
+        (C.with_value
+           t
+           (raw_json
+              { p with
+                control = Retired Lifecycle_changed
+              ; control_revision = Int64.max_value
+              })))
+  in
+  D.Document.json document
+;;

@@ -76,3 +76,8 @@ val effective_control
 val reserved_growth : t -> (Capacity_growth.t, Agent_protocol.Error.t) result
 
 val required_transition_steps : t -> int
+
+(** Private capacity-only future wire witness with bounded known control and
+    decimal growth. Never decode it as an entry, install it, or treat it as
+    retirement evidence. All compatible child unknowns remain present. *)
+val capacity_projection : t -> (Jsonaf.t, Document_schema.Error.t) result

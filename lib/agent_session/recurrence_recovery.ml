@@ -17,6 +17,43 @@ let check t =
   |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
 ;;
 
+let reconcile_lifecycle_receipts observation ~store ~handle ~complete =
+  let open Result.Let_syntax in
+  let protocol result =
+    Result.map_error result ~f:Agent_store.Store_error.to_protocol_error
+  in
+  let%bind () = S.check_lifecycle_observation store handle observation |> protocol in
+  let previous = S.Lifecycle.Observation.value observation in
+  let%bind () =
+    List.fold_result (R.receipts previous) ~init:() ~f:(fun () receipt ->
+      if receipt.R.Receipt.completion_acknowledged
+      then Ok ()
+      else
+        S.complete_lifecycle_outcome
+          store
+          handle
+          ~key:receipt.key
+          ~request_digest:receipt.request_digest
+          ~complete:(complete ~key:receipt.key ~request_digest:receipt.request_digest)
+        |> protocol)
+  in
+  let%bind current = S.read_lifecycle store handle |> protocol in
+  let value = S.Lifecycle.Observation.value current in
+  if
+    P.Id.Session.equal (R.session_id previous) (R.session_id value)
+    && R.Revision.equal (R.revision previous) (R.revision value)
+    && R.Status.equal (R.status previous) (R.status value)
+    && R.Admission.equal (R.admission previous) (R.admission value)
+  then Ok current
+  else
+    Error
+      (P.Error.create
+         Conflict
+         ~message:"session lifecycle changed during receipt recovery"
+         ~retryable:false
+         ())
+;;
+
 let prepare (state : Session_state.t) ~store ~handle ~observation =
   let open Result.Let_syntax in
   let t = { store; handle; observation; delta = None } in

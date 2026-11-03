@@ -1105,13 +1105,22 @@ let validate (t : t) =
       let summary = Instruction_selection.summary selection in
       if summary.project_selected || summary.skills > 0 then 1 else 0)
   in
+  let%bind recurrence_steps =
+    match t.recurrence_catalog with
+    | None -> Ok 0
+    | Some catalog ->
+      Result.map
+        (Recurrence_catalog.reservation catalog)
+        ~f:Recurrence_catalog.Reservation.required_transition_steps
+  in
+  let additional_steps = instruction_clear + recurrence_steps in
   let%bind () =
     Session_terminal_capacity.validate
       ~index:t.run_state
       ~jobs:t.jobs
       ~permissions:t.permissions
       ~schedules:t.schedules
-      ~additional_steps:instruction_clear
+      ~additional_steps
       ~additional_events:instruction_clear
       ~revision:t.counters.revision
       ~transaction_sequence:t.counters.transaction_sequence
