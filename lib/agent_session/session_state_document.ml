@@ -980,6 +980,7 @@ module Original = struct
     ; inference_ledger : Inference_ledger.t
     ; jobs : P.Job.t list
     ; invocations : P.Invocation.t list
+    ; queue_provenance : Queue_provenance_validation.t
     ; presence : Session_state_presence.t
     ; decode_evidence : Decode_evidence.t option
     }
@@ -1018,8 +1019,18 @@ let validate_run_capacity_only (state : S.t) document =
             { path = [ "run_state" ]; reason = "admitted run index is missing" }))
 ;;
 
+let validate_raw_queue_capacity document =
+  let raw_moderator =
+    match D.Json.field (D.Document.payload document) ~name:"moderator" with
+    | Value raw -> Some raw
+    | Absent | Null -> None
+  in
+  Moderator_checkpoint.validate_encoded_capacity raw_moderator |> X.document_result
+;;
+
 let validate_run_capacity (state : S.t) document ~limits =
   let open Result.Let_syntax in
+  let%bind () = validate_raw_queue_capacity document in
   let%bind () = validate_run_capacity_only state document in
   let%bind limits =
     match state.instruction_selection with
@@ -1112,6 +1123,7 @@ let decoded ?evidence carrier ~limits =
         ; inference_ledger = (D.Extension_carrier.value carrier).S.inference_ledger
         ; jobs = state.jobs
         ; invocations = state.invocations
+        ; queue_provenance = S.queue_provenance state
         ; presence
         ; decode_evidence = evidence
         }
@@ -1509,7 +1521,7 @@ let codec ~capture ~limits ~presence =
       ~kind:"session.state"
       ~version:current_version
       ~shape
-      ~supported_semantics:[]
+      ~supported_semantics:Queue_provenance_semantics.supported
       ~validate:(fun state -> X.document_result (S.validate state))
       ~decode:(fun json -> X.document_result (state_of_jsonaf ?capture ~limits json))
       ~encode:(fun state -> X.document_result (state_to_jsonaf state ~limits ~presence))
@@ -1531,9 +1543,24 @@ let previous_decode_evidence t =
   Option.bind t.original ~f:(fun original -> original.decode_evidence)
 ;;
 
+let require_queue_semantics document ~limits =
+  Queue_provenance_semantics.require
+    document
+    ~limits
+    ~required:(Queue_provenance_semantics.state_requires (D.Document.payload document))
+;;
+
+let check_queue_semantics document =
+  Queue_provenance_semantics.check
+    document
+    ~required:(Queue_provenance_semantics.state_requires (D.Document.payload document))
+;;
+
 let decode_with_evidence ?previous ~limits document =
   let open Result.Let_syntax in
   let%bind document = upgrade document ~limits in
+  let%bind () = check_queue_semantics document in
+  let%bind () = validate_raw_queue_capacity document in
   let capture = Decode_evidence.Capture.create ?previous ~limits () in
   let%bind carrier =
     D.Domain_codec.decode
@@ -1576,12 +1603,30 @@ let validate_inference_origin_carrier t =
     |> X.document_result
 ;;
 
+let validate_queue_carrier t =
+  match t.original with
+  | None -> Ok ()
+  | Some original ->
+    Queue_provenance_validation.validate_transition
+      ~previous:original.queue_provenance
+      (S.queue_provenance (value t))
+    |> X.document_result
+;;
+
+let validate_queue_update previous incoming =
+  Queue_provenance_validation.validate_transition
+    ~previous:(S.queue_provenance previous)
+    (S.queue_provenance incoming)
+  |> X.document_result
+;;
+
 let decode_after previous ~limits document =
   let open Result.Let_syntax in
   let%bind incoming =
     decode_with_evidence ?previous:(previous_decode_evidence previous) ~limits document
   in
-  let%map () = validate_inference_origin_update (value previous) (value incoming) in
+  let%bind () = validate_inference_origin_update (value previous) (value incoming) in
+  let%map () = validate_queue_update (value previous) (value incoming) in
   incoming
 ;;
 
@@ -1766,6 +1811,7 @@ let validate_accounts_carrier t ~limits =
 
 let encode t ~limits =
   let open Result.Let_syntax in
+  let%bind () = validate_queue_carrier t in
   let%bind () = validate_inference_origin_carrier t in
   let%bind () = validate_goal_carrier t in
   let%bind () = validate_instruction_carrier t in
@@ -1788,15 +1834,20 @@ let encode t ~limits =
       let%bind.Result document =
         D.Document.create ~limits ~kind:"session.state" ~version:current_version ~payload
       in
+      let%bind.Result document = require_queue_semantics document ~limits in
       let%bind.Result admitted = decode ~limits document in
       D.Domain_codec.encode (codec_for admitted ~limits) admitted.carrier
   in
+  let%bind document = require_queue_semantics document ~limits in
   let%map () = validate_run_capacity (value t) document ~limits in
   document
 ;;
 
 let adopt previous ~limits incoming =
   let open Result.Let_syntax in
+  let%bind () = validate_queue_carrier previous in
+  let%bind () = validate_queue_carrier incoming in
+  let%bind () = validate_queue_update (value previous) (value incoming) in
   let%bind () = validate_inference_origin_carrier previous in
   let%bind () = validate_inference_origin_carrier incoming in
   let%bind () = validate_inference_origin_update (value previous) (value incoming) in
@@ -2142,7 +2193,7 @@ module Transaction = struct
         ~kind:"session.state"
         ~version:current_version
         ~shape
-        ~supported_semantics:[]
+        ~supported_semantics:Queue_provenance_semantics.supported
         ~decode:(fun json ->
           state_fields_of_jsonaf ?capture ~limits json |> X.document_result)
         ~encode:(fun state ->
@@ -2204,12 +2255,15 @@ module Transaction = struct
              ~presence:Session_state_presence.authored)
           carrier
     in
+    let%bind document = require_queue_semantics document ~limits in
     let%map () = validate_run_capacity (value { staged = t }) document ~limits in
     document
   ;;
 
   let decode_prefix ?previous ~limits document =
     let open Result.Let_syntax in
+    let%bind () = check_queue_semantics document in
+    let%bind () = validate_raw_queue_capacity document in
     let capture = Decode_evidence.Capture.create ?previous ~limits () in
     let%bind carrier =
       D.Domain_codec.decode
@@ -2235,6 +2289,7 @@ module Transaction = struct
           ; inference_ledger = state.S.inference_ledger
           ; jobs = state.jobs
           ; invocations = state.invocations
+          ; queue_provenance = S.queue_provenance state
           ; presence
           ; decode_evidence = Some (Decode_evidence.Capture.finish capture)
           }

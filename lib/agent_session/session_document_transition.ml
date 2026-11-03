@@ -105,6 +105,16 @@ let admit_encoded previous ~delta ~(next : Session_state.t) ~limits =
   let%bind candidate = apply previous delta in
   let current = Transaction.value candidate in
   let%bind () =
+    Queue_provenance_validation.validate_transition
+      ~previous:(Session_state.queue_provenance previous_value)
+      (Session_state.queue_provenance current)
+    |> X.document_result
+  in
+  let%bind () =
+    Queue_provenance_validation.validate (Session_state.queue_provenance current)
+    |> X.document_result
+  in
+  let%bind () =
     Goal_run_evidence.validate_transition
       ~previous_runs:previous_value.run_state
       ~catalog:current.goal_catalog

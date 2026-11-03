@@ -1047,8 +1047,22 @@ let validate_domain (t : t) =
   else Ok ()
 ;;
 
+let queue_provenance (t : t) : Queue_provenance_validation.t =
+  { session_id = t.identity.session_id
+  ; generation = t.identity.generation
+  ; revision = t.counters.revision
+  ; moderator = t.moderator
+  ; runs = t.run_state
+  ; jobs = t.jobs
+  ; schedules = t.schedules
+  ; invocations = t.invocations
+  ; events = t.moderator_executions
+  }
+;;
+
 let validate (t : t) =
   let open Result.Let_syntax in
+  let%bind () = Queue_provenance_validation.validate (queue_provenance t) in
   let%bind () = Job_inference_provenance.validate ~jobs:t.jobs ~runs:t.run_state in
   let%bind () =
     Invocation_inference_provenance.validate

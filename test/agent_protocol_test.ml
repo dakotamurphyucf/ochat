@@ -1367,3 +1367,84 @@ let%expect_test "retained artifact access omits absent attachments and rejects n
        : bool * bool * bool * bool * bool * bool)];
   [%expect {| (true true true true true true) |}]
 ;;
+
+let%expect_test "Schedule original provenance is immutable and wire-versioned" =
+  let generator = deterministic_generator () in
+  let timestamp = Timestamp.of_time_ns Time_ns.epoch in
+  let source =
+    Run_source.create
+      ~observer:{ script_id = "legacy-schedule"; source_sha256 = String.make 64 'a' }
+      ~generation:0
+      ~installation_epoch:1L
+    |> ok_or_fail
+  in
+  let provenance =
+    Schedule_provenance.create ~source ~origin:(Some Unbound) |> ok_or_fail
+  in
+  let historical : Schedule.t =
+    { id = Id.Schedule.create_with generator
+    ; session_id = Id.Session.create_with generator
+    ; generation = 0
+    ; payload = `String "wake"
+    ; created_at = timestamp
+    ; next_due_at = timestamp
+    ; misfire = Deliver_once_immediately
+    ; status = Scheduled
+    ; delivery_count = 0
+    ; last_delivery_at = None
+    ; ownership = None
+    ; inference_provenance = None
+    ; delivery_cancellation = None
+    }
+  in
+  let positive = { historical with inference_provenance = Some provenance } in
+  let field json name =
+    match json with
+    | `Object fields -> List.Assoc.find fields name ~equal:String.equal
+    | _ -> None
+  in
+  let remove json name =
+    match json with
+    | `Object fields ->
+      `Object (List.filter fields ~f:(fun (key, _) -> not (String.equal key name)))
+    | _ -> assert false
+  in
+  let replace json name value =
+    match json with
+    | `Object fields ->
+      `Object
+        ((name, value)
+         :: List.filter fields ~f:(fun (key, _) -> not (String.equal key name)))
+    | _ -> assert false
+  in
+  let wire = Schedule.to_json positive in
+  assert (
+    Option.equal Jsonaf.exactly_equal (field wire "schema_version") (Some (`Number "4")));
+  assert (Option.is_none (field (Schedule.to_json historical) "schema_version"));
+  List.iter [ historical; positive ] ~f:(fun value ->
+    let decoded = Schedule.of_json (Schedule.to_json value) |> ok_or_fail in
+    assert (
+      Option.equal
+        Schedule_provenance.equal
+        value.inference_provenance
+        decoded.inference_provenance));
+  List.iter
+    [ remove wire "inference_provenance"; replace wire "inference_provenance" `Null ]
+    ~f:(fun malformed -> assert (Result.is_error (Schedule.of_json malformed)));
+  let storage = Schedule.Storage.to_json historical in
+  List.iter
+    [ storage; remove storage "inference_provenance" ]
+    ~f:(fun raw ->
+      assert (
+        Option.is_none (Schedule.Storage.of_json raw |> ok_or_fail).inference_provenance));
+  let child = Schedule_provenance.to_json provenance in
+  assert (Result.is_error (Schedule_provenance.of_json (remove child "origin")));
+  assert (
+    Result.is_error (Schedule.validate_transition ~previous:(Some historical) positive));
+  assert (
+    Result.is_error (Schedule.validate_transition ~previous:(Some positive) historical));
+  let forged = { positive with id = Id.Schedule.t_of_sexp (Atom "invalid") } in
+  assert (Result.is_error (Schedule.validate forged));
+  print_endline "legacy absence, positive v4, strict current child and immutable origin";
+  [%expect {| legacy absence, positive v4, strict current child and immutable origin |}]
+;;

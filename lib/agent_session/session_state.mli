@@ -264,3 +264,7 @@ val moderator_projection : t -> Jsonaf.t
 
 (** Payload-free extension summaries in stable identity order. *)
 val extension_status : t -> Agent_protocol.Extension_status.t list
+
+(** Pure complete-state facts for queue/Schedule carrier validation; no live
+    owner or source permission is produced. *)
+val queue_provenance : t -> Queue_provenance_validation.t

@@ -590,6 +590,7 @@ let on_event = fun ctx state event -> match event with
                   status = Agent_protocol.Schedule.Delivering
                 ; delivery_count = 0
                 ; last_delivery_at = None
+                ; inference_provenance = None
                 ; delivery_cancellation = None
                 }
               in

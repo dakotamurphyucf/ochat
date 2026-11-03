@@ -17,3 +17,15 @@ val observer
   -> (Agent_protocol.Invocation.observer option, Agent_protocol.Error.t) result
 
 val is_halted : Jsonaf.t option -> (bool, Agent_protocol.Error.t) result
+
+(** Optional durable occurrence metadata. Historical absent/null children remain
+    unavailable; a present current child is validated strictly. *)
+val queue : Jsonaf.t option -> (Moderator_queue.t option, Agent_protocol.Error.t) result
+
+val encode_with_queue
+  :  Session.Moderator_state.Identity_snapshot.t
+  -> queue:Moderator_queue.t
+  -> (Jsonaf.t, Agent_protocol.Error.t) result
+
+(** Complete raw optional queue child bounds, including its unknown fields. *)
+val validate_encoded_capacity : Jsonaf.t option -> (unit, Agent_protocol.Error.t) result

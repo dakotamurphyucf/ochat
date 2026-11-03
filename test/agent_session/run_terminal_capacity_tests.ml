@@ -37,6 +37,7 @@ let historical state =
         ; delivery_count = 0
         ; last_delivery_at = None
         ; ownership = None
+        ; inference_provenance = None
         ; delivery_cancellation = None
         }
       in
