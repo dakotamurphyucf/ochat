@@ -167,6 +167,7 @@
   run_preparation
   run_admission_outcome
   run_authorities
+  run_event_ancestry
   run_event_scope
   delegation_authority
   automatic_turn_budget

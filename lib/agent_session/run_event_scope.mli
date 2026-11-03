@@ -1,5 +1,8 @@
-(** Route only actual startup/owned operation/job callbacks to one retained run.
-    Observation and generic unrelated internal events do not acquire authority.
+(** Route actual startup, owned operation/job and retained queued callbacks to
+    one Run. Positive retained queued-event evidence is selected globally before
+    checking live ownership/source; its drainer operation cannot replace it when
+    that causal Run is terminal or stale. Observation and unrelated internal
+    events do not acquire authority.
     This selection grants no native scope: the actor separately checks its live
     borrow, current host authorization and exact source installation. *)
 val select
