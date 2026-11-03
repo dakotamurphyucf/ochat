@@ -10,6 +10,8 @@
   run_admission_tests
   headless_run_tests
   goal_catalog_tests
+  goal_accounting_persistence_tests
+  goal_accounting_state_tests
   instruction_selection_tests
   instruction_selection_persistence_tests
   goal_run_tests

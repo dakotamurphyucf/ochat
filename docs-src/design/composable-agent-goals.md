@@ -289,6 +289,14 @@ contract.
 
 ### Canonical rows and bounded accumulation
 
+The durable [`Goal_accounts`](../../lib/agent_session/goal_accounts.mli) child
+preserves bounded partitions through the existing session delta and snapshot
+owner. Stored claims resolve only to exact retained canonical handles; historical
+absence does not invent zero charges. See the [storage contract](../lib/agent_session/goal_accounting.doc.md)
+for quotas, unknown-field custody, retirement eligibility and additive host
+reservations. This storage foundation does not yet implement actual runtime
+attribution or inference admission gates.
+
 The existing
 [`Inference_ledger`](../../lib/agent_session/inference_ledger.mli) is a bounded
 retained window, not lifetime totals. It retains at most 256 attempts and 256 host

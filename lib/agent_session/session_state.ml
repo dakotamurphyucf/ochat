@@ -137,6 +137,7 @@ type 'spec fields =
   ; moderator_executions : Agent_protocol.Moderator_execution.t list [@sexp.list]
   ; run_state : Run_state.t option [@sexp.option]
   ; goal_catalog : Goal_catalog.t option [@sexp.option]
+  ; goal_accounts : (Goal_accounts.t option[@sexp.opaque])
   ; instruction_selection : Instruction_selection.t option [@sexp.option]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]
@@ -434,6 +435,7 @@ let create_fields ~(identity : Identity.t) ~spec ~desired ~initial_history =
   ; moderator_executions = []
   ; run_state = None
   ; goal_catalog = None
+  ; goal_accounts = None
   ; instruction_selection = None
   ; subscriptions = []
   ; deliveries = []
@@ -1046,6 +1048,16 @@ let validate_domain (t : t) =
 let validate (t : t) =
   let open Result.Let_syntax in
   let%bind () = Goal_run_evidence.validate ~catalog:t.goal_catalog ~runs:t.run_state in
+  let%bind () =
+    match t.goal_accounts with
+    | None -> Ok ()
+    | Some accounts ->
+      Goal_accounts.validate
+        accounts
+        ~catalog:t.goal_catalog
+        ~ledger:t.inference_ledger
+        ~runs:t.run_state
+  in
   let%bind () =
     match t.instruction_selection with
     | None -> Ok ()

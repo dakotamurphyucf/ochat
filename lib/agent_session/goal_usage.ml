@@ -195,3 +195,258 @@ let add_untracked t =
   let%map next = map_metrics t ~f:(fun metric _ -> Metric.add_untracked metric) in
   { next with attempts; untracked_attempts }
 ;;
+
+module Persistence = struct
+  module P = Agent_protocol
+  module X = Persistence_codec
+  module D = Document_schema
+
+  let invalid message = Error (P.Error.invalid_request message)
+
+  let sum_json = function
+    | Sum.Tokens value ->
+      `Object [ "kind", `String "tokens"; "amount", X.int64_json value ]
+    | Overflow -> `Object [ "kind", `String "overflow"; "amount", `Null ]
+  ;;
+
+  let sum_of_json json =
+    let open Result.Let_syntax in
+    let%bind fields = X.object_ json in
+    let%bind kind = X.required fields "kind" P.Json_codec.string in
+    let%bind amount = X.required fields "amount" (X.nullable X.nonnegative_int64) in
+    match kind, amount with
+    | "tokens", Some value -> Ok (Sum.Tokens value)
+    | "overflow", None -> Ok Sum.Overflow
+    | _ -> invalid "invalid aggregate token sum"
+  ;;
+
+  let estimator_json = function
+    | None -> `Null
+    | Some (method_, version) ->
+      `Object
+        [ ( "method"
+          , `String
+              (match method_ with
+               | O.Estimator.O200k_serialized_history -> "o200k_serialized_history"
+               | Utf8_heuristic -> "utf8_heuristic") )
+        ; "version", X.integer_json version
+        ]
+  ;;
+
+  let estimator_of_json =
+    X.nullable (fun json ->
+      let open Result.Let_syntax in
+      let%bind fields = X.object_ json in
+      let%bind method_ = X.required fields "method" P.Json_codec.string in
+      let%bind method_ =
+        match method_ with
+        | "o200k_serialized_history" -> Ok O.Estimator.O200k_serialized_history
+        | "utf8_heuristic" -> Ok O.Estimator.Utf8_heuristic
+        | _ -> invalid "unknown aggregate estimator"
+      in
+      let%bind version = X.required fields "version" X.integer in
+      if version > 0
+      then Ok (method_, version)
+      else invalid "nonpositive aggregate estimator version")
+  ;;
+
+  let unknown_json (t : Unknown.t) =
+    `Object
+      [ "not_reported", X.int64_json t.not_reported
+      ; "explicit_null", X.int64_json t.explicit_null
+      ; "interrupted", X.int64_json t.interrupted
+      ; "not_submitted", X.int64_json t.not_submitted
+      ; "before_tracking", X.int64_json t.before_tracking
+      ]
+  ;;
+
+  let metric_json (t : Metric.t) =
+    `Object
+      [ "actual", sum_json t.actual
+      ; "actual_attempts", X.int64_json t.actual_attempts
+      ; "estimated", sum_json t.estimated
+      ; "estimated_attempts", X.int64_json t.estimated_attempts
+      ; "first_estimator", estimator_json t.first_estimator
+      ; "mixed_estimators", X.bool_json t.mixed_estimators
+      ; "unknown", unknown_json t.unknown
+      ; "untracked_attempts", X.int64_json t.untracked_attempts
+      ]
+  ;;
+
+  let metrics =
+    [ "input", Component.Input
+    ; "output", Output
+    ; "reported_total", Reported_total
+    ; "cached_input", Cached_input
+    ; "cache_write_input", Cache_write_input
+    ; "reasoning_output", Reasoning_output
+    ]
+  ;;
+
+  let to_json t =
+    `Object
+      ([ "attempts", X.int64_json t.attempts
+       ; "untracked_attempts", X.int64_json t.untracked_attempts
+       ]
+       @ List.map metrics ~f:(fun (name, component_) ->
+         name, metric_json (component t component_)))
+  ;;
+
+  let zero_sum = function
+    | Sum.Tokens value -> Int64.equal value 0L
+    | Overflow -> false
+  ;;
+
+  let metric_of_json ~attempts ~untracked json =
+    let open Result.Let_syntax in
+    let%bind fields = X.object_ json in
+    let%bind actual = X.required fields "actual" sum_of_json in
+    let%bind actual_attempts = X.required fields "actual_attempts" X.nonnegative_int64 in
+    let%bind estimated = X.required fields "estimated" sum_of_json in
+    let%bind estimated_attempts =
+      X.required fields "estimated_attempts" X.nonnegative_int64
+    in
+    let%bind first_estimator = X.required fields "first_estimator" estimator_of_json in
+    let%bind mixed_estimators = X.required fields "mixed_estimators" P.Json_codec.bool in
+    let%bind untracked_attempts =
+      X.required fields "untracked_attempts" X.nonnegative_int64
+    in
+    let%bind u = X.required fields "unknown" X.object_ in
+    let%bind not_reported = X.required u "not_reported" X.nonnegative_int64 in
+    let%bind explicit_null = X.required u "explicit_null" X.nonnegative_int64 in
+    let%bind interrupted = X.required u "interrupted" X.nonnegative_int64 in
+    let%bind not_submitted = X.required u "not_submitted" X.nonnegative_int64 in
+    let%bind before_tracking = X.required u "before_tracking" X.nonnegative_int64 in
+    let%bind count =
+      List.fold_result
+        [ actual_attempts
+        ; estimated_attempts
+        ; not_reported
+        ; explicit_null
+        ; interrupted
+        ; not_submitted
+        ; before_tracking
+        ; untracked_attempts
+        ]
+        ~init:0L
+        ~f:(fun a b ->
+          Result.map_error (add_count a b) ~f:(fun _ ->
+            P.Error.invalid_request "aggregate count overflow"))
+    in
+    if
+      (not (Int64.equal count attempts && Int64.equal untracked_attempts untracked))
+      || (Int64.equal actual_attempts 0L && not (zero_sum actual))
+      || (Int64.equal estimated_attempts 0L
+          && ((not (zero_sum estimated))
+              || Option.is_some first_estimator
+              || mixed_estimators))
+      || (Int64.(estimated_attempts > 0L) && Option.is_none first_estimator)
+      || (mixed_estimators && Int64.(estimated_attempts < 2L))
+    then invalid "inconsistent aggregate contribution counts"
+    else
+      Ok
+        ({ Metric.actual
+         ; actual_attempts
+         ; estimated
+         ; estimated_attempts
+         ; first_estimator
+         ; mixed_estimators
+         ; unknown =
+             { not_reported; explicit_null; interrupted; not_submitted; before_tracking }
+         ; untracked_attempts
+         }
+         : Metric.t)
+  ;;
+
+  let of_json json =
+    let open Result.Let_syntax in
+    let limits =
+      D.Limits.create ~max_bytes:65536 ~max_depth:16 ~max_fields:4096 ~max_nodes:8192
+      |> Result.map_error ~f:(fun e -> Sexp.to_string_hum (D.Error.sexp_of_t e))
+      |> Result.ok_or_failwith
+    in
+    let%bind () =
+      D.Json.validate ~limits json
+      |> Result.map_error ~f:(fun e ->
+        P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t e)))
+    in
+    let%bind fields = X.object_ json in
+    let%bind attempts = X.required fields "attempts" X.nonnegative_int64 in
+    let%bind untracked_attempts =
+      X.required fields "untracked_attempts" X.nonnegative_int64
+    in
+    let metric name =
+      X.required fields name (metric_of_json ~attempts ~untracked:untracked_attempts)
+    in
+    let%bind input = metric "input" in
+    let%bind output = metric "output" in
+    let%bind reported_total = metric "reported_total" in
+    let%bind cached_input = metric "cached_input" in
+    let%bind cache_write_input = metric "cache_write_input" in
+    let%map reasoning_output = metric "reasoning_output" in
+    { attempts
+    ; untracked_attempts
+    ; input
+    ; output
+    ; reported_total
+    ; cached_input
+    ; cache_write_input
+    ; reasoning_output
+    }
+  ;;
+
+  let value = D.Shape.value
+  let sum_shape = X.fields_shape [ "kind"; "amount" ]
+
+  let metric_shape =
+    X.shape_exn
+      [ "actual", sum_shape
+      ; "actual_attempts", value
+      ; "estimated", sum_shape
+      ; "estimated_attempts", value
+      ; "first_estimator", D.Shape.nullable (X.fields_shape [ "method"; "version" ])
+      ; "mixed_estimators", value
+      ; ( "unknown"
+        , X.fields_shape
+            [ "not_reported"
+            ; "explicit_null"
+            ; "interrupted"
+            ; "not_submitted"
+            ; "before_tracking"
+            ] )
+      ; "untracked_attempts", value
+      ]
+  ;;
+
+  let shape =
+    X.shape_exn
+      ([ "attempts", value; "untracked_attempts", value ]
+       @ List.map metrics ~f:(fun (name, _) -> name, metric_shape))
+  ;;
+
+  let capacity_projection _t =
+    let maximal_metric =
+      Metric.
+        { actual = Tokens Int64.max_value
+        ; actual_attempts = Int64.max_value
+        ; estimated = Tokens Int64.max_value
+        ; estimated_attempts = Int64.max_value
+        ; first_estimator = Some (O.Estimator.O200k_serialized_history, Int.max_value)
+        ; mixed_estimators = false
+        ; unknown =
+            { not_reported = Int64.max_value
+            ; explicit_null = Int64.max_value
+            ; interrupted = Int64.max_value
+            ; not_submitted = Int64.max_value
+            ; before_tracking = Int64.max_value
+            }
+        ; untracked_attempts = Int64.max_value
+        }
+    in
+    `Object
+      ([ "attempts", X.int64_json Int64.max_value
+       ; "untracked_attempts", X.int64_json Int64.max_value
+       ]
+       @ List.map metrics ~f:(fun (name, _) -> name, metric_json maximal_metric))
+  ;;
+end

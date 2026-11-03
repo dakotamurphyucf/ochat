@@ -273,6 +273,9 @@ let atom_to_jsonaf ~limits ~state_document delta =
   | Instruction_selection_changed value ->
     let%map.Result json = Instruction_selection.to_jsonaf value in
     `Object [ "kind", `String "instruction_selection_changed"; "value", json ]
+  | Goal_accounts_changed value ->
+    let%map.Result json = Goal_accounts.to_jsonaf value in
+    `Object [ "kind", `String "goal_accounts_changed"; "value", json ]
   | Goal_catalog_changed value ->
     let%map.Result json = Goal_catalog.to_jsonaf value in
     `Object [ "kind", `String "goal_catalog_changed"; "value", json ]
@@ -588,6 +591,9 @@ let atom_of_jsonaf ~limits json =
   | "instruction_selection_changed" ->
     let%map.Result value = X.required fields "value" Instruction_selection.of_jsonaf in
     Delta.Instruction_selection_changed value
+  | "goal_accounts_changed" ->
+    let%map.Result value = X.required fields "value" Goal_accounts.of_jsonaf in
+    Delta.Goal_accounts_changed value
   | "goal_catalog_changed" ->
     Result.map (X.required fields "value" Goal_catalog.of_jsonaf) ~f:(fun value ->
       Delta.Goal_catalog_changed value)
@@ -808,6 +814,8 @@ let shape =
              ; ( "instruction_selection_changed"
                , X.shape_exn
                    [ "kind", D.Shape.value; "value", Instruction_selection.shape ] )
+             ; ( "goal_accounts_changed"
+               , X.shape_exn [ "kind", D.Shape.value; "value", D.Shape.value ] )
              ; ( "goal_catalog_changed"
                , X.shape_exn [ "kind", D.Shape.value; "value", Goal_catalog.shape ] )
              ; ( "run_state_changed"
@@ -1418,6 +1426,7 @@ let apply t ?transaction_metadata ~limits previous =
         patch_history ~limits payload entry
       | "instruction_selection_changed" ->
         scalar [ "instruction_selection" ] "value" Instruction_selection.shape
+      | "goal_accounts_changed" -> scalar [ "goal_accounts" ] "value" D.Shape.value
       | "goal_catalog_changed" -> scalar [ "goal_catalog" ] "value" Goal_catalog.shape
       | "run_state_changed" -> scalar [ "run_state" ] "value" Run_state.shape
       | "lifecycle_changed" ->
