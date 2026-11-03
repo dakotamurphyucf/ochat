@@ -1,7 +1,7 @@
 open! Core
 module P = Agent_protocol
 
-let validate
+let validate_runs
       ~index
       ~jobs
       ~permissions
@@ -110,4 +110,37 @@ let validate
         && enough event_sequence events
       then Ok ()
       else Error (P.Error.invalid_request "session lacks reserved Run terminal counters"))
+;;
+
+let charge_counter value ~reserved =
+  if reserved < 0 || Int64.(value < zero || value > max_value - of_int reserved)
+  then Error (P.Error.invalid_request "session lacks reserved terminal counters")
+  else Ok Int64.(value + of_int reserved)
+;;
+
+let validate
+      ~index
+      ~jobs
+      ~permissions
+      ~schedules
+      ~additional_steps
+      ~additional_events
+      ~revision
+      ~transaction_sequence
+      ~event_sequence
+  =
+  let open Result.Let_syntax in
+  let%bind revision = charge_counter revision ~reserved:additional_steps in
+  let%bind transaction_sequence =
+    charge_counter transaction_sequence ~reserved:additional_steps
+  in
+  let%bind event_sequence = charge_counter event_sequence ~reserved:additional_events in
+  validate_runs
+    ~index
+    ~jobs
+    ~permissions
+    ~schedules
+    ~revision
+    ~transaction_sequence
+    ~event_sequence
 ;;

@@ -1089,12 +1089,19 @@ let validate (t : t) =
         ~generation:t.identity.generation
   in
   let%bind () = validate_domain t in
+  let instruction_clear =
+    Option.value_map t.instruction_selection ~default:0 ~f:(fun selection ->
+      let summary = Instruction_selection.summary selection in
+      if summary.project_selected || summary.skills > 0 then 1 else 0)
+  in
   let%bind () =
     Session_terminal_capacity.validate
       ~index:t.run_state
       ~jobs:t.jobs
       ~permissions:t.permissions
       ~schedules:t.schedules
+      ~additional_steps:instruction_clear
+      ~additional_events:instruction_clear
       ~revision:t.counters.revision
       ~transaction_sequence:t.counters.transaction_sequence
       ~event_sequence:t.counters.event_sequence

@@ -273,6 +273,36 @@ let%expect_test
       }
     in
     A.Session_state.validate near |> protocol_ok;
+    let selected =
+      let module I = Instruction_selection_tests in
+      I.apply
+        I.Selection.empty
+        "run-clear-reserve"
+        (Replace_skills (I.C.skills (I.snapshot [ I.a ]) |> protocol_ok))
+    in
+    assert (
+      Result.is_error
+        (A.Session_state.validate { near with instruction_selection = Some selected }));
+    let with_clear =
+      { near with
+        instruction_selection = Some selected
+      ; counters =
+          { near.counters with
+            transaction_sequence = Int64.pred near.counters.transaction_sequence
+          }
+      }
+    in
+    A.Session_state.validate with_clear |> protocol_ok;
+    let cleared = Instruction_selection_tests.apply selected "run-clear" Clear in
+    let after_clear =
+      A.Session_transition.apply
+        ~now:timestamp
+        with_clear
+        ~delta:(Instruction_selection_changed cleared)
+        ~payloads:[]
+      |> protocol_ok
+    in
+    A.Session_state.validate (recovery after_clear.state).state |> protocol_ok;
     assert (
       Result.is_error
         (A.Session_state.validate
