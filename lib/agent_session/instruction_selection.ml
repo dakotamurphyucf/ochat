@@ -17,6 +17,12 @@ let empty = Carrier.of_authored_value M.empty
 let value (t : t) : M.t = Carrier.value t
 let revision t = (value t).revision
 let project t = M.project (value t)
+
+let project_capture t =
+  Option.bind (value t).project ~f:(fun id ->
+    List.find (value t).captures ~f:(fun capture -> String.equal (C.id capture) id))
+;;
+
 let skills t = M.skills (value t)
 let captures t = (value t).captures
 let receipts t = (value t).receipts

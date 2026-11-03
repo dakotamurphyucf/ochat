@@ -226,6 +226,8 @@ type extension_services =
     (** Optional readonly-helper target identity/policy. Qualified construction
         supplies installed defaults when omitted. An explicit host retains its
         target/compiler/source restrictions; retrieval grants no effect authority. *)
+  ; initial_agent_guidance : Chat_response.Agent_guidance.t option
+    (** Only genuine constructor initialization; never a turn-owner fallback. *)
   ; claim_lifecycle : event:Chat_response.Moderation.Event.t -> Moderator_event.claim
     (** Actual running-idle actor ownership. Never manufacture an operation. *)
   ; run_actions :

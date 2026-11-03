@@ -1126,6 +1126,11 @@ and invoke
           / Filename.dirname (Prompt_revision.root_relative_path revision))
       in
       let%bind () = check_selected () in
+      let ctx =
+        match target with
+        | Tool_target _ -> Script_tool_calls.agent_context ctx
+        | Content_target -> ctx
+      in
       Ok
         (Driver.run_prepared_agent
            parsed

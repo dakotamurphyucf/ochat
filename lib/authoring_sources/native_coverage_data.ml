@@ -2,7 +2,33 @@
    catalog's descriptor snapshots; source hashes detect drift, not new features.
    References name behavior suites, which must be run separately. *)
 let features =
-  [ ( "computation.request"
+  [ ( "instructions.source_admission"
+    , "Explicit read-only root discovery and exact capture through current source \
+       grants; reading never activates"
+    , [ "lib/agent_server/authoring_instruction_sources.ml"
+      ; "lib/agent_session/instruction_source_port.ml"
+      ; "lib/agent_session/instruction_source_request.ml"
+      ]
+    , "instructions.sources"
+    , [ "test/instruction_sources/runtime_tests.ml"
+      ; "test/instruction_sources/native_runtime_tests.ml"
+      ; "test/chatml_composition/instruction_runtime_tests.ml"
+      ] )
+  ; ( "instructions.selected_effects"
+    , "Five selected effect-specific native admissions, exact captured CAS and ACKed \
+       receipts; refresh never replaces selection"
+    , [ "lib/agent_session/instruction_native_admission.ml"
+      ; "lib/agent_session/instruction_native_request.ml"
+      ; "lib/agent_session/instruction_native_tool.ml"
+      ; "lib/agent_session/instruction_command_admission.ml"
+      ; "lib/agent_session/instruction_service.ml"
+      ]
+    , "instructions.sources"
+    , [ "test/chatml_composition/instruction_runtime_tests.ml"
+      ; "test/instruction_sources/native_runtime_tests.ml"
+      ; "test/agent_session/agent_authority_tests.ml"
+      ] )
+  ; ( "computation.request"
     , "Explicit source/input/tool selection and lowering-only limits"
     , [ "lib/chat_response/one_off_request.ml"; "lib/chat_response/one_off_script.ml" ]
     , "runtime.native.requests"
@@ -191,7 +217,23 @@ let features =
 ;;
 
 let implementation_sources =
-  [ ( "lib/agent_server/developer_claim_deadline.ml"
+  [ ( "lib/agent_server/authoring_instruction_sources.ml"
+    , "5a43fd47d8b0c1916d562f79dd27dfbd3ceb019dfb3f974cede919fc16a83b8e" )
+  ; ( "lib/agent_session/instruction_source_port.ml"
+    , "3521e99e67d7d698a5186fa2d43dfd999135e7e50e8106e60124de40ac4329a2" )
+  ; ( "lib/agent_session/instruction_source_request.ml"
+    , "c4993419caf79a25be6543253f8e63549918ed3010b5b6017991ddad7c9d0a7b" )
+  ; ( "lib/agent_session/instruction_native_admission.ml"
+    , "d5617a7fb0e72b7c3d8ff94f8fec8fe0a8650a6b797e688400a87cc2035ac925" )
+  ; ( "lib/agent_session/instruction_native_request.ml"
+    , "4960a708518b49ab66dcd01ab15ae99b6bac611e603c6f1c46c71e6653ba8a27" )
+  ; ( "lib/agent_session/instruction_native_tool.ml"
+    , "6145372a8e88260b77f77cdb6ed8b9567e4d6b5102aa5f26fc5d954f76145139" )
+  ; ( "lib/agent_session/instruction_command_admission.ml"
+    , "b09c970ef5a80ed479fe180210d1ac28865c79ed7b2b4a33109eb85ce2168899" )
+  ; ( "lib/agent_session/instruction_service.ml"
+    , "d5353074b86ed3aa8282f9f819947c225f81ea7ad8327345a368d8ee4d1e1ad2" )
+  ; ( "lib/agent_server/developer_claim_deadline.ml"
     , "04bb3b5eae209fbc7af9b938e65d9896f9838421dbc48ea823ac802fd0803f63" )
   ; ( "lib/agent_protocol/invocation.ml"
     , "4d5abb95474bcdef6c360b666a3b57d2203a7b378193df5c49266897acac4981" )
@@ -216,7 +258,7 @@ let implementation_sources =
   ; ( "lib/agent_server/managed_output_page.ml"
     , "a14130666a4495de0c35df1c01974922da31daed064f1f7622a9b686b9c38ba5" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "040dfe5fdf79fdf71f860b60641bce4dee0e67a2f8db71fc92139f7ce9e43763" )
+    , "41998cadc3339ebaa2e7967fbff586d2b6fb6ccabfa75d1e4eb3bc21c9dba95b" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
@@ -252,7 +294,7 @@ let implementation_sources =
   ; ( "lib/agent_session/managed_wait_tool.ml"
     , "2482da27415b0f542bbf5e2fa61bf97de70fb047790cb6ee5100ced465b43708" )
   ; ( "lib/agent_session/native_tool_invocation.ml"
-    , "33b7bf3ae591fca59955978775475a3748d4088186b2e22036f983596019a7f9" )
+    , "bb41f79365b633ccf74da6a21b615d8bc92617bbcb522fdcd2aed6f5da4057d5" )
   ; ( "lib/agent_session/native_tool_policy.ml"
     , "0d125cf75d5f61aa20a9452c979a70ebb43677e2458c9e9f1c9c2c5ad2c26938" )
   ; ( "lib/agent_session/one_off_execution.ml"
@@ -260,7 +302,7 @@ let implementation_sources =
   ; ( "lib/agent_session/run_chatml_tool.ml"
     , "eadb7cf2ac6622e977db08798fbfce7661062c47883cdf4f28700f1c85249b75" )
   ; ( "lib/agent_session/script_tool_calls.ml"
-    , "7a126aca4a8ae5d4e99e76884a87ae3531f4a175d3b34ceb5dd66a78315a8219" )
+    , "9bb442f72da4a95e62416e8ae0e34dec21a7c95c0971354f83c67ab2b4207691" )
   ; ( "lib/agent_session/session_management.ml"
     , "18431c4fd97a2d24a72b927fe8f0d20b8aea561f1f119d8f122d943f2a137f86" )
   ; ( "lib/agent_session/session_management_native.ml"
@@ -284,7 +326,7 @@ let implementation_sources =
   ; ( "lib/agent_session/prompt_catalog.ml"
     , "e70659b767477be0cf1a99fefa753841264846a5e426ac415cb160a6b1904c40" )
   ; ( "lib/agent_session/runtime_builder.ml"
-    , "bd0252ef7e0d2fe7e9c33d5dfd85279e480b0474155fb3667085532052807fd3" )
+    , "8332d634d4d60eb9b48be8e930016b13be0a032bbd0f68031c7ad697fd9fdfc9" )
   ; ( "lib/agent_session/authored_source_preparation.ml"
     , "d8eea801d69ffa262cfc1d0a9bee45123ce8d4b08f74c25c67df450cd247600c" )
   ; ( "lib/agent_store/prompt_source_receipt.ml"
@@ -294,6 +336,18 @@ let implementation_sources =
 
 let topic_contracts =
   [ ( "one_off_v1"
+    , "instructions.sources"
+    , "6c01d31beec1423681006f2320554f8f09c4163b27a8633bd2d8c2fa602a4852" )
+  ; ( "tool_v1"
+    , "instructions.sources"
+    , "66d91bb62409d861fb5a355506c12db41be038092317e625c57c608da95533f0" )
+  ; ( "moderator_v1"
+    , "instructions.sources"
+    , "552553a84efd975cfe41652872c94ea6c06db57593d050795fc8a31f6a33a070" )
+  ; ( "delegated_moderator_v1"
+    , "instructions.sources"
+    , "854af913368900b0355a1dec3b19e230a1a917fd1224b201ce096f85f471efa8" )
+  ; ( "one_off_v1"
     , "runtime.native.requests"
     , "5ce300e2cce67ff2c39b548e3fd8d44b244207c7d7e6637626fe6ece0f7780ff" )
   ; ( "one_off_v1"

@@ -3,7 +3,40 @@
    to separately executed behavior suites. Surface mappings describe readable
    contracts, never an authority grant. *)
 let shared_features =
-  [ ( "lifecycle.history"
+  [ ( "instructions.request_context"
+    , "Request-only User guidance under the exact agent owner; authored higher-priority \
+       instructions and canonical history remain unchanged"
+    , [ "lib/chat_response/agent_guidance.ml"
+      ; "lib/agent_session/instruction_guidance_text.ml"
+      ; "lib/chat_response/ctx.ml"
+      ; "lib/chat_response/driver.ml"
+      ; "lib/chat_response/model_executor.ml"
+      ; "lib/chat_response/in_memory_stream.ml"
+      ; "lib/agent_session/runtime_builder.ml"
+      ; "lib/agent_session/captured_agent_runner.ml"
+      ; "lib/agent_session/script_tool_calls.ml"
+      ]
+    , "instructions.sources"
+    , [ "test/chatml_composition/instruction_runtime_tests.ml"
+      ; "test/inference/guidance_tests.ml"
+      ] )
+  ; ( "instructions.continuation_and_clear"
+    , "ACK-owned lifecycle and completion handoffs, explicit compactor guidance \
+       reservation and actual writer-profile Clear admission"
+    , [ "lib/agent_session/session_actor.ml"
+      ; "lib/agent_server/session_factory.ml"
+      ; "lib/context_compaction/compactor.ml"
+      ; "lib/agent_session/instruction_clear_capacity.ml"
+      ; "lib/agent_session/session_transition.ml"
+      ; "lib/agent_session/session_terminal_journal.ml"
+      ]
+    , "instructions.sources"
+    , [ "test/agent_session/agent_authority_tests.ml"
+      ; "test/agent_session/instruction_selection_persistence_tests.ml"
+      ; "test/agent_session/instruction_clear_capacity_tests.ml"
+      ; "test/chatml_composition/instruction_runtime_tests.ml"
+      ] )
+  ; ( "lifecycle.history"
     , "Compaction retains work; generation reset retires live authority and preserves \
        receipt identity"
     , [ "lib/agent_session/administration.ml"
@@ -569,7 +602,25 @@ let moderator_features =
 ;;
 
 let implementation_sources =
-  [ ( "lib/agent_client/developer_trace_connection.ml"
+  [ ( "lib/agent_session/script_tool_calls.ml"
+    , "9bb442f72da4a95e62416e8ae0e34dec21a7c95c0971354f83c67ab2b4207691" )
+  ; ( "lib/chat_response/agent_guidance.ml"
+    , "5f00cdc8f90b5819dd8e079c8c201ec7ca790af59045b82a4c874315ad97be4b" )
+  ; ( "lib/agent_session/instruction_guidance_text.ml"
+    , "f479e72bd27d60883647524052eb04770198f07603b2d738633130ece31c4861" )
+  ; ( "lib/chat_response/in_memory_stream.ml"
+    , "e246a224d598a61fc78d93197cdf3e933fa41539bb37bc1d68471eb55573f145" )
+  ; ( "lib/agent_session/runtime_builder.ml"
+    , "8332d634d4d60eb9b48be8e930016b13be0a032bbd0f68031c7ad697fd9fdfc9" )
+  ; ( "lib/context_compaction/compactor.ml"
+    , "7b11eae5ce4d929bf1ab4702111d03f70fe97cfe8543135c73782c2b92391ff0" )
+  ; ( "lib/agent_session/session_transition.ml"
+    , "24b5a50b7508f8d98d90952e18d98bc42f409f51097ec479df5988f59fe24149" )
+  ; ( "lib/agent_session/instruction_clear_capacity.ml"
+    , "baa952a408f74f0795059df9e7f6bb3c677957c1866c6d2b20cb83fc7a475e0e" )
+  ; ( "lib/agent_session/session_terminal_journal.ml"
+    , "df1c2f60f413a5fe01dfe04a20eb91a869e6d157becfee8ec0171dc8a6573f33" )
+  ; ( "lib/agent_client/developer_trace_connection.ml"
     , "a737c2bc921e42546ae3ae8165eae078a409861563acbb61782db870dcf4adf6" )
   ; ( "lib/agent_client/connection.ml"
     , "33b6ec7ea16d65b4d5d44580b423276008065be644b810968ab81174d11c492e" )
@@ -598,7 +649,7 @@ let implementation_sources =
   ; ( "bin/ochat_agent_stdio.ml"
     , "8d134cd11c7df2a60e6b4b77a5ff7f9ea0c28a8a2674a3dd9f573adaa7623902" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "040dfe5fdf79fdf71f860b60641bce4dee0e67a2f8db71fc92139f7ce9e43763" )
+    , "41998cadc3339ebaa2e7967fbff586d2b6fb6ccabfa75d1e4eb3bc21c9dba95b" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"
@@ -650,7 +701,7 @@ let implementation_sources =
   ; ( "lib/agent_server/dispatcher.ml"
     , "e4602c092077367f6fb0c95d176ec9eef22f0ee2cbc24b5bbf536b41975daa86" )
   ; ( "lib/agent_server/authoring_installation.ml"
-    , "cffa9affee87aae27b9b0f1d308194fcb45ab84d0da74bf0af5482c61a2ca784" )
+    , "c153b07c85dae5395d4a5a4e30a0d430dcf922c23d29cc3f302a70c490b4a94b" )
   ; ( "lib/agent_server/connection_context.ml"
     , "772410fd0d32bc57ae9ee1f303f3d2a1b293143251fe419c99e141e8921dabba" )
   ; ( "lib/agent_server/startup_cleanup.ml"
@@ -676,7 +727,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_model_job_runner.ml"
     , "7604ff6140540e3b53720515526242e7bc1014c97d6895aacadbfb2909bda718" )
   ; ( "lib/agent_server/daemon.ml"
-    , "540b0c86dd69aadc8897f7948ba816970e089250f28353421c1bff6e70b77bae" )
+    , "db1c4ff75f729a9cd83618fe5fb8de7dc6ea57d70a47a8b8ed3a7a7ffe19bb3d" )
   ; ( "lib/agent_session/developer_claimed_resource_owner.ml"
     , "fb251c6e022f9880820b15807018adc5cf240500050a0424321d7507d3e2bc41" )
   ; ( "lib/agent_server/developer_claim_deadline.ml"
@@ -686,11 +737,11 @@ let implementation_sources =
   ; ( "lib/agent_protocol/model_spawn_request.ml"
     , "258c00854df5cd7a65eb28d8fccc4ab1e1d1880ccbbc15999306fd448322d160" )
   ; ( "lib/chat_response/ctx.ml"
-    , "7cc0abfa6a5091d99c4d6877d6495ceb6c516c2950902c0ca6d0cd9c5844f99e" )
+    , "82217e02c133136dd61852c93b2e9004a894d6cb0081b5aad58eb3e9ffee609e" )
   ; ( "lib/chat_response/driver.ml"
-    , "5bc8bf3d7831648af0f2ce63ff144a1c9d40f1f09f303b850354abdaedc14dd0" )
+    , "e2aeffb6a2d299213ff3ead090663a714ae33b2db8d09c14e04803c514fb6930" )
   ; ( "lib/chat_response/model_executor.ml"
-    , "587b7c855a3b9e47a5a055ae29dbe2f2966c4a293bf5b15776c7e98a858c9113" )
+    , "ba133ac36461d3ed2f1ea2cd432c1155f08213069c817d6d396b640f961110ae" )
   ; ( "lib/chat_response/model_completion_drain.ml"
     , "e635d3475610f909725ddab11af873e4ff1d2b55f06a59bfe24f9669c781f8c4" )
   ; ( "lib/chatml/chatml_task_array.ml"
@@ -718,7 +769,7 @@ let implementation_sources =
   ; ( "lib/agent_session/administration.ml"
     , "798836e32d154f322a0fdd0760d1348956515c3887b65e4b94b5c83c61bdb7e3" )
   ; ( "lib/agent_server/command_handler.ml"
-    , "1ecd16f2f3841ded44ced63fbf07ce2e743259ec943a16012177f9e737941a36" )
+    , "1e420ddef9281bf1fceb1569fe6fe6f9a76bcf0f70d104c27fb171fad50a90a7" )
   ; ( "lib/agent_server/runtime_owner.ml"
     , "ec30d503c58de70c6ab603d5f13699ef8e1a387afac7caea81c3e6870f470edc" )
   ; ( "lib/agent_session/managed_submission_tracking.ml"
@@ -780,7 +831,7 @@ let implementation_sources =
   ; ( "lib/agent_session/background_execution.ml"
     , "39dba0534aa949b8fc41d6d937e6b6688b4c819bfacec999d983e6ebf0569e44" )
   ; ( "lib/agent_session/captured_agent_runner.ml"
-    , "a85950beba627accb5793b7de60a874428b6e1d15a3aae32916e2fa403e22b50" )
+    , "02221a990c09bc62411c110600970c92382370ca59b68141927e35a111976d13" )
   ; ( "lib/agent_session/selected_agent_depth.ml"
     , "a5c52ff1391956f08af2cdb1651db530ab66abea394d7a7599885bcfc778c412" )
   ; ( "lib/agent_session/developer_child_preflight.ml"
@@ -844,7 +895,7 @@ let implementation_sources =
   ; ( "lib/agent_session/script_subscription_service.ml"
     , "54c775836b551733687e907ff46a2a7a0cc26bd46ff915cc6fd5f0cf5116f069" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "4ef2e59f86d58a82e40a733bcd4a3b1a9c1e25deb2ff30d2ed8454e86a1014f2" )
+    , "f85d1541d75dea9ccbc37cbea759e9d311493c2f66fd9c3c8d3f20dc6fadb6c4" )
   ; ( "lib/agent_session/staged_jobs.ml"
     , "7731a0fc9f021188e3856041fe493f3044556bc7a15364815c47299fe968603b" )
   ; ( "lib/agent_session/staged_notifications.ml"
@@ -906,6 +957,18 @@ let implementation_sources =
 
 let topic_contracts =
   [ ( "one_off_v1"
+    , "instructions.sources"
+    , "6c01d31beec1423681006f2320554f8f09c4163b27a8633bd2d8c2fa602a4852" )
+  ; ( "tool_v1"
+    , "instructions.sources"
+    , "66d91bb62409d861fb5a355506c12db41be038092317e625c57c608da95533f0" )
+  ; ( "moderator_v1"
+    , "instructions.sources"
+    , "552553a84efd975cfe41652872c94ea6c06db57593d050795fc8a31f6a33a070" )
+  ; ( "delegated_moderator_v1"
+    , "instructions.sources"
+    , "854af913368900b0355a1dec3b19e230a1a917fd1224b201ce096f85f471efa8" )
+  ; ( "one_off_v1"
     , "chatml.task-effects"
     , "4a4f9617b016c491dfd397876bbb32d01e95f727064471e2a4432dca0478a17e" )
   ; ( "tool_v1"

@@ -247,6 +247,49 @@ let require_native_admission (scope : borrowed) ~binding =
   | Some _, _ | None, _ -> denied ()
 ;;
 
+module Admission = struct
+  type t =
+    { borrowed : borrowed
+    ; admission : native_admission
+    ; binding : C.binding
+    ; actor : Operator_authorization.t option
+    }
+
+  let capture borrowed ~binding =
+    let open Result.Let_syntax in
+    let%bind () = require_native_admission borrowed ~binding in
+    let%bind actor = borrowed_agent_actor borrowed in
+    let%bind () = require_native_admission borrowed ~binding in
+    match Eio.Fiber.get native_admission_key with
+    | None ->
+      Error (Agent_protocol.Error.invalid_request "native admission is unavailable")
+    | Some admission -> Ok { borrowed; admission; binding; actor }
+  ;;
+
+  let check_now t ~binding =
+    let reference = C.reference binding in
+    let issued = C.reference t.binding in
+    if
+      Atomic.get t.borrowed.active
+      && Atomic.get t.admission.admission_active
+      && I.equal_context t.admission.invocation_context t.borrowed.invocation.context
+      && Agent_protocol.Id.Capability.equal reference.id issued.id
+      && String.equal reference.fingerprint issued.fingerprint
+      && Option.equal
+           phys_equal
+           (C.native_implementation binding)
+           (C.native_implementation t.binding)
+    then Ok ()
+    else
+      Error
+        (Agent_protocol.Error.invalid_request
+           "native admission expired or effect differs")
+  ;;
+
+  let invocation t = t.borrowed.invocation
+  let actor t = t.actor
+end
+
 let with_native_admission invocation binding f =
   let admission : native_admission =
     { invocation_context = invocation.I.context

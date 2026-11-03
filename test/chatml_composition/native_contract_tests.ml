@@ -48,6 +48,11 @@ let documentation name =
   | "agent_stop" -> "runtime.delegation.stop-helper", shared
   | "ochat_validate" -> "runtime.native.requests", shared
   | "ochat_authoring_context" -> "authoring.reference", shared
+  | "instructions_refresh"
+  | "instructions_read"
+  | "instructions_activate"
+  | "instructions_deactivate"
+  | "instructions_status" -> "instructions.sources", shared
   | name -> failwith ("native tool needs a reviewed reference mapping: " ^ name)
 ;;
 
@@ -111,6 +116,21 @@ let%expect_test "runtime native catalog contracts remain paired with reviewed re
     (ochat_authoring_context authoring.reference
      5af75d5c259034e3e5ed36b55716575412a4b6633fc35b771a260e4ef4a3a9f3
      7684a3aa2f943911039a35d1430b4922b9383c015a1293dbaa2c18e370dcb7f7)
+    (instructions_refresh instructions.sources
+     7e7602e9a7cb3b07316c036607484ab66493d061de0c46b7471657213eb9ecce
+     a75d305fe5c228d85ab983e21d5c5d93721b08ba4715d815a9a2da0f3b4ac123)
+    (instructions_read instructions.sources
+     b5d7c4847415ebd291f9b37e7bdfe38589c599c530ea102cc8ee7e6b063298eb
+     a75d305fe5c228d85ab983e21d5c5d93721b08ba4715d815a9a2da0f3b4ac123)
+    (instructions_activate instructions.sources
+     1a65c90884f6f002b1e2938e144b247f94f6b4af6be21441aaec42031ff92bb8
+     a75d305fe5c228d85ab983e21d5c5d93721b08ba4715d815a9a2da0f3b4ac123)
+    (instructions_deactivate instructions.sources
+     eec6ebbe4b66d02cdd865047b63acf37f5c0b59b431a8ed1ff5f3d876485c12d
+     a75d305fe5c228d85ab983e21d5c5d93721b08ba4715d815a9a2da0f3b4ac123)
+    (instructions_status instructions.sources
+     9aa238203e9443b0a8d51f41421fd455b18291a8b306ff76b209a5ae6e2c9934
+     a75d305fe5c228d85ab983e21d5c5d93721b08ba4715d815a9a2da0f3b4ac123)
     |}]
 ;;
 

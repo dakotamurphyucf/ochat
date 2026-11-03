@@ -158,6 +158,16 @@ end
     It exposes no replacement/seal and cannot be minted from copied lists. *)
 val developer_catalog : t -> Developer_catalog.t
 
+(** Startup-only once binding of the SAME retained Authoring_installation source
+    port, before scheduler/client execution exposure. Repeated installation
+    rejects. Existing lazy-runtime services consult it at use, so recovery does
+    not capture stale absence. Factory owns no duplicate source owner; the
+    installation must outlive all session consumers. Closed/absent roots deny. *)
+val install_instruction_sources
+  :  t
+  -> Agent_session.Instruction_source_port.t
+  -> (unit, Agent_protocol.Error.t) result
+
 type generated_lifetime =
   | Owned
   | Independent

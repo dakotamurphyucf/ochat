@@ -11,7 +11,11 @@ type t =
     same revision, after the supplied events. Public run evidence changes append
     one [session.updated] event unless the caller already supplied it, so existing
     session subscriptions can refresh their authorized run views. Private delivery
-    frames and interpreter state are not published. *)
+    frames and interpreter state are not published.
+
+    When the instruction receipt frontier changes, coalesce a final
+    [Session_updated] and attach its body-free typed instruction summary. Exact
+    retained retries do not call this transition owner. *)
 val apply
   :  now:Agent_protocol.Timestamp.t
   -> Session_state.t

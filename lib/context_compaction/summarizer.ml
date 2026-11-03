@@ -133,18 +133,23 @@ let summarise_with ~request ~relevant_items =
   request relevant_items |> Result.map_error ~f:(fun failure -> Failed failure)
 ;;
 
-let summarise ~inference ~relevant_items ~env:_ =
+let summarise_with_guidance ~guidance ~inference ~relevant_items ~env:_ =
   summarise_with ~relevant_items ~request:(fun items ->
     Eio.Switch.run (fun sw ->
       Inference_client.Execution.complete_text
         inference
         ~sw
         ~settings:[]
+        ?guidance
         ~messages:
           [ Developer, prompt
           ; User, sprintf "<conversation>%s</conversation>" (render_transcript items)
           ]
         ()))
+;;
+
+let summarise ~inference ~relevant_items ~env =
+  summarise_with_guidance ~guidance:None ~inference ~relevant_items ~env
 ;;
 
 module For_testing = struct

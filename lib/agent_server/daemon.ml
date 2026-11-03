@@ -1524,6 +1524,11 @@ let compose
       |> Result.map ~f:Option.some
   in
   Option.iter authoring ~f:(Startup_cleanup.adopt_authoring_exn startup_cleanup);
+  let%bind () =
+    match Option.bind authoring ~f:Authoring_installation.instruction_source_port with
+    | None -> Ok ()
+    | Some source -> Session_factory.install_instruction_sources factory source
+  in
   let%bind options =
     match config.server.developer with
     | None -> Ok options

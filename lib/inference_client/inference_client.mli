@@ -166,6 +166,7 @@ module Execution : sig
     :  t
     -> sw:Eio.Switch.t
     -> ?model:string
+    -> ?guidance:Inference.Request.Guidance.t
     -> settings:Inference.Request.Setting.t list
     -> messages:(History_entry.Payload.Role.t * string) list
     -> unit

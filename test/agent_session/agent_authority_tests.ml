@@ -995,3 +995,223 @@ let%expect_test
   [%expect
     {| distinct writer/actor replay exact input and creating principal; original and legacy metadata cannot resurrect execution custody |}]
 ;;
+
+let%expect_test
+    "authenticated Start lends only its exact lifecycle event and ACKed no-input intent"
+  =
+  List.iter [ `Live; `Expired_original; `Legacy; `Rejected_intent ] ~f:(fun mode ->
+    let live = Atomic.make true in
+    let original = authentication live in
+    let duplicate = authentication (Atomic.make true) in
+    let reject = ref false in
+    Job_fixtures.with_actor
+      ~start:false
+      ~reject_save:(fun _ ->
+        let reject_now = !reject in
+        reject := false;
+        reject_now)
+      (fun _env _sw actor writer _backend ->
+         let snapshot = Subscription_transaction_tests.before in
+         let encode = Agent_session.Runtime_builder.encode_moderator_snapshot in
+         A.change_moderator actor (Some (encode snapshot)) |> protocol_ok |> ignore;
+         (match mode with
+          | `Legacy -> A.start actor ~attachment_id:writer.id
+          | `Live | `Expired_original | `Rejected_intent ->
+            A.start ~actor:original actor ~attachment_id:writer.id)
+         |> protocol_ok
+         |> ignore;
+         (* A duplicate Start must neither upgrade legacy admission nor replace
+           an original whose authentication later expires. *)
+         A.start ~actor:duplicate actor ~attachment_id:writer.id |> protocol_ok |> ignore;
+         if
+           [%equal: [ `Live | `Expired_original | `Legacy | `Rejected_intent ]]
+             mode
+             `Expired_original
+         then Atomic.set live false;
+         let runs = ref 0 in
+         let worker =
+           Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+             Int.incr runs;
+             current (caps.original_agent_actor () |> require_actor);
+             Agent_session.Operation_worker.Completed
+               { final_history = input.history
+               ; moderator_snapshot = Some (encode snapshot)
+               ; runtime_requests = []
+               })
+         in
+         A.set_operation_worker actor (Some worker) |> protocol_ok;
+         let borrowed = ref None in
+         let called = ref false in
+         let result =
+           A.with_current_moderator_event
+             actor
+             ~operation_id:None
+             ~event:Session_start
+             ~snapshot:(fun () -> Ok snapshot)
+             (fun ~executing ~retirement_reason:_ ~event:_ ~execute ~commit ->
+                let invocation =
+                  I.create
+                    ~observer:Subscription_transaction_tests.source
+                    ~parent_event:executing.context.id
+                    { (invocation_fixture ()).context with
+                      id = P.Id.Invocation.create ()
+                    ; origin = Moderator
+                    }
+                  |> protocol_ok
+                in
+                let result =
+                  execute ~invocation (fun ~dispatched ~borrow_agent_actor ->
+                    called := true;
+                    let actor = borrow_agent_actor ~invocation:dispatched in
+                    (match mode, actor with
+                     | `Legacy, Ok None -> ()
+                     | `Expired_original, Error error ->
+                       [%test_eq: P.Error.code] Permission_denied error.code
+                     | (`Live | `Rejected_intent), Ok (Some actor) ->
+                       current actor;
+                       borrowed := Some actor
+                     | _ -> failwith "wrong lifecycle authority");
+                    Ok (I.Complete `Null))
+                in
+                (match result with
+                 | Ok _ -> ()
+                 | Error error -> raise_s [%sexp (error : P.Error.t)]);
+                if
+                  [%equal: [ `Live | `Expired_original | `Legacy | `Rejected_intent ]]
+                    mode
+                    `Rejected_intent
+                then reject := true;
+                commit
+                  ~snapshot
+                  ~requests:
+                    { request_turn = true
+                    ; request_compaction = false
+                    ; end_session = None
+                    })
+         in
+         reject := false;
+         assert !called;
+         Option.iter !borrowed ~f:expired;
+         match mode, result with
+         | `Rejected_intent, Error _ -> [%test_eq: int] 0 !runs
+         | `Rejected_intent, Ok _ -> failwith "rejected intent was acknowledged"
+         | (`Live | `Legacy | `Expired_original), Ok true ->
+           (match mode with
+            | `Live ->
+              assert (A.apply_moderator_follow_up actor |> protocol_ok);
+              await_idle actor |> ignore;
+              [%test_eq: int] 1 !runs
+            | `Expired_original ->
+              (match A.apply_moderator_follow_up actor with
+               | Error error -> [%test_eq: P.Error.code] Permission_denied error.code
+               | Ok _ -> failwith "expired intent gained fresh Start authority")
+            | `Legacy -> ()
+            | `Rejected_intent -> assert false)
+         | _, Error error -> raise_s [%sexp (error : P.Error.t)]
+         | _, Ok false -> failwith "lifecycle event was not claimed"));
+  print_endline
+    "Start is single-use; duplicate cannot replace or upgrade; only ACKed exact no-input \
+     intent transfers";
+  [%expect
+    {| Start is single-use; duplicate cannot replace or upgrade; only ACKed exact no-input intent transfers |}]
+;;
+
+let%expect_test
+    "completion-only compaction handoff preserves known expiry and terminal-save failure"
+  =
+  List.iter [ `Live; `Expired; `Failed_save ] ~f:(fun mode ->
+    let live = Atomic.make true in
+    let original = authentication live in
+    let returned = ref false in
+    let worker_proof = ref None in
+    let compactor_proof = ref None in
+    let compactor_calls = ref 0 in
+    let observed, observed_u = Eio.Promise.create () in
+    let signal () = ignore (Eio.Promise.try_resolve observed_u ()) in
+    let terminal_candidate (transition : Agent_session.Session_transition.t) =
+      !returned && Option.is_none transition.state.active_operation
+    in
+    Job_fixtures.with_actor
+      ~reject_save:(fun transition ->
+        let reject =
+          [%equal: [ `Live | `Expired | `Failed_save ]] mode `Failed_save
+          && terminal_candidate transition
+        in
+        if reject then signal ();
+        reject)
+      ~state_committed:(fun _state events ->
+        List.iter events ~f:(fun (event : P.Event.Durable.t) ->
+          let payload =
+            P.Event.Durable.Payload.of_json ~kind:event.kind event.payload |> protocol_ok
+          in
+          match mode, payload with
+          | `Live, (Operation_failed operation | Operation_completed operation)
+            when P.Operation.equal_kind operation.kind Compaction -> signal ()
+          | `Expired, Operation_completed { kind = Turn _; _ } -> signal ()
+          | _ -> ()))
+      (fun _env _sw actor writer _backend ->
+         let port : A.Compaction_inference.t =
+           { with_execution =
+               (fun ~operation:_ ~selection:_ ~borrow_agent_actor _ ->
+                 Int.incr compactor_calls;
+                 let proof = borrow_agent_actor () |> require_actor in
+                 current proof;
+                 expired (Option.value_exn !worker_proof);
+                 compactor_proof := Some proof;
+                 Error
+                   (P.Error.create
+                      Configuration_invalid
+                      ~message:"intentional auxiliary fixture stop"
+                      ~retryable:false
+                      ()))
+           }
+         in
+         A.set_compaction_inference actor (Some port) |> protocol_ok;
+         let worker =
+           Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+             let proof = caps.original_agent_actor () |> require_actor in
+             worker_proof := Some proof;
+             current proof;
+             if [%equal: [ `Live | `Expired | `Failed_save ]] mode `Expired
+             then Atomic.set live false;
+             returned := true;
+             Agent_session.Operation_worker.Completed
+               { final_history = input.history
+               ; moderator_snapshot = None
+               ; runtime_requests = [ Request_compaction ]
+               })
+         in
+         A.set_operation_worker actor (Some worker) |> protocol_ok;
+         A.submit_message_authenticated
+           actor
+           ~actor:original
+           ~attachment_id:writer.id
+           actor_entry
+         |> protocol_ok
+         |> ignore;
+         Eio.Promise.await observed;
+         (* The live path waits for the exact Compaction terminal event; expired
+            completion waits for its turn ACK; failed-save waits for rejection.
+            The harness timeout bounds a missing terminal regression. *)
+         let state = A.state actor |> protocol_ok in
+         expired (Option.value_exn !worker_proof);
+         Option.iter !compactor_proof ~f:expired;
+         match mode with
+         | `Live ->
+           [%test_eq: int] 1 !compactor_calls;
+           assert (Option.is_some !compactor_proof)
+         | `Expired ->
+           [%test_eq: int] 0 !compactor_calls;
+           assert (Option.is_none state.active_operation);
+           (* The acknowledged turn completion is truthful; denied automatic
+              continuation does not rewrite it to a failed turn. *)
+           assert (Option.is_none state.failure)
+         | `Failed_save ->
+           [%test_eq: int] 0 !compactor_calls;
+           assert (Option.is_some state.active_operation)));
+  print_endline
+    "worker proof retires before terminal save; live completion lends once; known expiry \
+     and rejected terminal save launch no compactor";
+  [%expect
+    {| worker proof retires before terminal save; live completion lends once; known expiry and rejected terminal save launch no compactor |}]
+;;

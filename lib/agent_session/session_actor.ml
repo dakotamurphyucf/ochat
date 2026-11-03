@@ -77,6 +77,26 @@ let transfer_agent_custody custody =
 
 let retire_agent_custody custody = Atomic.set custody.live false
 
+type agent_intent_key =
+  | Event_intent of Agent_protocol.Id.Moderator_execution.t
+  | Invocation_intent of Agent_protocol.Id.Invocation.t
+[@@deriving equal]
+
+type agent_intent_custody =
+  { key : agent_intent_key
+  ; generation : int
+  ; source : Agent_protocol.Invocation.observer option
+  ; custody : agent_custody option
+  }
+
+type lifecycle_agent_custody =
+  | Unadmitted
+  | Admitted of
+      { generation : int
+      ; source : Agent_protocol.Invocation.observer option
+      ; pending : agent_custody option
+      }
+
 module Initialization_scope = struct
   type t =
     { owner : unit ref
@@ -119,7 +139,12 @@ module Compaction_inference = struct
         'a.
         operation:Agent_protocol.Operation.t
         -> selection:Inference.Selection.t
-        -> (Inference_client.Execution.t -> ('a, Agent_protocol.Error.t) Result.t)
+        -> borrow_agent_actor:
+             (unit -> (Operator_authorization.t option, Agent_protocol.Error.t) result)
+        -> (Inference_client.Execution.t
+            -> guidance:Inference.Request.Guidance.t option
+            -> reserved_input_tokens:int
+            -> ('a, Agent_protocol.Error.t) Result.t)
         -> ('a, Agent_protocol.Error.t) Result.t
     }
 end
@@ -187,6 +212,7 @@ type event_borrow_kind =
 type queued_event_borrow =
   { kind : event_borrow_kind
   ; job_scope : job_scope option
+  ; agent_custody : agent_custody option
   ; receipt : Agent_protocol.Moderator_execution.t
   ; before : Session.Moderator_state.Identity_snapshot.t
   ; event : Session.Snapshot.t
@@ -581,6 +607,9 @@ type _ request =
   | Borrow_operation_agent_actor :
       Agent_protocol.Id.Operation.t
       -> Operator_authorization.t option request
+  | Borrow_compaction_agent_actor :
+      Agent_protocol.Operation.t
+      -> Operator_authorization.t option request
   | Borrow_invocation_agent_actor :
       invocation_execution * Agent_protocol.Invocation.t
       -> Operator_authorization.t option request
@@ -642,6 +671,11 @@ type _ request =
       Operator_authorization.t
       * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
       -> Agent_protocol.Goal.t list request
+  | Apply_instruction_command :
+      Instruction_native_admission.t
+      * Instruction_command_admission.Source.t option
+      * Instruction_command.t
+      -> Instruction_command.Receipt.t request
   | Update_metadata :
       Agent_protocol.Id.Attachment.t * int64 * Agent_protocol.Session_metadata.Patch.t
       -> Agent_protocol.Session.t request
@@ -767,7 +801,7 @@ type _ request =
       * Agent_protocol.History.entry
       -> Managed_submission.t request
   | Compact :
-      Agent_protocol.Id.Attachment.t * int64 option
+      Operator_authorization.t option * Agent_protocol.Id.Attachment.t * int64 option
       -> Agent_protocol.Session.t request
   | Delete_history :
       Agent_protocol.Id.Attachment.t * int64 * Agent_protocol.History.Id.t
@@ -813,7 +847,7 @@ type _ request =
   | Invocation_granted : string * string -> bool request
   | Worker_ready : Agent_protocol.Id.Operation.t * (unit -> unit) -> unit request
   | Worker_terminal :
-      Agent_protocol.Id.Operation.t * Operation_worker.outcome
+      Agent_protocol.Id.Operation.t * Operation_worker.outcome * agent_custody option
       -> unit request
   | Compaction_terminal :
       Agent_protocol.Id.Operation.t * compaction_outcome
@@ -1049,6 +1083,8 @@ type t =
   ; mutable queued_event_borrow : queued_event_borrow option
   ; mutable operation_agent_custody :
       (Agent_protocol.Id.Operation.t * agent_custody) option
+  ; mutable lifecycle_agent_custody : lifecycle_agent_custody
+  ; mutable intent_agent_custody : agent_intent_custody list
   ; mutable pending_agent_custody : (Agent_protocol.History.entry * agent_custody) list
   ; mutable job_agent_custody : (Agent_protocol.Job.t * agent_custody) list
   ; mutable run_authorities : Run_authorities.t
@@ -1079,7 +1115,53 @@ type t =
 
 let error code message = Agent_protocol.Error.create code ~message ~retryable:false ()
 
+let agent_source_current t generation source =
+  Int.equal generation t.state.identity.generation
+  && (not t.stopped)
+  && Agent_protocol.Session.equal_desired_state t.state.lifecycle.desired Running
+  &&
+  match Runtime_builder.moderator_snapshot_observer t.state.moderator with
+  | Error _ -> false
+  | Ok current -> Option.equal Agent_protocol.Invocation.equal_observer source current
+;;
+
+let retire_instruction_continuations t =
+  (match t.lifecycle_agent_custody with
+   | Unadmitted -> ()
+   | Admitted { pending; _ } -> Option.iter pending ~f:retire_agent_custody);
+  t.lifecycle_agent_custody <- Unadmitted;
+  List.iter t.intent_agent_custody ~f:(fun entry ->
+    Option.iter entry.custody ~f:retire_agent_custody);
+  t.intent_agent_custody <- []
+;;
+
+let retain_instruction_continuations t =
+  (match t.lifecycle_agent_custody with
+   | Admitted { generation; source; _ }
+     when not (agent_source_current t generation source) ->
+     retire_instruction_continuations t
+   | Unadmitted | Admitted _ -> ());
+  t.intent_agent_custody
+  <- List.filter t.intent_agent_custody ~f:(fun entry ->
+       let pending =
+         agent_source_current t entry.generation entry.source
+         &&
+         match entry.key with
+         | Event_intent id ->
+           List.exists t.state.moderator_executions ~f:(fun receipt ->
+             Agent_protocol.Id.Moderator_execution.equal receipt.context.id id
+             && Observation_follow_up.pending_event receipt)
+         | Invocation_intent id ->
+           List.exists t.state.invocations ~f:(fun invocation ->
+             Agent_protocol.Id.Invocation.equal invocation.context.id id
+             && Observation_follow_up.pending invocation)
+       in
+       if not pending then Option.iter entry.custody ~f:retire_agent_custody;
+       pending)
+;;
+
 let retained_agent_custody t =
+  retain_instruction_continuations t;
   let operation_current id =
     (not t.stopped)
     && Option.exists t.state.active_operation ~f:(fun operation ->
@@ -1115,6 +1197,13 @@ let operation_agent_actor t id =
   | Some (owner, custody) when Agent_protocol.Id.Operation.equal owner id ->
     Result.map (Agent_authority_scope.actor custody.authority) ~f:Option.some
   | Some _ | None -> Ok None
+;;
+
+let install_operation_agent_custody t operation custody =
+  Option.iter t.operation_agent_custody ~f:(fun (_, custody) ->
+    retire_agent_custody custody);
+  t.operation_agent_custody
+  <- Option.map custody ~f:(fun custody -> operation.Agent_protocol.Operation.id, custody)
 ;;
 
 let job_scope_current t scope =
@@ -2283,6 +2372,7 @@ let retire_runtime_worker t ~closing =
       Option.map t.state.active_operation ~f:(fun operation -> operation.id)
     in
     t.runtime_retirement <- Some { finished; finish; pending_operation; closing };
+    retire_instruction_continuations t;
     Option.iter t.operation_agent_custody ~f:(fun (_, custody) ->
       retire_agent_custody custody);
     Option.iter t.active_cancel ~f:(fun cancel -> cancel ());
@@ -3432,6 +3522,22 @@ let running_operation
     Error (error Invalid_state "foreground operation is not running at a tool safe point")
 ;;
 
+(* Compaction is an inference-only owner, not a tool safe point. This private
+   borrow belongs to the actual captured compaction worker; ordinary/native
+   invocation admission deliberately continues to require [running_operation]. *)
+let running_compaction t (expected : Agent_protocol.Operation.t) =
+  let open Result.Let_syntax in
+  let%bind () = require_runtime_admission t in
+  let%bind current = current_operation t expected.id in
+  match current.kind, current.state, t.state.lifecycle.observed with
+  | Compaction, Running, Compacting id
+    when Agent_protocol.Operation.equal_kind expected.kind Compaction
+         && Int.equal current.generation expected.generation
+         && Agent_protocol.Id.Operation.equal id expected.id
+         && not t.state.halted -> Ok current
+  | _ -> Error (error Conflict "compaction execution owner is no longer current")
+;;
+
 let invocation_admission_deltas t (invocation : Agent_protocol.Invocation.t) =
   match
     List.find t.state.invocations ~f:(fun current ->
@@ -3540,7 +3646,7 @@ let event_agent_custody t (borrow : queued_event_borrow) =
   match borrow.job_scope, borrow.receipt.context.operation_id with
   | Some scope, _ -> job_agent_custody t scope
   | None, Some id -> operation_agent_custody t id
-  | None, None -> None
+  | None, None -> borrow.agent_custody
 ;;
 
 let execution_agent_custody t (execution : invocation_execution) =
@@ -3617,6 +3723,95 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
   in
   t.invocation_executions <- execution :: t.invocation_executions;
   Ok execution
+;;
+
+(* One bounded process-local slot per actual durable pending intent. No codec or
+   principal lookup exists. Unknown/mixed custody remains explicitly unbound. *)
+let with_intent_agent_custody t key ~pending custody f =
+  if not pending
+  then f ()
+  else
+    let open Result.Let_syntax in
+    let existing =
+      List.find t.intent_agent_custody ~f:(fun entry ->
+        equal_agent_intent_key entry.key key)
+    in
+    let%bind () =
+      if Option.is_some existing || List.length t.intent_agent_custody < 128
+      then Ok ()
+      else
+        Error
+          (error Invalid_state "pending instruction continuation custody limit reached")
+    in
+    let%bind source = Runtime_builder.moderator_snapshot_observer t.state.moderator in
+    let custody =
+      match existing, custody with
+      | None, custody -> custody
+      | Some { custody = Some previous; _ }, Some current
+        when Agent_authority_scope.same_origin previous.authority current.authority ->
+        Some previous
+      | Some _, (Some _ | None) -> None
+    in
+    let staged, owned =
+      match custody with
+      | None -> None, false
+      | Some custody ->
+        (match transfer_agent_custody custody with
+         | Ok child -> Some child, true
+         | Error _ -> Some custody, false)
+    in
+    let published = ref false in
+    Exn.protect
+      ~f:(fun () ->
+        let%map result = f () in
+        Option.iter existing ~f:(fun previous ->
+          Option.iter previous.custody ~f:(fun previous ->
+            if not (Option.exists staged ~f:(phys_equal previous))
+            then retire_agent_custody previous));
+        t.intent_agent_custody
+        <- { key; generation = t.state.identity.generation; source; custody = staged }
+           :: List.filter t.intent_agent_custody ~f:(fun entry ->
+             not (equal_agent_intent_key entry.key key));
+        published := true;
+        result)
+      ~finally:(fun () ->
+        if owned && not !published then Option.iter staged ~f:retire_agent_custody)
+;;
+
+let plan_agent_custody t (plan : Observation_follow_up.t) =
+  let keys =
+    List.filter_map plan.events ~f:(fun receipt ->
+      match receipt.Agent_protocol.Moderator_execution.intent with
+      | Some (Applied | Waiting_compaction _) -> Some (Event_intent receipt.context.id)
+      | None | Some (Pending | Discarded _) -> None)
+    @ List.filter_map plan.invocations ~f:(fun invocation ->
+      let accepted = function
+        | Agent_protocol.Invocation.Applied_follow_up _ | Compaction_accepted_follow_up _
+          -> true
+        | Pending_follow_up _ | Discarded_follow_up _ -> false
+      in
+      let contributes =
+        Option.exists
+          invocation.Agent_protocol.Invocation.handler_intent
+          ~f:(fun intent -> accepted intent.follow_up)
+        || Option.exists invocation.observation ~f:(fun observation ->
+          Option.exists observation.follow_up ~f:accepted)
+      in
+      Option.some_if contributes (Invocation_intent invocation.context.id))
+  in
+  let entries =
+    List.map keys ~f:(fun key ->
+      List.find t.intent_agent_custody ~f:(fun entry ->
+        equal_agent_intent_key entry.key key))
+  in
+  match entries with
+  | [] -> Ok None
+  | Some { custody = Some first; _ } :: rest
+    when List.for_all rest ~f:(function
+           | Some { custody = Some other; _ } ->
+             Agent_authority_scope.same_origin first.authority other.authority
+           | None | Some { custody = None; _ } -> false) -> Ok (Some first)
+  | None :: _ | Some _ :: _ -> Ok None
 ;;
 
 let finish_invocation t execution outcome requests commit_starts authoring_reference =
@@ -3718,12 +3913,19 @@ let finish_invocation t execution outcome requests commit_starts authoring_refer
   in
   let%bind job_deltas, job_payloads = staged_work_changes t owner in
   let%bind _ =
-    transition
+    with_intent_agent_custody
       t
-      ~delta:
-        (Session_delta.Batch
-           ((Session_delta.Invocation_changed resolved :: permission_deltas) @ job_deltas))
-      ~payloads:(permission_payloads @ job_payloads)
+      (Invocation_intent resolved.context.id)
+      ~pending:(Observation_follow_up.pending resolved)
+      (execution_agent_custody t execution)
+      (fun () ->
+         transition
+           t
+           ~delta:
+             (Session_delta.Batch
+                ((Session_delta.Invocation_changed resolved :: permission_deltas)
+                 @ job_deltas))
+           ~payloads:(permission_payloads @ job_payloads))
   in
   resolve_cleaned_permission_waiters t permissions;
   t.invocation_executions
@@ -3893,6 +4095,7 @@ let claim_queued_event t id operation_id snapshot =
     let borrow =
       { kind = Queued
       ; job_scope = None
+      ; agent_custody = None
       ; receipt
       ; before = snapshot
       ; event
@@ -3938,9 +4141,24 @@ let claim_ordinary_event t id operation_id snapshot event =
     let%bind _ =
       transition t ~delta:(Session_delta.Moderator_execution_changed receipt) ~payloads:[]
     in
+    let%bind agent_custody =
+      match operation_id, t.lifecycle_agent_custody with
+      | None, Admitted ({ pending; _ } as admitted) ->
+        t.lifecycle_agent_custody <- Admitted { admitted with pending = None };
+        (match pending with
+         | None -> Ok None
+         | Some custody ->
+           (match transfer_agent_custody custody with
+            | Ok child ->
+              retire_agent_custody custody;
+              Ok (Some child)
+            | Error _ -> Ok (Some custody)))
+      | Some _, _ | None, Unadmitted -> Ok None
+    in
     let borrow =
       { kind = Ordinary
       ; job_scope = None
+      ; agent_custody
       ; receipt
       ; before = snapshot
       ; event
@@ -3987,6 +4205,7 @@ let claim_delegated_event t id delegation snapshot event =
         let borrow =
           { kind = Ordinary
           ; job_scope = None
+          ; agent_custody = None
           ; receipt
           ; before = snapshot
           ; event
@@ -4028,6 +4247,7 @@ let claim_job_event t scope id snapshot event =
   let borrow =
     { kind = Ordinary
     ; job_scope = Some scope
+    ; agent_custody = None
     ; receipt
     ; before = snapshot
     ; event
@@ -4093,6 +4313,7 @@ let claim_queued_retirement t id snapshot reason =
     let borrow =
       { kind = Queued
       ; job_scope = None
+      ; agent_custody = None
       ; receipt
       ; before = snapshot
       ; event
@@ -4483,27 +4704,33 @@ let commit_queued_event t borrow snapshot requests decision notifications =
   in
   let%bind run_deltas = prepared_run_delta t borrow completed requests job_deltas in
   let%bind _ =
-    transition
+    with_intent_agent_custody
       t
-      ~delta:
-        (Session_delta.Batch
-           (admission_deltas
-            @ [ Session_delta.Moderator_execution_changed completed
-              ; Moderator_changed
-                  (Some (Runtime_builder.encode_moderator_snapshot snapshot))
-              ]
-            @ job_deltas
-            @ run_deltas))
-      ~payloads:
-        (job_payloads
-         @ List.map notifications ~f:(fun message ->
-           Agent_protocol.Event.Durable.Payload.Moderator_notification
-             (`Object
-                 [ "message", `String message
-                 ; ( "moderator_execution_id"
-                   , Agent_protocol.Id.Moderator_execution.to_json
-                       borrow.receipt.context.id )
-                 ])))
+      (Event_intent completed.context.id)
+      ~pending:(Observation_follow_up.pending_event completed)
+      (event_agent_custody t borrow)
+      (fun () ->
+         transition
+           t
+           ~delta:
+             (Session_delta.Batch
+                (admission_deltas
+                 @ [ Session_delta.Moderator_execution_changed completed
+                   ; Moderator_changed
+                       (Some (Runtime_builder.encode_moderator_snapshot snapshot))
+                   ]
+                 @ job_deltas
+                 @ run_deltas))
+           ~payloads:
+             (job_payloads
+              @ List.map notifications ~f:(fun message ->
+                Agent_protocol.Event.Durable.Payload.Moderator_notification
+                  (`Object
+                      [ "message", `String message
+                      ; ( "moderator_execution_id"
+                        , Agent_protocol.Id.Moderator_execution.to_json
+                            borrow.receipt.context.id )
+                      ]))))
   in
   borrow.committed <- true;
   Ok ()
@@ -4581,6 +4808,7 @@ let finish_queued_event t borrow interrupted =
       |> Result.map ~f:ignore
   in
   resolve_cleaned_permission_waiters t permissions;
+  Option.iter borrow.agent_custody ~f:retire_agent_custody;
   t.queued_event_borrow <- None;
   t.invocation_executions
   <- List.filter t.invocation_executions ~f:(fun execution ->
@@ -5846,16 +6074,22 @@ let commit_moderator_invocation t borrow (resolved : Agent_protocol.Invocation.t
    | _ -> ());
   let%bind job_deltas, job_payloads = staged_work_changes t owner in
   let%bind _ =
-    transition
+    with_intent_agent_custody
       t
-      ~delta:
-        (Session_delta.Batch
-           ([ Session_delta.Invocation_changed resolved
-            ; Moderator_changed
-                (Some (Runtime_builder.encode_moderator_snapshot snapshot))
-            ]
-            @ job_deltas))
-      ~payloads:job_payloads
+      (Invocation_intent resolved.context.id)
+      ~pending:(Observation_follow_up.pending resolved)
+      (moderator_agent_custody t borrow)
+      (fun () ->
+         transition
+           t
+           ~delta:
+             (Session_delta.Batch
+                ([ Session_delta.Invocation_changed resolved
+                 ; Moderator_changed
+                     (Some (Runtime_builder.encode_moderator_snapshot snapshot))
+                 ]
+                 @ job_deltas))
+           ~payloads:job_payloads)
   in
   borrow.committed <- true;
   Ok ()
@@ -7054,9 +7288,11 @@ let compaction_failure exn =
 exception Compaction_cancel_requested
 
 let compute_compaction t operation selection port installed allocator history =
-  let compute inference =
+  let compute inference ~guidance ~reserved_input_tokens =
     match
-      Context_compaction.Compactor.compact_entries
+      Context_compaction.Compactor.compact_entries_with_guidance
+        ~guidance
+        ~reserved_input_tokens
         ~inference
         ~allocator
         ~env:t.compaction_env
@@ -7071,8 +7307,24 @@ let compute_compaction t operation selection port installed allocator history =
   let result =
     match port, installed with
     | Some port, _ ->
-      port.Compaction_inference.with_execution ~operation ~selection compute
-    | None, Some inference -> compute inference
+      port.Compaction_inference.with_execution
+        ~operation
+        ~selection
+        ~borrow_agent_actor:(fun () -> call t (Borrow_compaction_agent_actor operation))
+        compute
+    | None, Some inference ->
+      let active =
+        Option.value_map t.state.instruction_selection ~default:false ~f:(fun selection ->
+          let status = Instruction_selection.summary selection in
+          status.project_selected || status.skills > 0)
+      in
+      if active
+      then
+        Error
+          (error
+             Configuration_invalid
+             "active instructions require an owned compaction guidance port")
+      else compute inference ~guidance:None ~reserved_input_tokens:0
     | None, None ->
       Error (error Configuration_invalid "compaction requires selected runtime inference")
   in
@@ -7102,8 +7354,14 @@ let launch_compaction t operation allocator history =
   let selection = t.state.spec.inference_target in
   let port = t.compaction_inference in
   let installed = t.inference_execution in
+  let custody = operation_agent_custody t operation_id in
   Eio.Fiber.fork ~sw:t.sw (fun () ->
-    let outcome = run_compaction t operation selection port installed allocator history in
+    let outcome =
+      Exn.protect
+        ~f:(fun () ->
+          run_compaction t operation selection port installed allocator history)
+        ~finally:(fun () -> Option.iter custody ~f:retire_agent_custody)
+    in
     ignore
       (call t ~priority:Priority (Compaction_terminal (operation_id, outcome))
        : (unit, Agent_protocol.Error.t) result))
@@ -7184,7 +7442,12 @@ let retain_reconciliation_failure t failure =
   |> Result.map ~f:(fun _ -> ())
 ;;
 
-let start_compaction ?operation ?(extra_deltas : Session_delta.t list = []) t =
+let start_compaction
+      ?operation
+      ?agent_custody
+      ?(extra_deltas : Session_delta.t list = [])
+      t
+  =
   let open Result.Let_syntax in
   let%bind () = require_runtime_admission t in
   let%bind () = reconcile_foreground_invocations t in
@@ -7202,28 +7465,48 @@ let start_compaction ?operation ?(extra_deltas : Session_delta.t list = []) t =
       Option.value_or_thunk operation ~default:(fun () -> create_compaction_operation t)
     in
     let lifecycle = lifecycle_for_compaction t operation.id in
-    let%bind session =
-      transition
-        t
-        ~delta:
-          (Session_delta.Batch
-             (extra_deltas
-              @ [ Session_delta.History_block_reserved reserved_through
-                ; Active_operation_changed (Some operation)
-                ; Lifecycle_changed lifecycle
-                ]))
-        ~payloads:
-          [ Agent_protocol.Event.Durable.Payload.Operation_started operation
-          ; Session_state_changed
-              { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
-          ]
+    let%bind child =
+      match agent_custody with
+      | None -> Ok None
+      | Some custody -> Result.map (transfer_agent_custody custody) ~f:Option.some
     in
-    launch_compaction t operation allocator history;
-    Ok session)
+    let installed = ref false in
+    Exn.protect
+      ~f:(fun () ->
+        let%bind session =
+          transition
+            t
+            ~delta:
+              (Session_delta.Batch
+                 (extra_deltas
+                  @ [ Session_delta.History_block_reserved reserved_through
+                    ; Active_operation_changed (Some operation)
+                    ; Lifecycle_changed lifecycle
+                    ]))
+            ~payloads:
+              [ Agent_protocol.Event.Durable.Payload.Operation_started operation
+              ; Session_state_changed
+                  { desired_state = lifecycle.desired
+                  ; observed_state = lifecycle.observed
+                  }
+              ]
+        in
+        if Option.is_some child then install_operation_agent_custody t operation child;
+        installed := true;
+        launch_compaction t operation allocator history;
+        Ok session)
+      ~finally:(fun () ->
+        if not !installed then Option.iter child ~f:retire_agent_custody))
 ;;
 
-let compact_internal t attachment_id expected_revision =
+let compact_internal t original_actor attachment_id expected_revision =
   let open Result.Let_syntax in
+  let%bind () =
+    match original_actor with
+    | None -> Ok ()
+    | Some actor when Operator_authorization.is_current actor -> Ok ()
+    | Some _ -> Error (error Permission_denied "compaction authentication expired")
+  in
   let%bind _ = write_attachment t attachment_id in
   let%bind () =
     match expected_revision with
@@ -7236,7 +7519,11 @@ let compact_internal t attachment_id expected_revision =
   with
   | true, _, _ -> Error (error Conflict "session moderator is processing background work")
   | false, Some _, _ -> Error (error Conflict "a foreground operation is already active")
-  | false, None, (Idle | Stopped) -> start_compaction t
+  | false, None, (Idle | Stopped) ->
+    let custody = Option.map original_actor ~f:create_agent_custody in
+    Exn.protect
+      ~f:(fun () -> start_compaction ?agent_custody:custody t)
+      ~finally:(fun () -> Option.iter custody ~f:retire_agent_custody)
   | false, None, _ -> Error (error Invalid_state "session is not ready for compaction")
 ;;
 
@@ -7359,7 +7646,7 @@ let foreground_terminal_requests t operation_id outcome =
     follow_up_deltas t plan
 ;;
 
-let worker_terminal t operation_id outcome =
+let worker_terminal t operation_id outcome compaction_custody =
   match t.state.active_operation with
   | None -> Ok ()
   | Some operation when Agent_protocol.Id.Operation.compare operation.id operation_id <> 0
@@ -7483,7 +7770,8 @@ let worker_terminal t operation_id outcome =
         Error failure
     in
     if runtime_admission_open t && outcome_requests_compaction outcome
-    then Result.map (start_compaction t) ~f:(fun _ -> ())
+    then
+      Result.map (start_compaction ?agent_custody:compaction_custody t) ~f:(fun _ -> ())
     else Ok ()
 ;;
 
@@ -8433,21 +8721,46 @@ let launch_worker t operation =
     retire_authority ();
     Eio.Fiber.fork ~sw:t.sw (fun () ->
       ignore
-        (call t ~priority:Priority (Worker_terminal (operation_id, Failed failure))
+        (call t ~priority:Priority (Worker_terminal (operation_id, Failed failure, None))
          : (unit, Agent_protocol.Error.t) result))
   | Ok history ->
     Eio.Fiber.fork ~sw:t.sw (fun () ->
+      let compaction_custody = ref None in
       let outcome =
         Exn.protect ~finally:retire_authority ~f:(fun () ->
-          match t.operation_worker with
-          | Some worker -> run_worker t worker operation history
-          | None ->
-            Operation_worker.Failed
-              (error Invalid_state "session has no foreground operation worker"))
+          let outcome =
+            match t.operation_worker with
+            | Some worker -> run_worker t worker operation history
+            | None ->
+              Operation_worker.Failed
+                (error Invalid_state "session has no foreground operation worker")
+          in
+          (* This private completion handoff is staged while the exact physical
+             worker remains live. Only this Completed result may consume it, and
+             only after its terminal transition ACK. It is never a new borrower
+             of an already-retired operation. *)
+          if outcome_requests_compaction outcome
+          then
+            Option.iter custody ~f:(fun custody ->
+              match transfer_agent_custody custody with
+              | Ok child -> compaction_custody := Some child
+              | Error _ ->
+                (* Preserve known-but-unavailable provenance. The parent cell
+                   retires below and the actor must reject this handoff, even
+                   when no instructions are currently selected. None is only
+                   genuinely unbound legacy execution. *)
+                compaction_custody := Some custody);
+          outcome)
       in
-      ignore
-        (call t ~priority:Priority (Worker_terminal (operation_id, outcome))
-         : (unit, Agent_protocol.Error.t) result))
+      Exn.protect
+        ~f:(fun () ->
+          ignore
+            (call
+               t
+               ~priority:Priority
+               (Worker_terminal (operation_id, outcome, !compaction_custody))
+             : (unit, Agent_protocol.Error.t) result))
+        ~finally:(fun () -> Option.iter !compaction_custody ~f:retire_agent_custody))
 ;;
 
 let create_turn_operation t reason =
@@ -8509,13 +8822,6 @@ let adopted_agent_custody t entries incoming original_actor =
   | [ entry ] when equal_agent_entry entry incoming ->
     Ok (Option.map original_actor ~f:create_agent_custody)
   | _ -> pending_adoption_agent_custody t entries
-;;
-
-let install_operation_agent_custody t operation custody =
-  Option.iter t.operation_agent_custody ~f:(fun (_, custody) ->
-    retire_agent_custody custody);
-  t.operation_agent_custody
-  <- Option.map custody ~f:(fun custody -> operation.Agent_protocol.Operation.id, custody)
 ;;
 
 let submit_idle_message
@@ -11153,6 +11459,7 @@ let drain_payloads (drain : Runtime_builder.moderator_drain) =
 ;;
 
 let start_idle_turn_unchecked
+      ?continuation_custody
       ?(extra_deltas = [])
       ?(extra_payloads = [])
       ?(notification_wakes = [])
@@ -11176,6 +11483,18 @@ let start_idle_turn_unchecked
       ~adopt_deferred
   in
   let%bind agent_custody = admission_agent_custody t admission in
+  let%bind agent_custody =
+    let has_input =
+      List.exists (Turn_admission.payloads admission) ~f:(function
+        | Agent_protocol.Event.Durable.Payload.History_appended entries ->
+          not (List.is_empty entries)
+        | _ -> false)
+    in
+    match agent_custody, continuation_custody with
+    | None, Some custody when (not has_input) && List.is_empty notification_wakes ->
+      Result.map (transfer_agent_custody custody) ~f:Option.some
+    | custody, (None | Some _) -> Ok custody
+  in
   let leading_deltas, turn_deltas =
     match Turn_admission.deltas admission with
     | (Pending_inputs_changed _ as delta) :: rest -> [ delta ], rest
@@ -11203,11 +11522,18 @@ let start_idle_turn_unchecked
   let payloads =
     drain_payloads drain @ leading_payloads @ extra_payloads @ turn_payloads
   in
-  let%map _ = transition t ~delta:(Session_delta.Batch deltas) ~payloads in
-  if Option.is_none t.operation_agent_custody
-  then install_operation_agent_custody t operation agent_custody;
-  prune_pending_agent_custody t;
-  launch_worker t operation
+  let installed = ref false in
+  Exn.protect
+    ~f:(fun () ->
+      let%map _ = transition t ~delta:(Session_delta.Batch deltas) ~payloads in
+      if Option.is_none t.operation_agent_custody
+      then (
+        install_operation_agent_custody t operation agent_custody;
+        installed := true);
+      prune_pending_agent_custody t;
+      launch_worker t operation)
+    ~finally:(fun () ->
+      if not !installed then Option.iter agent_custody ~f:retire_agent_custody)
 ;;
 
 let commit_history_transition t ~delta ~payloads ~admission =
@@ -11537,6 +11863,7 @@ let suppress_follow_up_deltas t deltas ~reason =
 ;;
 
 let start_idle_turn
+      ?continuation_custody
       ?(extra_deltas = [])
       ?(extra_payloads = [])
       ?(notification_wakes = [])
@@ -11565,6 +11892,7 @@ let start_idle_turn
   match decision with
   | Allow_automatic_turn ->
     start_idle_turn_unchecked
+      ?continuation_custody
       ~extra_deltas
       ~extra_payloads
       ~notification_wakes
@@ -11766,6 +12094,7 @@ let apply_observation_follow_up t =
         ~halted
         ~compaction_operation_id:compaction.id
     in
+    let%bind continuation_custody = plan_agent_custody t plan in
     let extra_deltas = follow_up_deltas t plan in
     let drain : Runtime_builder.moderator_drain =
       { moderator_snapshot = t.state.moderator
@@ -11791,11 +12120,17 @@ let apply_observation_follow_up t =
         |> Result.map ~f:ignore
       | Stop reason, _ -> stop_from_idle_moderator ~extra_deltas t drain reason
       | Compact, _ ->
-        start_compaction ~operation:compaction ~extra_deltas t |> Result.map ~f:ignore
+        start_compaction
+          ?agent_custody:continuation_custody
+          ~operation:compaction
+          ~extra_deltas
+          t
+        |> Result.map ~f:ignore
       | Turn, _ when Option.is_none t.operation_worker ->
         Error (error Invalid_state "follow-up turn requires an installed worker")
       | Turn, _ ->
         start_idle_turn
+          ?continuation_custody
           ~extra_deltas
           t
           drain
@@ -12376,6 +12711,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Begin_initialization _
   | Borrow_initialization_agent_actor _
   | Borrow_operation_agent_actor _
+  | Borrow_compaction_agent_actor _
   | Borrow_invocation_agent_actor _
   | Borrow_moderator_agent_actor _
   | Begin_run_initialization _
@@ -12397,6 +12733,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Activate_queued_start
   | Update_organization _
   | Apply_goal_command _
+  | Apply_instruction_command _
   | Set_recurrence_controller _
   | Set_recurrence_planning_host _
   | Recurrence_due_ids
@@ -12933,6 +13270,10 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       let open Result.Let_syntax in
       let%bind _ = running_operation t id in
       operation_agent_actor t id
+    | Borrow_compaction_agent_actor operation ->
+      let open Result.Let_syntax in
+      let%bind _ = running_compaction t operation in
+      operation_agent_actor t operation.id
     | Borrow_invocation_agent_actor (execution, invocation) ->
       invocation_agent_actor t execution invocation
     | Borrow_moderator_agent_actor (borrow, invocation) ->
@@ -12979,7 +13320,19 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         | Some actor when Operator_authorization.is_current actor -> Ok ()
         | Some _ -> Error (error Permission_denied "start authentication expired")
       in
-      with_writer t attachment_id (fun () -> start_internal ?expected_parent_stop_epoch t)
+      with_writer t attachment_id (fun () ->
+        let%bind source = Runtime_builder.moderator_snapshot_observer t.state.moderator in
+        let%map summary = start_internal ?expected_parent_stop_epoch t in
+        (match t.lifecycle_agent_custody with
+         | Admitted _ -> ()
+         | Unadmitted ->
+           t.lifecycle_agent_custody
+           <- Admitted
+                { generation = t.state.identity.generation
+                ; source
+                ; pending = Option.map original_actor ~f:create_agent_custody
+                });
+        summary)
     | Start_initial_delegated (reference, expected_parent_stop_epoch) ->
       (match t.state.spec.delegation with
        | Some current
@@ -13216,6 +13569,30 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       prepared.receipt
     | Read_goals (actor, authorize) ->
       Goal_command_admission.read t.state ~actor ~authorize
+    | Apply_instruction_command (admission, source, request) ->
+      let open Result.Let_syntax in
+      let%bind decision =
+        Instruction_command_admission.prepare
+          t.state
+          ~admission
+          ~source
+          ~request
+          ~now:(t.services.now ())
+      in
+      (match decision with
+       | Retained receipt -> Ok receipt
+       | Prepared { selection; receipt } ->
+         let%bind candidate =
+           prepare_transition
+             t
+             ~delta:(Instruction_selection_changed selection)
+             ~payloads:[]
+         in
+         let%bind () =
+           Instruction_command_admission.check_now t.state ~admission ~source ~request
+         in
+         let%map () = install t candidate in
+         receipt)
     | Apply_goal_command (actor, authorize, session, request) ->
       let open Result.Let_syntax in
       let%bind prepared =
@@ -13482,8 +13859,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         entry
     | Submit_managed_message (reference, key, fingerprint, generation, maximum, entry) ->
       submit_managed_message t reference key fingerprint generation maximum entry
-    | Compact (attachment_id, expected_revision) ->
-      compact_internal t attachment_id expected_revision
+    | Compact (original_actor, attachment_id, expected_revision) ->
+      compact_internal t original_actor attachment_id expected_revision
     | Delete_history (attachment_id, revision, history_id) ->
       delete_history_internal t attachment_id revision history_id
     | Edit_history request -> edit_history_internal t request
@@ -13519,9 +13896,9 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Invocation_granted (tool_name, identity_digest) ->
       Ok (invocation_granted t ~tool_name ~identity_digest)
     | Worker_ready (operation_id, cancel) -> worker_ready t operation_id cancel
-    | Worker_terminal (operation_id, outcome) ->
+    | Worker_terminal (operation_id, outcome, compaction_custody) ->
       with_runtime_terminal t operation_id (fun () ->
-        worker_terminal t operation_id outcome)
+        worker_terminal t operation_id outcome compaction_custody)
     | Compaction_terminal (operation_id, outcome) ->
       with_runtime_terminal t operation_id (fun () ->
         compaction_terminal t operation_id outcome)
@@ -13689,6 +14066,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       finish_inference_owner ?run_preparation t owner
     | Reconcile_inference_recovery -> reconcile_inference_recovery t
     | Shutdown ->
+      retire_instruction_continuations t;
       Option.iter t.operation_agent_custody ~f:(fun (_, custody) ->
         retire_agent_custody custody);
       List.iter t.pending_agent_custody ~f:(fun (_, custody) ->
@@ -13820,6 +14198,8 @@ let create_with_owner_lease_duration
     ; moderator_borrow = None
     ; queued_event_borrow = None
     ; operation_agent_custody = None
+    ; lifecycle_agent_custody = Unadmitted
+    ; intent_agent_custody = []
     ; pending_agent_custody = []
     ; job_agent_custody = []
     ; run_authorities = Run_authorities.empty
@@ -14347,11 +14727,25 @@ let replace_pending
 ;;
 
 let compact t ~attachment_id ~expected_revision =
-  call t (Compact (attachment_id, expected_revision))
+  call t (Compact (None, attachment_id, expected_revision))
 ;;
 
 let compact_with_command_audit t ~command_audit ~attachment_id ~expected_revision =
-  call t ~command_audit (Compact (attachment_id, expected_revision))
+  call t ~command_audit (Compact (None, attachment_id, expected_revision))
+;;
+
+let compact_authenticated t ~actor ~attachment_id ~expected_revision =
+  call t (Compact (Some actor, attachment_id, expected_revision))
+;;
+
+let compact_authenticated_with_command_audit
+      t
+      ~actor
+      ~command_audit
+      ~attachment_id
+      ~expected_revision
+  =
+  call t ~command_audit (Compact (Some actor, attachment_id, expected_revision))
 ;;
 
 let delete_history t ?command_audit ~attachment_id ~expected_revision history_id =
@@ -14791,6 +15185,19 @@ let goal_command t ~actor ~authorize ~session ~request =
 ;;
 
 let read_goals t ~actor ~authorize = call t (Read_goals (actor, authorize))
+
+let instruction_selection_current t (basis : Session_state.t) =
+  (not t.stopped)
+  && Int.equal t.state.identity.generation basis.identity.generation
+  && Option.equal phys_equal t.state.instruction_selection basis.instruction_selection
+;;
+
+let instruction_command t ~admission ~source ~request =
+  (* Native instruction receipts are journaled with selection state. They are not
+     external server-request idempotency records and cannot mint command_audit. *)
+  call t (Apply_instruction_command (admission, source, request))
+;;
+
 let set_recurrence_controller t controller = call t (Set_recurrence_controller controller)
 
 let recurrence_command t ~actor ~authorize ~request =

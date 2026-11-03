@@ -1,5 +1,12 @@
 open! Core
 
+(** Capacity-only instruction delta using the actual encoder shape. The supplied
+    conservative selection is never decoded/applied as a command or receipt. *)
+val project_instruction_clear
+  :  Jsonaf.t
+  -> limits:Document_schema.Limits.t
+  -> (Document_schema.Document.t, Document_schema.Error.t) result
+
 (** Immutable journal change document. The admitted complete child documents and
     unknown fields remain attached to the value and are never rebuilt for hashing. *)
 type t

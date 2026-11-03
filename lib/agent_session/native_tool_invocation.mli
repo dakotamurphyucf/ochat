@@ -196,6 +196,33 @@ val require_native_admission
   -> binding:Chat_response.Tool_capability.binding
   -> (unit, Agent_protocol.Error.t) result
 
+module Admission : sig
+  (** Captured only inside a genuinely admitted native callback. Carries the
+      exact selected binding and borrowed/native callback epochs; it grants no
+      source access or session mutation by itself. There is no decoder or
+      ambient-current lookup at the consumer. *)
+  type t
+
+  val capture
+    :  borrowed
+    -> binding:Chat_response.Tool_capability.binding
+    -> (t, Agent_protocol.Error.t) result
+
+  (** Nonyielding final mailbox check. The consumer supplies its exact expected
+      binding/effect; a read admission cannot authorize a mutation. Retaining
+      this token does not extend either physical owner epoch. *)
+  val check_now
+    :  t
+    -> binding:Chat_response.Tool_capability.binding
+    -> (unit, Agent_protocol.Error.t) result
+
+  val invocation : t -> Agent_protocol.Invocation.t
+
+  (** Exact checked503 borrow captured from this dispatched invocation. None is
+      legacy/unbound, never a reason to reconstruct authority from a principal. *)
+  val actor : t -> Operator_authorization.t option
+end
+
 (** Record only the actual readonly query service's private response. This checks
     the live borrow and scope/selection; final output matching and atomic outcome
     persistence belong to the actor. Recording alone creates no model history. *)

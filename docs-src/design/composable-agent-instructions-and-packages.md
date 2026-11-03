@@ -238,12 +238,14 @@ instruction consumers.
 - `lib/instruction_content/` and `lib/agent_server/instruction_sources.*`:
   admitted discovery, exact loaded revisions and immutable captured instruction
   content. See [Admitted instruction sources](../guide/admitted-instructions.md)
-  for the bounded metadata profile and current library-only boundary.
+  for the bounded metadata profile, selected native operations and current-use policy.
 - `lib/agent_session/instruction_capture.*`, `instruction_selection*` and
   `instruction_transition.*`: pure bounded retained selections and receipts in
   the universal session document, with exact snapshot/payload custody and
-  internal transactional admission. This foundation is inert; it supplies no
-  authenticated native activation port or provider-context insertion.
+  internal transactional admission. `Instruction_service`, the installed source
+  facade and effect-specific native admission supply actual host integration;
+  request-only fixed User-level guidance leaves authored higher-priority
+  instructions and canonical history unchanged.
 - `lib/capability_sources/` and `lib/capability_source_export/`: the immutable
   installed ordinary-source inventory and explicit create-only Eio export.
   `ochat libraries` exposes list, exact member read and export without preparing

@@ -14,6 +14,7 @@
   goal_accounting_state_tests
   instruction_selection_tests
   instruction_selection_persistence_tests
+  instruction_clear_capacity_tests
   goal_run_tests
   run_terminal_capacity_tests
   run_subscription_wake_tests

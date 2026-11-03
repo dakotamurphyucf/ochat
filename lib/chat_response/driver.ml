@@ -751,7 +751,9 @@ module Prepared_inputs = struct
         ?agent_prompt_v1_recipe:ctx.agent_prompt_v1_recipe
         ~inference_relation:ctx.inference_relation
         ()
-      |> fun child -> Ctx.with_submission_guard child ctx.submission_guard
+      |> fun child ->
+      Ctx.with_submission_guard child ctx.submission_guard
+      |> fun child -> Ctx.inherit_agent_guidance child ~from:ctx
     in
     let config = Config.of_elements elements in
     { ctx; elements; config; input }
@@ -938,6 +940,7 @@ let run_stream_entries
     ~on_inference_completion:ctx.on_inference_completion
     ~on_inference_observation:ctx.on_inference_observation
     ~on_admitted_call:ctx.on_admitted_call
+    ?agent_guidance:(Ctx.agent_guidance ctx)
     ~submission_guard:ctx.submission_guard
     ~before_inference_dispatch:ctx.before_inference_dispatch
     ~inference_relation:ctx.inference_relation
@@ -1516,6 +1519,7 @@ and run_completion_stream
       ~on_inference_completion:ctx.on_inference_completion
       ~on_inference_observation:ctx.on_inference_observation
       ~on_admitted_call:ctx.on_admitted_call
+      ?agent_guidance:(Ctx.agent_guidance ctx)
       ~submission_guard:ctx.submission_guard
       ~before_inference_dispatch:ctx.before_inference_dispatch
       ~inference_relation:ctx.inference_relation

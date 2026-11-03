@@ -243,7 +243,7 @@ module Execution = struct
     [@@deriving equal, sexp_of]
   end
 
-  let complete_text t ~sw ?model ~settings ~messages () =
+  let complete_text t ~sw ?model ?guidance ~settings ~messages () =
     let open Result.Let_syntax in
     let preparation result =
       Result.map_error result ~f:(fun error ->
@@ -341,6 +341,9 @@ module Execution = struct
     let%bind request =
       Inference.Request.create ~target ~history ~tools:[] ~assets:[] ~limits
       |> request_error
+    in
+    let%bind request =
+      Inference.Request.with_guidance request ~guidance ~limits |> request_error
     in
     let%bind receipt =
       run { t with context } ~sw ~request ~on_event:ignore
