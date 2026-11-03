@@ -93,6 +93,12 @@
   goal_command
   goal_command_receipt
   goal_catalog
+  instruction_capture
+  instruction_command
+  instruction_selection_capacity
+  instruction_selection_record
+  instruction_selection
+  instruction_transition
   goal_command_transition
   goal_command_admission
   goal_catalog_source
@@ -219,7 +225,7 @@
   goal_usage
   goal_accounting
   inference_ledger)
- (private_modules workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles
+ (private_modules instruction_selection_capacity instruction_selection_record workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles
   prompt_project_baseline_record prompt_project_baseline_document native_tool_policy)
  (libraries ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript
   core
@@ -228,6 +234,7 @@
   eio
   eio.unix
   ochat.document_schema
+  ochat.instruction_content
   jsonaf
   chatml_prompt_programs
   ochat.chatmd_content_capture

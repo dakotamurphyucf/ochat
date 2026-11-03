@@ -87,6 +87,7 @@ let created_document transaction ~limits =
   | Ingress_changed _
   | Delivery_committed _
   | Delivery_wake_changed _
+  | Instruction_selection_changed _
   | Goal_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _

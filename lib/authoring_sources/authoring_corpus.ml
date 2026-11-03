@@ -3683,11 +3683,13 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "3d7ab433dd365f6979ccfd7cbbd368e340129a7eb99b8c8b84d891d0420170bd" ]
+                   [ "a71f2dfab551b4aa0f9dcd60cac3bc1e2a03cd745fb57d8774f3ae66bc6cee31" ]
                ; evidence =
                    [ "test/instruction_sources/metadata_tests.ml"
                    ; "test/instruction_sources/snapshot_tests.ml"
                    ; "test/instruction_sources/source_tests.ml"
+                   ; "test/agent_session/instruction_selection_tests.ml"
+                   ; "test/agent_session/instruction_selection_persistence_tests.ml"
                    ]
                }
          }
