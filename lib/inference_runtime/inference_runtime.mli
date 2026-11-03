@@ -193,9 +193,15 @@ module Adapter : sig
   (** Trusted composition-root registration, not an ambient global registry.
       Binding/preparation perform no credential lookup or provider I/O. [bind]
       checks the actual captured profile/account/endpoint/revision against host
-      policy. [prepare] returns a plan bound to this exact request and identity. *)
+      policy. [prepare] returns a plan bound to this exact request and identity.
+
+      Request-only guidance is denied by default, before adapter preparation.
+      Opt-in asserts actual fixed User-level lowering, complete wire/provenance
+      fingerprinting and private-data protection on every transport/session
+      path. It is a trusted adapter contract, never source authorization. *)
   val create
-    :  ?prepare_with_policy:
+    :  ?supports_request_guidance:bool
+    -> ?prepare_with_policy:
          (policy:Inference.Observation.Transport_policy.t
           -> preparation_id:string
           -> Inference.Request.t

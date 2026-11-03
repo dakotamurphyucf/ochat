@@ -268,6 +268,7 @@ module Adapter = struct
 
   type t =
     { id : string
+    ; supports_request_guidance : bool
     ; limits : Limits.t
     ; bind : Request.Target.t -> (unit, Preparation_error.t) Result.t
     ; preflight_history :
@@ -283,6 +284,7 @@ module Adapter = struct
     }
 
   let create
+        ?(supports_request_guidance = false)
         ?prepare_with_policy
         ?open_session
         ~id
@@ -309,7 +311,15 @@ module Adapter = struct
               | Prefer_websocket | Require_websocket ->
                 Error Preparation_error.Transport_unavailable)
         in
-        Ok { id; limits; bind; preflight_history; prepare; open_session })
+        Ok
+          { id
+          ; supports_request_guidance
+          ; limits
+          ; bind
+          ; preflight_history
+          ; prepare
+          ; open_session
+          })
   ;;
 end
 
@@ -539,7 +549,8 @@ module Prepared = struct
 end
 
 let request_equal a b =
-  Request.Target.equal (Request.target a) (Request.target b)
+  Option.equal Request.Guidance.equal (Request.guidance a) (Request.guidance b)
+  && Request.Target.equal (Request.target a) (Request.target b)
   && List.equal
        (fun a b ->
           History_entry.Id.equal (History_entry.id a) (History_entry.id b)
@@ -704,6 +715,9 @@ module Context = struct
     let open Result.Let_syntax in
     if Option.exists t.session ~f:Session.is_closed
     then Error Preparation_error.Session_closed
+    else if
+      Option.is_some (Request.guidance request) && not t.adapter.supports_request_guidance
+    then Error Preparation_error.Unsupported_input
     else if not (Request.Target.equal t.target (Request.target request))
     then Error Preparation_error.Target_mismatch
     else (

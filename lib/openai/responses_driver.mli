@@ -151,9 +151,15 @@ module Prepared : sig
 
   (** Lower an already captured effective selection without consulting current
       profile defaults. Names must be unique; provenance is retained. Absent
-      values remain omitted. This is the durable neutral adapter entry point. *)
+      values remain omitted. This is the durable neutral adapter entry point.
+
+      Optional private guidance provenance accompanies request-only User text
+      already lowered into input. It is bounded/nonblank UTF-8 and enters the
+      complete private preparation fingerprint, never public configuration.
+      Absence preserves the existing no-guidance fingerprint representation. *)
   val of_captured_settings
-    :  Profile.t
+    :  ?guidance_provenance:string
+    -> Profile.t
     -> model:string
     -> history:Jsonaf.t list
     -> tools:Responses_codec.Request.Tool.t list

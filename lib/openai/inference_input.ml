@@ -383,11 +383,29 @@ let prepare profile request =
     else Ok ()
   in
   let%bind history = history profile request in
+  let history =
+    match R.guidance request with
+    | None -> history
+    | Some guidance ->
+      `Object
+        [ "type", `String "message"
+        ; "role", `String "user"
+        ; ( "content"
+          , `Array
+              [ `Object
+                  [ "type", `String "input_text"
+                  ; "text", `String (R.Guidance.text guidance)
+                  ]
+              ] )
+        ]
+      :: history
+  in
   let%bind tools = Result.all (List.map (R.tools request) ~f:tool) in
   let%bind settings =
     Result.all (List.map (R.Target.settings (R.target request)) ~f:setting)
   in
   D.Prepared.of_captured_settings
+    ?guidance_provenance:(Option.map (R.guidance request) ~f:R.Guidance.provenance)
     profile
     ~model:(R.Target.model (R.target request))
     ~history
