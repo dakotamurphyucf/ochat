@@ -63,6 +63,7 @@ let admission () =
     ; parent_revision_id = P.Id.Prompt_revision.create ()
     ; parent_stop_epoch = None
     ; authored_tool = None
+    ; captured_recurrence = None
     ; authority_sha256 = digest "parent policy and effective resource allowance"
     ; capability_pins = [ "read_file", digest "registered parent root" ]
     ; lifetime = Owned

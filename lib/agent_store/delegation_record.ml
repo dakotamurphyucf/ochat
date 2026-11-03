@@ -35,6 +35,7 @@ module Admission = struct
     ; parent_stop_epoch : int64 option [@sexp.option]
     ; authority_sha256 : string
     ; authored_tool : authored_tool option [@sexp.option]
+    ; captured_recurrence : Delegation_captured_origin.t option [@sexp.option]
     ; capability_pins : (string * string) list
     ; lifetime : lifetime
     ; created_at : P.Timestamp.t
@@ -162,13 +163,15 @@ let validate (record : t) ~limits =
   in
   match
     (not (P.Id.Session.equal record.key.parent_session_id a.child_session_id))
-    && (not (P.Id.Prompt_revision.equal a.parent_revision_id a.revision_id))
+    && ((not (P.Id.Prompt_revision.equal a.parent_revision_id a.revision_id))
+        || Option.is_some a.captured_recurrence)
     && sha256 record.request_sha256
     && sha256 a.manifest_sha256
     && sha256 a.authority_sha256
     && Option.for_all a.parent_stop_epoch ~f:(fun epoch -> Int64.(epoch >= 0L))
     && lifetime_valid
     && authored_valid
+    && (not (Option.is_some a.authored_tool && Option.is_some a.captured_recurrence))
     && (match record.artifact_collection, record.stage, record.revocation with
         | None, _, _ -> true
         | Some Prepared, (Reserved | Artifact_installed), Some _ -> true

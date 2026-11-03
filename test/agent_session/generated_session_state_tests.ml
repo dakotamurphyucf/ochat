@@ -62,6 +62,7 @@ let%expect_test
           ; parent_revision_id = prompt_revision_id
           ; parent_stop_epoch = None
           ; authored_tool = None
+          ; captured_recurrence = None
           ; authority_sha256 = digest "admitted host authority"
           ; capability_pins = []
           ; lifetime = Owned

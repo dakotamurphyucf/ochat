@@ -324,6 +324,7 @@ let%expect_test
           ; authority_sha256 =
               Agent_session.Delegation_authority.fingerprint state |> protocol_ok
           ; authored_tool = None
+          ; captured_recurrence = None
           ; capability_pins = []
           ; lifetime = Independent { authorization_sha256 = digest "fixture grant" }
           ; created_at = timestamp

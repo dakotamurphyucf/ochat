@@ -43,6 +43,7 @@
   session_index_recovery_document
   session_projection_update
   session_index
+  delegation_captured_origin
   delegation_record
   delegation_document
   delegation_store

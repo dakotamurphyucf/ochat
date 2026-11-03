@@ -24,6 +24,14 @@ val stored_key
     ordering and lexemes. It is independent of mutable record disposition. *)
 val admission_sha256 : t -> string
 
+(** Maximum complete JSON payload bytes for this record's known remaining
+    stage/revocation/collection dispositions. Preserves the original immutable
+    admission, compatible unknowns, required semantics and immutable historical presence.
+    Rejects if that bounded future payload cannot fit [limits]. No disposition
+    is installed or authorized. The store adds its actual frame overhead and
+    charges only positive growth beyond the bytes already read for this record. *)
+val reserved_payload_bytes : t -> (int, Document_schema.Error.t) result
+
 val with_disposition
   :  t
   -> stage:Delegation_record.stage

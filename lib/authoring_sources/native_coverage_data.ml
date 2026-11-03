@@ -258,7 +258,7 @@ let implementation_sources =
   ; ( "lib/agent_server/managed_output_page.ml"
     , "a14130666a4495de0c35df1c01974922da31daed064f1f7622a9b686b9c38ba5" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "41998cadc3339ebaa2e7967fbff586d2b6fb6ccabfa75d1e4eb3bc21c9dba95b" )
+    , "fcc5b8a1dab72947bf73ba7cc252552fbfc6cd48b266f7b7f5483d83598b9785" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
@@ -308,7 +308,7 @@ let implementation_sources =
   ; ( "lib/agent_session/session_management_native.ml"
     , "8ccb5239373707dacbceec1ce9a0c5146eea5360921ad0a5209bcc2928bce806" )
   ; ( "lib/agent_store/delegation_store.ml"
-    , "23e90979a34b8093325f41aeb0db02ddbbb4f7b8ab24fd7a361b25bb57001216" )
+    , "995e942b820e7812192f247ec6d7cea6b69f9137c8fb1b93dbca0db7ab19da88" )
   ; ( "lib/chat_response/authoring_context.ml"
     , "b9d759b7df1c3dfb613756547325ad8b52082b571cc5e51a7a03c6bedbd009b8" )
   ; ( "lib/chat_response/authoring_validation.ml"
