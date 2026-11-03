@@ -115,52 +115,42 @@ let raw_json t =
     ]
 ;;
 
+let reserved_growth t =
+  let open Result.Let_syntax in
+  let%bind initial =
+    Capacity_growth.create
+      ~bytes:(19 - String.length (Int64.to_string t.revision))
+      ~fields:0
+      ~nodes:0
+  in
+  List.fold_result t.entries ~init:initial ~f:(fun growth e ->
+    let goal = Entry.value e in
+    let%bind current = G.Capacity.measure (G.to_json goal) in
+    let%bind reserved = G.reserved_capacity goal in
+    let%bind held =
+      match G.state goal with
+      | Open Enabled ->
+        let%bind held = G.hold goal G.Hold.Source_review in
+        let%bind document = Goal_document.update e.goal held |> domain in
+        let%bind _ = Goal_document.to_document document |> domain in
+        G.Capacity.measure (G.to_json held)
+      | Open (Held _) | Closed _ -> Ok current
+    in
+    let difference get = Int.max 0 (Int.max (get reserved) (get held) - get current) in
+    let%bind child =
+      Capacity_growth.create
+        ~bytes:(difference G.Capacity.encoded_bytes)
+        ~fields:(difference G.Capacity.fields)
+        ~nodes:(difference G.Capacity.nodes)
+    in
+    Capacity_growth.add growth child)
+;;
+
 let validate_capacity t raw ~limits =
   let open Result.Let_syntax in
-  let%bind bytes = D.Json.validate_and_measure ~limits raw |> domain in
-  let rec counts = function
-    | `Object fields ->
-      List.fold
-        fields
-        ~init:(List.length fields, 1)
-        ~f:(fun (f, n) (_, json) ->
-          let cf, cn = counts json in
-          f + cf, n + cn)
-    | `Array values ->
-      List.fold values ~init:(0, 1) ~f:(fun (f, n) json ->
-        let cf, cn = counts json in
-        f + cf, n + cn)
-    | `Null | `True | `False | `Number _ | `String _ -> 0, 1
-  in
-  let fields, nodes = counts raw in
-  let%bind bytes, fields, nodes =
-    List.fold_result
-      t.entries
-      ~init:(bytes + 19 - String.length (Int64.to_string t.revision), fields, nodes)
-      ~f:(fun (bytes, fields, nodes) e ->
-        let goal = Entry.value e in
-        let%bind current = G.Capacity.measure (G.to_json goal) in
-        let%bind reserved = G.reserved_capacity goal in
-        let%map held =
-          match G.state goal with
-          | Open Enabled ->
-            let%bind held = G.hold goal G.Hold.Source_review in
-            let%bind document = Goal_document.update e.goal held |> domain in
-            let%bind _ = Goal_document.to_document document |> domain in
-            G.Capacity.measure (G.to_json held)
-          | Open (Held _) | Closed _ -> Ok current
-        in
-        let growth get = Int.max 0 (Int.max (get reserved) (get held) - get current) in
-        ( bytes + growth G.Capacity.encoded_bytes
-        , fields + growth G.Capacity.fields
-        , nodes + growth G.Capacity.nodes ))
-  in
-  if
-    bytes > D.Limits.max_bytes limits
-    || fields > D.Limits.max_fields limits
-    || nodes > D.Limits.max_nodes limits
-  then full "goal catalog lacks reserved child settlement capacity"
-  else Ok ()
+  let%bind growth = reserved_growth t in
+  let%bind remaining = Capacity_growth.remaining_limits growth limits in
+  D.Json.validate ~limits:remaining raw |> domain
 ;;
 
 let validate_encoded_capacity t raw = validate_capacity t raw ~limits

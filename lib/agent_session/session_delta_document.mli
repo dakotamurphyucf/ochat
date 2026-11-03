@@ -4,6 +4,14 @@ open! Core
     unknown fields remain attached to the value and are never rebuilt for hashing. *)
 type t
 
+(** Private capacity projection of this owner's real retirement delta encoding.
+    Inputs are JSON witnesses only, never decoded/applied as Session_delta. *)
+val project_run_retirement
+  :  run:Jsonaf.t
+  -> goal:Jsonaf.t option
+  -> limits:Document_schema.Limits.t
+  -> (Document_schema.Document.t, Document_schema.Error.t) result
+
 val value : t -> Session_delta.t
 val document : t -> Document_schema.Document.t
 

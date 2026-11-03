@@ -1089,6 +1089,16 @@ let validate (t : t) =
         ~generation:t.identity.generation
   in
   let%bind () = validate_domain t in
+  let%bind () =
+    Session_terminal_capacity.validate
+      ~index:t.run_state
+      ~jobs:t.jobs
+      ~permissions:t.permissions
+      ~schedules:t.schedules
+      ~revision:t.counters.revision
+      ~transaction_sequence:t.counters.transaction_sequence
+      ~event_sequence:t.counters.event_sequence
+  in
   let%bind identity_metadata =
     Agent_protocol.Session_metadata.Values.create
       ~display_name:t.identity.display_name

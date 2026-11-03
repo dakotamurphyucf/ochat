@@ -32,6 +32,7 @@ type t =
   { requests : request Eio.Stream.t
   ; session_id : Agent_protocol.Id.Session.t
   ; stopped : unit Eio.Promise.t
+  ; max_payload_length : int
   ; mutable availability : availability
   }
 
@@ -145,6 +146,7 @@ let create
       { requests = Eio.Stream.create queue_capacity
       ; session_id
       ; stopped
+      ; max_payload_length = Journal.max_payload_length journal
       ; availability = Available
       }
     in
@@ -162,6 +164,8 @@ let create
             Eio.Promise.resolve stopped_resolver ())));
     Ok t)
 ;;
+
+let max_payload_length t = t.max_payload_length
 
 let await_reply t ~promise ~enqueue ~if_stopped =
   Eio.Fiber.first

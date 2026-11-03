@@ -36,6 +36,15 @@ val value : t -> Session_state.t
 val with_value : t -> Session_state.t -> t
 val shape : Document_schema.Shape.t
 
+(** Capacity-only future shape witnesses for this exact already encoded native
+    state. The persistence owner supplies its admitted [document]. Witness JSON
+    is never decoded as state/evidence or installed; it owns no execution right. *)
+val terminal_capacity
+  :  t
+  -> document:Document_schema.Document.t
+  -> limits:Document_schema.Limits.t
+  -> (Run_terminal_document.t, Document_schema.Error.t) result
+
 val decode
   :  limits:Document_schema.Limits.t
   -> Document_schema.Document.t

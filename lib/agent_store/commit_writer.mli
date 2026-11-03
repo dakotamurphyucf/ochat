@@ -2,6 +2,10 @@
 
 type t
 
+(** Fixed payload profile of this writer's actual Journal, captured at creation.
+    Reading it performs no IO and grants no writer/lifecycle authority. *)
+val max_payload_length : t -> int
+
 type committed =
   { transaction_sequence : int64
   ; transaction_hash : string

@@ -996,20 +996,30 @@ let validate_run_capacity (state : S.t) document ~limits =
       in
       Instruction_selection.remaining_host_limits selection limits
   in
-  match state.goal_catalog with
-  | None -> Ok ()
-  | Some catalog ->
-    (match D.Json.field (D.Document.payload document) ~name:"goal_catalog" with
-     | Value raw ->
-       let%bind () =
-         Goal_catalog.validate_encoded_capacity catalog raw |> X.document_result
-       in
-       Goal_catalog.validate_host_capacity catalog (D.Document.json document) ~limits
-       |> X.document_result
-     | Absent | Null ->
-       Error
-         (D.Error.Invalid_field
-            { path = [ "goal_catalog" ]; reason = "admitted goal catalog is missing" }))
+  let%bind terminal =
+    Run_terminal_document.capture state ~shape:state_shape ~document ~limits
+  in
+  let%bind growth =
+    match state.goal_catalog with
+    | None -> Ok (Run_terminal_document.growth terminal)
+    | Some catalog ->
+      (match D.Json.field (D.Document.payload document) ~name:"goal_catalog" with
+       | Value raw ->
+         let%bind () =
+           Goal_catalog.validate_encoded_capacity catalog raw |> X.document_result
+         in
+         let%bind goal = Goal_catalog.reserved_growth catalog |> X.document_result in
+         Capacity_growth.add (Run_terminal_document.growth terminal) goal
+         |> X.document_result
+       | Absent | Null ->
+         Error
+           (D.Error.Invalid_field
+              { path = [ "goal_catalog" ]; reason = "admitted goal catalog is missing" }))
+  in
+  let%bind remaining =
+    Capacity_growth.remaining_limits growth limits |> X.document_result
+  in
+  D.Json.validate ~limits:remaining (D.Document.json document)
 ;;
 
 let decoded ?evidence carrier ~limits =
@@ -1041,6 +1051,11 @@ let decoded ?evidence carrier ~limits =
 ;;
 
 let shape = state_shape
+
+let terminal_capacity t ~document ~limits =
+  Run_terminal_document.capture (value t) ~shape ~document ~limits
+;;
+
 let unresolved_json = `Object [ "state", `String "unresolved" ]
 
 let legacy_model_job_target json =

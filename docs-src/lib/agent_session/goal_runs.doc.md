@@ -68,6 +68,14 @@ charged against child, catalog and whole session limits on decoding, update,
 adoption and encoding. Protected future fields cannot make a promised automatic
 disposition uncommittable after effects have begun.
 
+The shared [Run terminal-capacity owner](run_terminal_capacity.doc.md) additionally
+reserves known work proofs, the actual terminal receipt and pending Finish result
+copy. Run/job and Goal positive growth are summed against the complete preserved
+host. Actual transaction/journal profiles and shared counter frontiers are checked
+before effects. An unbounded new worker body can still fail ordinary admission;
+the bounded truthful recovery disposition remains possible without claiming
+Completed or achieving the goal from missing evidence.
+
 The pure association and settlement model, actual recovery save failure and
 journal/snapshot restoration, and native compiler/Catch staging have focused
 fixtures. Authenticated controller enable/resume admission and a full authored

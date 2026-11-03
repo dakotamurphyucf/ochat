@@ -213,8 +213,15 @@ must not first discover a goal capacity failure after the Run settles. Completio
 adverse retirement and next-episode binding then fit that reserved quota. Existing
 unknown variant/container conflicts remain explicit guards. The actor must
 preflight future-schema compatibility before effects as well as reserved quota;
-reservation never permits discarding protected future data. General store capacity
-remains the actor transaction's responsibility. No receipt, imported
+reservation never permits discarding protected future data. The shared Run
+terminal-capacity owner also reserves known work proofs, terminal receipts and
+pending Finish result copies, additively with Goal growth in the complete host.
+The persistence owner preflights the actual transaction and Journal payload
+profiles, while candidate admission protects shared terminal counter headroom.
+This guarantees known bounded disposition and an honest recovery record under
+the fixed admitted profiles, not arbitrary future worker history or diagnostics.
+An oversized worker commit leaves durable evidence unchanged; recovery can
+truthfully interrupt the Run and keep the objective Open. No receipt, imported
 record or capacity reservation reconstructs host authority.
 
 ## Recovery and source changes
