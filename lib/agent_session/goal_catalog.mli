@@ -62,6 +62,10 @@ val of_jsonaf : Jsonaf.t -> (t, Agent_protocol.Error.t) result
 val shape : Document_schema.Shape.t
 val limits : Document_schema.Limits.t
 
+(** Existing per-child settlement/hold positive growth, including catalog decimal
+    width. The enclosing owner adds this to other children's reservations once. *)
+val reserved_growth : t -> (Capacity_growth.t, Agent_protocol.Error.t) result
+
 (** Charge actual preserved catalog unknowns plus the existing Goal_document
     positive child reservations. Whole-state owners run this after preservation. *)
 val validate_encoded_capacity : t -> Jsonaf.t -> (unit, Agent_protocol.Error.t) result

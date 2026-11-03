@@ -188,6 +188,25 @@ let reserved_bytes t =
   unresolved_job_bytes + Run_job_deliveries.reserved_bytes t.job_deliveries
 ;;
 
+let terminal_capacity t =
+  Run_terminal_capacity.capture ~runs:(runs t) ~intents:(intents t) ~receipts:(receipts t)
+;;
+
+let reserved_delivery_bytes = reserved_bytes
+
+let capacity_limits =
+  match
+    Document_schema.Limits.create
+      ~max_bytes:P.Run_limits.max_document_bytes
+      ~max_depth:P.Run_limits.max_depth
+      ~max_fields:100_000
+      ~max_nodes:1_000_000
+  with
+  | Ok limits -> limits
+  | Error error ->
+    raise_s [%sexp "invalid Run capacity profile", (error : Document_schema.Error.t)]
+;;
+
 let validate_encoded_capacity_with_reserve t ~additional_bytes json =
   let open Result.Let_syntax in
   let%bind () =
@@ -216,7 +235,29 @@ let validate_encoded_capacity_with_reserve t ~additional_bytes json =
   let max_bytes = P.Run_limits.max_document_bytes - reserved_bytes t - additional_bytes in
   if max_bytes <= 0
   then Error (P.Error.invalid_request "run occurrence metadata reserve exhausted")
-  else P.Json_codec.validate_limits ~max_bytes ~max_depth:P.Run_limits.max_depth json
+  else (
+    let%bind () =
+      P.Json_codec.validate_limits ~max_bytes ~max_depth:P.Run_limits.max_depth json
+    in
+    let%bind capacity = terminal_capacity t in
+    let%bind growth =
+      Run_terminal_capacity.reserved_growth
+        capacity
+        ~index:json
+        ~limits:capacity_limits
+        ~preserve:(fun json -> Ok json)
+    in
+    let%bind limits = Capacity_growth.remaining_limits growth capacity_limits in
+    let remaining =
+      Document_schema.Limits.max_bytes limits - reserved_bytes t - additional_bytes
+    in
+    if remaining <= 0
+    then Error (P.Error.invalid_request "Run lacks reserved terminal capacity")
+    else
+      P.Json_codec.validate_limits
+        ~max_bytes:remaining
+        ~max_depth:P.Run_limits.max_depth
+        json)
 ;;
 
 let validate_encoded_capacity t json =

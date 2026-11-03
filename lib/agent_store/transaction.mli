@@ -65,6 +65,21 @@ type t = private
 
 val kind : string
 val current_schema_version : int
+
+module Capacity : sig
+  (** Reuses the actual transaction encoder with maximal metadata widths. This
+      returns only a generic JSON envelope, never a Transaction, digest, receipt
+      or writer authority. Capacity-only children must never be decoded/applied.
+      Internal recovery has no user command audit. *)
+  val document
+    :  limits:Document_schema.Limits.t
+    -> session_id:Agent_protocol.Id.Session.t
+    -> generation:int
+    -> delta:Document_schema.Document.t
+    -> durable_events:Document_schema.Document.t list
+    -> (Document_schema.Document.t, Document_schema.Error.t) result
+end
+
 val value : t -> Value.t
 val carrier : t -> Value.t Document_schema.Extension_carrier.t
 val stored : t -> Stored.t

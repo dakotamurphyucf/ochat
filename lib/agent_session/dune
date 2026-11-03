@@ -110,6 +110,11 @@
   goal_run_settlement
   goal_run_resolution
   run_intent
+  capacity_growth
+  run_terminal_capacity
+  run_terminal_document
+  session_terminal_capacity
+  session_terminal_journal
   run_state
   run_transition
   run_retirement

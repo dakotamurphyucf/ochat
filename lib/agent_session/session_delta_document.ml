@@ -40,6 +40,15 @@ let changes_document changes ~limits =
     ~payload:(`Object [ "changes", `Array changes ])
 ;;
 
+let project_run_retirement ~run ~goal ~limits =
+  changes_document
+    (`Object [ "kind", `String "run_state_changed"; "value", run ]
+     :: Option.to_list
+          (Option.map goal ~f:(fun goal ->
+             `Object [ "kind", `String "goal_catalog_changed"; "value", goal ])))
+    ~limits
+;;
+
 let project_created state ~limits =
   let open Result.Let_syntax in
   let%bind () = D.Document.validate state ~limits in

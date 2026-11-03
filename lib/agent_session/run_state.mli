@@ -12,6 +12,15 @@ val installation : t -> Run_source_installation.t
 val runs : t -> Agent_protocol.Run.t list
 val intents : t -> Run_intent.t list
 val receipts : t -> Agent_protocol.Run_receipt.t list
+
+(** Derived known terminal obligations. Capacity-only JSON projections never
+    become index entries, runtime proof or admission authority. *)
+val terminal_capacity : t -> (Run_terminal_capacity.t, Agent_protocol.Error.t) result
+
+(** Existing exact job-frame and disposition byte credits, additive to shared
+    terminal proof/receipt capacity. *)
+val reserved_delivery_bytes : t -> int
+
 val goal_links : t -> Run_goal_link.t list
 val goal_link : t -> Agent_protocol.Id.Run.t -> Run_goal_link.t option
 

@@ -167,6 +167,20 @@ let commit t ~command_audit ~(previous : Session_state.t) transition =
     |> Result.map_error ~f:(fun e -> protocol_error (document_error e))
   in
   let next = { t.restored with state_document } in
+  let%bind terminal =
+    Session_state_document.terminal_capacity
+      state_document
+      ~document:(Session_state_document.Admitted.document admitted)
+      ~limits:t.archive_limits
+    |> Result.map_error ~f:(fun error -> protocol_error (document_error error))
+  in
+  let%bind () =
+    Session_terminal_journal.validate
+      transition.state
+      ~terminal
+      ~limits:t.limits
+      ~max_payload_length:(Store.Commit_writer.max_payload_length t.writer)
+  in
   let%bind transaction, events =
     transaction t ~state_document ~command_audit previous transition
     |> Result.map_error ~f:protocol_error
