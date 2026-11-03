@@ -60,6 +60,7 @@ type 'env t =
   ; submission_guard : Inference_runtime.Submission_guard.t
   ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
   ; agent_prompt_v1_recipe : Moderation.Capabilities.model_recipe option
+  ; agent_guidance_scope : Agent_guidance.Scope.t
   ; env : 'env
   ; dir : Eio.Fs.dir_ty Eio.Path.t
     (** Root directory used by {!Fetch} helpers for reading local files. *)
@@ -98,6 +99,7 @@ let create
   ; submission_guard = Inference_runtime.Submission_guard.empty
   ; before_inference_dispatch
   ; agent_prompt_v1_recipe
+  ; agent_guidance_scope = Eligible None
   ; env
   ; dir
   ; tool_dir
@@ -139,6 +141,25 @@ let of_env
 exception Inference_admission_rejected
 
 let with_inference t ~inference_context = { t with inference_context }
+
+let with_agent_guidance t guidance =
+  match t.agent_guidance_scope with
+  | Excluded -> t
+  | Eligible _ -> { t with agent_guidance_scope = Eligible (Some guidance) }
+;;
+
+let without_agent_guidance t = { t with agent_guidance_scope = Excluded }
+
+let inherit_agent_guidance t ~from =
+  { t with agent_guidance_scope = from.agent_guidance_scope }
+;;
+
+let agent_guidance t =
+  match t.agent_guidance_scope with
+  | Eligible guidance -> guidance
+  | Excluded -> None
+;;
+
 let with_agent_prompt_v1_recipe t recipe = { t with agent_prompt_v1_recipe = Some recipe }
 
 let with_submission_guard t guard =

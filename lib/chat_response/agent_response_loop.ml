@@ -44,6 +44,7 @@ let run_entries
     ~on_inference_completion:ctx.on_inference_completion
     ~on_inference_observation:ctx.on_inference_observation
     ~on_admitted_call:ctx.on_admitted_call
+    ?agent_guidance:(Ctx.agent_guidance ctx)
     ~submission_guard:ctx.submission_guard
     ~before_inference_dispatch:ctx.before_inference_dispatch
     ~inference_relation:ctx.inference_relation

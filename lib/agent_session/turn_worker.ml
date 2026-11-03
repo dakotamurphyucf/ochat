@@ -310,6 +310,7 @@ let run
       ?root_binding
       ?runtime_policy
       ?authoring_context
+      ?agent_guidance
       ?dispatch_tool
       ?moderator_events
       ?notification_input
@@ -382,6 +383,8 @@ let run
     else
       Chat_response.In_memory_stream.run_completion_stream_in_memory_entries
         ~env:config.Config.env
+        ?agent_guidance:
+          (Option.map agent_guidance ~f:(fun make -> make ~input ~capabilities))
         ~inference_context:config.inference_context
         ?root_context:
           (Option.map capabilities.root_context ~f:(fun source ->
@@ -439,6 +442,7 @@ let create
       ?root_binding
       ?runtime_policy
       ?authoring_context
+      ?agent_guidance
       ?dispatch_tool
       ?moderator_events
       ?notification_input
@@ -451,6 +455,7 @@ let create
         ?root_binding
         ?runtime_policy
         ?authoring_context
+        ?agent_guidance
         ?dispatch_tool
         ?moderator_events
         ?notification_input

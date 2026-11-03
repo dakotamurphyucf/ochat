@@ -12,11 +12,11 @@ let export_ok = function
   | Error error -> raise_s [%sexp (error : Export.Error.t)]
 ;;
 
-let resource () =
+let resource ?(id = "lifecycle") () =
   Sources.installed ~limits:Sources.Limits.default ~checkpoint:Eio.Fiber.check
   |> source_ok
   |> fun inventory ->
-  Sources.find inventory (Sources.Id.of_string "lifecycle" |> source_ok) |> source_ok
+  Sources.find inventory (Sources.Id.of_string id |> source_ok) |> source_ok
 ;;
 
 let path name = Source.Portable_path.create name |> Or_error.ok_exn

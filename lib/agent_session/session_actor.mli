@@ -103,7 +103,12 @@ module Compaction_inference : sig
         'a.
         operation:Agent_protocol.Operation.t
         -> selection:Inference.Selection.t
-        -> (Inference_client.Execution.t -> ('a, Agent_protocol.Error.t) Result.t)
+        -> borrow_agent_actor:
+             (unit -> (Operator_authorization.t option, Agent_protocol.Error.t) result)
+        -> (Inference_client.Execution.t
+            -> guidance:Inference.Request.Guidance.t option
+            -> reserved_input_tokens:int
+            -> ('a, Agent_protocol.Error.t) Result.t)
         -> ('a, Agent_protocol.Error.t) Result.t
     }
 end
@@ -1374,6 +1379,24 @@ val compact_with_command_audit
   -> expected_revision:int64 option
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
+(** Actual authenticated compaction admission. Retains the exact original proof
+    only in the newly ACKed compaction operation; the actor checks it at dispatch.
+    Completion/failed persistence cannot extend the physical worker epoch. *)
+val compact_authenticated
+  :  t
+  -> actor:Operator_authorization.t
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> expected_revision:int64 option
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
+val compact_authenticated_with_command_audit
+  :  t
+  -> actor:Operator_authorization.t
+  -> command_audit:Document_schema.Document.t
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> expected_revision:int64 option
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
 val adopt_deferred : t -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
 val reserve_history_block
@@ -2272,6 +2295,22 @@ val read_goals
   -> actor:Operator_authorization.t
   -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
   -> (Agent_protocol.Goal.t list, Agent_protocol.Error.t) result
+
+(** Actual admitted native effect and original execution epoch are checked in
+    the mailbox before CAS and immediately before persistence. Replacement needs
+    a genuine live source-use capture; current-root-only retries may return only
+    an exact previously acknowledged receipt. No transcript row is appended. *)
+val instruction_command
+  :  t
+  -> admission:Instruction_native_admission.t
+  -> source:Instruction_command_admission.Source.t option
+  -> request:Instruction_command.t
+  -> (Instruction_command.Receipt.t, Agent_protocol.Error.t) result
+
+(** Nonyielding immutable selection/generation epoch comparison for a snapshot
+    read from this actor. This grants no source or execution permission. The
+    owner separately retains original physical execution and source Use checks. *)
+val instruction_selection_current : t -> Session_state.t -> bool
 
 (** Install the actual store/retained Handle owner once during host factory
     construction. This is metadata custody, never target execution authority. *)

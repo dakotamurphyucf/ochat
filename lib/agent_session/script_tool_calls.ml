@@ -69,6 +69,7 @@ type t =
   ; authoring_services : Authoring_services.t option
   ; generated_creation_service : Generated_session_request.service option
   ; managed_session_service : Managed_session_service.t option
+  ; instruction_service : Instruction_service.t option
   ; agent_source_code_view : Agent_source_code_view.t option
   ; shell_code_view : Shell_runtime.Registry.Code_view.t option
   ; agent_artifact :
@@ -462,6 +463,7 @@ let create
   ; authoring_services = None
   ; generated_creation_service = None
   ; managed_session_service = None
+  ; instruction_service = None
   ; agent_source_code_view = None
   ; shell_code_view = None
   ; agent_artifact = None
@@ -469,6 +471,31 @@ let create
 ;;
 
 let with_shell_context t services = { t with shell_context = Some services }
+let with_instruction_service t service = { t with instruction_service = Some service }
+let instruction_service t = t.instruction_service
+
+let agent_context (ctx : Eio_unix.Stdenv.base Chat_response.Ctx.t) =
+  match ctx.agent_guidance_scope with
+  | Excluded -> ctx
+  | Eligible _ ->
+    (match native_services_scope () with
+     | Unbound -> ctx
+     | Expired -> raise Chat_response.Ctx.Inference_admission_rejected
+     | Active tools ->
+       (match instruction_service tools with
+        | None -> ctx
+        | Some service ->
+          let borrowed =
+            Native_tool_invocation.borrow ()
+            |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+            |> Result.ok_or_failwith
+          in
+          Chat_response.Ctx.with_agent_guidance
+            ctx
+            (Instruction_service.agent_guidance service ~borrow_actor:(fun () ->
+               Native_tool_invocation.borrowed_agent_actor borrowed))))
+;;
+
 let with_session_helpers t grants = { t with session_helpers = grants }
 
 let with_authoring_validation_host ~env t host =

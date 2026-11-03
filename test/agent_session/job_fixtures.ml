@@ -74,7 +74,10 @@ let reject label result =
   | Ok _ -> failwith (label ^ " was accepted")
 ;;
 
+(* [environment] reuses an existing real Eio/source-host workspace for composed
+   fixture owners. Default callers still allocate and release their own runner. *)
 let with_actor
+      ?environment
       ?(start = true)
       ?(archive_reference = archive_reference)
       ?(reject_save = fun _ -> false)
@@ -89,7 +92,12 @@ let with_actor
       ?(ingress_limits = Agent_session.Staged_ingress.default_limits)
       f
   =
-  with_actor_workspace (fun env workspace_instance ->
+  let with_workspace f =
+    match environment with
+    | None -> with_actor_workspace f
+    | Some (env, workspace_instance) -> f env workspace_instance
+  in
+  with_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
       let initial =
         actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false

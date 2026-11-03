@@ -38,6 +38,7 @@ type 'env t = private
   ; submission_guard : Inference_runtime.Submission_guard.t
   ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
   ; agent_prompt_v1_recipe : Moderation.Capabilities.model_recipe option
+  ; agent_guidance_scope : Agent_guidance.Scope.t
   ; env : 'env (** Underlying Eio standard environment. *)
   ; dir : Eio.Fs.dir_ty Eio.Path.t
     (** Base directory used when a function needs to access the
@@ -140,6 +141,19 @@ val with_inference_parent : 'env t -> parent:Transcript.Scope.parent -> 'env t
     the recipe is later invoked. Ordinary contexts keep their constructor's
     existing recipe behavior. *)
 val with_agent_prompt_v1_recipe : 'env t -> Moderation.Capabilities.model_recipe -> 'env t
+
+(** Agent-conversation-only request context. Immutable descendants retain it;
+    explicitly authored independent Model recipes clear it. This does not wrap
+    [inference_execution] or alter generic model input. *)
+val with_agent_guidance : 'env t -> Agent_guidance.t -> 'env t
+
+val without_agent_guidance : 'env t -> 'env t
+
+(** Preserve the complete Eligible/Excluded state when reconstructing a child
+    context. An ordinary Agent binding cannot reverse inherited exclusion. *)
+val inherit_agent_guidance : 'env t -> from:'other t -> 'env t
+
+val agent_guidance : 'env t -> Agent_guidance.t option
 
 (** Selected inference ports for auxiliary requests owned by this invocation.
     Attempt admission remains the supplied host identity and acknowledgement;

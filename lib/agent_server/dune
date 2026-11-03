@@ -2,6 +2,7 @@
  (name agent_server)
  (public_name ochat.agent_server)
  (modules instruction_sources
+  authoring_instruction_sources
   developer_startup_configuration
   developer_startup_limits
   developer_startup_tests

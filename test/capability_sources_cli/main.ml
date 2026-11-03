@@ -32,7 +32,11 @@ let () =
           output, Buffer.contents stderr
         in
         let listed, _ = run [ "list" ] in
-        assert (String.is_prefix listed ~prefix:"lifecycle\t");
+        let lines = String.split_lines listed in
+        [%test_eq: int] 2 (List.length lines);
+        List.iter [ "lifecycle"; "instruction-selection" ] ~f:(fun id ->
+          assert (
+            List.exists lines ~f:(fun line -> String.is_prefix line ~prefix:(id ^ "\t"))));
         let manifest, _ = run [ "show"; "lifecycle" ] in
         let inventory =
           Capability_sources.installed

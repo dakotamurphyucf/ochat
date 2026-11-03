@@ -13,6 +13,7 @@ val empty : t
 val revision : t -> int64
 
 val project : t -> Instruction_content.Loaded.t list
+val project_capture : t -> Instruction_capture.t option
 val skills : t -> Instruction_content.Loaded.t list
 val captures : t -> Instruction_capture.t list
 val receipts : t -> Instruction_command.Receipt.t list

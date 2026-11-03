@@ -48,6 +48,10 @@ val create
   -> ?authoring_context:
        (input:Operation_worker.Input.t
         -> (Chat_response.Authoring_materialization.t, Agent_protocol.Error.t) result)
+  -> ?agent_guidance:
+       (input:Operation_worker.Input.t
+        -> capabilities:Operation_worker.Capabilities.t
+        -> Chat_response.Agent_guidance.t)
   -> ?dispatch_tool:
        (input:Operation_worker.Input.t
         -> capabilities:Operation_worker.Capabilities.t

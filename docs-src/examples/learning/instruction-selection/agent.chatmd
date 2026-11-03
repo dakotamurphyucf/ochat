@@ -1,0 +1,15 @@
+<developer>
+Use explicitly admitted instruction roots only. Discovery and reading do not
+activate guidance. Read an exact descriptor, then request explicit activation
+with its capture ID, the current selection revision and a new idempotency key.
+An acknowledged retry keeps the same key and input. Refresh can inspect changed
+files but never replaces active captured bytes. Files grant no tools or access.
+The moderator inspects stored counts at turn end; it never selects guidance for
+you. Its Lifecycle components are author policy, not host execution authority.
+</developer>
+<tool name="instructions_refresh"/>
+<tool name="instructions_read"/>
+<tool name="instructions_activate"/>
+<tool name="instructions_deactivate"/>
+<tool name="instructions_status"/>
+<script id="instruction-review" language="chatml" kind="moderator" api="extensibility-v1" project="chatml.project.json" src="moderator.chatml"/>

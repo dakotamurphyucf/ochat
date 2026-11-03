@@ -152,12 +152,32 @@ end
     ledger in these tests. This fixture initializes its RNG before allocating a
     fresh host namespace, including when constructed before the Eio harness.
     Production compositions must supply actual tracking. *)
-let inference_policy ~default_model ~post_stream =
+let make_inference_policy
+      ?(on_prepare = ignore)
+      ~request_guidance
+      ~default_model
+      ~post_stream
+      ()
+  =
   Mirage_crypto_rng_unix.use_default ();
   let namespace =
     Agent_protocol.Id.Transaction.create () |> Agent_protocol.Id.Transaction.to_string
   in
-  let fixture = Inference_fixture.create ~namespace ~default_model ~post_stream in
+  let fixture =
+    if request_guidance
+    then
+      Inference_fixture.create_with_request_guidance
+        ~on_prepare
+        ~namespace
+        ~default_model
+        ~post_stream
+    else
+      Inference_fixture.create_with_observer
+        ~on_prepare
+        ~namespace
+        ~default_model
+        ~post_stream
+  in
   Agent_server.Session_factory.
     { capture_inference_target =
         (fun ~prompt_revision_id:_ ~config ->
@@ -189,6 +209,14 @@ let inference_policy ~default_model ~post_stream =
             ; on_completion = ignore
             })
     }
+;;
+
+let inference_policy ~default_model ~post_stream =
+  make_inference_policy ~request_guidance:false ~default_model ~post_stream ()
+;;
+
+let guidance_inference_policy ?on_prepare ~default_model ~post_stream () =
+  make_inference_policy ?on_prepare ~request_guidance:true ~default_model ~post_stream ()
 ;;
 
 let delegation_stage payload =

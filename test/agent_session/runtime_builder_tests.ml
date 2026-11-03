@@ -367,6 +367,7 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
             ; standalone_completion =
                 (fun ~tools:_ _ -> failwith "unexpected standalone completion")
             ; one_off_policy = Chat_response.One_off_request.default_policy
+            ; initial_agent_guidance = None
             ; native_service_revision = None
             ; authoring_validation_host = None
             ; run_actions = (fun _ -> Ok None)

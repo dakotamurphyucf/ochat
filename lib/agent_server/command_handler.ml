@@ -1873,7 +1873,7 @@ let handle_delete_history t ?prepared_writer context command_audit request =
          Agent_protocol.Method_result.Session_delete_history (session_mutation session)))
 ;;
 
-let handle_session_compact t ?prepared_writer context command_audit request =
+let handle_session_compact t ~agent_actor ?prepared_writer context command_audit request =
   with_writer
     t
     ?prepared_writer
@@ -1884,13 +1884,19 @@ let handle_session_compact t ?prepared_writer context command_audit request =
        actor_command
          command_audit
          ~plain:(fun () ->
-           Agent_session.Session_actor.compact
-             entry.actor
+           (match agent_actor with
+            | None -> Agent_session.Session_actor.compact entry.actor
+            | Some actor ->
+              Agent_session.Session_actor.compact_authenticated entry.actor ~actor)
              ~attachment_id:request.attachment_id
              ~expected_revision:request.expected_revision)
          ~audited:(fun command_audit ->
-           Agent_session.Session_actor.compact_with_command_audit
-             entry.actor
+           (match agent_actor with
+            | None -> Agent_session.Session_actor.compact_with_command_audit entry.actor
+            | Some actor ->
+              Agent_session.Session_actor.compact_authenticated_with_command_audit
+                entry.actor
+                ~actor)
              ~command_audit
              ~attachment_id:request.attachment_id
              ~expected_revision:request.expected_revision)
@@ -3085,7 +3091,7 @@ let dispatch_authorized
   | Session_replace_pending_input request ->
     handle_replace_pending t context command_audit request
   | Session_compact request ->
-    handle_session_compact t ?prepared_writer context command_audit request
+    handle_session_compact t ~agent_actor ?prepared_writer context command_audit request
   | Session_edit_history request -> handle_edit_history t context command_audit request
   | Session_continue_history request ->
     handle_continue_history t context command_audit request

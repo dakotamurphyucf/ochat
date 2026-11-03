@@ -365,7 +365,7 @@ let%expect_test
          ~f:(fun () ->
            let port : A.Compaction_inference.t =
              { with_execution =
-                 (fun ~operation ~selection:admitted f ->
+                 (fun ~operation ~selection:admitted ~borrow_agent_actor:_ f ->
                    [%test_eq: Agent_protocol.Operation.kind] Compaction operation.kind;
                    assert (
                      Document_schema.Json.equal
@@ -374,7 +374,7 @@ let%expect_test
                    Owner.with_auxiliary_execution_lifetime owner (fun installed ->
                      assert (Option.is_none installed);
                      incr uses;
-                     f execution))
+                     f execution ~guidance:None ~reserved_input_tokens:0))
              }
            in
            A.set_compaction_inference actor (Some port) |> protocol_ok;

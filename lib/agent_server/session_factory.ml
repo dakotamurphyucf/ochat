@@ -138,6 +138,7 @@ type t =
   ; independent_lifetime_policy : string option
   ; chatml_runtime_policy : Chat_response.Runtime_semantics.policy
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
+  ; mutable instruction_sources : Agent_session.Instruction_source_port.t option
   ; script_preparation : Agent_session.Runtime_script_preparation.t option
   ; content_limits : Chatmd_prompt_content.Limits.t option
   ; child_sources : Child_source_policy.t option
@@ -203,6 +204,16 @@ module Developer_catalog = struct
 end
 
 let developer_catalog t = t.catalogs
+
+let install_instruction_sources t source =
+  match t.instruction_sources with
+  | Some _ ->
+    Error
+      (Agent_protocol.Error.invalid_request "instruction source port already installed")
+  | None ->
+    t.instruction_sources <- Some source;
+    Ok ()
+;;
 
 let now t =
   Eio.Time.now (Eio.Stdenv.clock t.env)
@@ -1738,7 +1749,27 @@ let extension_schedules actor_ref =
   Service.create ~host
 ;;
 
-let extension_services t profile actor_ref ~(state : Agent_session.Session_state.t) =
+let instruction_service t actor_ref =
+  let module A = Agent_session.Session_actor in
+  Agent_session.Instruction_service.create
+    ~state:(fun () -> Result.bind (extension_actor actor_ref) ~f:A.state)
+    ~apply:(fun ~admission ~source ~request ->
+      Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+        A.instruction_command actor ~admission ~source ~request))
+    ~sources:(fun () -> t.instruction_sources)
+    ~selection_current:(fun basis ->
+      match extension_actor actor_ref with
+      | Error _ -> false
+      | Ok actor -> A.instruction_selection_current actor basis)
+;;
+
+let extension_services
+      t
+      profile
+      actor_ref
+      ~initialization_scope
+      ~(state : Agent_session.Session_state.t)
+  =
   let module A = Agent_session.Session_actor in
   let shell_provider = shell_approval_provider t profile actor_ref in
   let shell_store = shell_approval_store state actor_ref (ref state.shell) in
@@ -1854,6 +1885,10 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
             tools
             t.managed_sessions
           |> fun tools ->
+          Agent_session.Script_tool_calls.with_instruction_service
+            tools
+            (instruction_service t actor_ref)
+          |> fun tools ->
           Agent_session.Script_tool_calls.with_shell_context tools shell_context
           |> fun tools ->
           Agent_session.Script_tool_calls.with_session_helpers tools t.session_helpers
@@ -1902,6 +1937,16 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
     ; native_service_revision =
         Agent_session.Session_management_channel.policy_fingerprint t.session_helpers
     ; authoring_validation_host = t.authoring_validation_host
+    ; initial_agent_guidance =
+        Some
+          (Agent_session.Instruction_service.agent_guidance
+             (instruction_service t actor_ref)
+             ~borrow_actor:(fun () ->
+               match !initialization_scope with
+               | None -> Ok None
+               | Some scope ->
+                 Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+                   A.initialization_agent_actor actor ~scope)))
     ; claim_lifecycle =
         (fun ~event ~snapshot handle ->
           let open Result.Let_syntax in
@@ -3642,6 +3687,20 @@ let prepare_runtime_at_paths
       ~run_preparation
   =
   let open Result.Let_syntax in
+  let%bind () =
+    let active =
+      Option.value_map state.instruction_selection ~default:false ~f:(fun selection ->
+        let status = Agent_session.Instruction_selection.summary selection in
+        status.project_selected || status.skills > 0)
+    in
+    if (not t.qualify_chatml_extensions) && active
+    then
+      Error
+        (unavailable
+           Configuration_invalid
+           "active instructions require the session-owned qualified runtime")
+    else Ok ()
+  in
   let%bind inference_context = resolve_state_inference_context t state in
   let%bind tracking = create_graph_tracking ~run_preparation t actor_ref in
   let prepare () =
@@ -3726,7 +3785,9 @@ let prepare_runtime_at_paths
                        shell_state)
                 | true ->
                   let module B = Agent_session.Runtime_builder in
-                  let services = extension_services t profile actor_ref ~state in
+                  let services =
+                    extension_services t profile actor_ref ~initialization_scope ~state
+                  in
                   let%bind prepared, native_registrations =
                     prepare_authored_graph
                       t
@@ -3938,7 +3999,9 @@ let prepare_runtime_at_paths
                 }
               ()
           in
-          let services = extension_services t profile actor_ref ~state in
+          let services =
+            extension_services t profile actor_ref ~initialization_scope ~state
+          in
           let%bind inherited_managed =
             match source, managed with
             | `Authored _, _ | `Generated _, None -> Ok None
@@ -5101,7 +5164,25 @@ let install_compaction_inference t actor owner =
   let module A = Agent_session.Session_actor in
   let port : A.Compaction_inference.t =
     { with_execution =
-        (fun ~operation ~selection f ->
+        (fun ~operation ~selection ~borrow_agent_actor f ->
+          let guidance =
+            Agent_session.Instruction_service.agent_guidance
+              (instruction_service t (ref (Some actor)))
+              ~borrow_actor:borrow_agent_actor
+          in
+          let run inference =
+            Result.join
+              (guidance.with_guidance (fun prepared ->
+                 let inference =
+                   Inference_client.Execution.with_submission_guard
+                     inference
+                     prepared.guard
+                 in
+                 f
+                   inference
+                   ~guidance:prepared.guidance
+                   ~reserved_input_tokens:prepared.reserved_input_tokens))
+          in
           let open Result.Let_syntax in
           let%bind target =
             match Inference.Selection.view selection with
@@ -5139,7 +5220,7 @@ let install_compaction_inference t actor owner =
             match installed with
             | Some inference ->
               let%bind () = check_target (Inference_client.Execution.context inference) in
-              f inference
+              run inference
             | None ->
               let%bind context =
                 t.inference_policy.resolve_inference_context target
@@ -5162,7 +5243,7 @@ let install_compaction_inference t actor owner =
                     ~on_completion:(Graph_tracking.on_completion tracking)
                     ~on_observation:(Graph_tracking.on_observation tracking)
                 in
-                f inference)))
+                run inference)))
     }
   in
   A.set_compaction_inference actor (Some port)
@@ -9493,6 +9574,7 @@ let create
     ; independent_lifetime_policy
     ; chatml_runtime_policy
     ; authoring_validation_host
+    ; instruction_sources = None
     ; script_preparation
     ; content_limits
     ; child_sources

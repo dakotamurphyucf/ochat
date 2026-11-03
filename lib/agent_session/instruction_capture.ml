@@ -23,6 +23,8 @@ type t =
 
 let id t = t.id
 let kind t = t.kind
+let root t = t.root
+let scope t = t.scope
 let loaded t = I.Snapshot.loaded t.snapshot
 let payloads t = S.payloads (I.Snapshot.to_storage t.snapshot)
 

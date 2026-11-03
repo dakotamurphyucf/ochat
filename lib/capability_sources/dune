@@ -3,6 +3,13 @@
  (action
   (with-stdout-to %{targets}
    (run %{exe:../authoring_sources/embed_documents.exe}
+    examples/learning/instruction-selection/agent.chatmd %{dep:../../docs-src/examples/learning/instruction-selection/agent.chatmd}
+    examples/learning/instruction-selection/chatml.project.json %{dep:../../docs-src/examples/learning/instruction-selection/chatml.project.json}
+    examples/learning/instruction-selection/moderator.chatml %{dep:../../docs-src/examples/learning/instruction-selection/moderator.chatml}
+    examples/libraries/instruction-requests/chatml.project.json %{dep:../../docs-src/examples/libraries/instruction-requests/chatml.project.json}
+    examples/libraries/instruction-requests/src/instruction_requests.chatml %{dep:../../docs-src/examples/libraries/instruction-requests/src/instruction_requests.chatml}
+    examples/libraries/instruction-requests/src/instruction_requests.chatmli %{dep:../../docs-src/examples/libraries/instruction-requests/src/instruction_requests.chatmli}
+    guide/admitted-instructions.md %{dep:../../docs-src/guide/admitted-instructions.md}
     examples/learning/lifecycle-composition/agent.chatmd %{dep:../../docs-src/examples/learning/lifecycle-composition/agent.chatmd}
     examples/learning/lifecycle-composition/chatml.project.json %{dep:../../docs-src/examples/learning/lifecycle-composition/chatml.project.json}
     examples/learning/lifecycle-composition/components/counter/chatml.project.json %{dep:../../docs-src/examples/learning/lifecycle-composition/components/counter/chatml.project.json}

@@ -125,6 +125,15 @@
   goal_command
   goal_command_receipt
   goal_catalog
+  instruction_source_request
+  instruction_source_port
+  instruction_native_admission
+  instruction_command_admission
+  instruction_clear_capacity
+  instruction_service
+  instruction_guidance_text
+  instruction_native_request
+  instruction_native_tool
   instruction_capture
   instruction_command
   instruction_selection_capacity

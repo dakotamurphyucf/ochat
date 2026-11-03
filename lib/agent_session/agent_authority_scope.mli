@@ -18,3 +18,8 @@ val actor : t -> (Operator_authorization.t, Agent_protocol.Error.t) result
     The child does not retain a callback-limited wrapper. Never call this for a
     saved receipt, an unacknowledged launch or a principal-only restoration. *)
 val transfer : t -> is_current:(unit -> bool) -> (t, Agent_protocol.Error.t) result
+
+(** Exact retained original object identity, never principal equality. A narrower
+    original wrapper remains the original through transfers; this operation does
+    not unwrap it or cancel its expiry. It grants no currentness or authority. *)
+val same_origin : t -> t -> bool

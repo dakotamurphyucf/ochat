@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "namespace": "ochat.examples.instruction-selection",
+  "dependencies": {
+    "lifecycle": {
+      "source": {"kind": "local", "path": "../../libraries/lifecycle"},
+      "project": "chatml.project.json",
+      "environment": "pure"
+    },
+    "instructions": {
+      "source": {"kind": "local", "path": "../../libraries/instruction-requests"},
+      "project": "chatml.project.json",
+      "environment": "pure"
+    }
+  },
+  "environments": {
+    "default": {
+      "modules": {
+        "Lifecycle": "lifecycle.Lifecycle",
+        "Instruction_requests": "instructions.Instruction_requests"
+      },
+      "requires": {"targets": ["moderator_v1", "delegated_moderator_v1"]}
+    }
+  }
+}

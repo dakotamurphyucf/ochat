@@ -393,6 +393,7 @@ val run_completion_stream_in_memory_entries
   -> inference_identity:Neutral_turn.Identity.t
   -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
   -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> ?agent_guidance:Agent_guidance.t
   -> ?submission_guard:Inference_runtime.Submission_guard.t
   -> ?inference_relation:Transcript.Scope.relation
   -> ?on_inference_observation:(Inference.Observation.t -> unit)

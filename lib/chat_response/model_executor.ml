@@ -250,6 +250,7 @@ let run_agent_prompt_v1_body
   let prompt = Model_spawn_request.prompt request in
   let is_local = Model_spawn_request.is_local request in
   let input = Model_spawn_request.input request in
+  let ctx = Ctx.without_agent_guidance ctx in
   let history_compaction_opt = Model_spawn_request.history_compaction request in
   let nested_session_id_opt = Model_spawn_request.nested_prompt_id request in
   let nested_session_id = Option.value nested_session_id_opt ~default:prompt in

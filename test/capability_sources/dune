@@ -14,5 +14,7 @@
   ochat.chatmd ochat.chatml_project ochat.chat_response ochat.chatmd_shell_spec
   ochat.chatml_program_document ochat.chatml_catalog)
  (inline_tests)
- (preprocessor_deps ../../docs-src/examples/libraries/lifecycle/src/lifecycle.chatml)
+ (preprocessor_deps
+  ../../docs-src/examples/libraries/lifecycle/src/lifecycle.chatml
+  ../../docs-src/examples/libraries/instruction-requests/src/instruction_requests.chatmli)
  (preprocess (pps ppx_jane ppx_expect ppx_blob)))

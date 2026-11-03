@@ -1,12 +1,20 @@
 (rule
+ (target fixtures.ml)
+ (deps ../agent_session/fixtures.ml)
+ (action (copy %{deps} %{target})))
+(rule
+ (target job_fixtures.ml)
+ (deps ../agent_session/job_fixtures.ml)
+ (action (copy %{deps} %{target})))
+(rule
  (target project_support.ml)
  (deps ../project_source_host/support.ml)
  (action (copy %{deps} %{target})))
 (library
  (name instruction_sources_tests)
- (modules project_support support metadata_tests snapshot_tests source_tests)
+ (modules project_support support metadata_tests snapshot_tests source_tests runtime_tests fixtures job_fixtures native_runtime_tests)
  (libraries core eio eio.unix eio_main cstruct mirage-crypto-rng.unix
   ochat.instruction_content ochat.chatml_source ochat.document_schema ochat.agent_store
-  ochat.agent_server ochat.agent_protocol source)
+  ochat.agent_client ochat.agent_server ochat.agent_session ochat.agent_protocol source)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))
