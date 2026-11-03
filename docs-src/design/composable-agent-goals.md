@@ -409,6 +409,16 @@ physical-parent classification and immediate Model job/Run admission belong to
 the live accounting integration; the storage field alone does not provide those
 paths or qualify authored Goal execution.
 
+### Durable moderator queue provenance
+
+Legacy queued values and one-shot Schedules can retain optional original source
+and inference facts in the existing state carrier. Historical absence remains
+unavailable; it cannot become a later Goal or a new unbound claim. Complete
+ordered transactions preserve exact occurrence identity and retained producer
+evidence. These records grant no live continuation or Model authority. See
+[Durable moderator queue provenance](durable-moderator-queue.md) for the bounded
+frontier, old-reader fence, preservation rules and temporary source/reset boundary.
+
 ### Authenticated descendants
 
 Same-session inference descendants inherit attribution only through actual

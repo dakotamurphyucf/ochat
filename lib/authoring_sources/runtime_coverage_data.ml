@@ -615,7 +615,7 @@ let implementation_sources =
   ; ( "lib/context_compaction/compactor.ml"
     , "7b11eae5ce4d929bf1ab4702111d03f70fe97cfe8543135c73782c2b92391ff0" )
   ; ( "lib/agent_session/session_transition.ml"
-    , "24b5a50b7508f8d98d90952e18d98bc42f409f51097ec479df5988f59fe24149" )
+    , "c26a2da724ab3b53fe450d27fc25c9289ee5c25a634cffa2fe4a04dac7d03b27" )
   ; ( "lib/agent_session/instruction_clear_capacity.ml"
     , "baa952a408f74f0795059df9e7f6bb3c677957c1866c6d2b20cb83fc7a475e0e" )
   ; ( "lib/agent_session/session_terminal_journal.ml"
@@ -649,7 +649,7 @@ let implementation_sources =
   ; ( "bin/ochat_agent_stdio.ml"
     , "8d134cd11c7df2a60e6b4b77a5ff7f9ea0c28a8a2674a3dd9f573adaa7623902" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "fcc5b8a1dab72947bf73ba7cc252552fbfc6cd48b266f7b7f5483d83598b9785" )
+    , "ad9664d3a9289daab3c6d68b636cb7af31afe1bf4bf27c598acf8efe1f3ad3de" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"
@@ -769,7 +769,7 @@ let implementation_sources =
   ; ( "lib/agent_session/administration.ml"
     , "798836e32d154f322a0fdd0760d1348956515c3887b65e4b94b5c83c61bdb7e3" )
   ; ( "lib/agent_server/command_handler.ml"
-    , "1e420ddef9281bf1fceb1569fe6fe6f9a76bcf0f70d104c27fb171fad50a90a7" )
+    , "6ad418253fac1d1cdaeae3b536adb481b178bd0ffbe3402ce0ccde0423fb3b2c" )
   ; ( "lib/agent_server/runtime_owner.ml"
     , "ec30d503c58de70c6ab603d5f13699ef8e1a387afac7caea81c3e6870f470edc" )
   ; ( "lib/agent_session/managed_submission_tracking.ml"
@@ -895,7 +895,7 @@ let implementation_sources =
   ; ( "lib/agent_session/script_subscription_service.ml"
     , "54c775836b551733687e907ff46a2a7a0cc26bd46ff915cc6fd5f0cf5116f069" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "17c343599a6a3e025ac158b5b8d5628403dcf19de145f539290c88f9cfde2b06" )
+    , "0c804b75913ed72d8a88141d6f645bcdd310b36dd8bec9fc30e067fc8cb7e4bc" )
   ; ( "lib/agent_session/staged_jobs.ml"
     , "7731a0fc9f021188e3856041fe493f3044556bc7a15364815c47299fe968603b" )
   ; ( "lib/agent_session/staged_notifications.ml"

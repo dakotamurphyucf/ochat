@@ -422,6 +422,13 @@ let schedule =
     ; "last_delivery_at", v
     ; "ownership", n schedule_ownership
     ; "delivery_cancellation", v
+    ; ( "inference_provenance"
+      , n
+          (o
+             [ "schema_version", v
+             ; "source", Run_record_shapes.source
+             ; "origin", inference_origin
+             ]) )
     ]
 ;;
 
@@ -696,7 +703,14 @@ let public_schedule =
   o
     [ "schema_version", v
     ; "schedule", schedule_body
-    ; "ownership", schedule_ownership
+    ; "ownership", n schedule_ownership
+    ; ( "inference_provenance"
+      , n
+          (o
+             [ "schema_version", v
+             ; "source", Run_record_shapes.source
+             ; "origin", inference_origin
+             ]) )
     ; "delivery_cancellation", v
     ; "id", v
     ; "session_id", v

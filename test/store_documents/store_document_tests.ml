@@ -324,6 +324,39 @@ let%expect_test "durable structural limits agree from authored children through 
 
 let%expect_test "restored transaction digests are exact original bytes across edits" =
   let restored = S.Transaction.decode original_transaction |> ok in
+  (* Recognizing queue provenance never makes unrelated child semantics safe. *)
+  let marker = "future.queue-authority" in
+  let with_unknown_semantics document =
+    match D.Document.json document with
+    | `Object fields ->
+      D.Document.inspect
+        ~limits
+        (`Object (fields @ [ "required_semantics", `Array [ `String marker ] ]))
+      |> doc_ok
+    | _ -> assert false
+  in
+  let rejects_unknown = function
+    | Error (S.Store_error.Document (D.Error.Required_semantics_unknown actual)) ->
+      String.equal marker actual
+    | Error _ | Ok _ -> false
+  in
+  assert (
+    rejects_unknown
+      (S.Transaction.with_value
+         restored
+         ~limits
+         { (S.Transaction.value restored) with
+           delta = with_unknown_semantics restored.delta
+         }));
+  let snapshot = snapshot_document 0L None "initial" in
+  assert (
+    rejects_unknown
+      (S.Snapshot.with_value
+         snapshot
+         ~limits
+         { (S.Snapshot.value snapshot) with
+           payload = with_unknown_semantics snapshot.payload
+         }));
   let normalized =
     D.Extension_carrier.template (S.Transaction.carrier restored)
     |> Option.value_exn

@@ -1247,6 +1247,7 @@ let%expect_test "constructor schedule cancellation preserves admission custody" 
         ; delivery_count = 0
         ; last_delivery_at = None
         ; ownership = None
+        ; inference_provenance = None
         ; delivery_cancellation = None
         }
     in

@@ -5329,6 +5329,7 @@ let create_script_schedule_internal t owner source delay_ms payload misfire =
     ; status = Scheduled
     ; delivery_count = 0
     ; last_delivery_at = None
+    ; inference_provenance = None
     ; delivery_cancellation = None
     ; ownership = Some { source; creator = owner; subscription = None }
     }

@@ -117,6 +117,11 @@
   configuration_update
   configuration_capture
   configuration_policy
+  queue_provenance_semantics
+  queue_producer
+  queue_payload
+  moderator_queue
+  queue_provenance_validation
   moderator_checkpoint
   run_source_installation
   run_scope
@@ -286,7 +291,7 @@
   goal_accounting_document
   goal_accounts
   inference_ledger)
- (private_modules recurrence_runtime recurrence_frontier_records recurrence_frontier_codec recurrence_frontier_transition agent_authority_scope goal_accounting_state goal_accounting_stored instruction_selection_capacity instruction_selection_record workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles
+ (private_modules queue_payload recurrence_runtime recurrence_frontier_records recurrence_frontier_codec recurrence_frontier_transition agent_authority_scope goal_accounting_state goal_accounting_stored instruction_selection_capacity instruction_selection_record workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles
   prompt_project_baseline_record prompt_project_baseline_document native_tool_policy)
  (libraries ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript
   core

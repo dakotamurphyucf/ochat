@@ -6,6 +6,7 @@
   error
   id
   inference_origin
+  schedule_provenance
   execution_owner
   version
   timestamp
