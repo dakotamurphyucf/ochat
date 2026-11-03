@@ -353,12 +353,12 @@ let topic_contracts =
     , "f5657829c37cc2ab561768a6c0b4a9cbd441c7672e0401ed458b61969ddcfb35" )
   ; ( "tool_v1"
     , "chatmd.capabilities"
-    , "78c0b817ac77f944b95d709eb2ae3ebf65255258ac1df8c816bdb372edbc689c" )
+    , "ee9ed65e38c6c8141a732004a482f8c91253c4d52caa647567a8b4ded7266bad" )
   ; ( "moderator_v1"
     , "chatmd.capabilities"
-    , "4f01ba1662978b0de549c6a3a680ba831f89d757155610763ec323db14b57d18" )
+    , "5facb5c31b7526c2600b24c4c97d61a88ac8ccfd169868c5fcc2cc1cfb2d5088" )
   ; ( "delegated_moderator_v1"
     , "chatmd.capabilities"
-    , "51955def80615c5f261d495ab80a9cbefb198ae2b89a39c3a348a4ca15f7f47f" )
+    , "f0e284e6f9be19db39458d28d9438c06f807a2bff2a744b050297308f56f000b" )
   ]
 ;;

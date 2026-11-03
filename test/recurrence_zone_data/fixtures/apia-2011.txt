@@ -1,0 +1,6 @@
+Pacific/Apia  Sat Apr  2 13:59:59 2011 UT = Sat Apr  2 03:59:59 2011 -10 isdst=1 gmtoff=-36000
+Pacific/Apia  Sat Apr  2 14:00:00 2011 UT = Sat Apr  2 03:00:00 2011 -11 isdst=0 gmtoff=-39600
+Pacific/Apia  Sat Sep 24 13:59:59 2011 UT = Sat Sep 24 02:59:59 2011 -11 isdst=0 gmtoff=-39600
+Pacific/Apia  Sat Sep 24 14:00:00 2011 UT = Sat Sep 24 04:00:00 2011 -10 isdst=1 gmtoff=-36000
+Pacific/Apia  Fri Dec 30 09:59:59 2011 UT = Thu Dec 29 23:59:59 2011 -10 isdst=1 gmtoff=-36000
+Pacific/Apia  Fri Dec 30 10:00:00 2011 UT = Sat Dec 31 00:00:00 2011 +14 isdst=1 gmtoff=50400

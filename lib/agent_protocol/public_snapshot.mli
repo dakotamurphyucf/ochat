@@ -13,6 +13,7 @@ module Fields : sig
     ; jobs : Job.t list
     ; extension_status : Extension_status.t list
     ; schedules : Schedule.t list
+    ; goals : Goal_projection.t list
     ; active_tool_calls : Activity.Tool.summary list
       (** All currently running foreground tool calls, unique by activity key. *)
     ; active_agent_calls : Activity.Tool.summary list

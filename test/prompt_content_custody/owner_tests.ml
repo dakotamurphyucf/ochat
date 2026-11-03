@@ -464,6 +464,112 @@ let%test_module "actual prompt content custody owners" =
                ())))
     ;;
 
+    let%test_unit "composed builtin example is independent of original layout on restore" =
+      let example =
+        [%blob "../../docs-src/examples/learning/builtin-capabilities/agent.chatmd"]
+      in
+      let assets =
+        List.map [ "goals"; "recurrence"; "lifecycle" ] ~f:(fun id ->
+          Builtin_instructions.Id.of_string id
+          |> Or_error.ok_exn
+          |> Builtin_instructions.find
+          |> ok)
+      in
+      let expected = List.map assets ~f:Builtin_instructions.Asset.contents in
+      let identities =
+        List.map assets ~f:(fun asset ->
+          ( Builtin_instructions.Id.to_string (Builtin_instructions.Asset.id asset)
+          , Builtin_instructions.Asset.sha256 asset
+          , Builtin_instructions.Asset.byte_length asset ))
+      in
+      let run () =
+        with_fixture (fun env root save definition receipt store owner ->
+          save "root.chatmd" example;
+          let captured, content = acquire env owner definition in
+          let parent =
+            publish captured definition receipt store ~prepare_content:(fun _ ->
+              Ok content)
+            |> built
+          in
+          assert (List.equal String.equal (List.take (literals parent) 3) expected);
+          assert (Int.equal (Native.Accounting.occurrences (Native.accounting content)) 3);
+          assert (
+            Int.equal
+              (Native.Accounting.input_bytes (Native.accounting content))
+              (List.sum (module Int) assets ~f:Builtin_instructions.Asset.byte_length));
+          let metadata =
+            Content.to_storage (Native.content content)
+            |> Agent_store.Prompt_program_bundle.manifest
+          in
+          let payloads = Agent_store.Prompt_program_bundle.Manifest.payloads metadata in
+          let expected_payloads =
+            List.map identities ~f:(fun (_, sha, bytes) -> sha, bytes)
+          in
+          let compare_payload = [%compare: string * int] in
+          assert (
+            List.equal
+              (Tuple2.equal ~eq1:String.equal ~eq2:Int.equal)
+              (List.sort payloads ~compare:compare_payload)
+              (List.sort expected_payloads ~compare:compare_payload));
+          Owner.Policy.revoke (Owner.policy owner);
+          Eio.Path.unlink Eio.Path.(root / "root.chatmd");
+          let restarted =
+            Builder.restore
+              ~content_limits:(limits ())
+              ~artifact_store:store
+              definition
+              (Revision.id parent)
+            |> built
+          in
+          assert (List.equal String.equal (literals restarted) (literals parent));
+          literals restarted, payloads)
+      in
+      (* Each fixture owns an unrelated retained directory and artifact layout.
+         Source/parser identities differ legitimately; builtin bytes/hash do not. *)
+      let left_text, left_payloads = run () in
+      let right_text, right_payloads = run () in
+      assert (List.equal String.equal left_text right_text);
+      assert (
+        List.equal
+          (Tuple2.equal ~eq1:String.equal ~eq2:Int.equal)
+          (List.sort left_payloads ~compare:[%compare: string * int])
+          (List.sort right_payloads ~compare:[%compare: string * int]))
+    ;;
+
+    let%test_unit "unknown builtin never loads an authored decoy" =
+      with_fixture (fun env _ save definition _ _ owner ->
+        save "builtin:not-installed" "authored fallback must not be read";
+        save "root.chatmd" {|<system><doc src="builtin:not-installed"/></system>|};
+        let result =
+          Owner.with_scope owner ~f:(fun scope ->
+            let open Result.Let_syntax in
+            let%bind captured =
+              Owner.Scope.capture
+                scope
+                ~env
+                ~definition
+                ~preprocess:Fn.id
+                ~limits:(Builder.capture_limits ())
+                ~checkpoint:ignore
+            in
+            Owner.Scope.capture_documents
+              scope
+              ~capture:captured
+              ~limits:(limits ())
+              ~checkpoint:ignore)
+        in
+        match result with
+        | Ok _ -> failwith "unknown builtin used authored fallback"
+        | Error error ->
+          assert (Owner.Error.equal_code (Owner.Error.code error) Document_capture);
+          let error = Option.value_exn (Owner.Error.document_error error) in
+          assert (Option.is_some (Native.Error.range error));
+          assert (
+            String.is_substring
+              (Sexp.to_string (Native.Error.sexp_of_t error))
+              ~substring:"unknown builtin document: not-installed"))
+    ;;
+
     let%test_unit "actual bundled instruction capture and revoked native scope" =
       with_fixture (fun env root save definition receipt store owner ->
         save "root.chatmd" {|<developer><doc src="builtin:chatml"/></developer>|};

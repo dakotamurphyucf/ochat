@@ -168,6 +168,7 @@ let admit previous ~delta ~next ~limits =
     | Ingress_changed _
     | Delivery_committed _
     | Delivery_wake_changed _
+    | Goal_catalog_changed _
     | Run_state_changed _
     | Moderator_changed _
     | Shell_changed _

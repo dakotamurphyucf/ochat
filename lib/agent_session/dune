@@ -8,6 +8,7 @@
   workspace_resolver
   workspace_ownership
   runtime_paths
+  recurrence_zone_loader
   workspace_lease
   workspace_cleanup
   prompt_definition
@@ -88,6 +89,13 @@
   run_scope
   run_action_service
   run_record_shapes
+  goal_document
+  goal_command
+  goal_command_receipt
+  goal_catalog
+  goal_command_transition
+  goal_command_admission
+  goal_catalog_source
   run_intent
   run_state
   run_transition
@@ -100,6 +108,8 @@
   run_job_deliveries
   run_job_capacity
   run_job_completion
+  run_admission_request
+  run_command_authorization
   run_admission
   run_preparation
   run_admission_outcome
@@ -204,6 +214,10 @@
   quota_key
   quota_manager
   start_queue
+  inference_usage_count
+  goal_accounting_counter
+  goal_usage
+  goal_accounting
   inference_ledger)
  (private_modules workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles
   prompt_project_baseline_record prompt_project_baseline_document native_tool_policy)
@@ -219,11 +233,15 @@
   ochat.chatmd_content_capture
   ochat.chatmd_prompt_content
   ochat.chatml_local_source
+  ochat.source
+  ochat.recurrence_rules
+  ochat.recurrence_zone_data
   ochat.chatml_source
   ochat.chatml_project_prepare
   ochat.chatml_local_roots
   ochat.chatml_git_host
   ochat.agent_protocol
+  ochat.operator_authorization
   ochat.agent_store
   chatmd
   chat_response

@@ -85,6 +85,7 @@ let snapshot_fields =
     ; jobs = []
     ; extension_status = []
     ; schedules = []
+    ; goals = []
     ; active_tool_calls = []
     ; active_agent_calls = []
     ; halted = false

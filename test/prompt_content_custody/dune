@@ -2,4 +2,5 @@
  (name prompt_content_custody_tests)
  (libraries builtin_instructions core cstruct eio_main mirage-crypto-rng.unix agent_protocol agent_store agent_session chatmd chatmd_prompt_content chatmd_content_capture chat_response expect_test_helpers_core)
  (inline_tests)
- (preprocess (pps ppx_jane ppx_expect)))
+ (preprocessor_deps ../../docs-src/examples/learning/builtin-capabilities/agent.chatmd)
+ (preprocess (pps ppx_jane ppx_expect ppx_blob)))

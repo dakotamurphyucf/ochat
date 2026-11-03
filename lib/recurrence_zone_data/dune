@@ -1,0 +1,7 @@
+(library
+ (name recurrence_zone_data)
+ (public_name ochat.recurrence_zone_data)
+ (modules recurrence_zone_data zone_data_error tzif_reader posix_footer)
+ (private_modules zone_data_error tzif_reader posix_footer)
+ (libraries core digestif ochat.recurrence_rules)
+ (preprocess (pps ppx_jane)))

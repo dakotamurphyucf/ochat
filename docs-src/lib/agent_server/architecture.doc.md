@@ -47,3 +47,8 @@ resource ownership, return types and cancellation/error behavior.
 | `session_factory` | [contract](../../../lib/agent_server/session_factory.mli) | [source](../../../lib/agent_server/session_factory.ml) |
 | `session_registry` | [contract](../../../lib/agent_server/session_registry.mli) | [source](../../../lib/agent_server/session_registry.ml) |
 | `start_scheduler` | [contract](../../../lib/agent_server/start_scheduler.mli) | [source](../../../lib/agent_server/start_scheduler.ml) |
+
+The [shared Run start service](run_start_service.doc.md) retains writer admission
+and provides an internal authenticated headless host command through the same
+actor preparation, runtime, parser and persistence boundary. Controller-specific
+origin and atomic association remain separate integration work.

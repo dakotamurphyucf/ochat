@@ -553,6 +553,16 @@ type _ request =
   | Update_organization :
       Agent_protocol.Principal.t * Agent_protocol.Session_organization.Request.t
       -> Agent_protocol.Session.t request
+  | Apply_goal_command :
+      Operator_authorization.t
+      * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+      * Agent_protocol.Session_ref.t
+      * Goal_command.t
+      -> Goal_command_receipt.t request
+  | Read_goals :
+      Operator_authorization.t
+      * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+      -> Agent_protocol.Goal.t list request
   | Update_metadata :
       Agent_protocol.Id.Attachment.t * int64 * Agent_protocol.Session_metadata.Patch.t
       -> Agent_protocol.Session.t request
@@ -647,6 +657,11 @@ type _ request =
       * Agent_protocol.Id.Principal.t
       * Agent_protocol.Run_start.t
       * string
+      -> Run_preparation.Decision.t request
+  | Begin_headless_run_preparation :
+      Operator_authorization.t
+      * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+      * Run_admission_request.Headless.t
       -> Run_preparation.Decision.t request
   | Close_run_preparation : Run_preparation.t -> unit request
   | Run_start_receipt :
@@ -1192,6 +1207,7 @@ let prepare_transition ?run_preparation t ~delta ~payloads =
   in
   let now = t.services.now () in
   let%bind delta = Run_source_change.prepare t.state ~delta ~now in
+  let%bind delta = Goal_catalog_source.prepare_change t.state ~delta in
   let%bind prepared = Session_transition.apply ~now t.state ~delta ~payloads in
   let%map () =
     match prepared.state.run_state with
@@ -8160,12 +8176,64 @@ let submit_message t attachment_id submitting_principal timing entry =
       entry)
 ;;
 
+let check_run_caller ?preparation t caller =
+  match caller with
+  | Run_admission_request.Caller.Writer attachment_id ->
+    Result.map (write_attachment t attachment_id) ~f:ignore
+  | Headless_command ->
+    (match preparation with
+     | Some preparation -> check_run_preparation t preparation
+     | None -> Error (error Permission_denied "headless admission requires actor custody"))
+;;
+
+let begin_run_preparation_internal t ~authorize ~principal_id ~request ~request_sha256 =
+  let open Result.Let_syntax in
+  let%bind () = authorize t.state in
+  let%bind () =
+    match request.Run_admission_request.caller with
+    | Writer attachment_id -> Result.map (write_attachment t attachment_id) ~f:ignore
+    | Headless_command -> Ok ()
+  in
+  let%bind () =
+    if Agent_protocol.Id.Session.equal request.session_id t.state.identity.session_id
+    then Ok ()
+    else Error (error Invalid_request "run preparation targets another session")
+  in
+  let%bind receipt =
+    Run_state.receipt
+      (Option.value t.state.run_state ~default:Run_state.empty)
+      ~principal_id
+      ~key:request.key
+      ~request_sha256
+  in
+  match receipt with
+  | Some ({ kind = Admission; _ } as receipt) ->
+    Ok (Run_preparation.Decision.Retained receipt)
+  | Some { kind = Action | Terminal; _ } ->
+    Error (error Conflict "run start key belongs to another action")
+  | None ->
+    (match t.run_preparation with
+     | Some _ -> Error (error Conflict "another run admission is being prepared")
+     | None ->
+       let%map preparation =
+         Run_preparation.create_request
+           ~owner:t.run_preparation_owner
+           ~state:t.state
+           ~principal_id
+           ~request
+           ~request_sha256
+           ~authorize
+       in
+       t.run_preparation <- Some preparation;
+       Run_preparation.Decision.Prepare preparation)
+;;
+
 let admit_run
       ?preparation
       ?commit_attempted
       t
       scope
-      (request : Agent_protocol.Run_start.t)
+      (request : Run_admission_request.t)
       session
       request_sha256
       entry
@@ -8181,7 +8249,7 @@ let admit_run
     then Ok ()
     else Error (error Invalid_request "run request does not identify this session")
   in
-  let%bind _ = write_attachment t request.attachment_id in
+  let%bind () = check_run_caller ?preparation t request.caller in
   let index = Option.value t.state.run_state ~default:Run_state.empty in
   let%bind retained =
     Run_state.receipt
@@ -8224,7 +8292,7 @@ let admit_run
       let run_id = Agent_protocol.Id.Run.create () in
       match preparation with
       | None ->
-        Run_admission.prepare
+        Run_admission.prepare_request
           t.state
           ~scope
           ~request
@@ -8246,11 +8314,7 @@ let admit_run
     in
     let run = Run_admission.run admission in
     let%bind authorities =
-      Run_authorities.add
-        t.run_authorities
-        ~run
-        ~scope
-        ~attachment_id:request.attachment_id
+      Run_authorities.add_for_caller t.run_authorities ~run ~scope ~caller:request.caller
     in
     let delta = Session_delta.Run_state_changed (Run_admission.index admission) in
     let outcome =
@@ -11647,6 +11711,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Lifecycle_state _
   | Retire_lifecycle _
   | Abort_lifecycle _
+  | Read_goals _
   | State
   | Snapshot
   | Observe
@@ -11763,6 +11828,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Checkpoint_run_moderator _
   | Admit_prepared_run _
   | Begin_run_preparation _
+  | Begin_headless_run_preparation _
   | Complete_initialization _
   | Start _
   | Start_initial_delegated _
@@ -11770,6 +11836,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Queue_start _
   | Activate_queued_start
   | Update_organization _
+  | Apply_goal_command _
   | Update_metadata _
   | Stop _
   | Stop_managed _
@@ -11893,26 +11960,12 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         commit_queued_event t borrow snapshot requests decision notifications)
     | Reconcile_run_recovery ->
       let open Result.Let_syntax in
-      (match t.state.run_state with
+      let%bind delta =
+        Goal_catalog_source.recovery_delta t.state ~now:(t.services.now ())
+      in
+      (match delta with
        | None -> Ok ()
-       | Some index ->
-         if
-           List.for_all (Run_state.runs index) ~f:(fun run ->
-             match run.Agent_protocol.Run.lifecycle with
-             | Terminal _ -> true
-             | Admitted | Active | Waiting _ -> false)
-         then Ok ()
-         else if Int64.equal t.state.counters.revision Int64.max_value
-         then Error (error Invalid_state "session revision exhausted during run recovery")
-         else (
-           let%bind index =
-             Run_retirement.recover
-               index
-               ~session_revision:(Int64.succ t.state.counters.revision)
-               ~now:(t.services.now ())
-           in
-           transition t ~delta:(Session_delta.Run_state_changed index) ~payloads:[]
-           |> Result.map ~f:ignore))
+       | Some delta -> transition t ~delta ~payloads:[] |> Result.map ~f:ignore)
     | Run_actions executing -> run_actions_internal t executing
     | Finish_queued_event (borrow, interrupted) ->
       finish_queued_event t borrow interrupted
@@ -12358,6 +12411,28 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
             publish_committed_transition t transition)
         in
         Ok (Session_state.summary t.state))
+    | Read_goals (actor, authorize) ->
+      Goal_command_admission.read t.state ~actor ~authorize
+    | Apply_goal_command (actor, authorize, session, request) ->
+      let open Result.Let_syntax in
+      let%bind prepared =
+        Goal_command_admission.prepare
+          t.state
+          ~actor
+          ~authorize
+          ~session
+          ~request
+          ~now:(t.services.now ())
+      in
+      let%map () =
+        match prepared.delta with
+        | None -> Ok ()
+        | Some delta ->
+          let%bind transition = prepare_transition t ~delta ~payloads:[] in
+          let%bind () = Goal_command_admission.check_write actor ~authorize t.state in
+          install t transition
+      in
+      prepared.receipt
     | Update_metadata (attachment_id, expected_metadata_revision, patch) ->
       with_writer t attachment_id (fun () ->
         let open Result.Let_syntax in
@@ -12525,41 +12600,19 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
                     then Run_admission_outcome.Uncertain failure
                     else Run_admission_outcome.Rejected failure)))
     | Begin_run_preparation (authorize, principal_id, request, request_sha256) ->
+      begin_run_preparation_internal
+        t
+        ~authorize
+        ~principal_id
+        ~request:(Run_admission_request.of_writer request)
+        ~request_sha256
+    | Begin_headless_run_preparation (actor, authorize, request) ->
       let open Result.Let_syntax in
-      let%bind () = authorize t.state in
-      let%bind _ = write_attachment t request.attachment_id in
-      let%bind () =
-        if Agent_protocol.Id.Session.equal request.session_id t.state.identity.session_id
-        then Ok ()
-        else Error (error Invalid_request "run preparation targets another session")
-      in
-      let%bind receipt =
-        Run_state.receipt
-          (Option.value t.state.run_state ~default:Run_state.empty)
-          ~principal_id
-          ~key:request.key
-          ~request_sha256
-      in
-      (match receipt with
-       | Some ({ kind = Admission; _ } as receipt) ->
-         Ok (Run_preparation.Decision.Retained receipt)
-       | Some { kind = Action | Terminal; _ } ->
-         Error (error Conflict "run start key belongs to another action")
-       | None ->
-         (match t.run_preparation with
-          | Some _ -> Error (error Conflict "another run admission is being prepared")
-          | None ->
-            let%map preparation =
-              Run_preparation.create
-                ~owner:t.run_preparation_owner
-                ~state:t.state
-                ~principal_id
-                ~request
-                ~request_sha256
-                ~authorize
-            in
-            t.run_preparation <- Some preparation;
-            Run_preparation.Decision.Prepare preparation))
+      let authorize = Run_command_authorization.check actor ~authorize in
+      let principal_id = (Operator_authorization.principal actor).id in
+      let request = Run_admission_request.of_headless request in
+      let%bind request_sha256 = Run_admission_request.request_sha256 request in
+      begin_run_preparation_internal t ~authorize ~principal_id ~request ~request_sha256
     | Close_run_preparation preparation ->
       if not (Run_preparation.belongs_to preparation ~owner:t.run_preparation_owner)
       then Error (error Conflict "run preparation belongs to another actor")
@@ -12591,7 +12644,13 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        | Some { kind = Action | Terminal; _ } ->
          Error (error Conflict "run start key belongs to another action"))
     | Admit_run (scope, request, session, request_sha256, entry) ->
-      admit_run t scope request session request_sha256 entry
+      admit_run
+        t
+        scope
+        (Run_admission_request.of_writer request)
+        session
+        request_sha256
+        entry
     | Submit_managed_message (reference, key, fingerprint, generation, maximum, entry) ->
       submit_managed_message t reference key fingerprint generation maximum entry
     | Compact (attachment_id, expected_revision) ->
@@ -13314,6 +13373,10 @@ let begin_run_preparation t ~authorize ~principal_id ~request ~request_sha256 =
   call t (Begin_run_preparation (authorize, principal_id, request, request_sha256))
 ;;
 
+let begin_headless_run_preparation t ~actor ~authorize ~request =
+  call t (Begin_headless_run_preparation (actor, authorize, request))
+;;
+
 let end_run_preparation t preparation = call t (Close_run_preparation preparation)
 
 let run_start_receipt t ~authorize ~principal_id ~request ~request_sha256 =
@@ -13822,3 +13885,9 @@ let lifecycle_state t fence = call t ~priority:Priority (Lifecycle_state fence)
 let retire_lifecycle t fence = call t ~priority:Priority (Retire_lifecycle fence)
 let abort_lifecycle t fence = call t ~priority:Priority (Abort_lifecycle fence)
 let check_runtime_admission t = call t ~priority:Priority Check_runtime_admission
+
+let goal_command t ~actor ~authorize ~session ~request =
+  call t (Apply_goal_command (actor, authorize, session, request))
+;;
+
+let read_goals t ~actor ~authorize = call t (Read_goals (actor, authorize))

@@ -57,7 +57,7 @@ let current_installation state scope =
 
 let owned_operation state request operation =
   let open Result.Let_syntax in
-  match request.P.Run_start.input, operation with
+  match request.Run_admission_request.input, operation with
   | Authored_start, None -> Ok []
   | Authored_start, Some _ ->
     invalid "authored startup cannot fabricate an input operation"
@@ -94,7 +94,7 @@ let prepare_checked
       (state : Session_state.t)
       ~expected_current_revision
       ~scope
-      ~(request : P.Run_start.t)
+      ~(request : Run_admission_request.t)
       ~session
       ~run_id
       ~operation
@@ -191,10 +191,10 @@ let prepare_checked
   { run; receipt; index }
 ;;
 
-let prepare
+let prepare_request
       state
       ~scope
-      ~(request : P.Run_start.t)
+      ~(request : Run_admission_request.t)
       ~session
       ~run_id
       ~operation
@@ -206,6 +206,18 @@ let prepare
     ~expected_current_revision:request.expected_revision
     ~scope
     ~request
+    ~session
+    ~run_id
+    ~operation
+    ~request_sha256
+    ~now
+;;
+
+let prepare state ~scope ~request ~session ~run_id ~operation ~request_sha256 ~now =
+  prepare_request
+    state
+    ~scope
+    ~request:(Run_admission_request.of_writer request)
     ~session
     ~run_id
     ~operation

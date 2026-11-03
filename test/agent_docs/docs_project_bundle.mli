@@ -29,3 +29,15 @@ val check
   -> entry:Source.Portable_path.t
   -> required:Source.Portable_path.t list
   -> unit
+
+(** The same closure check with explicitly host-selected external Local roots.
+    Existing [check] retains the default local-only configuration. Root authority
+    is test/deployment input, never inferred from a missing declaration. *)
+val check_with_project_sources
+  :  project_sources:Agent_server.Project_source_configuration.t
+  -> env:Eio_unix.Stdenv.base
+  -> home_parent:Eio.Fs.dir_ty Eio.Path.t
+  -> bundle:Eio.Fs.dir_ty Eio.Path.t
+  -> entry:Source.Portable_path.t
+  -> required:Source.Portable_path.t list
+  -> unit
