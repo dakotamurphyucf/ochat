@@ -88,6 +88,7 @@
   run_scope
   run_action_service
   run_record_shapes
+  goal_document
   run_intent
   run_state
   run_transition
