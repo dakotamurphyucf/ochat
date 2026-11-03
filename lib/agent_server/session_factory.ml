@@ -1246,6 +1246,7 @@ let model_job t state ~recipe ~payload ~delivery =
     ; result = None
     ; delivery
     ; launch = None
+    ; inference_origin = None
     ; progress = None
     }
 ;;

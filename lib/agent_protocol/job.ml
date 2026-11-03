@@ -102,6 +102,60 @@ type launch =
   }
 [@@deriving equal, sexp]
 
+module Inference_origin = struct
+  type t =
+    | Unbound
+    | Run of Id.Run.t
+  [@@deriving equal, sexp]
+
+  let validate = function
+    | Unbound -> Ok ()
+    | Run id -> Id.Run.of_string (Id.Run.to_string id) |> Result.map ~f:ignore
+  ;;
+
+  let generated_t_of_sexp = t_of_sexp
+
+  let t_of_sexp sexp =
+    let value = generated_t_of_sexp sexp in
+    match validate value with
+    | Ok () -> value
+    | Error error -> Sexplib.Conv.of_sexp_error error.Protocol_error.message sexp
+  ;;
+
+  let to_json = function
+    | Unbound -> `Object [ "schema_version", `Number "1"; "type", `String "unbound" ]
+    | Run id ->
+      `Object
+        [ "schema_version", `Number "1"
+        ; "type", `String "run"
+        ; "run_id", Id.Run.to_json id
+        ]
+  ;;
+
+  let of_json json =
+    let open Result.Let_syntax in
+    let%bind fields = Json_codec.fields json in
+    let%bind _ =
+      Json_codec.required_as
+        fields
+        "schema_version"
+        (Json_codec.bounded_int ~min:1 ~max:1)
+    in
+    let%bind kind = Json_codec.required_as fields "type" Json_codec.string in
+    match kind with
+    | "unbound" ->
+      let%map () = Extension_codec.closed fields [ "schema_version"; "type" ] in
+      Unbound
+    | "run" ->
+      let%bind () =
+        Extension_codec.closed fields [ "schema_version"; "type"; "run_id" ]
+      in
+      let%map id = Json_codec.required_as fields "run_id" Id.Run.of_json in
+      Run id
+    | _ -> Error (Protocol_error.invalid_request "unknown job inference origin")
+  ;;
+end
+
 type t =
   { id : Id.Job.t
   ; session_id : Id.Session.t
@@ -118,6 +172,7 @@ type t =
   ; result : Jsonaf.t option
   ; delivery : delivery
   ; launch : launch option [@sexp.option]
+  ; inference_origin : Inference_origin.t option [@sexp.option]
   ; progress : Job_progress.t option [@sexp.option]
   }
 [@@deriving sexp]
@@ -639,6 +694,7 @@ let to_json t =
     ; optional_field "result" t.result Fn.id
     ; Some ("delivery", delivery_to_json t.delivery)
     ; optional_field "launch" t.launch launch_to_json
+    ; optional_field "inference_origin" t.inference_origin Inference_origin.to_json
     ; optional_field "progress" t.progress Job_progress.to_json
     ]
     |> List.filter_opt
@@ -668,6 +724,19 @@ let validate_delivery_transition ~previous t =
   | None, Discarded _ ->
     Error (Protocol_error.invalid_request "discarded delivery requires an existing job")
   | _, (Not_required | Pending | Delivered _) -> Ok ()
+;;
+
+let validate_inference_origin_transition ~previous t =
+  let open Result.Let_syntax in
+  let%bind () =
+    Option.value_map t.inference_origin ~default:(Ok ()) ~f:Inference_origin.validate
+  in
+  match previous with
+  | None -> Ok ()
+  | Some previous ->
+    if Option.equal Inference_origin.equal previous.inference_origin t.inference_origin
+    then Ok ()
+    else Error (Protocol_error.invalid_request "job inference origin is immutable")
 ;;
 
 let decode_identity fields =
@@ -716,6 +785,13 @@ let of_json json =
   let result = Json_codec.optional fields "result" in
   let%bind delivery = Json_codec.required_as fields "delivery" delivery_of_json in
   let%bind launch = Json_codec.optional_as fields "launch" launch_of_json in
+  let%bind inference_origin =
+    match
+      List.Assoc.find (Json_codec.to_alist fields) ~equal:String.equal "inference_origin"
+    with
+    | None -> Ok None
+    | Some raw -> Inference_origin.of_json raw |> Result.map ~f:Option.some
+  in
   let%bind progress = Json_codec.optional_as fields "progress" Job_progress.of_json in
   let%bind () =
     match status with
@@ -746,6 +822,7 @@ let of_json json =
     ; result
     ; delivery
     ; launch
+    ; inference_origin
     ; progress
     }
   in

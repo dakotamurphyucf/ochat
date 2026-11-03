@@ -148,6 +148,7 @@
   run_source_change
   run_wake_owner
   run_job_occurrence
+  job_inference_provenance
   run_callback_evidence
   run_job_delivery
   run_job_deliveries

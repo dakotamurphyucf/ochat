@@ -54,6 +54,7 @@ let%expect_test
           ; nested_depth = 0
           ; moderator_source = Some observer
           }
+    ; inference_origin = None
     ; progress = None
     }
   in

@@ -350,6 +350,12 @@ let job =
           ; "moderator_source", observer
           ; "parent_job", f [ "id"; "attempt" ]
           ] )
+    ; ( "inference_origin"
+      , tag
+          "type"
+          [ "unbound", f [ "schema_version"; "type" ]
+          ; "run", f [ "schema_version"; "type"; "run_id" ]
+          ] )
     ; ( "progress"
       , o
           [ "version", v

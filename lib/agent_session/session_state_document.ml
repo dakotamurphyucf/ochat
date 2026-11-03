@@ -978,6 +978,7 @@ module Original = struct
     { template : D.Document.t
     ; limits : D.Limits.t
     ; inference_ledger : Inference_ledger.t
+    ; jobs : P.Job.t list
     ; presence : Session_state_presence.t
     ; decode_evidence : Decode_evidence.t option
     }
@@ -1108,6 +1109,7 @@ let decoded ?evidence carrier ~limits =
         { template
         ; limits
         ; inference_ledger = (D.Extension_carrier.value carrier).S.inference_ledger
+        ; jobs = state.jobs
         ; presence
         ; decode_evidence = evidence
         }
@@ -1541,8 +1543,30 @@ let decode_with_evidence ?previous ~limits document =
 
 let decode ~limits document = decode_with_evidence ~limits document
 
+let validate_job_origin_update previous incoming =
+  Job_inference_provenance.validate_transition
+    ~previous:previous.S.jobs
+    ~incoming:incoming.S.jobs
+  |> X.document_result
+;;
+
+let validate_job_origin_carrier t =
+  match t.original with
+  | None -> Ok ()
+  | Some original ->
+    Job_inference_provenance.validate_transition
+      ~previous:original.jobs
+      ~incoming:(value t).S.jobs
+    |> X.document_result
+;;
+
 let decode_after previous ~limits document =
-  decode_with_evidence ?previous:(previous_decode_evidence previous) ~limits document
+  let open Result.Let_syntax in
+  let%bind incoming =
+    decode_with_evidence ?previous:(previous_decode_evidence previous) ~limits document
+  in
+  let%map () = validate_job_origin_update (value previous) (value incoming) in
+  incoming
 ;;
 
 let validate_ledger_carrier (t : t) ~limits =
@@ -1726,6 +1750,7 @@ let validate_accounts_carrier t ~limits =
 
 let encode t ~limits =
   let open Result.Let_syntax in
+  let%bind () = validate_job_origin_carrier t in
   let%bind () = validate_goal_carrier t in
   let%bind () = validate_instruction_carrier t in
   let%bind () = validate_recurrence_carrier t in
@@ -1756,6 +1781,9 @@ let encode t ~limits =
 
 let adopt previous ~limits incoming =
   let open Result.Let_syntax in
+  let%bind () = validate_job_origin_carrier previous in
+  let%bind () = validate_job_origin_carrier incoming in
+  let%bind () = validate_job_origin_update (value previous) (value incoming) in
   let%bind () = validate_recurrence_carrier previous in
   let%bind () = validate_recurrence_carrier incoming in
   let%bind () =
@@ -2117,6 +2145,7 @@ module Transaction = struct
 
   let encode_prefix t ~limits =
     let open Result.Let_syntax in
+    let%bind () = validate_job_origin_carrier t in
     let capture =
       Decode_evidence.Capture.create ?previous:(previous_decode_evidence t) ~limits ()
     in
@@ -2188,6 +2217,7 @@ module Transaction = struct
           { template = document
           ; limits
           ; inference_ledger = state.S.inference_ledger
+          ; jobs = state.jobs
           ; presence
           ; decode_evidence = Some (Decode_evidence.Capture.finish capture)
           }
