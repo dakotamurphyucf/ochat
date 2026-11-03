@@ -52,6 +52,13 @@ val bind
     not grant source access. *)
 val issued_by : t -> Project_source_host.t -> bool
 
+(** Administrative instruction provenance for an already admitted physical root.
+    Domain-separated digest of the exact configured resolved root spelling;
+    stable across reordering, different on remapping. This is neither durable
+    inode identity nor permission. Same-path replacement follows the existing
+    fresh Source_host policy. The enclosing facade verifies physical affinity. *)
+val instruction_root : t -> root:Sources.Root.t -> Instruction_content.Root_id.t option
+
 (** Nonyielding current operator decision by the *bound* internal root index,
     actual authenticated Principal.id and authentication_kind, and
     Operator_authorization.is_current. An unlisted principal/root denies.

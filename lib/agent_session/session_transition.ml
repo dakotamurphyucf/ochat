@@ -254,6 +254,17 @@ let apply ~now state ~delta ~payloads =
     | _ -> Ok (state, delta)
   in
   let payloads = projected_payloads ~previous state payloads in
+  let instruction_status state =
+    Instruction_selection.summary
+      (Option.value
+         state.Session_state.instruction_selection
+         ~default:Instruction_selection.empty)
+  in
+  let instructions = instruction_status state in
+  let instructions_changed =
+    not
+      (Agent_protocol.Instruction_status.equal (instruction_status previous) instructions)
+  in
   let statuses = Session_state.extension_status state in
   let statuses_changed =
     not
@@ -286,6 +297,19 @@ let apply ~now state ~delta ~payloads =
         ]
     else payloads
   in
+  (* The typed instruction extra shares the final public session anchor. Coalesce
+     any caller update at the end rather than attach it to an earlier sequence. *)
+  let payloads =
+    if instructions_changed
+    then
+      List.filter payloads ~f:(function
+        | Agent_protocol.Event.Durable.Payload.Session_updated _ -> false
+        | _ -> true)
+      @ [ Agent_protocol.Event.Durable.Payload.Session_updated
+            (Session_state.summary state)
+        ]
+    else payloads
+  in
   let%bind revision = increment "session revision" state.counters.revision in
   let%bind transaction_sequence =
     increment "transaction sequence" state.counters.transaction_sequence
@@ -295,7 +319,7 @@ let apply ~now state ~delta ~payloads =
   let identity = { state.identity with updated_at = now } in
   let counters = { state.counters with revision; event_sequence; transaction_sequence } in
   let state = { state with identity; counters } in
-  let%map () = Session_state.validate state in
+  let%bind () = Session_state.validate state in
   let payloads =
     List.map payloads ~f:(function
       | Agent_protocol.Event.Durable.Payload.Session_updated _ ->
@@ -310,6 +334,17 @@ let apply ~now state ~delta ~payloads =
       List.map events ~f:(fun event ->
         Agent_protocol.Event.Durable.with_extension_status event statuses)
     else events
+  in
+  let%map events =
+    if instructions_changed
+    then
+      List.map events ~f:(fun event ->
+        match event.Agent_protocol.Event.Durable.kind with
+        | Session_updated ->
+          Agent_protocol.Event.Durable.with_instruction_status event instructions
+        | _ -> Ok event)
+      |> Result.all
+    else Ok events
   in
   { state; delta; events }
 ;;

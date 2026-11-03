@@ -80,7 +80,13 @@ let save root member text =
   Eio.Path.save ~create:(`Or_truncate 0o600) Eio.Path.(root / member) text
 ;;
 
-let with_roots ?(max_read_bytes = 1_048_576) ?(max_browse_entries = 256) f =
+let with_roots
+      ?allowed_actor
+      ?(on_project = fun _ -> ())
+      ?(max_read_bytes = 1_048_576)
+      ?(max_browse_entries = 256)
+      f
+  =
   Project_support.with_workspace (fun env home data ->
     let left = Eio.Path.(home / "left") in
     let right = Eio.Path.(home / "right") in
@@ -93,7 +99,11 @@ let with_roots ?(max_read_bytes = 1_048_576) ?(max_browse_entries = 256) f =
           }
       in
       let project = Project_support.open_host ~configuration env data sw in
-      let allowed = actor "pri_instruction_allowed" in
+      on_project project;
+      let allowed =
+        Option.value_or_thunk allowed_actor ~default:(fun () ->
+          actor "pri_instruction_allowed")
+      in
       let denied = actor "pri_instruction_denied" in
       let admitted = ref true in
       let policy =

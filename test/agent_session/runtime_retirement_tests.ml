@@ -94,9 +94,9 @@ let%expect_test "retirement before compaction Worker_ready prevents auxiliary di
        let execution = Inference_ports.compaction_execution () in
        let port : A.Compaction_inference.t =
          { with_execution =
-             (fun ~operation:_ ~selection:_ f ->
+             (fun ~operation:_ ~selection:_ ~borrow_agent_actor:_ f ->
                Int.incr calls;
-               f execution)
+               f execution ~guidance:None ~reserved_input_tokens:0)
          }
        in
        A.set_compaction_inference actor (Some port) |> protocol_ok;
@@ -242,9 +242,9 @@ let%expect_test "ordinary detachment reopens auxiliary execution but closing is 
       let calls = ref 0 in
       let port : A.Compaction_inference.t =
         { with_execution =
-            (fun ~operation:_ ~selection:_ f ->
+            (fun ~operation:_ ~selection:_ ~borrow_agent_actor:_ f ->
               Int.incr calls;
-              f execution)
+              f execution ~guidance:None ~reserved_input_tokens:0)
         }
       in
       A.set_compaction_inference actor (Some port) |> protocol_ok;

@@ -93,7 +93,59 @@ let index json key =
   | _ -> failwith "synthetic position"
 ;;
 
+(* Opt-in fixture mode exercises the production pure OpenAI input translation.
+   Responses remain explicitly reconstructed synthetic events, not captures. *)
+let request_inputs ~request_guidance request =
+  if not request_guidance
+  then
+    R.history request
+    |> List.map ~f:(fun entry ->
+      Openai.Responses_history.to_item (History_entry.payload entry) |> ok)
+  else
+    let module D = Openai.Responses_driver in
+    let capabilities =
+      D.Capability.create
+        ~baseline:
+          ([ D.Capability.Text_input, D.Capability.Supported
+           ; Image_input, Supported
+           ; Document_input, Supported
+           ; Function_tools, Supported
+           ; Custom_tools, Supported
+           ; Opaque_replay, Supported
+           ]
+           @ List.map
+               (R.Target.settings (R.target request))
+               ~f:(fun setting ->
+                 D.Capability.Setting (R.Setting.name setting), D.Capability.Supported))
+        ~models:[]
+      |> Or_error.ok_exn
+    in
+    let profile =
+      D.Profile.create
+        ~id:"selected"
+        ~account:None
+        ~endpoint:"https://fixture.invalid/v1/responses"
+        ~capabilities
+        ~defaults:[]
+      |> Or_error.ok_exn
+    in
+    Openai.Inference_input.prepare profile request
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum
+        [%sexp
+          "synthetic OpenAI input preparation rejected"
+        , (error : Runtime.Preparation_error.t)
+        , (Option.is_some (R.guidance request) : bool)
+        , (List.length (R.history request) : int)
+        , (List.length (R.tools request) : int)])
+    |> Result.ok_or_failwith
+    |> D.Prepared.request
+    |> Openai.Responses_codec.Request.input
+    |> List.map ~f:Res.Item.t_of_jsonaf
+;;
+
 let run_stream
+      ~request_guidance
       post_stream
       request
       ~sw
@@ -102,13 +154,9 @@ let run_stream
       ~note_delivery
       ~on_event
       ~on_observation:_
-      ~submission_guard:_
+      ~submission_guard
   =
-  let inputs =
-    R.history request
-    |> List.map ~f:(fun entry ->
-      Openai.Responses_history.to_item (History_entry.payload entry) |> ok)
-  in
+  let inputs = request_inputs ~request_guidance request in
   let descriptors = ref Int.Map.empty in
   let output = ref Int.Map.empty in
   let outcome = ref E.Terminal.Completed in
@@ -174,6 +222,9 @@ let run_stream
     live (Changed { target; change = (if append then Append value else Replace value) })
   in
   live (Source_started { scope; origin = P.Origin.unavailable });
+  (* Every backend, including the legacy fixture branch, performs the final
+     owned submission check immediately before producing provider effects. *)
+  Runtime.Submission_guard.check submission_guard;
   post_stream ~sw ~inputs
   |> Stdlib.Seq.iter (fun event ->
     note_delivery E.Terminal.Response_started;
@@ -259,7 +310,7 @@ let run_stream
   |> ok
 ;;
 
-let create_with_observer ~on_prepare ~namespace ~default_model ~post_stream =
+let create_internal ~request_guidance ~on_prepare ~namespace ~default_model ~post_stream =
   let source = Transcript.Source_id.of_string namespace |> ok in
   let sequence = Atomic.make 0 in
   let next () = Atomic.fetch_and_add sequence 1 |> Int.to_string in
@@ -292,6 +343,7 @@ let create_with_observer ~on_prepare ~namespace ~default_model ~post_stream =
   in
   let adapter =
     Runtime.Adapter.create
+      ~supports_request_guidance:request_guidance
       ~preflight_history:(fun ~target:_ _ -> Ok ())
       ~id:"fixture.responses"
       ~limits:Runtime.Limits.default
@@ -312,11 +364,29 @@ let create_with_observer ~on_prepare ~namespace ~default_model ~post_stream =
           ~request
           ~configuration
           ~fingerprint:preparation_id
-          ~run:(run_stream post_stream request))
+          ~run:(run_stream ~request_guidance post_stream request))
       ()
     |> ok
   in
   { default_model; adapter; identity }
+;;
+
+let create_with_observer ~on_prepare ~namespace ~default_model ~post_stream =
+  create_internal
+    ~request_guidance:false
+    ~on_prepare
+    ~namespace
+    ~default_model
+    ~post_stream
+;;
+
+let create_with_request_guidance ~on_prepare ~namespace ~default_model ~post_stream =
+  create_internal
+    ~request_guidance:true
+    ~on_prepare
+    ~namespace
+    ~default_model
+    ~post_stream
 ;;
 
 let create ~namespace ~default_model ~post_stream =

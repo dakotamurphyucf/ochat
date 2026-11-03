@@ -54,6 +54,12 @@ let project_run_retirement ~run ~goal ~recurrence ~limits =
     ~limits
 ;;
 
+let project_instruction_clear selection ~limits =
+  changes_document
+    [ `Object [ "kind", `String "instruction_selection_changed"; "value", selection ] ]
+    ~limits
+;;
+
 let project_created state ~limits =
   let open Result.Let_syntax in
   let%bind () = D.Document.validate state ~limits in

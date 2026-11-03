@@ -39,6 +39,7 @@ type extension_services =
       Chat_response.Extension_compiler.t -> Chatml_execution.limits
   ; one_off_policy : Chat_response.One_off_request.policy
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
+  ; initial_agent_guidance : Chat_response.Agent_guidance.t option
   ; claim_lifecycle : event:Moderation.Event.t -> Moderator_event.claim
   ; run_actions :
       Agent_protocol.Moderator_execution.t
@@ -240,6 +241,7 @@ let run_agent
       prompt
       items
   =
+  let ctx = Script_tool_calls.agent_context ctx in
   Chat_response.Driver.run_agent
     ~history_compaction:false
     ?prompt_dir
@@ -1193,6 +1195,11 @@ let chatmd_user_item ~ctx ~run_agent paths text =
 ;;
 
 let parse_user_content ~ctx ~manifest_authorizer ~approval_provider ~response_dir paths =
+  (* Submitted ChatMD content construction precedes operation admission and is
+     an explicitly authored separate prompt. It cannot borrow a starter's lease
+     or a later turn's session guidance. The actual submitted root turn includes
+     its own guidance under its admitted operation owner. *)
+  let ctx = Chat_response.Ctx.without_agent_guidance ctx in
   let converter_runner ?prompt_dir ?session_id ~ctx prompt items =
     run_agent
       ~manifest_authorizer
@@ -1470,6 +1477,12 @@ let build_with_services
       ~on_inference_observation
       paths
       cache
+  in
+  let ctx =
+    Option.value_map
+      (Option.bind extension_services ~f:(fun services -> services.initial_agent_guidance))
+      ~default:ctx
+      ~f:(Chat_response.Ctx.with_agent_guidance ctx)
   in
   let declares_one_off = declares_native elements Run_chatml_tool.name in
   let%bind agent_runtime, definition, managed, authoring =
@@ -1952,6 +1965,15 @@ let build_with_services
     Turn_worker.create
       ~root_binding
       ?authoring_context:(Option.map authoring ~f:Authoring_runtime.materialize)
+      ?agent_guidance:
+        (Option.bind script_tools ~f:(fun tools ->
+           Option.map
+             (Script_tool_calls.instruction_service tools)
+             ~f:(fun service ~input:_ ~capabilities ->
+               Instruction_service.agent_guidance
+                 service
+                 ~borrow_actor:
+                   capabilities.Operation_worker.Capabilities.original_agent_actor)))
       ?runtime_policy:
         (Option.map extension_services ~f:(fun services -> services.runtime_policy))
       ?dispatch_tool

@@ -103,6 +103,8 @@ let with_daemon_switch env ~clocks f =
 ;;
 
 let with_daemon
+      ?(request_guidance = false)
+      ?(inspect_preparation = fun ~selection:_ ~request:_ -> ())
       ?validation_host
       ?config_file
       ?(daemon_clocks =
@@ -114,6 +116,7 @@ let with_daemon
       ?settle
       ?after_turn
       ?after_turn_with_daemon
+      ?after_shutdown
       ?(connect = fun ~sw:_ ~env:_ ~root:_ daemon -> connection daemon (principal ()))
       ?(inspect_request = fun _ _ -> ())
       ?(auxiliary_response = fun _ -> None)
@@ -183,6 +186,13 @@ let with_daemon
         in
         let requests = ref 0 in
         let provider_failure = ref None in
+        let preparation_state = ref (fun () -> None) in
+        let on_prepare request =
+          try inspect_preparation ~selection:(!preparation_state ()) ~request with
+          | exn ->
+            provider_failure := Some exn;
+            raise exn
+        in
         let post_stream ~sw:_ ~inputs =
           match
             (* An explicitly selected auxiliary response does not consume the
@@ -221,235 +231,280 @@ let with_daemon
                 ; chatml_runtime_policy = runtime_policy
                 ; authoring_validation_host = validation_host
                 ; inference_policy =
-                    Agent_server_test_support.inference_policy
-                      ~default_model:"fixture-model"
-                      ~post_stream
+                    (if request_guidance
+                     then
+                       Agent_server_test_support.guidance_inference_policy
+                         ~on_prepare
+                         ~default_model:"fixture-model"
+                         ~post_stream
+                         ()
+                     else
+                       Agent_server_test_support.inference_policy
+                         ~default_model:"fixture-model"
+                         ~post_stream)
                 }
               ()
             |> protocol_ok
           in
-          Exn.protect
-            ~finally:(fun () ->
-              release_clocks ();
-              Agent_server.Daemon.shutdown daemon |> protocol_ok)
-            ~f:(fun () ->
-              List.iter
-                (Agent_session.Prompt_catalog.entries
-                   (Agent_server.Daemon.prompts daemon))
-                ~f:(fun entry ->
-                  match entry.availability with
-                  | Ready _ -> ()
-                  | Disabled -> failwith "composition prompt is disabled"
-                  | Unavailable diagnostics ->
+          let result =
+            Exn.protect
+              ~finally:(fun () ->
+                release_clocks ();
+                Agent_server.Daemon.shutdown daemon |> protocol_ok)
+              ~f:(fun () ->
+                List.iter
+                  (Agent_session.Prompt_catalog.entries
+                     (Agent_server.Daemon.prompts daemon))
+                  ~f:(fun entry ->
+                    match entry.availability with
+                    | Ready _ -> ()
+                    | Disabled -> failwith "composition prompt is disabled"
+                    | Unavailable diagnostics ->
+                      raise_s
+                        [%sexp
+                          (diagnostics
+                           : Agent_session.Prompt_revision_builder.Diagnostic.t list)]);
+                let client = connect ~sw ~env ~root daemon in
+                initialize client;
+                let session, _ = create_session ~start_immediately:true client in
+                let handle =
+                  H.attach
+                    ~sw
+                    ~clock:(Eio.Stdenv.clock env)
+                    ~connection:client
+                    ~session_id:session.id
+                    ~mode:Read_write
+                    ()
+                  |> protocol_ok
+                in
+                let entry =
+                  Agent_server.Session_registry.find
+                    (Agent_server.Daemon.registry daemon)
+                    session.id
+                  |> Option.value_exn
+                in
+                (preparation_state
+                 := fun () ->
+                      let state = A.state entry.actor |> protocol_ok in
+                      Option.map
+                        state.instruction_selection
+                        ~f:Agent_session.Instruction_selection.summary);
+                let submission =
+                  H.send_message
+                    handle
+                    { kind = Plain_text
+                    ; text = "Inspect the fixture reports."
+                    ; attachments = []
+                    }
+                  |> protocol_ok
+                in
+                let last_state = ref None in
+                let final =
+                  try
+                    Eio.Time.with_timeout_exn
+                      (Eio.Stdenv.clock env)
+                      completion_timeout
+                      (fun () ->
+                         let rec wait () =
+                           Option.iter !provider_failure ~f:raise;
+                           let state = A.state entry.actor |> protocol_ok in
+                           last_state := Some state;
+                           Option.iter state.failure ~f:(fun error ->
+                             raise_s [%sexp (error : Agent_protocol.Error.t)]);
+                           match state.active_operation with
+                           | None
+                             when !requests >= fst (request_counts ())
+                                  && List.is_empty
+                                       state.conversation.deferred_user_entries -> state
+                           | None
+                             when request_guidance
+                                  && List.is_empty
+                                       state.conversation.deferred_user_entries ->
+                             (match
+                                Agent_session.Durable_event_log.replay
+                                  entry.durable_events
+                                  ~after_sequence:0L
+                                  ~through_sequence:Int64.max_value
+                              with
+                              | Snapshot_required -> ()
+                              | Available events ->
+                                List.iter events ~f:(fun event ->
+                                  match event.Agent_protocol.Event.Durable.kind with
+                                  | Operation_failed ->
+                                    raise_s
+                                      [%sexp
+                                        "guidance fixture operation failed"
+                                      , (event.payload : Jsonaf.t)]
+                                  | _ -> ()));
+                             Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                             wait ()
+                           | _ ->
+                             Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                             wait ()
+                         in
+                         wait ())
+                  with
+                  | Eio.Time.Timeout ->
+                    let failures =
+                      match
+                        Agent_session.Durable_event_log.replay
+                          entry.durable_events
+                          ~after_sequence:0L
+                          ~through_sequence:Int64.max_value
+                      with
+                      | Snapshot_required -> []
+                      | Available events ->
+                        List.filter_map events ~f:(fun event ->
+                          match event.Agent_protocol.Event.Durable.kind with
+                          | Operation_failed -> Some event.payload
+                          | _ -> None)
+                    in
                     raise_s
                       [%sexp
-                        (diagnostics
-                         : Agent_session.Prompt_revision_builder.Diagnostic.t list)]);
-              let client = connect ~sw ~env ~root daemon in
-              initialize client;
-              let session, _ = create_session ~start_immediately:true client in
-              let handle =
-                H.attach
-                  ~sw
-                  ~clock:(Eio.Stdenv.clock env)
-                  ~connection:client
-                  ~session_id:session.id
-                  ~mode:Read_write
-                  ()
-                |> protocol_ok
-              in
-              let entry =
-                Agent_server.Session_registry.find
-                  (Agent_server.Daemon.registry daemon)
-                  session.id
-                |> Option.value_exn
-              in
-              let submission =
-                H.send_message
-                  handle
-                  { kind = Plain_text
-                  ; text = "Inspect the fixture reports."
-                  ; attachments = []
-                  }
-                |> protocol_ok
-              in
-              let last_state = ref None in
-              let final =
-                try
-                  Eio.Time.with_timeout_exn
-                    (Eio.Stdenv.clock env)
-                    completion_timeout
-                    (fun () ->
-                       let rec wait () =
-                         Option.iter !provider_failure ~f:raise;
-                         let state = A.state entry.actor |> protocol_ok in
-                         last_state := Some state;
-                         Option.iter state.failure ~f:(fun error ->
-                           raise_s [%sexp (error : Agent_protocol.Error.t)]);
-                         match state.active_operation with
-                         | None
-                           when !requests >= fst (request_counts ())
-                                && List.is_empty state.conversation.deferred_user_entries
-                           -> state
-                         | _ ->
-                           Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
-                           wait ()
-                       in
-                       wait ())
-                with
-                | Eio.Time.Timeout ->
-                  let failures =
-                    match
-                      Agent_session.Durable_event_log.replay
-                        entry.durable_events
-                        ~after_sequence:0L
-                        ~through_sequence:Int64.max_value
-                    with
-                    | Snapshot_required -> []
-                    | Available events ->
-                      List.filter_map events ~f:(fun event ->
-                        match event.Agent_protocol.Event.Durable.kind with
-                        | Operation_failed -> Some event.payload
-                        | _ -> None)
-                  in
-                  raise_s
-                    [%sexp
-                      "composition session did not finish"
-                    , (!requests : int)
-                    , (request_counts () : int * int)
-                    , (failures : Jsonaf.t list)
-                    , (Option.map !last_state ~f:(fun state ->
-                         ( state.Agent_session.Session_state.lifecycle
-                         , state.active_operation
-                         , List.length state.conversation.deferred_user_entries
-                         , List.map state.invocations ~f:(fun invocation ->
-                             let status =
-                               match invocation.Agent_protocol.Invocation.status with
-                               | Admitted -> "admitted"
-                               | Dispatching -> "dispatching"
-                               | Resolved _ -> "resolved"
-                               | Published _ -> "published"
-                             in
-                             let failure =
-                               match invocation.status with
-                               | Resolved (Fail error) | Published (Fail error) ->
-                                 Some (error.code, error.message)
-                               | Admitted | Dispatching | Resolved _ | Published _ -> None
-                             in
-                             ( invocation.context.provider_call_id
-                             , invocation.context.tool_name
-                             , status
-                             , failure )) ))
-                       : (Agent_session.Session_state.Lifecycle.t
-                         * Agent_protocol.Operation.t option
-                         * int
-                         * (string option * string * string * (string * string) option)
-                             list)
-                           option)]
-              in
-              let events =
-                match
-                  Agent_session.Durable_event_log.replay
-                    entry.durable_events
-                    ~after_sequence:0L
-                    ~through_sequence:Int64.max_value
-                with
-                | Available events -> events
-                | Snapshot_required -> failwith "lost operation completion evidence"
-              in
-              let operation_id =
-                match submission.operation_id with
-                | Some id -> id
-                | None ->
-                  (* Idle moderator work can defer this first user input. Its
-                     eventual user-turn admission is recorded durably. *)
-                  let starts =
-                    List.filter_map events ~f:(fun event ->
-                      match
-                        Agent_protocol.Event.Durable.Payload.of_json
-                          ~kind:event.kind
-                          event.payload
-                        |> protocol_ok
-                      with
-                      | Operation_started { kind = Turn User_submit; id; _ } -> Some id
-                      | _ -> None)
-                  in
-                  (match starts with
-                   | [ id ] -> id
-                   | _ -> failwith "expected one deferred user-turn admission")
-              in
-              assert (
-                List.exists final.conversation.canonical_history ~f:(fun entry ->
-                  Agent_protocol.History.Id.equal entry.id submission.history_id));
-              assert (
-                List.exists events ~f:(fun event ->
+                        "composition session did not finish"
+                      , (!requests : int)
+                      , (request_counts () : int * int)
+                      , (failures : Jsonaf.t list)
+                      , (Option.map !last_state ~f:(fun state ->
+                           ( state.Agent_session.Session_state.lifecycle
+                           , state.active_operation
+                           , List.length state.conversation.deferred_user_entries
+                           , List.map state.invocations ~f:(fun invocation ->
+                               let status =
+                                 match invocation.Agent_protocol.Invocation.status with
+                                 | Admitted -> "admitted"
+                                 | Dispatching -> "dispatching"
+                                 | Resolved _ -> "resolved"
+                                 | Published _ -> "published"
+                               in
+                               let failure =
+                                 match invocation.status with
+                                 | Resolved (Fail error) | Published (Fail error) ->
+                                   Some (error.code, error.message)
+                                 | Admitted | Dispatching | Resolved _ | Published _ ->
+                                   None
+                               in
+                               ( invocation.context.provider_call_id
+                               , invocation.context.tool_name
+                               , status
+                               , failure )) ))
+                         : (Agent_session.Session_state.Lifecycle.t
+                           * Agent_protocol.Operation.t option
+                           * int
+                           * (string option * string * string * (string * string) option)
+                               list)
+                             option)]
+                in
+                let events =
                   match
-                    Agent_protocol.Event.Durable.Payload.of_json
-                      ~kind:event.kind
-                      event.payload
-                    |> protocol_ok
+                    Agent_session.Durable_event_log.replay
+                      entry.durable_events
+                      ~after_sequence:0L
+                      ~through_sequence:Int64.max_value
                   with
-                  | Operation_completed operation ->
-                    Agent_protocol.Id.Operation.equal operation.id operation_id
-                  | _ -> false));
-              [%test_eq: int] (fst (request_counts ())) !requests;
-              [%test_eq: int]
-                1
-                (List.length
-                   (Agent_server.Session_registry.entries
-                      (Agent_server.Daemon.registry daemon)));
-              [%test_eq: int]
-                1
-                (List.length
-                   (Agent_store.Session_store.list_sessions
-                      (Agent_server.Daemon.store daemon)));
-              [%test_eq: bool] expect_moderator (Option.is_some final.moderator);
-              (match settle with
-               | None -> assert (List.is_empty final.jobs)
-               | Some _ -> ());
-              [%test_eq: int] expected_schedules (List.length final.schedules);
-              List.iter final.invocations ~f:(fun invocation ->
+                  | Available events -> events
+                  | Snapshot_required -> failwith "lost operation completion evidence"
+                in
+                let operation_id =
+                  match submission.operation_id with
+                  | Some id -> id
+                  | None ->
+                    (* Idle moderator work can defer this first user input. Its
+                     eventual user-turn admission is recorded durably. *)
+                    let starts =
+                      List.filter_map events ~f:(fun event ->
+                        match
+                          Agent_protocol.Event.Durable.Payload.of_json
+                            ~kind:event.kind
+                            event.payload
+                          |> protocol_ok
+                        with
+                        | Operation_started { kind = Turn User_submit; id; _ } -> Some id
+                        | _ -> None)
+                    in
+                    (match starts with
+                     | [ id ] -> id
+                     | _ -> failwith "expected one deferred user-turn admission")
+                in
                 assert (
-                  Agent_protocol.Id.Session.equal invocation.context.session_id session.id);
-                match invocation.context.origin with
-                | Model ->
-                  let output_id = Option.value_exn invocation.output_entry_id in
+                  List.exists final.conversation.canonical_history ~f:(fun entry ->
+                    Agent_protocol.History.Id.equal entry.id submission.history_id));
+                assert (
+                  List.exists events ~f:(fun event ->
+                    match
+                      Agent_protocol.Event.Durable.Payload.of_json
+                        ~kind:event.kind
+                        event.payload
+                      |> protocol_ok
+                    with
+                    | Operation_completed operation ->
+                      Agent_protocol.Id.Operation.equal operation.id operation_id
+                    | _ -> false));
+                [%test_eq: int] (fst (request_counts ())) !requests;
+                [%test_eq: int]
+                  1
+                  (List.length
+                     (Agent_server.Session_registry.entries
+                        (Agent_server.Daemon.registry daemon)));
+                [%test_eq: int]
+                  1
+                  (List.length
+                     (Agent_store.Session_store.list_sessions
+                        (Agent_server.Daemon.store daemon)));
+                [%test_eq: bool] expect_moderator (Option.is_some final.moderator);
+                (match settle with
+                 | None -> assert (List.is_empty final.jobs)
+                 | Some _ -> ());
+                [%test_eq: int] expected_schedules (List.length final.schedules);
+                List.iter final.invocations ~f:(fun invocation ->
                   assert (
-                    List.exists final.conversation.canonical_history ~f:(fun entry ->
-                      Agent_protocol.History.Id.equal entry.id output_id))
-                | Script ->
-                  assert (
-                    Option.is_some invocation.context.parent_invocation
-                    || (Option.is_some settle
-                        && Option.is_some invocation.context.parent_job))
-                | Moderator when expect_moderator ->
-                  let observation = Option.value_exn invocation.observation in
-                  let source =
-                    Agent_session.Runtime_builder.moderator_snapshot_observer
-                      final.moderator
-                    |> protocol_ok
-                    |> Option.value_exn
-                  in
-                  assert (I.equal_observer source observation.observer);
-                  assert (
-                    Option.is_some invocation.context.parent_invocation
-                    || Option.is_some invocation.parent_event)
-                | Moderator | Delegated_agent | External_adapter ->
-                  failwith "unexpected invocation origin");
-              let final =
-                Option.iter after_turn ~f:(fun after_turn -> after_turn env handle entry);
-                Option.iter after_turn_with_daemon ~f:(fun after_turn ->
-                  after_turn env daemon entry);
-                match settle with
-                | None -> final
-                | Some settle ->
-                  settle env entry;
-                  A.state entry.actor |> protocol_ok
-              in
-              [%test_eq: int] (snd (request_counts ())) !requests;
-              f final;
-              H.close handle;
-              Agent_client.Connection.close client))))
+                    Agent_protocol.Id.Session.equal
+                      invocation.context.session_id
+                      session.id);
+                  match invocation.context.origin with
+                  | Model ->
+                    let output_id = Option.value_exn invocation.output_entry_id in
+                    assert (
+                      List.exists final.conversation.canonical_history ~f:(fun entry ->
+                        Agent_protocol.History.Id.equal entry.id output_id))
+                  | Script ->
+                    assert (
+                      Option.is_some invocation.context.parent_invocation
+                      || (Option.is_some settle
+                          && Option.is_some invocation.context.parent_job))
+                  | Moderator when expect_moderator ->
+                    let observation = Option.value_exn invocation.observation in
+                    let source =
+                      Agent_session.Runtime_builder.moderator_snapshot_observer
+                        final.moderator
+                      |> protocol_ok
+                      |> Option.value_exn
+                    in
+                    assert (I.equal_observer source observation.observer);
+                    assert (
+                      Option.is_some invocation.context.parent_invocation
+                      || Option.is_some invocation.parent_event)
+                  | Moderator | Delegated_agent | External_adapter ->
+                    failwith "unexpected invocation origin");
+                let final =
+                  Option.iter after_turn ~f:(fun after_turn ->
+                    after_turn env handle entry);
+                  Option.iter after_turn_with_daemon ~f:(fun after_turn ->
+                    after_turn env daemon entry);
+                  match settle with
+                  | None -> final
+                  | Some settle ->
+                    settle env entry;
+                    A.state entry.actor |> protocol_ok
+                in
+                [%test_eq: int] (snd (request_counts ())) !requests;
+                f final;
+                H.close handle;
+                Agent_client.Connection.close client)
+          in
+          Option.iter after_shutdown ~f:(fun after_shutdown ->
+            after_shutdown ~sw ~env ~root ~configuration);
+          result)))
 ;;
 
 let model_invocation state id =

@@ -1,0 +1,26 @@
+(* Ordinary modules supply request data and pure policy. Actual Tool.call uses
+   the current admitted callback; importing either dependency grants nothing. *)
+type state = {schema:int; instructions:{inspected:bool; last_status:json}; review:{seen:bool}; order:string array}
+let initial_state = {schema = 1; instructions = {inspected = false; last_status = `Null};
+                     review = {seen = false}; order = []}
+
+let inspect = fun state ->
+  let* result = Tool.call("instructions_status", Instruction_requests.status()) in
+  match result with
+  | `Error(message) -> Task.fail(message)
+  | `Ok(status) ->
+      (* Complete means stored counts were inspected, not source permission or
+         active-file authorization. No Run action or root finish is staged. *)
+      let components : (json Lifecycle.component) array = [
+        {id = "instructions"; obligation = `Finished; action = `No_action},
+        {id = "review"; obligation = `Finished; action = `No_action}] in
+      (match Lifecycle.compose(components, fun left right -> false) with
+       | `Error(error) -> Task.fail("Instruction review policies conflict.")
+       | `Ok(plan) -> Task.pure({schema = state.schema;
+           instructions = {inspected = true; last_status = status}; review = {seen = true}; order = plan.order}))
+
+let on_event = fun ctx state event ->
+  if state.schema != 1 then Task.fail("Explicit instruction-review state migration required.")
+  else match event with
+    | `Turn_end -> inspect(state)
+    | _ -> Task.pure(state)

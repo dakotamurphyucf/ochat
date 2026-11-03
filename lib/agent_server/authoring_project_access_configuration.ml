@@ -90,8 +90,8 @@ let validate t ~project_sources =
       | Entry { name; environment } ->
         String.length name + Option.value_map environment ~default:0 ~f:String.length)
   in
-  if List.is_empty t.read_grants || List.is_empty t.selections
-  then Or_error.error_string "authoring access needs grants and selections"
+  if List.is_empty t.read_grants
+  then Or_error.error_string "authoring access needs explicit read grants"
   else (
     let roots = project_sources.external_roots in
     let valid_root root = List.mem roots root ~equal:String.equal in

@@ -30,3 +30,5 @@ let actor t =
 let transfer t ~is_current =
   Result.map (actor t) ~f:(fun _ -> create ~actor:t.original ~is_current)
 ;;
+
+let same_origin t other = phys_equal t.original other.original

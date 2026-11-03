@@ -19,6 +19,20 @@ type t
     ceiling: native borrows still supply the exact permitted selection. *)
 val current_native_services : unit -> (t, string) result
 
+(** Actual invoking session's instruction consumer. This overlay grants no tools,
+    source roots or actor authority; every call needs genuine native admission. *)
+val with_instruction_service : t -> Instruction_service.t -> t
+
+val instruction_service : t -> Instruction_service.t option
+
+(** Rebind eligible agent-conversation guidance to the existing actual native
+    invocation's checked borrow. Constructor contexts cannot lend their expired
+    initialization owner to a later child. Independent Model exclusions remain
+    sticky; unbound standalone contexts acquire no session port. *)
+val agent_context
+  :  Eio_unix.Stdenv.base Chat_response.Ctx.t
+  -> Eio_unix.Stdenv.base Chat_response.Ctx.t
+
 module Native_services_scope : sig
   type nonrec t =
     | Unbound

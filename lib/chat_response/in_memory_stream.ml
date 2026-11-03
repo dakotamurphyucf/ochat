@@ -233,6 +233,7 @@ type ctx =
   ; on_inference_completion : Inference_client.Completion.t -> unit
   ; on_inference_observation : Inference.Observation.t -> unit
   ; on_admitted_call : Admitted_call.t -> unit
+  ; agent_guidance : Agent_guidance.t option
   ; submission_guard : Inference_runtime.Submission_guard.t
   ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
   ; resolve_inference_assets : History_entry.t list -> Inference.Request.Asset.t list
@@ -302,6 +303,7 @@ type args =
   ; on_inference_completion : Inference_client.Completion.t -> unit
   ; on_inference_observation : Inference.Observation.t -> unit
   ; on_admitted_call : Admitted_call.t -> unit
+  ; agent_guidance : Agent_guidance.t option
   ; submission_guard : Inference_runtime.Submission_guard.t
   ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
   ; resolve_inference_assets : History_entry.t list -> Inference.Request.Asset.t list
@@ -2274,39 +2276,47 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
           |> Result.ok_or_failwith
         in
         let receipt =
-          Neutral_turn.run
-            ~submission_guard:c.submission_guard
-            c.inference_context
-            ~sw
-            ~identity:c.inference_identity
-            ~relation:c.transcript_relation
+          Agent_guidance.with_request
+            c.agent_guidance
             ~request
-            ~before_dispatch:c.before_inference_dispatch
-            ~on_attempt:(fun attempt ->
-              on_dispatch (Inference_runtime.Attempt.configuration attempt);
-              c.on_inference_attempt attempt;
-              c.transcript_scope <- Some (Inference_runtime.Attempt.scope attempt);
-              admitted_attempt := Some attempt)
-            ~on_event:(fun event ->
-              match Inference.Event.view event with
-              | Live event -> publish_inference_live c ~st:!st event
-              | Candidate_ready { item; payload; local_execution } ->
-                st
-                := accept_inference_candidate
-                     ~turn:turn_for_fork
-                     c
-                     ~hist
-                     ~st:!st
-                     ~sem
-                     ~attempt:!admitted_attempt
-                     ~item
-                     ~payload
-                     ~local_execution
-              | Terminal _ -> ())
-            ~on_observation:c.on_inference_observation
-            ~on_completion:c.on_inference_completion
-          |> Result.map_error ~f:(fun error ->
-            Sexp.to_string_hum (Neutral_turn.Error.sexp_of_t error))
+            ~submission_guard:c.submission_guard
+            ~limits:Transcript.Admission.default
+            (fun request ~guard ~reserved_input_tokens:_ ->
+               Neutral_turn.run
+                 ~submission_guard:guard
+                 c.inference_context
+                 ~sw
+                 ~identity:c.inference_identity
+                 ~relation:c.transcript_relation
+                 ~request
+                 ~before_dispatch:c.before_inference_dispatch
+                 ~on_attempt:(fun attempt ->
+                   on_dispatch (Inference_runtime.Attempt.configuration attempt);
+                   c.on_inference_attempt attempt;
+                   c.transcript_scope <- Some (Inference_runtime.Attempt.scope attempt);
+                   admitted_attempt := Some attempt)
+                 ~on_event:(fun event ->
+                   match Inference.Event.view event with
+                   | Live event -> publish_inference_live c ~st:!st event
+                   | Candidate_ready { item; payload; local_execution } ->
+                     st
+                     := accept_inference_candidate
+                          ~turn:turn_for_fork
+                          c
+                          ~hist
+                          ~st:!st
+                          ~sem
+                          ~attempt:!admitted_attempt
+                          ~item
+                          ~payload
+                          ~local_execution
+                   | Terminal _ -> ())
+                 ~on_observation:c.on_inference_observation
+                 ~on_completion:c.on_inference_completion
+               |> Result.map_error ~f:(fun error ->
+                 Sexp.to_string_hum (Neutral_turn.Error.sexp_of_t error))
+               |> Result.ok_or_failwith)
+          |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
           |> Result.ok_or_failwith
         in
         c, receipt
@@ -2411,6 +2421,7 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
     ; on_inference_completion = a.on_inference_completion
     ; on_inference_observation = a.on_inference_observation
     ; on_admitted_call = a.on_admitted_call
+    ; agent_guidance = a.agent_guidance
     ; submission_guard = a.submission_guard
     ; before_inference_dispatch = a.before_inference_dispatch
     ; resolve_inference_assets = a.resolve_inference_assets
@@ -2480,6 +2491,7 @@ let run_completion_stream_in_memory_entries
       ~inference_identity
       ~on_inference_attempt
       ~on_inference_completion
+      ?agent_guidance
       ?(submission_guard = Inference_runtime.Submission_guard.empty)
       ?(inference_relation = Transcript.Scope.Root)
       ?(on_inference_observation = fun _ -> ())
@@ -2597,6 +2609,7 @@ let run_completion_stream_in_memory_entries
     ; on_inference_completion
     ; on_inference_observation
     ; on_admitted_call
+    ; agent_guidance
     ; submission_guard
     ; before_inference_dispatch
     ; resolve_inference_assets

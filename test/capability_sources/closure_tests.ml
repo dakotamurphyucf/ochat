@@ -152,88 +152,93 @@ let source_identity ?(normalize_entry = false) revision =
 let%expect_test
     "real exported local closure prepares and restores without original source tree"
   =
-  with_workspace (fun env root parent ->
-    let selected = resource () in
-    let left = export selected parent "left" |> export_ok in
-    let right = export selected parent "right" |> export_ok in
-    assert (
-      Capture.Digest.equal (Export.Receipt.digest left) (Export.Receipt.digest right));
-    let entry = Sources.Resource.entry selected in
-    let left_tree = Eio.Path.(root / "left") in
-    let right_tree = Eio.Path.(root / "right") in
-    with_revision env root left_tree entry (function
-      | Ok _ -> failwith "sibling libraries prepared without an explicit external root"
-      | Error diagnostics ->
-        assert (
-          List.exists diagnostics ~f:(fun diagnostic ->
-            String.equal
-              diagnostic.Agent_session.Prompt_revision_builder.Diagnostic.code
-              "prompt.original_source_unavailable")));
-    let old, artifact_root =
+  List.iter [ "lifecycle"; "instruction-selection" ] ~f:(fun id ->
+    with_workspace (fun env root parent ->
+      let selected = resource ~id () in
+      let left = export selected parent "left" |> export_ok in
+      let right = export selected parent "right" |> export_ok in
+      assert (
+        Capture.Digest.equal (Export.Receipt.digest left) (Export.Receipt.digest right));
+      let entry = Sources.Resource.entry selected in
+      let left_tree = Eio.Path.(root / "left") in
+      let right_tree = Eio.Path.(root / "right") in
+      with_revision env root left_tree entry (function
+        | Ok _ -> failwith "sibling libraries prepared without an explicit external root"
+        | Error diagnostics ->
+          assert (
+            List.exists diagnostics ~f:(fun diagnostic ->
+              String.equal
+                diagnostic.Agent_session.Prompt_revision_builder.Diagnostic.code
+                "prompt.original_source_unavailable")));
+      let old, artifact_root =
+        with_revision
+          ~project_sources:(project_sources left_tree)
+          env
+          root
+          left_tree
+          entry
+          require_ready
+      in
+      let expected = source_identity old in
+      assert (not (List.is_empty expected));
       with_revision
-        ~project_sources:(project_sources left_tree)
+        ~project_sources:(project_sources right_tree)
         env
         root
-        left_tree
+        right_tree
         entry
-        require_ready
-    in
-    let expected = source_identity old in
-    assert (not (List.is_empty expected));
-    with_revision
-      ~project_sources:(project_sources right_tree)
-      env
-      root
-      right_tree
-      entry
-      (fun outcome ->
-         let revision, _ = require_ready outcome in
-         (* Independent prompt registration owns a distinct entry namespace.
+        (fun outcome ->
+           let revision, _ = require_ready outcome in
+           (* Independent prompt registration owns a distinct entry namespace.
             Compare entry bytes/path and full package IDs across export locations;
             exact original IDs are still required by the deletion/restore check. *)
-         [%test_eq: (string * string * string) list]
-           (source_identity ~normalize_entry:true revision)
-           (source_identity ~normalize_entry:true old));
-    let required =
-      Sources.Resource.members selected
-      |> List.filter_map ~f:(fun member ->
-        let name = Source.Portable_path.to_string (Sources.Member.path member) in
-        if
-          String.is_suffix name ~suffix:".chatml"
-          || String.is_suffix name ~suffix:".chatmli"
-          || String.equal (Filename.basename name) "chatml.project.json"
-        then Some (Sources.Member.path member)
-        else None)
-    in
-    Docs_project_bundle.check_with_project_sources
-      ~project_sources:(project_sources right_tree)
-      ~env
-      ~home_parent:root
-      ~bundle:right_tree
-      ~entry
-      ~required;
-    Eio.Path.rmtree left_tree;
-    Eio.Path.rmtree right_tree;
-    let artifacts =
-      Agent_store.Prompt_artifact_store.open_existing ~env ~root:artifact_root
-      |> function
-      | Ok value -> value
-      | Error error -> raise_s [%sexp (error : Agent_store.Store_error.t)]
-    in
-    let reloaded =
-      Agent_session.Prompt_revision_builder.restore
-        ~artifact_store:artifacts
-        (Revision.definition old)
-        (Revision.id old)
-      |> function
-      | Ok value -> value
-      | Error errors ->
-        raise_s [%sexp (errors : Agent_session.Prompt_revision_builder.Diagnostic.t list)]
-    in
-    [%test_eq: (string * string * string) list] (source_identity reloaded) expected;
-    print_endline
-      "two fresh exports: same package identities and entry bytes; every required member \
-       enforced; captured restore survives deletion");
+           [%test_eq: (string * string * string) list]
+             (source_identity ~normalize_entry:true revision)
+             (source_identity ~normalize_entry:true old));
+      let required =
+        Sources.Resource.members selected
+        |> List.filter_map ~f:(fun member ->
+          let name = Source.Portable_path.to_string (Sources.Member.path member) in
+          if
+            String.is_suffix name ~suffix:".chatml"
+            || String.is_suffix name ~suffix:".chatmli"
+            || String.equal (Filename.basename name) "chatml.project.json"
+          then Some (Sources.Member.path member)
+          else None)
+      in
+      Docs_project_bundle.check_with_project_sources
+        ~project_sources:(project_sources right_tree)
+        ~env
+        ~home_parent:root
+        ~bundle:right_tree
+        ~entry
+        ~required;
+      Eio.Path.rmtree left_tree;
+      Eio.Path.rmtree right_tree;
+      let artifacts =
+        Agent_store.Prompt_artifact_store.open_existing ~env ~root:artifact_root
+        |> function
+        | Ok value -> value
+        | Error error -> raise_s [%sexp (error : Agent_store.Store_error.t)]
+      in
+      let reloaded =
+        Agent_session.Prompt_revision_builder.restore
+          ~artifact_store:artifacts
+          (Revision.definition old)
+          (Revision.id old)
+        |> function
+        | Ok value -> value
+        | Error errors ->
+          raise_s
+            [%sexp (errors : Agent_session.Prompt_revision_builder.Diagnostic.t list)]
+      in
+      [%test_eq: (string * string * string) list] (source_identity reloaded) expected;
+      print_endline
+        "two fresh exports: same package identities and entry bytes; every required \
+         member enforced; captured restore survives deletion"));
   [%expect
-    {| two fresh exports: same package identities and entry bytes; every required member enforced; captured restore survives deletion |}]
+    {|
+    two fresh exports: same package identities and entry bytes; every required member enforced; captured restore survives deletion
+    two fresh exports: same package identities and entry bytes; every required member enforced; captured restore survives deletion
+    |}]
 ;;

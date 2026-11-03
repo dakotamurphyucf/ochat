@@ -20,6 +20,7 @@ let replace json changes =
 
 let validate (state : Session_state.t) ~terminal ~recurrence ~limits ~max_payload_length =
   let open Result.Let_syntax in
+  let%bind () = Instruction_clear_capacity.validate state ~limits ~max_payload_length in
   let recurrence =
     Option.bind recurrence ~f:Recurrence_control_capacity.projected_catalog
   in

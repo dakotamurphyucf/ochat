@@ -4,6 +4,11 @@ open Support
 let%expect_test "installed discovery derives source identities and real requirements" =
   Eio_main.run (fun _ ->
     let resource = resource () in
+    (* Adding an independent installed closure preserves this exact existing
+       resource identity, including all original member bytes. *)
+    [%test_eq: string]
+      (Chatml_source.Digest.to_hex (Sources.Resource.digest resource))
+      "161326edc7e919448f86e26325fb08f5ea2503d332494c96cfe038092a277426";
     [%test_eq: string] (Sources.Id.to_string (Sources.Resource.id resource)) "lifecycle";
     let pure =
       Sources.Resource.member
@@ -49,4 +54,33 @@ let%expect_test "installed discovery derives source identities and real requirem
     | Ok _ -> failwith "uninstalled resource substituted");
   [%expect
     {| lifecycle: exact installed bytes, five decoded projects, moderator-only adapter |}]
+;;
+
+let%expect_test "installed instruction helper closure reuses canonical pure libraries" =
+  Eio_main.run (fun _ ->
+    let selected = resource ~id:"instruction-selection" () in
+    [%test_eq: int] 11 (List.length (Sources.Resource.members selected));
+    [%test_eq: int] 3 (List.length (Sources.Resource.projects selected));
+    let helper =
+      Sources.Resource.member
+        selected
+        (path "examples/libraries/instruction-requests/src/instruction_requests.chatmli")
+      |> source_ok
+    in
+    [%test_eq: string]
+      (Sources.Member.contents helper)
+      [%blob
+        "../../docs-src/examples/libraries/instruction-requests/src/instruction_requests.chatmli"];
+    let lifecycle_path = path "examples/libraries/lifecycle/src/lifecycle.chatml" in
+    let original = Sources.Resource.member (resource ()) lifecycle_path |> source_ok in
+    let shared = Sources.Resource.member selected lifecycle_path |> source_ok in
+    assert (
+      Chatml_source.Digest.equal
+        (Sources.Member.digest original)
+        (Sources.Member.digest shared));
+    print_endline
+      "instruction-selection: exact helper, three projects, shared canonical Lifecycle \
+       bytes");
+  [%expect
+    {| instruction-selection: exact helper, three projects, shared canonical Lifecycle bytes |}]
 ;;

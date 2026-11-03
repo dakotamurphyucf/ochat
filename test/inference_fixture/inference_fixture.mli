@@ -25,6 +25,16 @@ val create_with_observer
   -> post_stream:post_stream
   -> t
 
+(** Explicitly opts into the actual pure OpenAI input translator and final
+    submission guard. Default fixtures preserve history-only DTO input and reject
+    request guidance. Synthetic outputs remain reconstructed. *)
+val create_with_request_guidance
+  :  on_prepare:(Inference.Request.t -> unit)
+  -> namespace:string
+  -> default_model:string
+  -> post_stream:post_stream
+  -> t
+
 val capture_config
   :  t
   -> Chat_response.Config.t

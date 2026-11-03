@@ -18,6 +18,21 @@
  (action
   (with-stdout-to %{targets}
    (run %{exe:embed_contracts.exe}
+    lib/agent_server/authoring_instruction_sources.ml %{dep:../agent_server/authoring_instruction_sources.ml}
+    lib/agent_session/instruction_source_port.ml %{dep:../agent_session/instruction_source_port.ml}
+    lib/agent_session/instruction_source_request.ml %{dep:../agent_session/instruction_source_request.ml}
+    lib/agent_session/instruction_native_admission.ml %{dep:../agent_session/instruction_native_admission.ml}
+    lib/agent_session/instruction_native_request.ml %{dep:../agent_session/instruction_native_request.ml}
+    lib/agent_session/instruction_native_tool.ml %{dep:../agent_session/instruction_native_tool.ml}
+    lib/agent_session/instruction_command_admission.ml %{dep:../agent_session/instruction_command_admission.ml}
+    lib/agent_session/instruction_service.ml %{dep:../agent_session/instruction_service.ml}
+    lib/chat_response/agent_guidance.ml %{dep:../chat_response/agent_guidance.ml}
+    lib/agent_session/instruction_guidance_text.ml %{dep:../agent_session/instruction_guidance_text.ml}
+    lib/chat_response/in_memory_stream.ml %{dep:../chat_response/in_memory_stream.ml}
+    lib/context_compaction/compactor.ml %{dep:../context_compaction/compactor.ml}
+    lib/agent_session/instruction_clear_capacity.ml %{dep:../agent_session/instruction_clear_capacity.ml}
+    lib/agent_session/session_transition.ml %{dep:../agent_session/session_transition.ml}
+    lib/agent_session/session_terminal_journal.ml %{dep:../agent_session/session_terminal_journal.ml}
     lib/agent_protocol/model_spawn_request.ml %{dep:../agent_protocol/model_spawn_request.ml}
     lib/chat_response/ctx.ml %{dep:../chat_response/ctx.ml}
     lib/chat_response/driver.ml %{dep:../chat_response/driver.ml}

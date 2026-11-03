@@ -12,6 +12,11 @@ type t =
   | Agent_stop
   | Authoring_validation
   | Authoring_context
+  | Instructions_refresh
+  | Instructions_read
+  | Instructions_activate
+  | Instructions_deactivate
+  | Instructions_status
 [@@deriving enumerate]
 
 let name = function
@@ -24,6 +29,11 @@ let name = function
   | Agent_stop -> Managed_stop_tool.name
   | Authoring_validation -> Authoring_validation_tool.name
   | Authoring_context -> Authoring_context_tool.name
+  | Instructions_refresh -> Instruction_native_admission.Effect.name Refresh
+  | Instructions_read -> Instruction_native_admission.Effect.name Read
+  | Instructions_activate -> Instruction_native_admission.Effect.name Activate
+  | Instructions_deactivate -> Instruction_native_admission.Effect.name Deactivate
+  | Instructions_status -> Instruction_native_admission.Effect.name Status
 ;;
 
 let names = List.map all ~f:name
@@ -57,6 +67,12 @@ let registration ~env ~one_off_policy ~authoring_validation_host kind =
   let present value = Ok (Some value) in
   let unavailable message = P.Error.create Invalid_state ~message ~retryable:false () in
   match kind, one_off_policy with
+  | Instructions_refresh, _ -> Instruction_native_tool.registration Refresh |> present
+  | Instructions_read, _ -> Instruction_native_tool.registration Read |> present
+  | Instructions_activate, _ -> Instruction_native_tool.registration Activate |> present
+  | Instructions_deactivate, _ ->
+    Instruction_native_tool.registration Deactivate |> present
+  | Instructions_status, _ -> Instruction_native_tool.registration Status |> present
   | ( ( Run_chatml
       | Agent_create
       | Agent_status
