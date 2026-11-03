@@ -3,13 +3,14 @@ open Agent_server_test_support
 open Fixtures
 module P = Agent_protocol
 module Sources = Capability_sources
+module Recovery = Instruction_example_recovery
 
 let source_ok result =
   Result.map_error result ~f:Sources.Error.message |> Result.ok_or_failwith
 ;;
 
 let%expect_test
-    "installed instruction helper and Lifecycle compose in a real native callback"
+    "installed instruction helper and Lifecycle resume through context and failure"
   =
   let inventory =
     Sources.installed ~limits:Sources.Limits.default ~checkpoint:ignore |> source_ok
@@ -32,6 +33,7 @@ let%expect_test
          ~pattern:"(path \"./agent.chatmd\")"
          ~with_:"(path \"./examples/learning/instruction-selection/agent.chatmd\")"
   in
+  let saved = ref None in
   with_daemon
     ~sources:(("server.sexp", configuration) :: sources)
     ~config_file:"server.sexp"
@@ -41,7 +43,12 @@ let%expect_test
     ~initial_requests:1
     ~expected_requests:1
     ~calls:[]
-    ~after_turn:(fun _ _ entry ->
+    ~inspect_request:(fun _ inputs ->
+      assert (
+        String.is_substring
+          (Instruction_runtime_tests.wire_text inputs)
+          ~substring:"# Composed lifecycle decisions"))
+    ~after_turn:(fun env handle entry ->
       let state =
         Agent_session.Session_actor.state entry.Agent_server.Session_registry.actor
         |> protocol_ok
@@ -83,11 +90,24 @@ let%expect_test
           String.equal invocation.P.Invocation.context.tool_name "instructions_status")
       in
       [%test_eq: int] 1 (List.length status_calls);
-      assert (Option.is_none state.instruction_selection))
+      assert (Option.is_none state.instruction_selection);
+      assert (
+        List.exists state.moderator_executions ~f:(fun receipt ->
+          match receipt.P.Moderator_execution.context.phase, receipt.status with
+          | Session_start, Completed _ -> true
+          | _ -> false));
+      H.stop handle ~mode:Graceful |> protocol_ok |> ignore;
+      unload_idle_runtime env entry.runtime;
+      assert (not (Agent_server.Runtime_owner.is_loaded entry.runtime)))
+    ~after_turn_with_daemon:(fun _ daemon entry ->
+      saved := Some (Recovery.capture daemon (A.state entry.actor |> protocol_ok)))
+    ~after_shutdown:(fun ~sw ~env ~root ~configuration ->
+      Recovery.exercise (Option.value_exn !saved) ~sources ~sw ~env ~root ~configuration)
     (fun _ -> ());
   print_endline
-    "installed ordinary helper + Lifecycle: real provider turn and native status; two \
-     checkpointed components; no activation";
+    "installed helper + Lifecycle: native status and builtin guidance; deleted-source \
+     physical resume; real compaction; provider failure preserves components; fresh turn \
+     recovers";
   [%expect
-    {| installed ordinary helper + Lifecycle: real provider turn and native status; two checkpointed components; no activation |}]
+    {| installed helper + Lifecycle: native status and builtin guidance; deleted-source physical resume; real compaction; provider failure preserves components; fresh turn recovers |}]
 ;;

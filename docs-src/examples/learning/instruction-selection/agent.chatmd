@@ -1,4 +1,5 @@
 <developer>
+<doc src="builtin:lifecycle"/>
 Use explicitly admitted instruction roots only. Discovery and reading do not
 activate guidance. Read an exact descriptor, then request explicit activation
 with its capture ID, the current selection revision and a new idempotency key.

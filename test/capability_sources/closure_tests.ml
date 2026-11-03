@@ -222,7 +222,10 @@ let%expect_test
         | Error error -> raise_s [%sexp (error : Agent_store.Store_error.t)]
       in
       let reloaded =
+        (* The restoring test host selects the same finite content policy as
+           its daemon. Captured builtin docs do not supply their own permission. *)
         Agent_session.Prompt_revision_builder.restore
+          ?content_limits:Daemon.default_options.content_limits
           ~artifact_store:artifacts
           (Revision.definition old)
           (Revision.id old)
