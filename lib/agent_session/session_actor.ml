@@ -1,5 +1,13 @@
 open! Core
 
+module Recurrence_planning_read = struct
+  type t =
+    { entries : Recurrence_view.t list
+    ; planning : Recurrence_planning_status.t
+    }
+  [@@deriving sexp_of]
+end
+
 module Runtime_retirement = struct
   type outcome =
     ((unit, Agent_protocol.Error.t) result, exn * Stdlib.Printexc.raw_backtrace) result
@@ -604,6 +612,13 @@ type _ request =
       Agent_protocol.Principal.t * Agent_protocol.Session_organization.Request.t
       -> Agent_protocol.Session.t request
   | Set_recurrence_controller : Recurrence_controller.t -> unit request
+  | Set_recurrence_planning_host : Recurrence_planning_host.t -> unit request
+  | Recurrence_due_ids : Agent_protocol.Id.Recurrence.t list request
+  | Begin_recurrence_due :
+      Agent_protocol.Id.Recurrence.t
+      -> Recurrence_runtime.preparation option request
+  | Finish_recurrence_due : Recurrence_runtime.prepared -> unit request
+  | Release_recurrence_due : Recurrence_runtime.preparation -> unit request
   | Apply_recurrence_command :
       Operator_authorization.t
       * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
@@ -613,6 +628,10 @@ type _ request =
       Operator_authorization.t
       * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
       -> Recurrence_view.t list request
+  | Read_recurrence_planning :
+      Operator_authorization.t
+      * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+      -> Recurrence_planning_read.t request
   | Apply_goal_command :
       Operator_authorization.t
       * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
@@ -998,6 +1017,7 @@ type t =
   { sw : Eio.Switch.t
   ; sleep : float -> unit
   ; mailbox : packed Mailbox.t
+  ; finished : unit Eio.Promise.t
   ; persistence : persistence
   ; services : services
   ; subscriber_mutex : Eio.Mutex.t
@@ -1010,6 +1030,7 @@ type t =
   ; mutable organization_admission : Session_organization_admission.t option
   ; mutable configuration_policy : Configuration_policy.t option
   ; mutable recurrence_controller : Recurrence_controller.t option
+  ; recurrence_runtime : Recurrence_runtime.t
   ; configuration_update_owner : Configuration_update.Owner.t
   ; configuration_capture : Configuration_capture.t
   ; mutable operation_worker : Operation_worker.t option
@@ -1296,6 +1317,7 @@ let install_committed_transition ?run_preparation t (transition : Session_transi
    | None, (Some _ | None) -> ());
   t.command_audit <- None;
   t.state <- transition.state;
+  Recurrence_runtime.retain_committed t.recurrence_runtime t.state;
   t.run_authorities
   <- Run_authorities.retain_current
        t.run_authorities
@@ -12212,6 +12234,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Seal_inference_owner _
   | Finish_inference_owner _
   | Close_run_preparation _
+  | Release_recurrence_due _
   | Run_start_receipt _
   | Complete_run_constructor_model_job _
   | Interrupt_run_constructor_job _
@@ -12374,6 +12397,11 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Update_organization _
   | Apply_goal_command _
   | Set_recurrence_controller _
+  | Set_recurrence_planning_host _
+  | Recurrence_due_ids
+  | Begin_recurrence_due _
+  | Finish_recurrence_due _
+  | Read_recurrence_planning _
   | Apply_recurrence_command _
   | Read_recurrences _
   | Update_metadata _
@@ -13053,6 +13081,84 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       let open Result.Let_syntax in
       let%bind controller = require_recurrence_controller t in
       Recurrence_command_admission.read t.state ~controller ~actor ~authorize
+    | Read_recurrence_planning (actor, authorize) ->
+      let open Result.Let_syntax in
+      let%bind () = Recurrence_command_admission.check_read actor ~authorize t.state in
+      let%bind controller = require_recurrence_controller t in
+      let%bind planning =
+        Recurrence_runtime.status t.recurrence_runtime ~state:t.state ~controller
+      in
+      (* Status observation may yield. The existing metadata reader repeats the
+         original read policy and genuine Current checks before disclosure. *)
+      let%map entries =
+        Recurrence_command_admission.read t.state ~controller ~actor ~authorize
+      in
+      Recurrence_planning_read.{ entries; planning }
+    | Set_recurrence_planning_host host ->
+      let open Result.Let_syntax in
+      let%bind (_ : Recurrence_controller.t) = require_recurrence_controller t in
+      Recurrence_runtime.set_host t.recurrence_runtime host
+    | Recurrence_due_ids ->
+      if runtime_admission_open t then Ok (Recurrence_runtime.ids t.state) else Ok []
+    | Begin_recurrence_due recurrence_id ->
+      let open Result.Let_syntax in
+      if not (runtime_admission_open t)
+      then Error (error Conflict "recurrence runtime admission is closed")
+      else (
+        let%bind controller = require_recurrence_controller t in
+        let%bind () = reconcile_recurrences_internal t in
+        let%bind snapshot =
+          Recurrence_runtime.snapshot
+            t.recurrence_runtime
+            ~wall:(t.services.now ())
+            ~monotonic:(t.services.monotonic_now ())
+        in
+        Recurrence_runtime.begin_due
+          t.recurrence_runtime
+          ~state:t.state
+          ~controller
+          ~recurrence_id
+          ~snapshot)
+    | Finish_recurrence_due prepared ->
+      let open Result.Let_syntax in
+      if not (runtime_admission_open t)
+      then Error (error Conflict "recurrence runtime admission is closed")
+      else (
+        let%bind controller = require_recurrence_controller t in
+        let%bind validation =
+          Recurrence_runtime.validate
+            t.recurrence_runtime
+            prepared
+            ~state:t.state
+            ~controller
+        in
+        let%bind candidate =
+          match Recurrence_runtime.delta validation with
+          | None -> Ok None
+          | Some delta ->
+            prepare_transition t ~delta ~payloads:[] |> Result.map ~f:Option.some
+        in
+        let%bind () =
+          Recurrence_runtime.check_current t.recurrence_runtime validation ~state:t.state
+        in
+        let%bind () =
+          if runtime_admission_open t
+          then Ok ()
+          else Error (error Conflict "recurrence runtime admission closed before commit")
+        in
+        match candidate with
+        | None ->
+          Recurrence_runtime.install_phase t.recurrence_runtime validation ~state:t.state;
+          Ok ()
+        | Some candidate ->
+          let%bind () = persist_transition t candidate in
+          install_committed_transition t candidate;
+          Recurrence_runtime.install_phase t.recurrence_runtime validation ~state:t.state;
+          publish_committed_transition t candidate;
+          Ok ())
+    | Release_recurrence_due preparation ->
+      Recurrence_runtime.release t.recurrence_runtime preparation;
+      Ok ()
     | Apply_recurrence_command (actor, authorize, request) ->
       let open Result.Let_syntax in
       let%bind () = Recurrence_command_admission.check_write actor ~authorize t.state in
@@ -13080,11 +13186,31 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         | None -> Ok ()
         | Some delta ->
           let%bind candidate = prepare_transition t ~delta ~payloads:[] in
+          let previous = t.state in
+          let%bind adoption =
+            if Recurrence_runtime.needs_adoption ~previous ~current:candidate.state
+            then
+              Recurrence_runtime.snapshot
+                t.recurrence_runtime
+                ~wall:(t.services.now ())
+                ~monotonic:(t.services.monotonic_now ())
+              |> Result.map ~f:Option.some
+            else Ok None
+          in
           let%bind () =
             Recurrence_command_admission.check_write actor ~authorize t.state
           in
           let%bind () = Recurrence_command_admission.check_current prepared in
-          install t candidate
+          let%bind () = persist_transition t candidate in
+          install_committed_transition t candidate;
+          Option.iter adoption ~f:(fun snapshot ->
+            Recurrence_runtime.adopt_control
+              t.recurrence_runtime
+              ~previous
+              ~current:t.state
+              ~snapshot);
+          publish_committed_transition t candidate;
+          Ok ()
       in
       prepared.receipt
     | Read_goals (actor, authorize) ->
@@ -13658,10 +13784,12 @@ let create_with_owner_lease_duration
   (match Staged_notifications.validate_limits services.notification_limits with
    | Ok () -> ()
    | Error error -> invalid_arg error.message);
+  let finished, finish = Eio.Promise.create () in
   let t =
     { sw
     ; sleep = (fun seconds -> Eio.Time.sleep clock seconds)
     ; mailbox = Mailbox.create ~capacity:mailbox_capacity
+    ; finished
     ; persistence
     ; services
     ; subscriber_mutex = Eio.Mutex.create ()
@@ -13671,6 +13799,7 @@ let create_with_owner_lease_duration
     ; organization_admission = None
     ; configuration_policy = None
     ; recurrence_controller = None
+    ; recurrence_runtime = Recurrence_runtime.create ~origin:(services.monotonic_now ())
     ; configuration_update_owner = Configuration_update.Owner.create ()
     ; configuration_capture = Configuration_capture.create ()
     ; operation_worker
@@ -13721,7 +13850,8 @@ let create_with_owner_lease_duration
      operations acquire their own budgets and delegated authority; inheriting
      this caller's lexical ChatML frame would poison them after creation ends. *)
   Chatml_execution.without_ambient_context (fun () ->
-    Eio.Fiber.fork ~sw (fun () -> run t));
+    Eio.Fiber.fork ~sw (fun () ->
+      Exn.protect ~f:(fun () -> run t) ~finally:(fun () -> Eio.Promise.resolve finish ())));
   Option.iter (owner_attachment t) ~f:(fun attachment ->
     Option.iter attachment.owner_lease ~f:(schedule_owner_lease t));
   t
@@ -14667,3 +14797,68 @@ let recurrence_command t ~actor ~authorize ~request =
 ;;
 
 let read_recurrences t ~actor ~authorize = call t (Read_recurrences (actor, authorize))
+
+let read_recurrence_planning t ~actor ~authorize =
+  call t (Read_recurrence_planning (actor, authorize))
+;;
+
+let set_recurrence_planning_host t host = call t (Set_recurrence_planning_host host)
+
+(* Only recurrence acquisition/cleanup mask caller cancellation. Every sweep
+   request observes owner exit, since the scheduler may outlive that actor.
+   [Fiber.first] cancels and joins the losing waiter; termination grants no ACK. *)
+let recurrence_call t ?(priority = Mailbox.Normal) request =
+  let unavailable () =
+    Error (error Server_shutting_down "recurrence actor has terminated")
+  in
+  match Eio.Promise.peek t.finished with
+  | Some () -> unavailable ()
+  | None ->
+    Eio.Fiber.first
+      (fun () -> call t ~priority request)
+      (fun () ->
+         Eio.Promise.await t.finished;
+         unavailable ())
+;;
+
+let sweep_recurrences t =
+  let open Result.Let_syntax in
+  let%bind ids = recurrence_call t Recurrence_due_ids in
+  List.fold ids ~init:(Ok ()) ~f:(fun previous id ->
+    let outcome =
+      let%bind acquired =
+        Eio.Cancel.protect (fun () -> recurrence_call t (Begin_recurrence_due id))
+      in
+      match acquired with
+      | None -> Ok ()
+      | Some preparation ->
+        let release () =
+          Eio.Cancel.protect (fun () ->
+            recurrence_call t ~priority:Priority (Release_recurrence_due preparation))
+        in
+        let outcome =
+          match
+            (fun () ->
+               Eio.Fiber.check ();
+               let%bind prepared = Recurrence_runtime.prepare preparation in
+               recurrence_call t (Finish_recurrence_due prepared))
+              ()
+          with
+          | result -> result
+          | exception exn ->
+            let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+            (* Cleanup cannot replace the original planner/cancellation failure.
+               Neither a rejected nor a failed release implies any commit ACK. *)
+            (try ignore (release () : (unit, Agent_protocol.Error.t) result) with
+             | _ -> ());
+            Exn.raise_with_original_backtrace exn backtrace
+        in
+        let%bind () = release () in
+        outcome
+    in
+    (* Each retained ID is attempted once: one unavailable/capacity-saturated
+       definition cannot starve its unrelated controller definitions. *)
+    match previous with
+    | Error _ -> previous
+    | Ok () -> outcome)
+;;

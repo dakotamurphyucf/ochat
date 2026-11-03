@@ -1,7 +1,8 @@
 open! Core
 
-(** Daemon-owned timer service for durable one-shot ChatML schedules. Session
-    actors remain authoritative for every claim and terminal transition. *)
+(** Sole daemon timer service for one-shot schedules and recurrence due sweeps.
+    Session actors own every durable transition; recurrence alarms are metadata,
+    never inserted into the legacy one-shot Schedule list. *)
 
 type t
 
@@ -35,6 +36,11 @@ val start_controlled
 
 val start : sw:Eio.Switch.t -> clock:_ Eio.Time.Mono.t -> registry:Session_registry.t -> t
 val close : t -> unit
+
+(** [close] also cancels in-flight bounded recurrence preparations. Join these
+    before releasing their configured timezone root or shutting down actors used
+    by protected token cleanup. Legacy runtime callbacks keep existing grace. *)
+val await_recurrences_idle : t -> unit
 
 (** After [close], wait for already-dispatched deliveries and moderator callbacks.
     No new entry is admitted. The caller must bound this cancellable wait; an

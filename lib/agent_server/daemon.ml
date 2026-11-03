@@ -71,6 +71,7 @@ type t =
   ; job_scheduler : Job_scheduler.t
   ; permission_scheduler : Permission_scheduler.t
   ; schedule_scheduler : Schedule_scheduler.t
+  ; recurrence_automation : Recurrence_automation_host.t option
   ; maintenance : Maintenance.t
   ; config_watcher : Config_watcher.t
   ; factory : Session_factory.t
@@ -889,6 +890,12 @@ let server_health t request =
     }
 ;;
 
+let recurrence_zone_status t =
+  match t.recurrence_automation with
+  | None -> Recurrence_automation_host.Zone_status.Not_configured
+  | Some host -> Recurrence_automation_host.zone_status host
+;;
+
 let health t ~include_details =
   let services =
     { health_env = t.env
@@ -1273,6 +1280,22 @@ let compose
            ~source
            ~runtime_policy_revision:(identity "ochat.daemon.child-runtime.v1"))
   in
+  let%bind recurrence_automation =
+    match options.startup_mode, config.server.recurrence_automation with
+    | Operator_only, _ | (Execute | On_demand), None -> Ok None
+    | (Execute | On_demand), Some configuration ->
+      Recurrence_automation_host.open_owned
+        configuration
+        ~server_id:(Agent_store.Session_store.server_id store)
+        ~sw
+        ~fs:(Eio.Stdenv.fs env)
+        ~now:(fun () -> timestamp env)
+        ~checkpoint:Eio.Fiber.check
+      |> Result.map ~f:Option.some
+  in
+  Option.iter
+    recurrence_automation
+    ~f:(Startup_cleanup.adopt_recurrence_host_exn startup_cleanup);
   let factory =
     Session_factory.create
       ~sw
@@ -1298,6 +1321,8 @@ let compose
       ~script_preparation:options.script_preparation
       ~content_limits:options.content_limits
       ~child_sources
+      ~recurrence_planning_host:
+        (Option.map recurrence_automation ~f:Recurrence_automation_host.planning_host)
       ~durability:(durability config.server)
       ~limits:factory_limits
   in
@@ -1754,6 +1779,7 @@ let compose
       ~clock:(Eio.Stdenv.mono_clock env)
       ~registry
   in
+  Startup_cleanup.adopt_schedule_scheduler_exn startup_cleanup schedule_scheduler;
   let maintenance =
     Maintenance.start_controlled
       ~collection_policy:(if execute then Load_retained else Selected_only)
@@ -2002,6 +2028,7 @@ let compose
     ; job_scheduler
     ; permission_scheduler
     ; schedule_scheduler
+    ; recurrence_automation
     ; maintenance
     ; config_watcher
     ; project_sources
@@ -2240,6 +2267,7 @@ let shutdown_sessions t =
      event: if the grace expires, runtime retirement still cancels it normally.
      Registry teardown itself is cancellation-protected and must always run. *)
   Eio.Cancel.protect (fun () ->
+    Schedule_scheduler.await_recurrences_idle t.schedule_scheduler;
     (match
        Eio.Time.with_timeout (Eio.Stdenv.clock t.env) t.shutdown_grace_seconds (fun () ->
          Eio.Fiber.both
@@ -2252,6 +2280,7 @@ let shutdown_sessions t =
 ;;
 
 let shutdown_remaining t =
+  Option.iter t.recurrence_automation ~f:Recurrence_automation_host.close;
   Start_scheduler.close t.start_scheduler;
   Permission_scheduler.close t.permission_scheduler;
   Schedule_scheduler.close t.schedule_scheduler;
@@ -2266,6 +2295,7 @@ let shutdown_remaining t =
   in
   let%bind () = Job_scheduler.close_and_wait t.job_scheduler in
   shutdown_sessions t;
+  Option.iter t.recurrence_automation ~f:Recurrence_automation_host.close_and_wait;
   let%bind () =
     match t.authoring with
     | None -> Ok ()

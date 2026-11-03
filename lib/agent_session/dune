@@ -10,6 +10,8 @@
   workspace_ownership
   runtime_paths
   recurrence_zone_loader
+  recurrence_planning_status
+  recurrence_planning_host
   recurrence_identity
   recurrence_cursor
   recurrence_nominal
@@ -36,6 +38,7 @@
   recurrence_source
   recurrence_reconciliation
   recurrence_recovery
+  recurrence_runtime
   workspace_lease
   workspace_cleanup
   prompt_definition
@@ -268,7 +271,7 @@
   goal_accounting_document
   goal_accounts
   inference_ledger)
- (private_modules recurrence_frontier_records recurrence_frontier_codec recurrence_frontier_transition agent_authority_scope goal_accounting_state goal_accounting_stored instruction_selection_capacity instruction_selection_record workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles
+ (private_modules recurrence_runtime recurrence_frontier_records recurrence_frontier_codec recurrence_frontier_transition agent_authority_scope goal_accounting_state goal_accounting_stored instruction_selection_capacity instruction_selection_record workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles
   prompt_project_baseline_record prompt_project_baseline_document native_tool_policy)
  (libraries ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript
   core

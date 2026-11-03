@@ -4,11 +4,11 @@ Status: accepted engineering design with implemented timing, bounded pure due
 planning, and durable controller metadata. The `ochat.recurrence_rules` library implements validated timing rules,
 finite zone models, clock arithmetic and resumable cursors. The session actor owns
 validated captured definitions, keyed control receipts and lifecycle retirement.
-Publishing due plans through the live scheduler, execution admission, target
-dispatch and public user controls remain integration work.
-The retained-root timezone loader supplies bounded acquisition; host root policy
-and schedule integration remain explicit owners. Passing the pure timing suite
-does not qualify those features.
+The configured daemon host publishes bounded due plans through the existing live
+scheduler and actor persistence owner. Execution admission, target dispatch and
+public user controls remain integration work. The retained-root timezone loader
+supplies bounded acquisition under explicit host root policy. Passing the pure
+timing suite does not qualify host scheduling or target execution.
 
 A recurrence belongs to a durable controller session. Finishing an occurrence or
 disconnecting a client leaves future occurrences enabled. Explicitly stopping the
@@ -493,6 +493,57 @@ acknowledgement nor a surviving child directory proves an external effect safe
 to repeat. All retries retain actual current authority checks.
 
 ## Host and completion requirements
+
+A local daemon can configure bounded planning authority through
+`server.recurrence_automation`. For example:
+
+```lisp
+(recurrence_automation
+ ((principal_id pri_recurrence_planner)
+  (controllers (ses_controller))
+  (expires_at 2050-01-01T00:00:00Z)
+  (zone_directory
+   ((directory /srv/ochat/zoneinfo)
+    (source tzdata-2025b)
+    (from 2025-01-01T00:00:00Z)
+    (until 2050-01-01T00:00:00Z)))))
+```
+
+The dedicated principal has planning permission for only the exact listed
+controller IDs on this server. Its original proof belongs to the current daemon
+instance and expires with the configured deadline or host closure. Stored creator
+IDs, prior receipts and copied configuration do not restore a proof. These grants
+do not authorize target visibility, child creation, Run admission or execution.
+Those owners must obtain their own current policy authorization. Server policy
+changes use the existing server-configuration restart boundary.
+
+Omitting this configuration leaves recurrence metadata and stop/pause controls
+usable; an authorized actor read reports `Not_configured`. Omitting the optional
+zone directory, or failing to open a declared directory, leaves interval planning
+usable and calendar search unavailable. The embedding administrator can inspect
+the finite `Daemon.recurrence_zone_status`; no filesystem path is disclosed by
+that projection. Malformed present configuration rejects before opening roots.
+The explicit directory is opened component by component without following
+symlinks. Only canonical regular zone files are supported, including when a
+timezone database normally provides an internal symlink alias. Reads use bounded
+exact bytes, declared finite UTC coverage and provenance; there is no ambient
+timezone fallback or last-offset extrapolation.
+
+The existing scheduler owns the sole timer. It starts at most one bounded
+recurrence sweep per registered actor independently of legacy callbacks. The
+actor acquires original host authorization and a genuine current lifecycle
+observation before releasing bounded zone IO and pure planning outside its
+mailbox. A serialized finish rechecks that original proof and exact source,
+definition, control, cursor and frontier before committing through the existing
+persistence owner. Successful ACK installs state and its process-local phase
+before publication. A failed save installs neither. A genuinely new enable
+captures its adoption clock pair before persistence and installs it only after
+its control ACK; retained receipts and
+already-enabled controls never reset it. Recovery starts with no old monotonic
+phase and reconciles the retained wall deadline at the first authorized pair.
+Daemon closure revokes planning, cancels and joins sweeps, then closes borrowed
+timezone resources. Termination of the actor while protected acquisition or
+cleanup waits is an unavailable owner, never an acknowledgement or retry permit.
 
 A live daemon may continue after client disconnect. Embedded execution requires
 its controller to remain selected/open in the host; store reopening does not

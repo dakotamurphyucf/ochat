@@ -6,6 +6,8 @@
   developer_startup_limits
   developer_startup_tests
   config
+  recurrence_automation_configuration
+  recurrence_automation_host
   config_parser
   embedded_local_template
   project_source_configuration
@@ -263,6 +265,7 @@
   ochat.agent_client
   ochat.agent_store
   ochat.agent_session
+  ochat.recurrence_rules
   source
   chatmd)
  (inline_tests

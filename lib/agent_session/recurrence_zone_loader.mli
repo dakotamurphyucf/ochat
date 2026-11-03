@@ -39,3 +39,19 @@ val load
   -> until:Time_ns.Alternate_sexp.t
   -> checkpoint:(unit -> unit)
   -> (Recurrence_rules.Zone.t, Error.t) Result.t
+
+(** Borrow an existing admitted Local directory owner for one joined bounded
+    read. The caller keeps it live through this call and owns its release. Name,
+    source and coverage validation, exact byte cap/hash, finite decoding and final
+    cancellation checks match [load]. No new retained root is acquired; every
+    per-read native resource closes before pure decoding. Useful when the host
+    itself acquired its configured directory through Local.open_subroot's actual
+    componentwise no-follow traversal. No Eio capability is reconstructed. *)
+val load_local
+  :  Chatml_local_source.t
+  -> source:string
+  -> name:string
+  -> from:Time_ns.Alternate_sexp.t
+  -> until:Time_ns.Alternate_sexp.t
+  -> checkpoint:(unit -> unit)
+  -> (Recurrence_rules.Zone.t, Error.t) Result.t

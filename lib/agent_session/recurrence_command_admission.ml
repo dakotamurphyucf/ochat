@@ -30,6 +30,10 @@ let check actor ~scope ~authorize state =
 
 let check_write actor ~authorize state = check actor ~scope:Send_messages ~authorize state
 
+let check_read actor ~authorize state =
+  check actor ~scope:View_session_transcript ~authorize state
+;;
+
 let check_current t =
   if Option.for_all t.current ~f:Recurrence_controller.is_current
   then Ok ()
@@ -123,7 +127,7 @@ let prepare
 
 let read (state : Session_state.t) ~controller ~actor ~authorize =
   let open Result.Let_syntax in
-  let%bind () = check actor ~scope:View_session_transcript ~authorize state in
+  let%bind () = check_read actor ~authorize state in
   let%bind current = Recurrence_controller.observe controller state in
   let%bind entries =
     List.map
@@ -141,7 +145,7 @@ let read (state : Session_state.t) ~controller ~actor ~authorize =
         Recurrence_view.of_entry entry ~effective_control:control)
     |> Result.all
   in
-  let%bind () = check actor ~scope:View_session_transcript ~authorize state in
+  let%bind () = check_read actor ~authorize state in
   if Recurrence_controller.is_current current
   then Ok entries
   else
