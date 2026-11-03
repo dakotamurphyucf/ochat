@@ -369,6 +369,8 @@
     guide/chatml-authoring-children.md %{dep:../../docs-src/guide/chatml-authoring-children.md}
     guide/chatml-authoring-background.md %{dep:../../docs-src/guide/chatml-authoring-background.md}
     guide/chatml-authoring-runs.md %{dep:../../docs-src/guide/chatml-authoring-runs.md}
+    guide/chatml-installed-libraries.md %{dep:../../docs-src/guide/chatml-installed-libraries.md}
+    design/composable-agent-instructions-and-packages.md %{dep:../../docs-src/design/composable-agent-instructions-and-packages.md}
     guide/chatml-ocaml-differences.md %{dep:../../docs-src/guide/chatml-ocaml-differences.md}
     guide/chatml-match-semantics.md %{dep:../../docs-src/guide/chatml-match-semantics.md}
     guide/chatml-moderator-runtime.md %{dep:../../docs-src/guide/chatml-moderator-runtime.md}

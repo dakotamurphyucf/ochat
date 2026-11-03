@@ -14,7 +14,7 @@ type phase =
 type t =
   { owner : Owner.t
   ; principal_id : P.Id.Principal.t
-  ; request : P.Run_start.t
+  ; request : Run_admission_request.t
   ; request_sha256 : string
   ; authorize : Session_state.t -> (unit, P.Error.t) result
   ; mutable phase : phase
@@ -34,11 +34,11 @@ let digest_valid digest =
     | _ -> false)
 ;;
 
-let create
+let create_request
       ~owner
       ~(state : Session_state.t)
       ~principal_id
-      ~(request : P.Run_start.t)
+      ~(request : Run_admission_request.t)
       ~request_sha256
       ~authorize
   =
@@ -60,6 +60,16 @@ let create
       ; authorize
       ; phase = Open state.counters.revision
       }
+;;
+
+let create ~owner ~state ~principal_id ~request ~request_sha256 ~authorize =
+  create_request
+    ~owner
+    ~state
+    ~principal_id
+    ~request:(Run_admission_request.of_writer request)
+    ~request_sha256
+    ~authorize
 ;;
 
 let check_basis t ~owner ~(state : Session_state.t) =

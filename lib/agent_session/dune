@@ -88,6 +88,7 @@
   run_scope
   run_action_service
   run_record_shapes
+  goal_document
   run_intent
   run_state
   run_transition
@@ -100,6 +101,8 @@
   run_job_deliveries
   run_job_capacity
   run_job_completion
+  run_admission_request
+  run_command_authorization
   run_admission
   run_preparation
   run_admission_outcome
@@ -224,6 +227,7 @@
   ochat.chatml_local_roots
   ochat.chatml_git_host
   ochat.agent_protocol
+  ochat.operator_authorization
   ochat.agent_store
   chatmd
   chat_response

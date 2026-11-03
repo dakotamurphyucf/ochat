@@ -1,0 +1,28 @@
+(* Pure author policy, not runtime authority. Explicit component state remains
+   in the moderator's typed fields. No source import stages any host action. *)
+type 'wake action = [ `No_action | `Continue | `Wait('wake) ]
+type obligation = [ `Active | `Finished ]
+type 'wake component = {id:string; obligation:obligation; action:'wake action}
+type 'wake plan = {order:string array; active:string array; action:'wake action}
+type error =
+  [ `Too_many_components
+  | `Invalid_id(string)
+  | `Duplicate_id(string)
+  | `Finished_with_action(string)
+  | `Conflict({first:string; second:string})
+  | `Active_components(string array)
+  | `Pending_action
+  ]
+type 'a checked = [ `Ok('a) | `Error(error) ]
+
+(* At most 64 components, IDs [a-z][a-z0-9_-]* of 1..64 bytes. Input order is
+   execution-policy order, never sorted. Empty input is a neutral empty plan.
+   same_wait must be pure, total author policy; it supplies no host wake proof.
+   No_action is neutral; identical actions coalesce. Finished requires No_action.
+   Rejection returns no partial plan. Inputs are never mutated. *)
+val compose : fun(('wake component) array, fun('wake, 'wake) -> bool) -> ('wake plan) checked
+
+(* A separate explicit root decision, allowed only without active peers or a
+   pending action. Return the supplied decision unchanged; never invent success.
+   Transparent plans are author data, not evidence accepted by the Run owner. *)
+val root_finish : fun('wake plan, 'decision) -> 'decision checked

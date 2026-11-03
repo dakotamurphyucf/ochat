@@ -36,6 +36,7 @@ end
 module Server : S
 module Session : S
 module Run : S
+module Goal : S
 
 (* Developer run ownership, distinct from conversation Run and Session.
    An ID is a comparison coordinate, never authority by possession. *)

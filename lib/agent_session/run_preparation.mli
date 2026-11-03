@@ -23,10 +23,22 @@ val create
   -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
   -> (t, Agent_protocol.Error.t) result
 
+(** Internal normalized request under the same private actor owner. Headless
+    data alone cannot create custody for that owner. The actor requires actual
+    command authorization before issuing this preparation. *)
+val create_request
+  :  owner:Owner.t
+  -> state:Session_state.t
+  -> principal_id:Agent_protocol.Id.Principal.t
+  -> request:Run_admission_request.t
+  -> request_sha256:string
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> (t, Agent_protocol.Error.t) result
+
 (** Exact resource identity; not equality of durable session IDs. *)
 val belongs_to : t -> owner:Owner.t -> bool
 
-val request : t -> Agent_protocol.Run_start.t
+val request : t -> Run_admission_request.t
 val principal_id : t -> Agent_protocol.Id.Principal.t
 val request_sha256 : t -> string
 

@@ -1,0 +1,9 @@
+(library
+ (name lifecycle_helpers_tests)
+ (libraries core eio eio_main chatml_project_build_tests chatml_catalog agent_protocol agent_session chat_response chatml chatml_source chatml_project chatml_project_build chatml_linked_program chatml_host_runtime chatml_execution document_schema source)
+ (inline_tests)
+ (preprocessor_deps
+  (glob_files_rec ../../docs-src/examples/libraries/lifecycle/*)
+  (glob_files_rec ../../docs-src/examples/libraries/lifecycle-run/*)
+  (glob_files_rec ../../docs-src/examples/learning/lifecycle-composition/*))
+ (preprocess (pps ppx_jane ppx_expect ppx_blob)))
