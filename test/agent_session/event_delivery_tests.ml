@@ -1012,7 +1012,8 @@ let%expect_test "event-owned native calls retain lineage and expire with their c
                 in
                 assert (
                   Result.is_error
-                    (execute ~invocation:bad (fun ~dispatched:_ -> assert false)));
+                    (execute ~invocation:bad (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                       assert false)));
                 M.handle_next_event_entries_transactional
                   manager
                   ~session_id:"fixture"
@@ -1063,7 +1064,8 @@ let%expect_test "event-owned native calls retain lineage and expire with their c
          let execute, child = Option.value_exn !escaped in
          assert (
            Result.is_error
-             (execute ~invocation:(child ()) (fun ~dispatched:_ -> assert false)));
+             (execute ~invocation:(child ()) (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                assert false)));
          let state = A.state actor |> protocol_ok in
          let native = List.hd_exn state.invocations in
          assert (

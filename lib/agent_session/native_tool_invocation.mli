@@ -1,10 +1,18 @@
 open Core
 
-(** Scoped host admission/outcome persistence, without unrelated foreground
-    capabilities. The host controls its lifetime and cancellation ownership. *)
+(** Explicit executor-issued borrow, qualified by the exact dispatched invocation.
+    Returned proofs must remain bound to the original authentication and physical
+    execution lifetime. This is not a source grant. *)
+type agent_actor_borrow =
+  invocation:Agent_protocol.Invocation.t
+  -> (Operator_authorization.t option, Agent_protocol.Error.t) result
+
+(** Scoped host admission/outcome persistence. The explicit callback borrow is
+    associated with this executor's actual dispatched invocation. *)
 type executor =
   invocation:Agent_protocol.Invocation.t
   -> (dispatched:Agent_protocol.Invocation.t
+      -> borrow_agent_actor:agent_actor_borrow
       -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
   -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
 
@@ -23,6 +31,7 @@ type owned_executor =
 type moderator_executor =
   invocation:Agent_protocol.Invocation.t
   -> (dispatched:Agent_protocol.Invocation.t
+      -> borrow_agent_actor:agent_actor_borrow
       -> commit:
            (resolved:Agent_protocol.Invocation.t
             -> snapshot:Session.Moderator_state.Identity_snapshot.t
@@ -158,6 +167,15 @@ val borrowed_invocation : borrowed -> Agent_protocol.Invocation.t
     extend the owning scope's limits/lifetime. *)
 val borrowed_execution_context : borrowed -> Chatml_execution.context
 
+(** Host-only borrow from this exact native callback's actual actor executor.
+    Returns a narrowed proof retaining original authentication currentness and
+    the physical owner AND native callback epochs. Legacy/unbound execution returns None; foreign
+    or expired borrows reject without unrelated foreground fallback. This is not
+    a source grant, and retaining the object does not extend its lending owner. *)
+val borrowed_agent_actor
+  :  borrowed
+  -> (Operator_authorization.t option, Agent_protocol.Error.t) result
+
 (** Actual selected tool bindings verified by the dispatch boundary, never a
     registration closure's broader registry. Fails before capability validation
     or after scope expiration. Reading this registry does not skip current policy. *)
@@ -235,6 +253,7 @@ val with_managed_scope
 val with_dispatched_scope
   :  execute:executor
   -> ?moderator_execute:moderator_executor
+  -> ?borrow_agent_actor:agent_actor_borrow
   -> selected:Chat_response.Tool_capability.t
   -> invocation:Agent_protocol.Invocation.t
   -> (unit -> ('a, Agent_protocol.Error.t) result)

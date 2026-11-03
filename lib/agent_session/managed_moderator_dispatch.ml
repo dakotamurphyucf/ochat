@@ -45,11 +45,12 @@ let create
       Error "moderator dispatch check failed"
   in
   let result =
-    execute ~invocation (fun ~dispatched ~commit ->
+    execute ~invocation (fun ~dispatched ~borrow_agent_actor ~commit ->
       let authoring_scope =
         Authoring_reference_scope.capture ~invocation_id:dispatched.I.context.id
       in
       N.with_dispatched_scope
+        ~borrow_agent_actor
         ~execute:native_execute
         ~moderator_execute:execute
         ~selected

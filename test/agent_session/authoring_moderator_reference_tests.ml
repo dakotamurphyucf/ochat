@@ -76,71 +76,76 @@ let%expect_test
           in
           let run () =
             try
-              caps.with_moderator_invocation ~invocation (fun ~dispatched ~commit ->
-                N.with_dispatched_scope
-                  ~execute:caps.with_invocation
-                  ~selected
-                  ~invocation:dispatched
-                  (fun () ->
-                     let borrowed = N.borrow () |> protocol_ok in
-                     let response =
-                       Agent_session.Authoring_services.reference
-                         services
-                         borrowed
-                         request
-                       |> Result.map_error ~f:(fun error -> error.I.message)
-                       |> Result.ok_or_failwith
-                     in
-                     assert (
-                       not
-                         (List.Assoc.mem
-                            (match response with
-                             | `Object fields -> fields
-                             | _ -> assert false)
-                            "error"
-                            ~equal:String.equal));
-                     let before = A.state actor |> protocol_ok in
-                     assert (Option.is_none before.moderator);
-                     assert (
-                       List.for_all before.invocations ~f:(fun invocation ->
-                         Option.is_none invocation.I.authoring_reference));
-                     let outcome =
-                       match mode with
-                       | `Complete | `Reject_commit -> I.Complete response
-                       | `Replaced -> Complete (`String "disclosed replacement")
-                       | `Fail ->
-                         Fail
-                           { code = "fixture.failed"
-                           ; message = "handler failed"
-                           ; retryable = false
-                           ; details = `Null
-                           }
-                       | `Raise -> raise Exit
-                     in
-                     let resolved =
-                       I.resolve
-                         dispatched
-                         ~session_id:input.session_id
-                         ~generation:input.session_generation
-                         outcome
-                       |> protocol_ok
-                     in
-                     (* Dispatchers retain this same annotated value after commit. *)
-                     let scope =
-                       Scope.capture ~invocation_id:dispatched.context.id
-                       |> Option.value_exn
-                     in
-                     let resolved = Scope.annotate scope resolved |> protocol_ok in
-                     let open Result.Let_syntax in
-                     let%map () = commit ~resolved ~snapshot in
-                     saved := Some resolved))
+              caps.with_moderator_invocation
+                ~invocation
+                (fun ~dispatched ~borrow_agent_actor ~commit ->
+                   N.with_dispatched_scope
+                     ~borrow_agent_actor
+                     ~execute:caps.with_invocation
+                     ~selected
+                     ~invocation:dispatched
+                     (fun () ->
+                        let borrowed = N.borrow () |> protocol_ok in
+                        let response =
+                          Agent_session.Authoring_services.reference
+                            services
+                            borrowed
+                            request
+                          |> Result.map_error ~f:(fun error -> error.I.message)
+                          |> Result.ok_or_failwith
+                        in
+                        assert (
+                          not
+                            (List.Assoc.mem
+                               (match response with
+                                | `Object fields -> fields
+                                | _ -> assert false)
+                               "error"
+                               ~equal:String.equal));
+                        let before = A.state actor |> protocol_ok in
+                        assert (Option.is_none before.moderator);
+                        assert (
+                          List.for_all before.invocations ~f:(fun invocation ->
+                            Option.is_none invocation.I.authoring_reference));
+                        let outcome =
+                          match mode with
+                          | `Complete | `Reject_commit -> I.Complete response
+                          | `Replaced -> Complete (`String "disclosed replacement")
+                          | `Fail ->
+                            Fail
+                              { code = "fixture.failed"
+                              ; message = "handler failed"
+                              ; retryable = false
+                              ; details = `Null
+                              }
+                          | `Raise -> raise Exit
+                        in
+                        let resolved =
+                          I.resolve
+                            dispatched
+                            ~session_id:input.session_id
+                            ~generation:input.session_generation
+                            outcome
+                          |> protocol_ok
+                        in
+                        (* Dispatchers retain this same annotated value after commit. *)
+                        let scope =
+                          Scope.capture ~invocation_id:dispatched.context.id
+                          |> Option.value_exn
+                        in
+                        let resolved = Scope.annotate scope resolved |> protocol_ok in
+                        let open Result.Let_syntax in
+                        let%map () = commit ~resolved ~snapshot in
+                        saved := Some resolved))
             with
             | Exit -> Error (handoff_error "fixture exception")
           in
           let result = ref None in
-          caps.with_invocation ~invocation:parent (fun ~dispatched:_ ->
-            result := Some (run ());
-            Ok (I.Complete `Null))
+          caps.with_invocation
+            ~invocation:parent
+            (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+               result := Some (run ());
+               Ok (I.Complete `Null))
           |> protocol_ok
           |> ignore;
           let result = Option.value_exn !result in

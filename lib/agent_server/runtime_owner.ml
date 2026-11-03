@@ -20,6 +20,10 @@ type builder =
   | For_runs of
       (Agent_session.Run_preparation.t option
        -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
+  | For_authenticated_runs of
+      (original_actor:Operator_authorization.t option
+       -> Agent_session.Run_preparation.t option
+       -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
 
 type t =
   { actor : Agent_session.Session_actor.t
@@ -73,16 +77,29 @@ let create_with_run_unload ~before_unload ~actor ~initial ~build =
     ~build:(For_runs build)
 ;;
 
+let create_with_authenticated_run_unload ~before_unload ~actor ~initial ~build =
+  create_internal
+    ~before_unload:(Some before_unload)
+    ~actor
+    ~initial
+    ~build:(For_authenticated_runs build)
+;;
+
 let is_loaded t = Eio.Mutex.use_ro t.mutex (fun () -> Option.is_some t.runtime)
 
-let install ?run_preparation t (runtime : Agent_session.Runtime_builder.t) =
+let install ?run_preparation ?original_actor t (runtime : Agent_session.Runtime_builder.t)
+  =
   let open Result.Let_syntax in
   let%bind () =
     match runtime.automatic_turn_policy with
     | None -> Ok ()
     | Some policy ->
       (match run_preparation with
-       | None -> Agent_session.Session_actor.enable_automatic_turn_budget t.actor policy
+       | None ->
+         Agent_session.Session_actor.enable_automatic_turn_budget
+           ?actor:original_actor
+           t.actor
+           policy
        | Some preparation ->
          Agent_session.Session_actor.enable_run_constructor_turn_budget
            t.actor
@@ -92,7 +109,10 @@ let install ?run_preparation t (runtime : Agent_session.Runtime_builder.t) =
   let%bind _ =
     match run_preparation with
     | None ->
-      Agent_session.Session_actor.change_moderator t.actor (runtime.moderator_snapshot ())
+      Agent_session.Session_actor.change_moderator
+        ?actor:original_actor
+        t.actor
+        (runtime.moderator_snapshot ())
     | Some preparation ->
       Agent_session.Session_actor.checkpoint_run_moderator
         t.actor
@@ -101,6 +121,7 @@ let install ?run_preparation t (runtime : Agent_session.Runtime_builder.t) =
   in
   let%map () =
     Agent_session.Session_actor.set_runtime_worker
+      ?actor:original_actor
       t.actor
       ~worker:(Some runtime.worker)
       ~inference:(Some (Agent_session.Runtime_builder.inference_execution runtime))
@@ -131,7 +152,25 @@ let with_owner_lock t ~protect f =
   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
-let ensure_loaded_locked ?run_preparation t =
+let check_original_actor = function
+  | Some actor when not (Operator_authorization.is_current actor) ->
+    Error
+      (Agent_protocol.Error.create
+         Permission_denied
+         ~message:"runtime initialization authentication is no longer current"
+         ~retryable:false
+         ())
+  | Some _ | None -> Ok ()
+;;
+
+let ensure_loaded_locked ?run_preparation ?original_actor t =
+  let open Result.Let_syntax in
+  let original_actor =
+    Option.first_some
+      original_actor
+      (Option.bind run_preparation ~f:Agent_session.Run_preparation.original_actor)
+  in
+  let%bind () = check_original_actor original_actor in
   let check (runtime : Agent_session.Runtime_builder.t) =
     match runtime.check_execution with
     | None -> Ok ()
@@ -156,10 +195,12 @@ let ensure_loaded_locked ?run_preparation t =
   | false, Some runtime -> check runtime
   | false, None ->
     let built =
-      match t.build, run_preparation with
-      | Ordinary build, None -> build ()
-      | For_runs build, preparation -> build preparation
-      | Ordinary _, Some _ ->
+      match t.build, run_preparation, original_actor with
+      | Ordinary build, None, None -> build ()
+      | For_runs build, preparation, None -> build preparation
+      | For_authenticated_runs build, preparation, original_actor ->
+        build ~original_actor preparation
+      | Ordinary _, Some _, None | (Ordinary _ | For_runs _), _, Some _ ->
         Error
           (Agent_protocol.Error.create
              Invalid_state
@@ -170,7 +211,10 @@ let ensure_loaded_locked ?run_preparation t =
     (match built with
      | Error _ as failure -> failure
      | Ok runtime ->
-       (match install ?run_preparation t runtime with
+       (match
+          Result.bind (check_original_actor original_actor) ~f:(fun () ->
+            install ?run_preparation ?original_actor t runtime)
+        with
         | Ok () -> check runtime
         | Error _ as failure ->
           runtime.close ();
@@ -178,6 +222,10 @@ let ensure_loaded_locked ?run_preparation t =
 ;;
 
 let ensure_loaded t = with_owner_lock t ~protect:true (fun () -> ensure_loaded_locked t)
+
+let ensure_loaded_authenticated t ~actor =
+  with_owner_lock t ~protect:true (fun () -> ensure_loaded_locked ~original_actor:actor t)
+;;
 
 let background_busy () =
   Agent_protocol.Error.create

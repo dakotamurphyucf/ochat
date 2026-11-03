@@ -6,6 +6,12 @@ type create_session =
   -> Agent_protocol.Session.Create_request.t
   -> (Session_registry.entry, Agent_protocol.Error.t) result
 
+type create_session_authenticated =
+  command_audit:Document_schema.Document.t option
+  -> actor:Operator_authorization.t
+  -> Agent_protocol.Session.Create_request.t
+  -> (Session_registry.entry, Agent_protocol.Error.t) result
+
 type t =
   { sw : Eio.Switch.t
   ; env : Eio_unix.Stdenv.base
@@ -40,6 +46,7 @@ type t =
   ; server_health : Agent_protocol.Health.Request.t -> Agent_protocol.Health.Response.t
   ; cancel_job : actor:Agent_session.Session_actor.t -> job:Agent_protocol.Job.t -> unit
   ; create_session : create_session
+  ; create_session_authenticated : create_session_authenticated option
   ; prepare_session_start :
       Session_registry.entry -> (unit, Agent_protocol.Error.t) result
   ; workspace_retained :
@@ -73,6 +80,7 @@ let create
       ~server_health
       ~cancel_job
       ~create_session
+      ~create_session_authenticated
       ~seed_factory
       ~seed_recovery_limits
       ~prepare_session_start
@@ -188,6 +196,7 @@ let create
   ; server_health
   ; cancel_job
   ; create_session
+  ; create_session_authenticated
   ; prepare_session_start
   ; workspace_retained
   ; prepare_administration
@@ -945,8 +954,17 @@ let attach_entry
         }
 ;;
 
-let handle_session_create t context command_audit request =
+let check_original_agent_actor = function
+  | None -> Ok ()
+  | Some actor ->
+    if Operator_authorization.is_current actor
+    then Ok ()
+    else Error (error Permission_denied "agent execution authentication expired")
+;;
+
+let handle_session_create t ~agent_actor context command_audit request =
   let open Result.Let_syntax in
+  let%bind () = check_original_agent_actor agent_actor in
   let%bind () =
     match
       request.Agent_protocol.Session.Create_request.requested_mode, request.subscribe
@@ -957,10 +975,15 @@ let handle_session_create t context command_audit request =
     | Some _, _ -> Ok ()
   in
   let%bind entry =
-    t.create_session
-      ~command_audit
-      ~principal:(Connection_context.principal context)
-      request
+    match agent_actor, t.create_session_authenticated with
+    | Some actor, Some create -> create ~command_audit ~actor request
+    | None, _ ->
+      t.create_session
+        ~command_audit
+        ~principal:(Connection_context.principal context)
+        request
+    | Some _, None ->
+      Error (error Invalid_state "authenticated session initialization is unavailable")
   in
   let%bind state = Agent_session.Session_actor.state entry.actor in
   let%bind () =
@@ -1513,7 +1536,8 @@ let with_writer t ?prepared_writer context ~session_id ~attachment_id f =
   f entry
 ;;
 
-let rec handle_session_start t ?prepared_writer context command_audit request =
+let rec handle_session_start t ~agent_actor ?prepared_writer context command_audit request
+  =
   with_writer
     t
     ?prepared_writer
@@ -1522,6 +1546,7 @@ let rec handle_session_start t ?prepared_writer context command_audit request =
     ~attachment_id:request.attachment_id
     (fun entry ->
        let open Result.Let_syntax in
+       let%bind () = check_original_agent_actor agent_actor in
        let%bind () = t.prepare_session_start entry in
        let%bind state = Agent_session.Session_actor.state entry.actor in
        let%bind () =
@@ -1536,23 +1561,30 @@ let rec handle_session_start t ?prepared_writer context command_audit request =
            (Agent_protocol.Method_result.Session_start
               (session_mutation (Agent_session.Session_state.summary state)))
        | _, None ->
-         let%bind () = Runtime_owner.ensure_loaded entry.runtime in
+         let%bind () =
+           match agent_actor with
+           | None -> Runtime_owner.ensure_loaded entry.runtime
+           | Some actor -> Runtime_owner.ensure_loaded_authenticated entry.runtime ~actor
+         in
          actor_command
            command_audit
            ~plain:(fun () ->
              Agent_session.Session_actor.start
+               ?actor:agent_actor
                ?expected_parent_stop_epoch:state.parent_stop_epoch
                entry.actor
                ~attachment_id:request.attachment_id)
            ~audited:(fun command_audit ->
              Agent_session.Session_actor.start_with_command_audit
+               ?actor:agent_actor
                ?expected_parent_stop_epoch:state.parent_stop_epoch
                entry.actor
                ~command_audit
                ~attachment_id:request.attachment_id)
          |> Result.map ~f:(fun session ->
            Agent_protocol.Method_result.Session_start (session_mutation session))
-       | _, Some capacity -> handle_capacity_start t entry capacity command_audit request)
+       | _, Some capacity ->
+         handle_capacity_start t ~agent_actor entry capacity command_audit request)
 
 and enqueue_start t (state : Agent_session.Session_state.t) =
   let open Result.Let_syntax in
@@ -1587,18 +1619,32 @@ and queue_capacity_start t entry command_audit request =
   let%map () = enqueue_start t state in
   Agent_protocol.Method_result.Session_start (session_mutation session)
 
-and acquired_capacity_start entry capacity command_audit request ~newly_acquired =
+and acquired_capacity_start
+      ~agent_actor
+      entry
+      capacity
+      command_audit
+      request
+      ~newly_acquired
+  =
   let started =
     let open Result.Let_syntax in
-    let%bind () = Runtime_owner.ensure_loaded entry.Session_registry.runtime in
+    let%bind () =
+      match agent_actor with
+      | None -> Runtime_owner.ensure_loaded entry.Session_registry.runtime
+      | Some actor ->
+        Runtime_owner.ensure_loaded_authenticated entry.Session_registry.runtime ~actor
+    in
     actor_command
       command_audit
       ~plain:(fun () ->
         Agent_session.Session_actor.start
+          ?actor:agent_actor
           entry.actor
           ~attachment_id:request.Agent_protocol.Session.Start_request.attachment_id)
       ~audited:(fun command_audit ->
         Agent_session.Session_actor.start_with_command_audit
+          ?actor:agent_actor
           entry.actor
           ~command_audit
           ~attachment_id:request.attachment_id)
@@ -1611,16 +1657,28 @@ and acquired_capacity_start entry capacity command_audit request ~newly_acquired
     Session_capacity.runtime_ready capacity;
     Ok (Agent_protocol.Method_result.Session_start (session_mutation session))
 
-and handle_capacity_start t entry capacity command_audit request =
+and handle_capacity_start t ~agent_actor entry capacity command_audit request =
   match
     Session_capacity.try_acquire
       capacity
       ~queue_if_limited:request.Agent_protocol.Session.Start_request.queue_if_limited
   with
   | Acquired ->
-    acquired_capacity_start entry capacity command_audit request ~newly_acquired:true
+    acquired_capacity_start
+      ~agent_actor
+      entry
+      capacity
+      command_audit
+      request
+      ~newly_acquired:true
   | Already_acquired ->
-    acquired_capacity_start entry capacity command_audit request ~newly_acquired:false
+    acquired_capacity_start
+      ~agent_actor
+      entry
+      capacity
+      command_audit
+      request
+      ~newly_acquired:false
   | Queue_required _ -> queue_capacity_start t entry command_audit request
   | Rejected error -> Error error
 ;;
@@ -1938,8 +1996,9 @@ let run_start_result = function
   | Rejected failure | Uncertain failure -> Error failure
 ;;
 
-let handle_send_message t ?prepared_writer context command_audit request =
+let handle_send_message t ~agent_actor ?prepared_writer context command_audit request =
   let open Result.Let_syntax in
+  let%bind () = check_original_agent_actor agent_actor in
   let content = request.Agent_protocol.Session.Send_message_request.content in
   let%bind () =
     if String.is_empty (String.strip content.text)
@@ -1963,20 +2022,39 @@ let handle_send_message t ?prepared_writer context command_audit request =
          actor_command
            command_audit
            ~plain:(fun () ->
-             Agent_session.Session_actor.submit_message
-               entry.actor
-               ~timing:request.timing
-               ~submitting_principal:(Connection_context.principal context).id
-               ~attachment_id:request.attachment_id
-               history_entry)
+             match agent_actor with
+             | Some actor ->
+               Agent_session.Session_actor.submit_message_authenticated
+                 entry.actor
+                 ~actor
+                 ~timing:request.timing
+                 ~attachment_id:request.attachment_id
+                 history_entry
+             | None ->
+               Agent_session.Session_actor.submit_message
+                 entry.actor
+                 ~submitting_principal:(Connection_context.principal context).id
+                 ~timing:request.timing
+                 ~attachment_id:request.attachment_id
+                 history_entry)
            ~audited:(fun command_audit ->
-             Agent_session.Session_actor.submit_message_with_command_audit
-               entry.actor
-               ~command_audit
-               ~timing:request.timing
-               ~submitting_principal:(Connection_context.principal context).id
-               ~attachment_id:request.attachment_id
-               history_entry)
+             match agent_actor with
+             | Some actor ->
+               Agent_session.Session_actor.submit_message_authenticated_with_command_audit
+                 entry.actor
+                 ~actor
+                 ~command_audit
+                 ~timing:request.timing
+                 ~attachment_id:request.attachment_id
+                 history_entry
+             | None ->
+               Agent_session.Session_actor.submit_message_with_command_audit
+                 entry.actor
+                 ~submitting_principal:(Connection_context.principal context).id
+                 ~command_audit
+                 ~timing:request.timing
+                 ~attachment_id:request.attachment_id
+                 history_entry)
        in
        Ok
          (Agent_protocol.Method_result.Session_send_message
@@ -2897,6 +2975,7 @@ let dispatch_authorized
       t
       ?prepared_writer
       ~actor
+      ~agent_actor
       ~context
       ~command_audit
       ~inference_budget
@@ -2962,7 +3041,8 @@ let dispatch_authorized
       ~now:(now t)
       command
   | Blob_read request -> handle_blob_read t context request
-  | Session_create request -> handle_session_create t context command_audit request
+  | Session_create request ->
+    handle_session_create t ~agent_actor context command_audit request
   | Session_list request -> handle_session_list t context request
   | Session_search request -> handle_session_search t context request
   | Session_search_navigate request ->
@@ -2980,7 +3060,7 @@ let dispatch_authorized
   | Session_renew_owner request ->
     handle_session_renew_owner t context command_audit request
   | Session_start request ->
-    handle_session_start t ?prepared_writer context command_audit request
+    handle_session_start t ~agent_actor ?prepared_writer context command_audit request
   | Session_update_organization request ->
     handle_session_update_organization t ?prepared_writer context command_audit request
   | Session_update_metadata request ->
@@ -2995,7 +3075,7 @@ let dispatch_authorized
   | Session_run_start request ->
     handle_run_start t ~actor context command_audit request |> run_start_result
   | Session_send_message request ->
-    handle_send_message t ?prepared_writer context command_audit request
+    handle_send_message t ~agent_actor ?prepared_writer context command_audit request
   | Session_runs request -> handle_runs t ~actor context request
   | Session_run request -> handle_run t ~actor context request
   | Session_pending_inputs request -> handle_pending_inputs t context request
@@ -3053,6 +3133,7 @@ let handle_authorized
       t
       ?prepared_writer
       ~actor
+      ~agent_actor
       ~context
       ~command_audit
       ~inference_budget
@@ -3065,6 +3146,7 @@ let handle_authorized
       t
       ?prepared_writer
       ~actor
+      ~agent_actor
       ~context
       ~command_audit
       ~inference_budget
@@ -3753,7 +3835,7 @@ let handle_seed t ~actor context request =
          "seed authority changed after receipt admission; outcome is unknown")
 ;;
 
-let execute t ~actor context ~inference_budget command =
+let execute t ~actor ~agent_actor context ~inference_budget command =
   match command with
   | Agent_protocol.Command.Session_seed request -> handle_seed t ~actor context request
   | Agent_protocol.Command.Prompt_dependencies_status -> dependency_status t
@@ -3788,7 +3870,14 @@ let execute t ~actor context ~inference_budget command =
   | _ ->
     (match idempotency command with
      | None ->
-       handle_authorized t ~actor ~context ~command_audit:None ~inference_budget command
+       handle_authorized
+         t
+         ~actor
+         ~agent_actor
+         ~context
+         ~command_audit:None
+         ~inference_budget
+         command
      | Some identity ->
        handle_idempotent t context command identity ~prepare:(fun () ->
          let open Result.Let_syntax in
@@ -3804,6 +3893,7 @@ let execute t ~actor context ~inference_budget command =
              t
              ?prepared_writer
              ~actor
+             ~agent_actor
              ~context
              ~command_audit
              ~inference_budget
@@ -3812,6 +3902,7 @@ let execute t ~actor context ~inference_budget command =
 
 let handle t ?actor ~context ~inference_budget command =
   let open Result.Let_syntax in
+  let agent_actor = Option.first_some actor (Connection_context.original_actor context) in
   let%bind actor = Connection_context.request_actor context actor in
   let%bind () =
     Authorization.authorize
@@ -3861,7 +3952,7 @@ let handle t ?actor ~context ~inference_budget command =
     in
     let outcome =
       Result.bind
-        (execute t ~actor context ~inference_budget command)
+        (execute t ~actor ~agent_actor context ~inference_budget command)
         ~f:(Principal_projection.result (Connection_context.principal context))
     in
     let outcome =

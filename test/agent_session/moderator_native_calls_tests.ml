@@ -71,23 +71,27 @@ let%expect_test "idle moderator tools preserve authority, outcomes and scope lif
               I.create { (invocation_fixture ()).context with tool_name = "root" }
               |> protocol_ok
             in
-            caps.with_invocation ~invocation:parent (fun ~dispatched:_ ->
-              let child =
-                I.create
-                  ~observer
-                  { parent.context with
-                    id = Agent_protocol.Id.Invocation.create ()
-                  ; origin = Moderator
-                  ; parent_invocation = Some parent.context.id
-                  ; tool_name = "seed"
-                  }
-                |> protocol_ok
-              in
-              caps.with_invocation ~invocation:child (fun ~dispatched:_ ->
-                Ok (Complete (`String "seed")))
-              |> protocol_ok
-              |> ignore;
-              Ok (Complete `Null))
+            caps.with_invocation
+              ~invocation:parent
+              (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                 let child =
+                   I.create
+                     ~observer
+                     { parent.context with
+                       id = Agent_protocol.Id.Invocation.create ()
+                     ; origin = Moderator
+                     ; parent_invocation = Some parent.context.id
+                     ; tool_name = "seed"
+                     }
+                   |> protocol_ok
+                 in
+                 caps.with_invocation
+                   ~invocation:child
+                   (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                      Ok (Complete (`String "seed")))
+                 |> protocol_ok
+                 |> ignore;
+                 Ok (Complete `Null))
             |> protocol_ok
             |> ignore;
             Completed
@@ -176,7 +180,8 @@ let%expect_test "idle moderator tools preserve authority, outcomes and scope lif
                      in
                      forged_rejected
                      := Result.is_error
-                          (execute ~invocation (fun ~dispatched:_ -> assert false))
+                          (execute ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                             assert false))
                    | _ -> ());
                   Agent_session.Script_tool_calls.with_observation
                     tools
@@ -232,7 +237,8 @@ let%expect_test "idle moderator tools preserve authority, outcomes and scope lif
            let execute, child = Option.value_exn !escaped_executor in
            assert (
              Result.is_error
-               (execute ~invocation:(child ()) (fun ~dispatched:_ -> assert false)));
+               (execute ~invocation:(child ()) (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                  assert false)));
            [%test_eq: int] calls_before_escape !native_calls;
            let state = A.state actor |> protocol_ok in
            let observed =
@@ -713,47 +719,49 @@ let%test_unit "script call scopes bound attempts and reject escaped or closed pa
               Int.incr observations;
               Ok ())
         in
-        caps.with_moderator_invocation ~invocation:parent (fun ~dispatched ~commit ->
-          let scope f =
-            Agent_session.Script_tool_calls.with_invocation
-              tools
-              ~prepared
-              ~capabilities:caps
-              ~parent:dispatched
-              f
-          in
-          let escaped =
-            scope (fun call ->
-              for _ = 1 to 100 do
-                call ~name:"missing" ~args:`Null
-                |> expect_error "invocation.unselected_tool"
-              done;
-              call ~name:"read_file" ~args:(`Object [])
-              |> expect_error "invocation.nested_call_limit";
-              call)
-          in
-          escaped ~name:"read_file" ~args:(`Object [])
-          |> expect_error "invocation.inactive_scope";
-          assert (!calls = 0);
-          scope (fun call ->
-            call ~name:"read_file" ~args:(`String (String.make (300 * 1024) 'x'))
-            |> expect_error "invocation.invalid_input";
-            match call ~name:"read_file" ~args:(`Object []) with
-            | Ok (Tool_ok (`String "done")) -> ()
-            | _ -> assert false);
-          let resolved =
-            Agent_protocol.Invocation.resolve
-              dispatched
-              ~session_id:input.session_id
-              ~generation:input.session_generation
-              (Complete `Null)
-            |> protocol_ok
-          in
-          commit ~resolved ~snapshot:(handoff_snapshot 1) |> protocol_ok;
-          scope (fun call ->
-            call ~name:"read_file" ~args:(`Object [])
-            |> expect_error "invocation.admission_failed");
-          Ok ())
+        caps.with_moderator_invocation
+          ~invocation:parent
+          (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+             let scope f =
+               Agent_session.Script_tool_calls.with_invocation
+                 tools
+                 ~prepared
+                 ~capabilities:caps
+                 ~parent:dispatched
+                 f
+             in
+             let escaped =
+               scope (fun call ->
+                 for _ = 1 to 100 do
+                   call ~name:"missing" ~args:`Null
+                   |> expect_error "invocation.unselected_tool"
+                 done;
+                 call ~name:"read_file" ~args:(`Object [])
+                 |> expect_error "invocation.nested_call_limit";
+                 call)
+             in
+             escaped ~name:"read_file" ~args:(`Object [])
+             |> expect_error "invocation.inactive_scope";
+             assert (!calls = 0);
+             scope (fun call ->
+               call ~name:"read_file" ~args:(`String (String.make (300 * 1024) 'x'))
+               |> expect_error "invocation.invalid_input";
+               match call ~name:"read_file" ~args:(`Object []) with
+               | Ok (Tool_ok (`String "done")) -> ()
+               | _ -> assert false);
+             let resolved =
+               Agent_protocol.Invocation.resolve
+                 dispatched
+                 ~session_id:input.session_id
+                 ~generation:input.session_generation
+                 (Complete `Null)
+               |> protocol_ok
+             in
+             commit ~resolved ~snapshot:(handoff_snapshot 1) |> protocol_ok;
+             scope (fun call ->
+               call ~name:"read_file" ~args:(`Object [])
+               |> expect_error "invocation.admission_failed");
+             Ok ())
         |> protocol_ok;
         let state = Agent_session.Session_actor.state actor |> protocol_ok in
         Completed

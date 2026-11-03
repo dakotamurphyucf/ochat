@@ -35,11 +35,24 @@ val create_request
   -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
   -> (t, Agent_protocol.Error.t) result
 
+(** Same real actor-owner custody with the original authenticated object. No
+    principal is supplied separately. The normal actor admission still checks
+    current writer/Run policy and installs only its own private issuer. *)
+val create_authenticated_request
+  :  owner:Owner.t
+  -> state:Session_state.t
+  -> actor:Operator_authorization.t
+  -> request:Run_admission_request.t
+  -> request_sha256:string
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> (t, Agent_protocol.Error.t) result
+
 (** Exact resource identity; not equality of durable session IDs. *)
 val belongs_to : t -> owner:Owner.t -> bool
 
 val request : t -> Run_admission_request.t
 val principal_id : t -> Agent_protocol.Id.Principal.t
+val original_actor : t -> Operator_authorization.t option
 val request_sha256 : t -> string
 
 (** Checks the exact issuing actor, current original authorization and tracked

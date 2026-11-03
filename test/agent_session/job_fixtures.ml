@@ -74,6 +74,7 @@ let reject label result =
 ;;
 
 let with_actor
+      ?(start = true)
       ?(archive_reference = archive_reference)
       ?(reject_save = fun _ -> false)
       ?(prepare_state = Fn.id)
@@ -140,7 +141,7 @@ let with_actor
             let writer, _ =
               A.attach actor ~mode:Read_write ~subscribe:false |> protocol_ok
             in
-            A.start actor ~attachment_id:writer.id |> protocol_ok |> ignore;
+            if start then A.start actor ~attachment_id:writer.id |> protocol_ok |> ignore;
             f env sw actor writer backend))))
 ;;
 

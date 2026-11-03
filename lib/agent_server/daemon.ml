@@ -1856,6 +1856,8 @@ let compose
       ~server_health:(server_health health_services)
       ~cancel_job:(Job_scheduler.cancel_conversation job_scheduler)
       ~create_session:(Session_factory.create_session factory)
+      ~create_session_authenticated:
+        (Some (Session_factory.create_session_authenticated factory))
       ~seed_factory:(Some factory)
       ~seed_recovery_limits:options.seed_recovery_limits
       ~prepare_session_start:(Session_factory.prepare_session_start factory)

@@ -688,7 +688,7 @@ let publication_output
 let resolve_publication caps invocation =
   caps.Agent_session.Operation_worker.Capabilities.with_moderator_invocation
     ~invocation
-    (fun ~dispatched ~commit ->
+    (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
        let resolved =
          Agent_protocol.Invocation.resolve
            dispatched

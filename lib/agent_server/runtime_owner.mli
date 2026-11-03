@@ -41,7 +41,31 @@ val create_with_run_unload
   -> t
 
 val is_loaded : t -> bool
+
+(** Actual factory constructor retaining an explicitly supplied original actor
+    through initialization. The proof option is supplied only by authenticated
+    loading or genuine Run preparation, never by the stored session creator. *)
+val create_with_authenticated_run_unload
+  :  before_unload:(closing:bool -> (unit, Agent_protocol.Error.t) result)
+  -> actor:Agent_session.Session_actor.t
+  -> initial:Agent_session.Runtime_builder.t option
+  -> build:
+       (original_actor:Operator_authorization.t option
+        -> Agent_session.Run_preparation.t option
+        -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
+  -> t
+
 val ensure_loaded : t -> (unit, Agent_protocol.Error.t) result
+
+(** Current original actor is passed to a supporting initializer only. Existing
+    runtime ownership/policy still controls loading; this supplies no source,
+    execution or instruction permission. Legacy constructors reject proof-bearing cold construction rather than
+    silently dropping its proof; an already loaded runtime needs no reconstruction. *)
+val ensure_loaded_authenticated
+  :  t
+  -> actor:Operator_authorization.t
+  -> (unit, Agent_protocol.Error.t) result
+
 val unload : t -> (unit, Agent_protocol.Error.t) result
 
 (** Begin and join dependency cancellation after a durable stop request, even

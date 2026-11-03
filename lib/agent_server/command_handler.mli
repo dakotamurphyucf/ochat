@@ -6,6 +6,12 @@ type create_session =
   -> Agent_protocol.Session.Create_request.t
   -> (Session_registry.entry, Agent_protocol.Error.t) result
 
+type create_session_authenticated =
+  command_audit:Document_schema.Document.t option
+  -> actor:Operator_authorization.t
+  -> Agent_protocol.Session.Create_request.t
+  -> (Session_registry.entry, Agent_protocol.Error.t) result
+
 type t
 
 val create
@@ -32,6 +38,7 @@ val create
   -> server_health:(Agent_protocol.Health.Request.t -> Agent_protocol.Health.Response.t)
   -> cancel_job:(actor:Agent_session.Session_actor.t -> job:Agent_protocol.Job.t -> unit)
   -> create_session:create_session
+  -> create_session_authenticated:create_session_authenticated option
   -> seed_factory:Session_factory.t option
   -> seed_recovery_limits:Session_factory.Seed_recovery_limits.t
        (** [Some factory] borrows the actual same Store/Registry factory used by this

@@ -13,7 +13,7 @@ let%expect_test "ending the owner between preparation and staging releases capac
        let owner = J.Invocation invocation.context.id in
        let prepared = ref None in
        with_job actor parent (fun ~job:_ ~execute ->
-         execute ~invocation (fun ~dispatched:_ ->
+         execute ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ ->
            let job =
              A.prepare_background_job_launch actor ~owner request |> protocol_ok
            in
@@ -86,7 +86,7 @@ let%expect_test
            let selected = ref None in
            let result =
              with_job actor parent (fun ~job:_ ~execute ->
-               execute ~invocation (fun ~dispatched:_ ->
+               execute ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ ->
                  let discarded = stage actor backend capacity request owner in
                  assert (
                    A.has_staged_background_job actor ~owner ~id:discarded.id
@@ -238,41 +238,44 @@ let%expect_test "job starts commit atomically with managed handler and event che
                   let result =
                     match mode with
                     | `Handler | `Handler_cancelled ->
-                      services.execute ~invocation:(root parent) (fun ~dispatched:root ->
-                        let observer : I.observer =
-                          { script_id = before.script_id
-                          ; source_sha256 = before.script_source_hash
-                          }
-                        in
-                        let invocation =
-                          I.create
-                            ~observer
-                            { root.context with
-                              id = Agent_protocol.Id.Invocation.create ()
-                            ; parent_job = None
-                            ; parent_invocation = Some root.context.id
-                            ; tool_name = "counter"
-                            }
-                          |> protocol_ok
-                        in
-                        let result =
-                          services.moderator_execute
-                            ~invocation
-                            (fun ~dispatched ~commit ->
-                               let job = start (J.Invocation dispatched.context.id) in
-                               let outcome =
-                                 match mode with
-                                 | `Handler_cancelled -> I.Cancelled "handler cancelled"
-                                 | `Handler | `Event -> I.Pending (Job job.id, `Null)
-                               in
-                               let resolved =
-                                 I.resolve dispatched ~session_id ~generation:0 outcome
-                                 |> protocol_ok
-                               in
-                               commit ~resolved ~snapshot:after)
-                        in
-                        reject := false;
-                        Result.map result ~f:(fun () -> I.Complete `Null))
+                      services.execute
+                        ~invocation:(root parent)
+                        (fun ~dispatched:root ~borrow_agent_actor:_ ->
+                           let observer : I.observer =
+                             { script_id = before.script_id
+                             ; source_sha256 = before.script_source_hash
+                             }
+                           in
+                           let invocation =
+                             I.create
+                               ~observer
+                               { root.context with
+                                 id = Agent_protocol.Id.Invocation.create ()
+                               ; parent_job = None
+                               ; parent_invocation = Some root.context.id
+                               ; tool_name = "counter"
+                               }
+                             |> protocol_ok
+                           in
+                           let result =
+                             services.moderator_execute
+                               ~invocation
+                               (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+                                  let job = start (J.Invocation dispatched.context.id) in
+                                  let outcome =
+                                    match mode with
+                                    | `Handler_cancelled ->
+                                      I.Cancelled "handler cancelled"
+                                    | `Handler | `Event -> I.Pending (Job job.id, `Null)
+                                  in
+                                  let resolved =
+                                    I.resolve dispatched ~session_id ~generation:0 outcome
+                                    |> protocol_ok
+                                  in
+                                  commit ~resolved ~snapshot:after)
+                           in
+                           reject := false;
+                           Result.map result ~f:(fun () -> I.Complete `Null))
                       |> Result.map ~f:ignore
                     | `Event ->
                       let event =

@@ -34,7 +34,7 @@ let%expect_test "nested moderator handoff owns its descendants and permission re
           let expired = ref None in
           caps.with_invocation
             ~invocation:(fresh ~origin:Script ~name:"caller" ())
-            (fun ~dispatched:caller ->
+            (fun ~dispatched:caller ~borrow_agent_actor:_ ->
                let invocation =
                  fresh ~parent:caller.context.id ~origin:Script ~name:"moderated" ()
                in
@@ -50,87 +50,90 @@ let%expect_test "nested moderator handoff owns its descendants and permission re
                    reject
                      (caps.with_moderator_invocation
                         ~invocation:(I.create context |> protocol_ok)
-                        (fun ~dispatched:_ ~commit:_ -> failwith "invalid callback ran")));
+                        (fun ~dispatched:_ ~borrow_agent_actor:_ ~commit:_ ->
+                           failwith "invalid callback ran")));
                assert_same_session_snapshot before (A.state actor |> protocol_ok);
                let entered, entered_u = Eio.Promise.create () in
                let release, release_u = Eio.Promise.create () in
                let children_done, children_done_u = Eio.Promise.create () in
                let handoff =
-                 caps.with_moderator_invocation ~invocation (fun ~dispatched ~commit ->
-                   let permission : P.t =
-                     { id = Agent_protocol.Id.Permission.create ()
-                     ; session_id = input.session_id
-                     ; generation = input.session_generation
-                     ; owner = Invocation dispatched.context.id
-                     ; call_id =
-                         Agent_protocol.Id.Invocation.to_string dispatched.context.id
-                     ; tool_name = "moderated"
-                     ; runtime_identity = None
-                     ; invocation_display = "moderated(<redacted>)"
-                     ; rationale = None
-                     ; effects = [ "tool_invocation" ]
-                     ; choices = [ Approve_once; Deny ]
-                     ; created_at = timestamp
-                     ; expires_at = None
-                     ; state = Pending
-                     ; resolution = None
-                     }
-                   in
-                   let decision =
-                     caps.request_review ~permission ~review:(fun () -> Ok Allow)
-                     |> protocol_ok
-                   in
-                   assert (P.equal_choice decision.choice Approve_once);
-                   Eio.Fiber.fork ~sw (fun () ->
-                     let child_result =
-                       caps.with_invocation
-                         ~invocation:
-                           (fresh
-                              ~parent:dispatched.context.id
-                              ~origin:Moderator
-                              ~name:"native-child"
-                              ())
-                         (fun ~dispatched:child ->
-                            let grandchild_result =
-                              caps.with_invocation
-                                ~invocation:
-                                  (fresh
-                                     ~parent:child.context.id
-                                     ~origin:Script
-                                     ~name:"grandchild"
-                                     ())
-                                (fun ~dispatched:_ ->
-                                   Eio.Promise.resolve entered_u ();
-                                   Eio.Promise.await release;
-                                   Ok (I.Complete `Null))
-                            in
-                            (match mode with
-                             | `Commit -> ignore (protocol_ok grandchild_result : I.t)
-                             | `Abandon -> reject grandchild_result);
-                            Ok (I.Complete `Null))
-                     in
-                     (match mode with
-                      | `Commit -> ignore (protocol_ok child_result : I.t)
-                      | `Abandon -> reject child_result);
-                     Eio.Promise.resolve children_done_u ());
-                   Eio.Promise.await entered;
-                   let resolved =
-                     I.resolve
-                       dispatched
-                       ~session_id:input.session_id
-                       ~generation:input.session_generation
-                       (Complete `Null)
-                     |> protocol_ok
-                   in
-                   reject (commit ~resolved ~snapshot:(handoff_snapshot 1));
-                   assert (Option.is_none (A.state actor |> protocol_ok).moderator);
-                   match mode with
-                   | `Abandon ->
-                     Error (Agent_protocol.Error.invalid_request "handler abandoned")
-                   | `Commit ->
-                     Eio.Promise.resolve release_u ();
-                     Eio.Promise.await children_done;
-                     commit ~resolved ~snapshot:(handoff_snapshot 1))
+                 caps.with_moderator_invocation
+                   ~invocation
+                   (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+                      let permission : P.t =
+                        { id = Agent_protocol.Id.Permission.create ()
+                        ; session_id = input.session_id
+                        ; generation = input.session_generation
+                        ; owner = Invocation dispatched.context.id
+                        ; call_id =
+                            Agent_protocol.Id.Invocation.to_string dispatched.context.id
+                        ; tool_name = "moderated"
+                        ; runtime_identity = None
+                        ; invocation_display = "moderated(<redacted>)"
+                        ; rationale = None
+                        ; effects = [ "tool_invocation" ]
+                        ; choices = [ Approve_once; Deny ]
+                        ; created_at = timestamp
+                        ; expires_at = None
+                        ; state = Pending
+                        ; resolution = None
+                        }
+                      in
+                      let decision =
+                        caps.request_review ~permission ~review:(fun () -> Ok Allow)
+                        |> protocol_ok
+                      in
+                      assert (P.equal_choice decision.choice Approve_once);
+                      Eio.Fiber.fork ~sw (fun () ->
+                        let child_result =
+                          caps.with_invocation
+                            ~invocation:
+                              (fresh
+                                 ~parent:dispatched.context.id
+                                 ~origin:Moderator
+                                 ~name:"native-child"
+                                 ())
+                            (fun ~dispatched:child ~borrow_agent_actor:_ ->
+                               let grandchild_result =
+                                 caps.with_invocation
+                                   ~invocation:
+                                     (fresh
+                                        ~parent:child.context.id
+                                        ~origin:Script
+                                        ~name:"grandchild"
+                                        ())
+                                   (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                                      Eio.Promise.resolve entered_u ();
+                                      Eio.Promise.await release;
+                                      Ok (I.Complete `Null))
+                               in
+                               (match mode with
+                                | `Commit -> ignore (protocol_ok grandchild_result : I.t)
+                                | `Abandon -> reject grandchild_result);
+                               Ok (I.Complete `Null))
+                        in
+                        (match mode with
+                         | `Commit -> ignore (protocol_ok child_result : I.t)
+                         | `Abandon -> reject child_result);
+                        Eio.Promise.resolve children_done_u ());
+                      Eio.Promise.await entered;
+                      let resolved =
+                        I.resolve
+                          dispatched
+                          ~session_id:input.session_id
+                          ~generation:input.session_generation
+                          (Complete `Null)
+                        |> protocol_ok
+                      in
+                      reject (commit ~resolved ~snapshot:(handoff_snapshot 1));
+                      assert (Option.is_none (A.state actor |> protocol_ok).moderator);
+                      match mode with
+                      | `Abandon ->
+                        Error (Agent_protocol.Error.invalid_request "handler abandoned")
+                      | `Commit ->
+                        Eio.Promise.resolve release_u ();
+                        Eio.Promise.await children_done;
+                        commit ~resolved ~snapshot:(handoff_snapshot 1))
                in
                (match mode with
                 | `Commit -> protocol_ok handoff
@@ -147,7 +150,8 @@ let%expect_test "nested moderator handoff owns its descendants and permission re
                ~invocation:
                  (I.create { context with id = Agent_protocol.Id.Invocation.create () }
                   |> protocol_ok)
-               (fun ~dispatched:_ ~commit:_ -> failwith "expired caller admitted"));
+               (fun ~dispatched:_ ~borrow_agent_actor:_ ~commit:_ ->
+                  failwith "expired caller admitted"));
           let state = A.state actor |> protocol_ok in
           Eio.Promise.resolve done_u ();
           Completed
@@ -217,18 +221,20 @@ let%expect_test "a queued moderator loan cannot outlive its native caller" =
           |> protocol_ok
         in
         Eio.Fiber.fork ~sw (fun () ->
-          caps.with_moderator_invocation ~invocation:fresh (fun ~dispatched ~commit ->
-            Eio.Promise.resolve held_u ();
-            Eio.Promise.await release;
-            let resolved =
-              I.resolve
-                dispatched
-                ~session_id:input.session_id
-                ~generation:input.session_generation
-                (Complete `Null)
-              |> protocol_ok
-            in
-            commit ~resolved ~snapshot:(handoff_snapshot 0))
+          caps.with_moderator_invocation
+            ~invocation:fresh
+            (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+               Eio.Promise.resolve held_u ();
+               Eio.Promise.await release;
+               let resolved =
+                 I.resolve
+                   dispatched
+                   ~session_id:input.session_id
+                   ~generation:input.session_generation
+                   (Complete `Null)
+                 |> protocol_ok
+               in
+               commit ~resolved ~snapshot:(handoff_snapshot 0))
           |> protocol_ok;
           Eio.Promise.resolve holder_done_u ());
         Eio.Promise.await held;
@@ -249,8 +255,10 @@ let%expect_test "a queued moderator loan cannot outlive its native caller" =
               Eio.Fiber.fork ~sw (fun () ->
                 Eio.Promise.resolve attempted_u ();
                 let result =
-                  execute ~invocation:child (fun ~dispatched:_ ~commit:_ ->
-                    failwith "expired queued caller entered moderator")
+                  execute
+                    ~invocation:child
+                    (fun ~dispatched:_ ~borrow_agent_actor:_ ~commit:_ ->
+                       failwith "expired queued caller entered moderator")
                 in
                 rejected := Result.is_error result;
                 Eio.Promise.resolve queued_done_u ());
