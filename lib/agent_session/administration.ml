@@ -115,7 +115,9 @@ let plan_reset state options =
       match state.goal_catalog with
       | None -> Ok None
       | Some catalog ->
-        let%map held = Goal_catalog.hold_for_review catalog in
+        let%map held =
+          Goal_run_resolution.plan_catalog catalog ~runs:run_state ~hold_for_review:true
+        in
         Some (Option.value held ~default:catalog)
     in
     let candidate = { candidate with run_state; goal_catalog } in

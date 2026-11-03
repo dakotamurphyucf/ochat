@@ -70,7 +70,8 @@ let prepare_change (state : Session_state.t) ~delta =
     let%bind held =
       match catalog with
       | None -> Ok None
-      | Some catalog -> Goal_catalog.hold_for_review catalog
+      | Some catalog ->
+        Goal_run_resolution.plan_catalog catalog ~runs:index ~hold_for_review:true
     in
     match held with
     | None -> Ok delta
@@ -87,11 +88,6 @@ let prepare_change (state : Session_state.t) ~delta =
 
 let recovery_delta (state : Session_state.t) ~now =
   let open Result.Let_syntax in
-  let%bind goal =
-    match state.goal_catalog with
-    | None -> Ok None
-    | Some catalog -> Goal_catalog.hold_for_review catalog
-  in
   let%bind run =
     match state.run_state with
     | None -> Ok None
@@ -117,6 +113,15 @@ let recovery_delta (state : Session_state.t) ~now =
              ~session_revision:(Int64.succ state.counters.revision)
              ~now)
           ~f:Option.some
+  in
+  let%bind goal =
+    match state.goal_catalog with
+    | None -> Ok None
+    | Some catalog ->
+      Goal_run_resolution.plan_catalog
+        catalog
+        ~runs:(Option.first_some run state.run_state)
+        ~hold_for_review:true
   in
   let changes =
     Option.to_list (Option.map run ~f:(fun run -> Session_delta.Run_state_changed run))

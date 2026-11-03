@@ -3,6 +3,74 @@ module J = Json_codec
 
 let invalid text = Error (Protocol_error.invalid_request text)
 
+module Intent = struct
+  type t =
+    { expected_goal_revision : int64
+    ; evidence : Goal_text.Reason.t
+    ; action : Run_action.t
+    }
+  [@@deriving equal, sexp_of]
+
+  let expected_goal_revision t = t.expected_goal_revision
+  let evidence t = t.evidence
+  let action t = t.action
+
+  let to_json t =
+    `Object
+      [ "expected_goal_revision", `String (Int64.to_string t.expected_goal_revision)
+      ; "evidence", Goal_text.Reason.to_json t.evidence
+      ; "action", Run_action.to_json t.action
+      ]
+  ;;
+
+  let create ~expected_goal_revision ~evidence ~action =
+    let open Result.Let_syntax in
+    let%bind () = Run_action.validate action in
+    let%bind () =
+      match action with
+      | Finish { terminal = Completed _; _ } when Int64.(expected_goal_revision >= 0L) ->
+        Ok ()
+      | Continue | Wait _ | Finish _ ->
+        invalid "goal finish requires a nonnegative revision and Completed decision"
+    in
+    let t = { expected_goal_revision; evidence; action } in
+    let%map () =
+      Extension_codec.validate_json
+        ~max_bytes:Run_limits.max_document_bytes
+        ~max_depth:Run_limits.max_depth
+        (to_json t)
+    in
+    t
+  ;;
+
+  let of_json json =
+    let open Result.Let_syntax in
+    let%bind () =
+      Extension_codec.validate_json
+        ~max_bytes:Run_limits.max_document_bytes
+        ~max_depth:Run_limits.max_depth
+        json
+    in
+    let%bind fields = J.fields json in
+    let%bind () =
+      Extension_codec.closed fields [ "expected_goal_revision"; "evidence"; "action" ]
+    in
+    let%bind expected_goal_revision =
+      J.required_as fields "expected_goal_revision" (function
+        | `String text when String.length text <= 19 ->
+          (match Int64.of_string_opt text with
+           | Some revision
+             when Int64.(revision >= 0L) && String.equal text (Int64.to_string revision)
+             -> Ok revision
+           | None | Some _ -> invalid "invalid goal finish revision")
+        | _ -> invalid "goal finish revision must be a decimal string")
+    in
+    let%bind evidence = J.required_as fields "evidence" Goal_text.Reason.of_json in
+    let%bind action = J.required_as fields "action" Run_action.of_json in
+    create ~expected_goal_revision ~evidence ~action
+  ;;
+end
+
 let check_receipt episode (receipt : Run_receipt.t) ~kind =
   let admitted = Goal_episode.admission episode in
   if

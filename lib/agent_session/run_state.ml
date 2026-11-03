@@ -23,6 +23,7 @@ type t =
   ; intents : Run_intent.t Map.M(Receipt_key).t
   ; receipts : P.Run_receipt.t Map.M(Receipt_key).t
   ; job_deliveries : Run_job_deliveries.t
+  ; goal_links : Run_goal_links.t
   }
 
 let empty =
@@ -31,6 +32,7 @@ let empty =
   ; intents = Map.empty (module Receipt_key)
   ; receipts = Map.empty (module Receipt_key)
   ; job_deliveries = Run_job_deliveries.empty
+  ; goal_links = Run_goal_links.empty
   }
 ;;
 
@@ -39,6 +41,10 @@ let equal_observation t other =
   && Map.equal P.Run.equal t.runs other.runs
   && Map.equal Run_intent.equal t.intents other.intents
   && Map.equal P.Run_receipt.equal t.receipts other.receipts
+  && List.equal
+       Run_goal_link.equal
+       (Run_goal_links.entries t.goal_links)
+       (Run_goal_links.entries other.goal_links)
 ;;
 
 let installation t = t.installation
@@ -46,6 +52,8 @@ let runs t = Map.data t.runs
 let intents t = Map.data t.intents
 let receipts t = Map.data t.receipts
 let job_deliveries t = Run_job_deliveries.entries t.job_deliveries
+let goal_links t = Run_goal_links.entries t.goal_links
+let goal_link t id = Run_goal_links.find t.goal_links id
 let find_job_delivery t key = Run_job_deliveries.find t.job_deliveries key
 
 let enqueued_job_frame t ~frame =
@@ -54,6 +62,23 @@ let enqueued_job_frame t ~frame =
 
 let find t id = Map.find t.runs id
 let receipt_key (receipt : P.Run_receipt.t) = receipt.principal_id, receipt.key
+
+let validate_goal_links t =
+  List.fold_result (goal_links t) ~init:() ~f:(fun () link ->
+    let episode = Run_goal_link.episode link in
+    let admission = P.Goal_episode.admission episode in
+    match
+      find t (Run_goal_link.run_id link), Map.find t.receipts (receipt_key admission)
+    with
+    | Some run, Some retained
+      when P.Goal_episode.matches_run episode run
+           && Int64.equal admission.run_revision 0L
+           && P.Run_receipt.Kind.equal admission.kind Admission
+           && P.Run_receipt.equal admission retained -> Ok ()
+    | _, _ ->
+      Error
+        (P.Error.invalid_request "goal association lacks its exact Workflow admission"))
+;;
 
 let receipt t ~principal_id ~key ~request_sha256 =
   match Map.find t.receipts (principal_id, key) with
@@ -142,7 +167,8 @@ let to_jsonaf t =
      ; "intents", X.list_json Run_intent.to_jsonaf (intents t)
      ; "receipts", X.list_json P.Run_receipt.to_json (receipts t)
      ]
-     @ Run_job_deliveries.fields t.job_deliveries)
+     @ Run_job_deliveries.fields t.job_deliveries
+     @ Run_goal_links.fields t.goal_links)
 ;;
 
 let reserved_bytes t =
@@ -387,8 +413,13 @@ let of_jsonaf json =
     Run_job_deliveries.of_field
       (List.Assoc.find (J.to_alist fields) ~equal:String.equal "job_deliveries")
   in
-  let t = { installation; runs; receipts; intents; job_deliveries } in
+  let%bind goal_links =
+    Run_goal_links.of_field
+      (List.Assoc.find (J.to_alist fields) ~equal:String.equal "goal_links")
+  in
+  let t = { installation; runs; receipts; intents; job_deliveries; goal_links } in
   let%bind () = validate_encoded_capacity t json in
+  let%bind () = validate_goal_links t in
   let%bind () =
     Map.fold receipts ~init:(Ok ()) ~f:(fun ~key:_ ~data:receipt result ->
       let%bind () = result in
@@ -457,12 +488,14 @@ let shape =
     ; "intents", X.array_shape_exn Run_record_shapes.intent
     ; "receipts", X.array_shape_exn Run_record_shapes.receipt
     ; "job_deliveries", Run_job_deliveries.shape
+    ; "goal_links", Run_goal_links.shape
     ]
 ;;
 
 let validate t ~session_id ~generation =
   let%bind.Result () = validate_document_size t in
   let%bind.Result () = validate_job_deliveries t in
+  let%bind.Result () = validate_goal_links t in
   Map.fold t.runs ~init:(Ok ()) ~f:(fun ~key:_ ~data:run accumulated ->
     let%bind.Result () = accumulated in
     if not (P.Id.Session.equal (P.Session_ref.session_id run.session) session_id)
@@ -478,6 +511,25 @@ let validate t ~session_id ~generation =
 
 let validate_transition ~previous next =
   let open Result.Let_syntax in
+  let%bind () =
+    Run_goal_links.validate_transition ~previous:previous.goal_links next.goal_links
+  in
+  let%bind () = validate_goal_links next in
+  let%bind () =
+    List.fold_result (goal_links next) ~init:() ~f:(fun () link ->
+      let id = Run_goal_link.run_id link in
+      match goal_link previous id with
+      | Some _ -> Ok ()
+      | None ->
+        (match find previous id, find next id with
+         | None, Some run
+           when Int64.equal run.revision 0L
+                && P.Run.Lifecycle.equal run.lifecycle Admitted -> Ok ()
+         | _, _ ->
+           Error
+             (P.Error.invalid_request
+                "new goal association requires a new admitted Run in the same transition")))
+  in
   let%bind () =
     Run_job_deliveries.validate_transition
       ~previous:previous.job_deliveries
@@ -549,6 +601,15 @@ let validate_transition ~previous next =
                 "source replacement did not interrupt former live run")))
   in
   ()
+;;
+
+let bind_goal t link =
+  let open Result.Let_syntax in
+  let%bind goal_links = Run_goal_links.add t.goal_links link in
+  let next = { t with goal_links } in
+  let%bind () = validate_goal_links next in
+  let%map () = validate_document_size next in
+  next
 ;;
 
 let advance_owner t ~job_delivery ~(run : P.Run.t) ~intents =

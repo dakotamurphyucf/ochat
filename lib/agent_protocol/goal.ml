@@ -88,6 +88,24 @@ let reserved_capacity t =
 let validate_projection t =
   let open Result.Let_syntax in
   let%bind () =
+    let reserve =
+      match t.state, t.achievement_request, t.request_settlement with
+      | Open Enabled, Some _, None -> 2L
+      | Open Enabled, _, _ -> 1L
+      | Open (Held _), Some _, None -> 1L
+      | (Open _ | Closed _), (None | Some _), (None | Some _) -> 0L
+    in
+    if Int64.(t.revision > max_value - reserve)
+    then
+      Error
+        (Protocol_error.create
+           Resource_limit
+           ~message:"goal revision lacks reserved pending settlement headroom"
+           ~retryable:false
+           ())
+    else Ok ()
+  in
+  let%bind () =
     Extension_codec.validate_json
       ~max_bytes:Capacity.max_projection_bytes
       ~max_depth:64
@@ -251,6 +269,20 @@ let validate_update t ~incoming =
   let open Result.Let_syntax in
   let%bind () = validate_projection incoming in
   let%bind () = validate_associations incoming in
+  let%bind () =
+    if
+      Option.is_some t.achievement_request
+      && Option.is_none t.request_settlement
+      && not (Objective.equal t.objective incoming.objective)
+    then
+      Error
+        (Protocol_error.create
+           Conflict
+           ~message:"goal objective cannot change while achievement completion is pending"
+           ~retryable:false
+           ())
+    else Ok ()
+  in
   let%bind () =
     if
       Option.equal

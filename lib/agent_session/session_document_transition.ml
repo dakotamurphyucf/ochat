@@ -3,6 +3,7 @@ module X = Persistence_codec
 module Transaction = Session_state_document.Transaction
 
 let admit_encoded previous ~delta ~(next : Session_state.t) ~limits =
+  let previous_value = Session_state_document.value previous in
   let rec apply carrier = function
     | Session_delta.Batch changes -> List.fold_result changes ~init:carrier ~f:apply
     | Pending_inputs_changed (mutation, archive, expiry_archive) as delta ->
@@ -100,6 +101,14 @@ let admit_encoded previous ~delta ~(next : Session_state.t) ~limits =
   let open Result.Let_syntax in
   let%bind previous = Transaction.begin_ previous ~limits in
   let%bind candidate = apply previous delta in
+  let current = Transaction.value candidate in
+  let%bind () =
+    Goal_run_evidence.validate_transition
+      ~previous_runs:previous_value.run_state
+      ~catalog:current.goal_catalog
+      ~runs:current.run_state
+    |> X.document_result
+  in
   Transaction.finish_encoded candidate ~next ~limits
 ;;
 

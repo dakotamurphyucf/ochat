@@ -89,6 +89,8 @@
   run_scope
   run_action_service
   run_record_shapes
+  run_goal_link
+  run_goal_links
   goal_document
   goal_command
   goal_command_receipt
@@ -102,6 +104,11 @@
   goal_command_transition
   goal_command_admission
   goal_catalog_source
+  goal_run_evidence
+  goal_episode_admission
+  goal_run_transition
+  goal_run_settlement
+  goal_run_resolution
   run_intent
   run_state
   run_transition

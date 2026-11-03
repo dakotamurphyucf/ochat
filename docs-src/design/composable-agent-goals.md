@@ -1,9 +1,10 @@
 # Persistent goals and owned execution
 
 Status: accepted engineering direction with a persistent actor-owned metadata
-catalog and internal authenticated operator commands. Goal tools, execution
-admission, achievement coupling and cumulative goal accounting remain separate
-work. Existing Run lifecycle, actor receipts, bounded inference accounting
+catalog, internal authenticated operator commands, immutable episode-association
+planning and actual Run terminal convergence. Authenticated controller execution
+admission, full authored goal workflows and cumulative goal accounting remain
+separate integration work. Existing Run lifecycle, actor receipts, bounded inference accounting
 and continuation scheduling are the foundations. This document does not claim a
 passing authored goal workflow or full context-window rollover support.
 
@@ -180,13 +181,18 @@ request or closure.
 The pure protocol/domain, universal carrier and actor-owned metadata catalog are
 implemented. Internal original-operator commands cover create/read, objective and
 progress edits, hold, permitted budget changes, explicit source adoption and
-abandonment. They never enable or resume execution. Selected native/tool wrappers,
-actual episode admission, achievement coupling, continuation and cumulative
-accounting remain integration work. The
+abandonment. They never enable or resume execution. A minimal scoped `Goal.finish`
+primitive stages completion beside the actual Run Action receipt and checkpoint;
+only actual matching terminal evidence closes the objective. Its pure admission
+association planner still requires an authenticated controller consumer. Actual
+controller-admitted authored execution and worker-join qualification, configurable
+native/tool wrappers, continuation and cumulative accounting remain integration
+work. The [episode and settlement contract](../lib/agent_session/goal_runs.doc.md)
+details these boundaries. The
 [metadata command contract](../lib/agent_session/goal_catalog.doc.md) specifies the
 16-goal/256-receipt finite retention policy, source/reset/recovery holds and complete
 host capacity reservation. Internal holds do not consume user receipt slots;
-future actual terminal settlement must preserve that separation.
+actual terminal settlement preserves that separation.
 `Goal_episode.Settlement` retains an immutable episode and exact Terminal receipt,
 not a copied terminal classification. Live constructors validate the actual Run and
 canonical receipt digest. Achievement additionally hashes canonical

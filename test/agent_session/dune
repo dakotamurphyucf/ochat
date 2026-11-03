@@ -12,6 +12,7 @@
   goal_catalog_tests
   instruction_selection_tests
   instruction_selection_persistence_tests
+  goal_run_tests
   run_subscription_wake_tests
   run_persistence_tests
   run_job_delivery_tests

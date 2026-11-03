@@ -225,6 +225,20 @@ let run_module : S.builtin_module =
   }
 ;;
 
+let goal_module : S.builtin_module =
+  { name = "Goal"
+  ; exports =
+      [ task_builtin
+          ~name:"finish"
+          ~op:"Goal.finish"
+          ~parameters:[ S.json_ty ]
+          ~result:S.TUnit
+          ~spawn:false
+        |> project_receipt "Run_receipt"
+      ]
+  }
+;;
+
 let subscription_module : S.builtin_module =
   let operation name parameters result ~mutation =
     let builtin =
@@ -408,6 +422,7 @@ let moderator_v1 =
         :: schedule_module
         :: subscription_module
         :: run_module
+        :: goal_module
         :: job_module
         :: invocation
         :: overrides

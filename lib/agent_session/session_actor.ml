@@ -1208,6 +1208,7 @@ let prepare_transition ?run_preparation t ~delta ~payloads =
   let now = t.services.now () in
   let%bind delta = Run_source_change.prepare t.state ~delta ~now in
   let%bind delta = Goal_catalog_source.prepare_change t.state ~delta in
+  let%bind delta = Goal_run_settlement.prepare t.state ~delta in
   let%bind prepared = Session_transition.apply ~now t.state ~delta ~payloads in
   let%map () =
     match prepared.state.run_state with
@@ -4098,7 +4099,7 @@ let prepared_run_delta t (borrow : queued_event_borrow) completed requests job_d
           ~action
           ~now:(t.services.now ())
       in
-      let%map () =
+      let%bind () =
         match action with
         | Some (Wait wake) ->
           (match wake.occurrence with
@@ -4116,7 +4117,17 @@ let prepared_run_delta t (borrow : queued_event_borrow) completed requests job_d
            | Delivered_timer _ | Subscription_delivery _ -> Ok ())
         | None | Some (Continue | Finish _) -> Ok ()
       in
-      [ Run_transition.delta prepared ])
+      let%bind goal_finish =
+        Run_action_service.prepared_goal_finish owner
+        |> Result.map_error ~f:(fun message -> error Conflict message)
+      in
+      let%map goal_deltas =
+        match goal_finish with
+        | None -> Ok []
+        | Some intent ->
+          Goal_run_transition.prepare_request t.state ~scope ~prepared ~intent
+      in
+      Run_transition.delta prepared :: goal_deltas)
 ;;
 
 let commit_queued_event t borrow snapshot requests decision notifications =
