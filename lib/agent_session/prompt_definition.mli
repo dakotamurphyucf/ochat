@@ -43,3 +43,14 @@ val root_invocation
 val with_tool_contract : t -> Chatml_compilation.Tool_contract.t -> t
 
 val tool_contract : t -> Chatml_compilation.Tool_contract.t
+
+(** Bounded captured metadata projection, not catalog publication or execution
+    authority. The complete owned JSON is at most 256 KiB, depth 32, and at most 256
+    workspace selectors. Constructors and typed IDs are revalidated, including
+    values read through the legacy sexp API. The containing universal carrier
+    owns compatible unknown fields; no sexp is embedded in this wire format.
+    Captured [root_file] is provenance and never permission to reopen a source. *)
+val to_jsonaf : t -> (Jsonaf.t, Agent_protocol.Error.t) result
+
+val of_jsonaf : Jsonaf.t -> (t, Agent_protocol.Error.t) result
+val shape : Document_schema.Shape.t

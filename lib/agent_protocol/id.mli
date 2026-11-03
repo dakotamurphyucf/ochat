@@ -38,6 +38,10 @@ module Session : S
 module Run : S
 module Goal : S
 
+(** Controller recurrence identity, distinct from a one-shot Schedule. An ID is
+    comparison data, never admission authority. *)
+module Recurrence : S
+
 (* Developer run ownership, distinct from conversation Run and Session.
    An ID is a comparison coordinate, never authority by possession. *)
 module Developer_run : S

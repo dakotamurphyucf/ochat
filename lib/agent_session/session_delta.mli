@@ -71,6 +71,7 @@ type t =
       Repeating the same disposition remains valid after that turn has ended. *)
   | Goal_catalog_changed of Goal_catalog.t
   | Instruction_selection_changed of Instruction_selection.t
+  | Recurrence_catalog_changed of Recurrence_catalog.t
   | Run_state_changed of Run_state.t
   | Moderator_changed of Jsonaf.t option
   | Shell_changed of Session.Shell_state.t

@@ -276,6 +276,9 @@ let atom_to_jsonaf ~limits ~state_document delta =
   | Goal_catalog_changed value ->
     let%map.Result json = Goal_catalog.to_jsonaf value in
     `Object [ "kind", `String "goal_catalog_changed"; "value", json ]
+  | Recurrence_catalog_changed value ->
+    let%map.Result json = Recurrence_catalog.to_jsonaf value in
+    `Object [ "kind", `String "recurrence_catalog_changed"; "value", json ]
   | Run_state_changed value ->
     Ok
       (`Object [ "kind", `String "run_state_changed"; "value", Run_state.to_jsonaf value ])
@@ -591,6 +594,9 @@ let atom_of_jsonaf ~limits json =
   | "goal_catalog_changed" ->
     Result.map (X.required fields "value" Goal_catalog.of_jsonaf) ~f:(fun value ->
       Delta.Goal_catalog_changed value)
+  | "recurrence_catalog_changed" ->
+    Result.map (X.required fields "value" Recurrence_catalog.of_jsonaf) ~f:(fun value ->
+      Delta.Recurrence_catalog_changed value)
   | "run_state_changed" ->
     Result.map (X.required fields "value" Run_state.of_jsonaf) ~f:(fun value ->
       Delta.Run_state_changed value)
@@ -810,6 +816,9 @@ let shape =
                    [ "kind", D.Shape.value; "value", Instruction_selection.shape ] )
              ; ( "goal_catalog_changed"
                , X.shape_exn [ "kind", D.Shape.value; "value", Goal_catalog.shape ] )
+             ; ( "recurrence_catalog_changed"
+               , X.shape_exn [ "kind", D.Shape.value; "value", Recurrence_catalog.shape ]
+               )
              ; ( "run_state_changed"
                , X.shape_exn [ "kind", D.Shape.value; "value", Run_state.shape ] )
              ; ( "moderator_execution_changed"
@@ -1419,6 +1428,8 @@ let apply t ?transaction_metadata ~limits previous =
       | "instruction_selection_changed" ->
         scalar [ "instruction_selection" ] "value" Instruction_selection.shape
       | "goal_catalog_changed" -> scalar [ "goal_catalog" ] "value" Goal_catalog.shape
+      | "recurrence_catalog_changed" ->
+        scalar [ "recurrence_catalog" ] "value" Recurrence_catalog.shape
       | "run_state_changed" -> scalar [ "run_state" ] "value" Run_state.shape
       | "lifecycle_changed" ->
         scalar [ "lifecycle" ] "lifecycle" Session_record_shapes.lifecycle
