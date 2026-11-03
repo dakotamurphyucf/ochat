@@ -2292,6 +2292,67 @@ val recurrence_command
   -> request:Recurrence_command.t
   -> (Recurrence_command_receipt.t, Agent_protocol.Error.t) result
 
+module Recurrence_creation : sig
+  (** Process-local permit issued only by this actor after actual reservation ACK.
+      No constructor, decoder, ID lookup or creator equality can recreate it.
+      Original caller, current policy, source, birth and control remain required;
+      this is not permission to activate a child or admit a Run. *)
+  type t
+
+  (** Immutable evidence only. Reading it does not refresh permission. *)
+  val reservation : t -> Recurrence_child_reservation.t
+
+  module Checked : sig
+    (** Process-local prepared effect view. No constructor or decoder. *)
+    type t
+
+    (** Immutable captured data only; this getter grants no authority. *)
+    val definition : t -> Recurrence_definition.t
+
+    (** Synchronous, nonyielding final check against the actual issuing actor,
+        original proof and host policy, genuine lifecycle/source/control, exact
+        protected row, runtime liveness and current grace. Call after all yielding
+        preparation immediately before each owned mutation. A successful check
+        grants nothing across a subsequent yield or fence; refresh through the
+        actor before the next phase. Unexpected trusted guard exceptions propagate. *)
+    val check_current : t -> (unit, Agent_protocol.Error.t) result
+  end
+end
+
+(** Atomically move an exact Ready fresh-child nominal into protected custody, or
+    reacquire its original reservation after fresh authorization. Requires real
+    current Create_sessions and exact host target policy, genuine lifecycle,
+    installed source, enabled original control and current grace. A different
+    freshly authorized principal may reauthorize: the original principal remains
+    immutable audit data. Failed/uncertain persistence publishes no permit and
+    uses the existing whole-writer recovery fence, never replacement identities.
+    The trusted [authorize] callback must not yield and must check current host
+    target policy; it is retained and repeated at every final effect boundary.
+    No child/artifact install, link, timer or Run is created here. *)
+val reserve_recurrence_child
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:
+       (Session_state.t
+        -> Recurrence_definition.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> occurrence:Recurrence_identity.Occurrence.t
+  -> expected_control_revision:int64
+  -> (Recurrence_creation.t, Agent_protocol.Error.t) result
+
+(** Re-enter the exact issuing actor before each next factory phase and after
+    yielding preparation. Rechecks original proof/current host policy, fresh
+    genuine Current, exact retained row/source/birth/control, runtime and grace.
+    A foreign actor, decoded row, expired proof or stale frontier cannot refresh
+    permission. Returning through this RPC is itself a scheduling boundary:
+    invoke [Recurrence_creation.Checked.check_current] after all yielding
+    preparation immediately before the actual owner's mutation. No authority is
+    held across a later yield or fence. *)
+val check_recurrence_creation
+  :  t
+  -> Recurrence_creation.t
+  -> (Recurrence_creation.Checked.t, Agent_protocol.Error.t) result
+
 (** Current authorized read with effective lifecycle retirement. No native/script
     runtime is initialized; stored controls and acceptance receipts grant no work. *)
 val read_recurrences

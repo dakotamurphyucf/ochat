@@ -84,6 +84,35 @@ let%expect_test
     step forward ~phase (snapshot ~wall:(at_ms (-1000000)) ~elapsed_ms:1000)
   in
   [%test_eq: int64 list] (slots due) [ 0L ];
+  (* Independent elapsed subtraction oracle for the selected row, after the
+     cursor advances. A corrected wall cannot extend its live dispatch grace. *)
+  let selected_plan =
+    match prepare forward ~phase (snapshot ~wall:(at_ms (-1000000)) ~elapsed_ms:1000) with
+    | Plan.Candidate plan -> plan
+    | Unchanged _ -> assert false
+  in
+  let anchor = List.hd_exn (Plan.selection_grace selected_plan) in
+  let later = snapshot ~wall:(at_ms (-2000000)) ~elapsed_ms:1600 in
+  [%test_eq: int64]
+    (A.Recurrence_selection_grace.lateness_ns anchor ~snapshot:later |> protocol_ok)
+    600_000_000L;
+  assert (
+    Result.is_error
+      (A.Recurrence_selection_grace.lateness_ns
+         anchor
+         ~snapshot:(snapshot ~wall:(at_ms 0) ~elapsed_ms:999)));
+  let overflowing =
+    A.Recurrence_selection_grace.create
+      ~occurrence:(A.Recurrence_selection_grace.occurrence anchor)
+      ~snapshot:(snapshot ~wall:(at_ms 0) ~elapsed_ms:0)
+      ~lateness_ns:Int64.max_value
+    |> protocol_ok
+  in
+  assert (
+    Result.is_error
+      (A.Recurrence_selection_grace.lateness_ns
+         overflowing
+         ~snapshot:(snapshot ~wall:(at_ms 0) ~elapsed_ms:1)));
   let restarted, _, _ =
     step armed ~phase:None (snapshot ~wall:(at_ms 1000000000) ~elapsed_ms:0)
   in

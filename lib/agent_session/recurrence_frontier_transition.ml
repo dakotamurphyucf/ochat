@@ -8,6 +8,20 @@ module V = Recurrence_frontier_records
 module S = V.State
 module C = Recurrence_cursor
 
+let protected_rows (s : S.t) =
+  List.map s.protected_children ~f:(fun row ->
+    (* The complete reservation owns the original nominal; projection is used
+       only for partition/capacity checks, never for moving custody. *)
+    Recurrence_child_reservation.nominal row)
+;;
+
+let protected_count (s : S.t) = List.length s.protected_children
+let pending_count (s : S.t) = List.length s.ready + protected_count s
+
+let ready_capacity (s : S.t) definition =
+  Int.max 0 (Recurrence_policy.max_pending (F.policy definition) - protected_count s)
+;;
+
 let invalid message = Error (P.Error.invalid_request message)
 let value = V.Stored_nominal.value
 let key row = N.key (value row)
@@ -168,7 +182,7 @@ let consume_range (s : S.t) ~definition ~first_slot ~last_slot ~last_at ~selecte
     | (Skip | Catch_up _), _ | Coalesce, [] -> Ok s
   in
   let ready = s.ready @ selected in
-  if List.length ready > Recurrence_policy.max_pending (F.policy definition)
+  if List.length ready > ready_capacity s definition
   then invalid "recurrence pending capacity exceeded"
   else Ok { (retire_alarm s ~definition) with ready; issue = None }
 ;;
@@ -204,7 +218,9 @@ let collect_calendar (s : S.t) ~definition ~nominal =
       then add_omission s Expired
       else (
         match Recurrence_policy.misfire policy with
-        | Skip when not (List.is_empty s.ready) -> add_omission s Policy_skip
+        | Skip when pending_count s > 0 -> add_omission s Policy_skip
+        | (Skip | Coalesce) when ready_capacity s definition = 0 ->
+          add_omission s Pending_capacity
         | Skip | Coalesce ->
           let%map s =
             List.fold_result batch.candidates ~init:s ~f:(fun s previous ->
@@ -219,7 +235,9 @@ let collect_calendar (s : S.t) ~definition ~nominal =
           { s with batch = Some { batch with candidates = [ nominal ] } }
         | Catch_up maximum ->
           let capacity =
-            Int.min maximum (Recurrence_policy.max_pending policy - List.length s.ready)
+            Int.min
+              maximum
+              (Int.max 0 (Recurrence_policy.max_pending policy - pending_count s))
           in
           if List.length batch.candidates >= capacity
           then add_omission s Pending_capacity
@@ -242,8 +260,26 @@ let finish_calendar (s : S.t) ~definition ~lookahead =
         { s with ready = [] }
       | (Skip | Catch_up _), _ | Coalesce, [] -> Ok s
     in
-    let ready = s.ready @ batch.candidates in
-    if List.length ready > Recurrence_policy.max_pending (F.policy definition)
+    (* A Ready row may have become protected while this cutoff was scanned.
+       Its private Coalesce candidate remains selected custody, not permission.
+       Dispose any now-unavailable publication credit only at the proven cutoff. *)
+    let retained, omitted =
+      List.split_n
+        batch.candidates
+        (Int.max 0 (ready_capacity s definition - List.length s.ready))
+    in
+    let%bind s =
+      List.fold_result omitted ~init:s ~f:(fun s nominal ->
+        omit
+          s
+          definition
+          ~first_slot:(slot nominal)
+          ~last_slot:(slot nominal)
+          ~reason:Pending_capacity
+          ~nominal:(Some nominal))
+    in
+    let ready = s.ready @ retained in
+    if List.length ready > ready_capacity s definition
     then invalid "calendar publication exceeds pending capacity"
     else Ok { (retire_batch s ~definition) with ready; lookahead; issue = None }
 ;;
@@ -296,8 +332,15 @@ let validate_dispositions (s : S.t) =
       |> List.filter ~f:(fun row ->
         I.Definition.equal (I.Occurrence.definition (key row)) mark.definition)
     in
+    let protected =
+      List.filter (protected_rows s) ~f:(fun row ->
+        I.Definition.equal (I.Occurrence.definition (N.key row)) mark.definition)
+    in
     let intervals =
-      List.map details ~f:(fun r -> r.first_slot, r.last_slot)
+      List.map protected ~f:(fun row ->
+        let slot = I.Occurrence.slot (N.key row) in
+        slot, slot)
+      @ List.map details ~f:(fun r -> r.first_slot, r.last_slot)
       @ List.map pending ~f:(fun row -> slot row, slot row)
       |> List.sort ~compare:(fun (a, _) (b, _) -> Int64.compare a b)
     in
@@ -333,7 +376,11 @@ let validate_current (s : S.t) ~definition:current ~cursor =
           I.Definition.equal (I.Occurrence.definition (key row)) mark.definition)
       in
       let%bind total = V.add mark.omitted mark.withdrawn in
-      let%bind total = V.add total (Int64.of_int pending) in
+      let protected =
+        List.count (protected_rows s) ~f:(fun row ->
+          I.Definition.equal (I.Occurrence.definition (N.key row)) mark.definition)
+      in
+      let%bind total = V.add total (Int64.of_int (pending + protected)) in
       let%bind consumed = V.Mark.consumed mark in
       if Int64.equal total consumed
       then Ok ()
@@ -350,9 +397,11 @@ let validate_current (s : S.t) ~definition:current ~cursor =
       let capacity =
         match Recurrence_policy.misfire policy with
         | Coalesce -> 1
-        | Skip -> if List.is_empty s.ready then 1 else 0
+        | Skip -> if pending_count s = 0 then 1 else 0
         | Catch_up count ->
-          Int.min count (Recurrence_policy.max_pending policy - List.length s.ready)
+          Int.min
+            count
+            (Int.max 0 (Recurrence_policy.max_pending policy - pending_count s))
       in
       if
         List.length batch.candidates <= capacity
@@ -374,7 +423,7 @@ let validate_current (s : S.t) ~definition:current ~cursor =
   in
   let%bind () =
     if
-      List.length s.ready > Recurrence_policy.max_pending policy
+      List.length s.ready > ready_capacity s current
       || List.length s.history > Recurrence_policy.max_history policy
       || List.length s.control_history > Recurrence_policy.max_history policy
     then invalid "frontier exceeds captured retention policy"
@@ -514,6 +563,17 @@ let validate_associations (s : S.t) ~definitions ~cursor =
          with
          | None -> invalid "retained nominal lacks captured definition"
          | Some definition -> N.validate (value nominal) ~definition))
+  in
+  let%bind () =
+    List.fold_result s.protected_children ~init:() ~f:(fun () row ->
+      match
+        List.find definitions ~f:(fun definition ->
+          I.Definition.equal
+            (F.key definition)
+            (I.Occurrence.definition (Recurrence_child_reservation.occurrence row)))
+      with
+      | None -> invalid "protected creation lacks captured definition"
+      | Some definition -> Recurrence_child_reservation.validate row ~definition)
   in
   validate_current s ~definition:current ~cursor
 ;;

@@ -124,7 +124,13 @@ let steps = function
   | Retired _ -> 0
 ;;
 
-let required_transition_steps t = steps (control t)
+let pending_child_associations t =
+  match (C.value t).frontier with
+  | None -> 0
+  | Some frontier -> List.length (Recurrence_frontier.protected_children frontier.value)
+;;
+
+let required_transition_steps t = steps (control t) + pending_child_associations t
 
 let limits =
   D.Limits.create
@@ -241,6 +247,17 @@ let validate_projection p =
           frontier.value
           ~definitions:p.definitions
           ~cursor:p.cursor
+      in
+      let%bind () =
+        List.fold_result
+          (Recurrence_frontier.protected_children frontier.value)
+          ~init:()
+          ~f:(fun () row ->
+            if
+              Int64.(
+                Recurrence_child_reservation.control_revision row <= p.control_revision)
+            then Ok ()
+            else invalid "protected creation has future control frontier")
       in
       if
         Int64.(
@@ -679,6 +696,40 @@ let retire_lifecycle t =
   | Enabled | Paused _ ->
     let%map.Result retired = retire t ~reason:Lifecycle_changed in
     Some retired
+;;
+
+let reserve_child t ~principal_id ~child_session_id ~transaction_id ~occurrence =
+  let open Result.Let_syntax in
+  if not (equal_control (control t) Enabled)
+  then invalid "creation requires enabled recurrence"
+  else (
+    let%bind old = frontier t in
+    let%bind next, row =
+      Recurrence_frontier.reserve_child
+        old
+        ~definition:(current t)
+        ~control_revision:(control_revision t)
+        ~principal_id
+        ~child_session_id
+        ~transaction_id
+        ~occurrence
+    in
+    let%bind () =
+      if
+        Int64.equal
+          (Recurrence_child_reservation.control_revision row)
+          (control_revision t)
+      then Ok ()
+      else invalid "creation reservation belongs to earlier control"
+    in
+    if Int64.equal (Recurrence_frontier.revision old) (Recurrence_frontier.revision next)
+    then Ok (t, row)
+    else (
+      let%bind frontier = Stored_frontier.create next in
+      let candidate = C.with_value t { (C.value t) with frontier = Some frontier } in
+      let%bind () = validate_transition t ~incoming:candidate in
+      let%map _ = to_document candidate |> protocol in
+      candidate, row))
 ;;
 
 let effective_control t ~current_revision ~archived =

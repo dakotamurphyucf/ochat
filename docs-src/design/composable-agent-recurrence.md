@@ -427,6 +427,55 @@ Historical beta entries without a frontier remain inspectable and can be paused
 or retired, but require a new recurrence identity for planning; an initial-looking
 cursor is not evidence of zero historical consumption.
 
+Fresh-child creation now has an actor-owned reservation boundary. The actor moves
+the exact Ready nominal, including its complete compatible JSON, into immutable
+protected custody before any child effect. The reservation fixes the original
+child and transaction identities, occurrence, control revision, captured artifact,
+target/source/birth bindings and request digest. Retrying under fresh current
+authority returns those same identities; the stored original principal is audit
+data. The actor requires genuine current `Create_sessions` authority and current
+host target policy. The planning-only automation configuration described below
+cannot supply that authority.
+
+Only the actual reservation commit acknowledgement allows the actor to issue its
+process-local creation permit. Metadata/index repair and a fresh genuine lifecycle
+observation precede that publication. A lost acknowledgement or actor termination
+publishes no permit; the existing journal writer sequence/hash and complete carrier
+fences prevent stale follow-up writes from replacing uncertain durable identity.
+Recovery reopens that owner and reauthorizes the same retained reservation.
+
+An actor RPC reply does not make the caller's next effect atomic. After yielding
+preparation, the factory refreshes through the issuing actor and invokes the
+returned checked view's synchronous final check immediately before its own
+mutation. That check repeats original proof/current nonyielding host policy,
+actual actor liveness/runtime, lifecycle/source/control, exact retained row and
+grace. The captured definition getter alone grants no authority, and a successful
+check grants none across a later yield. Live interval grace retains the actual
+selected elapsed anchor through reservation, including fixed-delay waiting;
+calendar and recovered interval selections use their documented wall-time basis.
+
+Protected reservations consume pending/serial capacity and cannot be replaced or
+pruned by pause, edit, source retirement or detail-history compaction. Their
+presence requires the supported `recurrence.child-reservation.v1` semantics marker;
+an older reader must not reinterpret them as unadmitted gaps. They remain bounded
+by the existing frontier, entry, catalog and complete host/journal profiles.
+Before accepting a reservation, those owners reserve the complete immutable row
+plus a bounded future association envelope of at most 4 KiB, depth 24, 64 fields
+and 128 nodes. The concrete child owner must validate its complete actual envelope
+against that quota before effects; the capacity witness is never stored or
+interpreted as reference proof. Numeric credits sum one independent association
+step per retained reservation in addition to the maximum bulk-control sequence
+and the other session owners' obligations. Retirement does not spend unfinished
+association credits.
+
+The reservation owner does not install an artifact, create/link a child or admit
+a Run. Those execution owners must validate actual same-store reference/origin
+evidence and preserve uncertainty at every cut. Actual terminal associations must
+eventually release pending/serial occupancy without discarding their retained
+immutable evidence; retaining completed history must not permanently stall a
+serial recurrence. Until those owners are integrated, protected reservations are
+unsettled and continue to consume that capacity.
+
 The pure tests compare bounded interval enumeration with arithmetic planning,
 calendar chunked and whole searches, live wall corrections versus restart, exact
 selected provenance across timezone changes, control dispositions and complete

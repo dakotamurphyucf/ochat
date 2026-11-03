@@ -17,6 +17,8 @@
   recurrence_nominal
   recurrence_alarm
   recurrence_phase
+  recurrence_child_reservation
+  recurrence_selection_grace
   recurrence_frontier_records
   recurrence_frontier_codec
   recurrence_frontier_transition
@@ -35,6 +37,7 @@
   recurrence_controller
   recurrence_command_transition
   recurrence_command_admission
+  recurrence_creation_admission
   recurrence_source
   recurrence_reconciliation
   recurrence_recovery

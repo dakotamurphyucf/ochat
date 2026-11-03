@@ -191,6 +191,8 @@ let encode (s : S.t) =
     [ "revision", X.int64_json s.revision
     ; "marks", X.list_json mark_json s.marks
     ; "ready", X.list_json stored s.ready
+    ; ( "protected_children"
+      , X.list_json Recurrence_child_reservation.to_json s.protected_children )
     ; "batch", optional batch_json s.batch
     ; "lookahead", optional stored s.lookahead
     ; "alarm", optional V.Stored_alarm.json s.alarm
@@ -204,7 +206,9 @@ let validate (s : S.t) =
   let open Result.Let_syntax in
   let%bind () =
     if
-      Int64.(s.revision < 0L)
+      Int64.(
+        s.revision < 0L
+        || s.revision > max_value - of_int (List.length s.protected_children))
       || List.is_empty s.marks
       || List.length s.marks > 8
       || List.length s.ready > 32
@@ -243,6 +247,12 @@ let validate (s : S.t) =
   let rows = s.ready @ Option.value_map s.batch ~default:[] ~f:(fun b -> b.candidates) in
   let keys =
     List.map rows ~f:(fun n -> Recurrence_nominal.key (V.Stored_nominal.value n))
+    @ List.map s.protected_children ~f:Recurrence_child_reservation.occurrence
+  in
+  let%bind () =
+    if List.length s.protected_children > 256
+    then invalid "protected creation retention exhausted"
+    else Ok ()
   in
   let%bind () =
     if List.contains_dup keys ~compare:I.Occurrence.compare
@@ -275,6 +285,12 @@ let decode json =
   let%bind revision = X.required f "revision" X.nonnegative_int64 in
   let%bind marks = X.required f "marks" (list 8 mark_of_json) in
   let%bind ready = X.required f "ready" (list 32 stored_of_json) in
+  let%bind protected_children =
+    match D.Json.field json ~name:"protected_children" with
+    | Absent -> Ok []
+    | Null -> invalid "protected children must be an array"
+    | Value json -> list 256 Recurrence_child_reservation.of_json json
+  in
   let%bind batch = X.required f "batch" (nullable batch_of_json) in
   let%bind lookahead = X.required f "lookahead" (nullable stored_of_json) in
   let%bind alarm = X.required f "alarm" (nullable V.Stored_alarm.of_json) in
@@ -282,7 +298,18 @@ let decode json =
   let%bind history = X.required f "history" (list 256 detail_of_json) in
   let%bind control_history = X.required f "control_history" (list 256 control_of_json) in
   let state =
-    S.{ revision; marks; ready; batch; lookahead; alarm; issue; history; control_history }
+    S.
+      { revision
+      ; marks
+      ; ready
+      ; protected_children
+      ; batch
+      ; lookahead
+      ; alarm
+      ; issue
+      ; history
+      ; control_history
+      }
   in
   let%map () = validate state in
   state
@@ -306,6 +333,7 @@ let shape =
              ; "last_alarm_sequence"
              ]) )
     ; "ready", v
+    ; "protected_children", v
     ; "batch", v
     ; "lookahead", v
     ; "alarm", v
@@ -321,7 +349,7 @@ let codec =
     ~kind:"ochat.recurrence_frontier"
     ~version:1
     ~shape
-    ~supported_semantics:[]
+    ~supported_semantics:[ "recurrence.child-reservation.v1" ]
     ~validate:(fun s -> X.document_result (validate s))
     ~decode:(fun j -> X.document_result (decode j))
     ~encode:(fun s -> Ok (encode s))

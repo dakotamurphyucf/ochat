@@ -17,6 +17,7 @@ type t =
   ; cursor : C.t
   ; frontier : H.t
   ; next_phase : Phase.t option
+  ; selection_grace : Recurrence_selection_grace.t list
   }
 
 type decision =
@@ -26,6 +27,7 @@ type decision =
 let cursor t = t.cursor
 let frontier t = t.frontier
 let next_phase t = t.next_phase
+let selection_grace t = t.selection_grace
 let invalid message = Error (P.Error.invalid_request message)
 
 let timing r =
@@ -59,6 +61,7 @@ let finish ~definition ~old_cursor ~old_frontier ~work ~cursor ~next_phase =
       ; cursor
       ; frontier
       ; next_phase
+      ; selection_grace = []
       }
 ;;
 
@@ -83,7 +86,13 @@ let arm_interval work cursor =
 (* At most 32 explicit rows; arbitrarily long omitted runs remain arithmetic
    ranges. The interval cursor and captured phase, rather than callback duration,
    determine every selected nominal. *)
-let select_interval definition ~(range : R.Cursor.Interval.due_range) ~lateness ~pending =
+let select_interval
+      definition
+      ~(range : R.Cursor.Interval.due_range)
+      ~lateness
+      ~pending
+      ~protected
+  =
   let open Result.Let_syntax in
   let policy = F.policy definition in
   let period =
@@ -103,6 +112,8 @@ let select_interval definition ~(range : R.Cursor.Interval.due_range) ~lateness 
   let first_selected, count_selected, policy_reason =
     match Recurrence_policy.misfire policy with
     | Skip when pending > 0 -> range.count, 0, H.Reason.Policy_skip
+    | (Skip | Coalesce) when protected >= Recurrence_policy.max_pending policy ->
+      range.count, 0, H.Reason.Pending_capacity
     | Skip | Coalesce ->
       if Int64.equal eligible 0L
       then range.count, 0, H.Reason.Policy_skip
@@ -181,7 +192,8 @@ let prepare_rate definition ~old_cursor ~frontier ~interval ~phase ~snapshot ~wo
           definition
           ~range
           ~lateness
-          ~pending:(List.length (H.ready frontier))
+          ~pending:(H.pending_count frontier)
+          ~protected:(List.length (H.protected_children frontier))
       in
       let%bind work = W.consume_interval work ~range ~selected ~omitted in
       let%bind step = C.consume_interval old_cursor ~rule ~count:range.count in
@@ -330,7 +342,7 @@ let prepare_calendar definition ~old_cursor ~frontier ~snapshot ~zone ~work ~rul
   finish ~definition ~old_cursor ~old_frontier:frontier ~work ~cursor ~next_phase:None
 ;;
 
-let prepare ~definition ~cursor ~frontier ~phase ~snapshot ~zone =
+let prepare_inner ~definition ~cursor ~frontier ~phase ~snapshot ~zone =
   let open Result.Let_syntax in
   let%bind work = W.start frontier ~definition ~cursor in
   match C.position cursor, F.schedule definition with
@@ -364,4 +376,53 @@ let prepare ~definition ~cursor ~frontier ~phase ~snapshot ~zone =
   | (Awaiting_completion _ | Exhausted), (Interval _ | Calendar _) -> Ok (Unchanged None)
   | (Interval _ | Calendar _), (Interval _ | Calendar _) ->
     invalid "cursor mode differs from due definition"
+;;
+
+(* Newly selected interval rows carry the exact already-computed live lateness
+   into a bounded process-local anchor. Calendar admission remains wall based.
+   No anchor is installed until the actual owner acknowledges the due candidate. *)
+let prepare ~definition ~cursor ~frontier ~phase ~snapshot ~zone =
+  let open Result.Let_syntax in
+  let%bind decision =
+    prepare_inner ~definition ~cursor ~frontier ~phase ~snapshot ~zone
+  in
+  match decision, F.schedule definition with
+  | Unchanged _, _ | Candidate _, Calendar _ -> Ok decision
+  | Candidate plan, Interval { rule; _ } ->
+    let selected =
+      List.filter (H.ready plan.frontier) ~f:(fun nominal ->
+        not
+          (List.exists (H.ready frontier) ~f:(fun old ->
+             Recurrence_identity.Occurrence.equal (N.key nominal) (N.key old))))
+    in
+    let%map selection_grace =
+      List.map selected ~f:(fun nominal ->
+        let%bind lateness_ns =
+          match phase, C.position cursor with
+          | Some phase, Interval interval ->
+            let count =
+              Int64.(
+                Recurrence_identity.Occurrence.slot (N.key nominal)
+                - R.Cursor.Interval.slot interval)
+            in
+            let period = R.Rule.Period.nanoseconds (R.Rule.Interval.period rule) in
+            (match Phase.lateness_ns phase ~snapshot with
+             | Some late when Int64.(count >= 0L && count <= late / period) ->
+               Ok Int64.(late - (count * period))
+             | None | Some _ ->
+               invalid "selected nominal lacks matching live interval lateness")
+          | None, Interval _ ->
+            Result.of_option
+              (wall_lateness ~now:(Snapshot.wall snapshot) ~due_at:(N.at nominal))
+              ~error:(P.Error.invalid_request "recovered interval selection is not due")
+          | (Some _ | None), (Calendar _ | Awaiting_completion _ | Exhausted) ->
+            invalid "interval selection lacks original interval cursor"
+        in
+        Recurrence_selection_grace.create
+          ~occurrence:(N.key nominal)
+          ~snapshot
+          ~lateness_ns)
+      |> Result.all
+    in
+    Candidate { plan with selection_grace }
 ;;
