@@ -55,6 +55,7 @@ let public payload statuses =
     (event payload)
     ~body:(Full (Shared shared))
     ~extension_status:statuses
+    ~instruction_status:None
     ~replacement_snapshot:None
 ;;
 
@@ -138,6 +139,7 @@ let snapshot =
     ; permissions = []
     ; grants = []
     ; jobs = []
+    ; instruction_status = None
     ; extension_status = []
     ; schedules = []
     ; goals = []
@@ -260,4 +262,194 @@ let%expect_test "snapshot decode preserves constructor checks and normalized bou
        : bool)
     , (rejected (S.of_json oversized_normalization) : bool)];
   [%expect {| (true true true true true true) |}]
+;;
+
+let instruction_status ~revision ~selected =
+  P.Instruction_status.create
+    ~revision
+    ~project_selected:selected
+    ~project_files:(if selected then 2 else 0)
+    ~skills:(if selected then 1 else 0)
+    ~retained_captures:(if selected then 2 else 0)
+    ~retained_receipts:(Int64.to_int_exn revision)
+  |> ok
+;;
+
+let replace_field json name value =
+  match json with
+  | `Object fields ->
+    `Object ((name, value) :: List.Assoc.remove fields name ~equal:String.equal)
+  | _ -> assert false
+;;
+
+let%expect_test
+    "instruction snapshots distinguish legacy, empty and selected without authority"
+  =
+  let module S = P.Public.Snapshot in
+  let empty = instruction_status ~revision:0L ~selected:false in
+  let selected = instruction_status ~revision:2L ~selected:true in
+  let fields = S.fields snapshot in
+  let with_status status =
+    S.create { fields with instruction_status = Some status } |> ok
+  in
+  List.iter [ empty; selected ] ~f:(fun status ->
+    let wire = S.to_json (with_status status) in
+    let internal = P.Snapshot.of_json wire |> ok in
+    let public = S.of_json (P.Snapshot.to_json internal) |> ok in
+    assert (
+      Option.equal
+        P.Instruction_status.equal
+        (Some status)
+        (S.fields public).instruction_status);
+    assert (
+      P.Instruction_status.equal
+        status
+        (P.Instruction_status.t_of_sexp (P.Instruction_status.sexp_of_t status))));
+  assert (
+    Option.is_none (S.fields (S.of_json (S.to_json snapshot) |> ok)).instruction_status);
+  let raw = S.to_json snapshot in
+  let invalid =
+    [ `Null
+    ; `Object []
+    ; replace_field (P.Instruction_status.to_json selected) "revision" (`String "01")
+    ]
+  in
+  List.iter invalid ~f:(fun value ->
+    let wire = replace_field raw "instruction_status" value in
+    assert (Result.is_error (S.of_json wire));
+    assert (Result.is_error (P.Snapshot.of_json wire)));
+  let annotated =
+    replace_field (P.Instruction_status.to_json selected) "future" (`String "inert")
+  in
+  assert (
+    P.Instruction_status.equal selected (P.Instruction_status.of_json annotated |> ok));
+  let duplicate =
+    match annotated with
+    | `Object fields -> `Object (("skills", `Number "1") :: fields)
+    | _ -> assert false
+  in
+  assert (Result.is_error (P.Instruction_status.of_json duplicate));
+  assert (
+    Result.is_error
+      (P.Instruction_status.of_json
+         (replace_field annotated "future" (`String (String.make 4096 'x')))));
+  let invalid_sexp =
+    match P.Instruction_status.sexp_of_t selected with
+    | Sexp.List fields ->
+      Sexp.List
+        (List.map fields ~f:(function
+           | Sexp.List [ Sexp.Atom "revision"; _ ] ->
+             Sexp.List [ Sexp.Atom "revision"; Sexp.Atom "-1" ]
+           | field -> field))
+    | _ -> assert false
+  in
+  assert (
+    Exn.does_raise (fun () ->
+      ignore (P.Instruction_status.t_of_sexp invalid_sexp : P.Instruction_status.t)));
+  print_endline
+    "legacy omitted; supported empty and selected roundtrip; null, malformed, duplicates \
+     and bounds reject; sexp validates";
+  [%expect
+    {| legacy omitted; supported empty and selected roundtrip; null, malformed, duplicates and bounds reject; sexp validates |}]
+;;
+
+let%expect_test
+    "instruction status uses common get attach and event projection with transcript \
+     redaction"
+  =
+  let status = instruction_status ~revision:2L ~selected:true in
+  let internal =
+    P.Public.Snapshot.create
+      { (P.Public.Snapshot.fields snapshot) with instruction_status = Some status }
+    |> ok
+    |> P.Public.Snapshot.to_json
+    |> P.Snapshot.of_json
+    |> ok
+  in
+  let principal scopes =
+    P.Principal.create
+      ~id:(P.Id.Principal.of_string "pri_instruction_projection" |> ok)
+      ~authentication_kind:"test"
+      ~scopes:(P.Scope.Set.of_list scopes)
+      ~attributes:[]
+    |> ok
+  in
+  let allowed = principal [ View_session_transcript ] in
+  let redacted = principal [ View_security_state ] in
+  let get principal =
+    match
+      Agent_server.Principal_projection.result principal (Session_get internal) |> ok
+    with
+    | P.Public.Result.Session_get value ->
+      (P.Public.Snapshot.fields value).instruction_status
+    | _ -> assert false
+  in
+  let attach principal =
+    let result =
+      P.Method_result.Session_attach
+        { attachment =
+            { id = P.Id.Attachment.of_string "att_instruction_projection" |> ok
+            ; session_id
+            ; mode = Read_only
+            ; owner_lease = None
+            }
+        ; replay = Snapshot internal
+        ; latest_event_sequence = 1L
+        ; reclaim_token = None
+        }
+    in
+    match Agent_server.Principal_projection.result principal result |> ok with
+    | P.Public.Result.Session_attach { replay = Snapshot value; _ } ->
+      (P.Public.Snapshot.fields value).instruction_status
+    | _ -> assert false
+  in
+  assert (Option.equal P.Instruction_status.equal (get allowed) (Some status));
+  assert (Option.equal P.Instruction_status.equal (attach allowed) (Some status));
+  assert (Option.is_none (get redacted));
+  assert (Option.is_none (attach redacted));
+  let original = event (Session_updated session) in
+  let annotated = P.Event.Durable.with_instruction_status original status |> ok in
+  let projected = Agent_server.Principal_projection.durable allowed annotated |> ok in
+  let decoded = D.of_json (D.to_json projected) |> ok in
+  assert (Option.equal P.Instruction_status.equal decoded.instruction_status (Some status));
+  assert (
+    Option.is_none
+      (Agent_server.Principal_projection.durable redacted annotated |> ok)
+        .instruction_status);
+  assert (
+    Result.is_error
+      (P.Event.Durable.with_instruction_status
+         { original with visibility = Hidden }
+         status));
+  assert (
+    Result.is_error
+      (P.Event.Durable.with_instruction_status { original with revision = 2L } status));
+  assert (
+    Result.is_error
+      (P.Event.Durable.with_instruction_status
+         (event (Session_updated { session with id = foreign_id }))
+         status));
+  let wire value =
+    P.Event.Durable.to_json
+      { original with
+        payload = replace_field original.payload "instruction_status" value
+      }
+  in
+  assert (Result.is_error (D.of_json (wire `Null)));
+  let misplaced = { annotated with kind = P.Event.Durable.Session_created } in
+  assert (Result.is_error (P.Event.Durable.instruction_status misplaced));
+  assert (Result.is_error (D.of_json (P.Event.Durable.to_json misplaced)));
+  assert (
+    Result.is_error
+      (D.of_internal_envelope
+         original
+         ~body:Hidden
+         ~instruction_status:(Some status)
+         ~extension_status:None
+         ~replacement_snapshot:None));
+  print_endline
+    "shared get/attach and event wire carry counts; transcript redaction strips; hidden, \
+     null, foreign and mismatched anchors reject";
+  [%expect
+    {| shared get/attach and event wire carry counts; transcript redaction strips; hidden, null, foreign and mismatched anchors reject |}]
 ;;

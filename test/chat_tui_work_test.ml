@@ -67,6 +67,7 @@ let public_event payload ~sequence =
     event
     ~body:(Full (Shared value))
     ~extension_status:None
+    ~instruction_status:None
     ~replacement_snapshot:None
   |> protocol_ok
 ;;

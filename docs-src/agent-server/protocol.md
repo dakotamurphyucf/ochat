@@ -481,6 +481,24 @@ observations or `Activity.Tool` start/progress/finish observations with actual
 source/attempt identity and optional parent attribution. Public durable payloads
 are defined by `Public.Durable`; `Event.Recoverable` defines the live envelope.
 
+Snapshots may carry an `instruction_status` summary containing only the stored
+selection revision, project-selected flag and file, skill, retained-capture and
+receipt counts. It includes no instruction text, paths, root identities or source
+authority. The same optional extra is supported on the existing `session.updated`
+event. A present extra replaces the client's previous summary at that event's
+durable position; an absent extra preserves it. A replacement snapshot replaces
+that state as well. When both the extra and a replacement snapshot are present,
+the replacement must contain the same summary; contradictory values are rejected.
+These are read projections, not instruction activation commands.
+
+The field is omitted for legacy, unavailable or transcript-redacted state. A
+current host with no selected instructions returns a present summary with zero
+counts; omission does not mean that known empty state. Explicit JSON `null`,
+malformed counts, duplicate fields and mismatched event anchors are rejected.
+Bounded unknown annotations follow the existing read-DTO policy and may be
+ignored. `session.transcript.read` controls disclosure in both snapshots and
+events; security scope alone does not expose this summary.
+
 Client synchronization:
 
 1. Initialize and establish an attachment/projection.

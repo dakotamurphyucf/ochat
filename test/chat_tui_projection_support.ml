@@ -95,6 +95,7 @@ let projection text =
       ; permissions = []
       ; grants = []
       ; jobs = []
+      ; instruction_status = None
       ; extension_status = []
       ; schedules = []
       ; goals = []

@@ -8,7 +8,7 @@ type t = private
   ; retained_captures : int
   ; retained_receipts : int
   }
-[@@deriving equal, sexp_of]
+[@@deriving equal, sexp]
 
 val create
   :  revision:int64

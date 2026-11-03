@@ -8,7 +8,9 @@ type t =
   ; retained_captures : int
   ; retained_receipts : int
   }
-[@@deriving equal, sexp_of]
+[@@deriving equal, sexp]
+
+let decoded_of_sexp = t_of_sexp
 
 let create
       ~revision
@@ -42,6 +44,21 @@ let create
       ; retained_captures
       ; retained_receipts
       }
+;;
+
+let t_of_sexp sexp =
+  let wire = decoded_of_sexp sexp in
+  match
+    create
+      ~revision:wire.revision
+      ~project_selected:wire.project_selected
+      ~project_files:wire.project_files
+      ~skills:wire.skills
+      ~retained_captures:wire.retained_captures
+      ~retained_receipts:wire.retained_receipts
+  with
+  | Ok value -> value
+  | Error error -> Sexplib.Conv.of_sexp_error error.Protocol_error.message sexp
 ;;
 
 let to_json t =

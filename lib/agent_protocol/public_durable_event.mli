@@ -40,6 +40,7 @@ type t = private
   ; timestamp : Timestamp.t
   ; kind : Event.Durable.kind
   ; body : body
+  ; instruction_status : Instruction_status.t option
   ; extension_status : Extension_status.t list option
   ; replacement_snapshot : Public_snapshot.t option
   }
@@ -48,10 +49,14 @@ type t = private
 (** Copies only the event envelope. Checks kind, counters, payload session
     ownership and replacement anchors. Extension summaries are unique, validated
     and cannot name a future generation of their session update. Hidden events
-    must contain neither status nor snapshot extras. *)
+    must contain neither status nor snapshot extras. Instruction status is an optional
+    counts-only [Session_updated] extra, never an authorization or activation proof.
+    If a replacement snapshot and extra are both present, the snapshot must carry
+    the same Some status; an absent extra leaves the replacement value intact. *)
 val of_internal_envelope
   :  Event.Durable.t
   -> body:body
+  -> instruction_status:Instruction_status.t option
   -> extension_status:Extension_status.t list option
   -> replacement_snapshot:Public_snapshot.t option
   -> (t, Error.t) result

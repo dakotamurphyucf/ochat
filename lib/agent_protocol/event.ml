@@ -138,6 +138,64 @@ module Durable = struct
     | _ -> Ok None
   ;;
 
+  let instruction_status (event : t) =
+    let open Result.Let_syntax in
+    match event.payload with
+    | `Object fields
+      when List.exists fields ~f:(fun (name, _) -> String.equal name "instruction_status")
+      ->
+      let%bind () = Projection_codec.validate event.payload in
+      let%bind fields = Json_codec.fields event.payload in
+      let%bind status =
+        Json_codec.optional_as fields "instruction_status" Instruction_status.of_json
+      in
+      (match status with
+       | None -> Ok None
+       | Some _ ->
+         if
+           (not (equal_kind event.kind Session_updated))
+           || equal_visibility event.visibility Hidden
+           || Int64.(event.sequence < zero || event.revision < zero)
+         then
+           Error
+             (Protocol_error.invalid_request
+                "instruction status requires a visible session update")
+         else (
+           let%bind session = Session.of_json event.payload in
+           if
+             (not (Id.Session.equal session.id event.session_id))
+             || (not (Int64.equal session.revision event.revision))
+             || not (Int64.equal session.latest_event_sequence event.sequence)
+           then
+             Error
+               (Protocol_error.invalid_request
+                  "instruction status disagrees with session event anchor")
+           else Ok status))
+    | _ -> Ok None
+  ;;
+
+  let with_instruction_status (event : t) status =
+    let open Result.Let_syntax in
+    match event.kind, event.visibility, event.payload with
+    | Session_updated, (Full | Redacted), `Object fields ->
+      let%bind _ = Json_codec.fields event.payload in
+      let event =
+        { event with
+          payload =
+            `Object
+              (("instruction_status", Instruction_status.to_json status)
+               :: List.filter fields ~f:(fun (name, _) ->
+                 not (String.equal name "instruction_status")))
+        }
+      in
+      let%map _ = instruction_status event in
+      event
+    | _ ->
+      Error
+        (Protocol_error.invalid_request
+           "instruction status requires a visible session update")
+  ;;
+
   let kind_values =
     [ "session.created", Session_created
     ; "session.state_changed", Session_state_changed
@@ -417,13 +475,17 @@ module Durable = struct
     let%bind visibility = Json_codec.optional_as fields "visibility" visibility_of_json in
     let%bind payload = Json_codec.required fields "payload" in
     let visibility = Option.value visibility ~default:Full in
-    match visibility, payload with
-    | Hidden, `Object [] ->
-      Ok { session_id; sequence; revision; timestamp; kind; visibility; payload }
-    | Hidden, _ ->
-      Error (Protocol_error.invalid_request "hidden event payload must be empty")
-    | (Full | Redacted), _ ->
-      Ok { session_id; sequence; revision; timestamp; kind; visibility; payload }
+    let%bind event =
+      match visibility, payload with
+      | Hidden, `Object [] ->
+        Ok { session_id; sequence; revision; timestamp; kind; visibility; payload }
+      | Hidden, _ ->
+        Error (Protocol_error.invalid_request "hidden event payload must be empty")
+      | (Full | Redacted), _ ->
+        Ok { session_id; sequence; revision; timestamp; kind; visibility; payload }
+    in
+    let%map _ = instruction_status event in
+    event
   ;;
 
   let of_payload ~session_id ~sequence ~revision ~timestamp payload =

@@ -76,6 +76,7 @@ let snapshot ?(id = session_id) sequence =
     ; permissions = []
     ; grants = []
     ; jobs = []
+    ; instruction_status = None
     ; extension_status = []
     ; schedules = []
     ; goals = []
@@ -171,6 +172,7 @@ let event ~sequence ~replacement_snapshot payload =
     internal
     ~body:(Full (Shared (Public.Durable.Shared_payload.of_internal payload |> ok)))
     ~extension_status:None
+    ~instruction_status:None
     ~replacement_snapshot
   |> ok
 ;;

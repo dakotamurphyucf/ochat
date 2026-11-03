@@ -83,6 +83,7 @@ let private_fixture (fields : Agent_protocol.Public.Snapshot.Fields.t) =
     ; permissions = fields.permissions
     ; grants = fields.grants
     ; jobs = fields.jobs
+    ; instruction_status = fields.instruction_status
     ; extension_status = fields.extension_status
     ; schedules = fields.schedules
     ; goals = fields.goals

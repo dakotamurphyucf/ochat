@@ -32,6 +32,12 @@ let%expect_test
     let initial =
       actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
     in
+    let summary = State.snapshot ~now:timestamp initial in
+    assert (
+      Option.equal
+        P.Instruction_status.equal
+        summary.instruction_status
+        (Some (Selection.summary Selection.empty)));
     let encoded = state_document initial |> D.Document.json in
     let payload = member encoded "payload" in
     let absent =
@@ -64,6 +70,12 @@ let%expect_test
     let capture = C.skills (snapshot [ a; b ]) |> protocol_ok in
     let command = request Selection.empty "carrier" (Replace_skills capture) in
     let transition, _ = prepare_state basis command |> prepared in
+    let summary = State.snapshot ~now:timestamp transition.state in
+    assert (
+      Option.equal
+        P.Instruction_status.equal
+        summary.instruction_status
+        (Some (Selection.summary (selection transition.state))));
     let admitted =
       A.Session_document_transition.admit
         basis
