@@ -128,6 +128,7 @@ let%expect_test "generated installation requires its exact durable unrevoked res
           ; parent_revision_id = P.Id.Prompt_revision.create ()
           ; parent_stop_epoch = None
           ; authored_tool = None
+          ; captured_recurrence = None
           ; authority_sha256 = digest "host admission"
           ; capability_pins = G.capability_pins prepared
           ; lifetime = Owned

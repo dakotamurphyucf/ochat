@@ -52,6 +52,7 @@ let%expect_test
               ; parent_revision_id = parent.spec.prompt_revision_id
               ; parent_stop_epoch = Some parent.stop_epoch
               ; authored_tool = None
+              ; captured_recurrence = None
               ; authority_sha256 = Authority.fingerprint parent |> protocol_ok
               ; capability_pins = Request.capability_pins selected |> protocol_ok
               ; lifetime
@@ -280,6 +281,7 @@ let%expect_test "descendants revalidate private ancestry and its exact live narr
               ; parent_revision_id = parent.spec.prompt_revision_id
               ; parent_stop_epoch = Some parent.stop_epoch
               ; authored_tool = None
+              ; captured_recurrence = None
               ; authority_sha256 = Authority.fingerprint parent |> protocol_ok
               ; capability_pins = Request.capability_pins selected |> protocol_ok
               ; lifetime = Owned

@@ -65,6 +65,7 @@ let%expect_test "authored reservations preserve source identity through durable 
               ; parent_stop_epoch = Some 0L
               ; authority_sha256 = Chatmd_shell_spec.Source_ref.digest "parent-policy"
               ; authored_tool = origin
+              ; captured_recurrence = None
               ; capability_pins = pins
               ; lifetime = Owned
               ; created_at = artifact.created_at

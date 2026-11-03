@@ -33,6 +33,12 @@ module Admission : sig
     ; parent_stop_epoch : int64 option [@sexp.option]
     ; authority_sha256 : string
     ; authored_tool : authored_tool option [@sexp.option]
+    ; captured_recurrence : Delegation_captured_origin.t option [@sexp.option]
+      (** Immutable lower custody, never permission. Mutually exclusive with
+            [authored_tool]; the upper owner validates its actual domain types.
+            Captured recurrence children may reuse the parent's exact artifact
+            revision. They remain distinct sessions; the factory verifies the
+            captured manifest and reciprocal origin before any creation effect. *)
     ; capability_pins : (string * string) list
     ; lifetime : lifetime
     ; created_at : Agent_protocol.Timestamp.t
