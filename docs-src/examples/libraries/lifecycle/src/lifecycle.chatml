@@ -1,0 +1,95 @@
+type 'wake action = [ `No_action | `Continue | `Wait('wake) ]
+type obligation = [ `Active | `Finished ]
+type 'wake component = {id:string; obligation:obligation; action:'wake action}
+type 'wake plan = {order:string array; active:string array; action:'wake action}
+type error =
+  [ `Too_many_components
+  | `Invalid_id(string)
+  | `Duplicate_id(string)
+  | `Finished_with_action(string)
+  | `Conflict({first:string; second:string})
+  | `Active_components(string array)
+  | `Pending_action
+  ]
+type 'a checked = [ `Ok('a) | `Error(error) ]
+
+(* Seed the complete monomorphic error contract while leaving value/wake
+   parameters inferred; free polymorphic let annotations are not ChatML syntax. *)
+let failure : fun(error) -> error = fun error -> error
+
+let valid_id = fun id ->
+  let size = String.length(id) in
+  let lower = fun c -> String.contains("abcdefghijklmnopqrstuvwxyz", c) in
+  if size == 0 then false
+  else if size > 64 then false
+  else if lower(String.slice(id, 0, 1)) == false then false
+  else
+    let rec visit index =
+      if index == size then true
+      else
+        let c = String.slice(id, index, 1) in
+        if lower(c) then visit(index + 1)
+        else if String.contains("0123456789_-", c) then visit(index + 1)
+        else false
+    in
+    visit(1)
+
+let compose = fun components same_wait ->
+  let count = Array.length(components) in
+  if count > 64 then `Error(failure(`Too_many_components))
+  else
+    let rec duplicate index previous =
+      if previous == index then false
+      else if components[previous].id == components[index].id then true
+      else duplicate(index, previous + 1)
+    in
+    let rec visit index action owner active =
+      if index == count then
+        `Ok({order = Array.map(components, fun component -> component.id);
+             active = active; action = action})
+      else
+        let component = components[index] in
+        if valid_id(component.id) == false then `Error(failure(`Invalid_id(component.id)))
+        else if duplicate(index, 0) then `Error(failure(`Duplicate_id(component.id)))
+        else
+          let finished_action = match component.obligation with
+            | `Active -> false
+            | `Finished -> (match component.action with
+                | `No_action -> false
+                | `Continue -> true
+                | `Wait(wake) -> true)
+          in
+          if finished_action then `Error(failure(`Finished_with_action(component.id)))
+          else
+            let active = match component.obligation with
+              | `Active -> Array.append(active, [component.id])
+              | `Finished -> active
+            in
+            let advance = fun merged contributor ->
+              visit(index + 1, merged, contributor, active)
+            in
+            let conflict = fun () ->
+              `Error(failure(`Conflict({first = owner; second = component.id})))
+            in
+            match component.action with
+            | `No_action -> advance(action, owner)
+            | `Continue -> (match action with
+                | `No_action -> advance(`Continue, component.id)
+                | `Continue -> advance(`Continue, owner)
+                | `Wait(wake) -> conflict())
+            | `Wait(right) -> (match action with
+                | `No_action -> advance(`Wait(right), component.id)
+                | `Continue -> conflict()
+                | `Wait(left) ->
+                    if same_wait(left, right) then advance(action, owner)
+                    else conflict())
+
+    in
+    visit(0, `No_action, "", [])
+
+let root_finish = fun plan decision ->
+  if Array.length(plan.active) > 0 then `Error(failure(`Active_components(plan.active)))
+  else match plan.action with
+    | `No_action -> `Ok(decision)
+    | `Continue -> `Error(failure(`Pending_action))
+    | `Wait(wake) -> `Error(failure(`Pending_action))

@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "namespace": "ochat.examples.lifecycle-composition",
+  "dependencies": {
+    "lifecycle": {
+      "source": {
+        "kind": "local",
+        "path": "../../libraries/lifecycle"
+      },
+      "project": "chatml.project.json",
+      "environment": "pure"
+    },
+    "counter": {
+      "source": {
+        "kind": "local",
+        "path": "components/counter"
+      },
+      "project": "chatml.project.json"
+    },
+    "review": {
+      "source": {
+        "kind": "local",
+        "path": "components/review"
+      },
+      "project": "chatml.project.json"
+    },
+    "lifecycle_run": {
+      "source": {
+        "kind": "local",
+        "path": "../../libraries/lifecycle-run"
+      },
+      "project": "chatml.project.json",
+      "environment": "moderator"
+    }
+  },
+  "environments": {
+    "default": {
+      "modules": {
+        "Lifecycle": "lifecycle.Lifecycle",
+        "Lifecycle_run": "lifecycle_run.Lifecycle_run",
+        "Counter": "counter.Counter",
+        "Review": "review.Review"
+      },
+      "requires": {
+        "targets": [
+          "moderator_v1",
+          "delegated_moderator_v1"
+        ]
+      }
+    }
+  }
+}
