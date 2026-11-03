@@ -76,7 +76,7 @@ let%expect_test
                        in
                        let open Result.Let_syntax in
                        let%bind _ =
-                         execute ~invocation (fun ~dispatched:_ ->
+                         execute ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ ->
                            incr calls;
                            Ok (I.Complete (`String "effect happened")))
                        in

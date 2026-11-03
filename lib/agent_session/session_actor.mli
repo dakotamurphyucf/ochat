@@ -700,7 +700,8 @@ val with_job_invocations
 (** Enable qualified host follow-up accounting once. Reinstalling the same policy
     is a read-only success; replacement cannot reset a retained budget. *)
 val enable_automatic_turn_budget
-  :  t
+  :  ?actor:Operator_authorization.t
+  -> t
   -> Chat_response.Runtime_semantics.policy
   -> (unit, Agent_protocol.Error.t) result
 
@@ -722,18 +723,24 @@ val set_operation_worker
 (** Install or clear the actual selected runtime and inference execution together.
     Some/None mismatches reject; Pending initialization rejects installation.
     The constructor and legacy worker-only setter retain no inferred execution.
-    No callback reenters the runtime owner's mutex during compaction. *)
+    No callback reenters the runtime owner's mutex during compaction. When an
+    original [actor] is supplied, check it at actual worker installation after
+    any queued constructor checkpoints; legacy omission remains unbound. *)
 val set_runtime_worker
-  :  t
+  :  ?actor:Operator_authorization.t
+  -> t
   -> worker:Operation_worker.t option
   -> inference:Inference_client.Execution.t option
   -> (unit, Agent_protocol.Error.t) result
 
 (** Durably installs the supplied checkpoint, including an unchanged value.
     Publishes a public Session_updated position after commit so subscribers can
-    reach the returned revision. Private moderator state is not disclosed. *)
+    reach the returned revision. Private moderator state is not disclosed.
+    [actor], when supplied by authenticated construction, is rechecked at actual
+    actor admission; completed earlier effects are not rolled back. *)
 val change_moderator
-  :  t
+  :  ?actor:Operator_authorization.t
+  -> t
   -> Jsonaf.t option
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
@@ -825,6 +832,22 @@ val begin_initialization
   :  t
   -> expected:Session_state.t
   -> (Initialization_scope.t, Agent_protocol.Error.t) result
+
+(** Actual authenticated initialization admission. The scope still supplies
+    lifecycle/job ownership; the retained original actor grants no source read. *)
+val begin_initialization_authenticated
+  :  t
+  -> actor:Operator_authorization.t
+  -> expected:Session_state.t
+  -> (Initialization_scope.t, Agent_protocol.Error.t) result
+
+(** Borrow an attenuated original proof from this exact active initialization.
+    A retained proof expires with the initialization owner; no ambient authority
+    is installed and legacy initialization returns None. *)
+val initialization_agent_actor
+  :  t
+  -> scope:Initialization_scope.t
+  -> (Operator_authorization.t option, Agent_protocol.Error.t) result
 
 (** Same existing constructor scope, explicitly bound to this run preparation.
     Scoped commits recheck current custody and acknowledge only their own changes. *)
@@ -925,8 +948,11 @@ val upgrade_prompt_with_command_audit
   -> target_revision:Agent_protocol.Id.Prompt_revision.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
+(** [actor], when present, is checked again at actual actor admission after
+    runtime construction. Omission preserves the principal-only host API. *)
 val start
-  :  ?expected_parent_stop_epoch:int64
+  :  ?actor:Operator_authorization.t
+  -> ?expected_parent_stop_epoch:int64
   -> t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
@@ -956,7 +982,8 @@ val replace_workspace
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
 val start_with_command_audit
-  :  ?expected_parent_stop_epoch:int64
+  :  ?actor:Operator_authorization.t
+  -> ?expected_parent_stop_epoch:int64
   -> t
   -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
@@ -1044,6 +1071,22 @@ val submit_message
   :  t
   -> ?timing:Agent_protocol.Pending_input.Timing.t
   -> submitting_principal:Agent_protocol.Id.Principal.t
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> Agent_protocol.History.entry
+  -> (submission, Agent_protocol.Error.t) result
+
+(** Proof-bearing ingress used by actual authenticated transports. Repeats the
+    original current Send_messages scope and real writer checks. Its principal
+    is derived from that object. Live custody is installed only after admission;
+    deferred input retains its exact proof until its actual later adoption.
+    A single expired deferred proof rejects adoption; an ambiguous multi-entry
+    batch is unbound rather than selecting one caller's authority. Explicit Run
+    operation grants use their own admitted owner. The principal-only API above
+    remains explicitly unbound. *)
+val submit_message_authenticated
+  :  t
+  -> actor:Operator_authorization.t
+  -> ?timing:Agent_protocol.Pending_input.Timing.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> Agent_protocol.History.entry
   -> (submission, Agent_protocol.Error.t) result
@@ -1179,6 +1222,14 @@ val begin_run_preparation
   -> request_sha256:string
   -> (Run_preparation.Decision.t, Agent_protocol.Error.t) result
 
+val begin_run_preparation_authenticated
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> request:Agent_protocol.Run_start.t
+  -> request_sha256:string
+  -> (Run_preparation.Decision.t, Agent_protocol.Error.t) result
+
 (** Internal authorized host command, without a client attachment. The actual
     original authentication must be current and carry Send_messages. [authorize]
     is additional non-yielding current host policy, not a substitute for proof.
@@ -1238,6 +1289,15 @@ val submit_message_with_command_audit
   -> ?timing:Agent_protocol.Pending_input.Timing.t
   -> command_audit:Document_schema.Document.t
   -> submitting_principal:Agent_protocol.Id.Principal.t
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> Agent_protocol.History.entry
+  -> (submission, Agent_protocol.Error.t) result
+
+val submit_message_authenticated_with_command_audit
+  :  t
+  -> actor:Operator_authorization.t
+  -> ?timing:Agent_protocol.Pending_input.Timing.t
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> Agent_protocol.History.entry
   -> (submission, Agent_protocol.Error.t) result

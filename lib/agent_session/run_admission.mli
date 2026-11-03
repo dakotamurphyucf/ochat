@@ -12,7 +12,21 @@ module Scope : sig
     -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
     -> (t, Agent_protocol.Error.t) result
 
+  (** Genuine proof-bearing counterpart; derives its principal from the original
+      object and repeats its currentness before the supplied host policy. *)
+  val create_authenticated
+    :  actor:Operator_authorization.t
+    -> observer:Agent_protocol.Invocation.observer
+    -> startup_pending:(unit -> bool)
+    -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+    -> (t, Agent_protocol.Error.t) result
+
   val principal_id : t -> Agent_protocol.Id.Principal.t
+
+  (** Exact original proof when supplied by genuine authenticated admission.
+      Absence stays unavailable; a principal or retained receipt supplies none. *)
+  val original_actor : t -> Operator_authorization.t option
+
   val observer : t -> Agent_protocol.Invocation.observer
   val authorize : t -> Session_state.t -> (unit, Agent_protocol.Error.t) result
   val startup_pending : t -> bool

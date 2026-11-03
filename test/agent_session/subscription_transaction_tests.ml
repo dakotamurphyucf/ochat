@@ -67,150 +67,169 @@ let%expect_test
                  ~attempt:parent.attempt
                  ~deadline:(Some deadline)
                  (fun services ->
-                    services.execute ~invocation:(root parent) (fun ~dispatched:root ->
-                      let attempted = make_subscription root in
-                      assert (
-                        Result.is_error
-                          (A.stage_subscription_mutation
-                             actor
-                             ~owner:(J.Invocation root.context.id)
-                             ~source
-                             ~previous:None
-                             ~next:attempted));
-                      let invocation =
-                        I.create
-                          { root.context with
-                            id = P.Id.Invocation.create ()
-                          ; parent_job = None
-                          ; parent_invocation = Some root.context.id
-                          ; tool_name = "counter"
-                          }
-                        |> protocol_ok
-                      in
-                      let result =
-                        services.moderator_execute ~invocation (fun ~dispatched ~commit ->
-                          assert (Option.is_none dispatched.observation);
-                          let owner = J.Invocation dispatched.context.id in
-                          let value =
-                            make_subscription
-                              ~parent_job:(parent.id, parent.attempt)
-                              dispatched
-                          in
-                          retained := Some (owner, value);
-                          let stage previous next =
-                            A.stage_subscription_mutation
-                              actor
-                              ~owner
-                              ~source
-                              ~previous
-                              ~next
-                          in
-                          let stamp ns =
-                            Int63.of_int64_exn ns
-                            |> Time_ns.of_int63_ns_since_epoch
-                            |> P.Timestamp.of_time_ns
-                          in
-                          (* A forged lifetime across the epoch must not wrap to a
-                             negative signed span and bypass the host ceiling. *)
-                          let excessive =
-                            S.create
-                              { value.context with
-                                created_at = stamp (-4_000_000_000_000_000_000L)
-                              ; deadline = stamp 4_000_000_000_000_000_000L
-                              }
-                            |> protocol_ok
-                          in
-                          (match stage None excessive with
-                           | Error { code = Invalid_request; _ } -> ()
-                           | _ -> failwith "subscription lifetime bypassed admission");
-                          let first = stage None value |> protocol_ok in
-                          assert (
-                            Result.is_error
-                              (stage
-                                 None
-                                 (make_subscription
+                    services.execute
+                      ~invocation:(root parent)
+                      (fun ~dispatched:root ~borrow_agent_actor:_ ->
+                         let attempted = make_subscription root in
+                         assert (
+                           Result.is_error
+                             (A.stage_subscription_mutation
+                                actor
+                                ~owner:(J.Invocation root.context.id)
+                                ~source
+                                ~previous:None
+                                ~next:attempted));
+                         let invocation =
+                           I.create
+                             { root.context with
+                               id = P.Id.Invocation.create ()
+                             ; parent_job = None
+                             ; parent_invocation = Some root.context.id
+                             ; tool_name = "counter"
+                             }
+                           |> protocol_ok
+                         in
+                         let result =
+                           services.moderator_execute
+                             ~invocation
+                             (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+                                assert (Option.is_none dispatched.observation);
+                                let owner = J.Invocation dispatched.context.id in
+                                let value =
+                                  make_subscription
                                     ~parent_job:(parent.id, parent.attempt)
-                                    dispatched)));
-                          A.abort_subscription_mutation actor ~owner ~receipt:first
-                          |> protocol_ok;
-                          let creation = stage None value |> protocol_ok in
-                          let wrong = finish value (Succeeded `Null) in
-                          assert (Result.is_error (stage (Some value) wrong));
-                          let completed = finish value (Succeeded (`String "ready")) in
-                          let completion = stage (Some value) completed |> protocol_ok in
-                          let repeated = finish completed (Cancelled "too late") in
-                          let repeat = stage (Some completed) repeated |> protocol_ok in
-                          assert (
-                            Result.is_error
-                              (A.abort_subscription_mutation
-                                 actor
-                                 ~owner
-                                 ~receipt:completion));
-                          A.abort_subscription_mutation actor ~owner ~receipt:repeat
-                          |> protocol_ok;
-                          let current =
-                            A.read_script_subscription
-                              actor
-                              ~owner
-                              ~source
-                              ~id:value.context.id
-                            |> protocol_ok
-                          in
-                          assert (S.equal current completed);
-                          assert (
-                            Result.is_error
-                              (A.read_script_subscription
-                                 actor
-                                 ~owner
-                                 ~source:
-                                   { source with source_sha256 = String.make 64 'b' }
-                                 ~id:value.context.id));
-                          assert (
-                            List.is_empty
-                              (Agent_session.Memory_backend.state backend).subscriptions);
-                          assert (
-                            Result.is_error
-                              (A.select_subscription_mutations
-                                 actor
-                                 ~owner
-                                 ~source
-                                 ~receipts:[ completion ]));
-                          assert (
-                            Result.is_error
-                              (A.select_subscription_mutations
-                                 actor
-                                 ~owner
-                                 ~source
-                                 ~receipts:[ creation; completion; completion ]));
-                          let receipts =
-                            match mode with
-                            | `Unselected -> []
-                            | _ -> [ creation; completion ]
-                          in
-                          A.select_subscription_mutations actor ~owner ~source ~receipts
-                          |> protocol_ok;
-                          let outcome =
-                            match mode with
-                            | `Cancelled -> I.Cancelled "handler cancelled"
-                            | _ ->
-                              I.Pending (Subscription value.context.id, `String "accepted")
-                          in
-                          let resolved =
-                            I.resolve dispatched ~session_id ~generation:0 outcome
-                            |> protocol_ok
-                          in
-                          (match mode with
-                           | `Rejected_save -> reject_save := true
-                           | `Stopped ->
-                             A.stop actor ~attachment_id:writer.id ~mode:Cancel
-                             |> protocol_ok
-                             |> ignore
-                           | _ -> ());
-                          let result = commit ~resolved ~snapshot:after in
-                          reject_save := false;
-                          result)
-                      in
-                      Result.map result ~f:(fun () -> I.Complete `Null)))
+                                    dispatched
+                                in
+                                retained := Some (owner, value);
+                                let stage previous next =
+                                  A.stage_subscription_mutation
+                                    actor
+                                    ~owner
+                                    ~source
+                                    ~previous
+                                    ~next
+                                in
+                                let stamp ns =
+                                  Int63.of_int64_exn ns
+                                  |> Time_ns.of_int63_ns_since_epoch
+                                  |> P.Timestamp.of_time_ns
+                                in
+                                (* A forged lifetime across the epoch must not wrap to a
+                             negative signed span and bypass the host ceiling. *)
+                                let excessive =
+                                  S.create
+                                    { value.context with
+                                      created_at = stamp (-4_000_000_000_000_000_000L)
+                                    ; deadline = stamp 4_000_000_000_000_000_000L
+                                    }
+                                  |> protocol_ok
+                                in
+                                (match stage None excessive with
+                                 | Error { code = Invalid_request; _ } -> ()
+                                 | _ ->
+                                   failwith "subscription lifetime bypassed admission");
+                                let first = stage None value |> protocol_ok in
+                                assert (
+                                  Result.is_error
+                                    (stage
+                                       None
+                                       (make_subscription
+                                          ~parent_job:(parent.id, parent.attempt)
+                                          dispatched)));
+                                A.abort_subscription_mutation actor ~owner ~receipt:first
+                                |> protocol_ok;
+                                let creation = stage None value |> protocol_ok in
+                                let wrong = finish value (Succeeded `Null) in
+                                assert (Result.is_error (stage (Some value) wrong));
+                                let completed =
+                                  finish value (Succeeded (`String "ready"))
+                                in
+                                let completion =
+                                  stage (Some value) completed |> protocol_ok
+                                in
+                                let repeated = finish completed (Cancelled "too late") in
+                                let repeat =
+                                  stage (Some completed) repeated |> protocol_ok
+                                in
+                                assert (
+                                  Result.is_error
+                                    (A.abort_subscription_mutation
+                                       actor
+                                       ~owner
+                                       ~receipt:completion));
+                                A.abort_subscription_mutation actor ~owner ~receipt:repeat
+                                |> protocol_ok;
+                                let current =
+                                  A.read_script_subscription
+                                    actor
+                                    ~owner
+                                    ~source
+                                    ~id:value.context.id
+                                  |> protocol_ok
+                                in
+                                assert (S.equal current completed);
+                                assert (
+                                  Result.is_error
+                                    (A.read_script_subscription
+                                       actor
+                                       ~owner
+                                       ~source:
+                                         { source with
+                                           source_sha256 = String.make 64 'b'
+                                         }
+                                       ~id:value.context.id));
+                                assert (
+                                  List.is_empty
+                                    (Agent_session.Memory_backend.state backend)
+                                      .subscriptions);
+                                assert (
+                                  Result.is_error
+                                    (A.select_subscription_mutations
+                                       actor
+                                       ~owner
+                                       ~source
+                                       ~receipts:[ completion ]));
+                                assert (
+                                  Result.is_error
+                                    (A.select_subscription_mutations
+                                       actor
+                                       ~owner
+                                       ~source
+                                       ~receipts:[ creation; completion; completion ]));
+                                let receipts =
+                                  match mode with
+                                  | `Unselected -> []
+                                  | _ -> [ creation; completion ]
+                                in
+                                A.select_subscription_mutations
+                                  actor
+                                  ~owner
+                                  ~source
+                                  ~receipts
+                                |> protocol_ok;
+                                let outcome =
+                                  match mode with
+                                  | `Cancelled -> I.Cancelled "handler cancelled"
+                                  | _ ->
+                                    I.Pending
+                                      (Subscription value.context.id, `String "accepted")
+                                in
+                                let resolved =
+                                  I.resolve dispatched ~session_id ~generation:0 outcome
+                                  |> protocol_ok
+                                in
+                                (match mode with
+                                 | `Rejected_save -> reject_save := true
+                                 | `Stopped ->
+                                   A.stop actor ~attachment_id:writer.id ~mode:Cancel
+                                   |> protocol_ok
+                                   |> ignore
+                                 | _ -> ());
+                                let result = commit ~resolved ~snapshot:after in
+                                reject_save := false;
+                                result)
+                         in
+                         Result.map result ~f:(fun () -> I.Complete `Null)))
              with
              | Eio.Cancel.Cancelled _ as exn ->
                (match mode with

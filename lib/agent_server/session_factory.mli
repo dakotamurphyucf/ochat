@@ -270,6 +270,16 @@ val create_session
   -> Agent_protocol.Session.Create_request.t
   -> (Session_registry.entry, Agent_protocol.Error.t) result
 
+(** Same actual creation owner, retaining the original authentication through
+    actor-owned runtime initialization. An expired proof rejects; this never
+    derives authority from the saved creating principal. *)
+val create_session_authenticated
+  :  t
+  -> command_audit:Document_schema.Document.t option
+  -> actor:Operator_authorization.t
+  -> Agent_protocol.Session.Create_request.t
+  -> (Session_registry.entry, Agent_protocol.Error.t) result
+
 (** Validate pinned source/profile/workspace and explicitly approved target
     recapture without evaluating initializers. Return Pending selected state.
     The caller must fence/retire old resources and atomically compare-and-set this

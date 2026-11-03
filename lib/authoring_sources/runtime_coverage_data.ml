@@ -598,7 +598,7 @@ let implementation_sources =
   ; ( "bin/ochat_agent_stdio.ml"
     , "8d134cd11c7df2a60e6b4b77a5ff7f9ea0c28a8a2674a3dd9f573adaa7623902" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "49d9dd9057f8490b14491521d7d50e7facdd84f8c2f75e47ced21db92623566a" )
+    , "2a3767c53522a0807b10601200d2f56c93e58cf0862a21ed50edf68f274d0f85" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"
@@ -652,7 +652,7 @@ let implementation_sources =
   ; ( "lib/agent_server/authoring_installation.ml"
     , "cffa9affee87aae27b9b0f1d308194fcb45ab84d0da74bf0af5482c61a2ca784" )
   ; ( "lib/agent_server/connection_context.ml"
-    , "6efbe0038e4d033c7fd06b441e88e0f37194f444a8a79cf54c8c78def67c1584" )
+    , "772410fd0d32bc57ae9ee1f303f3d2a1b293143251fe419c99e141e8921dabba" )
   ; ( "lib/agent_server/startup_cleanup.ml"
     , "bcbd487cccc3783d039e2a31af0e4c836813fa4a6ef417305e4adb58a3f250fc" )
   ; ( "bin/ochat_agent_server.ml"
@@ -676,7 +676,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_model_job_runner.ml"
     , "7604ff6140540e3b53720515526242e7bc1014c97d6895aacadbfb2909bda718" )
   ; ( "lib/agent_server/daemon.ml"
-    , "5346930892fcd88a090ad80015ce3fc4895decc8f43e63d845ab98597ce31188" )
+    , "5132d533bb74d748a49d6e3b67e86fbd3ca0f7194fb0d5e7319cc8364da85a49" )
   ; ( "lib/agent_session/developer_claimed_resource_owner.ml"
     , "fb251c6e022f9880820b15807018adc5cf240500050a0424321d7507d3e2bc41" )
   ; ( "lib/agent_server/developer_claim_deadline.ml"
@@ -718,9 +718,9 @@ let implementation_sources =
   ; ( "lib/agent_session/administration.ml"
     , "798836e32d154f322a0fdd0760d1348956515c3887b65e4b94b5c83c61bdb7e3" )
   ; ( "lib/agent_server/command_handler.ml"
-    , "895cc7c1e6cc706adc39f6b98c71e1c994aab20814cd86f642d244bb17a06a59" )
+    , "1ecd16f2f3841ded44ced63fbf07ce2e743259ec943a16012177f9e737941a36" )
   ; ( "lib/agent_server/runtime_owner.ml"
-    , "7431f8254c524a641f3ce86633cd812481b938ba3b6e35bf1e31d01059cd7d66" )
+    , "ec30d503c58de70c6ab603d5f13699ef8e1a387afac7caea81c3e6870f470edc" )
   ; ( "lib/agent_session/managed_submission_tracking.ml"
     , "6c8804b2d0c2033631b965769af63c5240afeb6dabff72695c818dc1a68baed8" )
   ; ( "lib/agent_server/managed_output_cursor.ml"
@@ -778,7 +778,7 @@ let implementation_sources =
   ; ( "lib/agent_server/schedule_scheduler.ml"
     , "37cf371632d8ad86693c162e0593d56866f76df577dceb06ddd2ac5fe5bfdae9" )
   ; ( "lib/agent_session/background_execution.ml"
-    , "2149c979ce81c6c851c8d8cbe749c622334f3c43d05b72b17ae89873e5d563c3" )
+    , "39dba0534aa949b8fc41d6d937e6b6688b4c819bfacec999d983e6ebf0569e44" )
   ; ( "lib/agent_session/captured_agent_runner.ml"
     , "a85950beba627accb5793b7de60a874428b6e1d15a3aae32916e2fa403e22b50" )
   ; ( "lib/agent_session/selected_agent_depth.ml"
@@ -822,7 +822,7 @@ let implementation_sources =
   ; ( "lib/agent_session/external_ingress.ml"
     , "a86eff0d9e1389bd1b5bc5df9bd6688965b18fd49432463133e6782d3d5e8e1f" )
   ; ( "lib/agent_session/moderator_tool_dispatch.ml"
-    , "0a5bcab978a0040322f288676a8e784d7c5ea95253b2dfe38ce8121abfae27f0" )
+    , "15e17fc710a43958837887b34a1eb111e6e5ecbb5b465f96b60b81f931cac20a" )
   ; ( "lib/agent_session/notification_delivery.ml"
     , "9f18c6eb7561b0afda29cd706214ddf2a376c54b9f28980ce536079ae5b7b45e" )
   ; ( "lib/agent_session/notification_history.ml"
@@ -844,7 +844,7 @@ let implementation_sources =
   ; ( "lib/agent_session/script_subscription_service.ml"
     , "54c775836b551733687e907ff46a2a7a0cc26bd46ff915cc6fd5f0cf5116f069" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "a0d57fd18b85ae80f49637d7dd331cab1d5b3f7fd8c654ba86eddf856cce078f" )
+    , "c41c3dea09e54e9f67a247cb9a6b5ffa7ddb2f502b18135eacd379e7805f3da0" )
   ; ( "lib/agent_session/staged_jobs.ml"
     , "7731a0fc9f021188e3856041fe493f3044556bc7a15364815c47299fe968603b" )
   ; ( "lib/agent_session/staged_notifications.ml"

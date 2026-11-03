@@ -228,7 +228,7 @@ let%expect_test
                 in
                 let open Result.Let_syntax in
                 let%bind _ =
-                  execute ~invocation (fun ~dispatched:_ ->
+                  execute ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ ->
                     Int.incr calls;
                     Ok (P.Invocation.Complete (`String "parent policy effect")))
                 in
@@ -377,7 +377,7 @@ let%expect_test
                     |> protocol_ok
                   in
                   let%bind _ =
-                    execute ~invocation (fun ~dispatched:_ ->
+                    execute ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ ->
                       Int.incr effects;
                       (match boundary with
                        | `Effect_return ->
@@ -548,7 +548,7 @@ let%expect_test
                    |> protocol_ok
                  in
                  let%bind _ =
-                   execute ~invocation (fun ~dispatched:_ ->
+                   execute ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ ->
                      (match boundary with
                       | `During_native -> pause ()
                       | _ -> ());

@@ -6,9 +6,18 @@ module C = Chat_response.Tool_capability
 module S = Chatmd_shell_spec.Tool_schema
 module Managed = Chat_response.Managed_tool_registry
 
+(** Explicit executor-issued borrow, qualified by the exact dispatched invocation.
+    Returned proofs must remain bound to the original authentication and physical
+    execution lifetime. This is not a source grant. *)
+type agent_actor_borrow =
+  invocation:Agent_protocol.Invocation.t
+  -> (Operator_authorization.t option, Agent_protocol.Error.t) result
+
 type executor =
   invocation:I.t
-  -> (dispatched:I.t -> (I.outcome, Agent_protocol.Error.t) result)
+  -> (dispatched:I.t
+      -> borrow_agent_actor:agent_actor_borrow
+      -> (I.outcome, Agent_protocol.Error.t) result)
   -> (I.t, Agent_protocol.Error.t) result
 
 type owned_executor =
@@ -19,6 +28,7 @@ type owned_executor =
 type moderator_executor =
   invocation:I.t
   -> (dispatched:I.t
+      -> borrow_agent_actor:agent_actor_borrow
       -> commit:
            (resolved:I.t
             -> snapshot:Session.Moderator_state.Identity_snapshot.t
@@ -43,6 +53,7 @@ type borrowed =
   ; runtime_context : Chat_response.Runtime_request_scope.t option
   ; moderation_context : Native_tool_moderation.t option
   ; authoring_reference_context : Authoring_reference_scope.t option
+  ; borrow_agent_actor : agent_actor_borrow
   }
 
 type owned_borrowed =
@@ -173,6 +184,27 @@ let borrow () =
 
 let borrowed_invocation (scope : borrowed) = scope.invocation
 let borrowed_execution_context (scope : borrowed) = scope.execution_context
+
+let borrowed_agent_actor (scope : borrowed) =
+  let open Result.Let_syntax in
+  if not (Atomic.get scope.active)
+  then
+    Error (Agent_protocol.Error.invalid_request "native invocation scope is not active")
+  else (
+    let%bind actor = scope.borrow_agent_actor ~invocation:scope.invocation in
+    let%map () =
+      if Atomic.get scope.active
+      then Ok ()
+      else
+        Error
+          (Agent_protocol.Error.invalid_request "native invocation scope is not active")
+    in
+    Option.map actor ~f:(fun actor ->
+      Operator_authorization.guarded
+        ~principal:(Operator_authorization.principal actor)
+        ~is_current:(fun () ->
+          Atomic.get scope.active && Operator_authorization.is_current actor)))
+;;
 
 let borrowed_capabilities (scope : borrowed) =
   match Atomic.get scope.active, scope.ceiling with
@@ -583,6 +615,7 @@ let record_authoring_reference (scope : borrowed) response =
 let with_scope
       ?ceiling
       ?moderator_execute
+      ?(borrow_agent_actor = fun ~invocation:_ -> Ok None)
       ?(child_origin = I.Script)
       ?execution_context
       ?runtime_context
@@ -591,7 +624,13 @@ let with_scope
       invocation
       f
   =
-  let execute, moderator_execute, ceiling, execution_context, authoring_reference_context =
+  let ( execute
+      , moderator_execute
+      , ceiling
+      , execution_context
+      , authoring_reference_context
+      , borrow_agent_actor )
+    =
     match Eio.Fiber.get scope_key with
     | Some scope when Atomic.get scope.active && I.equal scope.invocation invocation ->
       (* Preserve the real actor executor rather than inheriting a direct-child
@@ -600,14 +639,16 @@ let with_scope
       , Option.first_some scope.moderator_execute moderator_execute
       , Option.first_some ceiling scope.ceiling
       , Option.value execution_context ~default:scope.execution_context
-      , scope.authoring_reference_context )
+      , scope.authoring_reference_context
+      , scope.borrow_agent_actor )
     | None | Some _ ->
       ( execute
       , moderator_execute
       , ceiling
       , Option.value_or_thunk execution_context ~default:(fun () ->
           Chatml_execution.capture_context ())
-      , Authoring_reference_scope.capture ~invocation_id:invocation.context.id )
+      , Authoring_reference_scope.capture ~invocation_id:invocation.context.id
+      , borrow_agent_actor )
   in
   let execution_context =
     Chatml_execution.capture_context ~inherited:execution_context ()
@@ -639,6 +680,7 @@ let with_scope
             ; runtime_context
             ; moderation_context
             ; authoring_reference_context
+            ; borrow_agent_actor
             }
             f)))
 ;;
@@ -687,19 +729,20 @@ let execute_borrowed (scope : borrowed) ~invocation f =
   let open Result.Let_syntax in
   let%bind ceiling = check_child scope invocation in
   Chat_response.Execution_gate.with_context scope.coordination_context (fun () ->
-    scope.execute ~invocation (fun ~dispatched ->
+    scope.execute ~invocation (fun ~dispatched ~borrow_agent_actor ->
       (* Actor admission can yield while the native callback returns. A retained
        executor must not start effects after its lending scope has expired. *)
       let%bind () = check_active scope in
       with_scope
         ~ceiling
+        ~borrow_agent_actor
         ?moderator_execute:scope.moderator_execute
         ~execution_context:scope.execution_context
         ~runtime_context:scope.runtime_context
         ~moderation_context:scope.moderation_context
         ~execute:scope.execute
         dispatched
-        (fun () -> f ~dispatched)))
+        (fun () -> f ~dispatched ~borrow_agent_actor)))
 ;;
 
 let execute_owned_borrowed (scope : owned_borrowed) ~invocation f =
@@ -760,17 +803,18 @@ let execute_moderator_borrowed (scope : borrowed) ~invocation f =
            "borrowed moderator executor is unavailable")
   in
   Chat_response.Execution_gate.with_context scope.coordination_context (fun () ->
-    execute ~invocation (fun ~dispatched ~commit ->
+    execute ~invocation (fun ~dispatched ~borrow_agent_actor ~commit ->
       let%bind () = check_active scope in
       with_scope
         ~ceiling
+        ~borrow_agent_actor
         ?moderator_execute:scope.moderator_execute
         ~execution_context:scope.execution_context
         ~runtime_context:scope.runtime_context
         ~moderation_context:scope.moderation_context
         ~execute:scope.execute
         dispatched
-        (fun () -> f ~dispatched ~commit)))
+        (fun () -> f ~dispatched ~borrow_agent_actor ~commit)))
 ;;
 
 let moderator_executor (scope : borrowed) =
@@ -898,13 +942,27 @@ let with_selected_managed_scope execution f =
     (fun () -> Result.bind (borrow_selected ()) ~f)
 ;;
 
-let with_dispatched_scope ~execute ?moderator_execute ~selected ~invocation f =
+let with_dispatched_scope
+      ~execute
+      ?moderator_execute
+      ?borrow_agent_actor
+      ~selected
+      ~invocation
+      f
+  =
   let open Result.Let_syntax in
   let%bind () = I.validate invocation in
   match invocation.status with
   | Dispatching
     when String.equal invocation.context.capability_fingerprint (C.fingerprint selected)
-    -> with_scope ~execute ?moderator_execute ~ceiling:selected invocation f
+    ->
+    with_scope
+      ~execute
+      ?moderator_execute
+      ?borrow_agent_actor
+      ~ceiling:selected
+      invocation
+      f
   | _ ->
     Error
       (Agent_protocol.Error.invalid_request
@@ -1139,8 +1197,9 @@ let run_with_native
       ~prepare_output
   =
   let scoped_execute ~invocation f =
-    execute ~invocation (fun ~dispatched ->
-      with_scope ?moderator_execute ~execute dispatched (fun () -> f ~dispatched))
+    execute ~invocation (fun ~dispatched ~borrow_agent_actor ->
+      with_scope ?moderator_execute ~borrow_agent_actor ~execute dispatched (fun () ->
+        f ~dispatched))
   in
   let managed_revision binding =
     match C.implementation binding, managed with

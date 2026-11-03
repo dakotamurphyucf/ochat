@@ -719,30 +719,34 @@ let%expect_test "runtime owner drains observation batches and applies durable te
         Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
           caps.commit_moderator snapshot |> protocol_ok;
           let parent = invocation_fixture () in
-          caps.with_invocation ~invocation:parent (fun ~dispatched:_ ->
-            List.iter (List.range 0 36) ~f:(fun n ->
-              let observer =
-                match n with
-                | 35 -> { observer with source_sha256 = String.make 64 'b' }
-                | _ -> observer
-              in
-              let child =
-                I.create
-                  ~observer
-                  { parent.context with
-                    id = Agent_protocol.Id.Invocation.create ()
-                  ; origin = Moderator
-                  ; parent_invocation = Some parent.context.id
-                  ; tool_name = "seed"
-                  }
-                |> protocol_ok
-              in
-              caps.with_invocation ~invocation:child (fun ~dispatched:_ ->
-                Int.incr native_calls;
-                Ok (Complete (`String "native result")))
-              |> protocol_ok
-              |> ignore);
-            Ok (Complete `Null))
+          caps.with_invocation
+            ~invocation:parent
+            (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+               List.iter (List.range 0 36) ~f:(fun n ->
+                 let observer =
+                   match n with
+                   | 35 -> { observer with source_sha256 = String.make 64 'b' }
+                   | _ -> observer
+                 in
+                 let child =
+                   I.create
+                     ~observer
+                     { parent.context with
+                       id = Agent_protocol.Id.Invocation.create ()
+                     ; origin = Moderator
+                     ; parent_invocation = Some parent.context.id
+                     ; tool_name = "seed"
+                     }
+                   |> protocol_ok
+                 in
+                 caps.with_invocation
+                   ~invocation:child
+                   (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                      Int.incr native_calls;
+                      Ok (Complete (`String "native result")))
+                 |> protocol_ok
+                 |> ignore);
+               Ok (Complete `Null))
           |> protocol_ok
           |> ignore;
           prepared := Some manager;

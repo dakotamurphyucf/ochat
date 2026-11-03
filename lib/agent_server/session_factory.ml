@@ -4850,7 +4850,7 @@ let close_unregistered_runtime t handle runtime writer actor capacity =
   Agent_store.Commit_writer.close writer
 ;;
 
-let build_runtime_for_actor ?run_preparation t handle actor =
+let build_runtime_for_actor ?run_preparation ?original_actor t handle actor =
   let open Result.Let_syntax in
   let%bind () = Agent_session.Session_actor.check_runtime_admission actor in
   let%bind state = Agent_session.Session_actor.state actor in
@@ -4892,7 +4892,14 @@ let build_runtime_for_actor ?run_preparation t handle actor =
     | None -> Ok None
     | Some _ ->
       (match run_preparation with
-       | None -> Agent_session.Session_actor.begin_initialization actor ~expected
+       | None ->
+         (match original_actor with
+          | None -> Agent_session.Session_actor.begin_initialization actor ~expected
+          | Some original_actor ->
+            Agent_session.Session_actor.begin_initialization_authenticated
+              actor
+              ~actor:original_actor
+              ~expected)
        | Some preparation ->
          Agent_session.Session_actor.begin_run_initialization actor ~preparation ~expected)
       |> Result.map ~f:Option.some
@@ -5292,12 +5299,12 @@ let create_loaded_entry
     failure
   | Ok () ->
     let runtime =
-      Runtime_owner.create_with_run_unload
+      Runtime_owner.create_with_authenticated_run_unload
         ~before_unload:(retire_owned_children t actor)
         ~actor
         ~initial:(Some runtime)
-        ~build:(fun run_preparation ->
-          build_runtime_for_actor ?run_preparation t handle actor)
+        ~build:(fun ~original_actor run_preparation ->
+          build_runtime_for_actor ?run_preparation ?original_actor t handle actor)
     in
     runtime_owner := Some runtime;
     let finish () =
@@ -5473,12 +5480,12 @@ let create_unloaded_entry
       Agent_session.Session_actor.set_configuration_policy actor (configuration_policy t)
     in
     let runtime =
-      Runtime_owner.create_with_run_unload
+      Runtime_owner.create_with_authenticated_run_unload
         ~before_unload:(retire_owned_children t actor)
         ~actor
         ~initial:None
-        ~build:(fun run_preparation ->
-          build_runtime_for_actor ?run_preparation t handle actor)
+        ~build:(fun ~original_actor run_preparation ->
+          build_runtime_for_actor ?run_preparation ?original_actor t handle actor)
     in
     runtime_owner := Some runtime;
     Session_recovery_owner.adopt_runtime_exn owner runtime;
@@ -5699,7 +5706,8 @@ let finish_unloaded_creation ?(retain_initial_proof = false) t handle state ~com
     Exn.raise_with_original_backtrace exn backtrace
 ;;
 
-let finish_creation t handle _revision _profile provisional ~command_audit =
+let finish_creation ?original_actor t handle _revision _profile provisional ~command_audit
+  =
   let open Result.Let_syntax in
   let provisional =
     { provisional with
@@ -5709,7 +5717,11 @@ let finish_creation t handle _revision _profile provisional ~command_audit =
   in
   let%bind entry = finish_unloaded_creation t handle provisional ~command_audit in
   let initialize_entry () =
-    let%bind () = Runtime_owner.ensure_loaded entry.runtime in
+    let%bind () =
+      match original_actor with
+      | None -> Runtime_owner.ensure_loaded entry.runtime
+      | Some actor -> Runtime_owner.ensure_loaded_authenticated entry.runtime ~actor
+    in
     let%bind state = Agent_session.Session_actor.state entry.actor in
     let%map () =
       match state.lifecycle.desired with
@@ -5758,6 +5770,7 @@ let with_catalog_admission t ~f =
 ;;
 
 let create_session_admitted
+      ?original_actor
       t
       ~command_audit
       ~principal
@@ -5829,7 +5842,9 @@ let create_session_admitted
               "session initializer did not return workspace state"))
       ~f:Result.return
   in
-  match finish_creation t handle revision profile provisional ~command_audit with
+  match
+    finish_creation ?original_actor t handle revision profile provisional ~command_audit
+  with
   | Ok entry -> Ok entry
   | Error _ as failure ->
     close_actor_lock_after_failure t handle;
@@ -5849,6 +5864,19 @@ let create_session_admitted
 let create_session t ~command_audit ~principal request =
   with_catalog_admission t ~f:(fun () ->
     create_session_admitted t ~command_audit ~principal request)
+;;
+
+let create_session_authenticated t ~command_audit ~actor request =
+  if not (Operator_authorization.is_current actor)
+  then Error (unavailable Permission_denied "session creation authentication expired")
+  else
+    with_catalog_admission t ~f:(fun () ->
+      create_session_admitted
+        ~original_actor:actor
+        t
+        ~command_audit
+        ~principal:(Operator_authorization.principal actor)
+        request)
 ;;
 
 let validate_import_request request legacy source_path =

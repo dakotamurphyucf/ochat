@@ -17,6 +17,9 @@ module Capabilities = struct
     -> execute:
          (invocation:Agent_protocol.Invocation.t
           -> (dispatched:Agent_protocol.Invocation.t
+              -> borrow_agent_actor:
+                   (invocation:Agent_protocol.Invocation.t
+                    -> (Operator_authorization.t option, Agent_protocol.Error.t) result)
               -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
           -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result)
     -> commit:
@@ -27,6 +30,8 @@ module Capabilities = struct
 
   type t =
     { id_source : History_entry.Id_source.t
+    ; original_agent_actor :
+        unit -> (Operator_authorization.t option, Agent_protocol.Error.t) result
     ; commit_entry : History_entry.t -> (unit, Agent_protocol.Error.t) result
     ; prepare_authoring_input :
         Chat_response.Authoring_materialization.t
@@ -45,11 +50,17 @@ module Capabilities = struct
     ; with_invocation :
         invocation:Agent_protocol.Invocation.t
         -> (dispatched:Agent_protocol.Invocation.t
+            -> borrow_agent_actor:
+                 (invocation:Agent_protocol.Invocation.t
+                  -> (Operator_authorization.t option, Agent_protocol.Error.t) result)
             -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
         -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
     ; with_moderator_invocation :
         invocation:Agent_protocol.Invocation.t
         -> (dispatched:Agent_protocol.Invocation.t
+            -> borrow_agent_actor:
+                 (invocation:Agent_protocol.Invocation.t
+                  -> (Operator_authorization.t option, Agent_protocol.Error.t) result)
             -> commit:
                  (resolved:Agent_protocol.Invocation.t
                   -> snapshot:Session.Moderator_state.Identity_snapshot.t

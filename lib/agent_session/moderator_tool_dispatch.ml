@@ -137,192 +137,198 @@ let dispatch
         failure := Some outcome;
         raise exn
     in
-    capabilities.with_moderator_invocation ~invocation (fun ~dispatched ~commit ->
-      let authoring_scope =
-        Authoring_reference_scope.capture ~invocation_id:dispatched.I.context.id
-      in
-      let save resolved snapshot =
-        let open Result.Let_syntax in
-        let%bind resolved =
-          Option.value_map authoring_scope ~default:(Ok resolved) ~f:(fun scope ->
-            Authoring_reference_scope.annotate scope resolved)
-        in
-        let%map () =
-          checked
-            (fail
-               "invocation.commit_failed"
-               "The moderator result could not be committed.")
-            (fun () -> commit ~resolved ~snapshot)
-        in
-        recorded := Some resolved
-      in
-      let run () =
-        if Option.is_some request.rejection
-        then (
-          failure
-          := Stream_invocation.rejection_outcome
-               (Stream_invocation.preparation request.rejection);
-          Error "invocation rejected before execution")
-        else if
-          parse_error
-          || Result.is_error (validate_input prepared invocation.context.input)
-        then (
-          failure
-          := Some
+    capabilities.with_moderator_invocation
+      ~invocation
+      (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+         let authoring_scope =
+           Authoring_reference_scope.capture ~invocation_id:dispatched.I.context.id
+         in
+         let save resolved snapshot =
+           let open Result.Let_syntax in
+           let%bind resolved =
+             Option.value_map authoring_scope ~default:(Ok resolved) ~f:(fun scope ->
+               Authoring_reference_scope.annotate scope resolved)
+           in
+           let%map () =
+             checked
                (fail
-                  "invocation.invalid_input"
-                  "The tool arguments do not satisfy its input schema.");
-          Error "invalid tool arguments")
-        else (
-          let handle
-                ?on_tool_call
-                ?job_scope
-                ?subscription_scope
-                ?schedule_scope
-                ?notification_scope
-                ?ingress_scope
-                ()
-            =
-            let jobs = Option.map job_scope ~f:Script_job_service.moderator_transaction in
-            let subscriptions =
-              Option.map
-                subscription_scope
-                ~f:Script_subscription_service.moderator_transaction
-            in
-            let schedules =
-              Option.map schedule_scope ~f:Script_schedule_service.moderator_transaction
-            in
-            let notifications =
-              Option.map
-                notification_scope
-                ~f:Script_notification_service.moderator_transaction
-            in
-            let ingress =
-              Option.map ingress_scope ~f:Script_ingress_service.moderator_transaction
-            in
-            let validate_work =
-              Script_tool_calls.validate_pending_work
-                ~jobs:job_scope
-                ~subscriptions:subscription_scope
-                ~fallback:validate_work
-            in
-            M.handle_invocation_entries
-              ?jobs
-              ?subscriptions
-              ?schedules
-              ?notifications
-              ?ingress
-              ?on_tool_call
-              manager
-              ~invocation:dispatched
-              ~history:request.history
-              ~available_tools
-              ~session_meta
-              ~now_ms:
-                (P.Timestamp.to_time_ns (now ())
-                 |> Time_ns.to_int_ns_since_epoch
-                 |> fun n -> n / 1_000_000)
-              ~validate_work
-              ~on_failure:(fun kind ->
-                if Option.is_none !failure then failure := Some (handler_failure kind))
-              ~authorize:(fun () ->
-                let open Result.Let_syntax in
-                let denied =
-                  fail
-                    "invocation.permission_denied"
-                    "The tool invocation is not authorized by the current policy."
-                in
-                let%bind () = checked denied (fun () -> admit request) in
-                let%bind () =
-                  checked denied (fun () ->
-                    authorize ();
-                    Ok ())
-                in
-                checked denied (fun () -> revalidate request))
-              ~prepare_resolution:(fun ~resolved ~outcome ~snapshot ->
-                let open Result.Let_syntax in
-                let%bind () =
-                  match resolved.I.status with
-                  | Resolved outcome ->
-                    checked
-                      (fail
-                         "invocation.disclosure_rejected"
-                         "The tool outcome did not pass the host output policy.")
-                      (fun () -> prepare_outcome outcome)
-                  | _ -> Error "handler did not resolve"
-                in
-                Ok
-                  { M.persist = (fun () -> save resolved snapshot |> message)
-                  ; install = (fun () -> observed := Some outcome)
-                  })
-            |> Result.map ~f:(fun _ -> ())
-          in
-          match script_tools with
-          | None -> handle ()
-          | Some tools ->
-            Script_tool_calls.with_moderator_work
-              tools
-              ~owner:(P.Job.Invocation dispatched.context.id)
-              ~selected:(EC.capabilities prepared)
-              ~source:
-                { script_id = (EC.script prepared).id
-                ; source_sha256 = EC.source_revision prepared
-                }
-              ~originating:(Some (Direct (prepared, dispatched)))
-              ~error:Fn.id
-              (fun ~jobs:job_scope
-                ~subscriptions:subscription_scope
-                ~schedules:schedule_scope
-                ~notifications:notification_scope
-                ~ingress:ingress_scope ->
-                 Script_tool_calls.with_invocation
-                   tools
-                   ~prepared
-                   ~capabilities
-                   ~parent:dispatched
-                   (fun on_tool_call ->
-                      handle
-                        ~on_tool_call
-                        ?job_scope
-                        ?subscription_scope
-                        ?schedule_scope
-                        ?notification_scope
-                        ?ingress_scope
-                        ())))
-      in
-      let result =
-        try run () with
-        | Eio.Cancel.Cancelled _ as exn -> raise exn
-        | _ -> Error "handler or authorization callback failed"
-      in
-      match result, !recorded with
-      | Ok (), Some _ -> Ok ()
-      | Error _, Some _ ->
-        Error
-          (P.Error.create
-             Invalid_state
-             ~message:"moderator failed after recording its resolution"
-             ~retryable:false
-             ())
-      | Ok (), None | Error _, None ->
-        let open Result.Let_syntax in
-        let%bind snapshot =
-          M.identity_snapshot manager
-          |> Result.map_error ~f:(fun _ ->
-            P.Error.create
-              Invalid_state
-              ~message:"cannot snapshot failed moderator invocation"
-              ~retryable:false
-              ())
-        in
-        let%bind resolved =
-          I.resolve
-            dispatched
-            ~session_id:input.session_id
-            ~generation:input.session_generation
-            (Option.value !failure ~default:(handler_failure Handler_failed))
-        in
-        save resolved snapshot)
+                  "invocation.commit_failed"
+                  "The moderator result could not be committed.")
+               (fun () -> commit ~resolved ~snapshot)
+           in
+           recorded := Some resolved
+         in
+         let run () =
+           if Option.is_some request.rejection
+           then (
+             failure
+             := Stream_invocation.rejection_outcome
+                  (Stream_invocation.preparation request.rejection);
+             Error "invocation rejected before execution")
+           else if
+             parse_error
+             || Result.is_error (validate_input prepared invocation.context.input)
+           then (
+             failure
+             := Some
+                  (fail
+                     "invocation.invalid_input"
+                     "The tool arguments do not satisfy its input schema.");
+             Error "invalid tool arguments")
+           else (
+             let handle
+                   ?on_tool_call
+                   ?job_scope
+                   ?subscription_scope
+                   ?schedule_scope
+                   ?notification_scope
+                   ?ingress_scope
+                   ()
+               =
+               let jobs =
+                 Option.map job_scope ~f:Script_job_service.moderator_transaction
+               in
+               let subscriptions =
+                 Option.map
+                   subscription_scope
+                   ~f:Script_subscription_service.moderator_transaction
+               in
+               let schedules =
+                 Option.map
+                   schedule_scope
+                   ~f:Script_schedule_service.moderator_transaction
+               in
+               let notifications =
+                 Option.map
+                   notification_scope
+                   ~f:Script_notification_service.moderator_transaction
+               in
+               let ingress =
+                 Option.map ingress_scope ~f:Script_ingress_service.moderator_transaction
+               in
+               let validate_work =
+                 Script_tool_calls.validate_pending_work
+                   ~jobs:job_scope
+                   ~subscriptions:subscription_scope
+                   ~fallback:validate_work
+               in
+               M.handle_invocation_entries
+                 ?jobs
+                 ?subscriptions
+                 ?schedules
+                 ?notifications
+                 ?ingress
+                 ?on_tool_call
+                 manager
+                 ~invocation:dispatched
+                 ~history:request.history
+                 ~available_tools
+                 ~session_meta
+                 ~now_ms:
+                   (P.Timestamp.to_time_ns (now ())
+                    |> Time_ns.to_int_ns_since_epoch
+                    |> fun n -> n / 1_000_000)
+                 ~validate_work
+                 ~on_failure:(fun kind ->
+                   if Option.is_none !failure then failure := Some (handler_failure kind))
+                 ~authorize:(fun () ->
+                   let open Result.Let_syntax in
+                   let denied =
+                     fail
+                       "invocation.permission_denied"
+                       "The tool invocation is not authorized by the current policy."
+                   in
+                   let%bind () = checked denied (fun () -> admit request) in
+                   let%bind () =
+                     checked denied (fun () ->
+                       authorize ();
+                       Ok ())
+                   in
+                   checked denied (fun () -> revalidate request))
+                 ~prepare_resolution:(fun ~resolved ~outcome ~snapshot ->
+                   let open Result.Let_syntax in
+                   let%bind () =
+                     match resolved.I.status with
+                     | Resolved outcome ->
+                       checked
+                         (fail
+                            "invocation.disclosure_rejected"
+                            "The tool outcome did not pass the host output policy.")
+                         (fun () -> prepare_outcome outcome)
+                     | _ -> Error "handler did not resolve"
+                   in
+                   Ok
+                     { M.persist = (fun () -> save resolved snapshot |> message)
+                     ; install = (fun () -> observed := Some outcome)
+                     })
+               |> Result.map ~f:(fun _ -> ())
+             in
+             match script_tools with
+             | None -> handle ()
+             | Some tools ->
+               Script_tool_calls.with_moderator_work
+                 tools
+                 ~owner:(P.Job.Invocation dispatched.context.id)
+                 ~selected:(EC.capabilities prepared)
+                 ~source:
+                   { script_id = (EC.script prepared).id
+                   ; source_sha256 = EC.source_revision prepared
+                   }
+                 ~originating:(Some (Direct (prepared, dispatched)))
+                 ~error:Fn.id
+                 (fun ~jobs:job_scope
+                   ~subscriptions:subscription_scope
+                   ~schedules:schedule_scope
+                   ~notifications:notification_scope
+                   ~ingress:ingress_scope ->
+                    Script_tool_calls.with_invocation
+                      tools
+                      ~prepared
+                      ~capabilities
+                      ~parent:dispatched
+                      (fun on_tool_call ->
+                         handle
+                           ~on_tool_call
+                           ?job_scope
+                           ?subscription_scope
+                           ?schedule_scope
+                           ?notification_scope
+                           ?ingress_scope
+                           ())))
+         in
+         let result =
+           try run () with
+           | Eio.Cancel.Cancelled _ as exn -> raise exn
+           | _ -> Error "handler or authorization callback failed"
+         in
+         match result, !recorded with
+         | Ok (), Some _ -> Ok ()
+         | Error _, Some _ ->
+           Error
+             (P.Error.create
+                Invalid_state
+                ~message:"moderator failed after recording its resolution"
+                ~retryable:false
+                ())
+         | Ok (), None | Error _, None ->
+           let open Result.Let_syntax in
+           let%bind snapshot =
+             M.identity_snapshot manager
+             |> Result.map_error ~f:(fun _ ->
+               P.Error.create
+                 Invalid_state
+                 ~message:"cannot snapshot failed moderator invocation"
+                 ~retryable:false
+                 ())
+           in
+           let%bind resolved =
+             I.resolve
+               dispatched
+               ~session_id:input.session_id
+               ~generation:input.session_generation
+               (Option.value !failure ~default:(handler_failure Handler_failed))
+           in
+           save resolved snapshot)
     |> require;
     let resolved = Option.value_exn !recorded in
     let observation_outcomes =

@@ -118,8 +118,9 @@ let create
         Chat_response.Runtime_request_scope.collect (fun () ->
           if Result.is_error value && Option.is_none request.rejection
           then
-            capabilities.with_invocation ~invocation (fun ~dispatched:_ ->
-              Ok invalid_input)
+            capabilities.with_invocation
+              ~invocation
+              (fun ~dispatched:_ ~borrow_agent_actor:_ -> Ok invalid_input)
             |> require
           else
             (match run_native with

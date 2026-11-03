@@ -24,6 +24,7 @@ type t =
   { connection_id : string
   ; principal : Agent_protocol.Principal.t
   ; actor : Operator_authorization.t
+  ; original_actor : Operator_authorization.t option
   ; transport : transport
   ; publish_notification : Agent_protocol.Envelope.t -> unit
   ; max_attachments : int
@@ -51,6 +52,7 @@ let create_authenticated
   { connection_id
   ; principal
   ; actor
+  ; original_actor = Some actor
   ; transport
   ; publish_notification
   ; max_attachments
@@ -67,16 +69,20 @@ let create_authenticated
 ;;
 
 let create ~connection_id ~principal ~transport ~publish_notification ~max_attachments =
-  create_authenticated
-    ~actor:(Operator_authorization.guarded ~principal ~is_current:(fun () -> false))
-    ~connection_id
-    ~transport
-    ~publish_notification
-    ~max_attachments
+  let context =
+    create_authenticated
+      ~actor:(Operator_authorization.guarded ~principal ~is_current:(fun () -> false))
+      ~connection_id
+      ~transport
+      ~publish_notification
+      ~max_attachments
+  in
+  { context with original_actor = None }
 ;;
 
 let principal t = t.principal
 let actor t = t.actor
+let original_actor t = t.original_actor
 
 let request_actor t actor =
   let actor = Option.value actor ~default:t.actor in

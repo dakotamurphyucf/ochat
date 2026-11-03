@@ -40,6 +40,7 @@
   managed_output_page_tests
   durable_event_wait_tests
   borrowed_execution_tests
+  agent_authority_tests
   background_execution_tests
   queued_source_tests
   queued_child_tests

@@ -83,12 +83,12 @@ let%expect_test "event and idle descendants require a live parent in the exact o
                 }
               |> protocol_ok
             in
-            let callback ~dispatched:_ =
+            let callback ~dispatched:_ ~borrow_agent_actor:_ =
               incr bodies;
               Ok (I.Complete `Null)
             in
             let resolved =
-              execute ~invocation:root (fun ~dispatched ->
+              execute ~invocation:root (fun ~dispatched ~borrow_agent_actor:_ ->
                 let candidate = child dispatched in
                 let before = A.state actor |> protocol_ok in
                 List.iter

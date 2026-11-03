@@ -27,9 +27,12 @@ type fixture =
   ; activate : unit -> (bool, P.Error.t) result
   }
 
-let with_service ?make_persistence ?(keep_writer = false) f =
+let with_service ?make_persistence ?(keep_writer = false) ?events f =
   let events =
-    {| | `Session_start ->
+    Option.value
+      events
+      ~default:
+        {| | `Session_start ->
        let ignored = state[0] <- state[0] + 1 in Task.pure(state)
        | _ -> Task.pure(state) |}
   in
@@ -83,7 +86,11 @@ let with_service ?make_persistence ?(keep_writer = false) f =
        in
        let parse_hook = ref (fun () -> ()) in
        let worker =
-         A.Operation_worker.create ~run:(fun ~sw:_ ~input _ ->
+         A.Operation_worker.create ~run:(fun ~sw:_ ~input capabilities ->
+           let authority =
+             capabilities.original_agent_actor () |> protocol_ok |> Option.value_exn
+           in
+           assert (Operator_authorization.is_current authority);
            Int.incr workers;
            A.Operation_worker.Completed
              { final_history = input.history
@@ -112,11 +119,14 @@ let with_service ?make_persistence ?(keep_writer = false) f =
          }
        in
        let owner =
-         Agent_server.Runtime_owner.create_with_run_unload
+         Agent_server.Runtime_owner.create_with_authenticated_run_unload
            ~actor
            ~initial:None
            ~before_unload:(fun ~closing:_ -> Ok ())
-           ~build:(fun _preparation ->
+           ~build:(fun ~original_actor _preparation ->
+             let original_actor = Option.value_exn original_actor in
+             assert (phys_equal original_actor proof);
+             assert (Operator_authorization.is_current original_actor);
              Int.incr constructions;
              Ok runtime)
        in
@@ -339,6 +349,17 @@ let%expect_test "intent, scope and digest cannot bypass actual headless command 
       |> Operator_authorization.trusted_local
     in
     assert (rejected (t.start ~proof:foreign request));
+    assert (Int.equal !(t.constructions) 0);
+    (* Host policy can revoke the same original proof before returning success.
+       That callback cannot authorize the subsequent admission. *)
+    let state = A.Session_actor.state t.actor |> protocol_ok in
+    let authorize _ =
+      t.auth_now := t.expires_at;
+      Ok ()
+    in
+    (match A.Run_command_authorization.check t.proof ~authorize state with
+     | Error error -> [%test_eq: P.Error.code] Permission_denied error.code
+     | Ok () -> failwith "host callback renewed expired original proof");
     assert (Int.equal !(t.constructions) 0);
     let writer =
       P.Run_start.create
@@ -574,4 +595,26 @@ let%expect_test "cancelled queued writer and headless acquisition release actor 
     "both queued callers cancel before construction; fresh admission obtains custody";
   [%expect
     {| both queued callers cancel before construction; fresh admission obtains custody |}]
+;;
+
+let%expect_test
+    "authored-start continuation carries only its exact admitted original proof"
+  =
+  let events =
+    {| | `Session_start -> Task.bind(Run.continue(), fun ignored -> Task.pure(state))
+       | _ -> Task.pure(state) |}
+  in
+  with_service ~events (fun t ->
+    t.start (t.request "authority-authored-continuation") |> admitted |> ignore;
+    assert (t.activate () |> protocol_ok);
+    assert (A.Session_actor.apply_moderator_follow_up t.actor |> protocol_ok);
+    await_idle t.actor |> ignore;
+    (* with_service's real worker requires Some/current from the original Run
+       port; its actor-owned Runtime_owner build also checks physical input. *)
+    [%test_eq: int] 1 !(t.workers);
+    assert (Operator_authorization.is_current t.proof));
+  print_endline
+    "actual compiled startup Continue -> owned operation -> original Run authority";
+  [%expect
+    {| actual compiled startup Continue -> owned operation -> original Run authority |}]
 ;;

@@ -2,6 +2,7 @@
  (name agent_session)
  (public_name ochat.agent_session)
  (modules
+  agent_authority_scope
   workspace_definition
   workspace_catalog
   workspace_instance
@@ -259,7 +260,7 @@
   goal_accounting_document
   goal_accounts
   inference_ledger)
- (private_modules goal_accounting_state goal_accounting_stored instruction_selection_capacity instruction_selection_record workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles
+ (private_modules agent_authority_scope goal_accounting_state goal_accounting_stored instruction_selection_capacity instruction_selection_record workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles
   prompt_project_baseline_record prompt_project_baseline_document native_tool_policy)
  (libraries ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript
   core

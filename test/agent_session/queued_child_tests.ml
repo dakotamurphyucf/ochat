@@ -379,24 +379,26 @@ let%expect_test
          in
          let issuing = add_claimed_job actor in
          with_job actor issuing (fun ~job:_ ~execute ->
-           execute ~invocation:(Job_fixtures.root issuing) (fun ~dispatched ->
-             Jobs.with_scope
-               service
-               ~owner:(Invocation dispatched.context.id)
-               ~selected:registry
-               ~error:P.Error.invalid_request
-               (fun scope ->
-                  let open Result.Let_syntax in
-                  let%bind id =
-                    (Jobs.moderator_transaction scope).handlers.start_tool
-                      ~name:"child"
-                      ~input:(`Object [ "input", `String "go" ])
-                    |> Result.map_error ~f:P.Error.invalid_request
-                  in
-                  let%map () =
-                    source_host.select (Invocation dispatched.context.id) [ id ]
-                  in
-                  I.Complete `Null)))
+           execute
+             ~invocation:(Job_fixtures.root issuing)
+             (fun ~dispatched ~borrow_agent_actor:_ ->
+                Jobs.with_scope
+                  service
+                  ~owner:(Invocation dispatched.context.id)
+                  ~selected:registry
+                  ~error:P.Error.invalid_request
+                  (fun scope ->
+                     let open Result.Let_syntax in
+                     let%bind id =
+                       (Jobs.moderator_transaction scope).handlers.start_tool
+                         ~name:"child"
+                         ~input:(`Object [ "input", `String "go" ])
+                       |> Result.map_error ~f:P.Error.invalid_request
+                     in
+                     let%map () =
+                       source_host.select (Invocation dispatched.context.id) [ id ]
+                     in
+                     I.Complete `Null)))
          |> protocol_ok
          |> ignore;
          let staged = Option.value_exn !staged in

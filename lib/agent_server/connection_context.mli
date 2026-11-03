@@ -29,6 +29,11 @@ val create_authenticated
 
 val actor : t -> Operator_authorization.t
 
+(** Explicit constructor provenance, independent of currentness. A principal-only
+    context has None; authenticated context retains Some even after expiry.
+    Request overrides still require [request_actor] validation before use. *)
+val original_actor : t -> Operator_authorization.t option
+
 val request_actor
   :  t
   -> Operator_authorization.t option

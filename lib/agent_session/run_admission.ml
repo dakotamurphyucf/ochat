@@ -4,6 +4,7 @@ module P = Agent_protocol
 module Scope = struct
   type t =
     { principal_id : P.Id.Principal.t
+    ; original_actor : Operator_authorization.t option
     ; observer : P.Invocation.observer
     ; startup_pending : unit -> bool
     ; authorize : Session_state.t -> (unit, P.Error.t) result
@@ -13,10 +14,23 @@ module Scope = struct
     let open Result.Let_syntax in
     let%bind _ = P.Id.Principal.of_json (P.Id.Principal.to_json principal_id) in
     let%map _ = P.Run_source.create ~observer ~generation:0 ~installation_epoch:1L in
-    { principal_id; observer; startup_pending; authorize }
+    { principal_id; original_actor = None; observer; startup_pending; authorize }
+  ;;
+
+  let create_authenticated ~actor ~observer ~startup_pending ~authorize =
+    let open Result.Let_syntax in
+    let%map scope =
+      create
+        ~principal_id:(Operator_authorization.principal actor).id
+        ~observer
+        ~startup_pending
+        ~authorize:(Run_command_authorization.check actor ~authorize)
+    in
+    { scope with original_actor = Some actor }
   ;;
 
   let principal_id t = t.principal_id
+  let original_actor t = t.original_actor
   let observer t = t.observer
   let authorize t state = t.authorize state
   let startup_pending t = t.startup_pending ()

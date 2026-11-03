@@ -154,8 +154,9 @@ let run ctx input = Task.bind(Job.start_tool("read_file", input), fun id ->
       in
       let result =
         with_job actor parent (fun ~job:_ ~execute ->
-          execute ~invocation:root (fun ~dispatched ->
+          execute ~invocation:root (fun ~dispatched ~borrow_agent_actor ->
             N.with_dispatched_scope
+              ~borrow_agent_actor
               ~execute
               ~selected:registry
               ~invocation:dispatched

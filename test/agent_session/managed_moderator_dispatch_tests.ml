@@ -129,8 +129,10 @@ let%expect_test
                               1.)
                            (fun () ->
                               match
-                                invoke ~invocation:child (fun ~dispatched:_ ~commit:_ ->
-                                  failwith "reentrant callback ran")
+                                invoke
+                                  ~invocation:child
+                                  (fun ~dispatched:_ ~borrow_agent_actor:_ ~commit:_ ->
+                                     failwith "reentrant callback ran")
                               with
                               | Error error ->
                                 String.is_prefix

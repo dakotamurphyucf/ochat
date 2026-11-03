@@ -13,6 +13,7 @@ type phase =
 
 type t =
   { owner : Owner.t
+  ; original_actor : Operator_authorization.t option
   ; principal_id : P.Id.Principal.t
   ; request : Run_admission_request.t
   ; request_sha256 : string
@@ -25,6 +26,13 @@ let belongs_to t ~owner = phys_equal t.owner owner
 let close t = t.phase <- Closed
 let request t = t.request
 let principal_id t = t.principal_id
+
+let original_actor t =
+  match t.phase with
+  | Open _ -> t.original_actor
+  | Closed -> None
+;;
+
 let request_sha256 t = t.request_sha256
 
 let digest_valid digest =
@@ -54,12 +62,27 @@ let create_request
   else
     Ok
       { owner
+      ; original_actor = None
       ; principal_id
       ; request
       ; request_sha256
       ; authorize
       ; phase = Open state.counters.revision
       }
+;;
+
+let create_authenticated_request ~owner ~state ~actor ~request ~request_sha256 ~authorize =
+  let open Result.Let_syntax in
+  let%map preparation =
+    create_request
+      ~owner
+      ~state
+      ~principal_id:(Operator_authorization.principal actor).id
+      ~request
+      ~request_sha256
+      ~authorize:(Run_command_authorization.check actor ~authorize)
+  in
+  { preparation with original_actor = Some actor }
 ;;
 
 let create ~owner ~state ~principal_id ~request ~request_sha256 ~authorize =
