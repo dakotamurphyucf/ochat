@@ -857,6 +857,7 @@ let%expect_test
           ; result = None
           ; delivery = Pending
           ; launch = None
+          ; inference_origin = None
           ; progress = None
           }
       in

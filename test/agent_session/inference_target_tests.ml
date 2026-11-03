@@ -33,6 +33,7 @@ let job (state : A.Session_state.t) : P.Job.t =
   ; result = None
   ; delivery = Not_required
   ; launch = None
+  ; inference_origin = None
   ; progress = None
   }
 ;;

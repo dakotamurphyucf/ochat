@@ -1420,6 +1420,7 @@ let%expect_test "graceful shutdown checkpoints the latest durable state" =
               ; result = Some `Null
               ; delivery = Not_required
               ; launch = None
+              ; inference_origin = None
               ; progress = None
               }
           in
@@ -2425,6 +2426,7 @@ let%expect_test "running model jobs recover interrupted and redeliver without re
               ; result = None
               ; delivery = Pending
               ; launch = None
+              ; inference_origin = None
               ; progress = None
               }
           in

@@ -64,6 +64,7 @@ let%expect_test "job occurrence controls deny stale attempts before any transiti
         ; result = None
         ; delivery = Not_required
         ; launch = None
+        ; inference_origin = None
         ; progress = None
         }
     in
@@ -193,6 +194,7 @@ let%expect_test
       ; result = None
       ; delivery = Not_required
       ; launch = None
+      ; inference_origin = None
       ; progress = None
       }
   in

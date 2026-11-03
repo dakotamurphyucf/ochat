@@ -169,6 +169,7 @@ let%expect_test "model jobs are claimed, completed, and delivered atomically" =
           ; result = None
           ; delivery = Pending
           ; launch = None
+          ; inference_origin = None
           ; progress = None
           }
       in
@@ -276,6 +277,7 @@ let%expect_test "durable job retry policy persists backoff before terminal deliv
           ; result = None
           ; delivery = Pending
           ; launch = None
+          ; inference_origin = None
           ; progress = None
           }
       in

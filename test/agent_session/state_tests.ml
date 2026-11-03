@@ -851,6 +851,7 @@ let%expect_test "named compaction archives admit typed state and preserve captur
           ; result = None
           ; delivery = Not_required
           ; launch = None
+          ; inference_origin = None
           ; progress = None
           }
       in
@@ -1382,6 +1383,7 @@ let%expect_test
           ; result = None
           ; delivery = Not_required
           ; launch = None
+          ; inference_origin = None
           ; progress = None
           }
       in

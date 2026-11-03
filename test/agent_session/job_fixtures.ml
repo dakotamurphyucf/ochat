@@ -30,6 +30,7 @@ let add_claimed_job
       ; result = None
       ; delivery = Pending
       ; launch = None
+      ; inference_origin = None
       ; progress = None
       }
   in

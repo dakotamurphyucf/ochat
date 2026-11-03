@@ -210,6 +210,11 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
         Error
           (Agent_protocol.Error.invalid_request "replacement discarded goal accounting")
     in
+    let%bind () =
+      Job_inference_provenance.validate_transition
+        ~previous:state.jobs
+        ~incoming:created.jobs
+    in
     let%map () =
       match state.run_state, created.run_state with
       | None, _ -> Ok ()
@@ -721,6 +726,7 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
       List.find state.jobs ~f:(fun previous ->
         Agent_protocol.Id.Job.equal previous.id job.id)
     in
+    let%bind () = Agent_protocol.Job.validate_inference_origin_transition ~previous job in
     let%bind () = Agent_protocol.Job.validate_delivery_transition ~previous job in
     let%bind () =
       match previous with

@@ -192,6 +192,7 @@ let%expect_test "File cancellation before reservation preserves source and Facto
             ; result = None
             ; delivery = Not_required
             ; launch = None
+            ; inference_origin = None
             ; progress = None
             }
           in

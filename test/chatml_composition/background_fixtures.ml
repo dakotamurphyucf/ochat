@@ -265,6 +265,7 @@ let submit ?created_at entry payload =
       ; result = None
       ; delivery = Pending
       ; launch = None
+      ; inference_origin = None
       ; progress = None
       }
   in

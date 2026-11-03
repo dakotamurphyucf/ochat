@@ -54,6 +54,7 @@ let%expect_test
                  (P.Completion.to_json
                     (Succeeded (`String "PRIVATE-COMPLETION-SENTINEL")))
            ; delivery = Pending
+           ; inference_origin = None
            ; progress = None
            ; launch =
                Some

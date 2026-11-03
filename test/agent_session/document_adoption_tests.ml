@@ -514,6 +514,7 @@ let%expect_test "waiting job null completion schema preserves the absent domain 
       ; result = None
       ; delivery = Pending
       ; launch = None
+      ; inference_origin = None
       ; progress = None
       }
   in
@@ -1129,6 +1130,7 @@ let%expect_test "live commits and snapshots retain the exact admitted replay bas
           ; result = None
           ; delivery = Pending
           ; launch = None
+          ; inference_origin = None
           ; progress = None
           }
         in
@@ -1542,6 +1544,7 @@ let%expect_test
         ; result = None
         ; delivery = Pending
         ; launch = None
+        ; inference_origin = None
         ; progress = None
         }
       in

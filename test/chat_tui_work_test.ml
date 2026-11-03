@@ -20,6 +20,7 @@ let job id : P.Job.t =
   ; result = None
   ; delivery = Pending
   ; launch = None
+  ; inference_origin = None
   ; progress =
       Some
         { sequence = 3
@@ -111,6 +112,7 @@ let%expect_test
     { running with
       status = Succeeded
     ; completed_at = Some timestamp
+    ; inference_origin = None
     ; progress = None
     ; result = Some (P.Completion.to_json (Succeeded (`String "PRIVATE-RESULT")))
     }

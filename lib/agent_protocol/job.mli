@@ -91,6 +91,21 @@ type launch =
   }
 [@@deriving equal, sexp]
 
+(** Immutable host-captured inference attribution evidence. A Run reference is
+    resolved through its exact retained occurrence; it is not a Goal selector or
+    execution permission. Missing historical evidence is represented by the
+    enclosing optional field, never by [Unbound]. *)
+module Inference_origin : sig
+  type t =
+    | Unbound
+    | Run of Id.Run.t
+  [@@deriving equal, sexp]
+
+  val validate : t -> (unit, Error.t) result
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
 type t =
   { id : Id.Job.t
   ; session_id : Id.Session.t
@@ -110,6 +125,10 @@ type t =
     (** Optional versioned launch provenance. Legacy jobs omit this field.
         Host admission binds the invocation/event owner and actual parent attempt;
         user scripts cannot choose their nesting depth. *)
+  ; inference_origin : Inference_origin.t option [@sexp.option]
+    (** Absent historical provenance is unavailable. No decoder or ordinary
+        constructor substitutes an unbound origin. A real admission owner must
+        capture new evidence before the first durable Job admission. *)
   ; progress : Job_progress.t option [@sexp.option]
     (** Transient read projection only. Durable job records omit progress, and
         terminal results never depend on retaining these display updates. *)
@@ -128,6 +147,15 @@ val validate_result : t -> (unit, Error.t) result
     This checks incremental journal changes; decoding a retained snapshot does not
     require the previous pending record. *)
 val validate_delivery_transition : previous:t option -> t -> (unit, Error.t) result
+
+(** Validate native nominal IDs and immutable origin through all retained Job
+    updates. Historical absence cannot be adopted retroactively; changing or
+    removing an existing origin rejects. Cross-state Run evidence is checked by
+    the complete Session carrier after its ordered batch. *)
+val validate_inference_origin_transition
+  :  previous:t option
+  -> t
+  -> (unit, Error.t) result
 
 (** Read the inline completion or explicit artifact descriptor without loading
     any bytes. Validates exact artifact session/job/generation/attempt ownership. *)

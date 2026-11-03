@@ -5587,6 +5587,7 @@ let prepare_background_job t owner request =
     ; result = None
     ; delivery = Pending
     ; launch = Some launch
+    ; inference_origin = None
     ; progress = None
     }
 ;;

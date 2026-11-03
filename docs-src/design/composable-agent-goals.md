@@ -341,6 +341,35 @@ the accounting view of a closed objective while canonical rows remain retained;
 they cannot reopen the goal or clear an operator hold. Goal creation begins a new
 scope and does not retroactively attribute unrelated historical session attempts.
 
+### Stored background inference provenance
+
+A background Job can retain a versioned inference origin: positively unbound work,
+or the immutable ID of its originating Run. Historical records that omit this
+field have unavailable provenance. Absence is never converted into unbound work,
+zero usage, or a choice of the current Goal. Existing records cannot acquire a
+classification retroactively or change it during retry, result delivery, source
+replacement, or recovery.
+
+The complete Session carrier checks a Run origin against actual retained work for
+the same Job ID and generation in that exact Run. It also checks the Run session
+and source generation. An explicit unbound claim contradicting retained Run work
+rejects. This check runs after the complete ordered transaction, so a new Job and
+its matching Run occurrence can be published atomically. Unknown Job fields and
+unknown fields inside its origin remain under the universal document carrier.
+
+The relationship is lifetime evidence. A queued Job cancelled before its first
+claim can retain a cancellation proof for its planned first attempt while the
+Job attempt counter remains zero. A queued retry similarly preserves earlier
+terminal history and the cancelled planned successor. Neither case changes the
+origin or invents an execution attempt.
+
+Stored provenance grants no execution permission. The allocating owner must still
+prove the exact current Job attempt, its physical callback lifetime, current
+original authority, and current Goal policy before provider submission. Fresh
+physical-parent classification and immediate Model job/Run admission belong to
+the live accounting integration; the storage field alone does not provide those
+paths or qualify authored Goal execution.
+
 ### Authenticated descendants
 
 Same-session inference descendants inherit attribution only through actual
