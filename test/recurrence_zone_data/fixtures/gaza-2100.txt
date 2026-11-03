@@ -1,0 +1,4 @@
+Asia/Gaza  Fri Mar 26 23:59:59 2100 UT = Sat Mar 27 01:59:59 2100 EET isdst=0 gmtoff=7200
+Asia/Gaza  Sat Mar 27 00:00:00 2100 UT = Sat Mar 27 03:00:00 2100 EEST isdst=1 gmtoff=10800
+Asia/Gaza  Fri Oct 29 22:59:59 2100 UT = Sat Oct 30 01:59:59 2100 EEST isdst=1 gmtoff=10800
+Asia/Gaza  Fri Oct 29 23:00:00 2100 UT = Sat Oct 30 01:00:00 2100 EET isdst=0 gmtoff=7200

@@ -150,12 +150,38 @@ cannot alone qualify general skipped-date and midnight-transition behavior.
 The pinned filename-based timezone parser also requires a separate IO review;
 calling it from a pure-looking function does not remove blocking IO.
 
-The adapter must qualify TZif v2/v3 transition sections and future POSIX-footer
-rules, or expose explicit unsupported coverage. It must never extend the final
-offset indefinitely without evidence. Parser reuse through an Eio-safe adapter
-and a small audited byte decoder are alternatives to assess at that boundary;
-this design does not claim either exists already. Parsing, source provenance
-and execution authorization remain distinct.
+The pure `ochat.recurrence_zone_data` library decodes bounded exact TZif v2/v3
+bytes and projects a fully requested finite interval into `Zone`. It validates
+both block structures and the final type/footer association. Type 0 governs
+before the first transition; with no transitions and no footer it governs all
+time. With transitions but an empty footer, coverage ends strictly before the
+last transition. Undefined `-00` intervals are unavailable. There is no fallback
+or silent coverage clipping. Leap-bearing data and other file versions are
+explicitly unsupported.
+
+Self-contained POSIX footers support standard/daylight offsets, quoted names,
+Julian/ordinal/month-week-day rules, default offsets/times, southern and negative
+DST, nonhour differences, perpetual daylight and signed v3 transition times up
+to 167 hours. A bounded Gregorian 400-year pattern supports future dates and
+validates raw signed 64-bit table timestamps without narrowing them into
+`Time_ns`. Implementation-defined external/default DST rules and effective
+offsets beyond `Zone`'s 24-hour domain fail explicitly. The parser admits at most
+1 MiB, 4096 transitions per block/projection, 256 types, 65536 designation bytes
+and 4096 footer bytes, checking count-derived sizes before allocation.
+
+Provenance hashes the exact input string once. Its bounded source label describes
+the host-selected data set; TZif itself does not authenticate an IANA release
+name. The library retains bounded parsed data, performs no IO and grants no
+execution authority. Its fixture suite uses committed bytes generated from
+pinned IANA source/reference tooling and independent calendar/offset oracles.
+
+The Eio host loader remains integration work. It must reuse the qualified
+`Chatml_local_source` retained-root/componentwise no-follow reader rather than
+relying on `Eio.Path` confinement flags: some supported backend fallbacks can
+follow symlinks. The initial policy requires canonical regular files and rejects
+all symlink aliases, including internal ones. Acquisition must preserve exact
+byte bounds, cancellation and resource ownership. Pure decoder validation does
+not qualify that host boundary.
 
 Persist selected UTC time, nominal label, fold/adjustment and admitted zone
 provenance with a materialized occurrence. Updated data may affect future
