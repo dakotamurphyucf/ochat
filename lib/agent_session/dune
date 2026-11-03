@@ -207,6 +207,10 @@
   quota_key
   quota_manager
   start_queue
+  inference_usage_count
+  goal_accounting_counter
+  goal_usage
+  goal_accounting
   inference_ledger)
  (private_modules workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles
   prompt_project_baseline_record prompt_project_baseline_document native_tool_policy)
