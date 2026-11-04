@@ -44,6 +44,14 @@ val reserve_child
     keyed command receipt, control edit or execution authority is introduced. *)
 val link_child : t -> Recurrence_child_association.t -> (t, Agent_protocol.Error.t) result
 
+(** Pure immutable original execution record; no receipt or execution authority
+    is synthesized. Exact replay leaves catalog and planning revisions unchanged. *)
+val record_execution
+  :  t
+  -> intent:Recurrence_execution_intent.t
+  -> attempt:Recurrence_execution_attempt.t
+  -> (t * Recurrence_execution.t, Agent_protocol.Error.t) result
+
 val apply_due
   :  t
   -> recurrence_id:Agent_protocol.Id.Recurrence.t
@@ -98,3 +106,13 @@ val validate_encoded_capacity : t -> Jsonaf.t -> (unit, Agent_protocol.Error.t) 
     it conveys no lifecycle authority or execution evidence. The enclosing
     universal carrier preserves its own compatible wrapper/envelope fields. *)
 val capacity_projection : t -> (Jsonaf.t, Agent_protocol.Error.t) result
+
+(** Exact one-entry atomic evidence/cursor/retention candidate. A duplicate or
+    unavailable old detail leaves every revision unchanged. No target observation
+    or activation authority is issued by this pure data operation. *)
+val import_execution
+  :  t
+  -> origin:Recurrence_run_origin.t
+  -> terminal:Recurrence_run_reference.t option
+  -> automatic:Recurrence_settlement.Automatic.t
+  -> (t * Recurrence_settlement.t, Agent_protocol.Error.t) result

@@ -60,7 +60,7 @@ module Stored = struct
     let%bind state = F.required payload "state" (F.document ~limits) in
     let%bind () =
       F.expect_versions
-        ~supported_semantics:[ Agent_protocol.Schedule_provenance.persistence_semantics ]
+        ~supported_semantics:Agent_protocol.Session_storage_semantics.supported_children
         state
         ~kind:"session.state"
         ~versions:[ 1; 2; 3; 4; 5; 6; 7; 8; 9; 10 ]

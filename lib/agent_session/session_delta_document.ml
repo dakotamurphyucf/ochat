@@ -41,10 +41,7 @@ let changes_document changes ~limits =
       ~version:6
       ~payload:(`Object [ "changes", `Array changes ])
   in
-  Queue_provenance_semantics.require
-    document
-    ~limits
-    ~required:(Queue_provenance_semantics.delta_requires (D.Document.payload document))
+  Session_storage_semantics.require_delta document ~limits
 ;;
 
 let project_run_retirement ~run ~goal ~recurrence ~limits =
@@ -1084,7 +1081,7 @@ let codec ~limits =
     ~kind:"session.delta"
     ~version:6
     ~shape
-    ~supported_semantics:Queue_provenance_semantics.supported
+    ~supported_semantics:Session_storage_semantics.supported
     ~decode:(fun json -> decode_payload ~limits json |> X.document_result)
     ~encode:(fun _ ->
       Error
@@ -1148,11 +1145,7 @@ let validate_raw_queues document =
 let decode ~limits document =
   let open Result.Let_syntax in
   let%bind document = upgrade document ~limits in
-  let%bind () =
-    Queue_provenance_semantics.check
-      document
-      ~required:(Queue_provenance_semantics.delta_requires (D.Document.payload document))
-  in
+  let%bind () = Session_storage_semantics.check_delta document in
   let%bind () = validate_raw_queues document in
   let%map carrier = D.Domain_codec.decode (codec ~limits) document in
   { value = D.Extension_carrier.value carrier; document }

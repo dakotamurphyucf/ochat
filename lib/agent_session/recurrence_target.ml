@@ -17,6 +17,7 @@ type view =
       { artifact : Artifact.t
       ; definition : Prompt_definition.t
       ; parent : Parent.t
+      ; mode : P.Run.Mode.t option
       }
 
 type t =
@@ -98,7 +99,7 @@ let validate_view = function
     if Int64.(configuration_revision < 0L)
     then invalid "negative target configuration revision"
     else Ok ()
-  | Fresh_child { artifact; definition; parent } ->
+  | Fresh_child { artifact; definition; parent; mode = _ } ->
     let open Result.Let_syntax in
     let%bind _ = Prompt_definition.to_jsonaf definition in
     let%bind _ = Parent.to_jsonaf parent in
@@ -143,7 +144,7 @@ let encode = function
           ; "configuration_revision", X.int64_json configuration_revision
           ; "input", P.Session.Message_content.to_json input
           ])
-  | Fresh_child { artifact; definition; parent } ->
+  | Fresh_child { artifact; definition; parent; mode } ->
     let open Result.Let_syntax in
     let%bind artifact = Artifact.to_document artifact |> protocol_result in
     let%bind definition = Prompt_definition.to_jsonaf definition in
@@ -154,6 +155,11 @@ let encode = function
       ; "definition", definition
       ; "parent", parent
       ]
+    |> fun json ->
+    (match mode, json with
+     | None, _ -> json
+     | Some mode, `Object fields -> `Object (fields @ [ "mode", P.Run.Mode.to_json mode ])
+     | Some _, _ -> assert false)
 ;;
 
 let decode json =
@@ -182,8 +188,14 @@ let decode json =
           Artifact.of_document document |> protocol_result)
       in
       let%bind definition = X.required fields "definition" Prompt_definition.of_jsonaf in
-      let%map parent = X.required fields "parent" Parent.of_jsonaf in
-      Fresh_child { artifact; definition; parent }
+      let%bind parent = X.required fields "parent" Parent.of_jsonaf in
+      let%map mode =
+        match D.Json.field json ~name:"mode" with
+        | Absent -> Ok None
+        | Null -> invalid "captured recurrence Run mode cannot be null"
+        | Value json -> Result.map (P.Run.Mode.of_json json) ~f:Option.some
+      in
+      Fresh_child { artifact; definition; parent; mode }
     | _ -> invalid "unsupported recurrence target kind"
   in
   let%map () = validate_view target in
@@ -230,6 +242,7 @@ let shape =
           ; "artifact", v
           ; "definition", Prompt_definition.shape
           ; "parent", Parent.shape
+          ; "mode", v
           ] )
     ]
 ;;
@@ -240,7 +253,7 @@ let codec =
     ~kind:"ochat.recurrence_target"
     ~version:1
     ~shape
-    ~supported_semantics:[]
+    ~supported_semantics:[ "recurrence.explicit-run-mode.v1" ]
     ~validate:(fun target -> document_result (validate_view target))
     ~decode:(fun json -> document_result (decode json))
     ~encode:(fun target -> document_result (encode target))
@@ -287,6 +300,20 @@ let of_document document =
   let open Result.Let_syntax in
   let%bind () = validate_slices document in
   let%bind carrier = D.Domain_codec.decode codec document in
+  let%bind () =
+    match C.value carrier with
+    | Existing_session _ | Fresh_child { mode = None; _ } -> Ok ()
+    | Fresh_child { mode = Some _; _ } ->
+      if
+        List.mem
+          (D.Document.required_semantics document)
+          "recurrence.explicit-run-mode.v1"
+          ~equal:String.equal
+      then Ok ()
+      else
+        Error
+          (D.Error.Required_semantics_unknown "missing recurrence.explicit-run-mode.v1")
+  in
   admitted (C.value carrier) document
 ;;
 
@@ -300,6 +327,23 @@ let create target =
   let%bind document =
     D.Domain_codec.encode codec (C.of_authored_value target) |> protocol_result
   in
+  let%bind document =
+    match target with
+    | Existing_session _ | Fresh_child { mode = None; _ } -> Ok document
+    | Fresh_child { mode = Some _; _ } ->
+      (match D.Document.json document with
+       | `Object fields ->
+         D.Document.inspect
+           ~limits
+           (`Object
+               (List.filter fields ~f:(fun (name, _) ->
+                  not (String.equal name "required_semantics"))
+                @ [ ( "required_semantics"
+                    , `Array [ `String "recurrence.explicit-run-mode.v1" ] )
+                  ]))
+         |> protocol_result
+       | _ -> assert false)
+  in
   let%bind () = validate_slices document |> protocol_result in
   admitted target document |> protocol_result
 ;;
@@ -308,8 +352,21 @@ let create_existing ~session ~source ~configuration_revision ~input =
   create (Existing_session { session; source; configuration_revision; input })
 ;;
 
-let create_fresh ~artifact ~definition ~parent =
-  create (Fresh_child { artifact; definition; parent })
+let create_fresh ~mode ~artifact ~definition ~parent =
+  create (Fresh_child { artifact; definition; parent; mode = Some mode })
 ;;
 
 let digest t = Ok t.sha256
+
+let run_mode t =
+  match view t with
+  | Existing_session _ -> Ok P.Run.Mode.Single_turn
+  | Fresh_child { mode = Some mode; _ } -> Ok mode
+  | Fresh_child { mode = None; _ } ->
+    Error
+      (P.Error.create
+         Invalid_state
+         ~message:"historical captured recurrence target has no explicit Run mode"
+         ~retryable:false
+         ())
+;;

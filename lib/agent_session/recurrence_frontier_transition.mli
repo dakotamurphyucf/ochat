@@ -54,3 +54,15 @@ val find_mark
   -> (V.Mark.t, Agent_protocol.Error.t) result
 
 val retire_alarm : V.State.t -> definition:Recurrence_definition.t -> V.State.t
+
+(** Private exact-state bookkeeping shared by settlement and ordinary planning. *)
+val update_mark : V.State.t -> V.Mark.t -> V.State.t
+
+val candidates : V.State.t -> V.Stored_nominal.t list
+
+val archive
+  :  V.State.t
+  -> Recurrence_definition.t
+  -> V.Control_detail.kind
+  -> Jsonaf.t
+  -> V.State.t

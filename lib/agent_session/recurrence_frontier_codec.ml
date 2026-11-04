@@ -32,15 +32,16 @@ let list maximum decode = function
 
 let mark_json (m : V.Mark.t) =
   `Object
-    [ "revision", X.int64_json (I.Definition.revision m.definition)
-    ; "definition", I.Definition.to_json m.definition
-    ; "definition_sha256", `String m.definition_sha256
-    ; "through", optional X.int64_json m.through
-    ; "last_at", optional time_json m.last_at
-    ; "omitted", X.int64_json m.omitted
-    ; "withdrawn", X.int64_json m.withdrawn
-    ; "last_alarm_sequence", optional X.int64_json m.last_alarm_sequence
-    ]
+    ([ "revision", X.int64_json (I.Definition.revision m.definition)
+     ; "definition", I.Definition.to_json m.definition
+     ; "definition_sha256", `String m.definition_sha256
+     ; "through", optional X.int64_json m.through
+     ; "last_at", optional time_json m.last_at
+     ; "omitted", X.int64_json m.omitted
+     ; "withdrawn", X.int64_json m.withdrawn
+     ; "last_alarm_sequence", optional X.int64_json m.last_alarm_sequence
+     ]
+     @ if Int64.equal m.settled 0L then [] else [ "settled", X.int64_json m.settled ])
 ;;
 
 let mark_of_json json =
@@ -53,6 +54,12 @@ let mark_of_json json =
   let%bind last_at = X.required f "last_at" (nullable time_of_json) in
   let%bind omitted = X.required f "omitted" X.nonnegative_int64 in
   let%bind withdrawn = X.required f "withdrawn" X.nonnegative_int64 in
+  let%bind settled =
+    match D.Json.field json ~name:"settled" with
+    | Absent -> Ok 0L
+    | Null -> invalid "settled total must be a nonnegative integer"
+    | Value json -> X.nonnegative_int64 json
+  in
   let%bind last_alarm_sequence =
     X.required f "last_alarm_sequence" (nullable X.nonnegative_int64)
   in
@@ -67,6 +74,7 @@ let mark_of_json json =
         ; last_at
         ; omitted
         ; withdrawn
+        ; settled
         ; last_alarm_sequence
         }
 ;;
@@ -158,7 +166,8 @@ let control_json (detail : V.Control_detail.t) =
         , `String
             (match detail.kind with
              | Retired_alarm -> "retired_alarm"
-             | Retired_batch -> "retired_batch") )
+             | Retired_batch -> "retired_batch"
+             | Retired_delay_basis -> "retired_delay_basis") )
       ; "value", detail.json
       ]
 ;;
@@ -175,6 +184,7 @@ let control_of_json original_json =
          ~name:"retained control metadata"
          [ "retired_alarm", V.Control_detail.Retired_alarm
          ; "retired_batch", Retired_batch
+         ; "retired_delay_basis", Retired_delay_basis
          ])
   in
   let%bind json = X.required f "value" X.raw in
@@ -182,12 +192,14 @@ let control_of_json original_json =
     match kind with
     | Retired_alarm -> Result.map (V.Stored_alarm.of_json json) ~f:(fun _ -> ())
     | Retired_batch -> Result.map (batch_of_json json) ~f:(fun _ -> ())
+    | Retired_delay_basis ->
+      Result.map (Recurrence_delay_basis.of_json json) ~f:(fun _ -> ())
   in
   V.Control_detail.{ kind; json; original_json = Some original_json }
 ;;
 
 let encode (s : S.t) =
-  `Object
+  let fields =
     [ "revision", X.int64_json s.revision
     ; "marks", X.list_json mark_json s.marks
     ; "ready", X.list_json stored s.ready
@@ -200,15 +212,21 @@ let encode (s : S.t) =
     ; "history", X.list_json detail_json s.history
     ; "control_history", X.list_json control_json s.control_history
     ]
-  |> fun json ->
-  match json with
-  | `Object fields when not (List.is_empty s.child_associations) ->
-    `Object
-      (fields
-       @ [ ( "child_associations"
+  in
+  let fields =
+    fields
+    @ (if List.is_empty s.child_associations
+       then []
+       else
+         [ ( "child_associations"
            , X.list_json Recurrence_child_association.to_json s.child_associations )
          ])
-  | _ -> json
+    @ Recurrence_executions.fields s.executions
+    @ Option.to_list
+        (Option.map s.delay_basis ~f:(fun basis ->
+           "delay_basis", Recurrence_delay_basis.to_json basis))
+  in
+  `Object fields
 ;;
 
 let validate (s : S.t) =
@@ -217,7 +235,12 @@ let validate (s : S.t) =
     if
       Int64.(
         s.revision < 0L
-        || s.revision > max_value - of_int (List.length (S.unlinked_children s)))
+        || s.revision
+           > max_value
+             - of_int
+                 Int.(
+                   List.length (S.unlinked_children s)
+                   + Recurrence_executions.required_transition_steps s.executions))
       || List.is_empty s.marks
       || List.length s.marks > 8
       || List.length s.ready > 32
@@ -227,11 +250,17 @@ let validate (s : S.t) =
     then invalid "frontier intrinsic bounds exceeded"
     else Ok ()
   in
+  let%bind () =
+    if S.pending_count s > 256
+    then invalid "entry-wide claimed occurrence inventory exhausted"
+    else Ok ()
+  in
   let%bind _ = V.State.summary s in
   let%bind () =
     List.fold_result s.marks ~init:0 ~f:(fun index (m : V.Mark.t) ->
       let%bind consumed = V.Mark.consumed m in
       let%bind omitted = V.add m.omitted m.withdrawn in
+      let%bind omitted = V.add omitted m.settled in
       if
         (not (Int64.equal (I.Definition.revision m.definition) (Int64.of_int index)))
         || (not
@@ -326,6 +355,19 @@ let decode json =
     | Null -> invalid "child associations must be an array"
     | Value json -> list 256 Recurrence_child_association.of_json json
   in
+  let%bind executions =
+    Recurrence_executions.of_field
+      (match D.Json.field json ~name:"executions" with
+       | Absent -> None
+       | Null -> Some `Null
+       | Value value -> Some value)
+  in
+  let%bind delay_basis =
+    match D.Json.field json ~name:"delay_basis" with
+    | Absent -> Ok None
+    | Null -> invalid "delay basis must be an immutable object"
+    | Value json -> Result.map (Recurrence_delay_basis.of_json json) ~f:Option.some
+  in
   let%bind batch = X.required f "batch" (nullable batch_of_json) in
   let%bind lookahead = X.required f "lookahead" (nullable stored_of_json) in
   let%bind alarm = X.required f "alarm" (nullable V.Stored_alarm.of_json) in
@@ -339,6 +381,8 @@ let decode json =
       ; ready
       ; protected_children
       ; child_associations
+      ; executions
+      ; delay_basis
       ; batch
       ; lookahead
       ; alarm
@@ -366,11 +410,14 @@ let shape =
              ; "last_at"
              ; "omitted"
              ; "withdrawn"
+             ; "settled"
              ; "last_alarm_sequence"
              ]) )
     ; "ready", v
     ; "protected_children", v
     ; "child_associations", v
+    ; "executions", v
+    ; "delay_basis", v
     ; "batch", v
     ; "lookahead", v
     ; "alarm", v
@@ -387,7 +434,10 @@ let codec =
     ~version:1
     ~shape
     ~supported_semantics:
-      [ "recurrence.child-reservation.v1"; "recurrence.child-association.v1" ]
+      [ "recurrence.child-reservation.v1"
+      ; "recurrence.child-association.v1"
+      ; "recurrence.execution.v1"
+      ]
     ~validate:(fun s -> X.document_result (validate s))
     ~decode:(fun j -> X.document_result (decode j))
     ~encode:(fun s -> Ok (encode s))

@@ -24,8 +24,109 @@ let map_first_definition payload ~f =
   | _ -> failwith "expected definition"
 ;;
 
+let check_produced_run_evidence ~initial ~snapshot ~intent =
+  let module Attempt = A.Recurrence_execution_attempt in
+  let module Origin = A.Recurrence_run_origin in
+  let module Reference = A.Recurrence_run_reference in
+  let attempt =
+    Attempt.create
+      ~intent
+      ~number:0
+      ~principal_id
+      ~expected_revision:initial.A.Session_state.counters.revision
+      ~key:(P.Idempotency_key.of_string "produced-origin" |> protocol_ok)
+    |> protocol_ok
+  in
+  let request = Attempt.request attempt ~intent |> protocol_ok in
+  (* Actual pure producers, not host authorization/actor observation fixtures. *)
+  let scope =
+    A.Run_admission.Scope.create
+      ~principal_id
+      ~observer:(A.Recurrence_execution_intent.source intent).observer
+      ~startup_pending:(fun () -> true)
+      ~authorize:(fun _ -> Ok ())
+    |> protocol_ok
+  in
+  let admitted =
+    A.Run_admission.prepare_request
+      initial
+      ~scope
+      ~request:(A.Run_admission_request.of_headless request)
+      ~session:(A.Recurrence_execution_intent.target intent)
+      ~run_id:(P.Id.Run.of_string "run_produced_origin" |> protocol_ok)
+      ~operation:None
+      ~request_sha256:(Attempt.request_sha256 attempt)
+      ~now:timestamp
+    |> protocol_ok
+  in
+  let run = A.Run_admission.run admitted in
+  let origin =
+    Origin.create ~intent ~attempt ~run ~admission:(A.Run_admission.receipt admitted)
+    |> protocol_ok
+  in
+  Run_origin_tests.check ~initial ~admitted ~origin;
+  let check_terminal index =
+    let actual = A.Run_state.find index run.id |> Option.value_exn in
+    let receipt =
+      List.find_exn (A.Run_state.receipts index) ~f:(fun receipt ->
+        P.Run_receipt.Kind.equal receipt.kind Terminal)
+    in
+    Reference.create ~origin ~run:actual ~receipt |> protocol_ok |> ignore
+  in
+  (* Independent alternative branches from the same retained admission. *)
+  A.Run_retirement.recover
+    (A.Run_admission.index admitted)
+    ~session_revision:2L
+    ~now:timestamp
+  |> protocol_ok
+  |> check_terminal;
+  let state =
+    A.Session_delta.apply initial (Run_state_changed (A.Run_admission.index admitted))
+    |> protocol_ok
+  in
+  let executing, _ =
+    A.Queued_moderator_event.claim_ordinary
+      ~state
+      ~id:(P.Id.Moderator_execution.of_string "mex_produced_origin" |> protocol_ok)
+      ~snapshot
+      ~operation_id:None
+      ~event:Session_start
+      ~now:timestamp
+    |> protocol_ok
+  in
+  let completed =
+    P.Moderator_execution.complete
+      executing
+      ~checkpoint_sha256:executing.context.checkpoint_sha256
+      ~requests:{ request_turn = false; request_compaction = false; end_session = None }
+    |> protocol_ok
+  in
+  let work_state =
+    A.Session_delta.apply
+      state
+      (Batch
+         [ Moderator_execution_changed executing; Moderator_execution_changed completed ])
+    |> protocol_ok
+  in
+  let transition =
+    A.Run_transition.prepare
+      state
+      ~scope:(A.Run_scope.create ~run ~execution_id:executing.context.id |> protocol_ok)
+      ~executing
+      ~work_state
+      ~owned_work:[]
+      ~action:None
+      ~now:timestamp
+    |> protocol_ok
+  in
+  let final =
+    A.Session_delta.apply state (A.Run_transition.delta transition) |> protocol_ok
+  in
+  check_terminal (Option.value_exn final.run_state)
+;;
+
 let check_fresh_custody () =
-  with_actor_workspace (fun _env workspace_instance ->
+  with_actor_workspace (fun env workspace_instance ->
     let module Artifact = Agent_store.Prompt_artifact_store.Artifact in
     let module Captured = Agent_store.Captured_prompt_artifact in
     let module Bundle = Agent_store.Prompt_program_bundle in
@@ -93,16 +194,162 @@ let check_fresh_custody () =
       |> protocol_ok
     in
     let target =
-      A.Recurrence_target.create_fresh ~artifact:captured ~definition ~parent
+      A.Recurrence_target.create_fresh
+        ~mode:Single_turn
+        ~artifact:captured
+        ~definition
+        ~parent
       |> protocol_ok
     in
+    List.iter [ P.Run.Mode.Single_turn; Workflow ] ~f:(fun mode ->
+      let target =
+        A.Recurrence_target.create_fresh ~mode ~artifact:captured ~definition ~parent
+        |> protocol_ok
+        |> A.Recurrence_target.to_document
+        |> document_ok
+        |> A.Recurrence_target.of_document
+        |> document_ok
+      in
+      assert (P.Run.Mode.equal (A.Recurrence_target.run_mode target |> protocol_ok) mode));
+    let current =
+      A.Recurrence_target.to_document target |> document_ok |> D.Document.json
+    in
+    let remove json name =
+      match json with
+      | `Object fields ->
+        `Object (List.filter fields ~f:(fun (key, _) -> not (String.equal key name)))
+      | _ -> assert false
+    in
+    let decode json =
+      D.Document.inspect ~limits:A.Recurrence_target.limits json
+      |> Result.bind ~f:A.Recurrence_target.of_document
+    in
+    let historical =
+      map_payload current ~f:(fun payload -> remove payload "mode")
+      |> fun json -> remove json "required_semantics"
+    in
+    let legacy = decode historical |> document_ok in
+    assert (Result.is_error (A.Recurrence_target.run_mode legacy));
+    assert (
+      D.Json.equal
+        historical
+        (A.Recurrence_target.to_document legacy |> document_ok |> D.Document.json));
+    List.iter
+      [ map_payload current ~f:(fun payload -> set payload "mode" `Null)
+      ; map_payload current ~f:(fun payload -> set payload "mode" (`String "implicit"))
+      ; remove current "required_semantics"
+      ]
+      ~f:(fun json -> assert (Result.is_error (decode json)));
     let capture = { (capture ()) with target } in
     let catalog, _ = fresh C.empty "fresh-custody" (Create (id "fresh", capture)) in
     let restored = roundtrip catalog in
-    let restored_target = F.target (E.current (entry restored "fresh")) in
+    let retained_definition = E.current (entry restored "fresh") in
+    let restored_target = F.target retained_definition in
+    let module Reservation = A.Recurrence_child_reservation in
+    let module Association = A.Recurrence_child_association in
+    let module Intent = A.Recurrence_execution_intent in
+    let module Store = Agent_store.Delegation_store in
+    let nominal =
+      A.Recurrence_nominal.create_interval retained_definition ~slot:0L |> protocol_ok
+    in
+    let reserve suffix =
+      Reservation.create
+        ~definition:retained_definition
+        ~control_revision:0L
+        ~principal_id
+        ~child_session_id:(P.Id.Session.of_string ("ses_intent_" ^ suffix) |> protocol_ok)
+        ~transaction_id:
+          (P.Id.Transaction.of_string ("txn_intent_" ^ suffix) |> protocol_ok)
+        ~nominal_json:(A.Recurrence_nominal.to_json nominal)
+      |> protocol_ok
+    in
+    let reservation = reserve "original" in
+    let key = Reservation.delegation_key reservation |> protocol_ok in
+    (* Pure validated reference data, not proof of child installation/linkage. *)
+    let reference =
+      Store.reference_of_jsonaf
+        (`Object
+            [ ( "key"
+              , `Object
+                  [ "parent_session_id", P.Id.Session.to_json key.parent_session_id
+                  ; "parent_generation", `Number (Int.to_string key.parent_generation)
+                  ; "principal_id", P.Id.Principal.to_json key.principal_id
+                  ; "idempotency_key", P.Idempotency_key.to_json key.idempotency_key
+                  ] )
+            ; ( "child_session_id"
+              , P.Id.Session.to_json (Reservation.child_session_id reservation) )
+            ; ( "revision_id"
+              , P.Id.Prompt_revision.to_json
+                  (Reservation.artifact_revision_id reservation) )
+            ; "request_sha256", `String (Reservation.request_sha256 reservation)
+            ; "admission_sha256", `String (String.make 64 'b')
+            ])
+      |> store_ok
+    in
+    let association = Association.create ~reservation ~reference |> protocol_ok in
+    let child = Intent.Child.create ~reservation ~association |> protocol_ok in
+    assert (
+      Result.is_error (Intent.Child.create ~reservation:(reserve "mixed") ~association));
+    let manager, _, _ = handoff_definition env in
+    let snapshot =
+      Chat_response.Moderator_manager.identity_snapshot manager |> Result.ok_or_failwith
+    in
+    let initial =
+      actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+    in
+    let initial =
+      A.Session_state.create
+        ~identity:
+          { initial.identity with session_id = Reservation.child_session_id reservation }
+        ~spec:initial.spec
+        ~initial_history:[]
+    in
+    let initial =
+      { initial with moderator = Some (A.Moderator_checkpoint.encode snapshot) }
+    in
+    let observer =
+      A.Moderator_checkpoint.observer initial.moderator |> protocol_ok |> Option.value_exn
+    in
+    let child_source =
+      A.Run_source_installation.apply
+        A.Run_source_installation.initial
+        ~change:(Replace observer)
+      |> protocol_ok
+      |> A.Run_source_installation.captured ~generation:initial.identity.generation
+      |> protocol_ok
+    in
+    let intent =
+      Intent.create
+        ~definition:retained_definition
+        ~control_revision:0L
+        ~nominal_json:(Reservation.nominal_json reservation)
+        ~target:
+          (P.Session_ref.create
+             ~server_id
+             ~session_id:(Reservation.child_session_id reservation))
+        ~source:child_source
+        ~child:(Some child)
+      |> protocol_ok
+      |> Intent.to_json
+      |> Intent.of_json
+      |> protocol_ok
+    in
+    Intent.validate intent ~definition:retained_definition ~reservation:(Some reservation)
+    |> protocol_ok;
+    assert (
+      Result.is_error
+        (Intent.validate
+           intent
+           ~definition:retained_definition
+           ~reservation:(Some (reserve "mixed"))));
+    (match Intent.input intent with
+     | Authored_start -> ()
+     | User_submission _ -> assert false);
+    check_produced_run_evidence ~initial ~snapshot ~intent;
     match A.Recurrence_target.view restored_target with
     | Existing_session _ -> assert false
-    | Fresh_child { artifact = actual; definition = actual_definition; parent = _ } ->
+    | Fresh_child
+        { artifact = actual; definition = actual_definition; parent = _; mode = _ } ->
       assert (
         D.Json.equal
           (D.Document.json artifact_document)

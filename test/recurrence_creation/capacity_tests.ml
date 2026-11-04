@@ -158,6 +158,7 @@ let%expect_test "actual child link coexists with its alarm within all reserved c
           previous
           ~incoming
           ~definitions:(E.definitions reserved)
+          ~previous_cursor:(E.cursor reserved)
           ~cursor:(E.cursor reserved)
         |> protocol_ok);
     assert (Association.equal association (List.hd_exn (H.child_associations linked)));

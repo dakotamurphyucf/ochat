@@ -150,6 +150,7 @@ let target ?revision_id env daemon parent ~root_file =
   in
   let target =
     Target.create_fresh
+      ~mode:Single_turn
       ~artifact:(Agent_store.Captured_prompt_artifact.create artifact |> document_ok)
       ~definition
       ~parent:captured_parent
@@ -171,7 +172,7 @@ let authorize_creation current definition =
   let open Result.Let_syntax in
   let%bind () = authorize current in
   match Target.view (A.Recurrence_definition.target definition) with
-  | Fresh_child { definition; artifact = _; parent = _ }
+  | Fresh_child { definition; artifact = _; parent = _; mode = _ }
     when definition.enabled && P.Principal.has_scope principal Create_sessions -> Ok ()
   | Fresh_child _ | Existing_session _ ->
     Error

@@ -69,6 +69,24 @@ val consume_initial_delay
   -> rule:Recurrence_rules.Rule.Interval.t
   -> (t, Agent_protocol.Error.t) result
 
+(** Current fixed-delay interval slot to its exact Awaiting_completion identity.
+    This consumes one selection, never rearms it. The enclosing frontier verifies
+    later-slot deadline association against its exact completion basis. *)
+val consume_delay
+  :  t
+  -> rule:Recurrence_rules.Rule.Interval.t
+  -> (t, Agent_protocol.Error.t) result
+
+(** Specific completion transition, not an arbitrary position setter: requires
+    the exact Awaiting_completion occurrence and next.slot = prior.slot + 1.
+    The enclosing owner computes [next] through the timing owner from its exact
+    validated terminal basis; this local shape transition grants no proof. *)
+val rearm_delay
+  :  t
+  -> occurrence:Recurrence_identity.Occurrence.t
+  -> next:Recurrence_rules.Cursor.Interval.t
+  -> (t, Agent_protocol.Error.t) result
+
 (** Validate rule kind and same-definition fixed-delay completion identity.
     Calendar candidate correctness is rechecked by Cursor.Calendar.next using
     the actual admitted Zone; decoding alone grants no scheduling authority. *)

@@ -31,6 +31,16 @@ val create_interval
   -> slot:int64
   -> (t, Agent_protocol.Error.t) result
 
+(** Capture the current timing-owner cursor. Fixed-rate and initial fixed-delay
+    association retains exact definition arithmetic. Later fixed-delay values
+    are bounded metadata: the enclosing frontier must verify the exact prior
+    terminal basis/cursor before selecting or admitting them. This constructor
+    cannot authenticate a completion or authorize a rearm. *)
+val of_interval_cursor
+  :  Recurrence_definition.t
+  -> Recurrence_rules.Cursor.Interval.t
+  -> (t, Agent_protocol.Error.t) result
+
 (** Copy a genuine pure calendar emission and assign its next nominal slot.
     The caller/plan validates its actual cursor/Zone association separately. *)
 val create_calendar
@@ -44,6 +54,11 @@ val definition_sha256 : t -> string
 val at : t -> Time_ns.Alternate_sexp.t
 val label : t -> label
 
+(** Exact definition/label association. Fixed-rate and initial fixed-delay UTC
+    are checked against the immutable rule. Later fixed-delay UTC cannot be
+    derived from first_due: the enclosing frontier must check its exact prior
+    completion basis before admitting a new selection. Historical metadata alone
+    never authorizes a completion or rearm. *)
 val validate
   :  t
   -> definition:Recurrence_definition.t

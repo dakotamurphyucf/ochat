@@ -86,7 +86,7 @@ module Stored = struct
     let%bind delta = F.required payload "delta" (F.document ~limits) in
     let%bind () =
       F.expect_versions
-        ~supported_semantics:[ Agent_protocol.Schedule_provenance.persistence_semantics ]
+        ~supported_semantics:Agent_protocol.Session_storage_semantics.supported_children
         delta
         ~kind:"session.delta"
         ~versions:[ 1; 2; 3; 4; 5; 6 ]

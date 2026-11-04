@@ -7,6 +7,7 @@ module Summary : sig
     { consumed : int64
     ; omitted : int64
     ; withdrawn : int64
+    ; settled : int64
     }
   [@@deriving equal, sexp_of]
 end
@@ -31,6 +32,9 @@ module Issue : sig
     | Timing_exhausted
     | Capacity_saturated
     | Initial_delay_missed
+    | Delay_nominal_missed
+    | Execution_interrupted
+    | Delay_successor_exhausted
   [@@deriving equal, sexp_of]
 
   val to_string : t -> string
@@ -61,6 +65,7 @@ module Control_detail : sig
   type kind =
     | Retired_alarm
     | Retired_batch
+    | Retired_delay_basis
   [@@deriving equal, sexp_of]
 
   type t =
@@ -78,6 +83,7 @@ module Mark : sig
     ; last_at : Time_ns.Alternate_sexp.t option
     ; omitted : int64
     ; withdrawn : int64
+    ; settled : int64
     ; last_alarm_sequence : int64 option
     }
   [@@deriving equal]
@@ -121,6 +127,8 @@ module State : sig
     ; ready : Stored_nominal.t list
     ; protected_children : Recurrence_child_reservation.t list
     ; child_associations : Recurrence_child_association.t list
+    ; executions : Recurrence_executions.t
+    ; delay_basis : Recurrence_delay_basis.t option
     ; batch : Batch.t option
     ; lookahead : Stored_nominal.t option
     ; alarm : Stored_alarm.t option
@@ -131,6 +139,17 @@ module State : sig
 
   val initial : Recurrence_definition.t -> t
   val unlinked_children : t -> Recurrence_child_reservation.t list
+  val execution_rows : t -> Recurrence_execution.t list
+
+  val find_execution
+    :  t
+    -> Recurrence_identity.Occurrence.t
+    -> Recurrence_execution.t option
+
+  val claimed_nominals : t -> Recurrence_nominal.t list
+  val unresolved_count : t -> int
+  val pending_count : t -> int
+  val requires_execution_semantics : t -> bool
   val summary : t -> (Summary.t, Agent_protocol.Error.t) result
 end
 

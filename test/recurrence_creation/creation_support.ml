@@ -7,6 +7,18 @@ module I = A.Recurrence_identity
 module N = A.Recurrence_nominal
 module Reservation = A.Recurrence_child_reservation
 
+let capture_owner_call f =
+  match f () with
+  | result -> Ok result
+  | exception exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+;;
+
+let assert_owner_cancelled = function
+  | Error (Eio.Cancel.Cancelled _, _) -> ()
+  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+  | Ok _ -> failwith "cancelled in-flight owner call returned ordinarily"
+;;
+
 let fresh_target workspace =
   let definition =
     A.Prompt_definition.create
@@ -46,7 +58,8 @@ let fresh_target workspace =
       ~capability_pins:[]
     |> protocol_ok
   in
-  A.Recurrence_target.create_fresh ~artifact ~definition ~parent |> protocol_ok
+  A.Recurrence_target.create_fresh ~mode:Single_turn ~artifact ~definition ~parent
+  |> protocol_ok
 ;;
 
 let create_fresh actor name schedule =
@@ -70,7 +83,7 @@ let authorize_creation state definition =
   let open Result.Let_syntax in
   let%bind () = authorize state in
   match A.Recurrence_target.view (F.target definition) with
-  | Fresh_child { artifact; definition; parent } ->
+  | Fresh_child { artifact; definition; parent; mode = _ } ->
     assert definition.enabled;
     assert (
       P.Id.Prompt_revision.equal

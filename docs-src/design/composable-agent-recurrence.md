@@ -699,6 +699,42 @@ records do not imply OS wake, a launch agent, automatic daemon installation or a
 remote hosting service. Host/provider availability and existing resource ceilings
 remain mandatory.
 
+The pure execution domain keeps selected input and nominal custody once per
+occurrence, with at most eight immutable admission attempts. Attempts have
+contiguous ordinals and fresh keys; each retains its original caller, CAS and
+canonical request digest. Rejection and uncertainty remain inspectably pending.
+Only a separately authenticated no-Run/no-effects resolution permits an actual
+owner to rotate an attempt. Its stored reference data and decoder grant no such
+permission. A pause/resume must recheck current control and policy separately
+from the intent's immutable original control revision. An uncertain attempt or
+contradictory late admission cannot be discarded to make room for another.
+
+Reciprocal Run origins bind complete intent/attempt digests to exact admission
+evidence without copying captured artifacts. Compact terminal references retain
+an exact receipt and cached outcome; the complete result stays in the target Run
+owner. Every live import must authenticate the actual retained admission and
+terminal payload and verify its canonical digest. A decoded Completed tag is
+unresolved data. A definitive terminal reference releases pending capacity,
+including Interrupted; automatic fixed-delay rearm is a separate atomic owner
+decision and remains held for Interrupted review.
+
+Each complete execution row is bounded to 512 KiB. Its current attempt reserves
+mandatory terminal or resolution growth before acceptance, including compatible
+unknown fields and audit slots. Complete origin and terminal-reference quotas
+are 8 KiB each; the mutually exclusive resolution reference is at most 4 KiB.
+Already present nullable slots avoid late slot-key insertion. The reservation
+does not promise capacity for all optional retries: each next candidate admits
+its full retained history and remaining mandatory growth. These row limits do
+not enlarge the enclosing frontier, catalog, host or journal limits. Fresh
+targets retain an explicit Single_turn or Workflow mode; historical missing
+mode stays manageable and cannot execute by inference.
+
+Pure contracts alone grant no target observation or execution authority. The
+actual target observation and controller import owners authenticate evidence and
+join terminal, cursor and alarm changes to the existing persistence transaction.
+Effect-deferred startup, reciprocal admission before effects, activation and host
+target dispatch remain required execution integration boundaries.
+
 The implementation proceeds through independently verifiable boundaries: pure
 timing; Eio-owned timezone acquisition; actor ledger/history and atomic alarms;
 shared headless admission; reciprocal captured-child creation; scheduler/target
@@ -729,3 +765,130 @@ consumed slot has outcome or summary evidence, every execution has one exact
 association, terminal outcomes stay immutable, uncertainty is inspectable and
 resource usage stays bounded. Full integration checks, documentation qualification
 and publication gates remain necessary after these component proofs.
+
+
+The target Run index retains a reciprocal origin under the existing bounded Run
+and receipt retention policy. A new origin can enter only with its new
+revision-zero admitted Run and exact new Admission receipt in one candidate;
+there is no independent late-attach operation. Terminal updates, source
+replacement and recovery retain that origin alongside the existing Run. The
+complete index still has its existing 1 MiB and occurrence limits, and admission
+also reserves the actual terminal projection in bytes, fields and nodes.
+
+A positive origin table requires `recurrence.run-origin.v1` on the enclosing
+stored state and change document. This fence composes with existing Schedule and
+queue provenance semantics. Snapshot and transaction readers recognize these
+markers on their state and delta children, while their own outer envelopes do
+not accept them. Historical missing or null origin fields remain readable and
+retain their wire presence. Native state updates, carrier adoption and delta
+application enforce the same association timing and immutable retention rules.
+These storage contracts grant no current target authority, execution permission
+or terminal observation. Actual actor observation and import authenticate their
+retained evidence; deferred activation remains separate runtime work.
+
+
+The target actor can issue an opaque read-only observation of that retained
+origin, Admission and actual terminal Run. It validates the canonical terminal
+payload against the exact retained receipt and repeats current transcript
+visibility, original proof and genuine Store lifecycle checks after observation.
+A synchronous final check is required after any later yielding preparation and
+before a separate owned effect. The observation loads no runtime and grants no
+execution permission; a missing request is not a no-effects or retry proof.
+The controller actor imports this evidence through its settlement owner;
+observation alone grants no deferred activation permission.
+
+
+The frontier can retain one immutable original execution request per selected
+occurrence, with bounded attempts sharing its input. Initial recording moves the
+exact complete Ready nominal for an existing target or binds the exact protected
+reservation and linked child. Repeating the original record changes no revision.
+Every retained intent remains associated with its captured historical definition;
+current policy and authority are separate from its original audit fields.
+
+Pending capacity counts the occurrence union across Ready, unresolved executions
+and protected children, including older revisions. A child and its execution
+count once. Lowering a policy prevents additional selection while preserving
+older obligations. The existing complete frontier profile may saturate before
+its defensive inventory ceilings. Positive execution tables require the
+frontier's `recurrence.execution.v1` semantics; missing and null history retain
+their original wire distinction.
+
+Before accepting a record, storage-only projections reserve mandatory proof,
+compact cursor-basis, archival-wrapper and alarm growth. Their complete child
+profiles include maximum depth, so the existing frontier, catalog, host and
+journal encoders can reject insufficient capacity before effects. Projections
+preserve the original unknown metadata and are never installed as evidence.
+The controller actor records the initial request through its existing transaction
+and returns immutable data after ACK and fresh Store/policy observation. Both new
+records and exact retained requests require current Send_messages and current
+host policy for the retained definition. Only new work additionally requires the
+running ready controller, current automatic birth/source, enabled control,
+selected-occurrence grace and the actual caller as attempt principal. Replaying
+historical data after pause or source changes writes no transaction and grants
+no target capability. Live selection anchors remain associated with unresolved
+execution rows under their original source/birth/control/definition checks.
+A separate actual actor import authenticates the observation and commits atomic
+terminal-plus-successor-or-hold settlement. This record path admits no Run,
+initializes no target and issues no retry or activation permission.
+
+Settlement data distinguishes an imported fact, exact retained evidence and
+detail that is no longer retained. A consumed high-water plus lifetime counts
+cannot certify that a particular missing coordinate previously completed; an
+unavailable-detail result changes no counts and never rearms. Whole recognized
+terminal bundles may retire under the declared history policy independently of
+slot order, while every unresolved or uncertain request remains protected.
+Compatible metadata stays complete while its identity is retained.
+
+Checked timing transitions can represent later fixed-delay slots, but their
+timestamps need the enclosing frontier's exact prior completion basis. They are
+not a definition-only periodic phase. The pure Frontier/Entry/Catalog candidate
+combines terminal data, one checked lifetime settled increment, whole-bundle
+retention and a completion-derived successor or hold. Its restore fence
+recomputes the complete candidate. A new ordinary-pause enable may consume the
+saved definitive basis once; duplicate enable does not. Actual actor import
+authenticates the target evidence and commits this whole candidate, then installs
+its prepared completion phase after ACK. These data values issue no target
+observation or activation permit.
+
+The lower process-local timing bridge can retain a signed completion position
+relative to a receiving controller's monotonic origin. A target completion may
+precede that origin. Checked translation into elapsed time since completion
+preserves the receipt-derived wall deadline across wall corrections, and rejects
+backward or overflowing live time. It reuses the existing delay clock. A missing
+process anchor keeps the existing wall-lateness and misfire reconciliation; an
+invalid live anchor is explicitly present and cannot silently choose recovery.
+The runtime's bounded completion plan validates exact reciprocal Run and receipt
+facts before persistence and is installed only after the corresponding ACK.
+The target actor captures the wall and absolute monotonic pair before each
+definitive Run terminal producer and passes that same wall to the receipt. Its
+existing persistence path prepares the complete map before committing, then
+installs it after state assignment and before publication. An opaque target
+observation privately retains any such sample and validation of saved extended
+references against the actual terminal payload. The sample grants no rearm or
+execution permission.
+
+The lower controller settlement admission helper freezes one exact catalog
+basis under fresh controller visibility and optional automatic-rearm policy.
+Its phase plan distinguishes contradictory evidence from unavailable live
+timing. Only the latter can select an evidence-plus-review-hold candidate;
+missing process timing instead preserves pending wall-time adoption. Phase maps
+are prepared before persistence and installed by assignment after ACK. The Actor
+import operation authenticates an opaque same-Store target observation, retains
+validated saved reference annotations, and commits the whole evidence and
+successor-or-hold candidate. After all policy callbacks, it checks both original
+proofs and exact owner/current evidence bases without invoking further policy.
+Nonyielding callbacks can revoke another proof, so ordering callbacks alone is
+insufficient. It then installs any phase before publication and
+refreshes controller visibility without reusing a self-target's stale witness.
+An invalid live clock returns a typed hold diagnostic with acknowledged data;
+it cannot disguise contradictory evidence or a failed persistence attempt.
+Physical Store/Actor checks cover self-target ACK, separate target ownership,
+current-policy revocation, exact retained-reference duplicates, recovered wall
+lateness and lost-reply journal reopening. An in-flight caller re-raises an
+unexpected owner exception or cancellation; queued and later calls instead return
+`Server_shutting_down`. Neither reply permits replay of an effect whose
+acknowledgement is uncertain. These checks do not qualify execution admission or
+target activation. Actual producer-to-importer live-phase
+qualification still requires genuine held admission, reciprocal controller
+acknowledgement, effect-deferred startup and central activation fences. Host
+target dispatch remains a separate required integration boundary.

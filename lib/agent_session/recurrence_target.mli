@@ -43,6 +43,7 @@ type view =
       { artifact : Agent_store.Captured_prompt_artifact.t
       ; definition : Prompt_definition.t
       ; parent : Parent.t
+      ; mode : Agent_protocol.Run.Mode.t option
       }
 
 (** The frozen input is ordinary user content, never Authored_start. Its complete
@@ -64,12 +65,19 @@ val create_existing
     and native policies before installation or initialization; this value never
     authorizes them. *)
 val create_fresh
-  :  artifact:Agent_store.Captured_prompt_artifact.t
+  :  mode:Agent_protocol.Run.Mode.t
+  -> artifact:Agent_store.Captured_prompt_artifact.t
   -> definition:Prompt_definition.t
   -> parent:Parent.t
   -> (t, Agent_protocol.Error.t) result
 
 val view : t -> view
+
+(** Existing inputs use Single_turn. New captured targets require their explicit
+    Single_turn or Workflow choice. Historical missing mode remains readable and
+    manageable; [run_mode] rejects it instead of inferring an execution mode.
+    Explicit null and unsupported modes reject during decoding. *)
+val run_mode : t -> (Agent_protocol.Run.Mode.t, Agent_protocol.Error.t) result
 
 (** Exact retained definition slice for a fresh-child target, including its
     compatible unknown fields. Existing-session targets reject. This is immutable

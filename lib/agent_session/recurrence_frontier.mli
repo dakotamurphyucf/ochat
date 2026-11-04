@@ -3,7 +3,8 @@ open! Core
 (** Pure bounded planning and retention custody alongside the entry's sole cursor.
     Ready work remains separate from batch-private calendar selection. No target,
     protected creation or Run state is invented. Unsupported execution variants
-    fail closed; only known unadmitted work can be withdrawn or compacted. *)
+    fail closed. Controls withdraw only known unadmitted work; retention may
+    retire whole known-terminal bundles while preserving lifetime counts. *)
 type t
 
 module Summary : sig
@@ -11,6 +12,7 @@ module Summary : sig
     { consumed : int64
     ; omitted : int64
     ; withdrawn : int64
+    ; settled : int64
     }
   [@@deriving equal, sexp_of]
 end
@@ -32,6 +34,9 @@ module Issue : sig
     | Timing_exhausted
     | Capacity_saturated
     | Initial_delay_missed
+    | Delay_nominal_missed
+    | Execution_interrupted
+    | Delay_successor_exhausted
   [@@deriving equal, sexp_of]
 end
 
@@ -41,24 +46,51 @@ val initial : Recurrence_definition.t -> (t, Agent_protocol.Error.t) result
 
 val ready : t -> Recurrence_nominal.t list
 
-(** Protected rows remain retained through controls/history pruning. All are
-    unsettled in this schema and count against pending capacity; the actual
-    terminal owner must separately classify settled associations in a later
-    schema without erasing their immutable evidence. *)
+(** Unresolved protected rows remain retained through controls and history
+    pruning. A known terminal execution releases pending occupancy; its complete
+    reservation and association retire only with that execution's whole bundle
+    under bounded terminal-detail retention. *)
 val protected_children : t -> Recurrence_child_reservation.t list
 
-(** Immutable linked locators, still unsettled pending actual terminal evidence.
-    Data alone does not authenticate the child or grant execution authority. *)
+(** Immutable linked locators. A retained terminal execution classifies their
+    settled occupancy; locator data alone authenticates neither the child nor
+    execution. Whole terminal-bundle retention may retire these details. *)
 val child_associations : t -> Recurrence_child_association.t list
 
 val unlinked_children : t -> Recurrence_child_reservation.t list
 
 (** Attach once to the exact retained reservation. Identical replay is a no-op;
     replacement, erasure, or association without a reservation rejects. The
-    actor separately authenticates actual child facts and persistence ACK. *)
+    actor separately authenticates actual child facts and persistence ACK.
+    Later whole known-terminal retirement is owned by atomic settlement. *)
 val link_child : t -> Recurrence_child_association.t -> (t, Agent_protocol.Error.t) result
 
+(** Entry-wide union of Ready, unresolved executions and protected children.
+    A linked child and its execution consume one claim. Settled data alone grants
+    no permission to dispatch another occurrence. *)
 val pending_count : t -> int
+
+val executions : t -> Recurrence_execution.t list
+
+val find_execution
+  :  t
+  -> Recurrence_identity.Occurrence.t
+  -> Recurrence_execution.t option
+
+val pending_execution_steps : t -> int
+
+(** Record only the exact initial ordinal-zero request. Existing targets move
+    their complete original Ready nominal; fresh targets bind the exact retained
+    reservation and linked child. Exact replay returns the original row without
+    moving work or incrementing counters. This is data, never target authority.
+    All current and historical intents validate against their retained definition
+    and child facts. Complete future proof/control capacity is preflighted. *)
+val record_execution
+  :  t
+  -> definition:Recurrence_definition.t
+  -> intent:Recurrence_execution_intent.t
+  -> attempt:Recurrence_execution_attempt.t
+  -> (t * Recurrence_execution.t, Agent_protocol.Error.t) result
 
 (** Pure exact Ready-to-protected disposition. Retried occurrence returns its
     original identities; actor authentication and ACK remain separate. *)
@@ -152,6 +184,13 @@ module Work : sig
     -> nominal:Recurrence_nominal.t
     -> (t, Agent_protocol.Error.t) result
 
+  (** Select the exact current fixed-delay cursor, including a later nominal
+      whose deadline was validated against its retained completion basis. *)
+  val consume_delay
+    :  t
+    -> nominal:Recurrence_nominal.t
+    -> (t, Agent_protocol.Error.t) result
+
   (** Begin or continue one captured wall cutoff. Existing Ready rows stay Ready;
       only new private candidates are coalesced while the cutoff is unproven. *)
   val begin_calendar
@@ -200,16 +239,57 @@ module Work : sig
 end
 
 (** Structural update fence for durable candidates. Retained definition marks,
-    consumed/omitted/withdrawn and alarm-sequence high-water cannot regress.
+    consumed/omitted/withdrawn/settled and alarm-sequence high-water cannot regress.
+    previous_cursor belongs to the prior frontier; cursor belongs to incoming.
+    Evidence changes require an exact complete settlement candidate and cannot
+    fall through to ordinary due validation.
     This cannot authenticate a clock, Zone, lifecycle or emission; the actual
     owner must use an exact-basis due plan before publishing a due transition. *)
 val validate_transition
   :  t
   -> incoming:t
   -> definitions:Recurrence_definition.t list
+  -> previous_cursor:Recurrence_cursor.t
   -> cursor:Recurrence_cursor.t
   -> (unit, Agent_protocol.Error.t) result
 
 (** Private complete storage-only withdrawal/counter witness for enclosing
     reservation composition. Never decode, publish or treat it as domain proof. *)
 val capacity_projection : t -> (Jsonaf.t, Document_schema.Error.t) result
+
+type settlement =
+  { frontier : t
+  ; cursor : Recurrence_cursor.t
+  ; result : Recurrence_settlement.t
+  }
+
+(** One complete pure candidate: associate/settle, lifetime increment, bounded
+    whole terminal-bundle retirement and completion-derived successor or hold.
+    Exact retained evidence is a no-op before current eligibility. Missing detail
+    below consumed high-water conveys no prior completion or receipt equality.
+    The publisher authenticates every new target observation separately. *)
+val import_execution
+  :  t
+  -> definitions:Recurrence_definition.t list
+  -> cursor:Recurrence_cursor.t
+  -> origin:Recurrence_run_origin.t
+  -> terminal:Recurrence_run_reference.t option
+  -> automatic:Recurrence_settlement.Automatic.t
+  -> (settlement, Agent_protocol.Error.t) result
+
+val delay_basis : t -> Recurrence_delay_basis.t option
+
+type resumption =
+  { frontier : t
+  ; cursor : Recurrence_cursor.t
+  ; next : Recurrence_settlement.Next.t
+  }
+
+(** Exact stored definitive basis plus Awaiting cursor, consumed once by a new
+    ordinary-pause Enable control candidate. Entry restricts control eligibility;
+    a duplicate Enable never calls this data operation. *)
+val resume_delay
+  :  t
+  -> definitions:Recurrence_definition.t list
+  -> cursor:Recurrence_cursor.t
+  -> (resumption, Agent_protocol.Error.t) result

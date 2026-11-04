@@ -165,12 +165,15 @@ let prepare_rate definition ~old_cursor ~frontier ~interval ~phase ~snapshot ~wo
   let%bind range, lateness =
     match phase with
     | Some phase ->
-      let count = Phase.due_count phase ~snapshot in
+      let%bind count = Phase.due_count phase ~snapshot in
       if Int64.equal count 0L
       then Ok (None, None)
       else (
-        let%map range = R.Cursor.Interval.consume_count interval ~rule ~count |> timing in
-        Some range, Phase.lateness_ns phase ~snapshot)
+        let%bind range =
+          R.Cursor.Interval.consume_count interval ~rule ~count |> timing
+        in
+        let%map lateness = Phase.lateness_ns phase ~snapshot in
+        Some range, lateness)
     | None ->
       let now = Snapshot.wall snapshot in
       let%map range = R.Cursor.Interval.due_through interval ~rule ~now |> timing in
@@ -238,15 +241,21 @@ let prepare_delay
     | Some _ -> invalid "fixed-delay phase differs from current source/cursor"
     | None -> Phase.recover definition ~cursor:interval ~snapshot
   in
-  let lateness =
+  let%bind lateness =
     match phase with
     | Some _ -> Phase.lateness_ns live ~snapshot
     | None ->
-      wall_lateness
-        ~now:(Snapshot.wall snapshot)
-        ~due_at:(R.Cursor.Interval.due_at interval)
+      Ok
+        (wall_lateness
+           ~now:(Snapshot.wall snapshot)
+           ~due_at:(R.Cursor.Interval.due_at interval))
   in
-  if Option.equal H.Issue.equal (H.issue frontier) (Some Initial_delay_missed)
+  let missed =
+    if Int64.equal (R.Cursor.Interval.slot interval) 0L
+    then H.Issue.Initial_delay_missed
+    else Delay_nominal_missed
+  in
+  if Option.equal H.Issue.equal (H.issue frontier) (Some missed)
   then Ok (Unchanged None)
   else (
     match lateness with
@@ -266,15 +275,15 @@ let prepare_delay
         ~definition
         ~old_cursor
         ~old_frontier:frontier
-        ~work:(W.set_issue work (Some Initial_delay_missed))
+        ~work:(W.set_issue work (Some missed))
         ~cursor:old_cursor
         ~next_phase:None
     | Some _ ->
-      let%bind nominal = N.create_interval definition ~slot:0L in
-      let%bind work = W.consume_initial_delay work ~nominal in
+      let%bind nominal = N.of_interval_cursor definition interval in
+      let%bind work = W.consume_delay work ~nominal in
       let%bind cursor =
         match F.schedule definition with
-        | Interval { rule; _ } -> C.consume_initial_delay old_cursor ~rule
+        | Interval { rule; _ } -> C.consume_delay old_cursor ~rule
         | Calendar _ -> assert false
       in
       finish ~definition ~old_cursor ~old_frontier:frontier ~work ~cursor ~next_phase:None)
@@ -406,7 +415,8 @@ let prepare ~definition ~cursor ~frontier ~phase ~snapshot ~zone =
                 - R.Cursor.Interval.slot interval)
             in
             let period = R.Rule.Period.nanoseconds (R.Rule.Interval.period rule) in
-            (match Phase.lateness_ns phase ~snapshot with
+            let%bind lateness = Phase.lateness_ns phase ~snapshot in
+            (match lateness with
              | Some late when Int64.(count >= 0L && count <= late / period) ->
                Ok Int64.(late - (count * period))
              | None | Some _ ->
