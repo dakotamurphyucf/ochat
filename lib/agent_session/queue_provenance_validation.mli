@@ -22,10 +22,15 @@ type t =
     even after terminal disposition or ordinary pruning. *)
 val validate : t -> (unit, Agent_protocol.Error.t) result
 
-(** Validate immutable schedule captures and queue frontiers. A queue lifetime
-    currently cannot be removed or replaced by a different source lifetime.
-    Explicit source/reset carrier handling belongs to its live integration;
-    observer strings and decoded installation claims never erase protection. *)
+(** Validate immutable schedule captures and queue frontiers. Retiring a queue
+    requires its exact original installation, one validated epoch rotation, the
+    same session and unchanged or exactly incremented generation. A destination
+    queue starts at ordinal zero with the actual new full source and validated
+    producer references. Prior Running queue occurrences cannot be retired here;
+    truthful terminal history keeps its existing later-epoch retention rules.
+    Complete raw checkpoint preservation is checked first: protected unfamiliar
+    data cannot disappear or move to the new lifetime. These durable facts grant
+    no live execution permission. *)
 val validate_transition : previous:t -> t -> (unit, Agent_protocol.Error.t) result
 
 (** Validate a fresh positive Running claim at its ordered admission prefix.

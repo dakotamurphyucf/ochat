@@ -73,6 +73,7 @@
   moderator_queue_tests
   moderator_queue_persistence_tests
   moderator_checkpoint_tests
+  queue_retirement_tests
   job_inference_persistence_tests
   job_dependency_tests
   subscription_dependency_tests
