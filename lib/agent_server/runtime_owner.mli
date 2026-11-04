@@ -135,6 +135,18 @@ val with_background_runtime
   -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
+(** Borrow only an already installed runtime, admitted under the existing owner
+    gate and cancellable/joined by stop or close. Closed, unloading, retiring and
+    unloaded owners reject; this never invokes the builder or initializer.
+    Installed execution checks still apply. The callback runs outside the gate;
+    no runtime, native resource or callback may escape its lifetime. Error,
+    cancellation and exceptions release the same existing lease. This grants no
+    source, session or tool authority. *)
+val with_loaded_runtime
+  :  t
+  -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
 (** Same existing lifetime lease with explicitly attributable constructor
     commits. The actor must have issued [preparation] first; every exit releases
     the runtime lease, including cancellation and unexpected exceptions. *)

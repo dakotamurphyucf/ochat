@@ -127,7 +127,7 @@ let steps = function
 let pending_child_associations t =
   match (C.value t).frontier with
   | None -> 0
-  | Some frontier -> List.length (Recurrence_frontier.protected_children frontier.value)
+  | Some frontier -> List.length (Recurrence_frontier.unlinked_children frontier.value)
 ;;
 
 let required_transition_steps t = steps (control t) + pending_child_associations t
@@ -730,6 +730,23 @@ let reserve_child t ~principal_id ~child_session_id ~transaction_id ~occurrence 
       let%bind () = validate_transition t ~incoming:candidate in
       let%map _ = to_document candidate |> protocol in
       candidate, row))
+;;
+
+let link_child t association =
+  let open Result.Let_syntax in
+  if not (equal_control (control t) Enabled)
+  then invalid "child linkage requires enabled recurrence"
+  else (
+    let%bind old = frontier t in
+    let%bind next = Recurrence_frontier.link_child old association in
+    if Int64.equal (Recurrence_frontier.revision old) (Recurrence_frontier.revision next)
+    then Ok t
+    else (
+      let%bind frontier = Stored_frontier.create next in
+      let candidate = C.with_value t { (C.value t) with frontier = Some frontier } in
+      let%bind () = validate_transition t ~incoming:candidate in
+      let%map _ = to_document candidate |> protocol in
+      candidate))
 ;;
 
 let effective_control t ~current_revision ~archived =

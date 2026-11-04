@@ -978,7 +978,14 @@ let acquire_handle t ~sw ~directory ~actor_lock_nonce _metadata =
   handle
 ;;
 
-let create_session_initialized t ~sw ~transaction_id ~actor_lock_nonce ~initialize =
+let create_session_initialized
+      ?(before_publish = fun () -> ())
+      t
+      ~sw
+      ~transaction_id
+      ~actor_lock_nonce
+      ~initialize
+  =
   let open Result.Let_syntax in
   let temporary_directory =
     Filename.concat
@@ -1024,22 +1031,28 @@ let create_session_initialized t ~sw ~transaction_id ~actor_lock_nonce ~initiali
     Session_projection_update.publish t.projection_updates ~f:(fun ~require_intent ->
       Session_index.with_prepared_upsert t.index entry ~publish_authority:(fun () ->
         let%bind () = require_intent () in
+        Eio.Fiber.check ();
         let%bind () =
-          try
-            (* Final evidence survives every later failure. Protect only transfer
-               of the staging ownership, not directory sync or handle acquisition. *)
-            Eio.Cancel.protect (fun () ->
+          (* Final evidence survives every later failure. Protect only transfer
+             of the staging ownership, not directory sync or handle acquisition. *)
+          Eio.Cancel.protect (fun () ->
+            (* A caller's synchronous exception is not a filesystem failure. *)
+            before_publish ();
+            try
               Eio.Path.rename temporary destination;
               owns_staging := false;
-              Initial_projection.publish initial);
-            Durable_file.sync_directory ~env:t.env ~path:(Data_root.sessions_path t.root)
-          with
-          | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
-            Error
-              (Store_error.of_exn
-                 ~operation:"install session layout"
-                 ~path:final_directory
-                 exn)
+              Initial_projection.publish initial;
+              Ok ()
+            with
+            | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+              Error
+                (Store_error.of_exn
+                   ~operation:"install session layout"
+                   ~path:final_directory
+                   exn))
+        in
+        let%bind () =
+          Durable_file.sync_directory ~env:t.env ~path:(Data_root.sessions_path t.root)
         in
         acquire_handle t ~sw ~directory:final_directory ~actor_lock_nonce metadata)))
 ;;

@@ -238,6 +238,7 @@ module State = struct
     ; marks : Mark.t list
     ; ready : Stored_nominal.t list
     ; protected_children : Recurrence_child_reservation.t list
+    ; child_associations : Recurrence_child_association.t list
     ; batch : Batch.t option
     ; lookahead : Stored_nominal.t option
     ; alarm : Stored_alarm.t option
@@ -251,6 +252,7 @@ module State = struct
     ; marks = [ Mark.initial definition ]
     ; ready = []
     ; protected_children = []
+    ; child_associations = []
     ; batch = None
     ; lookahead = None
     ; alarm = None
@@ -258,6 +260,15 @@ module State = struct
     ; history = []
     ; control_history = []
     }
+  ;;
+
+  let unlinked_children t =
+    List.filter t.protected_children ~f:(fun reservation ->
+      not
+        (List.exists t.child_associations ~f:(fun association ->
+           I.Occurrence.equal
+             (Recurrence_child_association.occurrence association)
+             (Recurrence_child_reservation.occurrence reservation))))
   ;;
 
   let summary t =

@@ -70,6 +70,12 @@ val create_fresh
   -> (t, Agent_protocol.Error.t) result
 
 val view : t -> view
+
+(** Exact retained definition slice for a fresh-child target, including its
+    compatible unknown fields. Existing-session targets reject. This is immutable
+    data custody, never current catalog membership or execution permission. *)
+val fresh_definition_json : t -> (Jsonaf.t, Agent_protocol.Error.t) result
+
 val digest : t -> (string, Agent_protocol.Error.t) result
 val of_document : Document_schema.Document.t -> (t, Document_schema.Error.t) result
 val to_document : t -> (Document_schema.Document.t, Document_schema.Error.t) result

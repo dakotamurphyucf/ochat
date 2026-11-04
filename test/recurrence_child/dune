@@ -1,0 +1,7 @@
+(copy_files ../agent_server_e2e/support/crash_fault_io.ml)
+
+(library
+ (name recurrence_child_tests)
+ (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix expect_test_helpers_core ochat.agent_session ochat.agent_protocol ochat.agent_client ochat.agent_server ochat.agent_store ochat.document_schema ochat.recurrence_rules)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

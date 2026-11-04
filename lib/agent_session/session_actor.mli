@@ -2348,6 +2348,10 @@ module Recurrence_creation : sig
     (** Immutable captured data only; this getter grants no authority. *)
     val definition : t -> Recurrence_definition.t
 
+    (** Actual caller retained by the refreshed proof. This is immutable policy
+        input only; identity alone cannot authorize an effect. *)
+    val principal : t -> Agent_protocol.Principal.t
+
     (** Synchronous, nonyielding final check against the actual issuing actor,
         original proof and host policy, genuine lifecycle/source/control, exact
         protected row, runtime liveness and current grace. Call after all yielding
@@ -2391,6 +2395,37 @@ val check_recurrence_creation
   :  t
   -> Recurrence_creation.t
   -> (Recurrence_creation.Checked.t, Agent_protocol.Error.t) result
+
+module Recurrence_child_link : sig
+  (** Actual owned-child observation. No constructor, decoder or session-ID
+      lookup can mint this proof. It retains a synchronous currentness check;
+      immutable association data alone grants no authority. *)
+  type t
+
+  val association : t -> Recurrence_child_association.t
+
+  (** Synchronous final proof check immediately before a separate owned effect.
+      No authority or child-liveness guarantee is held across a later yield. *)
+  val check_current : t -> (unit, Agent_protocol.Error.t) result
+end
+
+(** Observe this actual child's supported origin, exact reference and genuine
+    same-store Child_installed record while it remains intentionally dormant.
+    Does not initialize, load a runtime, admit a Run or publish parent linkage. *)
+val verify_recurrence_child
+  :  t
+  -> reservation:Recurrence_child_reservation.t
+  -> (Recurrence_child_link.t, Agent_protocol.Error.t) result
+
+(** Reauthorize the original parent permit and actual child proof, then persist
+    one immutable association before returning its acknowledgement. The child
+    must share this actor's actual Store; final child/current-parent checks are
+    synchronous and do not wait on another actor mailbox. No Run is admitted. *)
+val link_recurrence_child
+  :  t
+  -> permit:Recurrence_creation.t
+  -> child:Recurrence_child_link.t
+  -> (Recurrence_child_association.t, Agent_protocol.Error.t) result
 
 (** Current authorized read with effective lifecycle retirement. No native/script
     runtime is initialized; stored controls and acceptance receipts grant no work. *)

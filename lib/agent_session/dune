@@ -18,6 +18,9 @@
   recurrence_alarm
   recurrence_phase
   recurrence_child_reservation
+  recurrence_child_association
+  recurrence_child_origin
+  captured_recurrence_source
   recurrence_selection_grace
   recurrence_frontier_records
   recurrence_frontier_codec

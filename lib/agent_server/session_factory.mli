@@ -358,6 +358,28 @@ val create_generated_session
   -> Agent_session.Generated_definition.t
   -> (Session_registry.entry, Agent_protocol.Error.t) result
 
+module Recurrence_child : sig
+  (** Stopped durable child data, never Run or initialization permission. *)
+  type t
+
+  val session : t -> Agent_protocol.Session_ref.t
+  val reference : t -> Agent_store.Delegation_store.Reference.t
+end
+
+(** Consume the actual controller permit to create or recover its one immutable
+    captured child through the existing delegation/artifact/session owners.
+    Current caller and host policies are rechecked; original stored principal is
+    audit data only. Parent association ACK precedes lower Linked publication
+    and registry installation. All retries retain the same IDs and exact source
+    publication, including reuse of the controller's artifact. No initializer,
+    runtime activation or Run occurs. Ordinary execution remains fenced pending
+    genuine reciprocal occurrence Run admission. *)
+val create_recurrence_child
+  :  t
+  -> parent:Session_registry.entry
+  -> permit:Agent_session.Session_actor.Recurrence_creation.t
+  -> (Recurrence_child.t, Agent_protocol.Error.t) result
+
 (** Resume indexed pending generated starts under the daemon scheduler. Temporary
     ancestor unavailability leaves the intent pending; terminal activation errors
     are committed to the child. Persistence failures remain pending for retry. *)

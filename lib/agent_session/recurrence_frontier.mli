@@ -47,6 +47,17 @@ val ready : t -> Recurrence_nominal.t list
     schema without erasing their immutable evidence. *)
 val protected_children : t -> Recurrence_child_reservation.t list
 
+(** Immutable linked locators, still unsettled pending actual terminal evidence.
+    Data alone does not authenticate the child or grant execution authority. *)
+val child_associations : t -> Recurrence_child_association.t list
+
+val unlinked_children : t -> Recurrence_child_reservation.t list
+
+(** Attach once to the exact retained reservation. Identical replay is a no-op;
+    replacement, erasure, or association without a reservation rejects. The
+    actor separately authenticates actual child facts and persistence ACK. *)
+val link_child : t -> Recurrence_child_association.t -> (t, Agent_protocol.Error.t) result
+
 val pending_count : t -> int
 
 (** Pure exact Ready-to-protected disposition. Retried occurrence returns its

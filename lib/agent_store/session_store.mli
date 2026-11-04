@@ -207,9 +207,15 @@ val create_session
     acquisition never removes a pre-existing staging directory. Returned errors,
     cancellation and exceptions clean only this call's acquired staging; after
     rename, final evidence survives later failures. Original exceptions propagate
-    after protected best-effort cleanup. *)
+    after protected best-effort cleanup. Optional [before_publish] runs after
+    yielding preparation and projection intent, immediately before final rename
+    in the protected ownership transfer. It must be synchronous and non-yielding,
+    including any authorization checks. Its exceptions propagate unchanged;
+    existing projection/index failure fences remain conservative when intent
+    already exists. The default adds no authorization policy. *)
 val create_session_initialized
-  :  t
+  :  ?before_publish:(unit -> unit)
+  -> t
   -> sw:Eio.Switch.t
   -> transaction_id:Agent_protocol.Id.Transaction.t
   -> actor_lock_nonce:string
