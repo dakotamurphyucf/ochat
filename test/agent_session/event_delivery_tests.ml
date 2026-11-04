@@ -1533,6 +1533,9 @@ let%expect_test "legacy exact Manager claim installs source facts without a Run"
                     let binding : M.callback_binding =
                       { services =
                           { model_recipes = Map.empty (module String)
+                          ; tool_call =
+                              (fun ~name:_ ~args:_ ->
+                                Error "unused callback Tool service")
                           ; after_ms = (fun ~delay_ms:_ ~payload:_ -> Error "unused")
                           ; cancel = (fun ~id:_ -> Error "unused")
                           }
@@ -1844,6 +1847,8 @@ module Legacy_emit = struct
      no Model/provider port. Each inspection needs an oracle outside the engine. *)
   let invoke
         ?claim
+        ?tools
+        ?(on_tool_result = fun _ -> ())
         ?(requests =
           { Agent_protocol.Invocation.request_turn = false
           ; request_compaction = false
@@ -1861,23 +1866,39 @@ module Legacy_emit = struct
       Option.value claim ~default:(A.with_legacy_callback actor ~operation_id)
     in
     let outcome = ref None in
-    let result =
-      M.handle_legacy_callback_entries
-        manager
-        ~selection
-        ~session_id:"fixture"
-        ~now_ms:0
-        ~history:[]
-        ~available_tools:[]
-        ~session_meta:`Null
-        ~with_admission:(fun callback ~snapshot:_ run ->
-          let%bind committed =
-            claim ~callback (fun ~scope ~commit ->
-              inspect scope;
-              let schedules = A.callback_schedule_services actor ~scope in
+    M.handle_legacy_callback_entries
+      manager
+      ~selection
+      ~session_id:"fixture"
+      ~now_ms:0
+      ~history:[]
+      ~available_tools:[]
+      ~session_meta:`Null
+      ~with_admission:(fun callback ~snapshot:_ run ->
+        let%bind committed =
+          claim ~callback (fun ~scope ~commit ->
+            inspect scope;
+            let schedules = A.callback_schedule_services actor ~scope in
+            let with_tools f =
+              match tools with
+              | None -> f (fun ~name:_ ~args:_ -> Error "unused callback Tool service")
+              | Some (tools, selected) ->
+                Agent_session.Script_tool_calls.with_legacy_event
+                  tools
+                  ~selected
+                  ~execute:(A.callback_tool_executor actor ~scope)
+                  ~executing:(A.Callback_scope.executing scope)
+                  f
+            in
+            with_tools (fun tool_call ->
               let binding : M.callback_binding =
                 { services =
                     { model_recipes = Map.empty (module String)
+                    ; tool_call =
+                        (fun ~name ~args ->
+                          let result = tool_call ~name ~args in
+                          on_tool_result result;
+                          result)
                     ; after_ms =
                         (fun ~delay_ms ~payload ->
                           let%bind payload =
@@ -1908,14 +1929,12 @@ module Legacy_emit = struct
               in
               run binding
               |> Result.map_error ~f:handoff_error
-              |> Result.map ~f:(fun value -> outcome := Some value))
-            |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
-          in
-          if committed
-          then Ok (Option.value_exn !outcome)
-          else Error "legacy callback physical owner unavailable")
-    in
-    result
+              |> Result.map ~f:(fun value -> outcome := Some value)))
+          |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+        in
+        if committed
+        then Ok (Option.value_exn !outcome)
+        else Error "legacy callback physical owner unavailable")
   ;;
 
   let worker manager actor_ready during =
@@ -4817,4 +4836,268 @@ let%expect_test
      construction";
   [%expect
     {| post-effect checkpoint rejected; truthful Failed receipt and timer survive; restored prefix and exact retired resource stay unavailable after later construction |}]
+;;
+
+let%expect_test "legacy constructor Tool calls settle only their exact Event-owned rows" =
+  let module L = Legacy_emit in
+  let module A = L.A in
+  let module S = Agent_session in
+  let module P = Agent_protocol in
+  let module I = P.Invocation in
+  let module N = S.Native_tool_invocation in
+  let module C = Chat_response.Tool_capability in
+  let module T = Chat_response.Moderation.Capabilities in
+  List.iter
+    [ `Success; `Claim_reject; `Result_reject; `Expire_after_effect ]
+    ~f:(fun mode ->
+      with_actor_workspace (fun env workspace_instance ->
+        let live = Atomic.make true in
+        let original = L.authentication live in
+        let calls = ref 0 in
+        let native_borrows = ref [] in
+        let registry =
+          native_registry calls ~raises:false ~on_call:(fun () ->
+            let borrowed = N.borrow () |> protocol_ok in
+            let proof = N.borrowed_agent_actor borrowed in
+            let current =
+              match proof with
+              | Ok (Some proof) -> Operator_authorization.is_current proof
+              | Ok None | Error _ -> false
+            in
+            native_borrows
+            := (N.borrowed_invocation borrowed, proof, current) :: !native_borrows;
+            match mode with
+            | `Expire_after_effect -> Atomic.set live false
+            | `Success | `Claim_reject | `Result_reject -> ())
+        in
+        let manager =
+          prepared_legacy_callback_managers
+            ~capability_registry:registry
+            env
+            ~id:"constructor-native-calls"
+            ~source:
+              {|type event = [ `Session_start ]
+                let initial_state = 0
+                let on_event = fun ctx state event ->
+                  let call = fun st ->
+                    Task.bind(Tool.call("read_file", `Object([])), fun result ->
+                      match result with
+                      | `Ok(value) -> Task.pure(st + 1)
+                      | `Error(code) -> Task.fail(code))
+                  in Task.bind(call(state), fun first -> call(first))|}
+            ()
+        in
+        let unrelated =
+          let dispatched = I.dispatch (invocation_fixture ()) |> protocol_ok in
+          I.resolve
+            dispatched
+            ~session_id
+            ~generation:0
+            (Complete (`String "retained unrelated result"))
+          |> protocol_ok
+        in
+        let rejected = ref 0 in
+        Job_fixtures.with_actor
+          ~environment:(env, workspace_instance)
+          ~start:false
+          ~prepare_state:(fun state ->
+            { state with
+              runtime_initialization = Pending { fresh_history = true }
+            ; invocations = [ unrelated ]
+            })
+          ~reject_save:(fun transition ->
+            let selected =
+              List.exists
+                transition.S.Session_transition.state.invocations
+                ~f:(fun invocation ->
+                  match mode, invocation.P.Invocation.status with
+                  | `Claim_reject, Dispatching | `Result_reject, Resolved (Complete _) ->
+                    Option.is_some invocation.parent_event
+                  | _ -> false)
+            in
+            if selected && Int.equal !rejected 0
+            then (
+              incr rejected;
+              true)
+            else false)
+          (fun _env _sw actor _writer backend ->
+             let expected = A.state actor |> protocol_ok in
+             let constructor =
+               A.begin_initialization_authenticated actor ~actor:original ~expected
+               |> protocol_ok
+             in
+             let tools =
+               S.Script_tool_calls.create
+                 ~registry:(fun () -> registry)
+                 ~moderator_names:String.Set.empty
+                 ~now:P.Timestamp.now
+                 ~is_halted:(fun () -> false)
+                 ~requires_active_moderator:(fun _ -> false)
+                 ~authorize:(fun _ _ -> Ok ())
+                 ~prepare_output:(fun _ -> Ok (`String "disclosed"))
+                 ~defer_observation:(fun _ -> Ok ())
+             in
+             let callback = ref None in
+             let foreign_result = ref None in
+             let foreign_executed = ref false in
+             let results = ref [] in
+             let result =
+               L.invoke
+                 ~tools:(tools, registry)
+                 ~on_tool_result:(fun result ->
+                   let label =
+                     match result with
+                     | Ok (T.Tool_ok _) -> "ok"
+                     | Ok (Tool_error code) -> code
+                     | Error message -> "host error: " ^ message
+                   in
+                   results := label :: !results)
+                 ~claim:(A.with_initialization_callback actor ~scope:constructor ~manager)
+                 ~actor
+                 ~manager
+                 ~selection:(Boundary Session_start)
+                 ~operation_id:None
+                 ~inspect:(fun scope ->
+                   let executing = A.Callback_scope.executing scope in
+                   let reference = List.hd_exn (C.references registry) in
+                   let child ~parent =
+                     I.create
+                       ~parent_event:parent
+                       ~observer:executing.context.source
+                       { (invocation_fixture ()).context with
+                         id = P.Id.Invocation.create ()
+                       ; origin = Moderator
+                       ; session_id = executing.context.session_id
+                       ; generation = executing.context.generation
+                       ; input = `Object []
+                       ; parent_invocation = None
+                       ; parent_job = None
+                       ; implementation_revision = reference.implementation_revision
+                       ; capability_fingerprint = C.fingerprint registry
+                       }
+                     |> protocol_ok
+                   in
+                   let execute = A.callback_tool_executor actor ~scope in
+                   callback := Some (scope, execute, child ~parent:executing.context.id);
+                   foreign_result
+                   := Some
+                        (execute
+                           ~invocation:
+                             (child ~parent:(P.Id.Moderator_execution.create ()))
+                           (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                              foreign_executed := true;
+                              Ok (Complete `Null))))
+                 ()
+             in
+             (* All result and proof assertions are outside Manager and native
+               exception conversion. No worker completion is inferred from Idle. *)
+             let scope, execute, escaped_child = Option.value_exn !callback in
+             assert (not !foreign_executed);
+             (match Option.value_exn !foreign_result with
+              | Error failure -> [%test_eq: P.Error.code] Conflict failure.code
+              | Ok _ -> failwith "foreign Event acquired constructor Tool ownership");
+             let settled = A.state actor |> protocol_ok in
+             assert_same_session_snapshot settled (S.Memory_backend.state backend);
+             assert (Option.is_none settled.active_operation);
+             assert (List.is_empty (S.Run_state.runs (Option.value_exn settled.run_state)));
+             let event = List.hd_exn settled.moderator_executions in
+             let native, retained =
+               List.partition_tf settled.invocations ~f:(fun invocation ->
+                 Option.equal
+                   P.Id.Moderator_execution.equal
+                   invocation.I.parent_event
+                   (Some event.context.id))
+             in
+             assert (List.equal I.equal retained [ unrelated ]);
+             (match mode with
+              | `Success ->
+                result |> Result.ok_or_failwith |> ignore;
+                [%test_eq: int] 2 !calls;
+                [%test_eq: string list] [ "ok"; "ok" ] (List.rev !results);
+                [%test_eq: int] 0 !rejected;
+                [%test_eq: int] 2 (List.length native);
+                (match event.status with
+                 | Completed _ -> ()
+                 | Running | Failed _ | Interrupted _ -> assert false);
+                List.iter native ~f:(fun invocation ->
+                  match invocation.I.status with
+                  | Resolved (Complete (`String "disclosed")) -> ()
+                  | _ -> raise_s [%sexp (invocation : I.t)])
+              | `Claim_reject ->
+                assert (Result.is_error result);
+                [%test_eq: int] 0 !calls;
+                [%test_eq: int] 1 !rejected;
+                [%test_eq: string list] [ "invocation.admission_failed" ] !results;
+                assert (List.is_empty native)
+              | `Result_reject ->
+                assert (Result.is_error result);
+                [%test_eq: int] 1 !calls;
+                [%test_eq: int] 1 !rejected;
+                [%test_eq: string list] [ "invocation.admission_failed" ] !results;
+                (match (List.hd_exn native).I.status with
+                 | Resolved (Cancelled "event exited before recording its native outcome")
+                   -> ()
+                 | _ -> raise_s [%sexp (native : I.t list)])
+              | `Expire_after_effect ->
+                assert (Result.is_error result);
+                [%test_eq: int] 1 !calls;
+                [%test_eq: int] 0 !rejected;
+                [%test_eq: string list]
+                  [ "ok"; "invocation.admission_failed" ]
+                  (List.rev !results);
+                (match (List.hd_exn native).I.status with
+                 | Resolved (Complete (`String "disclosed")) -> ()
+                 | _ -> raise_s [%sexp (native : I.t list)]));
+             (match mode, event.status with
+              | `Success, Completed _ -> ()
+              | (`Claim_reject | `Result_reject | `Expire_after_effect), Failed failure ->
+                [%test_eq: string] "event.handler_failed" failure.code
+              | _ -> raise_s [%sexp (event : P.Moderator_execution.t)]);
+             List.iter native ~f:(fun invocation ->
+               assert (
+                 Option.equal
+                   P.Id.Moderator_execution.equal
+                   invocation.I.parent_event
+                   (Some event.context.id));
+               assert (Option.is_none invocation.context.parent_invocation));
+             [%test_eq: int] !calls (List.length !native_borrows);
+             List.iter !native_borrows ~f:(fun (dispatched, proof, was_current) ->
+               assert (
+                 Option.equal
+                   P.Id.Moderator_execution.equal
+                   dispatched.I.parent_event
+                   (Some event.context.id));
+               match proof, was_current with
+               | Ok (Some proof), true ->
+                 assert (
+                   P.Id.Principal.equal
+                     (Operator_authorization.principal proof).id
+                     (Operator_authorization.principal original).id);
+                 assert (not (Operator_authorization.is_current proof))
+               | Error failure, _ -> raise_s [%sexp (failure : P.Error.t)]
+               | Ok _, _ -> failwith "native effect did not receive its current original");
+             assert (Result.is_error (A.check_callback_current actor scope));
+             let escaped_ran = ref false in
+             assert (
+               Result.is_error
+                 (execute
+                    ~invocation:escaped_child
+                    (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                       escaped_ran := true;
+                       Ok (Complete `Null))));
+             assert (not !escaped_ran);
+             assert_same_session_snapshot settled (A.state actor |> protocol_ok);
+             assert_same_session_snapshot settled (S.Memory_backend.state backend);
+             (match mode with
+              | `Expire_after_effect ->
+                assert (not (Operator_authorization.is_current original))
+              | `Success | `Claim_reject | `Result_reject ->
+                assert (Operator_authorization.is_current original));
+             A.end_initialization actor ~scope:constructor |> protocol_ok)));
+  print_endline
+    "same Event two-call ACKs; foreign and escaped closures deny; claim rejection has no \
+     effect; result rejection settles honestly; expired original retains completed \
+     outcome";
+  [%expect
+    {| same Event two-call ACKs; foreign and escaped closures deny; claim rejection has no effect; result rejection settles honestly; expired original retains completed outcome |}]
 ;;

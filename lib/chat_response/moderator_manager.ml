@@ -325,6 +325,10 @@ type tool_call =
 module Callback_services = struct
   type t =
     { model_recipes : Moderation.Capabilities.model_recipe String.Map.t
+    ; tool_call :
+        name:string
+        -> args:Jsonaf.t
+        -> (Moderation.Capabilities.tool_call_result, string) result
     ; after_ms :
         delay_ms:int -> payload:Chatml.Chatml_lang.value -> (string, string) result
     ; cancel : id:string -> (unit, string) result
@@ -629,7 +633,10 @@ let create
   in
   let handlers =
     { handlers with
-      on_model_call =
+      on_tool_call =
+        (fun session ~name ~args ->
+          with_handlers (fun h -> h.Runtime.on_tool_call session ~name ~args))
+    ; on_model_call =
         (fun session ~recipe ~payload ->
           with_handlers (fun h -> h.Runtime.on_model_call session ~recipe ~payload))
     ; on_model_spawn =
@@ -2680,6 +2687,7 @@ let handle_legacy_callback_entries
                 let capabilities =
                   { Moderation.Capabilities.default with
                     model_recipes = services.model_recipes
+                  ; on_tool_call = services.tool_call
                   ; on_schedule_after_ms = services.after_ms
                   ; on_schedule_cancel = services.cancel
                   }

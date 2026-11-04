@@ -198,12 +198,14 @@ module Initialization_scope = struct
       { moderator : Jsonaf.t option
       ; run_state : Run_state.t option
       ; moderator_executions : Agent_protocol.Moderator_execution.t list
+      ; invocations : Agent_protocol.Invocation.t list
       }
 
     let capture (state : Session_state.t) =
       { moderator = state.moderator
       ; run_state = state.run_state
       ; moderator_executions = state.moderator_executions
+      ; invocations = state.invocations
       }
     ;;
 
@@ -212,6 +214,7 @@ module Initialization_scope = struct
         moderator = t.moderator
       ; run_state = t.run_state
       ; moderator_executions = t.moderator_executions
+      ; invocations = t.invocations
       }
     ;;
   end
@@ -5027,8 +5030,79 @@ let plan_agent_custody t (plan : Observation_follow_up.t) =
   | None :: _ | Some _ :: _ -> Ok None
 ;;
 
+let constructor_scope_of_borrow t borrow =
+  Option.bind t.legacy_callback_scope ~f:(fun scope ->
+    if phys_equal scope.borrow borrow then scope.constructor_scope else None)
+;;
+
+(* Completed native results own data settlement, not new effect admission.
+   Keep the immutable constructor control basis strict, then advance only the
+   exact selected Invocation row at its actual ACK. This check has no caller
+   policy callback and can also run after a yielding fresh-admission refresh. *)
+let check_constructor_invocation_basis t (scope : Initialization_scope.t) =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_owner t scope in
+  let%bind () =
+    if initialization_callback_is_owned t scope
+    then Ok ()
+    else Error (error Conflict "constructor no longer owns its Invocation result")
+  in
+  let%bind () =
+    validate_initialization_projection
+      (Initialization_scope.Acknowledged.apply scope.acknowledged scope.expected)
+      t.state
+  in
+  match scope.run_preparation with
+  | None -> Ok ()
+  | Some preparation ->
+    Run_preparation.check_basis preparation ~owner:t.run_preparation_owner ~state:t.state
+;;
+
+let prepare_constructor_invocation_ack
+      t
+      borrow
+      ~before
+      ~after
+      (prepared : Session_transition.t)
+  =
+  let open Result.Let_syntax in
+  match constructor_scope_of_borrow t borrow with
+  | None -> Ok None
+  | Some scope ->
+    let%bind () = check_constructor_invocation_basis t scope in
+    let%bind () =
+      Constructor_invocation_checkpoint.validate
+        ~previous:t.state
+        ~incoming:prepared.state
+        ~before
+        ~after
+    in
+    let acknowledgement =
+      Initialization_scope.Acknowledgement.prepare scope prepared.state
+    in
+    let%map () =
+      validate_initialization_projection
+        (Initialization_scope.Acknowledgement.expected acknowledgement)
+        prepared.state
+    in
+    Some acknowledgement
+;;
+
+let check_constructor_invocation_ack t borrow acknowledgement =
+  let open Result.Let_syntax in
+  match constructor_scope_of_borrow t borrow, acknowledgement with
+  | None, None -> Ok ()
+  | Some scope, Some acknowledgement
+    when phys_equal scope acknowledgement.Initialization_scope.Acknowledgement.scope ->
+    let%bind () = check_constructor_invocation_basis t scope in
+    Initialization_scope.Acknowledgement.check_basis acknowledgement
+  | None, Some _ | Some _, (Some _ | None) ->
+    Error (error Conflict "constructor Invocation owner changed before commit")
+;;
+
 let finish_invocation t execution outcome requests commit_starts authoring_reference =
   let open Result.Let_syntax in
+  let revision = t.state.counters.revision in
   let owner = Agent_protocol.Job.Invocation execution.dispatched.context.id in
   let%bind cancelled =
     match execution.owner with
@@ -5146,10 +5220,45 @@ let finish_invocation t execution outcome requests commit_starts authoring_refer
                    @ job_deltas))
              ~payloads:(permission_payloads @ job_payloads)
          in
+         let constructor_borrow =
+           match execution.owner with
+           | Event_moderator borrow -> Some borrow
+           | Foreground _ | Invocation_moderator _ | Background_job _ -> None
+         in
+         let%bind initialization_acknowledgement =
+           match constructor_borrow with
+           | None -> Ok None
+           | Some borrow ->
+             prepare_constructor_invocation_ack
+               t
+               borrow
+               ~before:(Some execution.dispatched)
+               ~after:resolved
+               prepared
+         in
+         let run_preparation =
+           Option.bind constructor_borrow ~f:(fun borrow ->
+             Option.bind (constructor_scope_of_borrow t borrow) ~f:(fun scope ->
+               scope.Initialization_scope.run_preparation))
+         in
          Eio.Cancel.protect (fun () ->
            let%bind () = check_jobs () in
+           let%bind () =
+             Option.value_map constructor_borrow ~default:(Ok ()) ~f:(fun borrow ->
+               check_constructor_invocation_ack t borrow initialization_acknowledgement)
+           in
+           let%bind () =
+             if Int64.equal revision t.state.counters.revision
+             then Ok ()
+             else Error (error Conflict "Invocation ACK basis changed before commit")
+           in
            let%bind () = persist_transition t prepared in
-           install_committed_transition ~job_custody t prepared;
+           install_committed_transition
+             ~job_custody
+             ?run_preparation
+             ?initialization_acknowledgement
+             t
+             prepared;
            acknowledge ();
            publish_committed_transition t prepared;
            Ok ()))
@@ -6185,11 +6294,6 @@ let queued_event_can_commit_installed t borrow =
      | _ -> Error (error Conflict "queued event cannot commit after completion or stop"))
 ;;
 
-let constructor_scope_of_borrow t borrow =
-  Option.bind t.legacy_callback_scope ~f:(fun scope ->
-    if phys_equal scope.borrow borrow then scope.constructor_scope else None)
-;;
-
 let queued_event_can_commit t borrow =
   match constructor_scope_of_borrow t borrow with
   | None -> queued_event_can_commit_installed t borrow
@@ -6322,6 +6426,7 @@ let compatible_script_observer observer (invocation : Agent_protocol.Invocation.
 
 let claim_event_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
   let open Result.Let_syntax in
+  let revision = t.state.counters.revision in
   let%bind () = queued_event_can_commit t borrow in
   let%bind () =
     match
@@ -6360,11 +6465,19 @@ let claim_event_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
   let%bind origin = event_invocation_origin t borrow.receipt invocation in
   let%bind invocation, admission = invocation_admission_deltas t invocation ~origin in
   let%bind dispatched = Agent_protocol.Invocation.dispatch invocation in
-  let%bind _ =
-    transition
+  let run_preparation =
+    Option.bind (constructor_scope_of_borrow t borrow) ~f:(fun scope ->
+      scope.Initialization_scope.run_preparation)
+  in
+  let%bind prepared =
+    prepare_transition
+      ?run_preparation
       t
       ~delta:(Session_delta.Batch (admission @ [ Invocation_changed dispatched ]))
       ~payloads:[]
+  in
+  let%bind initialization_acknowledgement =
+    prepare_constructor_invocation_ack t borrow ~before:None ~after:dispatched prepared
   in
   let execution =
     { owner = Event_moderator borrow
@@ -6373,7 +6486,27 @@ let claim_event_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
     ; authority_live = Atomic.make true
     }
   in
-  t.invocation_executions <- execution :: t.invocation_executions;
+  let%bind () =
+    Eio.Cancel.protect (fun () ->
+      let%bind () = queued_event_can_commit t borrow in
+      let%bind () =
+        check_constructor_invocation_ack t borrow initialization_acknowledgement
+      in
+      let%bind () =
+        if Int64.equal revision t.state.counters.revision
+        then Ok ()
+        else Error (error Conflict "Invocation ACK basis changed before commit")
+      in
+      let%bind () = persist_transition t prepared in
+      install_committed_transition
+        ?run_preparation
+        ?initialization_acknowledgement
+        t
+        prepared;
+      t.invocation_executions <- execution :: t.invocation_executions;
+      publish_committed_transition t prepared;
+      Ok ())
+  in
   Ok execution
 ;;
 
@@ -10225,6 +10358,18 @@ let with_invocation_claim t claim f =
     in
     ignore (finish outcome : (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result);
     Stdlib.Printexc.raise_with_backtrace exn backtrace
+;;
+
+let callback_tool_executor t ~scope ~invocation callback =
+  let open Result.Let_syntax in
+  let%bind () = check_callback_current t scope in
+  let%bind _ = callback_agent_actor t ~scope in
+  with_invocation_claim
+    t
+    (Claim_event_invocation (scope.borrow, invocation))
+    (fun ~dispatched ~borrow_agent_actor ->
+       let%bind () = check_callback_current t scope in
+       callback ~dispatched ~borrow_agent_actor)
 ;;
 
 let with_invocation t operation_id ~invocation f =

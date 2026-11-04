@@ -302,7 +302,7 @@ let implementation_sources =
   ; ( "lib/agent_session/run_chatml_tool.ml"
     , "eadb7cf2ac6622e977db08798fbfce7661062c47883cdf4f28700f1c85249b75" )
   ; ( "lib/agent_session/script_tool_calls.ml"
-    , "9bb442f72da4a95e62416e8ae0e34dec21a7c95c0971354f83c67ab2b4207691" )
+    , "ca518e3f239c3c441d50f4ae15b7845509b2a00c89ea85f01e9bbd974b1bdb79" )
   ; ( "lib/agent_session/session_management.ml"
     , "18431c4fd97a2d24a72b927fe8f0d20b8aea561f1f119d8f122d943f2a137f86" )
   ; ( "lib/agent_session/session_management_native.ml"

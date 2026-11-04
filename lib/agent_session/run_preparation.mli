@@ -63,6 +63,17 @@ val check
   -> state:Session_state.t
   -> (unit, Agent_protocol.Error.t) result
 
+(** Callback-free ownership and current revision/generation check. This does not
+    run original authorization and grants no effect permission. The actor uses it
+    only after selecting an exact already-owned result ACK, or after all yielding
+    admission policy checks before a fresh effect. Closed or displaced ownership
+    rejects. [check] remains required for new construction/admission authority. *)
+val check_basis
+  :  t
+  -> owner:Owner.t
+  -> state:Session_state.t
+  -> (unit, Agent_protocol.Error.t) result
+
 (** Called only after a durable commit carrying this exact preparation. Advances
     one acknowledged revision; a different or skipped basis invalidates custody.
     Ordinary commits close the actor's live preparation instead. *)

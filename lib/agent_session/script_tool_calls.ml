@@ -930,6 +930,17 @@ let with_model_preparation t ~selected ~(input : Operation_worker.Input.t) dispa
              else Ok (Some (Rewrite_args prepared.input))))
 ;;
 
+let validate_script_value ~limits value =
+  let open Result.Let_syntax in
+  let%bind () = I.validate_outcome (Complete value) in
+  Chat_response.Moderator_invocation.snapshot_state
+    ~limits
+    (Chatml.Chatml_value_codec.jsonaf_to_value value)
+  |> Result.map ~f:(fun _ -> ())
+  |> Result.map_error ~f:(fun _ ->
+    Agent_protocol.Error.invalid_request "nested value exceeds script limits")
+;;
+
 let with_scope_results
       ~result_of_invocation
       ~result_of_error
@@ -938,7 +949,7 @@ let with_scope_results
       ?(max_nested_calls = Chat_response.Moderator_invocation.max_nested_calls)
       t
       ~selected
-      ~limits
+      ~validate_value
       ~origin
       ~observer
       ~valid_parent
@@ -964,16 +975,6 @@ let with_scope_results
   in
   let active = Atomic.make true in
   let attempts = Atomic.make 0 in
-  let validate_value value =
-    let open Result.Let_syntax in
-    let%bind () = I.validate_outcome (Complete value) in
-    Chat_response.Moderator_invocation.snapshot_state
-      ~limits
-      (Chatml.Chatml_value_codec.jsonaf_to_value value)
-    |> Result.map ~f:(fun _ -> ())
-    |> Result.map_error ~f:(fun _ ->
-      Agent_protocol.Error.invalid_request "nested value exceeds script limits")
-  in
   let prepare_output output =
     let open Result.Let_syntax in
     let%bind value = t.prepare_output output in
@@ -1189,7 +1190,7 @@ let with_scope
     ?max_nested_calls
     t
     ~selected
-    ~limits
+    ~validate_value:(validate_script_value ~limits)
     ~origin
     ~observer
     ~valid_parent
@@ -1381,7 +1382,7 @@ let with_script_native_results
       ?moderator_execute
       t
       ~selected
-      ~limits
+      ~validate_value:(validate_script_value ~limits)
       ~origin:Script
       ~observer
       ~valid_parent
@@ -1781,6 +1782,24 @@ let with_event t ~definition ~execute ~(executing : E.t) f =
         Result.is_ok (E.validate executing)
         && I.equal_observer executing.context.source observer
       | Completed _ | Failed _ | Interrupted _ -> false)
+    f
+;;
+
+let with_legacy_event t ~selected ~execute ~(executing : E.t) f =
+  with_scope_results
+    ~result_of_invocation:tool_result
+    ~result_of_error:(fun code -> M.Tool_error code)
+    t
+    ~selected
+    ~validate_value:(fun value -> I.validate_outcome (Complete value))
+    ~origin:Moderator
+    ~observer:(Some executing.context.source)
+    ~valid_parent:
+      (match executing.status with
+       | Running -> Result.is_ok (E.validate executing)
+       | Completed _ | Failed _ | Interrupted _ -> false)
+    ~execute
+    ~parent:(Event executing)
     f
 ;;
 

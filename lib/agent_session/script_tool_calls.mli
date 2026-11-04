@@ -518,3 +518,20 @@ val with_event
        -> (Chat_response.Moderation.Capabilities.tool_call_result, string) result)
       -> 'a)
   -> 'a
+
+(** Native calls from one genuine legacy Manager callback. [selected] is the
+    host-prepared capability ceiling, not the script's required-tools list.
+    [execute] must own this same Running receipt. Values use protocol outcome
+    bounds, while disclosure, per-effect policy and the standard 100-attempt host
+    call-scope guard remain enforced. This does not impose v1 script limits or
+    replace the actual Manager's execution policy. Escaped calls expire on return. *)
+val with_legacy_event
+  :  t
+  -> selected:Chat_response.Tool_capability.t
+  -> execute:Native_tool_invocation.executor
+  -> executing:Agent_protocol.Moderator_execution.t
+  -> ((name:string
+       -> args:Jsonaf.t
+       -> (Chat_response.Moderation.Capabilities.tool_call_result, string) result)
+      -> 'a)
+  -> 'a

@@ -1052,7 +1052,7 @@ let legacy_pending_payload payload =
 
 (* Use real complete Prepared program custody for actor-visible source identity,
    rather than replacing it with the separate Single artifact's body identity. *)
-let prepared_legacy_callback_managers env ~id ~source =
+let prepared_legacy_callback_managers ?capability_registry env ~id ~source =
   let module C = Chatml_prompt_programs in
   let module CM = Prompt.Chat_markdown in
   let module M = Chat_response.Moderator_manager in
@@ -1154,6 +1154,7 @@ let prepared_legacy_callback_managers env ~id ~source =
     |> Result.map_error ~f:(fun error -> error.Chat_response.Tool_capability.message)
     |> Result.ok_or_failwith
   in
+  let capabilities = Option.value capability_registry ~default:capabilities in
   let artifact =
     M.Registry.prepare_script
       ~surface

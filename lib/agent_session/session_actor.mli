@@ -2108,6 +2108,17 @@ val callback_agent_actor
   -> scope:Callback_scope.t
   -> (Operator_authorization.t option, Agent_protocol.Error.t) result
 
+(** Native Tool executor for this exact callback and its already claimed Event.
+    Constructing it grants no authority. Every invocation rechecks the physical
+    Manager/callback, source and original admission before effect dispatch.
+    Historical unavailable custody rejects; genuine admitted None remains distinct.
+    Claims and truthful outcomes advance only their exact constructor Invocation
+    ACK projection. Returned outcomes do not renew expired effect authority. *)
+val callback_tool_executor
+  :  t
+  -> scope:Callback_scope.t
+  -> Native_tool_invocation.executor
+
 (** Immediate legacy Schedule services bound to this exact callback. Constructing
     the record grants no authority: each call rechecks the actual Manager/source,
     physical borrow and original admission at actor persistence. Unavailable or

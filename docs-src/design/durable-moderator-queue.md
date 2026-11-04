@@ -355,10 +355,17 @@ truthful durable effects intact.
 
 An executed callback failure can settle its exact owned receipt without asking
 for new Run-preparation authorization; its ACK closes that preparation. Foreign
-control or source changes still reject the constructor basis. Actual host routing
-and the native Tool adapter's exact claim/finish Invocation ACK projection remain
-separate integration; this consumer does not provide that adapter, a Model
-provider route or accounting authority.
+control or source changes still reject the constructor basis. The native Tool
+adapter reuses that same callback and Event. Its exact claim and finish ACKs
+advance only the owned Invocation row, preserving every unrelated Invocation and
+control field. Fresh effects recheck original authority; a truthful returned
+outcome does not acquire new permission. The legacy bridge uses the actual
+host-prepared native ceiling and protocol value bounds, plus the standard
+100-attempt host call-scope guard. It does not infer authority from required-tool
+names or impose a v1 script budget. Same-Manager callback services select Tool,
+Model and Schedule together, without falling back when the selected epoch expires.
+Actual host routing, interactive permission ownership and the paired Model
+provider/accounting integration remain separate consumers.
 
 Queue and timer loan retention checks the actual full source installation and
 unchanged retained facts separately from execution eligibility. A constructor

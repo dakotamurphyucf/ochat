@@ -96,13 +96,17 @@ type prepared_commit =
   ; install : unit -> unit
   }
 
-(** Services selected for one actual callback. Model and immediate legacy
+(** Services selected for one actual callback. Tool, Model and immediate legacy
     Schedule operations share the callback owner; constructing this record grants
     no host authority. Standalone embeddings keep their explicitly supplied
     constructor services when they do not use the callback boundary. *)
 module Callback_services : sig
   type t =
     { model_recipes : Moderation.Capabilities.model_recipe String.Map.t
+    ; tool_call :
+        name:string
+        -> args:Jsonaf.t
+        -> (Moderation.Capabilities.tool_call_result, string) result
     ; after_ms :
         delay_ms:int -> payload:Chatml.Chatml_lang.value -> (string, string) result
     ; cancel : id:string -> (unit, string) result

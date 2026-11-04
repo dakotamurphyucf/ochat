@@ -2976,6 +2976,8 @@ let%expect_test "unavailable legacy lookalike cannot consume a registered timer 
                let binding : M.callback_binding =
                  { services =
                      { model_recipes = Map.empty (module String)
+                     ; tool_call =
+                         (fun ~name:_ ~args:_ -> Error "unused callback Tool service")
                      ; after_ms = (fun ~delay_ms:_ ~payload:_ -> Error "unused")
                      ; cancel = (fun ~id:_ -> Error "unused")
                      }

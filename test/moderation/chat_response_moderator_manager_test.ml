@@ -1202,6 +1202,7 @@ let%expect_test
         let binding : Manager.callback_binding =
           { services =
               { model_recipes = recipes scoped_calls
+              ; tool_call = (fun ~name:_ ~args:_ -> Error "unused callback Tool service")
               ; after_ms = (fun ~delay_ms:_ ~payload:_ -> Error "not used")
               ; cancel = (fun ~id:_ -> Error "not used")
               }
