@@ -15,7 +15,12 @@ module Manager = Chat_response.Moderator_manager
    actual Actor. This is not the Factory/cold-Ready initialization path. *)
 let with_controller ?clock_read ?before_commit f =
   Held_tests.with_captured_target ~controller:true (fun fixture source root_file ->
-    let revision = Builder.Source.revision source in
+    let revision =
+      match Builder.Source.selection source with
+      | Authored revision -> revision
+      | Captured _ | Authored_child _ | Generated _ ->
+        failwith "controller fixture requires its actual captured revision"
+    in
     let _, artifact =
       Manager.Registry.of_elements
         Manager.Registry.empty

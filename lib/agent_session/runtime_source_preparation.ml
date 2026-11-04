@@ -14,14 +14,47 @@ module Moderator = struct
   [@@deriving equal, sexp_of]
 end
 
+module Selection = struct
+  type t =
+    | Authored of Prompt_revision.t
+    | Captured of Captured_recurrence_source.t
+    | Authored_child of
+        { source : Prompt_child_source.t
+        ; reference : Agent_store.Delegation_store.Reference.t
+        }
+    | Generated of Generated_definition.t
+end
+
 type t =
-  { revision : Prompt_revision.t
+  { selection : Selection.t
   ; invocation : Runtime_script_preparation.Invocation.t
   ; moderator : Moderator.t
   ; programs : Chatml_prompt_programs.Restored.t option
   }
 
-let revision t = t.revision
+let selection t = t.selection
+
+let artifact t =
+  match t.selection with
+  | Authored revision -> Prompt_revision.artifact revision
+  | Captured source ->
+    Prompt_revision.artifact (Captured_recurrence_source.revision source)
+  | Authored_child { source; reference = _ } ->
+    Prompt_revision.artifact (Prompt_child_source.revision source)
+  | Generated definition -> Generated_definition.artifact definition
+;;
+
+let definition_id t =
+  match t.selection with
+  | Authored revision -> Some (Prompt_revision.definition revision).id
+  | Captured source ->
+    Some (Prompt_revision.definition (Captured_recurrence_source.revision source)).id
+  | Authored_child { source; reference = _ } ->
+    Some (Prompt_revision.definition (Prompt_child_source.revision source)).id
+  | Generated definition ->
+    (Generated_definition.artifact definition).prompt_definition_id
+;;
+
 let invocation t = t.invocation
 let moderator t = t.moderator
 let programs t = t.programs
@@ -158,7 +191,7 @@ let select_moderator ~elements ~limits ~plan ~programs ~checkpoint =
   | [], None -> Ok Moderator.No_moderator
 ;;
 
-let prepare revision ~script_preparation ~invocation ~env ~checkpoint =
+let prepare_revision selection revision ~script_preparation ~invocation ~env ~checkpoint =
   Runtime_script_preparation.with_revision_plan
     script_preparation
     revision
@@ -177,5 +210,130 @@ let prepare revision ~script_preparation ~invocation ~env ~checkpoint =
             ~programs
             ~checkpoint
         in
-        { revision; invocation; moderator; programs }))
+        { selection; invocation; moderator; programs }))
+;;
+
+let prepare revision ~script_preparation ~invocation ~env ~checkpoint =
+  prepare_revision
+    (Authored revision)
+    revision
+    ~script_preparation
+    ~invocation
+    ~env
+    ~checkpoint
+;;
+
+let prepare_captured source ~script_preparation ~invocation ~env ~checkpoint =
+  prepare_revision
+    (Captured source)
+    (Captured_recurrence_source.revision source)
+    ~script_preparation
+    ~invocation
+    ~env
+    ~checkpoint
+;;
+
+let prepare_authored_child
+      source
+      ~(record : Agent_store.Delegation_store.record)
+      ~script_preparation
+      ~invocation
+      ~env
+      ~checkpoint
+  =
+  let module B = Chat_response.Background_request.Agent_artifact in
+  let open Result.Let_syntax in
+  let selected = Prompt_child_source.reference source in
+  let%bind () =
+    match record.admission.authored_tool, record.admission.captured_recurrence with
+    | Some _, None
+      when Agent_protocol.Id.Prompt_revision.equal
+             (B.revision_id selected)
+             record.admission.revision_id
+           && String.equal
+                (Chatml_source.Digest.to_hex (B.manifest_sha256 selected))
+                record.admission.manifest_sha256 -> Ok ()
+    | (None | Some _), (None | Some _) ->
+      Error (failure "authored child source differs from its recorded selection")
+  in
+  prepare_revision
+    (Authored_child { source; reference = Agent_store.Delegation_store.reference record })
+    (Prompt_child_source.revision source)
+    ~script_preparation
+    ~invocation
+    ~env
+    ~checkpoint
+;;
+
+let prepare_generated definition ~invocation =
+  let module Manager = Chat_response.Moderator_manager in
+  let open Result.Let_syntax in
+  let admission = Generated_definition.admission definition in
+  let%map _, artifact =
+    Manager.Registry.of_definition
+      Manager.Registry.empty
+      (Chat_response.Generated_admission.definition admission)
+    |> Result.map_error ~f:failure
+  in
+  let moderator =
+    match artifact with
+    | None -> Moderator.No_moderator
+    | Some artifact ->
+      Moderator.Extension
+        { script_id = Manager.Registry.script_id artifact
+        ; source_sha256 = Manager.Registry.source_hash artifact
+        }
+  in
+  { selection = Generated definition; invocation; moderator; programs = None }
+;;
+
+let validate_target t (state : Session_state.t) =
+  let module P = Agent_protocol in
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  let mismatch () =
+    Error
+      (P.Error.create
+         Conflict
+         ~message:"source binding does not match the retained target selection"
+         ~retryable:false
+         ())
+  in
+  let%bind () =
+    match t.selection with
+    | Captured source ->
+      let%bind () =
+        Recurrence_child_origin.validate_source
+          (Captured_recurrence_source.origin source)
+          state
+      in
+      if Option.is_none state.spec.prompt_definition_id then Ok () else mismatch ()
+    | Authored_child { source = _; reference } ->
+      let selected =
+        match state.spec.protocol.prompt with
+        | Generated revision -> P.Id.Prompt_revision.equal revision reference.revision_id
+        | Catalog _ | Local_path _ -> false
+      in
+      if
+        selected
+        && Option.is_none state.spec.prompt_definition_id
+        && P.Id.Session.equal state.identity.session_id reference.child_session_id
+        && Option.exists state.spec.delegation ~f:(D.Reference.equal reference)
+      then Ok ()
+      else mismatch ()
+    | Authored _ | Generated _ ->
+      let matches =
+        match state.spec.prompt_definition_id with
+        | Some id -> Option.exists (definition_id t) ~f:(P.Id.Prompt_definition.equal id)
+        | None -> Option.is_none (artifact t).prompt_definition_id
+      in
+      if matches then Ok () else mismatch ()
+  in
+  if
+    P.Id.Prompt_revision.equal (artifact t).revision_id state.spec.prompt_revision_id
+    && Runtime_script_preparation.Invocation.equal
+         t.invocation
+         (Runtime_script_preparation.Invocation.of_root state.spec.root_invocation)
+  then Ok ()
+  else mismatch ()
 ;;

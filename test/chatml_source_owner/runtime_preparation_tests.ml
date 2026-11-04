@@ -362,7 +362,10 @@ let on_event = fun ctx state event -> Task.pure(state)</script>|}
           in
           let selected = select original in
           assert (!checkpoints > 0);
-          assert (phys_equal (Source.revision selected) original);
+          (match Source.selection selected with
+           | Authored revision -> assert (phys_equal revision original)
+           | Captured _ | Authored_child _ | Generated _ ->
+             failwith "ordinary source changed its actual owner");
           assert (Preparation.Invocation.equal (Source.invocation selected) Ui);
           let identity =
             match kind, Source.moderator selected with

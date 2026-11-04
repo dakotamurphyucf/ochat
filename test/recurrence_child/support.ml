@@ -401,8 +401,30 @@ let assert_ordinary_execution_blocked env sw connection daemon child_id =
   assert_dormant daemon child_id |> ignore
 ;;
 
-let with_daemon env root configuration ~provider_calls f =
+let with_daemon
+      ?(on_runtime_construction = fun () -> ())
+      env
+      root
+      configuration
+      ~provider_calls
+      f
+  =
   Eio.Switch.run (fun sw ->
+    let policy =
+      T.inference_policy
+        ~default_model:"fixture-model"
+        ~post_stream:(fun ~sw:_ ~inputs:_ ->
+          Int.incr provider_calls;
+          failwith "captured child activated provider")
+    in
+    let policy =
+      { policy with
+        runtime_inference_ports =
+          (fun actor ->
+            on_runtime_construction ();
+            policy.runtime_inference_ports actor)
+      }
+    in
     let daemon =
       Daemon.start
         ~sw
@@ -414,12 +436,7 @@ let with_daemon env root configuration ~provider_calls f =
         ~options:
           { Daemon.default_options with
             qualify_chatml_extensions = true
-          ; inference_policy =
-              T.inference_policy
-                ~default_model:"fixture-model"
-                ~post_stream:(fun ~sw:_ ~inputs:_ ->
-                  Int.incr provider_calls;
-                  failwith "captured child activated provider")
+          ; inference_policy = policy
           }
         ()
       |> protocol_ok

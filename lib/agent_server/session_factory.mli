@@ -158,6 +158,30 @@ end
     It exposes no replacement/seal and cannot be minted from copied lists. *)
 val developer_catalog : t -> Developer_catalog.t
 
+(** Verify the actual target's pinned publication, complete stored tree and
+    program/content custody before staging its source under the existing runtime
+    owner. The entry must retain this Factory's actual live Store Handle, including
+    a newly created entry not yet registered. Cached authored revisions use the Catalog's exact retained publication;
+    captured recurrence children use their real private admission. No original
+    source lookup, history/input conversion, Manager/initializer, native/MCP setup,
+    provider call or Run admission occurs.
+
+    Generated and authored-tool children borrow their actual already loaded
+    parent's already-realized bindings for static restore/selection. The no-load
+    parent lease is acquired before parent policy lookup and retained through [f];
+    a cold parent or unrealized bindings reject without constructing resources.
+    Ordinary eager/cold loading paths remain separate. The callback cannot retain
+    Prepared or borrowed resource custody after return. The caller ends its actual
+    Run preparation and still owns current command/delegation authorization,
+    reciprocal ACK and final effect admission. Verification grants none of those.
+    Cancellation and unexpected checkpoint failures propagate unchanged. *)
+val with_prepared_run_source
+  :  t
+  -> Session_registry.entry
+  -> preparation:Agent_session.Run_preparation.t
+  -> (Runtime_owner.Prepared.t -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
 (** Startup-only once binding of the SAME retained Authoring_installation source
     port, before scheduler/client execution exposure. Repeated installation
     rejects. Existing lazy-runtime services consult it at use, so recovery does

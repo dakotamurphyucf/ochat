@@ -930,21 +930,51 @@ activated Run nor claims that an uncertain effect did not occur.
 
 ### Source selection before deferred activation
 
-`Runtime_builder.Source` selects the actual retained revision and invocation role
-through the existing bounded parser/program restoration owner. Its explicit
-`Legacy`, `Extension` and `No_moderator` outcomes separate source identity from
-versioned invocation capability. A legacy script's genuine identity does not
+`Runtime_builder.Source` retains an explicit `Authored` revision or `Generated`
+definition, rather than manufacturing an ordinary revision for generated code.
+Authored selection uses the existing bounded parser/program restoration owner. Its
+explicit `Legacy`, `Extension` and `No_moderator` outcomes separate source identity
+from versioned invocation capability. A legacy script's genuine identity does not
 become a versioned observer or handler receipt. Single-file source identity and
 complete linked-program identity use the same recipe as the live Registry.
 
 This immutable selection performs no Manager construction, Agent-content
 conversion, history allocation, native shell initialization or MCP connection.
-It grants no tool ABI or execution authority. Native resource discovery, live
-required-tool admission and full compilation still belong to the real activation
-path after the held Run and reciprocal controller acknowledgements. A source
-selection alone cannot authorize an inert admission or bypass the target's
-physical runtime lifetime. The held admission and first-effect owner integration
+It grants no execution authority. Native resource discovery and compilation
+requiring a newly discovered tool ABI still belong to the real activation path
+after the held Run and reciprocal controller acknowledgements. Generated
+definitions can statically restore and compile against their actual already
+loaded parent's inherited bindings; the source retains that genuine generated
+owner and its compiled programs. The existing Registry binds their exact identity
+without constructing or initializing a Manager. A source selection alone cannot
+authorize an inert admission or bypass the target's physical runtime lifetime.
+The held admission and first-effect owner integration
 remains a separate qualification boundary.
+
+`Session_factory.with_prepared_run_source` verifies the actual target's complete
+retained publication and materialized inventory before binding or any held Run
+write. Authored cache hits use the Catalog's own artifact store and exact retained
+manifest digest; cached revision identity alone is insufficient. Captured
+recurrence children retain their exact private admission and captured replay.
+The source witness distinguishes ordinary authored, captured recurrence,
+authored-tool child and generated families. Each child carries its actual
+retained child association; sharing the parent's artifact does not make the
+parent a valid target. The child's absent catalog identity does not erase the
+original artifact's defining metadata or relax ordinary source matching.
+Authored-tool children resolve their genuine defining policy and source through
+the loaded parent's existing resource index. Generated children restore their
+exact recorded artifact and inherited capability pins through the existing
+generated owner. Neither branch consults original files or repairs stored bytes.
+
+The Factory acquires the actual no-load parent lease before parent policy lookup
+and retains it through the prepared callback when inherited bindings are needed.
+Only already-realized inherited bindings are selected. A cold parent or unrealized
+bindings fail without creating tools, connecting MCP or running an initializer.
+Ordinary eager loading remains available through its existing authorized path;
+source staging does not invoke it covertly.
+The prepared callback still owns current command/delegation checks, reciprocal
+acknowledgement and final effect admission. It cannot retain the borrowed resource
+lifetime after returning, and artifact verification grants no execution permission.
 
 The actor can bind that source to its exact authenticated Run preparation.
 `Session_actor.Source_binding` owns only this source/preparation custody; it does

@@ -9504,22 +9504,7 @@ let bind_run_source_internal t ~preparation ~source =
       | None ->
         Error (error Permission_denied "source binding requires original authentication")
     in
-    let revision = Runtime_source_preparation.revision source in
-    let definition = Prompt_revision.definition revision in
-    if
-      Agent_protocol.Id.Prompt_revision.equal
-        (Prompt_revision.id revision)
-        t.state.spec.prompt_revision_id
-      && (match t.state.spec.prompt_definition_id with
-          | Some id -> Agent_protocol.Id.Prompt_definition.equal definition.id id
-          | None ->
-            Option.is_none (Prompt_revision.artifact revision).prompt_definition_id)
-      && Runtime_script_preparation.Invocation.equal
-           (Runtime_source_preparation.invocation source)
-           (Runtime_script_preparation.Invocation.of_root t.state.spec.root_invocation)
-    then Ok ()
-    else
-      Error (error Conflict "source binding does not match the retained target selection")
+    Runtime_source_preparation.validate_target source t.state
   in
   let%bind () = source_basis () in
   match t.run_source_binding with

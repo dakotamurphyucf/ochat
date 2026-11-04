@@ -17,6 +17,8 @@ let with_daemon
       ?(prompt_text = "<developer>Pinned source during creation.</developer>")
       ?(schemas = false)
       ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
+      ?(qualify_chatml_extensions = false)
+      ?(prepare_sources = fun _ _ -> ())
       ~policy
       f
   =
@@ -49,6 +51,7 @@ let with_daemon
              {|let run ctx input =
   let unused = fun () -> Model.spawn("agent_prompt_v1", input) in
   Task.pure(`Complete(`String("ok")))|});
+         prepare_sources env root;
          Eio.Switch.run (fun sw ->
            let daemon =
              Daemon.start
@@ -64,7 +67,11 @@ let with_daemon
                ~tool_dir:root
                ~home:root
                ~process_start_identity:None
-               ~options:{ Daemon.default_options with inference_policy = policy }
+               ~options:
+                 { Daemon.default_options with
+                   inference_policy = policy
+                 ; qualify_chatml_extensions
+                 }
                ()
              |> protocol_ok
            in
@@ -112,12 +119,12 @@ let%test_unit
        [%test_eq: Chatml_compilation.Tool_contract.t]
          (Agent_session.Prompt_definition.tool_contract entry.definition)
          Chatml_compilation.Tool_contract.Developer_model_spawn;
-      assert (Option.is_some (Agent_session.Prompt_revision.programs revision));
+       assert (Option.is_some (Agent_session.Prompt_revision.programs revision));
        Eio.Path.unlink Eio.Path.(env#fs / root / "parent.chatmd");
        Eio.Path.unlink Eio.Path.(env#fs / root / "input.json");
        Eio.Path.unlink Eio.Path.(env#fs / root / "output.json");
-      Eio.Path.unlink Eio.Path.(env#fs / root / "handler.chatml");
-      Eio.Path.unlink Eio.Path.(env#fs / root / "chatml.project.json");
+       Eio.Path.unlink Eio.Path.(env#fs / root / "handler.chatml");
+       Eio.Path.unlink Eio.Path.(env#fs / root / "chatml.project.json");
        let preparation = Option.value_exn Daemon.default_options.script_preparation in
        (match
           Agent_session.Runtime_script_preparation.with_revision_plan
@@ -127,16 +134,19 @@ let%test_unit
             ~env
             ~invocation:Agent_session.Runtime_script_preparation.Invocation.Ui
             ~checkpoint:Eio.Fiber.check
-           ~f:(fun _ ~compilation_limits:_ ~plan ~programs ->
-             Ok
-               ( Option.value_map plan ~default:0 ~f:(fun plan ->
-                   List.length (Chat_response.Script_contract_plan.programs plan))
-               , Option.is_some programs ))
+            ~f:(fun _ ~compilation_limits:_ ~plan ~programs ->
+              Ok
+                ( Option.value_map plan ~default:0 ~f:(fun plan ->
+                    List.length (Chat_response.Script_contract_plan.programs plan))
+                , Option.is_some programs ))
         with
-       | Ok (count, true) when count > 0 -> ()
-       | Ok (count, restored) ->
-         raise_s [%sexp "retained developer graph did not restore", (count : int), (restored : bool)]
-       | Error error -> raise_s [%sexp "retained developer restore", (error : Agent_protocol.Error.t)]);
+        | Ok (count, true) when count > 0 -> ()
+        | Ok (count, restored) ->
+          raise_s
+            [%sexp
+              "retained developer graph did not restore", (count : int), (restored : bool)]
+        | Error error ->
+          raise_s [%sexp "retained developer restore", (error : Agent_protocol.Error.t)]);
        assert (
          Result.is_error
            (Agent_session.Runtime_script_preparation.with_revision_plan

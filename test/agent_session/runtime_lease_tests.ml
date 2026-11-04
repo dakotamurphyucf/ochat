@@ -382,10 +382,8 @@ let%expect_test
                    assert (
                      not
                        (Agent_protocol.Id.Prompt_revision.equal
-                          (Agent_session.Prompt_revision.id
-                             (Builder.Source.revision fixture.source))
-                          (Agent_session.Prompt_revision.id
-                             (Builder.Source.revision foreign.source))));
+                          (Builder.Source.artifact fixture.source).revision_id
+                          (Builder.Source.artifact foreign.source).revision_id));
                    fixture.guards := 0;
                    fixture.policies := 0;
                    foreign.guards := 0;
