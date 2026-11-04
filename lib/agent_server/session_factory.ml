@@ -2468,20 +2468,33 @@ let flush_pending_jobs ?run_preparation actor jobs =
     |> Result.map ~f:(fun _ -> ()))
 ;;
 
-let install_moderator_if_changed ?run_preparation actor moderator_snapshot =
+let install_moderator_if_changed
+      ?run_preparation
+      ?moderator_manager
+      actor
+      moderator_snapshot
+  =
   let open Result.Let_syntax in
-  let%bind state = Agent_session.Session_actor.state actor in
-  if Option.equal Jsonaf.exactly_equal state.moderator moderator_snapshot
-  then Ok ()
-  else
-    (match run_preparation with
-     | None -> Agent_session.Session_actor.change_moderator actor moderator_snapshot
-     | Some preparation ->
-       Agent_session.Session_actor.checkpoint_run_moderator
-         actor
-         ~preparation
-         moderator_snapshot)
-    |> Result.map ~f:(fun _ -> ())
+  match run_preparation with
+  | Some preparation ->
+    Agent_session.Session_actor.checkpoint_run_moderator
+      ?moderator_manager
+      actor
+      ~preparation
+      moderator_snapshot
+    |> Result.map ~f:ignore
+  | None ->
+    let%bind state = Agent_session.Session_actor.state actor in
+    let%bind moderator_snapshot =
+      Agent_session.Moderator_checkpoint.reuse_unchanged_snapshot
+        ~previous:state.moderator
+        ~incoming:moderator_snapshot
+    in
+    if Option.equal Jsonaf.exactly_equal state.moderator moderator_snapshot
+    then Ok ()
+    else
+      Agent_session.Session_actor.change_moderator actor moderator_snapshot
+      |> Result.map ~f:ignore
 ;;
 
 let runtime_inference_ports t actor_ref =
@@ -5016,20 +5029,40 @@ let build_runtime_for_actor ?run_preparation ?original_actor t handle actor =
       |> Result.map ~f:Option.some
   in
   let%bind scope =
-    match pending with
-    | None -> Ok None
-    | Some _ ->
+    let open Agent_session.Session_actor.Initialization_scope in
+    let purpose =
+      match pending with
+      | Some _ -> Purpose.Pending_initialization
+      | None -> Runtime_construction
+    in
+    let unresolved_run =
+      Option.exists expected.run_state ~f:(fun index ->
+        List.exists (Agent_session.Run_state.runs index) ~f:(fun run ->
+          match run.Agent_protocol.Run.lifecycle with
+          | Admitted | Active | Waiting _ -> true
+          | Terminal _ -> false))
+    in
+    match pending, original_actor, run_preparation with
+    | None, None, None -> Ok None
+    | None, _, _ when unresolved_run -> Ok None
+    | _ ->
       (match run_preparation with
        | None ->
          (match original_actor with
-          | None -> Agent_session.Session_actor.begin_initialization actor ~expected
+          | None ->
+            Agent_session.Session_actor.begin_initialization ~purpose actor ~expected
           | Some original_actor ->
             Agent_session.Session_actor.begin_initialization_authenticated
+              ~purpose
               actor
               ~actor:original_actor
               ~expected)
        | Some preparation ->
-         Agent_session.Session_actor.begin_run_initialization actor ~preparation ~expected)
+         Agent_session.Session_actor.begin_run_initialization
+           ~purpose
+           actor
+           ~preparation
+           ~expected)
       |> Result.map ~f:Option.some
   in
   let initialization_scope = ref scope in
@@ -5056,13 +5089,55 @@ let build_runtime_for_actor ?run_preparation ?original_actor t handle actor =
         ~initialization_jobs
         ~run_preparation:constructor_preparation
     in
+    let runtime =
+      match scope, runtime.moderator_manager with
+      | Some scope, Some manager ->
+        let original_close = runtime.close in
+        let close () =
+          let exception Constructor_cleanup_failed of Agent_protocol.Error.t in
+          let cleanup () =
+            match
+              Agent_session.Session_actor.retire_initialization_resource
+                actor
+                ~scope
+                ~moderator_manager:manager
+            with
+            | Ok () | Error { code = Server_shutting_down; _ } -> ()
+            | Error failure -> raise (Constructor_cleanup_failed failure)
+          in
+          Eio.Cancel.protect (fun () ->
+            match cleanup () with
+            | () -> original_close ()
+            | exception exn ->
+              let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+              (try original_close () with
+               | _ -> ());
+              Exn.raise_with_original_backtrace exn backtrace)
+        in
+        { runtime with close }
+      | None, _ | Some _, None -> runtime
+    in
     let finish () =
       let%bind moderator = runtime.start_moderator () in
       let%bind () = flush_pending_schedules ?run_preparation actor !schedules in
       let%bind () = flush_pending_jobs ?run_preparation actor !jobs in
       let%bind () =
         match pending with
-        | None -> install_moderator_if_changed ?run_preparation actor moderator
+        | None ->
+          (match scope with
+           | Some scope ->
+             Agent_session.Session_actor.checkpoint_runtime_construction
+               ?moderator_manager:runtime.moderator_manager
+               actor
+               ~scope
+               moderator
+             |> Result.map ~f:ignore
+           | None ->
+             install_moderator_if_changed
+               ?run_preparation
+               ?moderator_manager:runtime.moderator_manager
+               actor
+               moderator)
         | Some fresh_history ->
           let candidate =
             prepared_state expected runtime (ref shell) (ref []) (ref []) ~fresh_history
@@ -5072,7 +5147,11 @@ let build_runtime_for_actor ?run_preparation ?original_actor t handle actor =
            | None ->
              Error (unavailable Conflict "Pending initialization has no host scope")
            | Some scope ->
-             Agent_session.Session_actor.complete_initialization actor ~scope ~candidate
+             Agent_session.Session_actor.complete_initialization
+               ?moderator_manager:runtime.moderator_manager
+               actor
+               ~scope
+               ~candidate
              |> Result.map ~f:ignore)
       in
       Ok runtime
@@ -5093,16 +5172,20 @@ let build_runtime_for_actor ?run_preparation ?original_actor t handle actor =
       Exn.raise_with_original_backtrace exn backtrace
   in
   let record_failure failure =
-    Option.iter scope ~f:(fun scope ->
-      (* Best effort: cancellation and a failed writer must not replace the
+    Option.iter
+      (match pending with
+       | None -> None
+       | Some _ -> scope)
+      ~f:(fun scope ->
+        (* Best effort: cancellation and a failed writer must not replace the
          original initializer failure. No exception details enter storage. *)
-      try
-        Eio.Cancel.protect (fun () ->
-          ignore
-            (Agent_session.Session_actor.fail_initialization actor ~scope failure
-             : (Agent_protocol.Session.t, Agent_protocol.Error.t) result))
-      with
-      | _ -> ())
+        try
+          Eio.Cancel.protect (fun () ->
+            ignore
+              (Agent_session.Session_actor.fail_initialization actor ~scope failure
+               : (Agent_protocol.Session.t, Agent_protocol.Error.t) result))
+        with
+        | _ -> ())
   in
   Exn.protect
     ~f:(fun () ->

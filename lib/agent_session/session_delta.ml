@@ -1259,7 +1259,11 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     let previous = Option.value state.run_state ~default:Run_state.empty in
     let%map () = Run_state.validate_transition ~previous run_state in
     { state with run_state = Some run_state }
-  | Moderator_changed moderator -> Ok { state with moderator }
+  | Moderator_changed moderator ->
+    let%map.Result () =
+      Moderator_checkpoint.validate_update ~previous:state.moderator moderator
+    in
+    { state with moderator }
   | Shell_changed shell -> Ok { state with shell }
   | History_block_reserved reserved_history_through ->
     if

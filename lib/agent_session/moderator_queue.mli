@@ -15,6 +15,7 @@ end
 module Entry : sig
   type t
 
+  val equal : t -> t -> bool
   val ordinal : t -> int64
   val payload_sha256 : t -> string
   val producer : t -> Queue_producer.t option

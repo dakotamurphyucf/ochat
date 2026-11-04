@@ -281,7 +281,10 @@ let%expect_test "queue occurrence unknowns follow ordinals through equal reemit"
     in
     let after_snapshot = { before_snapshot with queued_internal_events = values 2 } in
     let moderator =
-      A.Moderator_checkpoint.encode_with_queue after_snapshot ~queue:after_metadata
+      A.Moderator_checkpoint.update_with_queue
+        (SD.value before).moderator
+        ~snapshot:after_snapshot
+        ~queue:after_metadata
       |> protocol_ok
     in
     let after = { (SD.value before) with moderator = Some moderator } in
@@ -794,6 +797,53 @@ let%expect_test
   let module E = P.Moderator_execution in
   let module C = E.Queue_occurrence in
   F.with_actual_drainer (fun basis source original drainer operation ->
+    (* Independent saved-data law: causal attribution does not fabricate Schedule
+       work. The actual host above supplies the retained live and terminal Runs. *)
+    let validate_schedule source origin ~runs =
+      let provenance = P.Schedule_provenance.create ~source ~origin |> protocol_ok in
+      let timer : P.Schedule.t =
+        { id = P.Id.Schedule.of_string "sch_causal_attribution" |> protocol_ok
+        ; session_id
+        ; generation = source.P.Run_source.generation
+        ; payload = `Null
+        ; created_at = timestamp
+        ; next_due_at = timestamp
+        ; misfire = Deliver_once_immediately
+        ; status = Scheduled
+        ; delivery_count = 0
+        ; last_delivery_at = None
+        ; ownership = None
+        ; inference_provenance = Some provenance
+        ; delivery_cancellation = None
+        }
+      in
+      A.Queue_provenance_validation.validate
+        { session_id
+        ; generation = basis.A.Session_state.identity.generation
+        ; revision = basis.counters.revision
+        ; moderator = basis.moderator
+        ; runs
+        ; jobs = basis.jobs
+        ; schedules = timer :: basis.schedules
+        ; invocations = basis.invocations
+        ; events = basis.moderator_executions
+        }
+    in
+    List.iter
+      [ None; Some P.Inference_origin.Unbound; Some (Run original); Some (Run drainer) ]
+      ~f:(fun origin ->
+        validate_schedule source origin ~runs:basis.run_state |> protocol_ok);
+    assert (Result.is_error (validate_schedule source (Some (Run original)) ~runs:None));
+    let foreign_lifetime =
+      P.Run_source.create
+        ~observer:source.observer
+        ~generation:source.generation
+        ~installation_epoch:(Int64.succ source.installation_epoch)
+      |> protocol_ok
+    in
+    assert (
+      Result.is_error
+        (validate_schedule foreign_lifetime (Some (Run original)) ~runs:basis.run_state));
     List.iter
       [ None; Some P.Inference_origin.Unbound; Some (Run original) ]
       ~f:(fun origin ->

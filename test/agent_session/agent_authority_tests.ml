@@ -1215,3 +1215,230 @@ let%expect_test
   [%expect
     {| worker proof retires before terminal save; live completion lends once; known expiry and rejected terminal save launch no compactor |}]
 ;;
+
+let%expect_test
+    "genuine constructor Job loans retain exact custody through claim and both retry \
+     owners"
+  =
+  List.iter [ `Initialization; `Run_constructor ] ~f:(fun owner ->
+    List.iter [ false; true ] ~f:(fun authenticated ->
+      let live = Atomic.make true in
+      let original = if authenticated then Some (authentication live) else None in
+      let reject = ref false in
+      Job_fixtures.with_actor
+        ~start:false
+        ~prepare_state:(fun state ->
+          match owner with
+          | `Initialization ->
+            { state with runtime_initialization = Pending { fresh_history = true } }
+          | `Run_constructor -> state)
+        ~reject_save:(fun _ -> !reject)
+        (fun _env _sw actor writer backend ->
+           let expected = A.state actor |> protocol_ok in
+           let add, finish =
+             match owner with
+             | `Initialization ->
+               let scope =
+                 (match original with
+                  | None -> A.begin_initialization actor ~expected
+                  | Some original ->
+                    A.begin_initialization_authenticated actor ~actor:original ~expected)
+                 |> protocol_ok
+               in
+               ( (fun job -> A.add_initialization_model_job actor ~scope job)
+               , fun () ->
+                   A.complete_initialization actor ~scope ~candidate:expected
+                   |> protocol_ok
+                   |> ignore;
+                   A.end_initialization actor ~scope |> protocol_ok )
+             | `Run_constructor ->
+               let request =
+                 P.Run_start.create
+                   ~session_id
+                   ~attachment_id:writer.id
+                   ~generation:expected.identity.generation
+                   ~expected_revision:expected.counters.revision
+                   ~mode:Workflow
+                   ~input:Authored_start
+                   ~key:
+                     (P.Idempotency_key.of_string "constructor-job-custody" |> protocol_ok)
+                 |> protocol_ok
+               in
+               let request_sha256 =
+                 P.Run_start.to_json request
+                 |> Jsonaf.to_string
+                 |> Digestif.SHA256.digest_string
+                 |> Digestif.SHA256.to_hex
+               in
+               let preparation =
+                 (match original with
+                  | None ->
+                    A.begin_run_preparation
+                      actor
+                      ~authorize:(fun _ -> Ok ())
+                      ~principal_id
+                      ~request
+                      ~request_sha256
+                  | Some original ->
+                    A.begin_run_preparation_authenticated
+                      actor
+                      ~actor:original
+                      ~authorize:(fun _ -> Ok ())
+                      ~request
+                      ~request_sha256)
+                 |> protocol_ok
+                 |> function
+                 | Agent_session.Run_preparation.Decision.Prepare preparation ->
+                   preparation
+                 | Retained _ -> failwith "fresh constructor unexpectedly replayed"
+               in
+               ( (fun job -> A.add_run_constructor_job actor ~preparation job)
+               , fun () -> A.end_run_preparation actor preparation |> protocol_ok )
+           in
+           let job : P.Job.t =
+             { id = P.Id.Job.create ()
+             ; session_id
+             ; generation = expected.identity.generation
+             ; kind =
+                 (match owner with
+                  | `Initialization -> Model_call
+                  | `Run_constructor -> Async_tool)
+             ; payload = `Object []
+             ; status = Queued
+             ; retry_policy = Safe_retry { max_attempts = 3; backoff_ms = 0 }
+             ; attempt = 0
+             ; created_at = timestamp
+             ; started_at = None
+             ; next_run_at = None
+             ; completed_at = None
+             ; result = None
+             ; delivery = Pending
+             ; launch = None
+             ; inference_origin = None
+             ; progress = None
+             }
+           in
+           reject := true;
+           assert (Result.is_error (add job));
+           reject := false;
+           assert (List.is_empty (Agent_session.Memory_backend.state backend).jobs);
+           let job = add job |> protocol_ok in
+           finish ();
+           A.start ?actor:original actor ~attachment_id:writer.id |> protocol_ok |> ignore;
+           let claim () = A.claim_job actor ~job_id:job.id ~generation:job.generation in
+           let before = Agent_session.Memory_backend.state backend in
+           reject := true;
+           assert (Result.is_error (claim ()));
+           reject := false;
+           [%test_eq: int64]
+             before.counters.revision
+             (Agent_session.Memory_backend.state backend).counters.revision;
+           let check_callback job =
+             let observed = ref None in
+             let resolved =
+               Job_fixtures.with_job actor job (fun ~job:_ ~execute ->
+                 execute
+                   ~invocation:(Job_fixtures.root job)
+                   (fun ~dispatched ~borrow_agent_actor ->
+                      let borrowed = borrow_agent_actor ~invocation:dispatched in
+                      observed
+                      := Some
+                           ( borrowed
+                           , match borrowed with
+                             | Ok (Some proof) -> Operator_authorization.is_current proof
+                             | Ok None | Error _ -> false );
+                      Ok (I.Complete `Null)))
+               |> protocol_ok
+             in
+             (match resolved.I.status with
+              | Resolved (Complete `Null) -> ()
+              | _ -> failwith "Job callback failed before completing its oracle");
+             match authenticated, Option.value_exn !observed with
+             | false, (Ok None, false) -> ()
+             | true, (Ok (Some proof), true) -> expired proof
+             | _, (Error failure, _) -> raise_s [%sexp (failure : P.Error.t)]
+             | false, (Ok (Some _), _)
+             | true, (Ok None, _)
+             | false, (Ok None, true)
+             | true, (Ok (Some _), false) ->
+               failwith "Job callback changed its original admission"
+           in
+           let running = claim () |> protocol_ok |> Option.value_exn in
+           [%test_eq: int] 1 running.attempt;
+           check_callback running;
+           let retry () =
+             match owner with
+             | `Initialization ->
+               A.complete_job
+                 actor
+                 ~job_id:running.id
+                 ~generation:running.generation
+                 ~attempt:running.attempt
+                 (Model_failed "retry this admitted attempt")
+             | `Run_constructor ->
+               A.complete_background_job
+                 actor
+                 ~job_id:running.id
+                 ~generation:running.generation
+                 ~attempt:running.attempt
+                 (Failed
+                    { code = "fixture.retry"
+                    ; message = "retry this admitted attempt"
+                    ; retryable = true
+                    ; details = `Null
+                    })
+           in
+           reject := true;
+           assert (Result.is_error (retry ()));
+           reject := false;
+           check_callback running;
+           let queued = retry () |> protocol_ok in
+           (match queued.status with
+            | Queued -> ()
+            | _ -> failwith "retry did not acknowledge its queued successor");
+           let running = claim () |> protocol_ok |> Option.value_exn in
+           [%test_eq: int] 2 running.attempt;
+           check_callback running;
+           if authenticated
+           then (
+             Atomic.set live false;
+             let denied = ref None in
+             Job_fixtures.with_job actor running (fun ~job:_ ~execute ->
+               execute
+                 ~invocation:(Job_fixtures.root running)
+                 (fun ~dispatched ~borrow_agent_actor ->
+                    denied := Some (borrow_agent_actor ~invocation:dispatched);
+                    Ok (I.Complete `Null)))
+             |> protocol_ok
+             |> ignore;
+             match Option.value_exn !denied with
+             | Error { code = Permission_denied; _ } -> ()
+             | Error failure -> raise_s [%sexp (failure : P.Error.t)]
+             | Ok _ -> failwith "expired Job original became legacy None");
+           let terminal =
+             (match owner with
+              | `Initialization ->
+                A.complete_job
+                  actor
+                  ~job_id:running.id
+                  ~generation:running.generation
+                  ~attempt:running.attempt
+                  (Model_succeeded `Null)
+              | `Run_constructor ->
+                A.complete_background_job
+                  actor
+                  ~job_id:running.id
+                  ~generation:running.generation
+                  ~attempt:running.attempt
+                  (Succeeded `Null))
+             |> protocol_ok
+           in
+           match terminal.status with
+           | Succeeded -> ()
+           | _ -> failwith "known original expiry suppressed truthful terminal fact")));
+  print_endline
+    "genuine initialization/Run-constructor admissions; failed ACK retries; exact \
+     claims; Model and Async retries preserve original custody";
+  [%expect
+    {| genuine initialization/Run-constructor admissions; failed ACK retries; exact claims; Model and Async retries preserve original custody |}]
+;;

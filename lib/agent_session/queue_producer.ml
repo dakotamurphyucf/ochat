@@ -28,7 +28,7 @@ let validate = function
     P.Id.Invocation.of_string (P.Id.Invocation.to_string id) |> Result.map ~f:ignore
   | Job_completion { id; generation; attempt } ->
     let%bind.Result _ = P.Id.Job.of_string (P.Id.Job.to_string id) in
-    if generation >= 0 && attempt > 0
+    if generation >= 0 && attempt >= 0
     then Ok ()
     else invalid "invalid queued Job producer counters"
   | Schedule_delivery { id; generation; delivery_count } ->

@@ -4,6 +4,7 @@ module A = Agent_session
 module P = Agent_protocol
 
 let with_startup_actor
+      ?make_manager
       ?events
       ?make_worker
       ?make_job_results
@@ -17,7 +18,13 @@ let with_startup_actor
     let result =
       Eio.Switch.run (fun sw ->
         prepare env;
-        let manager, _, _ = handoff_definition ?events env in
+        let manager =
+          match make_manager with
+          | Some make -> make env
+          | None ->
+            let manager, _, _ = handoff_definition ?events env in
+            manager
+        in
         let snapshot =
           Chat_response.Moderator_manager.identity_snapshot manager
           |> Result.ok_or_failwith
@@ -1303,7 +1310,14 @@ let%expect_test "captured runtime installation advances only its owned accountin
     let policy = Chat_response.Runtime_semantics.default_policy in
     A.Session_actor.enable_run_constructor_turn_budget actor ~preparation policy
     |> protocol_ok;
+    let first_checkpoint = A.Session_actor.state actor |> protocol_ok in
+    A.Session_actor.checkpoint_run_moderator actor ~preparation first_checkpoint.moderator
+    |> protocol_ok
+    |> ignore;
     let installed = A.Session_actor.state actor |> protocol_ok in
+    let index = Option.value_exn installed.run_state in
+    assert (List.is_empty (A.Run_state.runs index));
+    assert (Option.is_some (A.Run_state.installation index).source);
     A.Session_actor.enable_run_constructor_turn_budget actor ~preparation policy
     |> protocol_ok;
     ignore
@@ -2819,4 +2833,196 @@ let%expect_test "owned job cancellation and interruption preserve actual custody
     ((truthful_outcome true) (actual_attempt_preserved true)
      (no_fabricated_success true) (finished_truthfully true) (no_replay true))
     |}]
+;;
+
+let%expect_test "unavailable legacy lookalike cannot consume a registered timer wait" =
+  let module M = Chat_response.Moderator_manager in
+  let make_manager env =
+    prepared_legacy_callback_managers
+      env
+      ~id:"legacy-wait"
+      ~source:
+        {|let initial_state = 0
+        let on_event = fun ctx st ev -> Task.pure(st)|}
+      ()
+  in
+  with_startup_actor ~make_manager (fun actor _ _ request start manager _ _ _ ->
+    start (request "legacy-lookalike") |> protocol_ok |> ignore;
+    let before = M.identity_snapshot manager |> Result.ok_or_failwith in
+    let timer = ref None in
+    A.Session_actor.with_current_moderator_event
+      actor
+      ~operation_id:None
+      ~event:Session_start
+      ~snapshot:(fun () -> Ok before)
+      (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
+         let service =
+           A.Session_actor.run_actions actor executing |> protocol_ok |> Option.value_exn
+         in
+         let owner = P.Job.Moderator_event executing.context.id in
+         let creation, staged =
+           A.Session_actor.create_script_schedule
+             actor
+             ~owner
+             ~source:executing.context.source
+             ~delay_ms:0
+             ~payload:(`String "timer")
+             ~misfire:Deliver_once_immediately
+           |> protocol_ok
+         in
+         timer := Some staged;
+         A.Session_actor.select_schedule_mutations
+           actor
+           ~owner
+           ~source:executing.context.source
+           ~receipts:[ creation ]
+         |> protocol_ok;
+         let run =
+           (A.Session_actor.state actor |> protocol_ok).run_state
+           |> Option.value_exn
+           |> A.Run_state.runs
+           |> List.hd_exn
+         in
+         let ownership = Option.value_exn staged.ownership in
+         let wake =
+           P.Run_wake.create
+             ~run_id:run.id
+             ~source:run.source
+             ~occurrence:
+               (Delivered_timer
+                  { schedule_id = staged.id
+                  ; delivery_count = Int.succ staged.delivery_count
+                  ; creator = ownership.creator
+                  ; subscription = ownership.subscription
+                  })
+           |> protocol_ok
+         in
+         let transaction = A.Run_action_service.transaction service in
+         let ticket = transaction.handlers.stage (Wait wake) |> Result.ok_or_failwith in
+         transaction.prepare [ ticket ] |> Result.ok_or_failwith |> ignore;
+         commit
+           ~snapshot:before
+           ~requests:
+             { request_turn = false; request_compaction = false; end_session = None })
+    |> protocol_ok
+    |> ignore;
+    let timer = Option.value_exn !timer in
+    let claimed =
+      A.Session_actor.claim_schedule
+        actor
+        ~schedule_id:timer.id
+        ~generation:timer.generation
+      |> protocol_ok
+      |> Option.value_exn
+    in
+    let frame =
+      Chat_response.Schedule_delivery.capture claimed |> Result.ok_or_failwith
+    in
+    (* Byte-identical raw content is not the actual Schedule delivery transaction:
+       the producer remains Delivering and there is no positive queue capture. *)
+    M.enqueue_internal_event_entries
+      manager
+      ~event:frame
+      ~prepare:(fun ~before:_ ~snapshot ->
+        A.Session_actor.change_moderator
+          actor
+          (Some (A.Moderator_checkpoint.encode snapshot))
+        |> Result.map ~f:ignore
+        |> Result.map_error ~f:(fun error -> error.P.Error.message))
+    |> Result.ok_or_failwith
+    |> ignore;
+    let waiting = A.Session_actor.state actor |> protocol_ok in
+    let index = Option.value_exn waiting.run_state in
+    let run = A.Run_state.runs index |> List.hd_exn in
+    (match run.lifecycle with
+     | Waiting _ -> ()
+     | _ -> failwith "real timer wait was not registered");
+    let worker =
+      A.Operation_worker.create ~run:(fun ~sw:_ ~input:_ _ ->
+        failwith "unexpected foreground worker")
+    in
+    A.Session_actor.set_runtime_worker
+      ~moderator_manager:manager
+      actor
+      ~worker:(Some worker)
+      ~inference:
+        (Some
+           (Inference_ports.create ~config:Chat_response.Config.default ()
+            |> Inference_ports.execution))
+    |> protocol_ok;
+    M.handle_legacy_callback_entries
+      manager
+      ~selection:Queue_head
+      ~session_id:"fixture"
+      ~now_ms:0
+      ~history:[]
+      ~available_tools:[]
+      ~session_meta:`Null
+      ~with_admission:(fun callback ~snapshot:_ execute ->
+        let outcome = ref None in
+        let result =
+          A.Session_actor.with_legacy_queued_callback
+            actor
+            ~callback
+            ~operation_id:None
+            (fun ~scope ~commit ->
+               assert (Option.is_none (A.Session_actor.Callback_scope.origin scope));
+               assert (
+                 Option.is_none
+                   (A.Session_actor.run_actions
+                      actor
+                      (A.Session_actor.Callback_scope.executing scope)
+                    |> protocol_ok));
+               let binding : M.callback_binding =
+                 { services =
+                     { model_recipes = Map.empty (module String)
+                     ; after_ms = (fun ~delay_ms:_ ~payload:_ -> Error "unused")
+                     ; cancel = (fun ~id:_ -> Error "unused")
+                     }
+                 ; authorize =
+                     (fun () ->
+                       A.Session_actor.check_callback_current actor scope
+                       |> Result.map_error ~f:(fun error -> error.P.Error.message))
+                 ; prepare =
+                     (fun ~outcome:_ ~snapshot ->
+                       Ok
+                         { M.persist =
+                             (fun () ->
+                               commit
+                                 ~snapshot
+                                 ~requests:
+                                   { request_turn = false
+                                   ; request_compaction = false
+                                   ; end_session = None
+                                   }
+                               |> Result.map_error ~f:(fun error -> error.P.Error.message))
+                         ; install = ignore
+                         })
+                 }
+               in
+               execute binding
+               |> Result.map_error ~f:handoff_error
+               |> Result.map ~f:(fun value -> outcome := Some value))
+        in
+        match result with
+        | Ok true -> Ok (Option.value_exn !outcome)
+        | Ok false -> Error "legacy callback unavailable"
+        | Error error -> Error error.P.Error.message)
+    |> Result.ok_or_failwith
+    |> ignore;
+    let after = A.Session_actor.state actor |> protocol_ok in
+    let after_index = Option.value_exn after.run_state in
+    assert (
+      Document_schema.Json.equal
+        (A.Run_state.to_jsonaf index)
+        (A.Run_state.to_jsonaf after_index));
+    let retained =
+      List.find_exn after.schedules ~f:(fun schedule ->
+        P.Id.Schedule.equal schedule.id timer.id)
+    in
+    (match retained.status with
+     | Delivering -> ()
+     | _ -> failwith "lookalike acknowledged timer delivery");
+    print_endline "raw lookalike runs without consuming Wait or lending Run actions");
+  [%expect {|raw lookalike runs without consuming Wait or lending Run actions|}]
 ;;

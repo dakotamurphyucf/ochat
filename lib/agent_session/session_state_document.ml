@@ -964,7 +964,9 @@ let state_shape =
     ; ( "ingress_registrations"
       , X.array_shape_exn ~identity_field:"id" External_ingress.shape )
     ; "attachments", X.array_shape_exn ~identity_field:"id" attachment_shape
-    ; "moderator", X.nullable_shape Moderator_checkpoint.shape
+      (* The checkpoint owns raw extension custody and validates every update
+       through Queue_provenance_validation, including carrier encode/adopt. *)
+    ; "moderator", X.nullable_shape D.Shape.value
     ; "shell", Session.Shell_state.shape
     ; "halted", Document_schema.Shape.value
     ; "halt_reason", X.nullable_shape Document_schema.Shape.value

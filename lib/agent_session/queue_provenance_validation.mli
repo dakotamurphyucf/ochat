@@ -19,13 +19,22 @@ type t =
     retired captures precede its frontier. Terminal history can outlive that
     lifetime only with a strictly later retained installation epoch, never by
     renewing permission. Retained queue producer references must remain present,
-    even after terminal disposition or ordinary pruning. *)
+    even after terminal disposition or ordinary pruning. A Schedule's original
+    Run attribution must name a retained same-session/full-source Run; absence of
+    a Schedule work occurrence is allowed because attribution creates no work.
+    Any actual retained Schedule owner must agree. Saved historical attribution
+    need not match the actor's newer installation; delivery checks currentness. *)
 val validate : t -> (unit, Agent_protocol.Error.t) result
 
-(** Validate immutable schedule captures and queue frontiers. A queue lifetime
-    currently cannot be removed or replaced by a different source lifetime.
-    Explicit source/reset carrier handling belongs to its live integration;
-    observer strings and decoded installation claims never erase protection. *)
+(** Validate immutable schedule captures and queue frontiers. Retiring a queue
+    requires its exact original installation, one validated epoch rotation, the
+    same session and unchanged or exactly incremented generation. A destination
+    queue starts at ordinal zero with the actual new full source and validated
+    producer references. Prior Running queue occurrences cannot be retired here;
+    truthful terminal history keeps its existing later-epoch retention rules.
+    Complete raw checkpoint preservation is checked first: protected unfamiliar
+    data cannot disappear or move to the new lifetime. These durable facts grant
+    no live execution permission. *)
 val validate_transition : previous:t -> t -> (unit, Agent_protocol.Error.t) result
 
 (** Validate a fresh positive Running claim at its ordered admission prefix.
