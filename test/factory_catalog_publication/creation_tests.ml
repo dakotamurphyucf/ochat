@@ -372,7 +372,8 @@ let on_event = fun ctx state event -> match event with
     | `Ok(value) ->
       Task.bind(Runtime.emit(`String("constructor suffix")), fun ignored ->
         Task.bind(Schedule.after_ms(60000, `String("constructor timer")), fun timer ->
-          Task.pure(state + 1))))
+          Task.bind(Ui.notify("constructor notification"), fun ignored ->
+            Task.pure(state + 1)))))
 | _ -> Task.pure(state)
 </script>|}
   in
@@ -427,6 +428,35 @@ let on_event = fun ctx state event -> match event with
               , (receipts : P.Moderator_execution.t list)]
         in
         assert (P.Moderator_execution.equal_phase receipt.context.phase Session_start);
+        let events =
+          match
+            Agent_session.Durable_event_log.replay
+              entry.durable_events
+              ~after_sequence:0L
+              ~through_sequence:state.counters.event_sequence
+          with
+          | Available events -> events
+          | Snapshot_required -> failwith "constructor events exceeded the replay window"
+        in
+        let notifications =
+          List.filter_map events ~f:(fun event ->
+            match
+              P.Event.Durable.Payload.of_json ~kind:event.kind event.payload
+              |> protocol_ok
+            with
+            | Moderator_notification payload -> Some payload
+            | _ -> None)
+        in
+        assert (
+          List.equal
+            Jsonaf.exactly_equal
+            notifications
+            [ `Object
+                [ "message", `String "constructor notification"
+                ; ( "moderator_execution_id"
+                  , P.Id.Moderator_execution.to_json receipt.context.id )
+                ]
+            ]);
         (match receipt.status with
          | Completed _ -> ()
          | Running | Failed _ | Interrupted _ ->

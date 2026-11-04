@@ -784,6 +784,7 @@ type legacy_callback_handler =
   -> commit:
        (snapshot:Session.Moderator_state.Identity_snapshot.t
         -> requests:Agent_protocol.Invocation.follow_up
+        -> notifications:string list
         -> (unit, Agent_protocol.Error.t) result)
   -> (unit, Agent_protocol.Error.t) result
 
@@ -10942,6 +10943,23 @@ let callback_tool_executor t ~scope ~invocation callback =
        callback ~dispatched ~capabilities)
 ;;
 
+let callback_model_jobs t ~scope =
+  let admission = model_job_port t (Inference_event scope.Callback_scope.borrow) in
+  Model_job_admission.Host.create ~admit:(fun job ->
+    let open Result.Let_syntax in
+    let%bind () =
+      match scope.constructor_scope with
+      | None -> Ok ()
+      | Some _ ->
+        Error
+          (error
+             Permission_denied
+             "installed callback Model admission excludes constructors")
+    in
+    let%bind () = check_callback_current t scope in
+    Model_job_admission.admit admission job)
+;;
+
 let with_invocation t operation_id ~invocation f =
   with_invocation_claim t (Claim_invocation (operation_id, invocation)) f
 ;;
@@ -11295,8 +11313,8 @@ let with_legacy_callback_parent t parent ~callback f =
     | Some scope ->
       run_queued_event_borrow t scope.borrow (fun ~borrow:_ ~event:_ ~commit ->
         let%bind () = check_callback_current t scope in
-        f ~scope ~commit:(fun ~snapshot ~requests ->
-          commit ~decision:None ~notifications:[] ~snapshot ~requests)))
+        f ~scope ~commit:(fun ~snapshot ~requests ~notifications ->
+          commit ~decision:None ~notifications ~snapshot ~requests)))
 ;;
 
 let with_initialization_callback t ~scope ~manager ~callback f =
@@ -11311,8 +11329,8 @@ let with_initialization_callback t ~scope ~manager ~callback f =
     | Some scope ->
       run_queued_event_borrow t scope.borrow (fun ~borrow:_ ~event:_ ~commit ->
         let%bind () = check_callback_current t scope in
-        f ~scope ~commit:(fun ~snapshot ~requests ->
-          commit ~decision:None ~notifications:[] ~snapshot ~requests)))
+        f ~scope ~commit:(fun ~snapshot ~requests ~notifications ->
+          commit ~decision:None ~notifications ~snapshot ~requests)))
 ;;
 
 let with_legacy_callback t ~operation_id =

@@ -44,7 +44,14 @@ let agent trigger =
       ^ start
     | Handler -> ""
     | Pre_tool -> "| `Pre_tool_call(p) -> if state then Task.pure(state) else " ^ start
-    | Observation -> "| `Tool_observed(p) -> if state then Task.pure(state) else " ^ start
+    | Observation ->
+      {|
+| `Session_start -> Task.bind(Tool.spawn("read_file", `Object([
+    {key = "root"; value = `String("reports")},
+    {key = "file"; value = `String("report.txt")}
+  ])), fun job -> Task.pure(state))
+| `Tool_observed(p) -> if state then Task.pure(state) else |}
+      ^ start
   in
   native_agent
   ^ {|<script id="owner" language="chatml" kind="moderator" api="extensibility-v1">
@@ -76,22 +83,44 @@ let%expect_test "moderator launches survive handler, event and observation commi
     with_background_daemon
       ~agent:(agent trigger)
       ~sources:Background_moderator_tests.sources
+      ?before_start:
+        (match trigger with
+         | Observation -> Some (fun () -> ())
+         | Lifecycle | Queued | Handler | Pre_tool -> None)
       (fun env client entry capabilities ->
-         (match trigger with
-          | Lifecycle | Queued -> ()
-          | Handler | Pre_tool | Observation ->
-            let request =
-              match trigger with
-              | Observation -> native capabilities "report.txt"
-              | Handler | Pre_tool -> tool capabilities "counter" (`Object [])
-              | Lifecycle | Queued -> assert false
-            in
-            let parent = submit entry (B.to_json request) in
-            let _, completion = await env client parent in
-            (match completion with
-             | Succeeded _ -> ()
-             | other -> raise_s [%sexp (other : Completion.t)]));
-         let job = launched_job env entry.actor in
+         let observed_parent =
+           match trigger with
+           | Lifecycle | Queued -> None
+           | Handler | Pre_tool ->
+             let request = tool capabilities "counter" (`Object []) in
+             let parent = submit entry (B.to_json request) in
+             let _, completion = await env client parent in
+             (match completion with
+              | Succeeded _ -> ()
+              | other -> raise_s [%sexp (other : Completion.t)]);
+             None
+           | Observation ->
+             let parent =
+               await_launch env entry.actor ~request:(native capabilities "report.txt")
+             in
+             let parent, completion = await env client parent in
+             (match completion with
+              | Succeeded (`String result) ->
+                assert (String.is_substring result ~substring:"background report")
+              | other -> raise_s [%sexp (other : Completion.t)]);
+             let launch = Option.value_exn parent.launch in
+             assert (Option.is_none launch.parent_job);
+             (match launch.owner with
+              | Moderator_event _ -> ()
+              | Invocation _ -> failwith "observed parent was not a lifecycle launch");
+             Some parent
+         in
+         let job =
+           match observed_parent with
+           | None -> launched_job env entry.actor
+           | Some _ ->
+             await_launch env entry.actor ~request:(native capabilities "second.txt")
+         in
          let _, completion = await env client job in
          let launch = Option.value_exn job.launch in
          let owner =
@@ -100,9 +129,59 @@ let%expect_test "moderator launches survive handler, event and observation commi
            | Invocation _ -> "invocation"
          in
          let state = Background_moderator_tests.await_cleanup env entry.actor in
-         [%test_eq: int]
-           1
-           (List.count state.jobs ~f:(fun job -> Option.is_some job.launch));
+         (match observed_parent with
+          | None ->
+            [%test_eq: int]
+              1
+              (List.count state.jobs ~f:(fun job -> Option.is_some job.launch))
+          | Some parent ->
+            assert (not (Agent_protocol.Id.Job.equal job.id parent.id));
+            (match launch.parent_job with
+             | Some (id, attempt) ->
+               assert (Agent_protocol.Id.Job.equal id parent.id);
+               [%test_eq: int] parent.attempt attempt
+             | None -> failwith "observation child lost its actual parent attempt");
+            (match launch.owner with
+             | Moderator_event _ -> failwith "observation child lost its invocation owner"
+             | Invocation id ->
+               let producer =
+                 List.find_exn state.invocations ~f:(fun invocation ->
+                   Agent_protocol.Id.Invocation.equal invocation.context.id id)
+               in
+               [%test_eq: string] "read_file" producer.context.tool_name;
+               assert (
+                 Agent_protocol.Invocation.equal_origin producer.context.origin Script);
+               assert (Option.is_none producer.context.parent_job);
+               assert (Option.is_none producer.parent_event);
+               assert (
+                 Jsonaf.exactly_equal
+                   producer.context.input
+                   (`Object [ "root", `String "reports"; "file", `String "report.txt" ]));
+               (* Background_execution owns a Script wrapper for the Job; its
+                  selected native target is an Invocation child, not another
+                  direct Job child. Assert the actual complete chain. *)
+               let wrapper_id = Option.value_exn producer.context.parent_invocation in
+               assert (not (Agent_protocol.Id.Invocation.equal wrapper_id id));
+               let wrapper =
+                 List.find_exn state.invocations ~f:(fun invocation ->
+                   Agent_protocol.Id.Invocation.equal invocation.context.id wrapper_id)
+               in
+               [%test_eq: string] "chatml.background" wrapper.context.tool_name;
+               assert (
+                 Agent_protocol.Invocation.equal_origin wrapper.context.origin Script);
+               assert (Option.is_none wrapper.context.parent_invocation);
+               assert (Option.is_none wrapper.parent_event);
+               assert (
+                 Option.equal
+                   Agent_protocol.Id.Job.equal
+                   wrapper.context.parent_job
+                   (Some parent.id));
+               (match wrapper.status with
+                | Resolved (Complete _) | Published (Complete _) -> ()
+                | status -> raise_s [%sexp (status : Agent_protocol.Invocation.status)]));
+            [%test_eq: int]
+              2
+              (List.count state.jobs ~f:(fun job -> Option.is_some job.launch)));
          print_s
            [%sexp (trigger : trigger), (owner : string), (completion : Completion.t)]));
   [%expect

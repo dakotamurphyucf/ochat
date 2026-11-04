@@ -520,6 +520,7 @@ let moderator_features =
     , [ "lib/chat_response/moderator_manager.ml"
       ; "lib/chat_response/moderator_invocation.ml"
       ; "lib/agent_session/moderator_tool_dispatch.ml"
+      ; "lib/agent_session/legacy_callback_runtime.ml"
       ; "lib/agent_session/session_actor.ml"
       ; "lib/agent_session/execution_custody.ml"
       ; "lib/agent_session/legacy_queue_custody.ml"
@@ -530,6 +531,7 @@ let moderator_features =
     , "runtime.invocations.moderator"
     , [ "test/agent_session/event_delivery_tests.ml"
       ; "test/chatml_composition/moderator_pending_tests.ml"
+      ; "test/factory_catalog_publication/creation_tests.ml"
       ; "test/agent_server_restart_test.ml"
       ; "test/chatml_script_routing/routing_tests.ml"
       ] )
@@ -650,8 +652,10 @@ let implementation_sources =
     , "f479e72bd27d60883647524052eb04770198f07603b2d738633130ece31c4861" )
   ; ( "lib/chat_response/in_memory_stream.ml"
     , "e246a224d598a61fc78d93197cdf3e933fa41539bb37bc1d68471eb55573f145" )
+  ; ( "lib/agent_session/legacy_callback_runtime.ml"
+    , "35145b8ad6e85ae947d2d5e433694d577bf29b5fdfaf0b69f312b377cab53884" )
   ; ( "lib/agent_session/runtime_builder.ml"
-    , "a556fc1c72df01f2f4a8a2b9b4eb608924074ac8f1fdca0606fe872b43b38f0b" )
+    , "94c9e37699d5d39db2679755e2082e5a6d08663e70b58c283a12d64a28c07c59" )
   ; ( "lib/context_compaction/compactor.ml"
     , "7b11eae5ce4d929bf1ab4702111d03f70fe97cfe8543135c73782c2b92391ff0" )
   ; ( "lib/agent_session/session_transition.ml"
@@ -689,7 +693,7 @@ let implementation_sources =
   ; ( "bin/ochat_agent_stdio.ml"
     , "8d134cd11c7df2a60e6b4b77a5ff7f9ea0c28a8a2674a3dd9f573adaa7623902" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "0a2e8c5a873febd53cc2e22d205f824aa88413b3200a11f82edc2d8286aeb98f" )
+    , "b5588144bb6bac60363b923c7ed733dda54052490e3babf0920260a97774eb66" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"
@@ -935,7 +939,7 @@ let implementation_sources =
   ; ( "lib/agent_session/script_subscription_service.ml"
     , "54c775836b551733687e907ff46a2a7a0cc26bd46ff915cc6fd5f0cf5116f069" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "37358ec7f076979a969c9fa4d1c22c4e1f79b77b708b0017f60781f31c6eef2d" )
+    , "eb43a323820e16b98bdc4f645418689aeaa1d25ef4764ed7645a4f92fb73481b" )
   ; ( "lib/agent_session/job_custody.ml"
     , "3f3a132b6fd32f11eba332ec3ae9f6ff4dbfb771dd542ab12cab5a1316e8f3b3" )
   ; ( "lib/agent_session/staged_jobs.ml"

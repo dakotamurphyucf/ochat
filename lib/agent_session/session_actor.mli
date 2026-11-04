@@ -687,13 +687,16 @@ module Callback_scope : sig
 end
 
 (** A callback holds its actual actor borrow through checkpoint commit and
-    cleanup. Commit persists the outcome and full prospective queue atomically.
+    cleanup. Commit persists the outcome, full prospective queue and explicit
+    notifications in the same Event acknowledgement. Notifications returned in a
+    host outcome must not be published again after this commit.
     Failure retains honest failed/interrupted evidence; effects are not replayed. *)
 type legacy_callback_handler =
   scope:Callback_scope.t
   -> commit:
        (snapshot:Session.Moderator_state.Identity_snapshot.t
         -> requests:Agent_protocol.Invocation.follow_up
+        -> notifications:string list
         -> (unit, Agent_protocol.Error.t) result)
   -> (unit, Agent_protocol.Error.t) result
 
@@ -2183,6 +2186,13 @@ val callback_tool_executor
   -> scope:Callback_scope.t
   -> Native_tool_invocation.executor
 
+(** Model Job admission for this exact installed callback only. Each admission
+    rejects constructor scopes, rechecks the physical callback/Manager/source and
+    original authority, then uses the actual Event parent. An escaped port cannot
+    retarget to a later callback or fall back to initialization services. This
+    grants neither synchronous constructor execution nor permission from IDs. *)
+val callback_model_jobs : t -> scope:Callback_scope.t -> Model_job_admission.t
+
 (** Immediate legacy Schedule services bound to this exact callback. Constructing
     the record grants no authority: each call rechecks the actual Manager/source,
     physical borrow and original admission at actor persistence. Unavailable or
@@ -2250,6 +2260,7 @@ val with_legacy_queued_callback
       -> commit:
            (snapshot:Session.Moderator_state.Identity_snapshot.t
             -> requests:Agent_protocol.Invocation.follow_up
+            -> notifications:string list
             -> (unit, Agent_protocol.Error.t) result)
       -> (unit, Agent_protocol.Error.t) result)
   -> (bool, Agent_protocol.Error.t) result

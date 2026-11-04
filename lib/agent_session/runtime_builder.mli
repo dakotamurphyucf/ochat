@@ -374,19 +374,19 @@ type t =
         Closes and joins graph-owned inference channels, then persists cache. *)
   }
 
-type schedule_services =
+type schedule_services = Legacy_callback_runtime.Services.schedules =
   { after_ms : delay_ms:int -> payload:Jsonaf.t -> (string, string) result
   ; cancel : id:string -> (unit, string) result
   }
 
 type job_services = Runtime_model_services.factory
 
-(** One actual constructor callback owner, shared by Tool, Schedule and Model.
-    Saved checkpoint is exact acknowledged DATA, not an effect-currentness check.
-    [is_halted] checks this same live constructor owner and actual failure/halt
-    state; it does not relax interactive permission eligibility. Claim failure
-    cannot fall back to standalone services. No installed callback owner is implied. *)
-type legacy_callback_services =
+(** One actual callback owner, shared by Tool, Schedule and Model. Saved
+    checkpoint is exact acknowledged DATA, not an effect-currentness check.
+    [is_halted] checks this same live owner and actual failure/halt state; it does
+    not relax interactive permission eligibility. The claim saves notifications
+    with its full checkpoint and request intent. No ambient fallback is allowed. *)
+type legacy_callback_services = Legacy_callback_runtime.Services.t =
   { jobs : Runtime_model_services.t
   ; schedules : schedule_services
   ; execute : Native_tool_invocation.executor
@@ -396,19 +396,16 @@ type legacy_callback_services =
   ; checkpoint : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
   }
 
-type legacy_callback_claim =
-  manager:Chat_response.Moderator_manager.t
-  -> callback:Chat_response.Moderator_manager.Callback.t
-  -> (services:legacy_callback_services
-      -> commit:
-           (snapshot:Session.Moderator_state.Identity_snapshot.t
-            -> requests:Agent_protocol.Invocation.follow_up
-            -> (unit, Agent_protocol.Error.t) result)
-      -> (unit, Agent_protocol.Error.t) result)
-  -> (bool, Agent_protocol.Error.t) result
+type legacy_callback_claim = Legacy_callback_runtime.claim
 
+(** Constructor and installed claims have separate exact lifetimes. [claim]
+    requires the actual initialization owner. [installed_claim] requires the
+    supplied operation or exact idle Queue_head and must never reuse constructor
+    services. Providing this host does not itself install foreground/idle routing. *)
 type legacy_construction =
   { claim : legacy_callback_claim
+  ; installed_claim :
+      operation_id:Agent_protocol.Id.Operation.t option -> legacy_callback_claim
   ; script_tools : Chat_response.Agent_runtime.t -> Script_tool_calls.t
   }
 

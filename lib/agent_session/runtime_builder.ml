@@ -146,14 +146,14 @@ type t =
   ; close : unit -> unit
   }
 
-type schedule_services =
+type schedule_services = Legacy_callback_runtime.Services.schedules =
   { after_ms : delay_ms:int -> payload:Jsonaf.t -> (string, string) result
   ; cancel : id:string -> (unit, string) result
   }
 
 type job_services = Runtime_model_services.factory
 
-type legacy_callback_services =
+type legacy_callback_services = Legacy_callback_runtime.Services.t =
   { jobs : Runtime_model_services.t
   ; schedules : schedule_services
   ; execute : Native_tool_invocation.executor
@@ -163,19 +163,12 @@ type legacy_callback_services =
   ; checkpoint : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
   }
 
-type legacy_callback_claim =
-  manager:Manager.t
-  -> callback:Manager.Callback.t
-  -> (services:legacy_callback_services
-      -> commit:
-           (snapshot:Session.Moderator_state.Identity_snapshot.t
-            -> requests:Agent_protocol.Invocation.follow_up
-            -> (unit, Agent_protocol.Error.t) result)
-      -> (unit, Agent_protocol.Error.t) result)
-  -> (bool, Agent_protocol.Error.t) result
+type legacy_callback_claim = Legacy_callback_runtime.claim
 
 type legacy_construction =
   { claim : legacy_callback_claim
+  ; installed_claim :
+      operation_id:Agent_protocol.Id.Operation.t option -> legacy_callback_claim
   ; script_tools : Agent_runtime.t -> Script_tool_calls.t
   }
 
@@ -900,98 +893,24 @@ let run_legacy_constructor
       ~selection
   =
   let open Result.Let_syntax in
-  let checkpoint = ref None in
-  let%bind outcome =
-    Manager.handle_legacy_callback_entries
+  let%bind result =
+    Legacy_callback_runtime.run
       manager
+      ~claim:host.claim
+      ~model_recipes:
+        (legacy_model_recipes ~delegated executor ~session_text ~bind_inference_identity)
+      ~script_tools
+      ~selected
       ~selection
       ~session_id:session_text
-      ~now_ms
       ~history
       ~available_tools:tools
       ~session_meta:`Null
-      ~with_admission:(fun callback ~snapshot:_ run ->
-        let outcome = ref None in
-        let%bind committed =
-          host.claim ~manager ~callback (fun ~services ~commit ->
-            let scoped_tools =
-              Script_tool_calls.with_lifecycle script_tools ~is_halted:services.is_halted
-            in
-            Script_tool_calls.with_legacy_event
-              scoped_tools
-              ~selected
-              ~execute:services.execute
-              ~executing:services.executing
-              (fun tool_call ->
-                 let binding : Manager.callback_binding =
-                   { services =
-                       { model_recipes =
-                           legacy_model_recipes
-                             ~delegated
-                             executor
-                             ~session_text
-                             ~bind_inference_identity
-                             services.jobs
-                       ; tool_call
-                       ; after_ms =
-                           (fun ~delay_ms ~payload ->
-                             let%bind payload =
-                               Chatml.Chatml_value_codec.Snapshot.of_value payload
-                             in
-                             services.schedules.after_ms
-                               ~delay_ms
-                               ~payload:
-                                 (Chatml.Chatml_value_codec.Snapshot.to_jsonaf payload))
-                       ; cancel = services.schedules.cancel
-                       }
-                   ; authorize =
-                       (fun () ->
-                         services.check_current ()
-                         |> Result.map_error ~f:(fun error ->
-                           error.Agent_protocol.Error.message))
-                   ; prepare =
-                       (fun ~(outcome : Moderation.Outcome.t) ~snapshot ->
-                         let requests : Agent_protocol.Invocation.follow_up =
-                           { request_turn =
-                               Chat_response.Runtime_semantics.request_turn
-                                 outcome.runtime_requests
-                           ; request_compaction =
-                               Chat_response.Runtime_semantics.request_compaction
-                                 outcome.runtime_requests
-                           ; end_session =
-                               Chat_response.Runtime_semantics.should_end_session
-                                 outcome.runtime_requests
-                           }
-                         in
-                         Ok
-                           { Manager.persist =
-                               (fun () ->
-                                 let result =
-                                   let%bind () = commit ~snapshot ~requests in
-                                   let%map acknowledged = services.checkpoint () in
-                                   checkpoint := Some acknowledged
-                                 in
-                                 Result.map_error result ~f:(fun error ->
-                                   error.Agent_protocol.Error.message))
-                           ; install = ignore
-                           })
-                   }
-                 in
-                 run binding
-                 |> Result.map_error ~f:failure
-                 |> Result.map ~f:(fun value -> outcome := Some value)))
-          |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
-        in
-        match committed, !outcome with
-        | true, Some outcome -> Ok outcome
-        | false, _ -> Error "legacy constructor has no current physical owner"
-        | true, None -> Error "legacy constructor committed without its outcome")
-    |> Result.map_error ~f:failure
+      ~now_ms
   in
-  match outcome, !checkpoint with
-  | Some _, Some checkpoint -> Ok checkpoint
-  | None, _ | Some _, None ->
-    Error (failure "legacy constructor did not acknowledge its checkpoint")
+  match result with
+  | Some result -> Ok result.checkpoint
+  | None -> Error (failure "legacy constructor did not acknowledge its checkpoint")
 ;;
 
 let create_moderator

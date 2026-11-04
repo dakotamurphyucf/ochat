@@ -1552,6 +1552,7 @@ let%expect_test "legacy exact Manager claim installs source facts without a Run"
                            assert (
                              Result.is_error
                                (commit
+                                  ~notifications:[]
                                   ~snapshot:(M.Callback.snapshot callback)
                                   ~requests:
                                     { request_turn
@@ -1579,6 +1580,7 @@ let%expect_test "legacy exact Manager claim installs source facts without a Run"
                               { M.persist =
                                   (fun () ->
                                     commit
+                                      ~notifications:[]
                                       ~snapshot
                                       ~requests:
                                         { request_turn = false
@@ -1949,7 +1951,7 @@ module Legacy_emit = struct
                       Ok
                         { M.persist =
                             (fun () ->
-                              commit ~snapshot ~requests
+                              commit ~snapshot ~requests ~notifications:[]
                               |> Result.map_error ~f:(fun error ->
                                 error.Agent_protocol.Error.message))
                         ; install = ignore
@@ -4687,8 +4689,8 @@ let%expect_test
              ~manager
              ~callback
              (fun ~scope ~commit ->
-                run ~scope ~commit:(fun ~snapshot ~requests ->
-                  let result = commit ~snapshot ~requests in
+                run ~scope ~commit:(fun ~snapshot ~requests ~notifications ->
+                  let result = commit ~snapshot ~requests ~notifications in
                   Result.iter_error result ~f:(fun failure ->
                     checkpoint_error := Some failure);
                   result))

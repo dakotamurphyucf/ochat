@@ -395,6 +395,21 @@ never drains them with constructor defaults. Standalone embeddings that explicit
 supply no construction port retain their existing behavior. Foreground/idle host
 routing and installed Model services remain subsequent composition gates.
 
+The shared legacy callback bridge returns the actual committed outcome together
+with that acknowledged checkpoint. Its explicit notification list commits in the
+same Event acknowledgement as the full prospective queue and request intent;
+consumers must not publish or schedule those facts again. An empty selected queue
+returns no outcome without claiming an Event. The bridge itself does not drain a
+batch or install foreground or idle routing.
+
+Installed callback services use a separate Factory claim and the Actor's exact
+callback Model admission port. Every admission rejects constructor scopes and
+rechecks the actual callback, installed Manager, source and original custody.
+Ordinary synchronous child Jobs retain their existing claimed execution and
+inference lifetime. Constructor services keep their genuine initialization owner;
+a missing installed owner cannot fall back to it. Exposing this shared bridge and
+service adapter does not itself qualify the foreground or idle host consumers.
+
 Deferred native observations retain a separate process-local admission component
 within the existing bounded continuation inventory. The completed native result
 ACK installs its loan before publication; the exact observation claim ACK transfers

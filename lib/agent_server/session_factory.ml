@@ -3757,6 +3757,57 @@ let legacy_construction
   =
   let module A = Agent_session.Session_actor in
   let module B = Agent_session.Runtime_builder in
+  let with_services actor scope (jobs : Agent_session.Runtime_model_services.t) ~commit f =
+    let check_current () = A.check_callback_current actor scope in
+    let check_service () =
+      check_current ()
+      |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+    in
+    let jobs : Agent_session.Runtime_model_services.t =
+      { spawn_model =
+          (fun ~recipe ~payload ->
+            let open Result.Let_syntax in
+            let%bind () = check_service () in
+            jobs.spawn_model ~recipe ~payload)
+      ; call_model =
+          (fun ~recipe ~payload ~execute ->
+            let open Result.Let_syntax in
+            let%bind () = check_service () in
+            jobs.call_model ~recipe ~payload ~execute)
+      }
+    in
+    let is_halted () =
+      match check_current () with
+      | Error _ -> true
+      | Ok () ->
+        (match A.state actor with
+         | Error _ -> true
+         | Ok current ->
+           current.halted
+           || Option.is_some current.failure
+           || Result.is_error (check_current ()))
+    in
+    let checkpoint () =
+      match A.Callback_scope.committed_checkpoint scope with
+      | Some checkpoint -> Ok checkpoint
+      | None ->
+        Error
+          (unavailable
+             Invalid_state
+             "legacy callback has not acknowledged its checkpoint")
+    in
+    let services : B.legacy_callback_services =
+      { jobs
+      ; schedules = A.callback_schedule_services actor ~scope
+      ; execute = A.callback_tool_executor actor ~scope
+      ; executing = A.Callback_scope.executing scope
+      ; check_current
+      ; is_halted
+      ; checkpoint
+      }
+    in
+    f ~services ~commit
+  in
   let claim ~manager ~callback f =
     match !actor_ref, !initialization_scope with
     | Some actor, Some constructor ->
@@ -3778,63 +3829,48 @@ let legacy_construction
         ~scope:constructor
         ~manager
         ~callback
-        (fun ~scope ~commit ->
-           let check_current () = A.check_callback_current actor scope in
-           let check_service () =
-             check_current ()
-             |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
-           in
-           let jobs : Agent_session.Runtime_model_services.t =
-             { spawn_model =
-                 (fun ~recipe ~payload ->
-                   let open Result.Let_syntax in
-                   let%bind () = check_service () in
-                   jobs.spawn_model ~recipe ~payload)
-             ; call_model =
-                 (fun ~recipe ~payload ~execute ->
-                   let open Result.Let_syntax in
-                   let%bind () = check_service () in
-                   jobs.call_model ~recipe ~payload ~execute)
-             }
-           in
-           let is_halted () =
-             match check_current () with
-             | Error _ -> true
-             | Ok () ->
-               (match A.state actor with
-                | Error _ -> true
-                | Ok current ->
-                  current.halted
-                  || Option.is_some current.failure
-                  || Result.is_error (check_current ()))
-           in
-           let checkpoint () =
-             match A.Callback_scope.committed_checkpoint scope with
-             | Some checkpoint -> Ok checkpoint
-             | None ->
-               Error
-                 (unavailable
-                    Invalid_state
-                    "legacy constructor has not acknowledged its checkpoint")
-           in
-           let services : B.legacy_callback_services =
-             { jobs
-             ; schedules = A.callback_schedule_services actor ~scope
-             ; execute = A.callback_tool_executor actor ~scope
-             ; executing = A.Callback_scope.executing scope
-             ; check_current
-             ; is_halted
-             ; checkpoint
-             }
-           in
-           f ~services ~commit)
+        (fun ~scope ~commit -> with_services actor scope jobs ~commit f)
     | None, _ | Some _, None ->
       Error
         (unavailable
            Permission_denied
            "legacy constructor callback requires its actual initialization owner")
   in
-  B.{ claim; script_tools = native_script_tools t profile actor_ref ~state }
+  (* Installed callbacks have no construction fallback or mutable preparation.
+     Their actual callback port owns admission; ordinary claimed Job execution
+     independently owns synchronous child lifetime and inference allocation. *)
+  let installed_jobs =
+    job_services
+      t
+      state
+      actor_ref
+      pending_jobs
+      ~initialization_scope:(ref None)
+      ~initialization_jobs:(ref [])
+      ~run_preparation:(ref None)
+  in
+  let installed_claim ~operation_id ~manager ~callback f =
+    match !actor_ref with
+    | None ->
+      Error (unavailable Permission_denied "installed legacy callback requires its actor")
+    | Some actor ->
+      if not (Chat_response.Moderator_manager.callback_is_current manager callback)
+      then Error (unavailable Conflict "installed legacy callback has no current Manager")
+      else (
+        let claim =
+          match Chat_response.Moderator_manager.Callback.selection callback with
+          | Boundary _ -> A.with_legacy_callback actor ~operation_id
+          | Queue_head -> A.with_legacy_queued_callback actor ~operation_id
+        in
+        claim ~callback (fun ~scope ~commit ->
+          let jobs = installed_jobs.for_execution (A.callback_model_jobs actor ~scope) in
+          with_services actor scope jobs ~commit f))
+  in
+  B.
+    { claim
+    ; installed_claim
+    ; script_tools = native_script_tools t profile actor_ref ~state
+    }
 ;;
 
 let prepare_runtime_at_paths

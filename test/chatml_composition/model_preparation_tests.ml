@@ -12,6 +12,9 @@ let%expect_test "synchronous Model preparation rejection retires its claimed Job
 <script id="owner" language="chatml" kind="moderator" api="extensibility-v1">
 let initial_state = 0
 let on_event ctx state event = match event with
+| `Session_start ->
+  let* job = Tool.spawn("prepare_probe", `Object([])) in
+  Task.pure(state)
 | `Tool_invoked(p) ->
   let* message = Task.catch(
     (let* ignored = Model.call("agent_prompt_v1", `Object([
@@ -33,6 +36,7 @@ let on_event ctx state event = match event with
       ; "output.json", {|{"type":"string"}|}
       ; "recipe.chatmd", "<developer>Independent recipe.</developer>"
       ]
+    ~before_start:(fun () -> reject_context := true)
     ~map_inference_policy:(fun policy ->
       { policy with
         Agent_server.Session_factory.resolve_inference_context =
@@ -48,17 +52,18 @@ let on_event ctx state event = match event with
        assert (
          Option.value_map before.run_state ~default:true ~f:(fun index ->
            List.is_empty (Agent_session.Run_state.runs index)));
-       reject_context := true;
+       assert !reject_context;
        let outer =
-         (* The test host explicitly classifies this unrelated root. This does
-            not qualify production provenance capture; real claim/scope gates
-            still govern its Model child. Missing historical provenance is tested
-            separately through document restoration. *)
-         submit
-           ~inference_origin:(Some P.Inference_origin.Unbound)
-           entry
-           (B.to_json (tool capabilities "prepare_probe" (`Object [])))
+         await_launch
+           env
+           entry.actor
+           ~request:(tool capabilities "prepare_probe" (`Object []))
        in
+       let launch = Option.value_exn outer.launch in
+       assert (Option.is_none launch.parent_job);
+       (match launch.owner with
+        | Moderator_event _ -> ()
+        | Invocation _ -> failwith "model probe was not launched by Session_start");
        let _, completion = await env client outer in
        (match completion with
         | Succeeded (`String message) ->

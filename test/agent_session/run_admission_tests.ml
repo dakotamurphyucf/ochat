@@ -3418,6 +3418,7 @@ let%expect_test "unavailable legacy lookalike cannot consume a registered timer 
                          { M.persist =
                              (fun () ->
                                commit
+                                 ~notifications:[]
                                  ~snapshot
                                  ~requests:
                                    { request_turn = false
