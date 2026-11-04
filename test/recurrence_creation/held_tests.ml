@@ -344,3 +344,232 @@ let%expect_test
     duplicate is DATA; runtime builder zero; escaped Held expires
     |}]
 ;;
+
+let%expect_test
+    "inert Held uncertainty and lost ACK retain evidence without recreating custody"
+  =
+  with_captured_target (fun fixture source _ ->
+    let actor = create_actor fixture ~sw:fixture.sw () in
+    Exn.protect
+      ~finally:(fun () -> A.Session_actor.shutdown actor)
+      ~f:(fun () ->
+        let builds = ref 0 in
+        let owner =
+          Owner.create ~actor ~initial:None ~build:(fun () ->
+            Int.incr builds;
+            failwith "uncertain inert admission entered runtime builder")
+        in
+        Exn.protect
+          ~finally:(fun () ->
+            fixture.reject := false;
+            Owner.close_and_wait owner)
+          ~f:(fun () ->
+            let intent, attempt = original_request fixture source "held-no-write" in
+            let preparation =
+              begin_preparation actor ~proof ~policy:authorize intent attempt
+            in
+            Exn.protect
+              ~finally:(fun () ->
+                A.Session_actor.end_run_preparation actor preparation |> protocol_ok)
+              ~f:(fun () ->
+                Owner.with_prepared_source owner ~preparation ~source (fun prepared ->
+                  let binding = Owner.Prepared.binding prepared in
+                  let before = state actor
+                  and before_frames = frames fixture in
+                  fixture.reject := true;
+                  (match admit actor binding intent attempt session |> protocol_ok with
+                   | Uncertain failure ->
+                     assert (P.Error.equal_code failure.code Persistence_error);
+                     [%test_eq: string]
+                       failure.message
+                       "definite no-write runtime fixture";
+                     assert failure.retryable
+                   | Held _ | Retained _ | Rejected _ ->
+                     failwith
+                       "attempted persistence was misclassified as definite rejection");
+                  Record_tests.assert_code Conflict (Binding.check_basis binding);
+                  Record_tests.assert_code Conflict (Owner.Prepared.check_basis prepared);
+                  Record_tests.assert_code
+                    Conflict
+                    (admit actor binding intent attempt session);
+                  assert_same_state before (state actor);
+                  [%test_eq: string list] before_frames (frames fixture);
+                  fixture.reject := false;
+                  [%test_eq: int] !builds 0;
+                  Ok ())
+                |> protocol_ok);
+            print_endline
+              "selected failed write: conservative Uncertain; closed owner; journal \
+               unchanged")));
+  with_captured_target (fun fixture source _ ->
+    let entered, enter = Eio.Promise.create () in
+    let never, _ = Eio.Promise.create () in
+    let owned, own = Eio.Promise.create () in
+    let exited, exit = Eio.Promise.create () in
+    Eio.Fiber.fork ~sw:fixture.sw (fun () ->
+      Exn.protect
+        ~finally:(fun () -> Eio.Promise.resolve exit ())
+        ~f:(fun () ->
+          try
+            Eio.Cancel.sub (fun cancel ->
+              Eio.Switch.run (fun sw ->
+                let actor =
+                  create_actor
+                    fixture
+                    ~sw
+                    ~published:(fun _ ->
+                      Eio.Promise.resolve enter ();
+                      Eio.Promise.await never)
+                    ()
+                in
+                Eio.Promise.resolve own (actor, cancel);
+                Eio.Promise.await never))
+          with
+          | Eio.Cancel.Cancelled _ -> ()));
+    let actor, cancel = Eio.Promise.await owned in
+    Exn.protect
+      ~finally:(fun () ->
+        if Option.is_none (Eio.Promise.peek exited) then Eio.Cancel.cancel cancel Exit;
+        Eio.Cancel.protect (fun () -> Eio.Promise.await exited))
+      ~f:(fun () ->
+        let builds = ref 0 in
+        let owner =
+          Owner.create ~actor ~initial:None ~build:(fun () ->
+            Int.incr builds;
+            failwith "lost inert ACK entered runtime builder")
+        in
+        let caller_finished = ref None in
+        Exn.protect
+          ~finally:(fun () ->
+            Eio.Cancel.protect (fun () ->
+              if Option.is_none (Eio.Promise.peek exited)
+              then Eio.Cancel.cancel cancel Exit;
+              Eio.Promise.await exited;
+              Option.iter !caller_finished ~f:Eio.Promise.await);
+            (* The actor was intentionally destroyed first. No runtime was ever
+               built and the actual staged callback is joined below. This one
+               documented dead-owner cleanup failure is expected, not success. *)
+            try Owner.close_and_wait owner with
+            | Owner.Cleanup_failed failure
+              when P.Error.equal_code failure.code Server_shutting_down -> ())
+          ~f:(fun () ->
+            let intent, attempt = original_request fixture source "held-lost-ack" in
+            let preparation =
+              begin_preparation actor ~proof ~policy:authorize intent attempt
+            in
+            let before = state actor
+            and before_frames = frames fixture in
+            let escaped = ref None in
+            let replied, reply = Eio.Promise.create () in
+            let joined, join = Eio.Promise.create () in
+            caller_finished := Some joined;
+            Eio.Fiber.fork ~sw:fixture.sw (fun () ->
+              Exn.protect
+                ~finally:(fun () -> Eio.Promise.resolve join ())
+                ~f:(fun () ->
+                  Eio.Promise.resolve
+                    reply
+                    (capture_owner_call (fun () ->
+                       Owner.with_prepared_source
+                         owner
+                         ~preparation
+                         ~source
+                         (fun prepared ->
+                            escaped := Some prepared;
+                            admit
+                              actor
+                              (Owner.Prepared.binding prepared)
+                              intent
+                              attempt
+                              session)))));
+            Eio.Time.with_timeout_exn (Eio.Stdenv.clock fixture.env) 5. (fun () ->
+              Eio.Promise.await entered;
+              Eio.Cancel.cancel cancel Exit;
+              Eio.Promise.await exited;
+              assert_owner_cancelled (Eio.Promise.await replied));
+            let prepared = Option.value_exn !escaped in
+            Record_tests.assert_code Conflict (Owner.Prepared.check_basis prepared);
+            Record_tests.assert_code
+              Conflict
+              (Binding.check_basis (Owner.Prepared.binding prepared));
+            Record_tests.assert_code
+              Server_shutting_down
+              (admit actor (Owner.Prepared.binding prepared) intent attempt session);
+            [%test_eq: int] !builds 0;
+            assert (not (Owner.is_loaded owner));
+            let recovered = replayed fixture in
+            [%test_eq: int64]
+              recovered.counters.revision
+              Int64.(before.counters.revision + 1L);
+            [%test_eq: int64]
+              recovered.counters.event_sequence
+              Int64.(before.counters.event_sequence + 1L);
+            [%test_eq: int64]
+              recovered.counters.transaction_sequence
+              Int64.(before.counters.transaction_sequence + 1L);
+            [%test_eq: int] (List.length (frames fixture)) (List.length before_frames + 1);
+            assert_pristine_effects before recovered;
+            let index = Option.value_exn recovered.run_state in
+            let run = List.hd_exn (A.Run_state.runs index) in
+            [%test_eq: int] (List.length (A.Run_state.runs index)) 1;
+            assert (P.Run.Lifecycle.equal run.lifecycle Admitted);
+            let admission =
+              A.Run_state.receipt
+                index
+                ~principal_id:(Attempt.principal_id attempt)
+                ~key:(Attempt.key attempt)
+                ~request_sha256:(Attempt.request_sha256 attempt)
+              |> protocol_ok
+              |> Option.value_exn
+            in
+            let origin = A.Run_state.recurrence_origin index run.id |> Option.value_exn in
+            Origin.validate origin ~intent ~attempt |> protocol_ok;
+            Origin.validate_run origin ~run ~admission |> protocol_ok;
+            let reopened = reopen_fixture fixture in
+            Exn.protect
+              ~finally:(fun () -> Agent_store.Commit_writer.close reopened.writer)
+              ~f:(fun () ->
+                let fresh = create_actor reopened ~sw:fixture.sw () in
+                Exn.protect
+                  ~finally:(fun () -> A.Session_actor.shutdown fresh)
+                  ~f:(fun () ->
+                    (match
+                       A.Session_actor.begin_headless_run_preparation
+                         fresh
+                         ~actor:proof
+                         ~authorize
+                         ~request:(Attempt.request attempt ~intent |> protocol_ok)
+                       |> protocol_ok
+                     with
+                     | Retained saved -> assert (P.Run_receipt.equal saved admission)
+                     | Prepare _ -> failwith "recovery recreated held startup custody");
+                    let observation =
+                      A.Session_actor.observe_recurrence_run
+                        fresh
+                        ~actor:proof
+                        ~authorize
+                        ~intent
+                        ~attempt
+                      |> protocol_ok
+                      |> Option.value_exn
+                    in
+                    A.Session_actor.Recurrence_run_observation.check_current observation
+                    |> protocol_ok;
+                    assert (
+                      Origin.equal
+                        origin
+                        (A.Session_actor.Recurrence_run_observation.origin observation));
+                    assert_same_state recovered (state fresh);
+                    assert_same_state recovered (replayed fixture);
+                    [%test_eq: int]
+                      (List.length (frames fixture))
+                      (List.length before_frames + 1);
+                    print_endline
+                      "caller ownerCancelled; actual ACK durable once; reopened receipt \
+                       is DATA")))));
+  [%expect
+    {|
+    selected failed write: conservative Uncertain; closed owner; journal unchanged
+    caller ownerCancelled; actual ACK durable once; reopened receipt is DATA
+    |}]
+;;
