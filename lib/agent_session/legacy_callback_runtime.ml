@@ -55,6 +55,14 @@ let run
   =
   let open Result.Let_syntax in
   let checkpoint = ref None in
+  (* The Manager's script-facing API uses strings. Keep the first actual host
+     rejection only for this callback so an unsuccessful return can restore its
+     typed cause after all Manager and Actor brackets have unwound. *)
+  let host_rejection : Agent_protocol.Error.t option ref = ref None in
+  let record_host_rejection (error : Agent_protocol.Error.t) =
+    if Option.is_none !host_rejection then host_rejection := Some error;
+    error.message
+  in
   let%bind outcome =
     Manager.handle_legacy_callback_entries
       manager
@@ -95,8 +103,7 @@ let run
                    ; authorize =
                        (fun () ->
                          services.check_current ()
-                         |> Result.map_error ~f:(fun error ->
-                           error.Agent_protocol.Error.message))
+                         |> Result.map_error ~f:record_host_rejection)
                    ; prepare =
                        (fun ~(outcome : Moderation.Outcome.t) ~snapshot ->
                          let requests : Agent_protocol.Invocation.follow_up =
@@ -124,8 +131,7 @@ let run
                                    let%map acknowledged = services.checkpoint () in
                                    checkpoint := Some acknowledged
                                  in
-                                 Result.map_error result ~f:(fun error ->
-                                   error.Agent_protocol.Error.message))
+                                 Result.map_error result ~f:record_host_rejection)
                            ; install = ignore
                            })
                    }
@@ -133,13 +139,14 @@ let run
                  run binding
                  |> Result.map_error ~f:failure
                  |> Result.map ~f:(fun value -> outcome := Some value)))
-          |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+          |> Result.map_error ~f:record_host_rejection
         in
         match committed, !outcome with
         | true, Some outcome -> Ok outcome
         | false, _ -> Error "legacy callback has no current physical owner"
         | true, None -> Error "legacy callback committed without its outcome")
-    |> Result.map_error ~f:failure
+    |> Result.map_error ~f:(fun message ->
+      Option.value !host_rejection ~default:(failure message))
   in
   match outcome, !checkpoint with
   | None, _ -> Ok None
@@ -212,6 +219,11 @@ module Installed = struct
     loop (Int.clamp_exn max_events ~min:0 ~max:256) []
   ;;
 
+  let foreground_result = function
+    | Ok value -> Ok value
+    | Error error -> raise (Chat_response.Ctx.Effect_rejected error)
+  ;;
+
   let foreground_handlers t ~capabilities =
     let open Result.Let_syntax in
     let%bind snapshot =
@@ -232,26 +244,20 @@ module Installed = struct
           | Ok (Some result) ->
             Ok (Some (Moderator_event.foreground_outcome (acknowledged_outcome result)))
           | Ok None -> Error (failure "foreground legacy callback was not admitted")
-          | Error error ->
-            let%bind stopped = halted t in
-            (match stopped with
-             | Some outcome -> Ok (Some outcome)
-             | None -> Error error)))
-      |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+          | Error error -> Error error))
+      |> foreground_result
     in
     let drain ~history ~available_tools ~now_ms ~max_events =
       drain t ~history ~available_tools ~now_ms ~max_events
       |> Result.map ~f:(List.map ~f:Moderator_event.foreground_outcome)
-      |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+      |> foreground_result
     in
     Ok
       Chat_response.In_memory_stream.
         { handle
         ; drain
         ; before_model_call =
-            (fun () ->
-              capabilities.admit_moderator_turn ()
-              |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message))
+            (fun () -> capabilities.admit_moderator_turn () |> foreground_result)
         }
   ;;
 end

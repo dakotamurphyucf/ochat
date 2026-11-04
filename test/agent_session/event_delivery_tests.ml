@@ -5763,3 +5763,211 @@ let%expect_test
   [%expect
     {| permission ACK retries preserve owner; unrelated basis and Stopped Ask reject; expired Run preparation settles Deny without native effect; both Stops ACK interruption |}]
 ;;
+
+let%expect_test "legacy callback adapters preserve typed failures and exceptional control"
+  =
+  let module A = Agent_session.Session_actor in
+  let module S = Agent_session in
+  let module P = Agent_protocol in
+  let module R = S.Legacy_callback_runtime in
+  List.iter
+    [ `Claim; `Authorize; `Commit; `Checkpoint; `Script; `Unexpected; `Cancel ]
+    ~f:(fun mode ->
+      with_actor_workspace (fun env workspace_instance ->
+        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+          let calls = ref 0 in
+          let registry = native_registry calls ~raises:false in
+          let manager =
+            prepared_legacy_callback_managers
+              ~capability_registry:registry
+              env
+              ~id:"typed-host-failure"
+              ~source:
+                (match mode with
+                 | `Script ->
+                   "let initial_state = 0\n\
+                    let on_event ctx state event = Task.fail(\"script failure\")"
+                 | _ ->
+                   "let initial_state = 0\n\
+                    let on_event ctx state event = Task.pure(state + 1)")
+              ()
+          in
+          let rejection =
+            P.Error.create
+              Permission_denied
+              ~message:"selected host adapter rejection"
+              ~retryable:false
+              ~data:(`Object [ "retained", `Array [ `String "host"; `Number "537" ] ])
+              ()
+          in
+          let unexpected = Failure "unexpected callback host exception" in
+          Job_fixtures.with_actor
+            ~environment:(env, workspace_instance)
+            ~start:false
+            ~prepare_state:(fun state ->
+              { state with runtime_initialization = Pending { fresh_history = true } })
+            (fun _env _sw actor _writer backend ->
+               let expected = A.state actor |> protocol_ok in
+               let original = Legacy_emit.authentication (Atomic.make true) in
+               let constructor =
+                 A.begin_initialization_authenticated actor ~actor:original ~expected
+                 |> protocol_ok
+               in
+               let tools =
+                 S.Script_tool_calls.create
+                   ~registry:(fun () -> registry)
+                   ~moderator_names:String.Set.empty
+                   ~now:P.Timestamp.now
+                   ~is_halted:(fun () -> false)
+                   ~requires_active_moderator:(fun _ -> false)
+                   ~authorize:(fun _ _ -> Ok ())
+                   ~prepare_output:(fun _ -> failwith "unexpected native output")
+                   ~defer_observation:(fun _ -> Ok ())
+               in
+               let entered = ref false in
+               let committed = ref false in
+               let checkpointed = ref false in
+               let result =
+                 try
+                   Ok
+                     (Eio.Cancel.sub (fun cancellation ->
+                        let claim ~manager ~callback f =
+                          match mode with
+                          | `Claim -> Error rejection
+                          | `Unexpected -> raise unexpected
+                          | _ ->
+                            A.with_initialization_callback
+                              actor
+                              ~scope:constructor
+                              ~manager
+                              ~callback
+                              (fun ~scope ~commit ->
+                                 entered := true;
+                                 let check_current () =
+                                   let open Result.Let_syntax in
+                                   let%bind () = A.check_callback_current actor scope in
+                                   match mode with
+                                   | `Authorize -> Error rejection
+                                   | `Cancel ->
+                                     Eio.Cancel.cancel cancellation Exit;
+                                     Eio.Fiber.check ();
+                                     assert false
+                                   | _ -> Ok ()
+                                 in
+                                 let schedules =
+                                   A.callback_schedule_services actor ~scope
+                                 in
+                                 let services : R.Services.t =
+                                   { jobs =
+                                       { spawn_model =
+                                           (fun ~recipe:_ ~payload:_ -> assert false)
+                                       ; call_model =
+                                           (fun ~recipe:_ ~payload:_ ~execute:_ ->
+                                             assert false)
+                                       }
+                                   ; schedules =
+                                       { after_ms = schedules.after_ms
+                                       ; cancel = schedules.cancel
+                                       }
+                                   ; execute = A.callback_tool_executor actor ~scope
+                                   ; executing = A.Callback_scope.executing scope
+                                   ; check_current
+                                   ; is_halted = (fun () -> false)
+                                   ; checkpoint =
+                                       (fun () ->
+                                         checkpointed := true;
+                                         match mode with
+                                         | `Checkpoint -> Error rejection
+                                         | _ ->
+                                           (match
+                                              A.Callback_scope.committed_checkpoint scope
+                                            with
+                                            | Some value -> Ok value
+                                            | None -> failwith "actual Event did not ACK"))
+                                   }
+                                 in
+                                 f
+                                   ~services
+                                   ~commit:(fun ~snapshot ~requests ~notifications ->
+                                     match mode with
+                                     | `Commit -> Error rejection
+                                     | _ ->
+                                       let open Result.Let_syntax in
+                                       let%map () =
+                                         commit ~snapshot ~requests ~notifications
+                                       in
+                                       committed := true))
+                        in
+                        R.run
+                          manager
+                          ~claim
+                          ~model_recipes:(fun _ -> Map.empty (module String))
+                          ~script_tools:tools
+                          ~selected:registry
+                          ~selection:(Boundary Session_start)
+                          ~session_id:"fixture"
+                          ~history:[]
+                          ~available_tools:[]
+                          ~session_meta:`Null
+                          ~now_ms:0))
+                 with
+                 | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+               in
+               (* These assertions are outside every Manager/Actor exception adapter. *)
+               (match mode, result with
+                | (`Claim | `Authorize | `Commit | `Checkpoint), Ok (Error actual) ->
+                  assert (
+                    Jsonaf.exactly_equal
+                      (P.Error.to_json rejection)
+                      (P.Error.to_json actual))
+                | `Script, Ok (Error actual) ->
+                  [%test_eq: P.Error.code] Invalid_state actual.code;
+                  assert (not actual.retryable);
+                  assert (
+                    not
+                      (Jsonaf.exactly_equal
+                         (P.Error.to_json rejection)
+                         (P.Error.to_json actual)))
+                | `Unexpected, Error (actual, _) -> assert (phys_equal actual unexpected)
+                | `Cancel, Error (Eio.Cancel.Cancelled _, _) -> ()
+                | _, Error (exn, backtrace) ->
+                  Exn.raise_with_original_backtrace exn backtrace
+                | _ -> failwith "legacy adapter lost its selected failure");
+               assert (
+                 Bool.equal
+                   !entered
+                   (match mode with
+                    | `Claim | `Unexpected -> false
+                    | _ -> true));
+               assert (
+                 Bool.equal
+                   !committed
+                   (match mode with
+                    | `Checkpoint -> true
+                    | _ -> false));
+               assert (
+                 Bool.equal
+                   !checkpointed
+                   (match mode with
+                    | `Checkpoint -> true
+                    | _ -> false));
+               [%test_eq: int] 0 !calls;
+               let settled = A.state actor |> protocol_ok in
+               assert_same_session_snapshot settled (S.Memory_backend.state backend);
+               assert (List.is_empty settled.invocations);
+               (match mode, settled.moderator_executions with
+                | (`Claim | `Unexpected), [] -> ()
+                | `Checkpoint, [ { status = Completed _; _ } ] -> ()
+                | `Cancel, [ { status = Interrupted _; _ } ] -> ()
+                | (`Authorize | `Commit | `Script), [ { status = Failed _; _ } ] -> ()
+                | _ ->
+                  raise_s
+                    [%sexp (settled.moderator_executions : P.Moderator_execution.t list)]);
+               A.end_initialization actor ~scope:constructor |> protocol_ok;
+               assert (Operator_authorization.is_current original)))));
+  print_endline
+    "claim/authorize/commit/checkpoint preserve whole host errors; script failure stays \
+     Invalid_state; unexpected exception and cancellation escape; no native effects";
+  [%expect
+    {| claim/authorize/commit/checkpoint preserve whole host errors; script failure stays Invalid_state; unexpected exception and cancellation escape; no native effects |}]
+;;

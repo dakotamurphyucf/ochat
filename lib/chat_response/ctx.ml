@@ -143,7 +143,7 @@ let of_env
 ;;
 
 exception Inference_admission_rejected
-exception Effect_rejected of Agent_protocol.Error.t
+exception Effect_rejected = Effect_rejection.Rejected
 
 let check_effect t = Option.iter t.effect_checkpoint ~f:(fun check -> check ())
 

@@ -42,7 +42,9 @@ end
     initial notification hook supplies only newly committed entries and claims
     restored wakes for the upcoming provider admission. New data receives its
     item-appended callbacks once; restored history is not appended or re-emitted.
-    All committed data is retained if a callback ends the session. *)
+    All committed data is retained if a callback ends the session. Typed host
+    [Chat_response.Ctx.Effect_rejected] errors become the exact failed operation
+    outcome; cancellation and unknown exceptions keep their existing paths. *)
 val create
   :  ?root_binding:Chat_response.Root_binding.t
   -> ?runtime_policy:Chat_response.Runtime_semantics.policy

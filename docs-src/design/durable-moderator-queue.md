@@ -590,3 +590,9 @@ recurrence or revoking authorization still prevents new work. After worker
 readiness, the actual worker branch refreshes both owners and checks them before
 its first effect. Failure settles the real Operation through normal terminal
 handling; it cannot erase effects already completed while preparing the input.
+
+Host rejections keep their protocol error code and retryability through legacy
+moderator callbacks. Revoked authorization therefore fails the foreground
+Operation as a non-retryable permission denial. The legacy string-based Manager
+interface does not turn that denial into a retryable internal error. Completed
+history or tool effects remain recorded; rejection does not roll them back.

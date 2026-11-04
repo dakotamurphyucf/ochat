@@ -160,7 +160,10 @@ exception Openai_stream_idle_timeout of float
 (** Host-owned event routing for identity-bearing streams. The host must claim
     durable event ownership, install the prospective checkpoint atomically, and
     define how returned runtime requests are consumed. Legacy raw-item APIs reject
-    these handlers rather than discarding identity or bypassing ownership. *)
+    these handlers rather than discarding identity or bypassing ownership.
+    Typed host effect rejection may raise [Ctx.Effect_rejected]; pre/post-tool
+    observer exception adapters preserve it for the owning worker. Already
+    committed calls/results remain factual when a later observer rejects. *)
 type moderator_event_handlers =
   { before_model_call : unit -> (unit, string) result
     (** Called once before provider dispatch, after turn preparation and budget

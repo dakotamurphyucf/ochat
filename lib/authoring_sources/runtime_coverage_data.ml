@@ -670,7 +670,7 @@ let implementation_sources =
   ; ( "lib/agent_session/instruction_guidance_text.ml"
     , "f479e72bd27d60883647524052eb04770198f07603b2d738633130ece31c4861" )
   ; ( "lib/chat_response/in_memory_stream.ml"
-    , "0c0bb5816ce2ce52966c7af14368c5f1bf87393307023533ce152d5ba6423488" )
+    , "d8726af77b14d98a0fd5231ce9a93704c96ba61eb88c8ec54d2395be0c1df112" )
   ; ( "lib/agent_session/run_job_completion.ml"
     , "378b464c44a8d17c52465bccf12fcbe54eff64c5be6ec6b67cd441f5f9d11bb1" )
   ; ( "lib/agent_session/run_transition.ml"
@@ -680,7 +680,7 @@ let implementation_sources =
   ; ( "lib/agent_session/constructor_permission_checkpoint.ml"
     , "f1d765c7b5bd1a488e360d2b27cc93e58503478e69d9e7f1a0d61e00751ebe5f" )
   ; ( "lib/agent_session/legacy_callback_runtime.ml"
-    , "44c5f795ade0b2ea0b0c4fb8fe91a9b8ab2f70084c0ab8410782fd52660753c8" )
+    , "558426b59a1832b4eb43a8e944a981a0ba635617e92df1eb98520c2b337e982e" )
   ; ( "lib/agent_session/runtime_builder.ml"
     , "0ac6649524d5bbc18becc18822c0b133b8dd3b26da0593f3662169e1a9b181b5" )
   ; ( "lib/context_compaction/compactor.ml"
@@ -808,7 +808,7 @@ let implementation_sources =
   ; ( "lib/agent_protocol/model_spawn_request.ml"
     , "258c00854df5cd7a65eb28d8fccc4ab1e1d1880ccbbc15999306fd448322d160" )
   ; ( "lib/chat_response/ctx.ml"
-    , "22ee2bec62e6dd674f3efdd70557d76133118bdb74fb71c424197a36b9791721" )
+    , "e0f44c2cfd98c32a05ba0d474af92bac5673087971932c522c9fe673b670a9ea" )
   ; ( "lib/chat_response/driver.ml"
     , "091a398d90aa8c1f556902a782dc97338ce89d964f3e3ab39c756b308e2e6737" )
   ; ( "lib/chat_response/model_executor.ml"

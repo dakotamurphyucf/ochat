@@ -1635,7 +1635,7 @@ let prepare_tool_call (c : ctx) ~hist ~st ~kind ~name ~payload ~call_id ~item_id
         in
         moderate ~kind ~name ~payload ~call_id ~item_id
       with
-      | Eio.Cancel.Cancelled _ as exn -> raise exn
+      | (Eio.Cancel.Cancelled _ | Effect_rejection.Rejected _) as exn -> raise exn
       | exn ->
         if Option.is_none c.dispatch_tool
         then raise exn
@@ -1708,7 +1708,7 @@ let prepare_host_tool_entry
     in
     let decision =
       try prepare request with
-      | Eio.Cancel.Cancelled _ as exn -> raise exn
+      | (Eio.Cancel.Cancelled _ | Effect_rejection.Rejected _) as exn -> raise exn
       | _ -> Error "host preparation failed"
     in
     let moderated, rejection =
@@ -2155,7 +2155,7 @@ let await_calls (c : ctx) ~(hist : History_entry.t list) (st : stream_state) =
             | Ok requests -> requests
             | Error exn -> raise exn
           with
-          | Eio.Cancel.Cancelled _ as exn -> raise exn
+          | (Eio.Cancel.Cancelled _ | Effect_rejection.Rejected _) as exn -> raise exn
           | Post_tool_moderation_failed _ as exn -> raise exn
           | _ ->
             raise

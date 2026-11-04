@@ -2003,3 +2003,120 @@ let%expect_test "aborted function/custom argument streams publish no secret frag
   print_s [%sexp "function/custom: abort withheld arguments and did not execute"];
   [%expect {| "function/custom: abort withheld arguments and did not execute" |}]
 ;;
+
+let%expect_test "tool observer adapters preserve exact typed host rejection" =
+  let module P = Agent_protocol in
+  Eio_main.run (fun env ->
+    List.iter [ `Pre_tool; `Host_prepare; `Post_tool ] ~f:(fun mode ->
+      Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+        let namespace =
+          match mode with
+          | `Pre_tool -> "typed-pre-tool"
+          | `Host_prepare -> "typed-host-prepare"
+          | `Post_tool -> "typed-post-tool"
+        in
+        let allocator =
+          History_entry.Allocator.create ~namespace ~next_sequence:0 |> ok_or_fail
+        in
+        let rejection =
+          P.Error.create
+            Permission_denied
+            ~message:"selected tool observer rejection"
+            ~retryable:false
+            ~data:(`Object [ "retained", `Array [ `String namespace; `Number "537" ] ])
+            ()
+        in
+        let rejected = ref 0 in
+        let reject () =
+          Int.incr rejected;
+          raise (Chat_response.Ctx.Effect_rejected rejection)
+        in
+        let handlers : Stream.moderator_event_handlers =
+          { before_model_call = (fun () -> Ok ())
+          ; handle =
+              (fun ~history:_ ~available_tools:_ ~now_ms:_ ~event ->
+                match mode, event with
+                | `Pre_tool, Moderation.Event.Pre_tool_call _
+                | `Post_tool, Moderation.Event.Post_tool_response _ -> reject ()
+                | _ -> Ok None)
+          ; drain = (fun ~history:_ ~available_tools:_ ~now_ms:_ ~max_events:_ -> Ok [])
+          }
+        in
+        let moderator = { (moderator ()) with event_handlers = Some handlers } in
+        (* A dispatcher is required to exercise the pre-tool catch that normally
+           converts unexpected host failures into a synthetic rejected call. *)
+        let dispatch_tool : Stream.Tool_dispatch.t =
+          { for_fork = None
+          ; commit_call = (fun _ -> false)
+          ; prepare_call =
+              (match mode with
+               | `Host_prepare -> Some (fun _ -> reject ())
+               | `Pre_tool | `Post_tool -> None)
+          ; validate_original = (fun ~kind:_ ~name:_ ~payload:_ -> Ok ())
+          ; run = (fun ?run_native:_ _ ~authorize:_ -> None)
+          }
+        in
+        let native_calls = ref 0 in
+        let tool_tbl = String.Table.create () in
+        Hashtbl.set tool_tbl ~key:"echo" ~data:(fun ~invocation:_ _ ->
+          Int.incr native_calls;
+          Res.Tool_output.Output.Text "native result");
+        let added, done_ =
+          stream_function_call
+            ~output_index:0
+            ~item_id:"typed-observer-item"
+            ~call_id:"typed-observer-call"
+            ~arguments:"null"
+        in
+        let requests = ref 0 in
+        let committed = Queue.create () in
+        let published_outputs = ref 0 in
+        let result =
+          try
+            ignore
+              (selected_run
+                 ~env
+                 ~allocator
+                 ~history:[ input_entry allocator ]
+                 ~tools:(Some [])
+                 ~tool_tbl
+                 ~moderator
+                 ~dispatch_tool
+                 ~parallel_tool_calls:false
+                 ~on_history_item_appended:(Queue.enqueue committed)
+                 ~on_history_tool_out:(fun _ -> Int.incr published_outputs)
+                 ~post_stream:(fun ~sw:_ ~inputs:_ ->
+                   Int.incr requests;
+                   if !requests > 1 then failwith "unexpected tool observer retry";
+                   [ added; done_ ] |> Stdlib.List.to_seq)
+                 ()
+               : History_entry.t list);
+            Ok ()
+          with
+          | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+        in
+        (* All oracles run after every stream exception adapter has unwound. *)
+        (match result with
+         | Error (Chat_response.Ctx.Effect_rejected actual, _) ->
+           assert (
+             Jsonaf.exactly_equal (P.Error.to_json rejection) (P.Error.to_json actual))
+         | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+         | Ok () -> failwith "tool observer rejection did not escape");
+        [%test_eq: int] 1 !rejected;
+        [%test_eq: int] 1 !requests;
+        let expected_native, expected_entries =
+          match mode with
+          | `Pre_tool | `Host_prepare -> 0, []
+          | `Post_tool -> 1, [ "function-call"; "function-output" ]
+        in
+        [%test_eq: int] expected_native !native_calls;
+        [%test_eq: int] expected_native !published_outputs;
+        [%test_eq: string list]
+          expected_entries
+          (Queue.to_list committed |> List.map ~f:entry_kind))));
+  print_endline
+    "pre-tool/host-prepare/post-tool preserve whole host errors; no retry; post-tool \
+     rejection retains the committed native result";
+  [%expect
+    {| pre-tool/host-prepare/post-tool preserve whole host errors; no retry; post-tool rejection retains the committed native result |}]
+;;

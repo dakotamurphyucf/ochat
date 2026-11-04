@@ -51,7 +51,10 @@ type t =
     unavailable ownership rejects. Tool/Model/Schedule services are lexical and
     expire before return. Original exceptions and cancellation propagate; the
     host's existing failed/interrupted claim prevents replay of external effects.
-    This neither drains a batch nor installs foreground/idle routing. *)
+    Actual host claim/currentness/ACK errors retain their original typed cause
+    across the Manager's script-facing string adapter. Script-only errors retain
+    the existing Invalid_state mapping. This neither drains a batch nor installs
+    foreground/idle routing. *)
 val run
   :  Chat_response.Moderator_manager.t
   -> claim:claim
@@ -99,7 +102,10 @@ module Installed : sig
   (** Use the ACTUAL foreground capabilities for follow-up ownership and the
       provider-before-model acknowledgement. Normalizes already-durable
       compaction/dependent-turn requests using the common foreground policy.
-      Idle consumers cannot obtain this adapter from a bare operation ID. *)
+      Idle consumers cannot obtain this adapter from a bare operation ID. The
+      returned callbacks raise [Chat_response.Ctx.Effect_rejected] with the exact
+      host error instead of erasing it into their script-facing string result;
+      the foreground worker maps that rejection to its factual failed outcome. *)
   val foreground_handlers
     :  t
     -> capabilities:Operation_worker.Capabilities.t
