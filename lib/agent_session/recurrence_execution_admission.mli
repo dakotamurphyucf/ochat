@@ -38,3 +38,8 @@ val nominal : t -> Recurrence_nominal.t
     into execution authority. Do not reuse after the persistence owner's own
     canonical projection changes; observe freshly after ACK if returning data. *)
 val check_current : t -> Session_state.t -> (unit, Agent_protocol.Error.t) result
+
+(** Callback-free exact controller Current/session/revision/retained entry and
+    new-work source/control/caller predicates. Original authentication and policy
+    remain required separately; this data basis never authorizes persistence. *)
+val check_basis : t -> Session_state.t -> (unit, Agent_protocol.Error.t) result

@@ -8,10 +8,10 @@ module Intent = A.Recurrence_execution_intent
 module Attempt = A.Recurrence_execution_attempt
 module Origin = A.Recurrence_run_origin
 
-(* Real artifact capture and physical target ownership. The Definition/Intent
-   below are DATA, not a controller admission or activation permit. No Manager,
-   compiled runtime, Run authority or provider is supplied by this fixture. *)
-let with_captured_target f =
+(* Real artifact capture and physical target ownership. The optional controller
+   case captures harmless code for separate real Manager initialization; the
+   default target remains poison code and has no Manager or runtime. *)
+let with_captured_target ?(controller = false) f =
   let captured = ref None in
   with_store
     ~prepare_initial:(fun env initial ->
@@ -21,8 +21,9 @@ let with_captured_target f =
       Eio.Path.save
         ~create:(`Exclusive 0o600)
         root_file
-        {|<script id="held" language="chatml" kind="moderator">let initial_state = fail("inert admission evaluated initializer")
-let on_event = fun event state -> Task.pure(state)</script>|};
+        ("<script id=\"held\" language=\"chatml\" kind=\"moderator\">let initial_state = "
+         ^ (if controller then "0" else "fail(\"inert admission evaluated initializer\")")
+         ^ "\nlet on_event = fun event state -> Task.pure(state)</script>");
       let definition =
         A.Prompt_definition.create
           ~root_invocation:Ui
@@ -66,16 +67,19 @@ let on_event = fun event state -> Task.pure(state)</script>|};
       in
       Eio.Path.unlink root_file;
       captured := Some (source, root_file);
-      let stopped =
-        actor_state
-          ~workspace_instance:workspace
-          ~liveness:Detached
-          ~start_immediately:false
+      let selected =
+        if controller
+        then initial
+        else
+          actor_state
+            ~workspace_instance:workspace
+            ~liveness:Detached
+            ~start_immediately:false
       in
-      { stopped with
+      { selected with
         identity = initial.identity
       ; spec =
-          { stopped.spec with
+          { selected.spec with
             prompt_definition_id = Some definition.id
           ; prompt_revision_id = A.Prompt_revision.id revision
           }

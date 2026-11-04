@@ -102,21 +102,8 @@ let changed_evidence entry ~origin ~terminal =
     not (Execution.equal previous incoming)
 ;;
 
-let check_basis t (state : Session_state.t) =
+let check_state_basis t (state : Session_state.t) =
   let open Result.Let_syntax in
-  let%bind () =
-    if
-      Operator_authorization.is_current t.actor
-      && P.Principal.has_scope (Operator_authorization.principal t.actor) Send_messages
-    then Ok ()
-    else
-      Error
-        (P.Error.create
-           Permission_denied
-           ~message:"recurrence original authority expired, was revoked or lacks scope"
-           ~retryable:false
-           ())
-  in
   let%bind () =
     if
       Recurrence_controller.is_current t.current
@@ -139,6 +126,24 @@ let check_basis t (state : Session_state.t) =
     if automatic_eligible state t.current t.entry t.definition
     then Ok ()
     else conflict "recurrence settlement automatic eligibility changed"
+;;
+
+let check_basis t (state : Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    if
+      Operator_authorization.is_current t.actor
+      && P.Principal.has_scope (Operator_authorization.principal t.actor) Send_messages
+    then Ok ()
+    else
+      Error
+        (P.Error.create
+           Permission_denied
+           ~message:"recurrence original authority expired, was revoked or lacks scope"
+           ~retryable:false
+           ())
+  in
+  check_state_basis t state
 ;;
 
 let check_current t (state : Session_state.t) =

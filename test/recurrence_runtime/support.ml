@@ -182,6 +182,7 @@ let create_actor
       ?(published = fun _ -> ())
       ?(published_events = fun _ -> ())
       ?(clock_read = fun () -> ())
+      ?(before_commit = fun () -> ())
       ()
   =
   let persistence : A.Session_actor.persistence =
@@ -196,7 +197,9 @@ let create_actor
                  ~message:"definite no-write runtime fixture"
                  ~retryable:true
                  ())
-          else A.Session_persistence.commit t.durable ~command_audit ~previous transition)
+          else (
+            before_commit ();
+            A.Session_persistence.commit t.durable ~command_audit ~previous transition))
     }
   in
   let actor =

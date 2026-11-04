@@ -2509,6 +2509,26 @@ val record_recurrence_execution
   -> attempt:Recurrence_execution_attempt.t
   -> (Recurrence_execution.t, Agent_protocol.Error.t) result
 
+(** Self-target recording under the exact Selected source/preparation owner.
+    Before callbacks, requires this actual actor and full controller and target
+    Session_refs and the unchanged original attempt request/principal/CAS/key/digest. Current
+    controller policy/source/grace still apply. Only its exact acknowledged
+    record advances that preparation; duplicate DATA neither advances nor
+    reattaches custody. Fresh grace clocks precede final original-authorization
+    checks and callback-free custody bases. No target Run or execution authority
+    is issued. *)
+val record_prepared_recurrence_execution
+  :  t
+  -> binding:Source_binding.t
+  -> actor:Operator_authorization.t
+  -> authorize:
+       (Session_state.t
+        -> Recurrence_definition.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> intent:Recurrence_execution_intent.t
+  -> attempt:Recurrence_execution_attempt.t
+  -> (Recurrence_execution.t, Agent_protocol.Error.t) result
+
 module Recurrence_run_observation : sig
   (** Actual target-owner observation of retained immutable Run evidence. No
       constructor or decoder; native/decoded origin/reference data cannot mint
@@ -2678,6 +2698,29 @@ val observe_recurrence_run
     rollback. No retry, Run admission or activation authority is issued. *)
 val import_recurrence_execution
   :  t
+  -> actor:Operator_authorization.t
+  -> authorize:
+       (Session_state.t
+        -> Recurrence_definition.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> automatic_policy:
+       (Session_state.t
+        -> Recurrence_definition.t
+        -> (bool, Agent_protocol.Error.t) result)
+  -> observation:Recurrence_run_observation.t
+  -> (Recurrence_import.t, Agent_protocol.Error.t) result
+
+(** A continuously owned self-target Held may import ONLY its exact nonterminal
+    Admitted origin/Admission association through the same Store. Both actual
+    target/controller proofs and current policies remain required. The single
+    association ACK advances only that Held's original preparation before
+    publication, leaving request/CAS/key/digest unchanged. Retained DATA writes
+    nothing and cannot recreate or reattach Held custody. PostACK visibility
+    refreshes only the controller, never the stale self-target observation.
+    No activation, startup, terminal settlement or no-effects proof is issued. *)
+val import_held_recurrence_execution
+  :  t
+  -> held:Held_run.t
   -> actor:Operator_authorization.t
   -> authorize:
        (Session_state.t

@@ -83,6 +83,8 @@ end
 module Held_run = struct
   type t =
     { admission : Agent_protocol.Run_receipt.t
+    ; binding : Source_binding.t
+    ; run : Agent_protocol.Run.t
     ; basis : unit -> (unit, Agent_protocol.Error.t) result
     }
 
@@ -853,6 +855,15 @@ type _ request =
       * Recurrence_execution_intent.t
       * Recurrence_execution_attempt.t
       -> Recurrence_execution.t request
+  | Record_prepared_recurrence_execution :
+      Source_binding.t
+      * Operator_authorization.t
+      * (Session_state.t
+         -> Recurrence_definition.t
+         -> (unit, Agent_protocol.Error.t) result)
+      * Recurrence_execution_intent.t
+      * Recurrence_execution_attempt.t
+      -> Recurrence_execution.t request
   | Observe_recurrence_run :
       Operator_authorization.t
       * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
@@ -867,6 +878,17 @@ type _ request =
       -> Held_run.Admission.t request
   | Import_recurrence_execution :
       Operator_authorization.t
+      * (Session_state.t
+         -> Recurrence_definition.t
+         -> (unit, Agent_protocol.Error.t) result)
+      * (Session_state.t
+         -> Recurrence_definition.t
+         -> (bool, Agent_protocol.Error.t) result)
+      * Recurrence_run_observation.t
+      -> Recurrence_import.t request
+  | Import_held_recurrence_execution :
+      Held_run.t
+      * Operator_authorization.t
       * (Session_state.t
          -> Recurrence_definition.t
          -> (unit, Agent_protocol.Error.t) result)
@@ -1646,7 +1668,7 @@ let retain_recurrence_activations t state =
   <- Activation_custody.retain_candidates t.recurrence_activations state
 ;;
 
-let persist_transition ?run_preparation ?commit_attempted t transition =
+let persist_transition ?run_preparation ?commit_attempted ?final_check t transition =
   (* Prepared normalized candidate; revocation precedes any yielding write.
      A failed write cannot revive cells retired by this candidate. *)
   let open Result.Let_syntax in
@@ -1661,6 +1683,11 @@ let persist_transition ?run_preparation ?commit_attempted t transition =
     | Some _ ->
       close_run_preparation t;
       Ok ()
+  in
+  (* Composed owned paths finish their joint authorization after the source's
+     policy callback. Nothing callback-bearing may follow this final fence. *)
+  let%bind () =
+    Option.value_map final_check ~default:(Ok ()) ~f:(fun check -> check ())
   in
   retain_recurrence_activations t transition.Session_transition.state;
   Option.iter commit_attempted ~f:(fun attempted -> attempted := true);
@@ -9523,63 +9550,20 @@ let bind_run_source_internal t ~preparation ~source =
     Ok binding
 ;;
 
-let held_run t binding run admission =
-  let basis () =
-    let open Result.Let_syntax in
-    let%bind () = Source_binding.check_basis binding in
-    let%bind () =
-      match binding.Source_binding.phase with
-      | Open (Admitted saved) when Agent_protocol.Run_receipt.equal saved admission ->
-        Ok ()
-      | Open (Selected | Admission_pending _ | Admitted _) | Closed _ ->
-        Error (error Conflict "held Run source owner is not continuously admitted")
-    in
-    let%bind index =
-      Result.of_option
-        t.state.run_state
-        ~error:(error Conflict "held Run index is unavailable")
-    in
-    let%bind current_source =
-      Run_source_installation.captured
-        (Run_state.installation index)
-        ~generation:t.state.identity.generation
-    in
-    let%bind actual =
-      Run_state.receipt
-        index
-        ~principal_id:admission.Agent_protocol.Run_receipt.principal_id
-        ~key:admission.key
-        ~request_sha256:admission.request_sha256
-    in
-    if
-      Agent_protocol.Run_source.equal current_source run.Agent_protocol.Run.source
-      && Option.exists (Run_state.find index run.id) ~f:(Agent_protocol.Run.equal run)
-      && Option.exists actual ~f:(Agent_protocol.Run_receipt.equal admission)
-    then Ok ()
-    else Error (error Conflict "held Run or exact Admission evidence changed")
+let check_bound_source t binding =
+  let open Result.Let_syntax in
+  let%bind () =
+    match t.run_source_binding with
+    | Some current when phys_equal current binding -> Ok ()
+    | Some _ | None -> Error (error Conflict "source binding belongs to another actor")
   in
-  let held : Held_run.t = { admission; basis } in
-  held
+  Source_binding.check_basis binding
 ;;
 
-let admit_held_recurrence_run_internal t ~binding ~intent ~attempt ~session =
+let check_bound_recurrence_request t binding ~intent ~attempt ~session =
   let open Result.Let_syntax in
-  (* Capture before any original/policy or supplied clock callback. *)
-  let previous = t.state in
+  let%bind () = check_bound_source t binding in
   let preparation = binding.Source_binding.preparation in
-  let check_basis () =
-    let%bind () =
-      match t.run_source_binding with
-      | Some current when phys_equal current binding -> Ok ()
-      | Some _ | None ->
-        Error (error Conflict "held admission source belongs to another owner")
-    in
-    let%bind () = Source_binding.check_basis binding in
-    if Int64.equal previous.counters.revision t.state.counters.revision
-    then Ok ()
-    else Error (error Conflict "held admission basis changed during preparation")
-  in
-  let%bind () = check_basis () in
   let%bind controller = require_recurrence_controller t in
   let actual_session = Recurrence_controller.session controller in
   let%bind () =
@@ -9616,6 +9600,115 @@ let admit_held_recurrence_run_internal t ~binding ~intent ~attempt ~session =
       Error
         (error Conflict "held admission requires the exact original occurrence request")
   in
+  Ok ()
+;;
+
+let check_source_original t binding =
+  let open Result.Let_syntax in
+  let%bind () = check_bound_source t binding in
+  match Run_preparation.original_actor binding.Source_binding.preparation with
+  | None ->
+    Error (error Permission_denied "source preparation lost original authentication")
+  | Some actor ->
+    Run_command_authorization.check actor ~authorize:(fun _ -> Ok ()) t.state
+;;
+
+let check_selected_source t binding =
+  let open Result.Let_syntax in
+  let%bind () = check_bound_source t binding in
+  let%bind () =
+    match binding.Source_binding.phase with
+    | Open Selected -> Ok ()
+    | Open (Admission_pending _ | Admitted _) | Closed _ ->
+      Error
+        (error Conflict "prepared recurrence record requires the Selected source owner")
+  in
+  Ok ()
+;;
+
+let check_selected_recurrence_source t binding ~intent ~attempt =
+  let open Result.Let_syntax in
+  let%bind () = check_selected_source t binding in
+  let%bind controller = require_recurrence_controller t in
+  let definition =
+    Recurrence_identity.Occurrence.definition
+      (Recurrence_execution_intent.occurrence intent)
+  in
+  let%bind () =
+    if
+      Agent_protocol.Session_ref.equal
+        (Recurrence_controller.session controller)
+        (Recurrence_identity.Definition.controller definition)
+    then Ok ()
+    else Error (error Conflict "prepared recurrence record belongs to another controller")
+  in
+  check_bound_recurrence_request
+    t
+    binding
+    ~intent
+    ~attempt
+    ~session:(Recurrence_execution_intent.target intent)
+;;
+
+let held_run t binding run admission =
+  let basis () =
+    let open Result.Let_syntax in
+    let%bind () = Source_binding.check_basis binding in
+    let%bind () =
+      match binding.Source_binding.phase with
+      | Open (Admitted saved) when Agent_protocol.Run_receipt.equal saved admission ->
+        Ok ()
+      | Open (Selected | Admission_pending _ | Admitted _) | Closed _ ->
+        Error (error Conflict "held Run source owner is not continuously admitted")
+    in
+    let%bind index =
+      Result.of_option
+        t.state.run_state
+        ~error:(error Conflict "held Run index is unavailable")
+    in
+    let%bind current_source =
+      Run_source_installation.captured
+        (Run_state.installation index)
+        ~generation:t.state.identity.generation
+    in
+    let%bind actual =
+      Run_state.receipt
+        index
+        ~principal_id:admission.Agent_protocol.Run_receipt.principal_id
+        ~key:admission.key
+        ~request_sha256:admission.request_sha256
+    in
+    if
+      Agent_protocol.Run_source.equal current_source run.Agent_protocol.Run.source
+      && Option.exists (Run_state.find index run.id) ~f:(Agent_protocol.Run.equal run)
+      && Option.exists actual ~f:(Agent_protocol.Run_receipt.equal admission)
+    then Ok ()
+    else Error (error Conflict "held Run or exact Admission evidence changed")
+  in
+  let held : Held_run.t = { admission; binding; run; basis } in
+  held
+;;
+
+let admit_held_recurrence_run_internal t ~binding ~intent ~attempt ~session =
+  let open Result.Let_syntax in
+  (* Capture before any original/policy or supplied clock callback. *)
+  let previous = t.state in
+  let preparation = binding.Source_binding.preparation in
+  let check_basis () =
+    let%bind () =
+      match t.run_source_binding with
+      | Some current when phys_equal current binding -> Ok ()
+      | Some _ | None ->
+        Error (error Conflict "held admission source belongs to another owner")
+    in
+    let%bind () = Source_binding.check_basis binding in
+    if Int64.equal previous.counters.revision t.state.counters.revision
+    then Ok ()
+    else Error (error Conflict "held admission basis changed during preparation")
+  in
+  let%bind () = check_basis () in
+  let%bind () = check_bound_recurrence_request t binding ~intent ~attempt ~session in
+  let actual = Run_preparation.request preparation in
   let%bind () = Source_binding.check_current binding in
   let%bind () = check_basis () in
   let index = Option.value previous.run_state ~default:Run_state.empty in
@@ -13446,12 +13539,14 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Reserve_recurrence_child _
   | Check_recurrence_creation _
   | Record_recurrence_execution _
+  | Record_prepared_recurrence_execution _
   | Verify_recurrence_child _
   | Acquire_recurrence_activation _
   | Check_recurrence_activation _
   | Release_recurrence_activation _
   | Observe_recurrence_run _
   | Import_recurrence_execution _
+  | Import_held_recurrence_execution _
   | Link_recurrence_child _
   | Read_recurrences _
   | Update_metadata _
@@ -13556,7 +13651,7 @@ let check_recurrence_creation_admission t prepared =
   Recurrence_creation_admission.check_current prepared t.state
 ;;
 
-let check_recurrence_execution_admission t prepared =
+let check_recurrence_execution_runtime t prepared =
   let open Result.Let_syntax in
   let%bind () =
     if
@@ -13566,7 +13661,6 @@ let check_recurrence_execution_admission t prepared =
     then Ok ()
     else Error (error Conflict "recurrence execution controller owner is unavailable")
   in
-  let%bind () = Recurrence_execution_admission.check_current prepared t.state in
   match Recurrence_execution_admission.decision prepared with
   | Retained _ -> Ok ()
   | New _ ->
@@ -13608,11 +13702,36 @@ let check_recurrence_execution_admission t prepared =
         Error (error Conflict "recurrence execution nominal is outside current grace")
     in
     let%bind () = require_runtime_admission t in
+    Ok ()
+;;
+
+let check_recurrence_execution_admission t prepared =
+  let open Result.Let_syntax in
+  let%bind () =
+    if
+      (not t.stopped)
+      && Option.is_none (Eio.Promise.peek t.finished)
+      && Option.is_none t.lifecycle_fence
+    then Ok ()
+    else Error (error Conflict "recurrence execution controller owner is unavailable")
+  in
+  let%bind () = Recurrence_execution_admission.check_current prepared t.state in
+  match Recurrence_execution_admission.decision prepared with
+  | Retained _ -> Ok ()
+  | New _ ->
+    let%bind () = check_recurrence_execution_runtime t prepared in
     Recurrence_execution_admission.check_current prepared t.state
 ;;
 
-let record_recurrence_execution_internal t ~actor ~authorize ~intent ~attempt =
+let record_recurrence_execution_internal ?binding t ~actor ~authorize ~intent ~attempt =
   let open Result.Let_syntax in
+  let%bind () =
+    Option.value_map binding ~default:(Ok ()) ~f:(fun binding ->
+      check_selected_recurrence_source t binding ~intent ~attempt)
+  in
+  let run_preparation =
+    Option.map binding ~f:(fun binding -> binding.Source_binding.preparation)
+  in
   let%bind controller = require_recurrence_controller t in
   let prepare () =
     Recurrence_execution_admission.prepare
@@ -13623,25 +13742,48 @@ let record_recurrence_execution_internal t ~actor ~authorize ~intent ~attempt =
       ~intent
       ~attempt
   in
+  let check_owned prepared binding =
+    (* The central source-policy check has finished. Controller policies and
+       fresh grace precede both originals and the final joint pure bases. *)
+    let%bind () = Recurrence_execution_admission.check_current prepared t.state in
+    let%bind () = check_recurrence_execution_runtime t prepared in
+    let%bind () = check_source_original t binding in
+    let%bind () =
+      Recurrence_command_admission.check_write actor ~authorize:(fun _ -> Ok ()) t.state
+    in
+    let%bind () = Recurrence_execution_admission.check_basis prepared t.state in
+    check_selected_source t binding
+  in
+  let check_current prepared =
+    match binding with
+    | None -> check_recurrence_execution_admission t prepared
+    | Some binding ->
+      let%bind () = Source_binding.check_current binding in
+      check_owned prepared binding
+  in
   let%bind prepared = prepare () in
-  let%bind () = check_recurrence_execution_admission t prepared in
+  let%bind () = check_current prepared in
   match Recurrence_execution_admission.decision prepared with
   | Retained row -> Ok row
   | New { catalog; execution } ->
     let%bind candidate =
       prepare_transition
+        ?run_preparation
         t
         ~delta:(Session_delta.Recurrence_catalog_changed catalog)
         ~payloads:[]
     in
-    let%bind () = check_recurrence_execution_admission t prepared in
-    let%bind () = persist_transition t candidate in
-    install_committed_transition t candidate;
+    let%bind () = check_current prepared in
+    let final_check =
+      Option.map binding ~f:(fun binding -> fun () -> check_owned prepared binding)
+    in
+    let%bind () = persist_transition ?run_preparation ?final_check t candidate in
+    install_committed_transition ?run_preparation t candidate;
     publish_committed_transition t candidate;
     (* Our own canonical projection rotates the genuine Current. Refresh rather
        than testing the precommit observation or claiming rollback after ACK. *)
     let%bind refreshed = prepare () in
-    let%bind () = check_recurrence_execution_admission t refreshed in
+    let%bind () = check_current refreshed in
     (match Recurrence_execution_admission.decision refreshed with
      | Retained row when Recurrence_execution.equal row execution -> Ok row
      | Retained _ | New _ ->
@@ -13898,6 +14040,53 @@ let check_recurrence_import_owner t =
   else Error (error Conflict "recurrence settlement controller owner is unavailable")
 ;;
 
+let check_held_recurrence_source
+      t
+      (held : Held_run.t)
+      (observation : Recurrence_run_observation.t)
+  =
+  let open Result.Let_syntax in
+  let%bind () = check_bound_source t held.binding in
+  let%bind () = Held_run.check_basis held in
+  let%bind controller = require_recurrence_controller t in
+  let session = Recurrence_controller.session controller in
+  let origin = observation.origin in
+  let controller_session =
+    Recurrence_run_origin.occurrence origin
+    |> Recurrence_identity.Occurrence.definition
+    |> Recurrence_identity.Definition.controller
+  in
+  let%bind () =
+    if
+      Recurrence_controller.same_store controller observation.controller
+      && Agent_protocol.Session_ref.equal session held.run.session
+      && Agent_protocol.Session_ref.equal session (Recurrence_run_origin.session origin)
+      && Agent_protocol.Session_ref.equal session controller_session
+      && Agent_protocol.Run_receipt.equal
+           held.admission
+           (Recurrence_run_origin.admission origin)
+      && Option.is_none observation.terminal
+    then Ok ()
+    else
+      Error (error Conflict "held association requires this exact self-target Admission")
+  in
+  let%bind index =
+    Result.of_option
+      t.state.run_state
+      ~error:(error Conflict "held association index is unavailable")
+  in
+  let%bind () =
+    if
+      Option.exists
+        (Run_state.recurrence_origin index held.run.id)
+        ~f:(Recurrence_run_origin.equal origin)
+    then Ok ()
+    else
+      Error (error Conflict "held association differs from the actual immutable origin")
+  in
+  observation.check_admitted ()
+;;
+
 let recurrence_import_evidence t (observation : Recurrence_run_observation.t) =
   let open Result.Let_syntax in
   let origin = observation.origin in
@@ -13944,6 +14133,7 @@ let recurrence_import_evidence t (observation : Recurrence_run_observation.t) =
 ;;
 
 let prepare_recurrence_import_candidate
+      ?run_preparation
       t
       (observation : Recurrence_run_observation.t)
       admission
@@ -13951,6 +14141,7 @@ let prepare_recurrence_import_candidate
   let open Result.Let_syntax in
   let prepare admission =
     prepare_transition
+      ?run_preparation
       t
       ~delta:
         (Session_delta.Recurrence_catalog_changed
@@ -14009,6 +14200,7 @@ let prepare_recurrence_import_candidate
 ;;
 
 let import_recurrence_execution_internal
+      ?held
       t
       ~actor
       ~authorize
@@ -14016,6 +14208,13 @@ let import_recurrence_execution_internal
       ~(observation : Recurrence_run_observation.t)
   =
   let open Result.Let_syntax in
+  let%bind () =
+    Option.value_map held ~default:(Ok ()) ~f:(fun held ->
+      check_held_recurrence_source t held observation)
+  in
+  let run_preparation =
+    Option.map held ~f:(fun held -> held.Held_run.binding.preparation)
+  in
   let%bind () = check_recurrence_import_owner t in
   let%bind () =
     Recurrence_command_admission.check_write actor ~authorize:(fun _ -> Ok ()) t.state
@@ -14047,19 +14246,47 @@ let import_recurrence_execution_internal
        basis after that callback, without another policy or evidence query. *)
     let%bind () = observation.check_authority () in
     let%bind () = Recurrence_settlement_admission.check_basis admission t.state in
+    let%bind () =
+      match held with
+      | None -> Ok ()
+      | Some held ->
+        let%bind () = check_source_original t held.binding in
+        let%bind () =
+          Recurrence_command_admission.check_write
+            actor
+            ~authorize:(fun _ -> Ok ())
+            t.state
+        in
+        let%bind () = check_held_recurrence_source t held observation in
+        Recurrence_settlement_admission.check_state_basis admission t.state
+    in
     let%bind () = observation.check_basis () in
     check_recurrence_import_owner t
   in
-  let%bind () = check_current admission in
+  let check_all admission =
+    let%bind () =
+      Option.value_map held ~default:(Ok ()) ~f:(fun held ->
+        Source_binding.check_current held.Held_run.binding)
+    in
+    check_current admission
+  in
+  let%bind () = check_all admission in
   match Recurrence_settlement_admission.settlement admission with
   | (Retained_exact _ | Detail_not_retained _) as settlement ->
     Ok Recurrence_import.{ settlement; timing = No_successor }
   | Imported _ ->
-    let%bind candidate = prepare_recurrence_import_candidate t observation admission in
-    let%bind () = check_current candidate.admission in
+    let%bind candidate =
+      prepare_recurrence_import_candidate ?run_preparation t observation admission
+    in
+    let%bind () = check_all candidate.admission in
     let settlement = Recurrence_settlement_admission.settlement candidate.admission in
-    let%bind () = persist_transition t candidate.transition in
-    install_committed_transition t candidate.transition;
+    let final_check =
+      Option.map held ~f:(fun _ -> fun () -> check_current candidate.admission)
+    in
+    let%bind () =
+      persist_transition ?run_preparation ?final_check t candidate.transition
+    in
+    install_committed_transition ?run_preparation t candidate.transition;
     Option.iter
       candidate.phase
       ~f:(Recurrence_runtime.install_completion_phase t.recurrence_runtime);
@@ -14073,6 +14300,21 @@ let import_recurrence_execution_internal
         ~authorize:(fun state ->
           authorize state (Recurrence_settlement_admission.definition candidate.admission))
         t.state
+    in
+    let%bind () =
+      match held with
+      | None -> Ok ()
+      | Some held ->
+        (* Own ACK stales the target observation. Authenticate the actual live
+           source and controller only, then check the advanced Held basis. *)
+        let%bind () = check_source_original t held.binding in
+        let%bind () =
+          Recurrence_command_admission.check_write
+            actor
+            ~authorize:(fun _ -> Ok ())
+            t.state
+        in
+        Held_run.check_basis held
     in
     let%bind () = check_recurrence_import_owner t in
     if Recurrence_controller.is_current current
@@ -14960,10 +15202,21 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Check_recurrence_creation permit -> refresh_recurrence_creation t permit
     | Record_recurrence_execution (actor, authorize, intent, attempt) ->
       record_recurrence_execution_internal t ~actor ~authorize ~intent ~attempt
+    | Record_prepared_recurrence_execution (binding, actor, authorize, intent, attempt) ->
+      record_recurrence_execution_internal ~binding t ~actor ~authorize ~intent ~attempt
     | Observe_recurrence_run (actor, authorize, intent, attempt) ->
       observe_recurrence_run_internal t ~actor ~authorize ~intent ~attempt
     | Import_recurrence_execution (actor, authorize, automatic_policy, observation) ->
       import_recurrence_execution_internal
+        t
+        ~actor
+        ~authorize
+        ~automatic_policy
+        ~observation
+    | Import_held_recurrence_execution
+        (held, actor, authorize, automatic_policy, observation) ->
+      import_recurrence_execution_internal
+        ~held
         t
         ~actor
         ~authorize
@@ -16946,4 +17199,24 @@ let sweep_recurrences t =
 
 let admit_held_recurrence_run t ~binding ~intent ~attempt ~session =
   recurrence_call t (Admit_held_recurrence_run (binding, intent, attempt, session))
+;;
+
+let record_prepared_recurrence_execution t ~binding ~actor ~authorize ~intent ~attempt =
+  recurrence_call
+    t
+    (Record_prepared_recurrence_execution (binding, actor, authorize, intent, attempt))
+;;
+
+let import_held_recurrence_execution
+      t
+      ~held
+      ~actor
+      ~authorize
+      ~automatic_policy
+      ~observation
+  =
+  recurrence_call
+    t
+    (Import_held_recurrence_execution
+       (held, actor, authorize, automatic_policy, observation))
 ;;

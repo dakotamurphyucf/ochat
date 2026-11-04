@@ -55,3 +55,9 @@ val check_current : t -> Session_state.t -> (unit, Agent_protocol.Error.t) resul
     original callback immediately before its effect. Does not replace policy
     checks or establish a callback-free activation boundary. *)
 val check_basis : t -> Session_state.t -> (unit, Agent_protocol.Error.t) result
+
+(** Callback-free captured controller/session/catalog/entry/Current and
+    automatic-eligibility predicates. Unlike [check_basis], this does not invoke
+    original authentication. A composed actual owner must run all policy and
+    original checks before this final state fence; it grants no authority alone. *)
+val check_state_basis : t -> Session_state.t -> (unit, Agent_protocol.Error.t) result

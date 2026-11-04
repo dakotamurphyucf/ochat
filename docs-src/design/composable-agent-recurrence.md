@@ -978,7 +978,28 @@ custody. Closure preserves the last write disposition and durable evidence.
 Prewrite rejection, attempted-write uncertainty and confirmed admission remain
 distinct, including when custody closes during persistence or publication raises.
 
-The deferred host, self-target controller acknowledgement advancement, actual
-reciprocal activation barrier and no-effects retry issuer remain separate
-qualification boundaries. This inert admission seam starts no deferred effects
-and issues no no-effects proof.
+For a controller targeting its own session, the exact prepared-record operation
+keeps the original target request, CAS, key and digest while its controller record
+ACK advances only the actual owned preparation. The held association import then
+requires the same live `Admitted` Run, canonical Admission and immutable origin.
+Its reciprocal controller ACK advances that same preparation before publication.
+Retained data neither advances nor reattaches custody; unrelated ordinary writes
+still close it. Neither operation accepts a different actor or server-qualified
+target. The controller must already own its legitimate installed source and
+checkpoint; these operations create no cold checkpoint.
+
+Both owned paths finish their controller policies after the central source-binding
+policy callback. Fresh selection grace, where required, precedes the final
+original proofs and callback-free controller and source/held bases immediately
+before the sole writer attempt. Own ACK rotates the actual Store witness, so returned
+data refreshes controller visibility without reusing the stale self-target read.
+The pure custody basis alone remains neither authentication nor runtime authority.
+
+The deferred host, actual reciprocal activation barrier and no-effects retry
+issuer remain separate qualification boundaries. Factory must verify the full
+retained artifact, installed tree and selected program/content custody before
+binding or held admission; equal revision IDs alone do not establish that proof.
+Activation must consume the same genuine `Prepared` and `Held_run` owners through
+a one-shot phase, without widening staged quiescence or accepting an arbitrary
+runtime replacement. This inert admission seam starts no deferred effects and
+issues no no-effects proof.
