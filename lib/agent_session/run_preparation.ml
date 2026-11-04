@@ -19,11 +19,17 @@ type t =
   ; request_sha256 : string
   ; authorize : Session_state.t -> (unit, P.Error.t) result
   ; mutable phase : phase
+  ; mutable constructor_jobs : P.Id.Job.t list
   }
 
 let conflict message = Error (P.Error.create Conflict ~message ~retryable:false ())
 let belongs_to t ~owner = phys_equal t.owner owner
-let close t = t.phase <- Closed
+
+let close t =
+  t.phase <- Closed;
+  t.constructor_jobs <- []
+;;
+
 let request t = t.request
 let principal_id t = t.principal_id
 
@@ -68,6 +74,7 @@ let create_request
       ; request_sha256
       ; authorize
       ; phase = Open state.counters.revision
+      ; constructor_jobs = []
       }
 ;;
 
@@ -139,6 +146,86 @@ let advance t ~owner ~(previous : Session_state.t) ~(current : Session_state.t) 
   Result.iter_error result ~f:(fun _ -> close t);
   result
 ;;
+
+module Constructor_jobs = struct
+  type preparation = t
+
+  type t =
+    { preparation : preparation
+    ; revision : int64
+    ; basis : P.Id.Job.t list
+    ; candidate : P.Id.Job.t list
+    }
+
+  let retained preparation (state : Session_state.t) =
+    List.filter preparation.constructor_jobs ~f:(fun id ->
+      List.exists state.jobs ~f:(fun job ->
+        P.Id.Job.equal id job.P.Job.id
+        && Int.equal job.generation state.identity.generation))
+  ;;
+
+  let prepare_add preparation ~owner ~(state : Session_state.t) ~(job : P.Job.t) =
+    let open Result.Let_syntax in
+    let%bind () = check preparation ~owner ~state in
+    let%bind _ = P.Id.Job.of_string (P.Id.Job.to_string job.id) in
+    let%bind () =
+      if
+        P.Id.Session.equal job.session_id state.identity.session_id
+        && Int.equal job.generation state.identity.generation
+        && (not
+              (List.exists state.jobs ~f:(fun previous ->
+                 P.Id.Job.equal previous.id job.id)))
+        && not (List.mem preparation.constructor_jobs job.id ~equal:P.Id.Job.equal)
+      then Ok ()
+      else conflict "constructor Job bookkeeping requires a fresh owned identity"
+    in
+    let%map () =
+      match job.status with
+      | Queued when Int.equal job.attempt 0 -> Ok ()
+      | Queued
+      | Running
+      | Waiting_permission _
+      | Waiting_completion _
+      | Succeeded
+      | Failed _
+      | Cancelled
+      | Interrupted _ ->
+        conflict "constructor Job bookkeeping requires queued attempt zero"
+    in
+    { preparation
+    ; revision = state.counters.revision
+    ; basis = preparation.constructor_jobs
+    ; candidate = job.id :: retained preparation state
+    }
+  ;;
+
+  let prepare_handoff preparation ~owner ~(state : Session_state.t) =
+    let open Result.Let_syntax in
+    let%map () = check preparation ~owner ~state in
+    ( retained preparation state
+    , { preparation
+      ; revision = state.counters.revision
+      ; basis = preparation.constructor_jobs
+      ; candidate = []
+      } )
+  ;;
+
+  let check_before_commit t ~owner ~(state : Session_state.t) =
+    let open Result.Let_syntax in
+    let%bind () = check t.preparation ~owner ~state in
+    if
+      Int64.equal state.counters.revision t.revision
+      && phys_equal t.basis t.preparation.constructor_jobs
+    then Ok ()
+    else conflict "constructor Job selection changed before its owner commit"
+  ;;
+
+  let acknowledge t =
+    match t.preparation.phase with
+    | Closed -> ()
+    | Open _ -> t.preparation.constructor_jobs <- t.candidate
+  ;;
+end
 
 module Decision = struct
   type preparation = t

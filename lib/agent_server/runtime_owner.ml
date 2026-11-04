@@ -109,12 +109,16 @@ let install ?run_preparation ?original_actor t (runtime : Agent_session.Runtime_
   let%bind _ =
     match run_preparation with
     | None ->
-      Agent_session.Session_actor.change_moderator
-        ?actor:original_actor
-        t.actor
-        (runtime.moderator_snapshot ())
+      let%bind state = Agent_session.Session_actor.state t.actor in
+      let%bind moderator =
+        Agent_session.Moderator_checkpoint.reuse_unchanged_snapshot
+          ~previous:state.moderator
+          ~incoming:(runtime.moderator_snapshot ())
+      in
+      Agent_session.Session_actor.change_moderator ?actor:original_actor t.actor moderator
     | Some preparation ->
       Agent_session.Session_actor.checkpoint_run_moderator
+        ?moderator_manager:runtime.moderator_manager
         t.actor
         ~preparation
         (runtime.moderator_snapshot ())
@@ -122,6 +126,7 @@ let install ?run_preparation ?original_actor t (runtime : Agent_session.Runtime_
   let%map () =
     Agent_session.Session_actor.set_runtime_worker
       ?actor:original_actor
+      ?moderator_manager:runtime.moderator_manager
       t.actor
       ~worker:(Some runtime.worker)
       ~inference:(Some (Agent_session.Runtime_builder.inference_execution runtime))
@@ -217,7 +222,16 @@ let ensure_loaded_locked ?run_preparation ?original_actor t =
         with
         | Ok () -> check runtime
         | Error _ as failure ->
-          runtime.close ();
+          (* The admitted install failure remains primary; exact constructor
+             cleanup and the original resource close still run. *)
+          (try Eio.Cancel.protect runtime.close with
+           | cleanup ->
+             (try
+                Eio.traceln
+                  "runtime cleanup after failed install: %s"
+                  (Exn.to_string cleanup)
+              with
+              | _ -> ()));
           failure))
 ;;
 
@@ -869,6 +883,7 @@ let deliver_schedule t (schedule : Agent_protocol.Schedule.t) =
         Agent_session.Session_actor.complete_schedule
           ~expected:before
           ~expected_schedule:schedule
+          ?moderator_manager:runtime.moderator_manager
           t.actor
           ~schedule_id:schedule.id
           ~generation:schedule.generation
@@ -1375,6 +1390,7 @@ let deliver_model_job_completion t (job : Agent_protocol.Job.t) =
         Agent_session.Session_actor.deliver_job
           ~expected:before
           ~expected_job:job
+          ?moderator_manager:runtime.moderator_manager
           t.actor
           ~job_id:job.id
           ~generation:job.generation
@@ -1402,13 +1418,21 @@ let deliver_moderated_background_job_completion
     | true -> Ok ()
     | false ->
       let%bind observer =
-        Option.bind
-          runtime.moderator_manager
-          ~f:Chat_response.Moderator_manager.invocation_observer
-        |> Result.of_option
-             ~error:
-               (Agent_protocol.Error.invalid_request
-                  "background completion requires a qualified moderator")
+        match runtime.moderator_manager with
+        | None ->
+          Error
+            (Agent_protocol.Error.invalid_request
+               "background completion requires its actual moderator")
+        | Some manager ->
+          (match Chat_response.Moderator_manager.invocation_observer manager with
+           | Some observer -> Ok observer
+           | None ->
+             Chat_response.Moderator_manager.identity_snapshot manager
+             |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+             |> Result.map ~f:(fun snapshot ->
+               { Agent_protocol.Invocation.script_id = snapshot.script_id
+               ; source_sha256 = snapshot.script_source_hash
+               }))
       in
       let%bind frame = Agent_session.Background_job_event.frame ~state ~observer job in
       let%bind payload =
@@ -1421,6 +1445,7 @@ let deliver_moderated_background_job_completion
         Agent_session.Session_actor.deliver_job
           ~expected:before
           ~expected_job:job
+          ?moderator_manager:runtime.moderator_manager
           t.actor
           ~job_id:job.id
           ~generation:job.generation

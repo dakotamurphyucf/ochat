@@ -17,7 +17,7 @@ let unavailable = function
 
 (* Callers live outside the actor's switch, including protected cleanup callers.
    An actor failure must release them before its owning switch can be joined. *)
-let with_owner ~state_committed f =
+let with_owner_env ~state_committed f =
   with_actor_workspace (fun env workspace_instance ->
     Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
       Eio.Switch.run (fun callers ->
@@ -79,9 +79,10 @@ let with_owner ~state_committed f =
               A.shutdown actor;
               ignore (Eio.Promise.try_resolve release_u ());
               ignore (Eio.Promise.await_exn exited)))
-          ~f:(fun () -> f callers actor backend cancel exited))))
+          ~f:(fun () -> f env callers actor backend cancel exited))))
 ;;
 
+let with_owner ~state_committed f = with_owner_env ~state_committed (fun _env -> f)
 let fail_publication failure = raise failure [@@inline never]
 
 let%expect_test "post-ACK owner exception releases protected callers and expires proof" =
@@ -218,4 +219,169 @@ let%expect_test
      ordinary shutdown still returns.";
   [%expect
     {| Owner cancellation closes requests; caller cancellation leaves the actor live; ordinary shutdown still returns. |}]
+;;
+
+let%expect_test
+    "selected Job capacity and publication cuts drain actions and preserve the first \
+     failure"
+  =
+  List.iter [ `Capacity; `State_publication ] ~f:(fun cut ->
+    let selected : P.Job.t list ref = ref [] in
+    let unselected = ref None in
+    let published = ref []
+    and aborted = ref [] in
+    let retained = ref None in
+    let failure = Failure "first selected Job publication failure" in
+    let later_failure = Failure "later selected Job publication failure" in
+    let old_backtraces = Stdlib.Printexc.backtrace_status () in
+    Exn.protect
+      ~finally:(fun () -> Stdlib.Printexc.record_backtrace old_backtraces)
+      ~f:(fun () ->
+        Stdlib.Printexc.record_backtrace true;
+        with_owner_env
+          ~state_committed:(fun state _ ->
+            match cut, !selected with
+            | `State_publication, (_ :: _ as jobs)
+              when List.for_all jobs ~f:(fun job ->
+                     List.exists state.Agent_session.Session_state.jobs ~f:(fun saved ->
+                       P.Id.Job.equal saved.id job.id)) -> fail_publication failure
+            | (`Capacity | `State_publication), _ -> ())
+          (fun _env _callers actor backend _cancel exited ->
+             let original = Agent_authority_tests.authentication (Atomic.make true) in
+             let writer, _ =
+               A.attach actor ~mode:Read_write ~subscribe:false |> protocol_ok
+             in
+             let expected = A.state actor |> protocol_ok in
+             let initialization =
+               A.begin_initialization_authenticated actor ~actor:original ~expected
+               |> protocol_ok
+             in
+             let parent : P.Job.t =
+               { id = P.Id.Job.create ()
+               ; session_id
+               ; generation = expected.identity.generation
+               ; kind = Model_call
+               ; payload = `Object []
+               ; status = Queued
+               ; retry_policy = Never
+               ; attempt = 0
+               ; created_at = timestamp
+               ; started_at = None
+               ; next_run_at = None
+               ; completed_at = None
+               ; result = None
+               ; delivery = Not_required
+               ; launch = None
+               ; inference_origin = None
+               ; progress = None
+               }
+             in
+             let parent =
+               A.add_initialization_model_job actor ~scope:initialization parent
+               |> protocol_ok
+             in
+             A.complete_initialization actor ~scope:initialization ~candidate:expected
+             |> protocol_ok
+             |> ignore;
+             A.end_initialization actor ~scope:initialization |> protocol_ok;
+             A.start actor ~actor:original ~attachment_id:writer.id
+             |> protocol_ok
+             |> ignore;
+             let parent =
+               A.claim_job actor ~job_id:parent.id ~generation:parent.generation
+               |> protocol_ok
+               |> Option.value_exn
+             in
+             let registry = native_registry (ref 0) ~raises:false in
+             let request =
+               Background_execution_tests.capture_tool
+                 registry
+                 Chat_response.One_off_request.default_policy
+             in
+             let invocation = Job_fixtures.root parent in
+             let stage owner action =
+               let job =
+                 A.prepare_background_job_launch actor ~owner request |> protocol_ok
+               in
+               A.stage_background_job
+                 actor
+                 ~job
+                 ~capacity:
+                   { publish =
+                       (fun () ->
+                         published := job.id :: !published;
+                         match cut, action with
+                         | `Capacity, `First -> fail_publication failure
+                         | `Capacity, `Second -> fail_publication later_failure
+                         | `State_publication, (`First | `Second) -> ()
+                         | (`Capacity | `State_publication), `Unselected ->
+                           failwith "unselected Job published")
+                   ; abort = (fun () -> aborted := job.id :: !aborted)
+                   }
+               |> protocol_ok;
+               job
+             in
+             let outcome =
+               capture (fun () ->
+                 A.with_job_execution
+                   actor
+                   ~job_id:parent.id
+                   ~generation:parent.generation
+                   ~attempt:parent.attempt
+                   ~deadline:(Some Job_fixtures.deadline)
+                   (fun services ->
+                      services.execute ~invocation (fun ~dispatched ~borrow_agent_actor ->
+                        retained
+                        := Some
+                             (borrow_agent_actor ~invocation:dispatched
+                              |> Agent_authority_tests.require_actor);
+                        let owner = P.Job.Invocation dispatched.context.id in
+                        let first = stage owner `First in
+                        let second = stage owner `Second in
+                        let other = stage owner `Unselected in
+                        selected := [ first; second ];
+                        unselected := Some other;
+                        A.select_background_jobs actor ~owner ~ids:[ first.id; second.id ]
+                        |> protocol_ok;
+                        Ok (P.Invocation.Complete `Null))))
+             in
+             (* These checks run outside both the actual actor owner switch and
+                every native/worker exception-conversion boundary. *)
+             (match outcome with
+              | Error (actual, backtrace) ->
+                assert (phys_equal actual failure);
+                assert (
+                  String.is_substring
+                    (Stdlib.Printexc.raw_backtrace_to_string backtrace)
+                    ~substring:"fail_publication")
+              | Ok _ -> failwith "post-ACK capacity/publication failure was swallowed");
+             let selected_ids = List.map !selected ~f:(fun job -> job.P.Job.id) in
+             [%test_eq: int] 2 (List.length selected_ids);
+             assert (List.equal P.Id.Job.equal selected_ids (List.rev !published));
+             let other = Option.value_exn !unselected in
+             assert (List.equal P.Id.Job.equal [ other.id ] (List.rev !aborted));
+             let stored = Agent_session.Memory_backend.state backend in
+             assert (
+               List.for_all selected_ids ~f:(fun id ->
+                 List.exists stored.jobs ~f:(fun job -> P.Id.Job.equal id job.id)));
+             assert (
+               not
+                 (List.exists stored.jobs ~f:(fun job -> P.Id.Job.equal other.id job.id)));
+             (match
+                List.find stored.invocations ~f:(fun saved ->
+                  P.Id.Invocation.equal saved.context.id invocation.context.id)
+              with
+              | Some { status = Resolved (Complete `Null); _ } -> ()
+              | Some _ | None -> failwith "ACKed parent outcome did not persist");
+             assert (Result.is_error (Eio.Promise.await_exn exited));
+             unavailable (A.state actor);
+             unavailable
+               (Eio.Cancel.protect (fun () -> A.reserve_history_block actor ~count:1));
+             assert (Operator_authorization.is_current original);
+             assert (not (Operator_authorization.is_current (Option.value_exn !retained))))));
+  print_endline
+    "selected facts and outcome stay committed; all prescribed capacity actions run; \
+     first failure/backtrace survives; dead owner lends no permission";
+  [%expect
+    {| selected facts and outcome stay committed; all prescribed capacity actions run; first failure/backtrace survives; dead owner lends no permission |}]
 ;;

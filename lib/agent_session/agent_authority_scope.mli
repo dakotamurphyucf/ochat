@@ -13,6 +13,10 @@ val create : actor:Operator_authorization.t -> is_current:(unit -> bool) -> t
     lifetime checks. Keeping the returned object cannot extend either lifetime. *)
 val actor : t -> (Operator_authorization.t, Agent_protocol.Error.t) result
 
+(** Nonyielding liveness of this exact original/owner epoch. Exceptions from an
+    original host guard remain exceptions; this does not authenticate or renew. *)
+val is_current : t -> bool
+
 (** Acknowledged ownership handoff only. Checks the lending owner now, then keeps
     the ORIGINAL authentication with the new owner's independent live epoch.
     The child does not retain a callback-limited wrapper. Never call this for a

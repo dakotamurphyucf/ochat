@@ -96,6 +96,84 @@ type prepared_commit =
   ; install : unit -> unit
   }
 
+(** Services selected for one actual callback. Model and immediate legacy
+    Schedule operations share the callback owner; constructing this record grants
+    no host authority. Standalone embeddings keep their explicitly supplied
+    constructor services when they do not use the callback boundary. *)
+module Callback_services : sig
+  type t =
+    { model_recipes : Moderation.Capabilities.model_recipe String.Map.t
+    ; after_ms :
+        delay_ms:int -> payload:Chatml.Chatml_lang.value -> (string, string) result
+    ; cancel : id:string -> (unit, string) result
+    }
+end
+
+module Callback : sig
+  (** Issued under the actual Manager gate for one selected callback. No codec or
+      public constructor exists. Saved values expire before that callback returns. *)
+  type t
+
+  module Selection : sig
+    type t =
+      | Boundary of Moderation.Event.t
+      | Queue_head
+  end
+
+  val source : t -> Agent_protocol.Invocation.observer
+  val snapshot : t -> Session.Moderator_state.Identity_snapshot.t
+  val event : t -> Session.Snapshot.t
+
+  (** The actual selection made while this Manager holds its gate. Reading it
+      grants no host admission or authority; the callback epoch must still be
+      current on that exact installed Manager. *)
+  val selection : t -> Selection.t
+
+  val consumes_head : t -> bool
+end
+
+(** Exact installed resource identity and callback epoch, not source-string
+    equality. This check does not acquire the Manager gate or yield. *)
+val callback_is_current : t -> Callback.t -> bool
+
+type callback_binding =
+  { services : Callback_services.t
+  ; authorize : unit -> (unit, string) result
+  ; prepare :
+      outcome:Moderation.Outcome.t
+      -> snapshot:Session.Moderator_state.Identity_snapshot.t
+      -> (prepared_commit, string) result
+  }
+
+(** Execute one legacy boundary or exact queue head through the existing Runtime
+    transaction engine. Mode is taken from this compiled Manager, never a caller
+    relaxation of v1 envelopes. The CPS admission owns its actor borrow through
+    handler execution, checkpoint persistence and cleanup. The supplied snapshot
+    precedes execution; prepare receives the full prospective queue. Queue removal
+    and local installation follow successful persistence. Empty queues do not
+    call admission. Failure leaves the live checkpoint unchanged; the host must
+    retain failed/interrupted claims so external effects cannot automatically replay.
+    Services are restored on error, exception or cancellation. The supplied CPS
+    executor rejects reuse and execution after its admission callback ends. This
+    boundary retains the compiled runtime's existing execution controls; deferred
+    Task values are interpreted under the callback that executes them. UI
+    suspension rejects this boundary.
+    Existing standalone drains and strict v1 entry points are unchanged. *)
+val handle_legacy_callback_entries
+  :  t
+  -> selection:Callback.Selection.t
+  -> session_id:string
+  -> now_ms:int
+  -> history:History_entry.t list
+  -> available_tools:Res.Request.Tool.t list
+  -> session_meta:Jsonaf.t
+  -> with_admission:
+       (Callback.t
+        -> snapshot:Session.Moderator_state.Identity_snapshot.t
+        -> (callback_binding -> (Moderation.Outcome.t, string) result)
+        -> (Moderation.Outcome.t, string) result)
+  -> (Moderation.Outcome.t option, string) result
+
 (** In-memory embeddings/tests with no durable owner. Does not grant job services. *)
 val memory_commit : (unit -> unit) -> prepared_commit
 

@@ -1049,3 +1049,134 @@ let legacy_pending_payload payload =
   | `Null | `True | `False | `Number _ | `String _ | `Array _ ->
     failwith "expected fixture state payload"
 ;;
+
+(* Use real complete Prepared program custody for actor-visible source identity,
+   rather than replacing it with the separate Single artifact's body identity. *)
+let prepared_legacy_callback_managers env ~id ~source =
+  let module C = Chatml_prompt_programs in
+  let module CM = Prompt.Chat_markdown in
+  let module M = Chat_response.Moderator_manager in
+  let checkpoint = Eio.Fiber.check in
+  let raw =
+    Printf.sprintf
+      "<script id=\"%s\" language=\"chatml\" kind=\"moderator\">%s</script>"
+      id
+      source
+  in
+  let dir = Eio.Stdenv.cwd env in
+  let sources = [ "callback.chatmd", raw ] in
+  let authored =
+    Agent_session.Prompt_program_custody.authored ~root_file:"callback.chatmd" ~sources
+    |> Or_error.ok_exn
+  in
+  let parsed =
+    CM.prepare_chat_inputs
+      ~source:"callback.chatmd"
+      ~source_loader:(Source_loader.captured_filesystem ~root:dir ~sources)
+      ~dir
+      ~preprocess:Fn.id
+      ~limits:
+        (CM.Limits.create
+           ~max_input_bytes:65536
+           ~max_parse_calls:16
+           ~max_tokens:10000
+           ~max_depth:32
+         |> Or_error.ok_exn)
+      ~checkpoint
+      raw
+  in
+  let script =
+    List.find_map_exn (CM.Parsed.elements parsed) ~f:(function
+      | CM.Script script -> Some script
+      | _ -> None)
+  in
+  let declaration = List.hd_exn (CM.Parsed.declarations parsed) in
+  let binding =
+    C.Binding.of_declaration parsed declaration ~checkpoint |> Or_error.ok_exn
+  in
+  let surface = Chatml.Chatml_builtin_surface.moderator_surface in
+  let contract = Chat_response.Moderator_program.contract surface ~checkpoint in
+  let contract_digest =
+    Chatml.Chatml_compiler_contract.fingerprint contract ~checkpoint
+  in
+  let body =
+    match script.source with
+    | Inline source -> source
+    | Src { source_text; _ } -> source_text
+  in
+  let captured =
+    Chatml_source.create
+      (Chatml_source.Id.create
+         ~package_namespace:"callback"
+         ~relative_path:"handler.chatml"
+       |> Or_error.ok_exn)
+      ~contents:body
+      ~expected_digest:None
+      ~max_bytes:(Some 65536)
+      ~checkpoint
+    |> Or_error.ok_exn
+  in
+  let program =
+    Chatml_prepared_program.single_captured
+      ~compiler_contract:contract_digest
+      ~source:captured
+      ~max_input_bytes:262144
+      ~checkpoint
+      ()
+    |> Result.map_error ~f:(fun error -> error.Chatml_prepared_program.Error.message)
+    |> Result.ok_or_failwith
+  in
+  let limits = Agent_session.Prompt_program_custody.limits () in
+  let checked = function
+    | Ok value -> value
+    | Error _ -> failwith "valid callback program custody rejected"
+  in
+  let custody =
+    C.capture
+      authored
+      ~parsed_contexts:[ parsed ]
+      ~root:(CM.Parsed.root_input parsed)
+      ~programs:[ binding, Provided program ]
+      ~active_programs:[ binding, contract_digest ]
+      ~limits
+      ~checkpoint
+    |> checked
+  in
+  let programs =
+    C.restore custody ~parsed ~contracts:[ binding, contract ] ~limits ~checkpoint
+    |> checked
+  in
+  let capabilities =
+    Chat_response.Tool_capability.create
+      ~owner:"callback"
+      ~resource_fingerprint:(Chatmd_shell_spec.Source_ref.digest "callback")
+      []
+    |> Result.map_error ~f:(fun error -> error.Chat_response.Tool_capability.message)
+    |> Result.ok_or_failwith
+  in
+  let artifact =
+    M.Registry.prepare_script
+      ~surface
+      M.Registry.empty
+      script
+      ~programs
+      ~capabilities
+      ~env
+      ~checkpoint
+      ~limits:Chatml_compilation.default_limits
+      ~max_dependency_depth:128
+    |> Result.ok_or_failwith
+    |> snd
+  in
+  fun ?snapshot () ->
+    M.create_entries
+      ~env
+      ~artifact
+      ~capabilities:Chat_response.Moderation.Capabilities.default
+      ?snapshot
+      ~allocator:
+        (History_entry.Allocator.create ~namespace:id ~next_sequence:0
+         |> Result.ok_or_failwith)
+      ()
+    |> Result.ok_or_failwith
+;;

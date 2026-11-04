@@ -23,9 +23,8 @@ let create ~actor:original ~is_current =
   { original; actor }
 ;;
 
-let actor t =
-  if Operator_authorization.is_current t.actor then Ok t.actor else Error (denied ())
-;;
+let is_current t = Operator_authorization.is_current t.actor
+let actor t = if is_current t then Ok t.actor else Error (denied ())
 
 let transfer t ~is_current =
   Result.map (actor t) ~f:(fun _ -> create ~actor:t.original ~is_current)

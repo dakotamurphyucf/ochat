@@ -11,11 +11,17 @@ let same_value a b =
 ;;
 
 let installed ~state ~(snapshot : S.t) =
-  match state.Session_state.moderator with
-  | Some saved
-    when Document_schema.Json.equal
-           saved
-           (Runtime_builder.encode_moderator_snapshot snapshot) -> Ok ()
+  let open Result.Let_syntax in
+  let%bind saved = Moderator_checkpoint.decode state.Session_state.moderator in
+  let%bind metadata = Moderator_checkpoint.queue state.moderator in
+  let%bind () =
+    match metadata with
+    | None -> Ok ()
+    | Some metadata ->
+      Moderator_queue.validate_queue metadata snapshot.queued_internal_events
+  in
+  match saved with
+  | Some saved when Sexp.equal (S.sexp_of_t saved) (S.sexp_of_t snapshot) -> Ok ()
   | _ -> conflict "queued event requires the exact installed moderator checkpoint"
 ;;
 
@@ -326,7 +332,15 @@ let has_unsettled_claim ~state ~(observer : P.Invocation.observer) =
     | Completed _ -> false)
 ;;
 
-let claim_in_context ~operation_id ~state ~id ~(snapshot : S.t) ~now =
+let claim_in_context
+      ~queue_occurrence
+      ~check_event
+      ~operation_id
+      ~state
+      ~id
+      ~(snapshot : S.t)
+      ~now
+  =
   let open Result.Let_syntax in
   let%bind () = installed ~state ~snapshot in
   let%bind event =
@@ -334,19 +348,7 @@ let claim_in_context ~operation_id ~state ~id ~(snapshot : S.t) ~now =
     | false, event :: _ -> Ok event
     | _ -> conflict "moderator has no runnable queued event"
   in
-  let%bind () =
-    let checked =
-      let%bind value = Session.Snapshot.to_value event in
-      let%bind value = Chat_response.Schedule_delivery.script_event value in
-      let%bind value = Chat_response.Ingress_delivery.script_event value in
-      let%bind value = Chat_response.Background_delivery.script_event value in
-      match value with
-      | Chatml.Chatml_lang.VVariant ("Internal_event", [ payload ]) ->
-        Chat_response.Moderator_invocation.internal_event payload |> Result.map ~f:ignore
-      | _ -> Error "queued event requires an extensibility-v1 Internal_event envelope"
-    in
-    Result.map_error checked ~f:P.Error.invalid_request
-  in
+  let%bind () = check_event event in
   let checkpoint_sha256 = checkpoint snapshot in
   let%bind () =
     match
@@ -360,7 +362,9 @@ let claim_in_context ~operation_id ~state ~id ~(snapshot : S.t) ~now =
         "moderator has an unsettled queued event claim; automatic replay is forbidden"
     | false -> Ok ()
   in
-  E.create
+  (match queue_occurrence with
+   | None -> E.create
+   | Some occurrence -> E.create_queued ~queue_occurrence:occurrence)
     { id
     ; session_id = state.identity.session_id
     ; generation = state.identity.generation
@@ -376,8 +380,73 @@ let claim_in_context ~operation_id ~state ~id ~(snapshot : S.t) ~now =
   |> Result.map ~f:(fun receipt -> receipt, event)
 ;;
 
-let claim = claim_in_context ~operation_id:None
-let claim_foreground ~operation_id = claim_in_context ~operation_id:(Some operation_id)
+let check_versioned_event event =
+  let open Result.Let_syntax in
+  let checked =
+    let%bind value = Session.Snapshot.to_value event in
+    let%bind value = Chat_response.Schedule_delivery.script_event value in
+    let%bind value = Chat_response.Ingress_delivery.script_event value in
+    let%bind value = Chat_response.Background_delivery.script_event value in
+    match value with
+    | Chatml.Chatml_lang.VVariant ("Internal_event", [ payload ]) ->
+      Chat_response.Moderator_invocation.internal_event payload |> Result.map ~f:ignore
+    | _ -> Error "queued event requires an extensibility-v1 Internal_event envelope"
+  in
+  Result.map_error checked ~f:P.Error.invalid_request
+;;
+
+let claim =
+  claim_in_context
+    ~queue_occurrence:None
+    ~check_event:check_versioned_event
+    ~operation_id:None
+;;
+
+let claim_foreground ~operation_id =
+  claim_in_context
+    ~queue_occurrence:None
+    ~check_event:check_versioned_event
+    ~operation_id:(Some operation_id)
+;;
+
+let claim_legacy ~callback ~operation_id ~state ~id ~now =
+  let open Result.Let_syntax in
+  let%bind () =
+    if Chat_response.Moderator_manager.Callback.consumes_head callback
+    then Ok ()
+    else conflict "legacy queued claim requires the selected exact queue head"
+  in
+  let snapshot = Chat_response.Moderator_manager.Callback.snapshot callback in
+  let%bind _, source = Moderator_source_installation.capture state in
+  let%bind metadata = Moderator_checkpoint.queue state.Session_state.moderator in
+  let%bind metadata =
+    match metadata with
+    | Some metadata -> Ok metadata
+    | None -> Moderator_queue.bootstrap ~source ~queue:snapshot.queued_internal_events
+  in
+  let%bind entry =
+    match Moderator_queue.entries metadata with
+    | entry :: _ -> Ok entry
+    | [] -> conflict "legacy queued claim requires its exact occurrence"
+  in
+  let%bind queue_occurrence =
+    E.Queue_occurrence.create
+      ~source:(Moderator_queue.source metadata)
+      ~ordinal:(Moderator_queue.Entry.ordinal entry)
+      ~origin:(Moderator_queue.Entry.origin entry)
+  in
+  claim_in_context
+    ~queue_occurrence:(Some queue_occurrence)
+    ~check_event:(fun event ->
+      if same_value event (Chat_response.Moderator_manager.Callback.event callback)
+      then Ok ()
+      else conflict "legacy callback no longer selects the installed queue head")
+    ~operation_id
+    ~state
+    ~id
+    ~snapshot
+    ~now
+;;
 
 let complete ~claimed ~before ~(snapshot : S.t) ~requests =
   let open Result.Let_syntax in

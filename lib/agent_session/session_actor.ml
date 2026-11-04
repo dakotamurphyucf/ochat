@@ -150,28 +150,20 @@ end
 
 let equal_agent_entry = Agent_protocol.History.equal_entry
 
-type agent_custody =
-  { authority : Agent_authority_scope.t
-  ; live : bool Atomic.t
-  }
+type agent_custody = Execution_custody.t
+type agent_admission = Execution_custody.Admission.t
 
-let create_agent_custody actor =
-  let live = Atomic.make true in
-  { authority =
-      Agent_authority_scope.create ~actor ~is_current:(fun () -> Atomic.get live)
-  ; live
-  }
-;;
+let create_agent_custody = Execution_custody.create
+let transfer_agent_custody = Execution_custody.transfer
+let retire_agent_custody = Execution_custody.retire
+let create_agent_admission = Execution_custody.Admission.create
+let retire_agent_admission = Execution_custody.Admission.retire
+let check_agent_admission = Execution_custody.Admission.check
+let transfer_agent_admission = Execution_custody.Admission.transfer
 
-let transfer_agent_custody custody =
-  let live = Atomic.make true in
-  Result.map
-    (Agent_authority_scope.transfer custody.authority ~is_current:(fun () ->
-       Atomic.get live))
-    ~f:(fun authority -> { authority; live })
-;;
-
-let retire_agent_custody custody = Atomic.set custody.live false
+type lifecycle_continuation =
+  | Pending of agent_admission
+  | Consumed
 
 type agent_intent_key =
   | Event_intent of Agent_protocol.Id.Moderator_execution.t
@@ -190,17 +182,169 @@ type lifecycle_agent_custody =
   | Admitted of
       { generation : int
       ; source : Agent_protocol.Invocation.observer option
-      ; pending : agent_custody option
+      ; pending : lifecycle_continuation
       }
 
 module Initialization_scope = struct
+  module Purpose = struct
+    type t =
+      | Pending_initialization
+      | Runtime_construction
+    [@@deriving equal, sexp_of]
+  end
+
+  module Acknowledged = struct
+    type t =
+      { moderator : Jsonaf.t option
+      ; run_state : Run_state.t option
+      ; moderator_executions : Agent_protocol.Moderator_execution.t list
+      }
+
+    let capture (state : Session_state.t) =
+      { moderator = state.moderator
+      ; run_state = state.run_state
+      ; moderator_executions = state.moderator_executions
+      }
+    ;;
+
+    let apply t (expected : Session_state.t) =
+      { expected with
+        moderator = t.moderator
+      ; run_state = t.run_state
+      ; moderator_executions = t.moderator_executions
+      }
+    ;;
+  end
+
+  module Callback = struct
+    type t =
+      | Unclaimed
+      | Claimed of Agent_protocol.Id.Moderator_execution.t
+      | Settled of Agent_protocol.Id.Moderator_execution.t
+    [@@deriving equal]
+  end
+
+  module Resource = struct
+    type t =
+      { manager : Chat_response.Moderator_manager.t
+      ; source : Agent_protocol.Run_source.t
+      ; ordinals : int64 list
+      ; schedules : Agent_protocol.Id.Schedule.t list
+      ; handed_off : bool
+      }
+
+    let select previous (state : Session_state.t) ~manager ~source ~ordinals ~schedules =
+      let open Result.Let_syntax in
+      let%bind previous =
+        match previous with
+        | None ->
+          Ok ({ manager; source; ordinals = []; schedules = []; handed_off = false } : t)
+        | Some previous ->
+          if
+            phys_equal previous.manager manager
+            && Agent_protocol.Run_source.equal previous.source source
+            && not previous.handed_off
+          then Ok previous
+          else
+            Error
+              (Agent_protocol.Error.create
+                 Conflict
+                 ~message:"constructor resource changed before its checkpoint"
+                 ~retryable:false
+                 ())
+      in
+      let%map metadata = Moderator_checkpoint.queue state.moderator in
+      let retained_ordinals =
+        Option.value_map metadata ~default:[] ~f:(fun metadata ->
+          List.map (Moderator_queue.entries metadata) ~f:Moderator_queue.Entry.ordinal)
+      in
+      { previous with
+        ordinals =
+          List.filter (previous.ordinals @ ordinals) ~f:(fun ordinal ->
+            List.mem retained_ordinals ordinal ~equal:Int64.equal)
+          |> List.dedup_and_sort ~compare:Int64.compare
+      ; schedules =
+          List.filter (previous.schedules @ schedules) ~f:(fun id ->
+            List.exists state.schedules ~f:(fun schedule ->
+              Agent_protocol.Id.Schedule.equal id schedule.id))
+          |> List.dedup_and_sort ~compare:Agent_protocol.Id.Schedule.compare
+      }
+    ;;
+  end
+
   type t =
     { owner : unit ref
+    ; purpose : Purpose.t
     ; expected : Session_state.t
+    ; mutable acknowledged : Acknowledged.t
     ; mutable jobs : Agent_protocol.Id.Job.t list
+    ; mutable callback : Callback.t
+    ; mutable resource : Resource.t option
     ; run_preparation : Run_preparation.t option
-    ; agent_custody : agent_custody option
+    ; agent_admission : agent_admission
     }
+
+  module Acknowledgement = struct
+    type scope = t
+
+    (* Only the actual constructor checkpoint/claim planners prepare this private
+       candidate. It changes the currentness projection, never the immutable
+       control/Selection basis or original Admission. *)
+    type t =
+      { scope : scope
+      ; previous : Acknowledged.t
+      ; previous_callback : Callback.t
+      ; previous_resource : Resource.t option
+      ; previous_jobs : Agent_protocol.Id.Job.t list
+      ; callback : Callback.t
+      ; resource : Resource.t option
+      ; jobs : Agent_protocol.Id.Job.t list
+      ; incoming : Acknowledged.t
+      }
+
+    let prepare ?callback ?resource ?jobs scope (state : Session_state.t) =
+      { scope
+      ; previous = scope.acknowledged
+      ; previous_callback = scope.callback
+      ; previous_resource = scope.resource
+      ; previous_jobs = scope.jobs
+      ; callback = Option.value callback ~default:scope.callback
+      ; resource =
+          (match resource with
+           | Some _ -> resource
+           | None -> scope.resource)
+      ; jobs = Option.value jobs ~default:scope.jobs
+      ; incoming = Acknowledged.capture state
+      }
+    ;;
+
+    let check_basis t =
+      if
+        phys_equal t.scope.acknowledged t.previous
+        && Callback.equal t.scope.callback t.previous_callback
+        && Option.equal phys_equal t.scope.resource t.previous_resource
+        && phys_equal t.scope.jobs t.previous_jobs
+      then Ok ()
+      else
+        Error
+          (Agent_protocol.Error.create
+             Conflict
+             ~message:"constructor acknowledged checkpoint changed before commit"
+             ~retryable:false
+             ())
+    ;;
+
+    let expected t = Acknowledged.apply t.incoming t.scope.expected
+
+    (* Caller has checked the exact scope and prepared candidate before ACK.
+       This assignment is nonyielding and cannot fail after durable acceptance. *)
+    let install t =
+      t.scope.acknowledged <- t.incoming;
+      t.scope.callback <- t.callback;
+      t.scope.resource <- t.resource;
+      t.scope.jobs <- t.jobs
+    ;;
+  end
 end
 
 type persistence =
@@ -308,7 +452,7 @@ type event_borrow_kind =
 type queued_event_borrow =
   { kind : event_borrow_kind
   ; job_scope : job_scope option
-  ; agent_custody : agent_custody option
+  ; agent_admission : agent_admission option
   ; receipt : Agent_protocol.Moderator_execution.t
   ; before : Session.Moderator_state.Identity_snapshot.t
   ; event : Session.Snapshot.t
@@ -320,6 +464,45 @@ type queued_event_borrow =
   ; mutable cancel : (unit -> unit) option
   ; mutable cancel_requested : bool
   }
+
+module Callback_scope = struct
+  (* Source bootstrap alone never creates a continuation. Only an actual live
+     parent admission lends custody; historical absence is not legacy None. *)
+  type custody =
+    | Unavailable
+    | Admitted of agent_admission
+
+  type t =
+    { manager : Chat_response.Moderator_manager.t
+    ; constructor_scope : Initialization_scope.t option
+    ; callback : Chat_response.Moderator_manager.Callback.t
+    ; borrow : queued_event_borrow
+    ; source : Agent_protocol.Run_source.t
+    ; origin : Agent_protocol.Inference_origin.t option
+    ; custody : custody
+    }
+
+  let executing t = t.borrow.receipt
+  let source t = t.source
+  let origin t = t.origin
+end
+
+type legacy_callback_handler =
+  scope:Callback_scope.t
+  -> commit:
+       (snapshot:Session.Moderator_state.Identity_snapshot.t
+        -> requests:Agent_protocol.Invocation.follow_up
+        -> (unit, Agent_protocol.Error.t) result)
+  -> (unit, Agent_protocol.Error.t) result
+
+type legacy_callback_claim =
+  callback:Chat_response.Moderator_manager.Callback.t
+  -> legacy_callback_handler
+  -> (bool, Agent_protocol.Error.t) result
+
+type legacy_callback_parent =
+  | Callback_operation of Agent_protocol.Id.Operation.t option
+  | Callback_job of job_scope
 
 type invocation_owner =
   | Foreground of Agent_protocol.Id.Operation.t
@@ -432,6 +615,17 @@ type _ request =
       * Agent_protocol.Id.Operation.t option
       * Session.Moderator_state.Identity_snapshot.t
       -> queued_event_borrow option request
+  | Claim_legacy_callback :
+      Chat_response.Moderator_manager.Callback.t * legacy_callback_parent
+      -> Callback_scope.t option request
+  | Claim_initialization_callback :
+      Initialization_scope.t
+      * Chat_response.Moderator_manager.t
+      * Chat_response.Moderator_manager.Callback.t
+      -> Callback_scope.t option request
+  | Retire_initialization_resource :
+      Initialization_scope.t * Chat_response.Moderator_manager.t
+      -> unit request
   | Claim_queued_retirement :
       Agent_protocol.Id.Moderator_execution.t
       * Session.Moderator_state.Identity_snapshot.t
@@ -648,6 +842,7 @@ type _ request =
       Operator_authorization.t option
       * Operation_worker.t option
       * Inference_client.Execution.t option
+      * Chat_response.Moderator_manager.t option
       -> unit request
   | Check_runtime_admission : unit request
   | Retire_runtime_worker : bool -> Runtime_retirement.t request
@@ -695,7 +890,7 @@ type _ request =
       * Session_state.t
       -> Agent_protocol.Session.t request
   | Begin_initialization :
-      Operator_authorization.t option * Session_state.t
+      Initialization_scope.Purpose.t * Operator_authorization.t option * Session_state.t
       -> Initialization_scope.t request
   | Borrow_initialization_agent_actor :
       Initialization_scope.t
@@ -713,11 +908,14 @@ type _ request =
       moderator_borrow * Agent_protocol.Invocation.t
       -> Operator_authorization.t option request
   | Begin_run_initialization :
-      Run_preparation.t * Session_state.t
+      Initialization_scope.Purpose.t * Run_preparation.t * Session_state.t
       -> Initialization_scope.t request
   | End_initialization : Initialization_scope.t -> unit request
   | Complete_initialization :
-      Initialization_scope.t * Session_state.t
+      Initialization_scope.t * Session_state.t * Chat_response.Moderator_manager.t option
+      -> Agent_protocol.Session.t request
+  | Checkpoint_runtime_construction :
+      Initialization_scope.t * Jsonaf.t option * Chat_response.Moderator_manager.t option
       -> Agent_protocol.Session.t request
   | Fail_initialization :
       Initialization_scope.t * Agent_protocol.Error.t
@@ -906,7 +1104,7 @@ type _ request =
       Run_preparation.t * int
       -> History_id_source.reservation request
   | Checkpoint_run_moderator :
-      Run_preparation.t * Jsonaf.t option
+      Run_preparation.t * Jsonaf.t option * Chat_response.Moderator_manager.t option
       -> Agent_protocol.Session.t request
   | Admit_prepared_run :
       Run_preparation.t
@@ -1091,6 +1289,7 @@ type _ request =
       * Session.Moderator_state.Identity_snapshot.t option
       * Agent_protocol.Job.t option
       * Jsonaf.t option
+      * Chat_response.Moderator_manager.t option
       -> Agent_protocol.Job.t request
   | Enqueue_run_job_delivery :
       Run_job_delivery.t * Session.Moderator_state.Identity_snapshot.t * Jsonaf.t
@@ -1108,6 +1307,12 @@ type _ request =
       * Agent_protocol.Schedule.t
       -> Agent_protocol.Session.t request
   | Add_schedule : Agent_protocol.Schedule.t -> Agent_protocol.Schedule.t request
+  | Callback_schedule_after_ms :
+      Callback_scope.t * int * Jsonaf.t
+      -> Agent_protocol.Schedule.t request
+  | Callback_schedule_cancel :
+      Callback_scope.t * Agent_protocol.Id.Schedule.t
+      -> Agent_protocol.Schedule.t request
   | Cancel_schedule :
       Agent_protocol.Id.Attachment.t * Agent_protocol.Id.Schedule.t * int option
       -> Agent_protocol.Schedule.t request
@@ -1128,6 +1333,7 @@ type _ request =
       * Session.Moderator_state.Identity_snapshot.t option
       * Agent_protocol.Schedule.t option
       * Jsonaf.t option
+      * Chat_response.Moderator_manager.t option
       -> Agent_protocol.Schedule.t request
   | Prepare_ingress_submission :
       Agent_protocol.Invocation.observer
@@ -1219,6 +1425,7 @@ type t =
   ; mutable operation_worker : Operation_worker.t option
   ; mutable compaction_inference : Compaction_inference.t option
   ; mutable inference_execution : Inference_client.Execution.t option
+  ; mutable moderator_manager : Chat_response.Moderator_manager.t option
   ; compaction_env : Eio_unix.Stdenv.base option
   ; owner_lease_duration_ms : int
   ; max_attachments : int
@@ -1230,12 +1437,15 @@ type t =
   ; mutable idle_moderator_borrowed : bool
   ; mutable moderator_borrow : moderator_borrow option
   ; mutable queued_event_borrow : queued_event_borrow option
+  ; mutable legacy_callback_scope : Callback_scope.t option
+  ; mutable legacy_queue_custody : Legacy_queue_custody.t
+  ; mutable legacy_schedule_custody : Legacy_schedule_custody.t
   ; mutable operation_agent_custody :
-      (Agent_protocol.Id.Operation.t * agent_custody) option
+      (Agent_protocol.Id.Operation.t * agent_admission) option
   ; mutable lifecycle_agent_custody : lifecycle_agent_custody
   ; mutable intent_agent_custody : agent_intent_custody list
   ; mutable pending_agent_custody : (Agent_protocol.History.entry * agent_custody) list
-  ; mutable job_agent_custody : (Agent_protocol.Job.t * agent_custody) list
+  ; mutable job_agent_custody : Job_custody.t
   ; mutable run_authorities : Run_authorities.t
   ; run_preparation_owner : Run_preparation.Owner.t
   ; mutable run_preparation : Run_preparation.t option
@@ -1247,7 +1457,7 @@ type t =
   ; initialization_owner : unit ref
   ; mutable initialization_scope : Initialization_scope.t option
   ; mutable job_scopes : job_scope list
-  ; staged_jobs : Staged_jobs.t
+  ; staged_jobs : Job_custody.Fresh.t option Staged_jobs.t
   ; staged_subscriptions : Staged_subscriptions.t
   ; staged_ingress : Staged_ingress.t
   ; staged_schedules : Staged_schedules.t
@@ -1277,7 +1487,8 @@ let agent_source_current t generation source =
 let retire_instruction_continuations t =
   (match t.lifecycle_agent_custody with
    | Unadmitted -> ()
-   | Admitted { pending; _ } -> Option.iter pending ~f:retire_agent_custody);
+   | Admitted { pending = Pending admission; _ } -> retire_agent_admission admission
+   | Admitted { pending = Consumed; _ } -> ());
   t.lifecycle_agent_custody <- Unadmitted;
   List.iter t.intent_agent_custody ~f:(fun entry ->
     Option.iter entry.custody ~f:retire_agent_custody);
@@ -1309,8 +1520,54 @@ let retain_instruction_continuations t =
        pending)
 ;;
 
+(* Retention uses actual installation facts, independently of whether this
+   resource is currently eligible to execute. It cannot capture a new source. *)
+let retained_moderator_source (state : Session_state.t) =
+  match state.run_state with
+  | None -> None
+  | Some index ->
+    let source =
+      let open Result.Let_syntax in
+      let%bind observer = Moderator_checkpoint.observer state.moderator in
+      let%bind source =
+        Run_source_installation.captured
+          (Run_state.installation index)
+          ~generation:state.identity.generation
+      in
+      if
+        Option.equal
+          Agent_protocol.Invocation.equal_observer
+          observer
+          (Some source.observer)
+      then Ok source
+      else Error (error Conflict "retained moderator source differs from installation")
+    in
+    (match source with
+     | Ok source -> Some source
+     | Error _ -> None)
+;;
+
 let retained_agent_custody t =
   retain_instruction_continuations t;
+  let metadata =
+    match Moderator_checkpoint.queue t.state.moderator with
+    | Ok metadata -> metadata
+    | Error _ -> None
+  in
+  let source = retained_moderator_source t.state in
+  t.legacy_queue_custody
+  <- Legacy_queue_custody.install
+       t.legacy_queue_custody
+       ~incoming:
+         (Legacy_queue_custody.retain_facts t.legacy_queue_custody ~source ~metadata);
+  t.legacy_schedule_custody
+  <- Legacy_schedule_custody.install
+       t.legacy_schedule_custody
+       ~incoming:
+         (Legacy_schedule_custody.retain_facts
+            t.legacy_schedule_custody
+            ~source
+            ~schedules:t.state.schedules);
   let operation_current id =
     (not t.stopped)
     && Option.exists t.state.active_operation ~f:(fun operation ->
@@ -1321,38 +1578,33 @@ let retained_agent_custody t =
       | Cancelling | Completed | Failed _ | Cancelled | Interrupted _ -> false)
   in
   (match t.operation_agent_custody with
-   | Some (id, custody) when not (operation_current id) ->
-     retire_agent_custody custody;
+   | Some (id, admission) when not (operation_current id) ->
+     retire_agent_admission admission;
      t.operation_agent_custody <- None
    | Some _ | None -> ());
   t.job_agent_custody
-  <- List.filter t.job_agent_custody ~f:(fun (original, custody) ->
-       let current =
-         (not t.stopped)
-         && List.exists t.state.jobs ~f:(fun job ->
-           Agent_protocol.Id.Job.equal original.id job.id
-           && Int.equal original.generation job.generation
-           &&
-           match job.status with
-           | Queued | Running | Waiting_permission _ | Waiting_completion _ -> true
-           | Succeeded | Failed _ | Cancelled | Interrupted _ -> false)
-       in
-       if not current then retire_agent_custody custody;
-       current)
+  <- Job_custody.install_retained
+       t.job_agent_custody
+       ~incoming:
+         (if t.stopped
+          then Job_custody.empty
+          else Job_custody.retain t.job_agent_custody ~jobs:t.state.jobs)
 ;;
 
 let operation_agent_actor t id =
   match t.operation_agent_custody with
-  | Some (owner, custody) when Agent_protocol.Id.Operation.equal owner id ->
-    Result.map (Agent_authority_scope.actor custody.authority) ~f:Option.some
+  | Some (owner, admission) when Agent_protocol.Id.Operation.equal owner id ->
+    (match Execution_custody.Admission.custody admission with
+     | Some custody -> Result.map (Execution_custody.actor custody) ~f:Option.some
+     | None -> Ok None)
   | Some _ | None -> Ok None
 ;;
 
 let install_operation_agent_custody t operation custody =
-  Option.iter t.operation_agent_custody ~f:(fun (_, custody) ->
-    retire_agent_custody custody);
+  Option.iter t.operation_agent_custody ~f:(fun (_, admission) ->
+    retire_agent_admission admission);
   t.operation_agent_custody
-  <- Option.map custody ~f:(fun custody -> operation.Agent_protocol.Operation.id, custody)
+  <- Some (operation.Agent_protocol.Operation.id, create_agent_admission custody)
 ;;
 
 let job_scope_current t scope =
@@ -1530,7 +1782,10 @@ let install_live_run_agent_custody t =
          Option.iter
            (Run_admission.Scope.original_actor (Run_authorities.scope binding))
            ~f:(fun actor ->
-             t.operation_agent_custody <- Some (operation.id, create_agent_custody actor)))
+             t.operation_agent_custody
+             <- Some
+                  ( operation.id
+                  , create_agent_admission (Some (create_agent_custody actor)) )))
      | [] | _ :: _ :: _ -> ())
   | Some _, _, _ | None, None, _ | None, Some _, (Some _ | None) -> ()
 ;;
@@ -1552,7 +1807,21 @@ let persist_transition t transition =
   t.persistence.commit ~command_audit:t.command_audit ~previous:t.state transition
 ;;
 
-let install_committed_transition ?run_preparation t (transition : Session_transition.t) =
+let install_committed_transition
+      ?legacy_queue_custody
+      ?legacy_schedule_custody
+      ?retire_legacy_custody
+      ?run_preparation
+      ?job_custody
+      ?initialization_acknowledgement
+      t
+      (transition : Session_transition.t)
+  =
+  let stopping_jobs =
+    match t.state.lifecycle.desired, transition.state.lifecycle.desired with
+    | Running, Stopped -> true
+    | Running, Running | Stopped, Running | Stopped, Stopped -> false
+  in
   (match t.run_preparation, run_preparation with
    | Some active, Some supplied when phys_equal active supplied ->
      (match
@@ -1568,6 +1837,34 @@ let install_committed_transition ?run_preparation t (transition : Session_transi
    | None, (Some _ | None) -> ());
   t.command_audit <- None;
   t.state <- transition.state;
+  Option.iter
+    initialization_acknowledgement
+    ~f:Initialization_scope.Acknowledgement.install;
+  Option.iter job_custody ~f:(fun update ->
+    t.job_agent_custody <- Job_custody.Update.install update);
+  Option.iter legacy_queue_custody ~f:(fun incoming ->
+    t.legacy_queue_custody
+    <- Legacy_queue_custody.install t.legacy_queue_custody ~incoming);
+  Option.iter legacy_schedule_custody ~f:(fun incoming ->
+    t.legacy_schedule_custody
+    <- Legacy_schedule_custody.install t.legacy_schedule_custody ~incoming);
+  if stopping_jobs
+  then (
+    Job_custody.retire t.job_agent_custody;
+    t.job_agent_custody <- Job_custody.empty);
+  (* Explicit Stop also retires loans when already Stopped. An ordinary
+     constructor ACK while initially Stopped is not a Stop disposition. *)
+  let stopping_legacy_custody =
+    match retire_legacy_custody with
+    | Some () -> true
+    | None -> stopping_jobs
+  in
+  if stopping_legacy_custody
+  then (
+    Legacy_queue_custody.retire t.legacy_queue_custody;
+    t.legacy_queue_custody <- Legacy_queue_custody.empty;
+    Legacy_schedule_custody.retire t.legacy_schedule_custody;
+    t.legacy_schedule_custody <- Legacy_schedule_custody.empty);
   Recurrence_runtime.retain_committed t.recurrence_runtime t.state;
   t.run_authorities
   <- Run_authorities.retain_current
@@ -1585,22 +1882,41 @@ let publish_committed_transition t (transition : Session_transition.t) =
   t.services.state_committed t.state transition.events
 ;;
 
-let install ?run_preparation ?commit_attempted ?completion_sample t transition =
+let prepare_completion_plan t (transition : Session_transition.t) completion_sample =
+  match completion_sample with
+  | None -> Ok None
+  | Some sample ->
+    Recurrence_runtime.prepare_completions
+      t.recurrence_runtime
+      ~sample
+      ~previous:t.state
+      ~current:transition.state
+    |> Result.map ~f:Option.some
+;;
+
+let install
+      ?retire_legacy_custody
+      ?run_preparation
+      ?commit_attempted
+      ?job_custody
+      ?completion_sample
+      t
+      transition
+  =
   let open Result.Let_syntax in
-  let%bind completion_plan =
-    match completion_sample with
-    | None -> Ok None
-    | Some sample ->
-      Recurrence_runtime.prepare_completions
-        t.recurrence_runtime
-        ~sample
-        ~previous:t.state
-        ~current:transition.Session_transition.state
-      |> Result.map ~f:Option.some
+  let%bind () =
+    Option.value_map job_custody ~default:(Ok ()) ~f:(fun update ->
+      Job_custody.Update.check_before_commit update ~current:t.job_agent_custody)
   in
+  let%bind completion_plan = prepare_completion_plan t transition completion_sample in
   Option.iter commit_attempted ~f:(fun attempted -> attempted := true);
   let%bind () = persist_transition t transition in
-  install_committed_transition ?run_preparation t transition;
+  install_committed_transition
+    ?retire_legacy_custody
+    ?run_preparation
+    ?job_custody
+    t
+    transition;
   Option.iter
     completion_plan
     ~f:(Recurrence_runtime.install_completions t.recurrence_runtime);
@@ -1648,13 +1964,86 @@ let prepare_transition ?run_preparation t ~delta ~payloads =
   prepared
 ;;
 
-let transition ?run_preparation ?commit_attempted ?completion_sample t ~delta ~payloads =
+let prepare_constructor_job_handoff ?run_preparation t ~delta ~payloads ~ids ~manager =
   let open Result.Let_syntax in
-  let%bind transition = prepare_transition ?run_preparation t ~delta ~payloads in
-  let%map () =
-    install ?run_preparation ?commit_attempted ?completion_sample t transition
+  let revision = t.state.counters.revision in
+  let%bind prepared = prepare_transition ?run_preparation t ~delta ~payloads in
+  let%bind index, binding = Constructor_job_handoff.prepare prepared.state ~manager in
+  let source_changed =
+    not (Option.equal Run_state.equal_observation prepared.state.run_state index)
   in
-  Agent_protocol.Session.(Session_state.summary t.state)
+  let%bind prepared =
+    if not source_changed
+    then Ok prepared
+    else (
+      match index with
+      | None -> Error (error Invalid_state "constructor removed its planned source index")
+      | Some index ->
+        let delta =
+          match Session_replacement_delta.classify delta with
+          | Some replacement ->
+            let candidate = Session_replacement_delta.state replacement in
+            Session_replacement_delta.with_state
+              replacement
+              { candidate with run_state = Some index }
+          | None -> Session_delta.Batch [ delta; Run_state_changed index ]
+        in
+        prepare_transition ?run_preparation t ~delta ~payloads)
+  in
+  let jobs =
+    List.filter_map ids ~f:(fun id ->
+      List.find prepared.state.jobs ~f:(fun job -> Agent_protocol.Id.Job.equal id job.id))
+  in
+  let%map job_custody =
+    Job_custody.prepare_constructor_handoff t.job_agent_custody ~jobs ~binding
+  in
+  prepared, job_custody, source_changed, revision
+;;
+
+let check_constructor_job_handoff
+      t
+      ~(prepared : Session_transition.t)
+      ~job_custody
+      ~manager
+      ~revision
+  =
+  let open Result.Let_syntax in
+  let%bind () =
+    if Int64.equal revision t.state.counters.revision
+    then Ok ()
+    else Error (error Conflict "constructor checkpoint basis changed before commit")
+  in
+  let%bind _ = Constructor_job_handoff.prepare prepared.state ~manager in
+  Option.value_map job_custody ~default:(Ok ()) ~f:(fun update ->
+    Job_custody.Update.check_before_commit update ~current:t.job_agent_custody)
+;;
+
+let transition
+      ?retire_legacy_custody
+      ?run_preparation
+      ?commit_attempted
+      ?job_custody
+      ?completion_sample
+      t
+      ~delta
+      ~payloads
+  =
+  Exn.protect
+    ~finally:(fun () -> Option.iter job_custody ~f:Job_custody.Update.discard)
+    ~f:(fun () ->
+      let open Result.Let_syntax in
+      let%bind transition = prepare_transition ?run_preparation t ~delta ~payloads in
+      let%map () =
+        install
+          ?retire_legacy_custody
+          ?run_preparation
+          ?commit_attempted
+          ?job_custody
+          ?completion_sample
+          t
+          transition
+      in
+      Agent_protocol.Session.(Session_state.summary t.state))
 ;;
 
 let require_recurrence_controller t =
@@ -2502,7 +2891,7 @@ let commit_extensions_internal t generation expected_revision changes =
     transition t ~delta ~payloads:(history_payloads @ work_payloads))
 ;;
 
-let set_operation_worker t worker =
+let replace_operation_worker t worker ~intended_manager =
   if
     Option.exists t.runtime_retirement ~f:(fun retirement ->
       match Eio.Promise.peek retirement.finished with
@@ -2519,8 +2908,30 @@ let set_operation_worker t worker =
     | None, None, true -> Error (error Conflict "cannot unload a borrowed moderator")
     | None, None, false | Some _, _, _ ->
       if Option.is_some t.operation_worker then close_recurrence_activations t;
+      let job_custody =
+        Job_custody.retain_runtime t.job_agent_custody ~manager:intended_manager
+      in
+      let queue_custody =
+        Legacy_queue_custody.retain_runtime
+          t.legacy_queue_custody
+          ~manager:intended_manager
+      in
+      let schedule_custody =
+        Legacy_schedule_custody.retain_runtime
+          t.legacy_schedule_custody
+          ~manager:intended_manager
+      in
       t.operation_worker <- worker;
       t.inference_execution <- None;
+      t.job_agent_custody
+      <- Job_custody.install_retained t.job_agent_custody ~incoming:job_custody;
+      t.legacy_queue_custody
+      <- Legacy_queue_custody.install t.legacy_queue_custody ~incoming:queue_custody;
+      t.legacy_schedule_custody
+      <- Legacy_schedule_custody.install
+           t.legacy_schedule_custody
+           ~incoming:schedule_custody;
+      t.moderator_manager <- None;
       (match worker with
        | Some _ -> t.runtime_retirement <- None
        | None ->
@@ -2528,6 +2939,10 @@ let set_operation_worker t worker =
           | Some retirement when not retirement.closing -> t.runtime_retirement <- None
           | Some _ | None -> ()));
       Ok ())
+;;
+
+let set_operation_worker t worker =
+  replace_operation_worker t worker ~intended_manager:None
 ;;
 
 let runtime_admission_open t =
@@ -2552,9 +2967,18 @@ let retire_runtime_worker t ~closing =
     in
     close_recurrence_activations t;
     t.runtime_retirement <- Some { finished; finish; pending_operation; closing };
+    Legacy_queue_custody.retire t.legacy_queue_custody;
+    t.legacy_queue_custody <- Legacy_queue_custody.empty;
+    Legacy_schedule_custody.retire t.legacy_schedule_custody;
+    t.legacy_schedule_custody <- Legacy_schedule_custody.empty;
+    t.moderator_manager <- None;
+    t.job_agent_custody
+    <- Job_custody.install_retained
+         t.job_agent_custody
+         ~incoming:(Job_custody.retain_runtime t.job_agent_custody ~manager:None);
     retire_instruction_continuations t;
-    Option.iter t.operation_agent_custody ~f:(fun (_, custody) ->
-      retire_agent_custody custody);
+    Option.iter t.operation_agent_custody ~f:(fun (_, admission) ->
+      retire_agent_admission admission);
     Option.iter t.active_cancel ~f:(fun cancel -> cancel ());
     if Option.is_none pending_operation then Eio.Promise.resolve finish (Ok (Ok ()));
     Ok finished
@@ -2580,7 +3004,7 @@ let with_runtime_terminal t operation_id f =
     Exn.raise_with_original_backtrace exn backtrace
 ;;
 
-let set_runtime_worker t worker inference =
+let set_runtime_worker t worker inference moderator_manager =
   let open Result.Let_syntax in
   let%bind () =
     match worker, inference with
@@ -2593,8 +3017,22 @@ let set_runtime_worker t worker inference =
       Error
         (error Invalid_request "worker and selected inference must be installed together")
   in
-  let%map () = set_operation_worker t worker in
-  t.inference_execution <- inference
+  let%bind () =
+    match worker, moderator_manager with
+    | None, Some _ ->
+      Error (error Invalid_request "moderator resource requires an installed runtime")
+    | Some _, _ | None, None -> Ok ()
+  in
+  let%bind () =
+    match moderator_manager with
+    | None -> Ok ()
+    | Some _ ->
+      Constructor_job_handoff.prepare t.state ~manager:moderator_manager
+      |> Result.map ~f:ignore
+  in
+  let%map () = replace_operation_worker t worker ~intended_manager:moderator_manager in
+  t.inference_execution <- inference;
+  t.moderator_manager <- moderator_manager
 ;;
 
 let change_moderator t moderator =
@@ -2860,12 +3298,15 @@ let stop_transition
       ~reason:"session stopped"
   in
   let jobs = stopped_jobs t mode in
+  let job_custody = Job_custody.prepare_retirement t.job_agent_custody in
   let permissions =
     pending_invocation_permissions t ~matches:(fun _ -> true)
     |> List.map ~f:(cancel_permission t "session stopped")
   in
   let%map result =
     transition
+      ~retire_legacy_custody:()
+      ~job_custody
       t
       ~delta:
         (Session_delta.Batch
@@ -2971,6 +3412,9 @@ let stop_internal ?parent_stop_epoch ?managed_receipt t mode =
              && Option.is_none parent_stop_epoch
              && Option.is_none managed_receipt
              && List.is_empty (stopped_jobs t mode)
+             && Job_custody.is_empty t.job_agent_custody
+             && Legacy_queue_custody.is_empty t.legacy_queue_custody
+             && Legacy_schedule_custody.is_empty t.legacy_schedule_custody
              && Extension_stop.is_empty extension_work
              && (not
                    (Option.exists t.state.recurrence_catalog ~f:(fun catalog ->
@@ -3415,27 +3859,61 @@ let initialization_basis (basis : Session_state.t) (state : Session_state.t) =
   }
 ;;
 
-let validate_initialization_basis t (expected : Session_state.t) =
+let validate_initialization_projection (expected : Session_state.t) state =
+  if
+    Sexp.equal
+      (Session_state.sexp_of_t expected)
+      (Session_state.sexp_of_t (initialization_basis expected state))
+    && Document_schema.Json.equal
+         (Inference.Selection.to_json expected.spec.inference_target)
+         (Inference.Selection.to_json state.Session_state.spec.inference_target)
+  then Ok ()
+  else Error (error Conflict "initialization basis changed while resources were prepared")
+;;
+
+(* The explicit constructor scope must own the very borrow already held by this
+   actor. This predicate does not call the effect/currentness guard, so Init and
+   callback validation cannot recurse through each other. Existing installed
+   callback claims never set [constructor_scope]. *)
+let initialization_callback_is_owned t (scope : Initialization_scope.t) =
+  match t.initialization_scope, t.legacy_callback_scope, t.queued_event_borrow with
+  | Some active, Some callback, Some borrow ->
+    phys_equal active scope
+    && Option.exists callback.constructor_scope ~f:(phys_equal scope)
+    && phys_equal callback.borrow borrow
+    && (match scope.callback with
+        | Claimed id ->
+          Agent_protocol.Id.Moderator_execution.equal id borrow.receipt.context.id
+        | Unclaimed | Settled _ -> false)
+    && t.idle_moderator_borrowed
+    && borrow.callback_active
+    && (not (borrow.committed || borrow.cancel_requested))
+    && Atomic.get borrow.authority_live
+    && Chat_response.Moderator_manager.callback_is_current
+         callback.manager
+         callback.callback
+  | None, _, _ | _, None, _ | _, _, None -> false
+;;
+
+let validate_initialization_basis ?scope t ~purpose (expected : Session_state.t) =
   let open Result.Let_syntax in
   let%bind () =
-    match expected.runtime_initialization, t.state.runtime_initialization with
-    | Pending _, Pending _ -> Ok ()
-    | Ready, _ | _, Ready -> Error (error Conflict "initialization is not pending")
+    match purpose, expected.runtime_initialization, t.state.runtime_initialization with
+    | Initialization_scope.Purpose.Pending_initialization, Pending _, Pending _
+    | Runtime_construction, Ready, Ready -> Ok ()
+    | Pending_initialization, Ready, _
+    | Pending_initialization, _, Ready
+    | Runtime_construction, Pending _, _
+    | Runtime_construction, _, Pending _ ->
+      Error (error Conflict "constructor purpose differs from its actual lifecycle basis")
   in
   if
     Option.is_some t.state.active_operation
-    || t.idle_moderator_borrowed
-    || (not (List.is_empty t.job_scopes))
-    || (not
-          (Sexp.equal
-             (Session_state.sexp_of_t expected)
-             (Session_state.sexp_of_t (initialization_basis expected t.state))))
-    || not
-         (Document_schema.Json.equal
-            (Inference.Selection.to_json expected.spec.inference_target)
-            (Inference.Selection.to_json t.state.spec.inference_target))
+    || (t.idle_moderator_borrowed
+        && not (Option.exists scope ~f:(initialization_callback_is_owned t)))
+    || not (List.is_empty t.job_scopes)
   then Error (error Conflict "initialization basis changed while resources were prepared")
-  else Ok ()
+  else validate_initialization_projection expected t.state
 ;;
 
 let validate_initialization_owner t (scope : Initialization_scope.t) =
@@ -3453,15 +3931,39 @@ let validate_initialization_scope t scope =
     | Some active when phys_equal active scope -> Ok ()
     | Some _ | None -> Error (error Conflict "initialization scope is no longer active")
   in
-  let%bind () = validate_initialization_basis t scope.expected in
+  let expected =
+    Initialization_scope.Acknowledged.apply scope.acknowledged scope.expected
+  in
+  let%bind () = validate_initialization_basis ~scope t ~purpose:scope.purpose expected in
   match scope.Initialization_scope.run_preparation with
   | None -> Ok ()
   | Some preparation -> check_run_preparation t preparation
 ;;
 
-let begin_initialization ?run_preparation ?original_actor t expected =
+let begin_initialization
+      ?run_preparation
+      ?original_actor
+      ?(purpose = Initialization_scope.Purpose.Pending_initialization)
+      t
+      (expected : Session_state.t)
+  =
   let open Result.Let_syntax in
-  let%bind () = validate_initialization_basis t expected in
+  let%bind () = validate_initialization_basis t ~purpose expected in
+  let%bind () =
+    match purpose with
+    | Pending_initialization -> Ok ()
+    | Runtime_construction ->
+      if
+        Int64.equal expected.counters.revision t.state.counters.revision
+        && (Option.is_some original_actor || Option.is_some run_preparation)
+      then Ok ()
+      else
+        Error
+          (error
+             Permission_denied
+             "Ready construction requires current original custody or its exact Run \
+              preparation and CAS")
+  in
   let%bind () =
     match Inference.Selection.view t.state.spec.inference_target with
     | Captured _ -> Ok ()
@@ -3474,14 +3976,99 @@ let begin_initialization ?run_preparation ?original_actor t expected =
     let scope =
       Initialization_scope.
         { owner = t.initialization_owner
+        ; purpose
         ; expected
+        ; acknowledged = Acknowledged.capture expected
         ; jobs = []
+        ; callback = Callback.Unclaimed
+        ; resource = None
         ; run_preparation
-        ; agent_custody = Option.map original_actor ~f:create_agent_custody
+        ; agent_admission =
+            create_agent_admission (Option.map original_actor ~f:create_agent_custody)
         }
     in
     t.initialization_scope <- Some scope;
     Ok scope
+;;
+
+(* Selected keys identify only this constructor's already acknowledged rows.
+   They contain no loan and cannot reconstruct an absent process-local row. *)
+let retire_constructor_rows t (resource : Initialization_scope.Resource.t) =
+  t.legacy_queue_custody
+  <- Legacy_queue_custody.install
+       t.legacy_queue_custody
+       ~incoming:
+         (Legacy_queue_custody.without_constructor
+            t.legacy_queue_custody
+            ~manager:resource.manager
+            ~source:resource.source
+            ~ordinals:resource.ordinals);
+  t.legacy_schedule_custody
+  <- Legacy_schedule_custody.install
+       t.legacy_schedule_custody
+       ~incoming:
+         (Legacy_schedule_custody.without_constructor
+            t.legacy_schedule_custody
+            ~manager:resource.manager
+            ~source:resource.source
+            ~ids:resource.schedules)
+;;
+
+let retire_initialization_resource t (scope : Initialization_scope.t) manager =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_owner t scope in
+  match scope.resource with
+  | None -> Ok ()
+  | Some resource when phys_equal manager resource.manager ->
+    retire_constructor_rows t resource;
+    Ok ()
+  | Some _ -> Error (error Conflict "constructor cleanup names a different Manager")
+;;
+
+let check_constructor_callback_settled (scope : Initialization_scope.t) =
+  match scope.callback with
+  | Unclaimed | Settled _ -> Ok ()
+  | Claimed _ -> Error (error Conflict "constructor callback has not settled")
+;;
+
+let prepare_constructor_resource_handoff
+      t
+      (scope : Initialization_scope.t)
+      (state : Session_state.t)
+      manager
+  =
+  let open Result.Let_syntax in
+  let%bind () = check_constructor_callback_settled scope in
+  match scope.resource, manager with
+  | None, _ -> Ok None
+  | Some resource, Some manager ->
+    let%bind () =
+      if
+        phys_equal resource.manager manager
+        && Option.equal
+             Agent_protocol.Run_source.equal
+             (retained_moderator_source state)
+             (Some resource.source)
+      then Ok ()
+      else Error (error Conflict "constructor handoff resource or source changed")
+    in
+    let%bind () =
+      Legacy_queue_custody.validate_constructor_handoff
+        t.legacy_queue_custody
+        ~manager
+        ~source:resource.source
+        ~ordinals:resource.ordinals
+    in
+    let%map () =
+      Legacy_schedule_custody.validate_constructor_handoff
+        t.legacy_schedule_custody
+        ~manager
+        ~source:resource.source
+        ~ids:resource.schedules
+    in
+    Some { resource with handed_off = true }
+  | Some _, None ->
+    Error (error Conflict "constructor handoff requires its actual Manager")
 ;;
 
 let end_initialization t scope =
@@ -3489,21 +4076,53 @@ let end_initialization t scope =
   let%map () = validate_initialization_owner t scope in
   match t.initialization_scope with
   | Some active when phys_equal active scope ->
-    Option.iter active.agent_custody ~f:retire_agent_custody;
+    Option.iter active.resource ~f:(fun resource ->
+      if not resource.handed_off then retire_constructor_rows t resource);
+    retire_agent_admission active.agent_admission;
     t.initialization_scope <- None
   | Some _ | None -> ()
 ;;
 
 let check_initialization_agent_actor scope =
-  match scope.Initialization_scope.agent_custody with
-  | None -> Ok ()
-  | Some custody -> Agent_authority_scope.actor custody.authority |> Result.map ~f:ignore
+  check_agent_admission scope.Initialization_scope.agent_admission
 ;;
 
-let complete_initialization t scope (candidate : Session_state.t) =
+let prepare_initialization_job_selection t (scope : Initialization_scope.t) =
+  let open Result.Let_syntax in
+  match scope.run_preparation with
+  | None -> Ok (scope.jobs, None)
+  | Some preparation ->
+    let%map ids, selection =
+      Run_preparation.Constructor_jobs.prepare_handoff
+        preparation
+        ~owner:t.run_preparation_owner
+        ~state:t.state
+    in
+    ( List.dedup_and_sort (scope.jobs @ ids) ~compare:Agent_protocol.Id.Job.compare
+    , Some selection )
+;;
+
+let complete_initialization t scope (candidate : Session_state.t) moderator_manager =
   let open Result.Let_syntax in
   let%bind () = validate_initialization_scope t scope in
+  (* Reject before any Manager snapshot can reacquire the active callback gate. *)
+  let%bind () = check_constructor_callback_settled scope in
+  let%bind () =
+    match scope.Initialization_scope.purpose with
+    | Pending_initialization -> Ok ()
+    | Runtime_construction ->
+      Error
+        (error
+           Conflict
+           "Ready construction cannot complete or fail Pending initialization")
+  in
   let%bind () = check_initialization_agent_actor scope in
+  let%bind moderator =
+    Moderator_checkpoint.reuse_unchanged_snapshot
+      ~previous:t.state.moderator
+      ~incoming:candidate.moderator
+  in
+  let candidate = { candidate with moderator } in
   let expected = scope.Initialization_scope.expected in
   let projection =
     { candidate with
@@ -3565,18 +4184,222 @@ let complete_initialization t scope (candidate : Session_state.t) =
     }
   in
   let%bind () = Session_state.validate state in
-  transition
-    ?run_preparation:scope.Initialization_scope.run_preparation
-    t
-    ~delta:(Session_delta.Created state)
-    ~payloads:
-      [ Agent_protocol.Event.Durable.Payload.Session_updated (Session_state.summary state)
-      ]
+  let run_preparation = scope.Initialization_scope.run_preparation in
+  let%bind ids, selection = prepare_initialization_job_selection t scope in
+  let%bind prepared, job_custody, _, revision =
+    prepare_constructor_job_handoff
+      ?run_preparation
+      t
+      ~delta:(Session_delta.Created state)
+      ~payloads:
+        [ Agent_protocol.Event.Durable.Payload.Session_updated
+            (Session_state.summary state)
+        ]
+      ~ids
+      ~manager:moderator_manager
+  in
+  Exn.protect
+    ~finally:(fun () -> Option.iter job_custody ~f:Job_custody.Update.discard)
+    ~f:(fun () ->
+      let%bind resource =
+        prepare_constructor_resource_handoff t scope prepared.state moderator_manager
+      in
+      let acknowledgement =
+        Initialization_scope.Acknowledgement.prepare ?resource scope prepared.state
+      in
+      Eio.Cancel.protect (fun () ->
+        let%bind () = validate_initialization_scope t scope in
+        let%bind () = check_initialization_agent_actor scope in
+        let%bind () =
+          Option.value_map selection ~default:(Ok ()) ~f:(fun selection ->
+            Run_preparation.Constructor_jobs.check_before_commit
+              selection
+              ~owner:t.run_preparation_owner
+              ~state:t.state)
+        in
+        let%bind () =
+          check_constructor_job_handoff
+            t
+            ~prepared
+            ~job_custody
+            ~manager:moderator_manager
+            ~revision
+        in
+        let%bind _ =
+          prepare_constructor_resource_handoff t scope prepared.state moderator_manager
+        in
+        let%bind () = Initialization_scope.Acknowledgement.check_basis acknowledgement in
+        let%bind () = persist_transition t prepared in
+        install_committed_transition
+          ?run_preparation
+          ?job_custody
+          ~initialization_acknowledgement:acknowledgement
+          t
+          prepared;
+        Option.iter selection ~f:Run_preparation.Constructor_jobs.acknowledge;
+        publish_committed_transition t prepared;
+        Ok (Session_state.summary t.state)))
+;;
+
+let checkpoint_runtime_construction t scope moderator moderator_manager =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_scope t scope in
+  (* Reject before any Manager snapshot can reacquire the active callback gate. *)
+  let%bind () = check_constructor_callback_settled scope in
+  let%bind () =
+    match scope.Initialization_scope.purpose with
+    | Runtime_construction -> Ok ()
+    | Pending_initialization ->
+      Error (error Conflict "Pending construction requires initialization completion")
+  in
+  let%bind () = check_initialization_agent_actor scope in
+  let%bind moderator =
+    Moderator_checkpoint.reuse_unchanged_snapshot
+      ~previous:t.state.moderator
+      ~incoming:moderator
+  in
+  let%bind ids, selection = prepare_initialization_job_selection t scope in
+  let run_preparation = scope.Initialization_scope.run_preparation in
+  let%bind prepared, job_custody, source_changed, revision =
+    prepare_constructor_job_handoff
+      ?run_preparation
+      t
+      ~delta:(Session_delta.Moderator_changed moderator)
+      ~payloads:[]
+      ~ids
+      ~manager:moderator_manager
+  in
+  Exn.protect
+    ~finally:(fun () -> Option.iter job_custody ~f:Job_custody.Update.discard)
+    ~f:(fun () ->
+      let%bind resource =
+        prepare_constructor_resource_handoff t scope prepared.state moderator_manager
+      in
+      let needs_handoff =
+        Option.exists scope.resource ~f:(fun resource -> not resource.handed_off)
+      in
+      if
+        (not needs_handoff)
+        && Option.equal Jsonaf.exactly_equal t.state.moderator moderator
+        && (not source_changed)
+        && Option.is_none job_custody
+      then Ok (Session_state.summary t.state)
+      else (
+        let acknowledgement =
+          Initialization_scope.Acknowledgement.prepare ?resource scope prepared.state
+        in
+        let%bind () =
+          validate_initialization_projection
+            (Initialization_scope.Acknowledgement.expected acknowledgement)
+            prepared.state
+        in
+        Eio.Cancel.protect (fun () ->
+          let%bind () = validate_initialization_scope t scope in
+          let%bind () = check_initialization_agent_actor scope in
+          let%bind () =
+            Option.value_map selection ~default:(Ok ()) ~f:(fun selection ->
+              Run_preparation.Constructor_jobs.check_before_commit
+                selection
+                ~owner:t.run_preparation_owner
+                ~state:t.state)
+          in
+          let%bind () =
+            check_constructor_job_handoff
+              t
+              ~prepared
+              ~job_custody
+              ~manager:moderator_manager
+              ~revision
+          in
+          let%bind () =
+            Initialization_scope.Acknowledgement.check_basis acknowledgement
+          in
+          let%bind _ =
+            prepare_constructor_resource_handoff t scope prepared.state moderator_manager
+          in
+          let%bind () = persist_transition t prepared in
+          install_committed_transition
+            ?run_preparation
+            ?job_custody
+            ~initialization_acknowledgement:acknowledgement
+            t
+            prepared;
+          Option.iter selection ~f:Run_preparation.Constructor_jobs.acknowledge;
+          publish_committed_transition t prepared;
+          Ok (Session_state.summary t.state))))
+;;
+
+let checkpoint_run_moderator t preparation moderator moderator_manager =
+  let open Result.Let_syntax in
+  let%bind () = check_run_preparation t preparation in
+  let%bind moderator =
+    Moderator_checkpoint.reuse_unchanged_snapshot
+      ~previous:t.state.moderator
+      ~incoming:moderator
+  in
+  let%bind ids, selection =
+    Run_preparation.Constructor_jobs.prepare_handoff
+      preparation
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+  in
+  let%bind prepared, job_custody, source_changed, revision =
+    prepare_constructor_job_handoff
+      ~run_preparation:preparation
+      t
+      ~delta:(Session_delta.Moderator_changed moderator)
+      ~payloads:[]
+      ~ids
+      ~manager:moderator_manager
+  in
+  if
+    Option.equal Jsonaf.exactly_equal t.state.moderator moderator
+    && (not source_changed)
+    && Option.is_none job_custody
+  then Ok (Session_state.summary t.state)
+  else
+    Exn.protect
+      ~finally:(fun () -> Option.iter job_custody ~f:Job_custody.Update.discard)
+      ~f:(fun () ->
+        Eio.Cancel.protect (fun () ->
+          let%bind () = check_run_preparation t preparation in
+          let%bind () =
+            Run_preparation.Constructor_jobs.check_before_commit
+              selection
+              ~owner:t.run_preparation_owner
+              ~state:t.state
+          in
+          let%bind () =
+            check_constructor_job_handoff
+              t
+              ~prepared
+              ~job_custody
+              ~manager:moderator_manager
+              ~revision
+          in
+          let%bind () = persist_transition t prepared in
+          install_committed_transition
+            ~run_preparation:preparation
+            ?job_custody
+            t
+            prepared;
+          Run_preparation.Constructor_jobs.acknowledge selection;
+          publish_committed_transition t prepared;
+          Ok (Session_state.summary t.state)))
 ;;
 
 let fail_initialization t scope failure =
   let open Result.Let_syntax in
   let%bind () = validate_initialization_scope t scope in
+  let%bind () =
+    match scope.Initialization_scope.purpose with
+    | Pending_initialization -> Ok ()
+    | Runtime_construction ->
+      Error
+        (error
+           Conflict
+           "Ready construction cannot complete or fail Pending initialization")
+  in
   let lifecycle =
     { t.state.lifecycle with Session_state.Lifecycle.observed = Failed failure }
   in
@@ -3869,39 +4692,165 @@ let commit_invocation_call t operation_id (invocation : Agent_protocol.Invocatio
     |> Result.map ~f:(fun _ -> ())
 ;;
 
-let job_agent_custody t scope =
-  Option.map
-    (List.find t.job_agent_custody ~f:(fun (job, _) ->
-       Agent_protocol.Id.Job.equal job.id scope.job.id
-       && Int.equal job.generation scope.job.generation))
-    ~f:snd
+let custody_of_admission = function
+  | None -> Ok None
+  | Some admission ->
+    let open Result.Let_syntax in
+    let%map () = check_agent_admission admission in
+    Execution_custody.Admission.custody admission
 ;;
 
-let operation_agent_custody t id =
-  Option.bind t.operation_agent_custody ~f:(fun (owner, custody) ->
-    Option.some_if (Agent_protocol.Id.Operation.equal owner id) custody)
+let job_agent_admission t scope =
+  let open Result.Let_syntax in
+  let%bind job = job_scope_current t scope in
+  let%bind row = Job_custody.find t.job_agent_custody ~job in
+  match row with
+  | None -> Ok None
+  | Some row -> Result.map (Job_custody.Row.admission row) ~f:Option.some
 ;;
 
-let moderator_agent_custody t (borrow : moderator_borrow) =
+let job_callback_admission t scope ~manager ~source =
+  let open Result.Let_syntax in
+  let%bind job = job_scope_current t scope in
+  let%bind row = Job_custody.find t.job_agent_custody ~job in
+  match row with
+  | None -> Ok None
+  | Some row ->
+    let%bind () =
+      match Job_custody.Row.binding row with
+      | Captured { source = captured; manager = Some resource }
+        when Agent_protocol.Run_source.equal captured source
+             && phys_equal resource manager -> Ok ()
+      | No_captured_moderator | Captured _ ->
+        Error
+          (error Conflict "Job callback has no loan for this exact Manager and source")
+    in
+    Result.map (Job_custody.Row.admission row) ~f:Option.some
+;;
+
+let operation_agent_admission t id =
+  match t.operation_agent_custody with
+  | None -> Ok None
+  | Some (owner, admission) ->
+    if Agent_protocol.Id.Operation.equal owner id
+    then Ok (Some admission)
+    else Error (error Conflict "operation admission belongs to another owner")
+;;
+
+let moderator_agent_admission t (borrow : moderator_borrow) =
   match borrow.job_scope, borrow.operation_id with
-  | Some scope, _ -> job_agent_custody t scope
-  | None, Some id -> operation_agent_custody t id
-  | None, None -> None
+  | Some scope, _ -> job_agent_admission t scope
+  | None, Some id -> operation_agent_admission t id
+  | None, None -> Ok None
 ;;
 
-let event_agent_custody t (borrow : queued_event_borrow) =
-  match borrow.job_scope, borrow.receipt.context.operation_id with
-  | Some scope, _ -> job_agent_custody t scope
-  | None, Some id -> operation_agent_custody t id
-  | None, None -> borrow.agent_custody
+let moderator_agent_custody t borrow =
+  Result.bind (moderator_agent_admission t borrow) ~f:custody_of_admission
 ;;
 
-let execution_agent_custody t (execution : invocation_execution) =
+let event_agent_admission t (borrow : queued_event_borrow) =
+  match t.legacy_callback_scope with
+  | Some scope when phys_equal scope.borrow borrow ->
+    (match scope.custody with
+     | Unavailable -> Ok None
+     | Admitted admission -> Ok (Some admission))
+  | None | Some _ ->
+    (match borrow.job_scope, borrow.receipt.context.operation_id with
+     | Some scope, _ -> job_agent_admission t scope
+     | None, Some id -> operation_agent_admission t id
+     | None, None -> Ok borrow.agent_admission)
+;;
+
+let execution_agent_admission t (execution : invocation_execution) =
   match execution.owner with
-  | Foreground id -> operation_agent_custody t id
-  | Invocation_moderator borrow -> moderator_agent_custody t borrow
-  | Event_moderator borrow -> event_agent_custody t borrow
-  | Background_job scope -> job_agent_custody t scope
+  | Foreground id -> operation_agent_admission t id
+  | Invocation_moderator borrow -> moderator_agent_admission t borrow
+  | Event_moderator borrow -> event_agent_admission t borrow
+  | Background_job scope -> job_agent_admission t scope
+;;
+
+let execution_agent_custody t execution =
+  Result.bind (execution_agent_admission t execution) ~f:custody_of_admission
+;;
+
+let job_moderator_binding t =
+  let open Result.Let_syntax in
+  let%bind observer = Moderator_checkpoint.observer t.state.moderator in
+  match observer with
+  | None -> Ok Job_custody.Moderator_binding.No_captured_moderator
+  | Some _ ->
+    let%map _, source = Moderator_source_installation.capture t.state in
+    Job_custody.Moderator_binding.Captured { source; manager = t.moderator_manager }
+;;
+
+let check_job_moderator_binding t = function
+  | Job_custody.Moderator_binding.No_captured_moderator ->
+    let open Result.Let_syntax in
+    let%bind observer = Moderator_checkpoint.observer t.state.moderator in
+    (match observer with
+     | None -> Ok ()
+     | Some _ -> Error (error Conflict "Job admission acquired a different source"))
+  | Captured { source; manager } ->
+    let open Result.Let_syntax in
+    let%bind _, current = Moderator_source_installation.capture t.state in
+    if
+      Agent_protocol.Run_source.equal source current
+      && Option.for_all manager ~f:(fun manager ->
+        Option.exists t.moderator_manager ~f:(phys_equal manager))
+    then Ok ()
+    else Error (error Conflict "Job admission source or resource changed")
+;;
+
+let prepare_selected_job_custody t owner =
+  let open Result.Let_syntax in
+  let selected =
+    Staged_jobs.selected_payloads t.staged_jobs ~owner
+    |> List.filter_map ~f:(fun ((job : Agent_protocol.Job.t), fresh) ->
+      match job.status, fresh with
+      | Queued, Some fresh -> Some (job, fresh)
+      | Queued, None -> None
+      | ( ( Running
+          | Waiting_permission _
+          | Waiting_completion _
+          | Succeeded
+          | Failed _
+          | Cancelled
+          | Interrupted _ )
+        , _ ) -> None)
+  in
+  let%map update = Job_custody.prepare_selected t.job_agent_custody ~selected in
+  update, selected
+;;
+
+let check_selected_job_custody t update selected =
+  let open Result.Let_syntax in
+  let%bind () =
+    List.fold_result selected ~init:() ~f:(fun () (_, fresh) ->
+      let binding = Job_custody.Fresh.binding fresh in
+      let%bind () = check_job_moderator_binding t binding in
+      match binding with
+      | No_captured_moderator -> Ok ()
+      | Captured { source = _; manager } ->
+        if Option.equal phys_equal manager t.moderator_manager
+        then Ok ()
+        else Error (error Conflict "staged Job admission resource topology changed"))
+  in
+  Job_custody.Update.check_before_commit update ~current:t.job_agent_custody
+;;
+
+let with_selected_job_custody t owner f =
+  let open Result.Let_syntax in
+  let%bind update, selected = prepare_selected_job_custody t owner in
+  let acknowledged = ref false in
+  Exn.protect
+    ~finally:(fun () -> if not !acknowledged then Job_custody.Update.discard update)
+    ~f:(fun () ->
+      f
+        ~job_custody:update
+        ~check_jobs:(fun () -> check_selected_job_custody t update selected)
+        ~acknowledge_jobs:(fun () ->
+          acknowledged := true;
+          Staged_jobs.commit t.staged_jobs ~owner))
 ;;
 
 let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
@@ -3974,10 +4923,10 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
 ;;
 
 (* One bounded process-local slot per actual durable pending intent. No codec or
-   principal lookup exists. Unknown/mixed custody remains explicitly unbound. *)
+   principal lookup exists. Missing or mixed original proofs mint no authentication. *)
 let with_intent_agent_custody t key ~pending custody f =
   if not pending
-  then f ()
+  then f ~acknowledge:(fun () -> ())
   else
     let open Result.Let_syntax in
     let existing =
@@ -3996,8 +4945,7 @@ let with_intent_agent_custody t key ~pending custody f =
       match existing, custody with
       | None, custody -> custody
       | Some { custody = Some previous; _ }, Some current
-        when Agent_authority_scope.same_origin previous.authority current.authority ->
-        Some previous
+        when Execution_custody.same_origin previous current -> Some previous
       | Some _, (Some _ | None) -> None
     in
     let staged, owned =
@@ -4008,22 +4956,40 @@ let with_intent_agent_custody t key ~pending custody f =
          | Ok child -> Some child, true
          | Error _ -> Some custody, false)
     in
-    let published = ref false in
-    Exn.protect
-      ~f:(fun () ->
-        let%map result = f () in
+    let entry : agent_intent_custody =
+      { key; generation = t.state.identity.generation; source; custody = staged }
+    in
+    let acknowledged = ref false in
+    (* This callback is actor-private. Every caller invokes it immediately after
+       the actual committed-state install, before publication can yield. Keep
+       other entries from that install's retention pass, not a stale old list. *)
+    let acknowledge () =
+      if not !acknowledged
+      then (
         Option.iter existing ~f:(fun previous ->
           Option.iter previous.custody ~f:(fun previous ->
             if not (Option.exists staged ~f:(phys_equal previous))
             then retire_agent_custody previous));
         t.intent_agent_custody
-        <- { key; generation = t.state.identity.generation; source; custody = staged }
-           :: List.filter t.intent_agent_custody ~f:(fun entry ->
-             not (equal_agent_intent_key entry.key key));
-        published := true;
-        result)
+        <- entry
+           :: List.filter t.intent_agent_custody ~f:(fun current ->
+             not (equal_agent_intent_key current.key key));
+        acknowledged := true)
+    in
+    Exn.protect
+      ~f:(fun () -> f ~acknowledge)
       ~finally:(fun () ->
-        if owned && not !published then Option.iter staged ~f:retire_agent_custody)
+        if owned && not !acknowledged then Option.iter staged ~f:retire_agent_custody)
+;;
+
+(* The selected Job candidate is prepared against the current inventory, not
+   the inventory present when each independent staged loan was captured. *)
+let with_selected_intent_agent_custody t owner key ~pending custody f =
+  with_selected_job_custody t owner (fun ~job_custody ~check_jobs ~acknowledge_jobs ->
+    with_intent_agent_custody t key ~pending custody (fun ~acknowledge ->
+      f ~job_custody ~check_jobs ~acknowledge:(fun () ->
+        acknowledge ();
+        acknowledge_jobs ())))
 ;;
 
 let plan_agent_custody t (plan : Observation_follow_up.t) =
@@ -4056,8 +5022,7 @@ let plan_agent_custody t (plan : Observation_follow_up.t) =
   | [] -> Ok None
   | Some { custody = Some first; _ } :: rest
     when List.for_all rest ~f:(function
-           | Some { custody = Some other; _ } ->
-             Agent_authority_scope.same_origin first.authority other.authority
+           | Some { custody = Some other; _ } -> Execution_custody.same_origin first other
            | None | Some { custody = None; _ } -> false) -> Ok (Some first)
   | None :: _ | Some _ :: _ -> Ok None
 ;;
@@ -4160,20 +5125,34 @@ let finish_invocation t execution outcome requests commit_starts authoring_refer
     cleanup_invocation_permissions t [ execution.dispatched.context.id ]
   in
   let%bind job_deltas, job_payloads = staged_work_changes t owner in
+  (* Completing the selected result retains negative expiry evidence. New work
+     and proof borrows separately check the Admission; this is not a renewal. *)
+  let%bind admission = execution_agent_admission t execution in
+  let custody = Option.bind admission ~f:Execution_custody.Admission.custody in
   let%bind _ =
-    with_intent_agent_custody
+    with_selected_intent_agent_custody
       t
+      owner
       (Invocation_intent resolved.context.id)
       ~pending:(Observation_follow_up.pending resolved)
-      (execution_agent_custody t execution)
-      (fun () ->
-         transition
-           t
-           ~delta:
-             (Session_delta.Batch
-                ((Session_delta.Invocation_changed resolved :: permission_deltas)
-                 @ job_deltas))
-           ~payloads:(permission_payloads @ job_payloads))
+      custody
+      (fun ~job_custody ~check_jobs ~acknowledge ->
+         let%bind prepared =
+           prepare_transition
+             t
+             ~delta:
+               (Session_delta.Batch
+                  ((Session_delta.Invocation_changed resolved :: permission_deltas)
+                   @ job_deltas))
+             ~payloads:(permission_payloads @ job_payloads)
+         in
+         Eio.Cancel.protect (fun () ->
+           let%bind () = check_jobs () in
+           let%bind () = persist_transition t prepared in
+           install_committed_transition ~job_custody t prepared;
+           acknowledge ();
+           publish_committed_transition t prepared;
+           Ok ()))
   in
   resolve_cleaned_permission_waiters t permissions;
   t.invocation_executions
@@ -4296,7 +5275,12 @@ let check_run_binding t run_id =
   Run_admission.Scope.authorize (Run_authorities.scope binding) t.state
 ;;
 
-let claim_queued_event t id operation_id snapshot =
+let claim_queued_event
+      t
+      id
+      operation_id
+      (snapshot : Session.Moderator_state.Identity_snapshot.t)
+  =
   let open Result.Let_syntax in
   let%bind available =
     match operation_id with
@@ -4346,7 +5330,7 @@ let claim_queued_event t id operation_id snapshot =
     let borrow =
       { kind = Queued
       ; job_scope = None
-      ; agent_custody = None
+      ; agent_admission = None
       ; receipt
       ; before = snapshot
       ; event
@@ -4362,6 +5346,57 @@ let claim_queued_event t id operation_id snapshot =
     t.queued_event_borrow <- Some borrow;
     t.idle_moderator_borrowed <- true;
     Ok (Some borrow)
+;;
+
+type lifecycle_claim_handoff =
+  | Current_lifecycle_child of
+      { original : agent_admission
+      ; child : agent_admission
+      }
+  | Expired_lifecycle_original of
+      { original : agent_admission
+      ; child : agent_admission
+      }
+
+let stage_lifecycle_claim original =
+  let expired () =
+    match Execution_custody.Admission.custody original with
+    | Some custody ->
+      Ok
+        (Expired_lifecycle_original
+           { original; child = create_agent_admission (Some custody) })
+    | None -> Error (error Internal_error "expired lifecycle admission lost its original")
+  in
+  match Execution_custody.Admission.status original with
+  | Authority_expired -> expired ()
+  | Closed -> Error (error Conflict "lifecycle admission has ended")
+  | Current ->
+    (match transfer_agent_admission original with
+     | Ok child -> Ok (Current_lifecycle_child { original; child })
+     | Error failure ->
+       (match Execution_custody.Admission.status original with
+        | Authority_expired -> expired ()
+        | Current | Closed -> Error failure))
+;;
+
+let lifecycle_claim_admission = function
+  | Current_lifecycle_child { child; _ } | Expired_lifecycle_original { child; _ } ->
+    child
+;;
+
+let discard_lifecycle_claim = function
+  | Current_lifecycle_child { child; _ } -> retire_agent_admission child
+  | Expired_lifecycle_original { child; _ } -> Execution_custody.Admission.close child
+;;
+
+let check_lifecycle_claim = function
+  | Current_lifecycle_child { child; _ } -> check_agent_admission child
+  | Expired_lifecycle_original _ -> Ok ()
+;;
+
+let acknowledge_lifecycle_claim = function
+  | Current_lifecycle_child { original; _ } | Expired_lifecycle_original { original; _ }
+    -> retire_agent_admission original
 ;;
 
 let claim_ordinary_event t id operation_id snapshot event =
@@ -4389,42 +5424,57 @@ let claim_ordinary_event t id operation_id snapshot event =
         ~event
         ~now:(t.services.now ())
     in
-    let%bind _ =
-      transition t ~delta:(Session_delta.Moderator_execution_changed receipt) ~payloads:[]
-    in
-    let%bind agent_custody =
+    let%bind handoff =
       match operation_id, t.lifecycle_agent_custody with
-      | None, Admitted ({ pending; _ } as admitted) ->
-        t.lifecycle_agent_custody <- Admitted { admitted with pending = None };
-        (match pending with
-         | None -> Ok None
-         | Some custody ->
-           (match transfer_agent_custody custody with
-            | Ok child ->
-              retire_agent_custody custody;
-              Ok (Some child)
-            | Error _ -> Ok (Some custody)))
-      | Some _, _ | None, Unadmitted -> Ok None
+      | None, Admitted { pending = Pending admission; _ } ->
+        Result.map (stage_lifecycle_claim admission) ~f:Option.some
+      | Some _, _ | None, (Unadmitted | Admitted { pending = Consumed; _ }) -> Ok None
     in
-    let borrow =
-      { kind = Ordinary
-      ; job_scope = None
-      ; agent_custody
-      ; receipt
-      ; before = snapshot
-      ; event
-      ; retirement_reason = None
-      ; run_actions = None
-      ; callback_active = true
-      ; authority_live = Atomic.make true
-      ; committed = false
-      ; cancel = None
-      ; cancel_requested = false
-      }
-    in
-    t.queued_event_borrow <- Some borrow;
-    t.idle_moderator_borrowed <- true;
-    Ok (Some borrow)
+    let agent_admission = Option.map handoff ~f:lifecycle_claim_admission in
+    let acknowledged = ref false in
+    Exn.protect
+      ~finally:(fun () ->
+        if not !acknowledged then Option.iter handoff ~f:discard_lifecycle_claim)
+      ~f:(fun () ->
+        let borrow =
+          { kind = Ordinary
+          ; job_scope = None
+          ; agent_admission
+          ; receipt
+          ; before = snapshot
+          ; event
+          ; retirement_reason = None
+          ; run_actions = None
+          ; callback_active = true
+          ; authority_live = Atomic.make true
+          ; committed = false
+          ; cancel = None
+          ; cancel_requested = false
+          }
+        in
+        let%bind prepared =
+          prepare_transition
+            t
+            ~delta:(Session_delta.Moderator_execution_changed receipt)
+            ~payloads:[]
+        in
+        let%bind () =
+          Option.value_map handoff ~default:(Ok ()) ~f:check_lifecycle_claim
+        in
+        Eio.Cancel.protect (fun () ->
+          let%bind () = persist_transition t prepared in
+          install_committed_transition t prepared;
+          Option.iter handoff ~f:(fun handoff ->
+            (match t.lifecycle_agent_custody with
+             | Admitted admitted ->
+               t.lifecycle_agent_custody <- Admitted { admitted with pending = Consumed }
+             | Unadmitted -> ());
+            acknowledge_lifecycle_claim handoff);
+          t.queued_event_borrow <- Some borrow;
+          t.idle_moderator_borrowed <- true;
+          acknowledged := true;
+          publish_committed_transition t prepared;
+          Ok (Some borrow)))
 ;;
 
 let claim_delegated_event t id delegation snapshot event =
@@ -4456,7 +5506,7 @@ let claim_delegated_event t id delegation snapshot event =
         let borrow =
           { kind = Ordinary
           ; job_scope = None
-          ; agent_custody = None
+          ; agent_admission = None
           ; receipt
           ; before = snapshot
           ; event
@@ -4498,7 +5548,7 @@ let claim_job_event t scope id snapshot event =
   let borrow =
     { kind = Ordinary
     ; job_scope = Some scope
-    ; agent_custody = None
+    ; agent_admission = None
     ; receipt
     ; before = snapshot
     ; event
@@ -4536,6 +5586,514 @@ let validate_queued_event_borrow t borrow =
   | _ -> Error (error Conflict "queued event is no longer owned by this callback")
 ;;
 
+let legacy_boundary_available t parent event =
+  let open Result.Let_syntax in
+  let%bind () =
+    match event with
+    | Chat_response.Moderation.Event.Internal_event _ ->
+      Error (error Invalid_request "legacy internal events require an exact queue head")
+    | Session_start
+    | Session_resume
+    | Turn_start
+    | Item_appended _
+    | Pre_tool_call _
+    | Post_tool_response _
+    | Turn_end -> Ok ()
+  in
+  match parent with
+  | Callback_job scope ->
+    let%map () = job_scope_can_execute t scope in
+    not (t.idle_moderator_borrowed || moderator_is_borrowed t)
+  | Callback_operation (Some id) ->
+    let%map _ = running_operation t id in
+    not (t.idle_moderator_borrowed || moderator_is_borrowed t)
+  | Callback_operation None ->
+    (match event with
+     | Session_start | Session_resume -> Ok (idle_moderator_eligible t)
+     | Turn_start | Item_appended _ | Pre_tool_call _ | Post_tool_response _ | Turn_end ->
+       Error (error Invalid_state "legacy boundary requires its active operation")
+     | Internal_event _ ->
+       Error (error Invalid_request "legacy internal events require an exact queue head"))
+;;
+
+let legacy_boundary_admission t parent ~manager ~source =
+  match parent with
+  | Callback_operation (Some id) ->
+    Ok
+      ( Option.bind t.operation_agent_custody ~f:(fun (owner, admission) ->
+          Option.some_if (Agent_protocol.Id.Operation.equal owner id) admission)
+      , false )
+  | Callback_operation None ->
+    (match t.lifecycle_agent_custody with
+     | Admitted { generation; source; pending = Pending admission }
+       when agent_source_current t generation source -> Ok (Some admission, true)
+     | Admitted _ | Unadmitted -> Ok (None, false))
+  | Callback_job scope ->
+    (* Missing historical job custody is unavailable, not admitted legacy None.
+       Fresh optional job admissions are integrated with their real producers. *)
+    Result.map (job_callback_admission t scope ~manager ~source) ~f:(fun admission ->
+      admission, false)
+;;
+
+let claim_initialization_callback
+      t
+      (constructor : Initialization_scope.t)
+      manager
+      callback
+  =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_scope t constructor in
+  let%bind () = check_initialization_agent_actor constructor in
+  let%bind event =
+    match Chat_response.Moderator_manager.Callback.selection callback with
+    | Boundary (Session_start as event) | Boundary (Session_resume as event) -> Ok event
+    | Boundary
+        ( Turn_start
+        | Item_appended _
+        | Pre_tool_call _
+        | Post_tool_response _
+        | Turn_end
+        | Internal_event _ )
+    | Queue_head ->
+      Error
+        (error Invalid_request "constructor admits only its startup or resume callback")
+  in
+  let%bind () =
+    match constructor.callback with
+    | Unclaimed -> Ok ()
+    | Claimed _ | Settled _ ->
+      Error (error Conflict "constructor callback was already claimed")
+  in
+  let%bind () =
+    match t.moderator_manager with
+    | None -> Ok ()
+    | Some installed when phys_equal installed manager -> Ok ()
+    | Some _ ->
+      Error (error Conflict "constructor cannot borrow another installed Manager")
+  in
+  let revision = t.state.counters.revision in
+  let%bind checkpoint =
+    Constructor_callback_checkpoint.prepare t.state ~manager ~callback
+  in
+  let snapshot = Chat_response.Moderator_manager.Callback.snapshot callback in
+  let checkpoint_state =
+    { t.state with
+      moderator = Some checkpoint.moderator
+    ; run_state = Some checkpoint.index
+    }
+  in
+  let%bind receipt, event =
+    Queued_moderator_event.claim_ordinary
+      ~state:checkpoint_state
+      ~id:(Agent_protocol.Id.Moderator_execution.create ())
+      ~operation_id:None
+      ~snapshot
+      ~event
+      ~now:(t.services.now ())
+  in
+  let%bind origin =
+    Invocation_inference_provenance.of_event
+      ~runs:checkpoint_state.run_state
+      ~jobs:checkpoint_state.jobs
+      receipt
+  in
+  let%bind admission = transfer_agent_admission constructor.agent_admission in
+  let acknowledged = ref false in
+  Exn.protect
+    ~finally:(fun () -> if not !acknowledged then retire_agent_admission admission)
+    ~f:(fun () ->
+      let%bind prepared =
+        prepare_transition
+          ?run_preparation:constructor.run_preparation
+          t
+          ~delta:
+            (Session_delta.Batch
+               [ Run_state_changed checkpoint.index
+               ; Moderator_changed (Some checkpoint.moderator)
+               ; Moderator_execution_changed receipt
+               ])
+          ~payloads:[]
+      in
+      let%bind resource =
+        Initialization_scope.Resource.select
+          constructor.resource
+          prepared.state
+          ~manager
+          ~source:checkpoint.source
+          ~ordinals:[]
+          ~schedules:[]
+      in
+      let acknowledgement =
+        Initialization_scope.Acknowledgement.prepare
+          ~callback:(Claimed receipt.context.id)
+          ~resource
+          constructor
+          prepared.state
+      in
+      let%bind () =
+        validate_initialization_projection
+          (Initialization_scope.Acknowledgement.expected acknowledgement)
+          prepared.state
+      in
+      let borrow =
+        { kind = Ordinary
+        ; job_scope = None
+        ; agent_admission = None
+        ; receipt
+        ; before = snapshot
+        ; event
+        ; retirement_reason = None
+        ; run_actions = None
+        ; callback_active = true
+        ; authority_live = Atomic.make true
+        ; committed = false
+        ; cancel = None
+        ; cancel_requested = false
+        }
+      in
+      let scope : Callback_scope.t =
+        { manager
+        ; constructor_scope = Some constructor
+        ; callback
+        ; borrow
+        ; source = checkpoint.source
+        ; origin
+        ; custody = Admitted admission
+        }
+      in
+      Eio.Cancel.protect (fun () ->
+        let%bind () = validate_initialization_scope t constructor in
+        let%bind () = check_initialization_agent_actor constructor in
+        let%bind () = check_agent_admission admission in
+        let%bind () = Initialization_scope.Acknowledgement.check_basis acknowledgement in
+        let%bind current =
+          Constructor_callback_checkpoint.prepare t.state ~manager ~callback
+        in
+        let%bind () =
+          if
+            Int64.equal revision t.state.counters.revision
+            && Agent_protocol.Run_source.equal checkpoint.source current.source
+          then Ok ()
+          else Error (error Conflict "constructor callback basis changed before commit")
+        in
+        let%bind () = persist_transition t prepared in
+        install_committed_transition
+          ?run_preparation:constructor.run_preparation
+          ~initialization_acknowledgement:acknowledgement
+          t
+          prepared;
+        t.queued_event_borrow <- Some borrow;
+        t.idle_moderator_borrowed <- true;
+        t.legacy_callback_scope <- Some scope;
+        acknowledged := true;
+        publish_committed_transition t prepared;
+        Ok (Some scope)))
+;;
+
+let claim_legacy_boundary t manager callback parent event =
+  let open Result.Let_syntax in
+  let%bind available = legacy_boundary_available t parent event in
+  if not available
+  then Ok None
+  else (
+    let snapshot = Chat_response.Moderator_manager.Callback.snapshot callback in
+    let id = Agent_protocol.Id.Moderator_execution.create () in
+    let%bind receipt, captured_event =
+      match parent with
+      | Callback_operation operation_id ->
+        Queued_moderator_event.claim_ordinary
+          ~state:t.state
+          ~id
+          ~operation_id
+          ~snapshot
+          ~event
+          ~now:(t.services.now ())
+      | Callback_job scope ->
+        Queued_moderator_event.claim_job
+          ~job:
+            { job_id = scope.job.id
+            ; attempt = scope.job.attempt
+            ; deadline = scope.deadline
+            }
+          ~state:t.state
+          ~id
+          ~snapshot
+          ~event
+          ~now:(t.services.now ())
+    in
+    let%bind index, source = Moderator_source_installation.capture t.state in
+    let%bind metadata = Moderator_checkpoint.queue t.state.moderator in
+    let%bind metadata =
+      match metadata with
+      | Some metadata -> Ok metadata
+      | None -> Moderator_queue.bootstrap ~source ~queue:snapshot.queued_internal_events
+    in
+    let%bind moderator =
+      Moderator_checkpoint.update_with_queue t.state.moderator ~snapshot ~queue:metadata
+    in
+    let%bind origin =
+      Invocation_inference_provenance.of_event
+        ~runs:t.state.run_state
+        ~jobs:t.state.jobs
+        receipt
+    in
+    let%bind parent_admission, consume_lifecycle =
+      legacy_boundary_admission t parent ~manager ~source
+    in
+    let%bind admission =
+      match parent_admission with
+      | None -> Ok None
+      | Some admission -> Result.map (transfer_agent_admission admission) ~f:Option.some
+    in
+    let acknowledged = ref false in
+    Exn.protect
+      ~finally:(fun () ->
+        if not !acknowledged then Option.iter admission ~f:retire_agent_admission)
+      ~f:(fun () ->
+        let%bind prepared =
+          prepare_transition
+            t
+            ~delta:
+              (Session_delta.Batch
+                 [ Run_state_changed index
+                 ; Moderator_changed (Some moderator)
+                 ; Moderator_execution_changed receipt
+                 ])
+            ~payloads:[]
+        in
+        let%bind () =
+          if
+            Chat_response.Moderator_manager.callback_is_current manager callback
+            && Option.exists t.moderator_manager ~f:(phys_equal manager)
+          then Ok ()
+          else Error (error Conflict "legacy Manager changed before boundary claim")
+        in
+        let%bind () =
+          match parent_admission with
+          | None -> Ok ()
+          | Some admission -> check_agent_admission admission
+        in
+        let%bind available = legacy_boundary_available t parent event in
+        let%bind () =
+          if available
+          then Ok ()
+          else Error (error Conflict "legacy boundary physical owner changed")
+        in
+        let%bind _, current_source = Moderator_source_installation.capture t.state in
+        let%bind () =
+          if Agent_protocol.Run_source.equal source current_source
+          then Ok ()
+          else Error (error Conflict "legacy boundary source changed before claim")
+        in
+        Eio.Cancel.protect (fun () ->
+          let%bind () = persist_transition t prepared in
+          install_committed_transition t prepared;
+          let borrow =
+            { kind = Ordinary
+            ; job_scope =
+                (match parent with
+                 | Callback_job scope -> Some scope
+                 | Callback_operation _ -> None)
+            ; agent_admission = None
+            ; receipt
+            ; before = snapshot
+            ; event = captured_event
+            ; retirement_reason = None
+            ; callback_active = true
+            ; authority_live = Atomic.make true
+            ; run_actions = None
+            ; committed = false
+            ; cancel = None
+            ; cancel_requested = false
+            }
+          in
+          let scope : Callback_scope.t =
+            { manager
+            ; constructor_scope = None
+            ; callback
+            ; borrow
+            ; source
+            ; origin
+            ; custody =
+                (match admission with
+                 | None -> Unavailable
+                 | Some admission -> Admitted admission)
+            }
+          in
+          t.queued_event_borrow <- Some borrow;
+          t.idle_moderator_borrowed <- true;
+          t.legacy_callback_scope <- Some scope;
+          if consume_lifecycle
+          then (
+            match t.lifecycle_agent_custody with
+            | Admitted ({ pending = Pending current; _ } as lifecycle)
+              when Option.exists parent_admission ~f:(phys_equal current) ->
+              t.lifecycle_agent_custody <- Admitted { lifecycle with pending = Consumed };
+              retire_agent_admission current
+            | Unadmitted | Admitted _ -> ());
+          acknowledged := true;
+          publish_committed_transition t prepared;
+          Ok (Some scope))))
+;;
+
+let claim_legacy_head t manager callback operation_id =
+  let open Result.Let_syntax in
+  let available () =
+    match operation_id with
+    | None -> Ok (idle_moderator_eligible t)
+    | Some id ->
+      let%map _ = running_operation t id in
+      not (t.idle_moderator_borrowed || moderator_is_borrowed t)
+  in
+  let%bind ready = available () in
+  if not ready
+  then Ok None
+  else (
+    let snapshot = Chat_response.Moderator_manager.Callback.snapshot callback in
+    let%bind receipt, event =
+      Queued_moderator_event.claim_legacy
+        ~callback
+        ~operation_id
+        ~state:t.state
+        ~id:(Agent_protocol.Id.Moderator_execution.create ())
+        ~now:(t.services.now ())
+    in
+    let%bind index, source = Moderator_source_installation.capture t.state in
+    let%bind metadata = Moderator_checkpoint.queue t.state.moderator in
+    let%bind metadata =
+      match metadata with
+      | Some metadata -> Ok metadata
+      | None -> Moderator_queue.bootstrap ~source ~queue:snapshot.queued_internal_events
+    in
+    let%bind entry =
+      Result.of_option
+        (List.hd (Moderator_queue.entries metadata))
+        ~error:
+          (error Conflict "legacy callback requires the actual structural queue head")
+    in
+    let original =
+      Legacy_queue_custody.find t.legacy_queue_custody ~manager ~source ~entry
+    in
+    let%bind admission =
+      match original with
+      | None -> Ok None
+      | Some original ->
+        Result.map (Legacy_queue_custody.Row.transfer original) ~f:Option.some
+    in
+    let acknowledged = ref false in
+    Exn.protect
+      ~finally:(fun () ->
+        if not !acknowledged then Option.iter admission ~f:retire_agent_admission)
+      ~f:(fun () ->
+        let%bind moderator =
+          Moderator_checkpoint.update_with_queue
+            t.state.moderator
+            ~snapshot
+            ~queue:metadata
+        in
+        (* The installation and original queue precede the v5 Running leaf. No
+           incoming receipt can certify its own source or attribution. *)
+        let%bind prepared =
+          prepare_transition
+            t
+            ~delta:
+              (Session_delta.Batch
+                 [ Run_state_changed index
+                 ; Moderator_changed (Some moderator)
+                 ; Moderator_execution_changed receipt
+                 ])
+            ~payloads:[]
+        in
+        let%bind () =
+          if
+            Chat_response.Moderator_manager.callback_is_current manager callback
+            && Option.exists t.moderator_manager ~f:(phys_equal manager)
+          then Ok ()
+          else Error (error Conflict "legacy Manager changed before queue claim")
+        in
+        let%bind ready = available () in
+        let%bind () =
+          if ready
+          then Ok ()
+          else Error (error Conflict "legacy queue drainer changed before claim")
+        in
+        let%bind _, current_source = Moderator_source_installation.capture t.state in
+        let%bind () =
+          if Agent_protocol.Run_source.equal source current_source
+          then Ok ()
+          else Error (error Conflict "legacy queue source changed before claim")
+        in
+        let%bind () =
+          match original with
+          | None -> Ok ()
+          | Some row -> Legacy_queue_custody.Row.check row
+        in
+        let borrow =
+          { kind = Queued
+          ; job_scope = None
+          ; agent_admission = None
+          ; receipt
+          ; before = snapshot
+          ; event
+          ; retirement_reason = None
+          ; run_actions = None
+          ; callback_active = true
+          ; authority_live = Atomic.make true
+          ; committed = false
+          ; cancel = None
+          ; cancel_requested = false
+          }
+        in
+        let scope : Callback_scope.t =
+          { manager
+          ; constructor_scope = None
+          ; callback
+          ; borrow
+          ; source
+          ; origin = Moderator_queue.Entry.origin entry
+          ; custody =
+              (match admission with
+               | None -> Unavailable
+               | Some admission -> Admitted admission)
+          }
+        in
+        let remaining =
+          Legacy_queue_custody.without t.legacy_queue_custody ~selected:original
+        in
+        Eio.Cancel.protect (fun () ->
+          let%bind () = persist_transition t prepared in
+          install_committed_transition t prepared;
+          t.legacy_queue_custody
+          <- Legacy_queue_custody.install t.legacy_queue_custody ~incoming:remaining;
+          t.queued_event_borrow <- Some borrow;
+          t.idle_moderator_borrowed <- true;
+          t.legacy_callback_scope <- Some scope;
+          acknowledged := true;
+          publish_committed_transition t prepared;
+          Ok (Some scope))))
+;;
+
+let claim_legacy_callback t callback parent =
+  let open Result.Let_syntax in
+  let%bind manager =
+    match t.moderator_manager with
+    | Some manager
+      when Chat_response.Moderator_manager.callback_is_current manager callback ->
+      Ok manager
+    | _ -> Error (error Conflict "legacy callback requires its exact installed Manager")
+  in
+  match Chat_response.Moderator_manager.Callback.selection callback with
+  | Boundary event -> claim_legacy_boundary t manager callback parent event
+  | Queue_head ->
+    let%bind operation_id =
+      match parent with
+      | Callback_operation id -> Ok id
+      | Callback_job _ ->
+        Error (error Invalid_request "job callback cannot claim an unrelated queue head")
+    in
+    claim_legacy_head t manager callback operation_id
+;;
+
 let queued_retirement_available t =
   (not t.idle_moderator_borrowed)
   && (not (moderator_is_borrowed t))
@@ -4564,7 +6122,7 @@ let claim_queued_retirement t id snapshot reason =
     let borrow =
       { kind = Queued
       ; job_scope = None
-      ; agent_custody = None
+      ; agent_admission = None
       ; receipt
       ; before = snapshot
       ; event
@@ -4582,7 +6140,7 @@ let claim_queued_retirement t id snapshot reason =
     Ok (Some borrow)
 ;;
 
-let queued_event_can_commit t borrow =
+let queued_event_can_commit_installed t borrow =
   let open Result.Let_syntax in
   let%bind () = validate_queued_event_borrow t borrow in
   match borrow.job_scope, borrow.receipt.context.operation_id with
@@ -4625,6 +6183,95 @@ let queued_event_can_commit t borrow =
             && (not (borrow.committed || borrow.cancel_requested || t.state.halted))
             && Option.is_none t.state.active_operation -> Ok ()
      | _ -> Error (error Conflict "queued event cannot commit after completion or stop"))
+;;
+
+let constructor_scope_of_borrow t borrow =
+  Option.bind t.legacy_callback_scope ~f:(fun scope ->
+    if phys_equal scope.borrow borrow then scope.constructor_scope else None)
+;;
+
+let queued_event_can_commit t borrow =
+  match constructor_scope_of_borrow t borrow with
+  | None -> queued_event_can_commit_installed t borrow
+  | Some scope ->
+    let open Result.Let_syntax in
+    let%bind () = validate_queued_event_borrow t borrow in
+    let%bind () = validate_initialization_scope t scope in
+    let%bind () = check_initialization_agent_actor scope in
+    if initialization_callback_is_owned t scope
+    then Ok ()
+    else Error (error Conflict "constructor callback is no longer current")
+;;
+
+let callback_run_preparation (scope : Callback_scope.t) =
+  Option.bind scope.constructor_scope ~f:(fun constructor -> constructor.run_preparation)
+;;
+
+let check_callback_current t (scope : Callback_scope.t) =
+  let open Result.Let_syntax in
+  let%bind () = queued_event_can_commit t scope.borrow in
+  let%bind () =
+    match t.legacy_callback_scope, scope.constructor_scope with
+    | Some current, Some constructor when phys_equal current scope ->
+      (match constructor.resource with
+       | Some resource
+         when initialization_callback_is_owned t constructor
+              && phys_equal resource.manager scope.manager
+              && Agent_protocol.Run_source.equal resource.source scope.source
+              && not resource.handed_off -> Ok ()
+       | None | Some _ -> Error (error Conflict "constructor callback resource changed"))
+    | Some current, None when phys_equal current scope ->
+      (match t.moderator_manager with
+       | Some manager
+         when phys_equal manager scope.manager
+              && Chat_response.Moderator_manager.callback_is_current
+                   manager
+                   scope.callback -> Ok ()
+       | None | Some _ ->
+         Error (error Conflict "legacy callback no longer owns the installed Manager"))
+    | None, _ | Some _, _ ->
+      Error (error Conflict "legacy callback no longer owns its exact borrow")
+  in
+  let%bind _, source = Moderator_source_installation.capture t.state in
+  let%bind () =
+    if Agent_protocol.Run_source.equal source scope.source
+    then Ok ()
+    else Error (error Conflict "legacy callback source installation changed")
+  in
+  let%bind () =
+    match scope.borrow.job_scope with
+    | None -> Ok ()
+    | Some job_scope ->
+      let%bind current =
+        job_callback_admission t job_scope ~manager:scope.manager ~source:scope.source
+      in
+      (match scope.custody, current with
+       | Unavailable, None | Admitted _, Some _ -> Ok ()
+       | Unavailable, Some _ | Admitted _, None ->
+         Error (error Conflict "Job callback admission changed before commit"))
+  in
+  match scope.custody with
+  | Unavailable -> Ok ()
+  | Admitted admission -> check_agent_admission admission
+;;
+
+let callback_agent_actor t ~scope =
+  let open Result.Let_syntax in
+  let%bind () = check_callback_current t scope in
+  match scope.Callback_scope.custody with
+  | Unavailable ->
+    Error (error Permission_denied "legacy queue continuation custody is unavailable")
+  | Admitted admission ->
+    (match Execution_custody.Admission.custody admission with
+     | None -> Ok None
+     | Some custody ->
+       let%map actor = Execution_custody.actor custody in
+       Some
+         (Operator_authorization.guarded
+            ~principal:(Operator_authorization.principal actor)
+            ~is_current:(fun () ->
+              Result.is_ok (check_callback_current t scope)
+              && Operator_authorization.is_current actor)))
 ;;
 
 let event_execution_owned_by borrow execution =
@@ -4758,20 +6405,25 @@ let run_actions_internal t (executing : Agent_protocol.Moderator_execution.t) =
       Error (error Conflict "run actions require the exact active event borrow")
   in
   let%bind () = queued_event_can_commit t borrow in
-  match borrow.run_actions with
-  | Some owner ->
-    let%map () = check_run_authority t (Run_action_service.scope owner) in
-    Some owner
-  | None ->
-    let%bind selected = Run_event_scope.select t.state ~executing in
-    (match selected with
-     | None -> Ok None
-     | Some run ->
-       let%bind scope = Run_scope.create ~run ~execution_id:executing.context.id in
-       let%map () = check_run_authority t scope in
-       let owner = Run_action_service.create ~scope in
-       borrow.run_actions <- Some owner;
-       Some owner)
+  match t.legacy_callback_scope with
+  | Some scope when phys_equal scope.borrow borrow ->
+    let%map () = check_callback_current t scope in
+    None
+  | None | Some _ ->
+    (match borrow.run_actions with
+     | Some owner ->
+       let%map () = check_run_authority t (Run_action_service.scope owner) in
+       Some owner
+     | None ->
+       let%bind selected = Run_event_scope.select t.state ~executing in
+       (match selected with
+        | None -> Ok None
+        | Some run ->
+          let%bind scope = Run_scope.create ~run ~execution_id:executing.context.id in
+          let%map () = check_run_authority t scope in
+          let owner = Run_action_service.create ~scope in
+          borrow.run_actions <- Some owner;
+          Some owner))
 ;;
 
 module Prepared_run_delta = struct
@@ -4910,6 +6562,25 @@ let commit_queued_event t borrow snapshot requests decision notifications =
     | true -> Error (error Conflict "event native invocations still require completion")
     | false -> Ok ()
   in
+  let%bind () =
+    match t.legacy_callback_scope with
+    | Some scope when phys_equal scope.borrow borrow -> check_callback_current t scope
+    | None | Some _ -> Ok ()
+  in
+  let%bind () =
+    match t.legacy_callback_scope with
+    | Some scope when phys_equal scope.borrow borrow ->
+      (match scope.custody with
+       | Unavailable
+         when requests.Agent_protocol.Invocation.request_turn
+              || requests.request_compaction ->
+         Error
+           (error
+              Permission_denied
+              "legacy continuation custody is unavailable for turn or compaction requests")
+       | Unavailable | Admitted _ -> Ok ())
+    | None | Some _ -> Ok ()
+  in
   let%bind receipt, admission_deltas =
     match borrow.retirement_reason, borrow.receipt.status with
     | Some reason, Running ->
@@ -4970,42 +6641,238 @@ let commit_queued_event t borrow snapshot requests decision notifications =
        | _ ->
          Error (error Invalid_state "failed-head retirement cannot schedule new work"))
   in
-  let%bind job_deltas, job_payloads =
-    staged_work_changes t (Agent_protocol.Job.Moderator_event borrow.receipt.context.id)
+  let legacy_scope =
+    Option.filter t.legacy_callback_scope ~f:(fun scope -> phys_equal scope.borrow borrow)
   in
+  let run_preparation = Option.bind legacy_scope ~f:callback_run_preparation in
+  let%bind encoded_snapshot, queue_plan =
+    match legacy_scope with
+    | Some scope ->
+      let%bind metadata = Moderator_checkpoint.queue t.state.moderator in
+      let%bind metadata =
+        Result.of_option
+          metadata
+          ~error:(error Internal_error "legacy callback queue metadata disappeared")
+      in
+      let%bind plan =
+        Legacy_queue_checkpoint.prepare
+          ~metadata
+          ~before:borrow.before
+          ~snapshot
+          ~consumption:
+            (match borrow.kind with
+             | Ordinary -> Keep
+             | Queued -> Consume_head)
+          ~completed
+          ~origin:scope.origin
+      in
+      let%map encoded =
+        Moderator_checkpoint.update_with_queue
+          t.state.moderator
+          ~snapshot
+          ~queue:(Legacy_queue_checkpoint.metadata plan)
+      in
+      encoded, Some plan
+    | None -> Ok (Runtime_builder.encode_moderator_snapshot snapshot, None)
+  in
+  let owner = Agent_protocol.Job.Moderator_event borrow.receipt.context.id in
+  let%bind job_deltas, job_payloads = staged_work_changes t owner in
   let%bind run_change = prepared_run_delta t borrow completed requests job_deltas in
-  let%bind _ =
-    with_intent_agent_custody
-      t
-      (Event_intent completed.context.id)
-      ~pending:(Observation_follow_up.pending_event completed)
-      (event_agent_custody t borrow)
-      (fun () ->
-         transition
-           ?completion_sample:run_change.completion_sample
-           t
-           ~delta:
-             (Session_delta.Batch
-                (admission_deltas
-                 @ [ Session_delta.Moderator_execution_changed completed
-                   ; Moderator_changed
-                       (Some (Runtime_builder.encode_moderator_snapshot snapshot))
-                   ]
-                 @ job_deltas
-                 @ run_change.deltas))
-           ~payloads:
-             (job_payloads
-              @ List.map notifications ~f:(fun message ->
-                Agent_protocol.Event.Durable.Payload.Moderator_notification
-                  (`Object
-                      [ "message", `String message
-                      ; ( "moderator_execution_id"
-                        , Agent_protocol.Id.Moderator_execution.to_json
-                            borrow.receipt.context.id )
-                      ]))))
+  let%bind staged =
+    match legacy_scope, queue_plan with
+    | Some scope, Some plan ->
+      (match scope.custody with
+       | Unavailable -> Ok Legacy_queue_custody.empty
+       | Admitted parent ->
+         Legacy_queue_custody.stage
+           ~manager:scope.manager
+           ~source:scope.source
+           ~entries:(Legacy_queue_checkpoint.appended plan)
+           ~parent)
+    | None, None -> Ok Legacy_queue_custody.empty
+    | Some _, None | None, Some _ ->
+      Error (error Internal_error "legacy checkpoint plan lost its physical scope")
   in
-  borrow.committed <- true;
-  Ok ()
+  let acknowledged = ref false in
+  Exn.protect
+    ~finally:(fun () -> if not !acknowledged then Legacy_queue_custody.retire staged)
+    ~f:(fun () ->
+      let%bind inventory =
+        match legacy_scope, queue_plan with
+        | Some scope, Some plan ->
+          Legacy_queue_custody.candidate
+            t.legacy_queue_custody
+            ~manager:scope.manager
+            ~metadata:(Legacy_queue_checkpoint.metadata plan)
+            ~staged
+        | None, None -> Ok t.legacy_queue_custody
+        | Some _, None | None, Some _ ->
+          Error (error Internal_error "legacy checkpoint plan lost its physical scope")
+      in
+      let%bind admission = event_agent_admission t borrow in
+      let custody = Option.bind admission ~f:Execution_custody.Admission.custody in
+      with_selected_intent_agent_custody
+        t
+        owner
+        (Event_intent completed.context.id)
+        ~pending:(Observation_follow_up.pending_event completed)
+        custody
+        (fun ~job_custody ~check_jobs ~acknowledge ->
+           let%bind prepared =
+             prepare_transition
+               ?run_preparation
+               t
+               ~delta:
+                 (Session_delta.Batch
+                    (admission_deltas
+                     @ [ Session_delta.Moderator_execution_changed completed
+                       ; Moderator_changed (Some encoded_snapshot)
+                       ]
+                     @ job_deltas
+                     @ run_change.deltas))
+               ~payloads:
+                 (job_payloads
+                  @ List.map notifications ~f:(fun message ->
+                    Agent_protocol.Event.Durable.Payload.Moderator_notification
+                      (`Object
+                          [ "message", `String message
+                          ; ( "moderator_execution_id"
+                            , Agent_protocol.Id.Moderator_execution.to_json
+                                borrow.receipt.context.id )
+                          ])))
+           in
+           let%bind initialization_acknowledgement =
+             match legacy_scope, queue_plan with
+             | Some scope, Some plan ->
+               (match scope.constructor_scope with
+                | None -> Ok None
+                | Some constructor ->
+                  let%bind resource =
+                    Initialization_scope.Resource.select
+                      constructor.resource
+                      prepared.state
+                      ~manager:scope.manager
+                      ~source:scope.source
+                      ~ordinals:
+                        (List.map
+                           (Legacy_queue_checkpoint.appended plan)
+                           ~f:Moderator_queue.Entry.ordinal)
+                      ~schedules:[]
+                  in
+                  let selected_jobs =
+                    List.filter_map job_deltas ~f:(function
+                      | Session_delta.Job_changed job -> Some job.id
+                      | _ -> None)
+                  in
+                  let jobs =
+                    List.dedup_and_sort
+                      (constructor.jobs @ selected_jobs)
+                      ~compare:Agent_protocol.Id.Job.compare
+                  in
+                  let acknowledgement =
+                    Initialization_scope.Acknowledgement.prepare
+                      ~callback:(Settled completed.context.id)
+                      ~resource
+                      ~jobs
+                      constructor
+                      prepared.state
+                  in
+                  let%map () =
+                    validate_initialization_projection
+                      (Initialization_scope.Acknowledgement.expected acknowledgement)
+                      prepared.state
+                  in
+                  Some acknowledgement)
+             | None, None -> Ok None
+             | Some _, None | None, Some _ ->
+               Error (error Internal_error "constructor queue plan lost its callback")
+           in
+           let%bind completion_plan =
+             prepare_completion_plan t prepared run_change.completion_sample
+           in
+           let%bind () = queued_event_can_commit t borrow in
+           let%bind () =
+             match legacy_scope with
+             | None -> Ok ()
+             | Some scope -> check_callback_current t scope
+           in
+           (* The checkpoint and each child loan become visible together before
+             publication can yield. A post-ACK publication exception must not
+             retire acknowledged children or make this callback replayable. *)
+           Eio.Cancel.protect (fun () ->
+             let%bind () = check_jobs () in
+             let%bind () =
+               Option.value_map
+                 initialization_acknowledgement
+                 ~default:(Ok ())
+                 ~f:Initialization_scope.Acknowledgement.check_basis
+             in
+             let%bind () = persist_transition t prepared in
+             install_committed_transition
+               ?run_preparation
+               ~job_custody
+               ~legacy_queue_custody:inventory
+               ?initialization_acknowledgement
+               t
+               prepared;
+             Option.iter
+               completion_plan
+               ~f:(Recurrence_runtime.install_completions t.recurrence_runtime);
+             borrow.committed <- true;
+             acknowledged := true;
+             acknowledge ();
+             publish_committed_transition t prepared;
+             Ok ())))
+;;
+
+(* Cleanup owns the already executed receipt, not admission of another effect.
+   In particular it must not call an expired Run-preparation authorization. A
+   foreign control/source change still rejects instead of entering the scope's
+   acknowledged projection. Ordinary event settlement retains its existing path. *)
+let commit_event_failure ?completion_sample t borrow ~delta ~payloads =
+  let open Result.Let_syntax in
+  match constructor_scope_of_borrow t borrow with
+  | None -> transition ?completion_sample t ~delta ~payloads |> Result.map ~f:ignore
+  | Some constructor ->
+    let%bind () = validate_initialization_owner t constructor in
+    let%bind () =
+      match t.initialization_scope, constructor.callback with
+      | Some active, Claimed id
+        when phys_equal active constructor
+             && Agent_protocol.Id.Moderator_execution.equal id borrow.receipt.context.id
+        -> Ok ()
+      | (Some _ | None), (Unclaimed | Claimed _ | Settled _) ->
+        Error (error Conflict "constructor no longer owns this failed receipt")
+    in
+    let%bind () =
+      validate_initialization_projection
+        (Initialization_scope.Acknowledged.apply
+           constructor.acknowledged
+           constructor.expected)
+        t.state
+    in
+    let%bind prepared = prepare_transition t ~delta ~payloads in
+    let%bind completion_plan = prepare_completion_plan t prepared completion_sample in
+    let acknowledgement =
+      Initialization_scope.Acknowledgement.prepare
+        ~callback:(Settled borrow.receipt.context.id)
+        constructor
+        prepared.state
+    in
+    Eio.Cancel.protect (fun () ->
+      let%bind () = Initialization_scope.Acknowledgement.check_basis acknowledgement in
+      let%bind () = persist_transition t prepared in
+      (* No preparation is supplied: the existing ACK installer closes it rather
+         than renewing it. This records only the truthful terminal receipt. *)
+      install_committed_transition
+        ~initialization_acknowledgement:acknowledgement
+        t
+        prepared;
+      Option.iter
+        completion_plan
+        ~f:(Recurrence_runtime.install_completions t.recurrence_runtime);
+      publish_committed_transition t prepared;
+      Ok ())
 ;;
 
 let finish_queued_event t borrow interrupted =
@@ -5072,9 +6939,10 @@ let finish_queued_event t borrow interrupted =
           in
           Prepared_run_delta.{ deltas; completion_sample = Some completion_sample }
       in
-      transition
+      commit_event_failure
         ?completion_sample:run_change.completion_sample
         t
+        borrow
         ~delta:
           (Session_delta.Batch
              (children_deltas
@@ -5082,10 +6950,16 @@ let finish_queued_event t borrow interrupted =
               @ [ Session_delta.Moderator_execution_changed terminal ]
               @ run_change.deltas))
         ~payloads:permission_payloads
-      |> Result.map ~f:ignore
   in
   resolve_cleaned_permission_waiters t permissions;
-  Option.iter borrow.agent_custody ~f:retire_agent_custody;
+  Option.iter borrow.agent_admission ~f:retire_agent_admission;
+  (match t.legacy_callback_scope with
+   | Some scope when phys_equal scope.borrow borrow ->
+     (match scope.custody with
+      | Unavailable -> ()
+      | Admitted admission -> retire_agent_admission admission);
+     t.legacy_callback_scope <- None
+   | None | Some _ -> ());
   t.queued_event_borrow <- None;
   t.invocation_executions
   <- List.filter t.invocation_executions ~f:(fun execution ->
@@ -6166,44 +8040,51 @@ let stage_background_job_internal t (job : Agent_protocol.Job.t) capacity =
       | true -> Error (error Conflict "background job already exists")
       | false -> Ok ()
     in
-    let parent =
+    let%bind parent =
       match launch.owner with
       | Invocation id ->
         (match
            List.find t.invocation_executions ~f:(fun execution ->
              Agent_protocol.Id.Invocation.equal execution.dispatched.context.id id)
          with
-         | Some execution -> execution_agent_custody t execution
+         | Some execution -> execution_agent_admission t execution
          | None ->
-           Option.bind t.moderator_borrow ~f:(fun borrow ->
-             if Agent_protocol.Id.Invocation.equal borrow.invocation.context.id id
-             then moderator_agent_custody t borrow
-             else None))
+           (match t.moderator_borrow with
+            | Some borrow
+              when Agent_protocol.Id.Invocation.equal borrow.invocation.context.id id ->
+              moderator_agent_admission t borrow
+            | Some _ | None -> Error (error Conflict "staged Job parent is unavailable")))
       | Moderator_event id ->
-        Option.bind t.queued_event_borrow ~f:(fun borrow ->
-          if Agent_protocol.Id.Moderator_execution.equal borrow.receipt.context.id id
-          then event_agent_custody t borrow
-          else None)
+        (match t.queued_event_borrow with
+         | Some borrow
+           when Agent_protocol.Id.Moderator_execution.equal borrow.receipt.context.id id
+           -> event_agent_admission t borrow
+         | Some _ | None ->
+           Error (error Conflict "staged Job event parent is unavailable"))
     in
-    let%bind child =
+    let%bind fresh =
       match parent with
       | None -> Ok None
-      | Some parent -> Result.map (transfer_agent_custody parent) ~f:Option.some
+      | Some parent ->
+        let%bind binding = job_moderator_binding t in
+        Job_custody.Fresh.stage ~job ~binding ~parent |> Result.map ~f:Option.some
     in
     let capacity =
       Staged_jobs.
-        { publish =
-            (fun () ->
-              Option.iter child ~f:(fun custody ->
-                t.job_agent_custody <- (job, custody) :: t.job_agent_custody);
-              capacity.publish ())
+        { publish = capacity.publish
         ; abort =
             (fun () ->
-              Option.iter child ~f:retire_agent_custody;
+              Option.iter fresh ~f:Job_custody.Fresh.discard;
               capacity.abort ())
         }
     in
-    Staged_jobs.stage t.staged_jobs ~job ~capacity
+    let staged = ref false in
+    Exn.protect
+      ~finally:(fun () ->
+        if not !staged then Option.iter fresh ~f:Job_custody.Fresh.discard)
+      ~f:(fun () ->
+        let%map () = Staged_jobs.stage t.staged_jobs ~job ~payload:fresh ~capacity in
+        staged := true)
   in
   match result with
   | Ok () -> Ok ()
@@ -6358,25 +8239,37 @@ let commit_moderator_invocation t borrow (resolved : Agent_protocol.Invocation.t
    | Invocation, Resolved (Cancelled _) -> abort_staged_work t ~owner
    | _ -> ());
   let%bind job_deltas, job_payloads = staged_work_changes t owner in
+  let%bind admission = moderator_agent_admission t borrow in
+  let custody = Option.bind admission ~f:Execution_custody.Admission.custody in
   let%bind _ =
-    with_intent_agent_custody
+    with_selected_intent_agent_custody
       t
+      owner
       (Invocation_intent resolved.context.id)
       ~pending:(Observation_follow_up.pending resolved)
-      (moderator_agent_custody t borrow)
-      (fun () ->
-         transition
-           t
-           ~delta:
-             (Session_delta.Batch
-                ([ Session_delta.Invocation_changed resolved
-                 ; Moderator_changed
-                     (Some (Runtime_builder.encode_moderator_snapshot snapshot))
-                 ]
-                 @ job_deltas))
-           ~payloads:job_payloads)
+      custody
+      (fun ~job_custody ~check_jobs ~acknowledge ->
+         let%bind prepared =
+           prepare_transition
+             t
+             ~delta:
+               (Session_delta.Batch
+                  ([ Session_delta.Invocation_changed resolved
+                   ; Moderator_changed
+                       (Some (Runtime_builder.encode_moderator_snapshot snapshot))
+                   ]
+                   @ job_deltas))
+             ~payloads:job_payloads
+         in
+         Eio.Cancel.protect (fun () ->
+           let%bind () = check_jobs () in
+           let%bind () = persist_transition t prepared in
+           install_committed_transition ~job_custody t prepared;
+           borrow.committed <- true;
+           acknowledge ();
+           publish_committed_transition t prepared;
+           Ok ()))
   in
-  borrow.committed <- true;
   Ok ()
 ;;
 
@@ -7410,6 +9303,23 @@ let interrupt_permission_review_job t reason (job : Agent_protocol.Job.t) =
   else None
 ;;
 
+(* Only genuine terminal/control writers call this helper with their exact final
+   persisted records. Ordinary DTO changes remain negative-only reconciliation. *)
+let prepare_terminal_job_custody t jobs =
+  let open Result.Let_syntax in
+  let%bind completed =
+    List.map jobs ~f:(fun (terminal : Agent_protocol.Job.t) ->
+      let%map previous =
+        List.find t.state.jobs ~f:(fun job ->
+          Agent_protocol.Id.Job.equal job.id terminal.id)
+        |> Result.of_option ~error:(error Invalid_request "terminal Job was not found")
+      in
+      previous, terminal)
+    |> Result.all
+  in
+  Job_custody.prepare_terminals t.job_agent_custody ~completed
+;;
+
 let operation_terminal_cleanup t operation outcome =
   let reason =
     match outcome with
@@ -7639,13 +9549,16 @@ let launch_compaction t operation allocator history =
   let selection = t.state.spec.inference_target in
   let port = t.compaction_inference in
   let installed = t.inference_execution in
-  let custody = operation_agent_custody t operation_id in
+  let admission =
+    Option.bind t.operation_agent_custody ~f:(fun (owner, admission) ->
+      Option.some_if (Agent_protocol.Id.Operation.equal owner operation_id) admission)
+  in
   Eio.Fiber.fork ~sw:t.sw (fun () ->
     let outcome =
       Exn.protect
         ~f:(fun () ->
           run_compaction t operation selection port installed allocator history)
-        ~finally:(fun () -> Option.iter custody ~f:retire_agent_custody)
+        ~finally:(fun () -> Option.iter admission ~f:retire_agent_admission)
     in
     ignore
       (call t ~priority:Priority (Compaction_terminal (operation_id, outcome))
@@ -7776,7 +9689,7 @@ let start_compaction
                   }
               ]
         in
-        if Option.is_some child then install_operation_agent_custody t operation child;
+        install_operation_agent_custody t operation child;
         installed := true;
         launch_compaction t operation allocator history;
         Ok session)
@@ -8017,9 +9930,11 @@ let worker_terminal t operation_id outcome compaction_custody =
     let%bind follow_up = foreground_terminal_requests t operation_id outcome in
     let%bind notifications = notification_wake_deltas t operation_id ~accept:false in
     let permissions, jobs = operation_terminal_cleanup t operation outcome in
+    let%bind job_custody = prepare_terminal_job_custody t jobs in
     let%bind _ =
       transition
         ~completion_sample
+        ~job_custody
         t
         ~delta:
           (Session_delta.Batch
@@ -8222,10 +10137,10 @@ let invocation_agent_actor t execution invocation =
           Atomic.get scope.authority_live)
   in
   let%bind actor =
-    match execution_agent_custody t execution with
+    let%bind custody = execution_agent_custody t execution in
+    match custody with
     | None -> Ok None
-    | Some custody ->
-      Result.map (Agent_authority_scope.actor custody.authority) ~f:Option.some
+    | Some custody -> Result.map (Execution_custody.actor custody) ~f:Option.some
   in
   Ok
     (Option.map actor ~f:(fun actor ->
@@ -8642,6 +10557,48 @@ let with_delegated_moderator_event
       |> Result.map ~f:Option.some)
 ;;
 
+let with_legacy_callback_parent t parent ~callback f =
+  with_moderator_gate t (fun () ->
+    let open Result.Let_syntax in
+    let%bind scope =
+      Eio.Cancel.protect (fun () -> call t (Claim_legacy_callback (callback, parent)))
+    in
+    match scope with
+    | None -> Ok false
+    | Some scope ->
+      run_queued_event_borrow t scope.borrow (fun ~borrow:_ ~event:_ ~commit ->
+        let%bind () = check_callback_current t scope in
+        f ~scope ~commit:(fun ~snapshot ~requests ->
+          commit ~decision:None ~notifications:[] ~snapshot ~requests)))
+;;
+
+let with_initialization_callback t ~scope ~manager ~callback f =
+  with_moderator_gate t (fun () ->
+    let open Result.Let_syntax in
+    let%bind callback_scope =
+      Eio.Cancel.protect (fun () ->
+        call t (Claim_initialization_callback (scope, manager, callback)))
+    in
+    match callback_scope with
+    | None -> Ok false
+    | Some scope ->
+      run_queued_event_borrow t scope.borrow (fun ~borrow:_ ~event:_ ~commit ->
+        let%bind () = check_callback_current t scope in
+        f ~scope ~commit:(fun ~snapshot ~requests ->
+          commit ~decision:None ~notifications:[] ~snapshot ~requests)))
+;;
+
+let with_legacy_callback t ~operation_id =
+  with_legacy_callback_parent t (Callback_operation operation_id)
+;;
+
+let with_legacy_queued_callback t ~callback ~operation_id f =
+  match Chat_response.Moderator_manager.Callback.selection callback with
+  | Boundary _ ->
+    Error (error Invalid_request "legacy queued callback requires an actual Queue_head")
+  | Queue_head -> with_legacy_callback t ~operation_id ~callback f
+;;
+
 let with_idle_queued_moderator_event t ~snapshot f =
   with_queued_event_borrow
     t
@@ -8733,6 +10690,7 @@ type job_execution =
   ; execute : Native_tool_invocation.executor
   ; moderator_execute : Native_tool_invocation.moderator_executor
   ; claim_event : event:Chat_response.Moderation.Event.t -> Moderator_event.claim
+  ; claim_legacy_callback : legacy_callback_claim
   }
 
 let with_job_execution t ~job_id ~generation ~attempt ~deadline f =
@@ -8754,7 +10712,8 @@ let with_job_execution t ~job_id ~generation ~attempt ~deadline f =
           ~claim:(Claim_job_moderator (scope, invocation))
           callback)
     in
-    f { job = scope.job; execute; moderator_execute; claim_event })
+    let claim_legacy_callback = with_legacy_callback_parent t (Callback_job scope) in
+    f { job = scope.job; execute; moderator_execute; claim_event; claim_legacy_callback })
 ;;
 
 let with_job_invocations t ~job_id ~generation ~attempt ~deadline f =
@@ -8990,10 +10949,12 @@ let launch_worker t operation =
   (* Capture the physical worker's cell, not a later operation's mutable slot.
      A failed terminal save cannot extend the callback that already returned. *)
   let custody =
-    Option.bind t.operation_agent_custody ~f:(fun (owner, custody) ->
-      Option.some_if (Agent_protocol.Id.Operation.equal owner operation_id) custody)
+    Option.bind t.operation_agent_custody ~f:(fun (owner, admission) ->
+      if Agent_protocol.Id.Operation.equal owner operation_id
+      then Some admission
+      else None)
   in
-  let retire_authority () = Option.iter custody ~f:retire_agent_custody in
+  let retire_authority () = Option.iter custody ~f:retire_agent_admission in
   let history =
     let open Result.Let_syntax in
     let%bind () = reconcile_foreground_invocations t in
@@ -9024,15 +10985,18 @@ let launch_worker t operation =
              of an already-retired operation. *)
           if outcome_requests_compaction outcome
           then
-            Option.iter custody ~f:(fun custody ->
-              match transfer_agent_custody custody with
-              | Ok child -> compaction_custody := Some child
-              | Error _ ->
-                (* Preserve known-but-unavailable provenance. The parent cell
+            Option.iter
+              (Option.bind custody ~f:(fun admission ->
+                 Execution_custody.Admission.custody admission))
+              ~f:(fun custody ->
+                match transfer_agent_custody custody with
+                | Ok child -> compaction_custody := Some child
+                | Error _ ->
+                  (* Preserve known-but-unavailable provenance. The parent cell
                    retires below and the actor must reject this handoff, even
                    when no instructions are currently selected. None is only
                    genuinely unbound legacy execution. *)
-                compaction_custody := Some custody);
+                  compaction_custody := Some custody);
           outcome)
       in
       Exn.protect
@@ -10060,7 +12024,14 @@ let validate_job_generation t (job : Agent_protocol.Job.t) generation =
   else Ok ()
 ;;
 
-let update_jobs ?run_preparation ?(subscriptions = []) ?(run_deltas = []) t jobs =
+let update_jobs
+      ?run_preparation
+      ?job_custody
+      ?(subscriptions = [])
+      ?(run_deltas = [])
+      t
+      jobs
+  =
   let timer_ids =
     List.filter_map subscriptions ~f:(fun next ->
       match
@@ -10113,6 +12084,7 @@ let update_jobs ?run_preparation ?(subscriptions = []) ?(run_deltas = []) t jobs
   let%map session =
     transition
       ?run_preparation
+      ?job_custody
       t
       ~delta:
         (Session_delta.Batch
@@ -10135,18 +12107,27 @@ let update_jobs ?run_preparation ?(subscriptions = []) ?(run_deltas = []) t jobs
   session
 ;;
 
-let update_job ?run_preparation t job = update_jobs ?run_preparation t [ job ]
+let update_job ?run_preparation ?job_custody t job =
+  update_jobs ?run_preparation ?job_custody t [ job ]
+;;
 
-let add_job ?run_preparation t (job : Agent_protocol.Job.t) =
-  if Agent_protocol.Id.Session.compare job.session_id t.state.identity.session_id <> 0
+let validate_new_job t (job : Agent_protocol.Job.t) =
+  if not (Agent_protocol.Id.Session.equal job.session_id t.state.identity.session_id)
   then Error (error Invalid_request "job belongs to another session")
-  else if job.generation <> t.state.identity.generation
+  else if not (Int.equal job.generation t.state.identity.generation)
   then Error (error Conflict "job belongs to a stale session generation")
   else if
     List.exists t.state.jobs ~f:(fun existing ->
-      Agent_protocol.Id.Job.compare existing.id job.id = 0)
+      Agent_protocol.Id.Job.equal existing.id job.id)
   then Error (error Conflict "job ID is already present")
-  else Result.map (update_job ?run_preparation t job) ~f:(fun _ -> job)
+  else Ok ()
+;;
+
+let add_job ?run_preparation t (job : Agent_protocol.Job.t) =
+  let open Result.Let_syntax in
+  let%bind () = validate_new_job t job in
+  let%map _ = update_job ?run_preparation t job in
+  job
 ;;
 
 let job_is_due t (job : Agent_protocol.Job.t) =
@@ -10240,6 +12221,7 @@ let claim_job ?run_preparation t job_id generation =
     else if job.attempt = Int.max_value
     then Error (error Invalid_state "job attempt counter overflow")
     else (
+      let previous = job in
       let job =
         { job with
           status = Running
@@ -10249,7 +12231,17 @@ let claim_job ?run_preparation t job_id generation =
         ; result = None
         }
       in
-      let%map _ = update_job ?run_preparation t job in
+      let%bind row = Job_custody.find t.job_agent_custody ~job:previous in
+      let%bind () =
+        Option.value_map row ~default:(Ok ()) ~f:(fun row ->
+          let%bind () = check_job_moderator_binding t (Job_custody.Row.binding row) in
+          let%bind admission = Job_custody.Row.admission row in
+          check_agent_admission admission)
+      in
+      let%bind job_custody =
+        Job_custody.prepare_claim t.job_agent_custody ~previous ~claimed:job
+      in
+      let%map _ = update_job ?run_preparation ~job_custody t job in
       Some job)
   | Queued -> Ok None
   | Running
@@ -10572,33 +12564,119 @@ let running_job_for_completion t job_id generation attempt =
 
 let complete_job ?run_preparation t job_id generation attempt outcome =
   let open Result.Let_syntax in
-  let%bind job = running_job_for_completion t job_id generation attempt in
-  let job = complete_job_outcome t job outcome in
-  let%map _ = update_job ?run_preparation t job in
+  let%bind previous = running_job_for_completion t job_id generation attempt in
+  let job = complete_job_outcome t previous outcome in
+  let%bind job_custody =
+    match job.status with
+    | Queued ->
+      Result.map
+        (Job_custody.prepare_retry t.job_agent_custody ~previous ~queued:job)
+        ~f:Option.some
+    | Succeeded | Failed _ | Cancelled | Interrupted _ ->
+      Result.map (prepare_terminal_job_custody t [ job ]) ~f:Option.some
+    | Running | Waiting_permission _ | Waiting_completion _ ->
+      Error (error Invalid_state "completed Job retained an active state")
+  in
+  let%map _ = update_job ?run_preparation ?job_custody t job in
   job
+;;
+
+(* These are actual actor-issued constructor owners, not identity-bearing DTOs.
+   A preparation's genuine legacy None is an admission only while that exact
+   preparation is current; missing historical Job inventory never enters here. *)
+type constructor_job_owner =
+  | Initialization_job of Initialization_scope.t
+  | Run_constructor_job of Run_preparation.t
+
+let check_constructor_job_owner t = function
+  | Initialization_job scope ->
+    let open Result.Let_syntax in
+    let%bind () = validate_initialization_scope t scope in
+    check_initialization_agent_actor scope
+  | Run_constructor_job preparation -> check_run_preparation t preparation
+;;
+
+let add_constructor_job t owner (job : Agent_protocol.Job.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_constructor_job_owner t owner in
+  let%bind () = validate_new_job t job in
+  let run_preparation, parent, temporary =
+    match owner with
+    | Initialization_job scope -> scope.run_preparation, scope.agent_admission, false
+    | Run_constructor_job preparation ->
+      ( Some preparation
+      , create_agent_admission
+          (Option.map
+             (Run_preparation.original_actor preparation)
+             ~f:create_agent_custody)
+      , true )
+  in
+  Exn.protect
+    ~finally:(fun () -> if temporary then retire_agent_admission parent)
+    ~f:(fun () ->
+      let%bind selection =
+        match owner with
+        | Initialization_job _ -> Ok None
+        | Run_constructor_job preparation ->
+          Result.map
+            (Run_preparation.Constructor_jobs.prepare_add
+               preparation
+               ~owner:t.run_preparation_owner
+               ~state:t.state
+               ~job)
+            ~f:Option.some
+      in
+      let%bind binding = job_moderator_binding t in
+      let%bind job_custody =
+        Job_custody.prepare_fresh t.job_agent_custody ~job ~binding ~parent
+      in
+      let acknowledged = ref false in
+      Exn.protect
+        ~finally:(fun () ->
+          if not !acknowledged then Job_custody.Update.discard job_custody)
+        ~f:(fun () ->
+          let%bind prepared =
+            prepare_transition
+              ?run_preparation
+              t
+              ~delta:(Session_delta.Job_changed job)
+              ~payloads:[ Agent_protocol.Event.Durable.Payload.Job_state_changed job ]
+          in
+          Eio.Cancel.protect (fun () ->
+            let%bind () = check_constructor_job_owner t owner in
+            let%bind () = check_job_moderator_binding t binding in
+            let%bind () =
+              Option.value_map selection ~default:(Ok ()) ~f:(fun selection ->
+                Run_preparation.Constructor_jobs.check_before_commit
+                  selection
+                  ~owner:t.run_preparation_owner
+                  ~state:t.state)
+            in
+            let%bind () =
+              Job_custody.Update.check_before_commit
+                job_custody
+                ~current:t.job_agent_custody
+            in
+            let%bind () = persist_transition t prepared in
+            install_committed_transition ?run_preparation ~job_custody t prepared;
+            (match owner with
+             | Initialization_job scope -> scope.jobs <- job.id :: scope.jobs
+             | Run_constructor_job _ ->
+               Option.iter selection ~f:Run_preparation.Constructor_jobs.acknowledge);
+            acknowledged := true;
+            publish_committed_transition t prepared;
+            Ok job)))
 ;;
 
 let add_initialization_model_job t scope (job : Agent_protocol.Job.t) =
   let open Result.Let_syntax in
-  let%bind () = validate_initialization_scope t scope in
   let%bind () =
     match job.kind, job.status with
     | Model_call, Queued when Int.equal job.attempt 0 -> Ok ()
     | _ ->
       Error (error Invalid_request "initialization requires a fresh queued model job")
   in
-  let%bind custody =
-    match scope.Initialization_scope.agent_custody with
-    | None -> Ok None
-    | Some parent -> Result.map (transfer_agent_custody parent) ~f:Option.some
-  in
-  let%map job =
-    add_job ?run_preparation:scope.Initialization_scope.run_preparation t job
-  in
-  Option.iter custody ~f:(fun custody ->
-    t.job_agent_custody <- (job, custody) :: t.job_agent_custody);
-  scope.Initialization_scope.jobs <- job.id :: scope.jobs;
-  job
+  add_constructor_job t (Initialization_job scope) job
 ;;
 
 let start_initialization_model_job t scope (job : Agent_protocol.Job.t) =
@@ -10719,7 +12797,10 @@ let defer_background_job t job_id generation attempt dependency =
   let%bind job = running_job_for_completion t job_id generation attempt in
   let next = { job with status = Waiting_completion dependency; result = None } in
   let%bind () = validate_job_dependency t next in
-  let%map _ = update_job t next in
+  let%bind job_custody =
+    Job_custody.prepare_defer t.job_agent_custody ~previous:job ~waiting:next
+  in
+  let%map _ = update_job ~job_custody t next in
   next
 ;;
 
@@ -10919,7 +13000,20 @@ let complete_background_job
         ~outcome
         ~now:(t.services.now ())
     in
-    let%map _ = update_jobs ~subscriptions ~run_deltas t (job :: cancelled) in
+    let%bind job_custody =
+      match job.status with
+      | Queued ->
+        Result.map
+          (Job_custody.prepare_retry t.job_agent_custody ~previous:running ~queued:job)
+          ~f:Option.some
+      | Succeeded | Failed _ | Cancelled | Interrupted _ ->
+        Result.map (prepare_terminal_job_custody t (job :: cancelled)) ~f:Option.some
+      | Running | Waiting_permission _ | Waiting_completion _ ->
+        Error (error Invalid_state "completed background Job retained an active state")
+    in
+    let%map _ =
+      update_jobs ?job_custody ~subscriptions ~run_deltas t (job :: cancelled)
+    in
     job
   in
   match job.status, t.services.job_results, storage_limited, awaited with
@@ -11162,7 +13256,14 @@ let enqueue_run_job_delivery t expected before after =
   ()
 ;;
 
-let deliver_job t job_id generation expected expected_job moderator_snapshot =
+let deliver_job_without_legacy
+      t
+      job_id
+      generation
+      expected
+      expected_job
+      moderator_snapshot
+  =
   let open Result.Let_syntax in
   let%bind () = check_expected_moderator_checkpoint t expected in
   let%bind () =
@@ -11253,6 +13354,176 @@ let deliver_job t job_id generation expected expected_job moderator_snapshot =
     Error (error Already_resolved "job delivery is resolved")
 ;;
 
+let complete_legacy_job t manager job expected expected_job moderator_snapshot =
+  let open Result.Let_syntax in
+  let current_source () =
+    let%bind () = require_runtime_admission t in
+    let%bind () =
+      if Option.exists t.moderator_manager ~f:(phys_equal manager)
+      then Ok ()
+      else Error (error Conflict "legacy Job Manager changed before delivery")
+    in
+    Moderator_source_installation.capture t.state
+  in
+  let%bind () =
+    if Option.is_some expected_job
+    then Ok ()
+    else Error (error Conflict "legacy Job delivery requires its exact saved record")
+  in
+  let%bind before =
+    Result.of_option
+      expected
+      ~error:(error Conflict "legacy Job delivery requires its previous checkpoint")
+  in
+  let%bind _, source = current_source () in
+  let%bind named_run =
+    match job.Agent_protocol.Job.inference_origin with
+    | Some (Run id) ->
+      (match Option.bind t.state.run_state ~f:(fun index -> Run_state.find index id) with
+       | Some run
+         when Agent_protocol.Id.Session.equal
+                (Agent_protocol.Session_ref.session_id run.session)
+                job.session_id
+              && Agent_protocol.Run_source.equal run.source source -> Ok true
+       | Some _ | None ->
+         Error (error Conflict "legacy Job original Run source is unavailable or changed"))
+    | Some Unbound | None -> Ok false
+  in
+  let%bind row = Job_custody.find t.job_agent_custody ~job in
+  let%bind capture =
+    if Option.is_some row || named_run
+    then
+      Moderator_queue.Capture.create
+        ~producer:
+          (Job_completion
+             { id = job.id; generation = job.generation; attempt = job.attempt })
+        ~origin:job.inference_origin
+    else Ok Moderator_queue.Capture.unavailable
+  in
+  let%bind plan =
+    Legacy_job_delivery.prepare t.state ~job ~before ~snapshot:moderator_snapshot ~capture
+  in
+  let%bind continuation =
+    Job_custody.transfer_delivery t.job_agent_custody ~manager ~source ~job
+  in
+  let staged =
+    match continuation with
+    | None -> Legacy_queue_custody.empty
+    | Some continuation ->
+      Legacy_queue_custody.stage_delivery
+        ~manager
+        ~source
+        ~entry:(Legacy_job_delivery.entry plan)
+        ~continuation
+  in
+  let acknowledged = ref false in
+  Exn.protect
+    ~finally:(fun () -> if not !acknowledged then Legacy_queue_custody.retire staged)
+    ~f:(fun () ->
+      let%bind inventory =
+        Legacy_queue_custody.candidate
+          t.legacy_queue_custody
+          ~manager
+          ~metadata:(Legacy_job_delivery.metadata plan)
+          ~staged
+      in
+      let delivered = { job with delivery = Delivered (t.services.now ()) } in
+      let%bind prepared =
+        prepare_transition
+          t
+          ~delta:
+            (Session_delta.Batch
+               [ Run_state_changed (Legacy_job_delivery.index plan)
+               ; Job_changed delivered
+               ; Moderator_changed (Some (Legacy_job_delivery.checkpoint plan))
+               ])
+          ~payloads:[ Agent_protocol.Event.Durable.Payload.Job_state_changed delivered ]
+      in
+      let%bind _, final_source = current_source () in
+      let%bind () =
+        if Agent_protocol.Run_source.equal source final_source
+        then Ok ()
+        else Error (error Conflict "legacy Job source changed before delivery ACK")
+      in
+      (* Completed facts remain truthful after original authority expiry. The
+         typed expired continuation cannot authorize the later queued callback. *)
+      Eio.Cancel.protect (fun () ->
+        let%bind () = persist_transition t prepared in
+        install_committed_transition t prepared;
+        t.legacy_queue_custody
+        <- Legacy_queue_custody.install t.legacy_queue_custody ~incoming:inventory;
+        acknowledged := true;
+        publish_committed_transition t prepared;
+        Ok delivered))
+;;
+
+let deliver_job t job_id generation expected expected_job moderator_snapshot manager =
+  let open Result.Let_syntax in
+  let%bind () =
+    match manager with
+    | Some manager when not (Option.exists t.moderator_manager ~f:(phys_equal manager)) ->
+      Error (error Conflict "Job delivery requires its actual installed Manager")
+    | Some _ | None -> Ok ()
+  in
+  match manager with
+  | Some manager
+    when Option.is_none (Chat_response.Moderator_manager.invocation_observer manager) ->
+    let%bind () =
+      if moderator_is_borrowed t
+      then Error (error Conflict "moderator callback owns the checkpoint")
+      else Ok ()
+    in
+    let%bind job = find_job t job_id in
+    let%bind () = validate_job_generation t job generation in
+    let%bind () =
+      match expected_job with
+      | Some expected_job
+        when Jsonaf.exactly_equal
+               (Agent_protocol.Job.to_json expected_job)
+               (Agent_protocol.Job.to_json job) -> Ok ()
+      | Some _ | None ->
+        Error (error Conflict "Job changed before legacy completion delivery")
+    in
+    complete_legacy_job t manager job expected expected_job moderator_snapshot
+  | Some _ | None ->
+    let%bind metadata = Moderator_checkpoint.queue t.state.moderator in
+    let%bind () =
+      if Option.is_some metadata
+      then
+        Error (error Conflict "captured legacy Job delivery requires its actual Manager")
+      else (
+        match t.moderator_manager with
+        | Some installed
+          when Option.is_none
+                 (Chat_response.Moderator_manager.invocation_observer installed) ->
+          let%bind job = find_job t job_id in
+          let%bind row = Job_custody.find t.job_agent_custody ~job in
+          if
+            Option.is_some row
+            || Option.is_some job.inference_origin
+            || Option.exists job.launch ~f:(fun launch ->
+              Option.is_some launch.moderator_source)
+          then
+            Error
+              (error Conflict "captured legacy Job delivery requires its actual Manager")
+          else Ok ()
+        | None ->
+          let%bind job = find_job t job_id in
+          let%bind row = Job_custody.find t.job_agent_custody ~job in
+          if Option.is_some row || Option.is_some job.inference_origin
+          then Error (error Conflict "captured Job delivery requires its actual Manager")
+          else Ok ()
+        | Some _ -> Ok ())
+    in
+    deliver_job_without_legacy
+      t
+      job_id
+      generation
+      expected
+      expected_job
+      moderator_snapshot
+;;
+
 let cancel_job_internal t job_id =
   let open Result.Let_syntax in
   let%bind job = find_job t job_id in
@@ -11311,7 +13582,10 @@ let cancel_job_internal t job_id =
            | _ -> Pending)
       }
     in
-    let%map _ = update_jobs ~subscriptions ~run_deltas t (job :: cancelled) in
+    let%bind job_custody = prepare_terminal_job_custody t (job :: cancelled) in
+    let%map _ =
+      update_jobs ~job_custody ~subscriptions ~run_deltas t (job :: cancelled)
+    in
     job
   | (Succeeded | Failed _ | Cancelled), _ -> Ok job
 ;;
@@ -11357,7 +13631,8 @@ let interrupt_job ?run_preparation t job_id generation attempt reason =
            | _ -> Pending)
       }
     in
-    let%map _ = update_job ?run_preparation t job in
+    let%bind job_custody = prepare_terminal_job_custody t [ job ] in
+    let%map _ = update_job ?run_preparation ~job_custody t job in
     job
   | Queued
   | Waiting_permission _
@@ -11603,6 +13878,172 @@ let commit_ingress_submission_internal t proposal before snapshot =
   receipt
 ;;
 
+let complete_legacy_schedule
+      t
+      manager
+      expected_schedule
+      (before : Session.Moderator_state.Identity_snapshot.t option)
+      moderator_snapshot
+      schedule
+  =
+  let open Result.Let_syntax in
+  let current_source () =
+    let%bind () = require_runtime_admission t in
+    let%bind () =
+      if Option.exists t.moderator_manager ~f:(phys_equal manager)
+      then Ok ()
+      else Error (error Conflict "legacy timer Manager changed before delivery")
+    in
+    Moderator_source_installation.capture t.state
+  in
+  let%bind () =
+    if Option.is_some expected_schedule
+    then Ok ()
+    else Error (error Conflict "legacy timer delivery requires its exact saved record")
+  in
+  let%bind before =
+    Result.of_option
+      before
+      ~error:(error Conflict "legacy timer delivery requires its previous checkpoint")
+  in
+  (* The Manager's known snapshot has no persistence metadata. Compare against
+     the original installed checkpoint, while validating the complete retained
+     queue child independently. Never compare a rewritten candidate to itself. *)
+  let%bind () = Moderator_checkpoint.validate_encoded_capacity t.state.moderator in
+  let%bind installed = Moderator_checkpoint.decode t.state.moderator in
+  let%bind () =
+    if
+      Option.exists installed ~f:(fun installed ->
+        Sexp.equal
+          (Session.Moderator_state.Identity_snapshot.sexp_of_t installed)
+          (Session.Moderator_state.Identity_snapshot.sexp_of_t before))
+    then Ok ()
+    else Error (error Conflict "legacy timer checkpoint changed before delivery")
+  in
+  let%bind snapshot = Moderator_checkpoint.decode moderator_snapshot in
+  let%bind snapshot =
+    Result.of_option
+      snapshot
+      ~error:(error Conflict "legacy timer delivery requires its prospective checkpoint")
+  in
+  let%bind index, source = current_source () in
+  let%bind () =
+    match schedule.Agent_protocol.Schedule.inference_provenance with
+    | None -> Ok ()
+    | Some provenance ->
+      if
+        Agent_protocol.Run_source.equal
+          source
+          (Agent_protocol.Schedule_provenance.source provenance)
+      then Ok ()
+      else Error (error Conflict "legacy timer original source is no longer installed")
+  in
+  let%bind metadata = Moderator_checkpoint.queue t.state.moderator in
+  let%bind metadata =
+    match metadata with
+    | None -> Moderator_queue.bootstrap ~source ~queue:before.queued_internal_events
+    | Some metadata ->
+      if Agent_protocol.Run_source.equal source (Moderator_queue.source metadata)
+      then Ok metadata
+      else Error (error Conflict "legacy timer queue lifetime changed")
+  in
+  let%bind payload =
+    Session.Snapshot.of_jsonaf schedule.payload
+    |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+  in
+  let expected_snapshot =
+    { before with queued_internal_events = before.queued_internal_events @ [ payload ] }
+  in
+  let%bind () =
+    if
+      Sexp.equal
+        (Session.Moderator_state.Identity_snapshot.sexp_of_t expected_snapshot)
+        (Session.Moderator_state.Identity_snapshot.sexp_of_t snapshot)
+    then Ok ()
+    else Error (error Conflict "legacy timer delivery must append its exact raw payload")
+  in
+  let%bind capture =
+    match schedule.inference_provenance with
+    | None -> Ok Moderator_queue.Capture.unavailable
+    | Some provenance ->
+      Moderator_queue.Capture.create
+        ~producer:
+          (Schedule_delivery
+             { id = schedule.id
+             ; generation = schedule.generation
+             ; delivery_count = schedule.delivery_count
+             })
+        ~origin:(Agent_protocol.Schedule_provenance.origin provenance)
+  in
+  let%bind plan =
+    Legacy_queue_checkpoint.append_delivery ~metadata ~before ~snapshot ~capture
+  in
+  let%bind encoded =
+    Moderator_checkpoint.update_with_queue
+      t.state.moderator
+      ~snapshot
+      ~queue:(Legacy_queue_checkpoint.metadata plan)
+  in
+  (* Stage while the Delivering timer's actual loan still exists. Installing
+     Delivered will retire that phase, so no later lookup may reconstruct it. *)
+  let%bind continuation =
+    Legacy_schedule_custody.transfer_delivery
+      t.legacy_schedule_custody
+      ~manager
+      ~source
+      ~schedule
+  in
+  let staged =
+    match continuation with
+    | None -> Legacy_queue_custody.empty
+    | Some continuation ->
+      Legacy_queue_custody.stage_delivery
+        ~manager
+        ~source
+        ~entry:(List.hd_exn (Legacy_queue_checkpoint.appended plan))
+        ~continuation
+  in
+  let acknowledged = ref false in
+  Exn.protect
+    ~finally:(fun () -> if not !acknowledged then Legacy_queue_custody.retire staged)
+    ~f:(fun () ->
+      let%bind inventory =
+        Legacy_queue_custody.candidate
+          t.legacy_queue_custody
+          ~manager
+          ~metadata:(Legacy_queue_checkpoint.metadata plan)
+          ~staged
+      in
+      let%bind prepared =
+        prepare_transition
+          t
+          ~delta:
+            (Session_delta.Batch
+               [ Run_state_changed index
+               ; Schedule_changed schedule
+               ; Moderator_changed (Some encoded)
+               ])
+          ~payloads:
+            [ Agent_protocol.Event.Durable.Payload.Schedule_state_changed schedule ]
+      in
+      let%bind _, final_source = current_source () in
+      let%bind () =
+        if Agent_protocol.Run_source.equal source final_source
+        then Ok ()
+        else Error (error Conflict "legacy timer source changed before delivery ACK")
+      in
+      (* This is a truthful completed-fact write, not a new effect admission.
+         Known expiry is carried into the queue and must not erase Delivered. *)
+      Eio.Cancel.protect (fun () ->
+        let%bind () = persist_transition t prepared in
+        install_committed_transition t prepared;
+        t.legacy_queue_custody
+        <- Legacy_queue_custody.install t.legacy_queue_custody ~incoming:inventory;
+        acknowledged := true;
+        publish_committed_transition t prepared;
+        Ok schedule))
+;;
+
 let complete_schedule
       t
       schedule_id
@@ -11610,15 +14051,24 @@ let complete_schedule
       expected
       expected_schedule
       moderator_snapshot
+      moderator_manager
   =
   let open Result.Let_syntax in
-  let%bind () = check_expected_moderator_checkpoint t expected in
   let%bind () =
     match moderator_is_borrowed t with
     | true -> Error (error Conflict "moderator callback owns the checkpoint")
     | false -> Ok ()
   in
   let%bind schedule = find_schedule t schedule_id in
+  let%bind () =
+    match schedule.ownership, moderator_manager with
+    | None, Some manager
+      when Option.is_none (Chat_response.Moderator_manager.invocation_observer manager) ->
+      (* Only the actual legacy helper below performs known comparison together
+         with resource/source/queue validation. Generic/v1 remains byte-strict. *)
+      Ok ()
+    | (Some _ | None), _ -> check_expected_moderator_checkpoint t expected
+  in
   let%bind () =
     match expected_schedule with
     | None -> Ok ()
@@ -11680,16 +14130,33 @@ let complete_schedule
                   | false -> now))
         }
       in
-      let%map _ =
-        transition
+      let%bind metadata = Moderator_checkpoint.queue t.state.moderator in
+      match schedule.ownership, moderator_manager with
+      | None, Some manager
+        when Option.is_none (Chat_response.Moderator_manager.invocation_observer manager)
+        ->
+        complete_legacy_schedule
           t
-          ~delta:
-            (Session_delta.Batch
-               [ Schedule_changed schedule; Moderator_changed moderator_snapshot ])
-          ~payloads:
-            [ Agent_protocol.Event.Durable.Payload.Schedule_state_changed schedule ]
-      in
-      schedule)
+          manager
+          expected_schedule
+          expected
+          moderator_snapshot
+          schedule
+      | None, _
+        when Option.is_some schedule.inference_provenance || Option.is_some metadata ->
+        Error
+          (error Conflict "captured legacy timer delivery requires its actual Manager")
+      | (Some _ | None), _ ->
+        let%map _ =
+          transition
+            t
+            ~delta:
+              (Session_delta.Batch
+                 [ Schedule_changed schedule; Moderator_changed moderator_snapshot ])
+            ~payloads:
+              [ Agent_protocol.Event.Durable.Payload.Schedule_state_changed schedule ]
+        in
+        schedule)
   | Scheduled -> Error (error Conflict "schedule delivery was not claimed")
   | Delivered | Cancelled | Failed _ ->
     Error (error Already_resolved "schedule is already terminal")
@@ -11736,6 +14203,133 @@ let cancel_schedule_internal ?run_preparation t schedule_id =
         ~payloads:[ Agent_protocol.Event.Durable.Payload.Schedule_cancelled schedule ]
     in
     schedule
+  | Delivering | Delivered | Cancelled | Failed _ ->
+    Error (error Already_resolved "schedule is already terminal")
+;;
+
+let callback_schedule_admission t (scope : Callback_scope.t) =
+  let open Result.Let_syntax in
+  let%bind () = require_runtime_admission t in
+  let%bind () = check_callback_current t scope in
+  match scope.custody with
+  | Admitted admission -> Ok admission
+  | Unavailable ->
+    Error (error Permission_denied "legacy Schedule continuation custody is unavailable")
+;;
+
+let callback_schedule_after_ms t (scope : Callback_scope.t) delay_ms payload =
+  let open Result.Let_syntax in
+  let%bind parent = callback_schedule_admission t scope in
+  let created_at = t.services.now () in
+  (* Preserve immediate legacy wall-clock semantics. Timestamp.add_ms performs
+     the existing nonnegative and representable-endpoint checks. *)
+  let%bind next_due_at = Agent_protocol.Timestamp.add_ms created_at delay_ms in
+  let%bind provenance =
+    Agent_protocol.Schedule_provenance.create ~source:scope.source ~origin:scope.origin
+  in
+  let schedule : Agent_protocol.Schedule.t =
+    { id = Agent_protocol.Id.Schedule.create ()
+    ; session_id = t.state.identity.session_id
+    ; generation = t.state.identity.generation
+    ; payload
+    ; created_at
+    ; next_due_at
+    ; misfire = Deliver_once_immediately
+    ; status = Scheduled
+    ; delivery_count = 0
+    ; last_delivery_at = None
+    ; inference_provenance = Some provenance
+    ; delivery_cancellation = None
+    ; ownership = None
+    }
+  in
+  let%bind staged =
+    Legacy_schedule_custody.stage
+      ~manager:scope.manager
+      ~source:scope.source
+      ~schedule
+      ~parent
+  in
+  let acknowledged = ref false in
+  Exn.protect
+    ~finally:(fun () -> if not !acknowledged then Legacy_schedule_custody.retire staged)
+    ~f:(fun () ->
+      let%bind inventory =
+        Legacy_schedule_custody.candidate t.legacy_schedule_custody ~staged
+      in
+      let%bind prepared =
+        prepare_transition
+          ?run_preparation:(callback_run_preparation scope)
+          t
+          ~delta:(Session_delta.Schedule_changed schedule)
+          ~payloads:[ Agent_protocol.Event.Durable.Payload.Schedule_created schedule ]
+      in
+      let%bind initialization_acknowledgement =
+        match scope.constructor_scope with
+        | None -> Ok None
+        | Some constructor ->
+          let%map resource =
+            Initialization_scope.Resource.select
+              constructor.resource
+              prepared.state
+              ~manager:scope.manager
+              ~source:scope.source
+              ~ordinals:[]
+              ~schedules:[ schedule.id ]
+          in
+          Some
+            (Initialization_scope.Acknowledgement.prepare
+               ~resource
+               constructor
+               prepared.state)
+      in
+      let%bind _ = callback_schedule_admission t scope in
+      Eio.Cancel.protect (fun () ->
+        let%bind () =
+          Option.value_map
+            initialization_acknowledgement
+            ~default:(Ok ())
+            ~f:Initialization_scope.Acknowledgement.check_basis
+        in
+        let%bind () = persist_transition t prepared in
+        install_committed_transition
+          ?run_preparation:(callback_run_preparation scope)
+          ~legacy_schedule_custody:inventory
+          ?initialization_acknowledgement
+          t
+          prepared;
+        acknowledged := true;
+        publish_committed_transition t prepared;
+        Ok schedule))
+;;
+
+let callback_schedule_cancel t scope schedule_id =
+  let open Result.Let_syntax in
+  let%bind _ = callback_schedule_admission t scope in
+  let%bind schedule = find_schedule t schedule_id in
+  match schedule.status with
+  | Scheduled ->
+    (* The genuine caller is checked, not the target timer's provenance. Keep
+       legacy cancellation of any retained Scheduled ID, including old timers. *)
+    let schedule = { schedule with status = Agent_protocol.Schedule.Cancelled } in
+    let%bind prepared =
+      prepare_transition
+        ?run_preparation:(callback_run_preparation scope)
+        t
+        ~delta:(Session_delta.Schedule_changed schedule)
+        ~payloads:[ Agent_protocol.Event.Durable.Payload.Schedule_cancelled schedule ]
+    in
+    let%bind _ = callback_schedule_admission t scope in
+    Eio.Cancel.protect (fun () ->
+      let%bind () = persist_transition t prepared in
+      (* The ordinary installation retention pass closes a matching timer loan
+         before publication. Historical targets need not have a loan. *)
+      install_committed_transition
+        ?run_preparation:(callback_run_preparation scope)
+        t
+        prepared;
+      publish_committed_transition t prepared;
+      Ok schedule)
   | Delivering | Delivered | Cancelled | Failed _ ->
     Error (error Already_resolved "schedule is already terminal")
 ;;
@@ -12234,6 +14828,7 @@ let stop_from_idle_moderator
   =
   let open Result.Let_syntax in
   let jobs = stopped_jobs t Cancel in
+  let job_custody = Job_custody.prepare_retirement t.job_agent_custody in
   let permissions =
     pending_invocation_permissions t ~matches:(fun _ -> true)
     |> List.map ~f:(cancel_permission t "session ended")
@@ -12287,6 +14882,8 @@ let stop_from_idle_moderator
   in
   let%map _ =
     transition
+      ~retire_legacy_custody:()
+      ~job_custody
       t
       ~delta:
         (Session_delta.Batch
@@ -12858,10 +15455,10 @@ let enable_automatic_turn_budget ?run_preparation t policy =
 
 let lifecycle_request_allowed : type a. a request -> bool = function
   | Set_operation_worker None
-  | Set_runtime_worker (_, None, _)
+  | Set_runtime_worker (_, None, _, _)
   | Set_compaction_inference None -> true
   | Set_operation_worker (Some _)
-  | Set_runtime_worker (_, Some _, _)
+  | Set_runtime_worker (_, Some _, _, _)
   | Set_compaction_inference (Some _) -> false
   | Acknowledge_inference _
   | Observe_inference _
@@ -12912,6 +15509,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Shell_approval_grants
   | Shell_manifest_grants
   | End_initialization _
+  | Retire_initialization_resource _
   | Fail_initialization _
   | Stop_delegated _
   | Stop_delegated_at_epoch _
@@ -12957,6 +15555,8 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Admit_notification_turn _
   | Claim_ordinary_event _
   | Claim_queued_event _
+  | Claim_legacy_callback _
+  | Claim_initialization_callback _
   | Reconcile_run_recovery
   | Run_actions _
   | Commit_invocation_call _
@@ -13027,6 +15627,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Begin_run_preparation _
   | Begin_headless_run_preparation _
   | Complete_initialization _
+  | Checkpoint_runtime_construction _
   | Start _
   | Start_initial_delegated _
   | Fail_initial_delegated _
@@ -13095,6 +15696,8 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Cancel_job _
   | Change_schedule _
   | Add_schedule _
+  | Callback_schedule_after_ms _
+  | Callback_schedule_cancel _
   | Cancel_schedule _
   | Claim_schedule _
   | Due_schedules
@@ -13833,19 +16436,29 @@ let observe_recurrence_child t reservation =
    rollback of already committed effects. *)
 let retire_execution_custody t =
   close_recurrence_activations t;
+  Legacy_queue_custody.retire t.legacy_queue_custody;
+  t.legacy_queue_custody <- Legacy_queue_custody.empty;
+  Legacy_schedule_custody.retire t.legacy_schedule_custody;
+  t.legacy_schedule_custody <- Legacy_schedule_custody.empty;
+  Option.iter t.legacy_callback_scope ~f:(fun scope ->
+    match scope.Callback_scope.custody with
+    | Unavailable -> ()
+    | Admitted admission -> retire_agent_admission admission);
+  t.legacy_callback_scope <- None;
+  t.moderator_manager <- None;
   retire_instruction_continuations t;
-  Option.iter t.operation_agent_custody ~f:(fun (_, custody) ->
-    retire_agent_custody custody);
+  Option.iter t.operation_agent_custody ~f:(fun (_, admission) ->
+    retire_agent_admission admission);
   List.iter t.pending_agent_custody ~f:(fun (_, custody) -> retire_agent_custody custody);
-  List.iter t.job_agent_custody ~f:(fun (_, custody) -> retire_agent_custody custody);
+  Job_custody.retire t.job_agent_custody;
   Option.iter t.initialization_scope ~f:(fun scope ->
-    Option.iter scope.agent_custody ~f:retire_agent_custody);
+    retire_agent_admission scope.agent_admission);
   List.iter t.invocation_executions ~f:(fun execution ->
     Atomic.set execution.authority_live false);
   List.iter t.job_scopes ~f:(fun scope -> Atomic.set scope.authority_live false);
   Option.iter t.moderator_borrow ~f:(fun borrow -> Atomic.set borrow.authority_live false);
   Option.iter t.queued_event_borrow ~f:(fun borrow ->
-    Option.iter borrow.agent_custody ~f:retire_agent_custody;
+    Option.iter borrow.agent_admission ~f:retire_agent_admission;
     borrow.callback_active <- false;
     Atomic.set borrow.authority_live false);
   close_run_preparation t;
@@ -13885,6 +16498,12 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       claim_ordinary_event t id operation_id snapshot event
     | Claim_queued_event (id, operation_id, snapshot) ->
       claim_queued_event t id operation_id snapshot
+    | Claim_legacy_callback (callback, operation_id) ->
+      claim_legacy_callback t callback operation_id
+    | Claim_initialization_callback (scope, manager, callback) ->
+      claim_initialization_callback t scope manager callback
+    | Retire_initialization_resource (scope, manager) ->
+      retire_initialization_resource t scope manager
     | Claim_queued_retirement (id, snapshot, reason) ->
       claim_queued_retirement t id snapshot reason
     | Commit_queued_event (borrow, snapshot, requests, decision, notifications) ->
@@ -14197,7 +16816,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Snapshot -> Ok (current_snapshot t)
     | Observe -> Ok (t.state, current_snapshot t)
     | Set_operation_worker worker -> set_operation_worker t worker
-    | Set_runtime_worker (original_actor, worker, inference) ->
+    | Set_runtime_worker (original_actor, worker, inference, moderator_manager) ->
       let open Result.Let_syntax in
       let%bind () =
         match original_actor with
@@ -14206,7 +16825,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         | Some _ ->
           Error (error Permission_denied "runtime installation authentication expired")
       in
-      set_runtime_worker t worker inference
+      set_runtime_worker t worker inference moderator_manager
     | Check_runtime_admission -> require_runtime_admission t
     | Retire_runtime_worker closing -> retire_runtime_worker t ~closing
     | Set_compaction_inference port ->
@@ -14277,7 +16896,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       validate_administration_basis t attachment_id expected
     | Commit_reconciled_administration (attachment_id, expected, kind, candidate) ->
       commit_reconciled_administration t attachment_id expected kind candidate
-    | Begin_initialization (original_actor, expected) ->
+    | Begin_initialization (purpose, original_actor, expected) ->
       let open Result.Let_syntax in
       let%bind () =
         match original_actor with
@@ -14287,14 +16906,14 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
           then Ok ()
           else Error (error Permission_denied "initialization authentication expired")
       in
-      begin_initialization ?original_actor t expected
+      begin_initialization ?original_actor ~purpose t expected
     | Borrow_initialization_agent_actor scope ->
       let open Result.Let_syntax in
       let%bind () = validate_initialization_scope t scope in
-      (match scope.agent_custody with
+      let%bind custody = custody_of_admission (Some scope.agent_admission) in
+      (match custody with
        | None -> Ok None
-       | Some custody ->
-         Result.map (Agent_authority_scope.actor custody.authority) ~f:Option.some)
+       | Some custody -> Result.map (Execution_custody.actor custody) ~f:Option.some)
     | Borrow_operation_agent_actor id ->
       let open Result.Let_syntax in
       let%bind _ = running_operation t id in
@@ -14319,27 +16938,31 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
                Permission_denied
                "agent authority belongs to another or expired moderator")
       in
-      (match moderator_agent_custody t borrow with
+      let%bind custody = moderator_agent_custody t borrow in
+      (match custody with
        | None -> Ok None
        | Some custody ->
-         Result.map (Agent_authority_scope.actor custody.authority) ~f:(fun actor ->
+         Result.map (Execution_custody.actor custody) ~f:(fun actor ->
            Some
              (Operator_authorization.guarded
                 ~principal:(Operator_authorization.principal actor)
                 ~is_current:(fun () ->
                   Atomic.get borrow.authority_live
                   && Operator_authorization.is_current actor))))
-    | Begin_run_initialization (preparation, expected) ->
+    | Begin_run_initialization (purpose, preparation, expected) ->
       let open Result.Let_syntax in
       let%bind () = check_run_preparation t preparation in
       begin_initialization
         ~run_preparation:preparation
         ?original_actor:(Run_preparation.original_actor preparation)
+        ~purpose
         t
         expected
     | End_initialization scope -> end_initialization t scope
-    | Complete_initialization (scope, candidate) ->
-      complete_initialization t scope candidate
+    | Complete_initialization (scope, candidate, moderator_manager) ->
+      complete_initialization t scope candidate moderator_manager
+    | Checkpoint_runtime_construction (scope, moderator, moderator_manager) ->
+      checkpoint_runtime_construction t scope moderator moderator_manager
     | Fail_initialization (scope, failure) -> fail_initialization t scope failure
     | Start (original_actor, attachment_id, expected_parent_stop_epoch) ->
       let open Result.Let_syntax in
@@ -14359,7 +16982,10 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
            <- Admitted
                 { generation = t.state.identity.generation
                 ; source
-                ; pending = Option.map original_actor ~f:create_agent_custody
+                ; pending =
+                    Pending
+                      (create_agent_admission
+                         (Option.map original_actor ~f:create_agent_custody))
                 });
         summary)
     | Start_initial_delegated (reference, expected_parent_stop_epoch) ->
@@ -14882,7 +17508,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Start_run_constructor_model_job (preparation, job) ->
       let open Result.Let_syntax in
       let%bind () = check_run_preparation t preparation in
-      let%bind job = add_job ~run_preparation:preparation t job in
+      let%bind job = add_constructor_job t (Run_constructor_job preparation) job in
       let%bind claimed = claim_job ~run_preparation:preparation t job.id job.generation in
       Result.of_option
         claimed
@@ -14897,9 +17523,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       let%bind () = check_run_preparation t preparation in
       interrupt_job ~run_preparation:preparation t job_id generation attempt reason
     | Add_run_constructor_job (preparation, job) ->
-      let open Result.Let_syntax in
-      let%bind () = check_run_preparation t preparation in
-      add_job ~run_preparation:preparation t job
+      add_constructor_job t (Run_constructor_job preparation) job
     | Add_run_constructor_schedule (preparation, schedule) ->
       let open Result.Let_syntax in
       let%bind () = check_run_preparation t preparation in
@@ -14912,17 +17536,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       let open Result.Let_syntax in
       let%bind () = check_run_preparation t preparation in
       reserve_history_block ~run_preparation:preparation t count
-    | Checkpoint_run_moderator (preparation, moderator) ->
-      let open Result.Let_syntax in
-      let%bind () = check_run_preparation t preparation in
-      if Option.equal Jsonaf.exactly_equal t.state.moderator moderator
-      then Ok (Session_state.summary t.state)
-      else
-        transition
-          ~run_preparation:preparation
-          t
-          ~delta:(Session_delta.Moderator_changed moderator)
-          ~payloads:[]
+    | Checkpoint_run_moderator (preparation, moderator, moderator_manager) ->
+      checkpoint_run_moderator t preparation moderator moderator_manager
     | Admit_prepared_run (preparation, scope, session, entry) ->
       if not (Run_preparation.belongs_to preparation ~owner:t.run_preparation_owner)
       then
@@ -15126,8 +17741,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       recover_background_results t max_count max_total_bytes
     | Enqueue_run_job_delivery (delivery, before, after) ->
       enqueue_run_job_delivery t delivery before after
-    | Deliver_job (job_id, generation, expected, expected_job, moderator_snapshot) ->
-      deliver_job t job_id generation expected expected_job moderator_snapshot
+    | Deliver_job (job_id, generation, expected, expected_job, moderator_snapshot, manager)
+      -> deliver_job t job_id generation expected expected_job moderator_snapshot manager
     | Cancel_job_internal job_id -> cancel_job_internal t job_id
     | Cancel_job (attachment_id, job_id, expected_generation, expected_attempt) ->
       with_writer t attachment_id (fun () ->
@@ -15152,6 +17767,10 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Change_schedule (attachment_id, event, schedule) ->
       change_schedule t attachment_id event schedule
     | Add_schedule schedule -> add_schedule t schedule
+    | Callback_schedule_after_ms (scope, delay_ms, payload) ->
+      callback_schedule_after_ms t scope delay_ms payload
+    | Callback_schedule_cancel (scope, schedule_id) ->
+      callback_schedule_cancel t scope schedule_id
     | Cancel_schedule (attachment_id, schedule_id, expected_generation) ->
       with_writer t attachment_id (fun () ->
         let open Result.Let_syntax in
@@ -15171,7 +17790,12 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Claim_schedule (schedule_id, generation) -> claim_schedule t schedule_id generation
     | Retry_schedule (schedule_id, generation) -> retry_schedule t schedule_id generation
     | Complete_schedule
-        (schedule_id, generation, expected, expected_schedule, moderator_snapshot) ->
+        ( schedule_id
+        , generation
+        , expected
+        , expected_schedule
+        , moderator_snapshot
+        , moderator_manager ) ->
       complete_schedule
         t
         schedule_id
@@ -15179,6 +17803,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         expected
         expected_schedule
         moderator_snapshot
+        moderator_manager
     | Fail_schedule (schedule_id, generation, failure) ->
       fail_schedule t schedule_id generation failure
     | Skip_schedule (schedule_id, generation) -> skip_schedule t schedule_id generation
@@ -15360,6 +17985,7 @@ let create_with_owner_lease_duration
     ; operation_worker
     ; compaction_inference = None
     ; inference_execution = None
+    ; moderator_manager = None
     ; compaction_env
     ; owner_lease_duration_ms
     ; max_attachments
@@ -15373,11 +17999,14 @@ let create_with_owner_lease_duration
     ; idle_moderator_borrowed = false
     ; moderator_borrow = None
     ; queued_event_borrow = None
+    ; legacy_callback_scope = None
+    ; legacy_queue_custody = Legacy_queue_custody.empty
+    ; legacy_schedule_custody = Legacy_schedule_custody.empty
     ; operation_agent_custody = None
     ; lifecycle_agent_custody = Unadmitted
     ; intent_agent_custody = []
     ; pending_agent_custody = []
-    ; job_agent_custody = []
+    ; job_agent_custody = Job_custody.empty
     ; run_authorities = Run_authorities.empty
     ; run_preparation_owner = Run_preparation.Owner.create ()
     ; run_preparation = None
@@ -15466,8 +18095,11 @@ let set_operation_worker t worker =
   call t ~priority:Priority (Set_operation_worker worker)
 ;;
 
-let set_runtime_worker ?actor t ~worker ~inference =
-  call t ~priority:Priority (Set_runtime_worker (actor, worker, inference))
+let set_runtime_worker ?actor ?moderator_manager t ~worker ~inference =
+  call
+    t
+    ~priority:Priority
+    (Set_runtime_worker (actor, worker, inference, moderator_manager))
 ;;
 
 let retire_runtime_worker t ~closing =
@@ -15599,22 +18231,47 @@ module Constructor_mutations = struct
 end
 
 let reconcile_inference_recovery t = call t Reconcile_inference_recovery
-let begin_initialization t ~expected = call t (Begin_initialization (None, expected))
 
-let begin_initialization_authenticated t ~actor ~expected =
-  call t (Begin_initialization (Some actor, expected))
+let begin_initialization
+      ?(purpose = Initialization_scope.Purpose.Pending_initialization)
+      t
+      ~expected
+  =
+  call t (Begin_initialization (purpose, None, expected))
+;;
+
+let begin_initialization_authenticated
+      ?(purpose = Initialization_scope.Purpose.Pending_initialization)
+      t
+      ~actor
+      ~expected
+  =
+  call t (Begin_initialization (purpose, Some actor, expected))
 ;;
 
 let initialization_agent_actor t ~scope = call t (Borrow_initialization_agent_actor scope)
 
-let begin_run_initialization t ~preparation ~expected =
-  call t (Begin_run_initialization (preparation, expected))
+let begin_run_initialization
+      ?(purpose = Initialization_scope.Purpose.Pending_initialization)
+      t
+      ~preparation
+      ~expected
+  =
+  call t (Begin_run_initialization (purpose, preparation, expected))
 ;;
 
 let end_initialization t ~scope = call t ~priority:Priority (End_initialization scope)
 
-let complete_initialization t ~scope ~candidate =
-  call t (Complete_initialization (scope, candidate))
+let retire_initialization_resource t ~scope ~moderator_manager =
+  call t ~priority:Priority (Retire_initialization_resource (scope, moderator_manager))
+;;
+
+let complete_initialization ?moderator_manager t ~scope ~candidate =
+  call t (Complete_initialization (scope, candidate, moderator_manager))
+;;
+
+let checkpoint_runtime_construction ?moderator_manager t ~scope moderator =
+  call t (Checkpoint_runtime_construction (scope, moderator, moderator_manager))
 ;;
 
 let fail_initialization t ~scope failure = call t (Fail_initialization (scope, failure))
@@ -15787,8 +18444,8 @@ let reserve_run_history_block t ~preparation ~count =
   call t (Reserve_run_history_block (preparation, count))
 ;;
 
-let checkpoint_run_moderator t ~preparation moderator =
-  call t (Checkpoint_run_moderator (preparation, moderator))
+let checkpoint_run_moderator ?moderator_manager t ~preparation moderator =
+  call t (Checkpoint_run_moderator (preparation, moderator, moderator_manager))
 ;;
 
 let admit_prepared_run t ~command_audit ~preparation ~scope ~session ~entry =
@@ -16156,8 +18813,19 @@ let enqueue_run_job_delivery t ~delivery ~before ~after =
   call t (Enqueue_run_job_delivery (delivery, before, after))
 ;;
 
-let deliver_job ?expected ?expected_job t ~job_id ~generation ~moderator_snapshot =
-  call t (Deliver_job (job_id, generation, expected, expected_job, moderator_snapshot))
+let deliver_job
+      ?expected
+      ?expected_job
+      ?moderator_manager
+      t
+      ~job_id
+      ~generation
+      ~moderator_snapshot
+  =
+  call
+    t
+    (Deliver_job
+       (job_id, generation, expected, expected_job, moderator_snapshot, moderator_manager))
 ;;
 
 let cancel_job_internal t ~job_id = call t ~priority:Priority (Cancel_job_internal job_id)
@@ -16197,6 +18865,26 @@ let change_schedule_with_command_audit t ~command_audit ~attachment_id ~event sc
 
 let add_schedule t schedule = call t (Add_schedule schedule)
 
+let callback_schedule_services t ~scope : Runtime_builder.schedule_services =
+  let message (error : Agent_protocol.Error.t) = error.message in
+  { after_ms =
+      (fun ~delay_ms ~payload ->
+        call t (Callback_schedule_after_ms (scope, delay_ms, payload))
+        |> Result.map ~f:(fun schedule ->
+          Agent_protocol.Id.Schedule.to_string schedule.Agent_protocol.Schedule.id)
+        |> Result.map_error ~f:message)
+  ; cancel =
+      (fun ~id ->
+        let open Result.Let_syntax in
+        let%bind schedule_id =
+          Agent_protocol.Id.Schedule.of_string id |> Result.map_error ~f:message
+        in
+        call t (Callback_schedule_cancel (scope, schedule_id))
+        |> Result.map ~f:ignore
+        |> Result.map_error ~f:message)
+  }
+;;
+
 let cancel_schedule t ?command_audit ?expected_generation ~attachment_id ~schedule_id () =
   call
     t
@@ -16220,6 +18908,7 @@ let retry_schedule t ~schedule_id ~generation =
 let complete_schedule
       ?expected
       ?expected_schedule
+      ?moderator_manager
       t
       ~schedule_id
       ~generation
@@ -16228,7 +18917,12 @@ let complete_schedule
   call
     t
     (Complete_schedule
-       (schedule_id, generation, expected, expected_schedule, moderator_snapshot))
+       ( schedule_id
+       , generation
+       , expected
+       , expected_schedule
+       , moderator_snapshot
+       , moderator_manager ))
 ;;
 
 let fail_schedule t ~schedule_id ~generation failure =

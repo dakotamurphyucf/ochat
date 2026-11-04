@@ -632,14 +632,12 @@ let%test_unit "authorized stopped no-op revokes initialization but rejected stop
     assert (
       Result.is_error (A.Session_actor.stop actor ~attachment_id:reader.id ~mode:Graceful));
     let queued =
-      A.Session_actor.add_initialization_model_job
-        actor
-        ~scope
-        { (job expected) with delivery = Pending }
+      A.Session_actor.add_initialization_model_job actor ~scope (job expected)
       |> protocol_ok
     in
-    (* Graceful stop preserves queued work. Clear it through ordinary cancellation
-       so the next stop is the actual stopped/no-work no-op branch. *)
+    (* Use a non-deliverable Job: cancellation retires its custody completely.
+       A terminal Pending delivery now retains a continuation and requires a Stop
+       ACK, so it would not exercise this genuinely empty no-op branch. *)
     A.Session_actor.cancel_job actor ~attachment_id:writer.id ~job_id:queued.id ()
     |> protocol_ok
     |> ignore;

@@ -628,3 +628,10 @@ val with_authored_source_lease
   :  authored_resources
   -> source_lease:Prompt_source_lease.t
   -> authored_resources Or_error.t
+
+(** The existing exact Model completion event payload, shared by runtime enqueue
+    and Actor's factual queue-append validator. This allocates no execution or
+    continuation authority. Caller selects an actual terminal Model Job. *)
+val model_job_event
+  :  Agent_protocol.Job.t
+  -> (Chatml.Chatml_lang.value, Agent_protocol.Error.t) result

@@ -19,7 +19,11 @@ type t =
     retired captures precede its frontier. Terminal history can outlive that
     lifetime only with a strictly later retained installation epoch, never by
     renewing permission. Retained queue producer references must remain present,
-    even after terminal disposition or ordinary pruning. *)
+    even after terminal disposition or ordinary pruning. A Schedule's original
+    Run attribution must name a retained same-session/full-source Run; absence of
+    a Schedule work occurrence is allowed because attribution creates no work.
+    Any actual retained Schedule owner must agree. Saved historical attribution
+    need not match the actor's newer installation; delivery checks currentness. *)
 val validate : t -> (unit, Agent_protocol.Error.t) result
 
 (** Validate immutable schedule captures and queue frontiers. Retiring a queue
