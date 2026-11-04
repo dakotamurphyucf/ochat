@@ -40,7 +40,13 @@ let%expect_test
          ~operation_id:None
          ~event:Session_start
          ~snapshot:(fun () -> Ok (snapshot ()))
-         (fun ~executing ~retirement_reason ~event:_ ~execute:_ ~commit ->
+         (fun ~executing
+           ~model_jobs:_
+           ~allocate_inference:_
+           ~retirement_reason
+           ~event:_
+           ~execute:_
+           ~commit ->
             assert (Option.is_none retirement_reason);
             let owner = J.Moderator_event executing.context.id in
             let source = executing.context.source in
@@ -240,7 +246,13 @@ let%expect_test
            ~operation_id:None
            ~event:Session_start
            ~snapshot:(fun () -> Ok (snapshot ()))
-           (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
+           (fun ~executing
+             ~model_jobs:_
+             ~allocate_inference:_
+             ~retirement_reason:_
+             ~event:_
+             ~execute:_
+             ~commit ->
               let owner = J.Moderator_event executing.context.id in
               let creation, created =
                 A.create_script_schedule
@@ -379,7 +391,13 @@ let%expect_test
               ~operation_id:None
               ~event:Session_resume
               ~snapshot:(fun () -> Ok (snapshot ()))
-              (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
+              (fun ~executing
+                ~model_jobs:_
+                ~allocate_inference:_
+                ~retirement_reason:_
+                ~event:_
+                ~execute:_
+                ~commit ->
                  let next =
                    match mode with
                    | `Rearm ->

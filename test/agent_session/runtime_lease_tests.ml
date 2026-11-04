@@ -17,6 +17,7 @@ let runtime ?script_tools ?check_execution ?activity ~close () : Builder.t =
   ; reserved_history_through = 0
   ; moderator_snapshot = (fun () -> None)
   ; moderator_manager = None
+  ; model_recipes = (fun _ -> Core.String.Map.empty)
   ; moderator_tools = []
   ; moderator_script_tools = script_tools
   ; standalone_completion = None
@@ -33,8 +34,11 @@ let runtime ?script_tools ?check_execution ?activity ~close () : Builder.t =
   ; enqueue_internal_event = (fun ?prepare:_ _ -> failwith "unexpected event")
   ; drain_internal_events = (fun _ -> failwith "unexpected event drain")
   ; execute_model_job =
-      (fun ~inference_context:_ ~capture_recipe_target:_ ~recipe:_ ~payload:_ ->
-        failwith "unexpected model job")
+      (fun ~allocate_inference:_
+        ~inference_context:_
+        ~capture_recipe_target:_
+        ~recipe:_
+        ~payload:_ -> failwith "unexpected model job")
   ; enqueue_model_job_completion = (fun ?prepare:_ _ -> failwith "unexpected completion")
   ; close
   }

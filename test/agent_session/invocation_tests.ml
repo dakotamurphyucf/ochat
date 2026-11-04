@@ -706,7 +706,7 @@ let%test_unit "worker cancellation publishes an interrupted handler result exact
           ignore
             (caps.with_moderator_invocation
                ~invocation
-               (fun ~dispatched:_ ~borrow_agent_actor:_ ~commit:_ ->
+               (fun ~dispatched:_ ~capabilities:_ ~commit:_ ->
                   Int.incr calls;
                   Eio.Promise.resolve ready_u ();
                   Eio.Promise.await never)
@@ -998,7 +998,7 @@ let%test_unit "independent ordinary invocations run concurrently outside the act
             |> protocol_ok
           in
           let result =
-            caps.with_invocation ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+            caps.with_invocation ~invocation (fun ~dispatched:_ ~capabilities:_ ->
               Int.incr started;
               if !started = 2 then Eio.Promise.resolve ready_u ();
               Eio.Promise.await ready;
@@ -1035,7 +1035,7 @@ let%test_unit "native nested invocation persists without reentering a borrowed m
           let result =
             caps.with_moderator_invocation
               ~invocation:parent
-              (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+              (fun ~dispatched ~capabilities:_ ~commit ->
                  let reference, child =
                    native_context
                      registry
@@ -1084,7 +1084,7 @@ let%test_unit "native nested invocation persists without reentering a borrowed m
             Result.is_error
               (caps.with_invocation
                  ~invocation:stale_child
-                 (fun ~dispatched:_ ~borrow_agent_actor:_ -> assert false)));
+                 (fun ~dispatched:_ ~capabilities:_ -> assert false)));
           let state = Agent_session.Session_actor.state actor |> protocol_ok in
           Completed
             { final_history = input.history
@@ -1137,7 +1137,7 @@ let%test_unit
               else input.history, invocation_fixture ()
             in
             let result =
-              caps.with_invocation ~invocation (fun ~dispatched ~borrow_agent_actor:_ ->
+              caps.with_invocation ~invocation (fun ~dispatched ~capabilities:_ ->
                 Int.incr calls;
                 let live = Agent_session.Session_actor.state actor |> protocol_ok in
                 assert (List.mem live.invocations dispatched ~equal:Poly.equal);
@@ -1158,7 +1158,7 @@ let%test_unit
                   Result.is_error
                     (caps.with_invocation
                        ~invocation
-                       (fun ~dispatched:_ ~borrow_agent_actor:_ -> assert false)));
+                       (fun ~dispatched:_ ~capabilities:_ -> assert false)));
                 Eio.Promise.resolve ready_u ();
                 match mode with
                 | `Cancel -> Eio.Promise.await never
@@ -1183,7 +1183,7 @@ let%test_unit
               Result.is_error
                 (caps.with_invocation
                    ~invocation:stale_child
-                   (fun ~dispatched:_ ~borrow_agent_actor:_ -> assert false)));
+                   (fun ~dispatched:_ ~capabilities:_ -> assert false)));
             match result with
             | Error failure -> Failed failure
             | Ok _ ->

@@ -371,7 +371,13 @@ execution or inference permission.
 
 Historical absence remains unavailable. Native work under a genuine admitted
 parent with unavailable classification can preserve that absence; it does not
-become positively unbound. Missing or mismatched parents still reject. Model
+become positively unbound. This includes native background child preparation
+and its selected-child acknowledgement. Inference classification and retained
+work ownership are separate: an actual retained Run parent still requires its
+current authority, source and exact owned occurrence, and the child joins that
+Run atomically while retaining unavailable inference classification. Missing,
+stale or mismatched parents never fall back to an unrelated draining operation.
+Model
 attribution requires positive evidence and the separate current physical owner,
 authentication, source, and accounting gates. Unknown invocation and nested origin
 fields remain protected by the universal carrier, including journal replay and
@@ -404,10 +410,73 @@ origin or invents an execution attempt.
 
 Stored provenance grants no execution permission. The allocating owner must still
 prove the exact current Job attempt, its physical callback lifetime, current
-original authority, and current Goal policy before provider submission. Fresh
-physical-parent classification and immediate Model job/Run admission belong to
-the live accounting integration; the storage field alone does not provide those
-paths or qualify authored Goal execution.
+original authority, and current Goal policy before provider submission.
+
+### Live inference admission and accounting
+
+The session actor supplies separate ports for selecting a model Job and admitting
+an inference attempt. Each port retains its actual operation, Job attempt, native
+invocation, or moderator callback. Runtime construction does not provide an ambient
+fallback for an expired callback. The runtime binds model recipes to those ports
+under the existing moderator execution lock and restores the prior binding when
+the callback exits.
+
+Requests through model recipes use the inference identity allocated to their
+actual child Job. When a recipe is rebound, it uses the current request context;
+it does not restore
+identity or submission-guard overrides captured by an earlier callback. Identity
+metadata itself grants no permission to allocate or submit a request.
+
+A new model Job records its original classification at admission. If it belongs
+to a Run, the Job and its exact work occurrence commit together. An idle observation
+of a live Run can introduce real Job occurrences without fabricating a parent work
+item. An observation of a terminal Run keeps that historical origin but cannot
+start new attributed model work. Historical missing provenance remains unavailable;
+ordinary native work can retain that absence, but model admission cannot treat it
+as positively unbound work.
+
+A completed native result can retain its original admission for its observation
+callback in the existing bounded invocation inventory. The result acknowledgement
+installs this continuation. The process-local inventory has one combined slot per
+exact retained Invocation or Moderator_execution owner. Persistent hosts bound
+those owner inventories through their existing complete-state and journal limits.
+Observation and follow-up components share that slot; adding a follow-up does not
+impose a second count quota on an already executed native result. A successful
+observation-claim acknowledgement transfers the observation continuation. A failed
+claim leaves the original continuation available for retry.
+The transfer preserves the exact result, source and original permission context,
+including when an unrelated foreground turn drains the observation. Claiming the
+observation does not consume a separate handler follow-up on the same result.
+
+Missing admission differs from an actual admission with no agent credentials.
+Known expiry remains a negative fact. Already-completed results can settle;
+missing or expired custody cannot authorize new Model or authenticated agent
+actions. Ordinary declared Tool calls retain their existing capability and
+host-policy checks. Follow-up turns and compactions check every required original
+admission again at their final write boundary; adopting another user's
+queued input cannot replace an observation's original permission. Saved receipts
+and historical results do not reconstruct these process-local permissions.
+
+The actual resource graph owns each inference allocation. The actor acknowledges
+the canonical ledger row and its Goal charge in the same persistence transaction
+before handing back the allocation. The allocation also carries a final submission
+guard: current physical ownership, original authority, source, Goal policy, and
+deadline are checked again after yielding preparation or authentication work and
+before provider submission. A rejected allocation never becomes an unattributed
+request. A model preparation failure after a durable Job claim follows the same
+terminal completion path as execution failure; it does not leave a Running Job
+behind or invent a provider attempt.
+
+Host turns are accounted at the real Operation_started transaction; compaction
+is not a host turn. Ledger changes reconcile existing Goal partitions against the
+same before/after canonical rows. Revised usage replaces the retained contribution,
+and retirement preserves protected future accounting data rather than dropping it
+to make space. Missing historical accounting is an explicit admission failure,
+including for an unlimited budget.
+
+These owner and storage contracts do not by themselves qualify every authored
+workflow. Legacy queued callback service binding, cross-session attribution, and
+the composed Goal/recurrence example retain the integration requirements below.
 
 ### Durable moderator queue provenance
 

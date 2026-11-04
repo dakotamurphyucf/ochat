@@ -43,42 +43,38 @@ let%expect_test
                   (M.identity_snapshot manager |> Result.ok_or_failwith)))
           |> protocol_ok;
           let parent = invocation_fixture () in
-          caps.with_invocation
-            ~invocation:parent
-            (fun ~dispatched:_ ~borrow_agent_actor:_ ->
-               List.iter [ 2; 0; 1; 3 ] ~f:(fun index ->
-                 let observer =
-                   match index with
-                   | 3 -> { observer with script_id = "unrelated" }
-                   | _ -> observer
-                 in
-                 let child =
-                   I.create
-                     ~observer
-                     { parent.context with
-                       id =
-                         Agent_protocol.Id.Invocation.of_string
-                           ("inv_queue_" ^ Int.to_string index)
-                         |> protocol_ok
-                     ; origin = Moderator
-                     ; parent_invocation = Some parent.context.id
-                     }
-                   |> protocol_ok
-                 in
-                 caps.with_invocation
-                   ~invocation:child
-                   (fun ~dispatched:_ ~borrow_agent_actor:_ ->
-                      Int.incr native_calls;
-                      Ok (Complete (`Number (Int.to_string index))))
-                 |> protocol_ok
-                 |> ignore);
-               assert (
-                 not
-                   (caps.with_next_moderator_observation
-                      ~observer
-                      (fun ~observing:_ ~commit:_ -> assert false)
-                    |> protocol_ok));
-               Ok (Complete `Null))
+          caps.with_invocation ~invocation:parent (fun ~dispatched:_ ~capabilities:_ ->
+            List.iter [ 2; 0; 1; 3 ] ~f:(fun index ->
+              let observer =
+                match index with
+                | 3 -> { observer with script_id = "unrelated" }
+                | _ -> observer
+              in
+              let child =
+                I.create
+                  ~observer
+                  { parent.context with
+                    id =
+                      Agent_protocol.Id.Invocation.of_string
+                        ("inv_queue_" ^ Int.to_string index)
+                      |> protocol_ok
+                  ; origin = Moderator
+                  ; parent_invocation = Some parent.context.id
+                  }
+                |> protocol_ok
+              in
+              caps.with_invocation ~invocation:child (fun ~dispatched:_ ~capabilities:_ ->
+                Int.incr native_calls;
+                Ok (Complete (`Number (Int.to_string index))))
+              |> protocol_ok
+              |> ignore);
+            assert (
+              not
+                (caps.with_next_moderator_observation
+                   ~observer
+                   (fun ~observing:_ ~capabilities:_ ~commit:_ -> assert false)
+                 |> protocol_ok));
+            Ok (Complete `Null))
           |> protocol_ok
           |> ignore;
           let drain max_observations =
@@ -298,28 +294,24 @@ let%expect_test "idle observations own state without starting a model operation"
             in
             caps.commit_moderator snapshot |> protocol_ok;
             let parent = invocation_fixture () in
-            caps.with_invocation
-              ~invocation:parent
-              (fun ~dispatched:_ ~borrow_agent_actor:_ ->
-                 let child =
-                   I.create
-                     ~observer
-                     { parent.context with
-                       id =
-                         Agent_protocol.Id.Invocation.of_string "inv_idle_observation"
-                         |> protocol_ok
-                     ; origin = Moderator
-                     ; parent_invocation = Some parent.context.id
-                     }
-                   |> protocol_ok
-                 in
-                 caps.with_invocation
-                   ~invocation:child
-                   (fun ~dispatched:_ ~borrow_agent_actor:_ ->
-                      Ok (Complete (`String "native result")))
-                 |> protocol_ok
-                 |> ignore;
-                 Ok (Complete `Null))
+            caps.with_invocation ~invocation:parent (fun ~dispatched:_ ~capabilities:_ ->
+              let child =
+                I.create
+                  ~observer
+                  { parent.context with
+                    id =
+                      Agent_protocol.Id.Invocation.of_string "inv_idle_observation"
+                      |> protocol_ok
+                  ; origin = Moderator
+                  ; parent_invocation = Some parent.context.id
+                  }
+                |> protocol_ok
+              in
+              caps.with_invocation ~invocation:child (fun ~dispatched:_ ~capabilities:_ ->
+                Ok (Complete (`String "native result")))
+              |> protocol_ok
+              |> ignore;
+              Ok (Complete `Null))
             |> protocol_ok
             |> ignore;
             prepared := Some (manager, observer);
@@ -339,8 +331,8 @@ let%expect_test "idle observations own state without starting a model operation"
                  A.with_idle_moderator_observation
                    actor
                    ~observer
-                   (fun ~observing ~commit ->
-                      let result = callback ~observing ~commit in
+                   (fun ~observing ~capabilities ~commit ->
+                      let result = callback ~observing ~capabilities ~commit in
                       !before_observation_return ();
                       result))
                ~manager
@@ -384,7 +376,7 @@ let%expect_test "idle observations own state without starting a model operation"
                         (A.with_idle_moderator_observation
                            actor
                            ~observer
-                           (fun ~observing:_ ~commit:_ -> assert false)))
+                           (fun ~observing:_ ~capabilities:_ ~commit:_ -> assert false)))
                   | `Cancelled ->
                     Eio.Cancel.cancel (Option.value_exn !cancellation) Exit;
                     Eio.Fiber.yield ();
@@ -696,22 +688,18 @@ let%test_unit
                 }
               |> protocol_ok
             in
-            caps.with_invocation
-              ~invocation:parent
-              (fun ~dispatched:_ ~borrow_agent_actor:_ ->
-                 caps.with_invocation
-                   ~invocation:child
-                   (fun ~dispatched:_ ~borrow_agent_actor:_ ->
-                      Int.incr native_calls;
-                      Ok (Complete (`String "native result")))
-                 |> protocol_ok
-                 |> ignore;
-                 assert (
-                   Result.is_error
-                     (caps.with_moderator_observation
-                        ~invocation_id:child.context.id
-                        (fun ~observing:_ ~commit:_ -> assert false)));
-                 Ok (Complete `Null))
+            caps.with_invocation ~invocation:parent (fun ~dispatched:_ ~capabilities:_ ->
+              caps.with_invocation ~invocation:child (fun ~dispatched:_ ~capabilities:_ ->
+                Int.incr native_calls;
+                Ok (Complete (`String "native result")))
+              |> protocol_ok
+              |> ignore;
+              assert (
+                Result.is_error
+                  (caps.with_moderator_observation
+                     ~invocation_id:child.context.id
+                     (fun ~observing:_ ~capabilities:_ ~commit:_ -> assert false)));
+              Ok (Complete `Null))
             |> protocol_ok
             |> ignore;
             let escaped = ref None in
@@ -719,14 +707,14 @@ let%test_unit
             let run () =
               caps.with_moderator_observation
                 ~invocation_id:child.context.id
-                (fun ~observing ~commit ->
+                (fun ~observing ~capabilities:_ ~commit ->
                    let state = Agent_session.Session_actor.state actor |> protocol_ok in
                    assert (List.mem state.invocations observing ~equal:I.equal);
                    assert (
                      Result.is_error
                        (caps.with_moderator_observation
                           ~invocation_id:child.context.id
-                          (fun ~observing:_ ~commit:_ -> assert false)));
+                          (fun ~observing:_ ~capabilities:_ ~commit:_ -> assert false)));
                    let result =
                      M.handle_observation_entries
                        manager
@@ -900,26 +888,22 @@ let%test_unit "cancellation during an idle observation claim releases its runtim
         in
         caps.commit_moderator snapshot |> protocol_ok;
         let parent = invocation_fixture () in
-        caps.with_invocation
-          ~invocation:parent
-          (fun ~dispatched:_ ~borrow_agent_actor:_ ->
-             let child =
-               I.create
-                 ~observer
-                 { parent.context with
-                   id = child_id
-                 ; origin = Moderator
-                 ; parent_invocation = Some parent.context.id
-                 }
-               |> protocol_ok
-             in
-             caps.with_invocation
-               ~invocation:child
-               (fun ~dispatched:_ ~borrow_agent_actor:_ ->
-                  Ok (Complete (`String "recorded native result")))
-             |> protocol_ok
-             |> ignore;
-             Ok (Complete `Null))
+        caps.with_invocation ~invocation:parent (fun ~dispatched:_ ~capabilities:_ ->
+          let child =
+            I.create
+              ~observer
+              { parent.context with
+                id = child_id
+              ; origin = Moderator
+              ; parent_invocation = Some parent.context.id
+              }
+            |> protocol_ok
+          in
+          caps.with_invocation ~invocation:child (fun ~dispatched:_ ~capabilities:_ ->
+            Ok (Complete (`String "recorded native result")))
+          |> protocol_ok
+          |> ignore;
+          Ok (Complete `Null))
         |> protocol_ok
         |> ignore;
         Completed
@@ -958,7 +942,7 @@ let%test_unit "cancellation during an idle observation claim releases its runtim
                 A.with_idle_moderator_observation
                   actor
                   ~observer
-                  (fun ~observing:_ ~commit:_ ->
+                  (fun ~observing:_ ~capabilities:_ ~commit:_ ->
                      callback_entered := true;
                      failwith "cancelled observation callback entered"))
             with
@@ -1004,4 +988,497 @@ let%test_unit "cancellation during an idle observation claim releases its runtim
         | Some { status = Observation_failed _; _ } -> ()
         | Some _ | None -> failwith "cancelled observation claim was not retired");
        assert_same_session_snapshot state (Agent_session.Memory_backend.state backend))
+;;
+
+let%expect_test "observation follow-up keeps every original through final input admission"
+  =
+  let module A = Agent_session.Session_actor in
+  let module I = Agent_protocol.Invocation in
+  let module P = Agent_protocol in
+  let module M = Chat_response.Moderator_manager in
+  let module N = Agent_session.Native_tool_invocation in
+  let learned_final_clock = ref None in
+  List.iter
+    [ `Mixed_turn; `Mixed_compaction; `Adopted_input_baseline; `Adopted_input ]
+    ~f:(fun mode ->
+      let a_live = Atomic.make true
+      and b_live = Atomic.make true in
+      let armed = ref false
+      and input_selected = ref false
+      and revoked = ref false
+      and b_checked_before_input = ref false
+      and b_checked_after_revocation = ref false
+      and samples = ref 0
+      and turn_writes = ref 0 in
+      let a_original = Agent_authority_tests.authentication a_live in
+      let b_original = Agent_authority_tests.authentication b_live in
+      let a =
+        Operator_authorization.guarded
+          ~principal:(Operator_authorization.principal a_original)
+          ~is_current:(fun () ->
+            if !armed then input_selected := true;
+            Operator_authorization.is_current a_original)
+      in
+      let b =
+        Operator_authorization.guarded
+          ~principal:(Operator_authorization.principal b_original)
+          ~is_current:(fun () ->
+            if !armed
+            then
+              if !revoked
+              then b_checked_after_revocation := true
+              else if not !input_selected
+              then b_checked_before_input := true;
+            Operator_authorization.is_current b_original)
+      in
+      let now () =
+        if !armed
+        then (
+          Int.incr samples;
+          match mode, !learned_final_clock with
+          | `Adopted_input, Some final when Int.equal final !samples ->
+            revoked := true;
+            Atomic.set b_live false
+          | ( (`Mixed_turn | `Mixed_compaction | `Adopted_input_baseline | `Adopted_input)
+            , (None | Some _) ) -> ());
+        timestamp
+      in
+      Job_fixtures.with_actor
+        ~now
+        ~reject_save:(fun transition ->
+          let starts_turn =
+            List.exists
+              transition.Agent_session.Session_transition.events
+              ~f:(fun event ->
+                match
+                  P.Event.Durable.Payload.of_json
+                    ~kind:event.P.Event.Durable.kind
+                    event.payload
+                  |> protocol_ok
+                with
+                | Operation_started { kind = Turn User_submit; _ } -> true
+                | _ -> false)
+          in
+          if !armed && starts_turn
+          then (
+            Int.incr turn_writes;
+            match mode with
+            | `Adopted_input_baseline -> learned_final_clock := Some !samples
+            | `Mixed_turn | `Mixed_compaction | `Adopted_input -> ());
+          false)
+        ~monotonic_now:(fun () -> Mtime.min_stamp)
+        (fun env _sw actor writer backend ->
+           let native_calls = ref 0 in
+           let registry = native_registry native_calls ~raises:false in
+           let manager, _, _ =
+             handoff_definition env ~capability_registry:registry ~declare_tool:false
+           in
+           let observer = M.invocation_observer manager |> Option.value_exn in
+           let snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in
+           let encoded =
+             Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot)
+           in
+           let produced = ref []
+           and workers = ref 0 in
+           let follow_up_worker = ref false in
+           let worker =
+             Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+               caps.commit_moderator encoded |> protocol_ok;
+               if !follow_up_worker
+               then (
+                 let proof =
+                   caps.original_agent_actor () |> protocol_ok |> Option.value_exn
+                 in
+                 assert (Operator_authorization.is_current proof);
+                 Atomic.set a_live false;
+                 assert (not (Operator_authorization.is_current proof));
+                 Atomic.set a_live true;
+                 assert (Operator_authorization.is_current proof))
+               else (
+                 let parent =
+                   I.create
+                     { (invocation_fixture ()).context with
+                       id = P.Id.Invocation.create ()
+                     ; tool_name = "producer"
+                     }
+                   |> protocol_ok
+                 in
+                 caps.with_invocation
+                   ~invocation:parent
+                   (fun ~dispatched:_ ~capabilities:_ ->
+                      let reference =
+                        List.hd_exn (Chat_response.Tool_capability.references registry)
+                      in
+                      let invocation =
+                        I.create
+                          ~observer
+                          { parent.context with
+                            id = P.Id.Invocation.create ()
+                          ; origin = Moderator
+                          ; parent_invocation = Some parent.context.id
+                          ; tool_name = "read_file"
+                          ; input = `Object []
+                          ; implementation_revision = reference.implementation_revision
+                          ; capability_fingerprint =
+                              Chat_response.Tool_capability.fingerprint registry
+                          }
+                        |> protocol_ok
+                      in
+                      let result =
+                        N.run_scoped
+                          ~execute:caps.with_invocation
+                          ~registry:(fun () -> registry)
+                          ~reference
+                          ~invocation
+                          ~is_halted:(fun () -> false)
+                          ~authorize:(fun _ _ -> Ok ())
+                          ~prepare_output:(fun _ -> Ok (`String "native result"))
+                        |> protocol_ok
+                      in
+                      produced := result :: !produced;
+                      Ok (Complete `Null))
+                 |> protocol_ok
+                 |> ignore);
+               Int.incr workers;
+               Completed
+                 { final_history = input.history
+                 ; moderator_snapshot = encoded
+                 ; runtime_requests = []
+                 })
+           in
+           A.set_operation_worker actor (Some worker) |> protocol_ok;
+           let entry text =
+             let reservation = A.reserve_history_block actor ~count:1 |> protocol_ok in
+             Pending_input_tests.occurrence
+               (Int64.to_int_exn reservation.first_sequence)
+               text
+           in
+           let produce original =
+             let entry = entry "native producer" in
+             let count = !workers in
+             let before_events = (A.state actor |> protocol_ok).counters.event_sequence in
+             let submitted =
+               A.submit_message_authenticated
+                 actor
+                 ~actor:original
+                 ~attachment_id:writer.id
+                 entry
+               |> protocol_ok
+             in
+             let operation_id = Option.value_exn submitted.operation_id in
+             await_idle actor |> ignore;
+             [%test_eq: int] (count + 1) !workers;
+             assert (
+               List.exists
+                 (Agent_session.Memory_backend.events_after backend before_events
+                  |> protocol_ok)
+                 ~f:(fun event ->
+                   match
+                     P.Event.Durable.Payload.of_json
+                       ~kind:event.P.Event.Durable.kind
+                       event.payload
+                     |> protocol_ok
+                   with
+                   | Operation_completed { id; state = Completed; _ } ->
+                     P.Id.Operation.equal id operation_id
+                   | _ -> false));
+             (List.hd_exn !produced).context.id
+           in
+           let owners =
+             match mode with
+             | `Mixed_turn | `Mixed_compaction ->
+               let first = produce a in
+               let second = produce b in
+               [ first, a_live; second, b_live ]
+             | `Adopted_input_baseline | `Adopted_input -> [ produce b, b_live ]
+           in
+           let deferred =
+             match mode with
+             | `Mixed_turn | `Mixed_compaction -> None
+             | `Adopted_input_baseline | `Adopted_input -> Some (entry "input owned by A")
+           in
+           let follow_up : I.follow_up =
+             { request_turn =
+                 (match mode with
+                  | `Mixed_turn | `Adopted_input_baseline | `Adopted_input -> true
+                  | `Mixed_compaction -> false)
+             ; request_compaction =
+                 (match mode with
+                  | `Mixed_compaction -> true
+                  | `Mixed_turn | `Adopted_input_baseline | `Adopted_input -> false)
+             ; end_session = None
+             }
+           in
+           List.iter owners ~f:(fun _ ->
+             let completed = ref false
+             and escaped = ref None in
+             let ran =
+               A.with_idle_moderator_observation
+                 actor
+                 ~observer
+                 (fun ~observing ~capabilities ~commit ->
+                    let _, original_live =
+                      List.find_exn owners ~f:(fun (id, _) ->
+                        P.Id.Invocation.equal id observing.context.id)
+                    in
+                    let proof =
+                      capabilities.borrow_agent_actor ~invocation:observing
+                      |> protocol_ok
+                      |> Option.value_exn
+                    in
+                    assert (Operator_authorization.is_current proof);
+                    Atomic.set original_live false;
+                    assert (not (Operator_authorization.is_current proof));
+                    Atomic.set original_live true;
+                    assert (Operator_authorization.is_current proof);
+                    escaped := Some proof;
+                    Option.iter deferred ~f:(fun entry ->
+                      let submitted =
+                        A.submit_message_authenticated
+                          actor
+                          ~actor:a
+                          ~attachment_id:writer.id
+                          entry
+                        |> protocol_ok
+                      in
+                      match submitted.disposition with
+                      | Deferred -> ()
+                      | Started -> failwith "observation did not retain deferred A input");
+                    commit
+                      ~resolved:
+                        (I.complete_observation ~follow_up observing |> protocol_ok)
+                      ~snapshot
+                    |> protocol_ok;
+                    completed := true;
+                    Ok ())
+               |> protocol_ok
+             in
+             assert ran;
+             assert !completed;
+             assert (not (Operator_authorization.is_current (Option.value_exn !escaped))));
+           let before = A.state actor |> protocol_ok in
+           let workers_before = !workers in
+           (match mode with
+            | `Mixed_turn | `Mixed_compaction -> ()
+            | `Adopted_input_baseline | `Adopted_input ->
+              [%test_eq: int] 1 (List.length before.conversation.deferred_user_entries);
+              follow_up_worker := true;
+              armed := true);
+           (* The successful identical topology records the actual last wall sample
+            at real Turn persistence, after every guard. The fresh negative case
+            revokes at that learned ordinal, rather than a hard-coded clock count. *)
+           let result = A.apply_moderator_follow_up actor in
+           armed := false;
+           (match mode, result with
+            | `Adopted_input_baseline, Ok true ->
+              [%test_eq: int] 1 !turn_writes;
+              assert (Option.exists !learned_final_clock ~f:(fun ordinal -> ordinal > 0));
+              let after = await_idle actor in
+              [%test_eq: int] (workers_before + 1) !workers;
+              assert (
+                List.exists
+                  (Agent_session.Memory_backend.events_after
+                     backend
+                     before.counters.event_sequence
+                   |> protocol_ok)
+                  ~f:(fun event ->
+                    match
+                      P.Event.Durable.Payload.of_json
+                        ~kind:event.P.Event.Durable.kind
+                        event.payload
+                      |> protocol_ok
+                    with
+                    | Operation_completed
+                        { kind = Turn User_submit; state = Completed; _ } -> true
+                    | _ -> false));
+              assert !b_checked_before_input;
+              assert !input_selected;
+              assert (not !revoked);
+              assert (Operator_authorization.is_current b);
+              assert (List.is_empty after.conversation.deferred_user_entries);
+              assert (Option.is_none after.active_operation);
+              assert_same_session_snapshot
+                after
+                (Agent_session.Memory_backend.state backend)
+            | ( ((`Mixed_turn | `Mixed_compaction | `Adopted_input) as denied_mode)
+              , Error error ) ->
+              assert (P.Error.equal_code error.code Permission_denied);
+              let expected =
+                match denied_mode with
+                | `Mixed_turn | `Mixed_compaction ->
+                  "observation follow-up has missing or mixed original admissions"
+                | `Adopted_input ->
+                  "original agent execution authority is no longer current"
+              in
+              if not (String.equal error.message expected)
+              then raise_s [%sexp (error : P.Error.t)];
+              [%test_eq: int] 0 !turn_writes;
+              (match denied_mode with
+               | `Mixed_turn | `Mixed_compaction ->
+                 assert (not !input_selected);
+                 assert (not !revoked);
+                 assert (Operator_authorization.is_current b)
+               | `Adopted_input ->
+                 assert !b_checked_before_input;
+                 assert !input_selected;
+                 assert !revoked;
+                 assert !b_checked_after_revocation;
+                 assert (not (Operator_authorization.is_current b)));
+              [%test_eq: int] workers_before !workers;
+              let after = A.state actor |> protocol_ok in
+              assert (Option.is_none after.active_operation);
+              assert_same_session_snapshot before after;
+              assert_same_session_snapshot
+                after
+                (Agent_session.Memory_backend.state backend)
+            | ( ( `Mixed_turn
+                | `Mixed_compaction
+                | `Adopted_input_baseline
+                | `Adopted_input )
+              , unexpected ) ->
+              raise_s
+                [%sexp
+                  "unexpected follow-up result"
+                , (mode
+                   : [ `Mixed_turn
+                     | `Mixed_compaction
+                     | `Adopted_input_baseline
+                     | `Adopted_input
+                     ])
+                , (unexpected : (bool, P.Error.t) result)]);
+           assert (Operator_authorization.is_current a)));
+  print_endline
+    "mixed A/B Turn and Compact deny; adopted input A cannot replace observation B after \
+     final clock revocation";
+  [%expect
+    {| mixed A/B Turn and Compact deny; adopted input A cannot replace observation B after final clock revocation |}]
+;;
+
+let%expect_test
+    "historical observation absence settles results without admitting new work"
+  =
+  let module A = Agent_session in
+  let module I = Agent_protocol.Invocation in
+  let module P = Agent_protocol in
+  let module M = Chat_response.Moderator_manager in
+  with_actor_workspace (fun env workspace_instance ->
+    let manager, _, _ = handoff_definition env ~declare_tool:false in
+    let observer = M.invocation_observer manager |> Option.value_exn in
+    let snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in
+    let parent = invocation_fixture () in
+    let child =
+      I.create
+        ~observer
+        { parent.context with
+          id = P.Id.Invocation.create ()
+        ; parent_invocation = Some parent.context.id
+        ; origin = Moderator
+        }
+      |> protocol_ok
+    in
+    let resolved invocation outcome =
+      I.dispatch invocation
+      |> protocol_ok
+      |> fun dispatched ->
+      I.resolve dispatched ~session_id ~generation:0 outcome |> protocol_ok
+    in
+    let child = resolved child (Complete (`String "historical native result")) in
+    let parent = resolved parent (Complete `Null) in
+    (* Imported records pass through the actual storage document decoder. Their
+       historical absence supplies no process-local continuation or original. *)
+    let prepare_state state =
+      let state =
+        { state with
+          A.Session_state.moderator =
+            Some (A.Runtime_builder.encode_moderator_snapshot snapshot)
+        ; invocations = [ child; parent ]
+        }
+      in
+      A.Session_state_document.authored state
+      |> A.Session_state_document.encode ~limits:document_limits
+      |> document_ok
+      |> A.Session_state_document.decode ~limits:document_limits
+      |> document_ok
+      |> A.Session_state_document.value
+    in
+    Job_fixtures.with_actor
+      ~environment:(env, workspace_instance)
+      ~prepare_state
+      (fun _env _sw actor _writer backend ->
+         let workers = ref 0 in
+         let worker =
+           A.Operation_worker.create ~run:(fun ~sw:_ ~input _ ->
+             Int.incr workers;
+             Completed
+               { final_history = input.history
+               ; moderator_snapshot =
+                   Some (A.Runtime_builder.encode_moderator_snapshot snapshot)
+               ; runtime_requests = []
+               })
+         in
+         A.Session_actor.set_operation_worker actor (Some worker) |> protocol_ok;
+         let callback_completed = ref false in
+         let ran =
+           A.Session_actor.with_idle_moderator_observation
+             actor
+             ~observer
+             (fun ~observing ~capabilities ~commit ->
+                assert (Option.is_none observing.inference_origin);
+                let before = A.Session_actor.state actor |> protocol_ok in
+                let denied result =
+                  match result with
+                  | Error error ->
+                    assert (P.Error.equal_code error.P.Error.code Permission_denied)
+                  | Ok _ -> failwith "historical absence became an execution admission"
+                in
+                denied (capabilities.borrow_agent_actor ~invocation:observing);
+                denied
+                  (A.Model_job_admission.admit
+                     capabilities.model_jobs
+                     (Inference_target_tests.job before));
+                assert_same_session_snapshot
+                  before
+                  (A.Session_actor.state actor |> protocol_ok);
+                let follow_up : I.follow_up =
+                  { request_turn = true; request_compaction = false; end_session = None }
+                in
+                commit
+                  ~resolved:(I.complete_observation ~follow_up observing |> protocol_ok)
+                  ~snapshot
+                |> protocol_ok;
+                callback_completed := true;
+                Ok ())
+           |> protocol_ok
+         in
+         assert ran;
+         assert !callback_completed;
+         let before = A.Session_actor.state actor |> protocol_ok in
+         let settled =
+           List.find_exn before.invocations ~f:(fun invocation ->
+             P.Id.Invocation.equal invocation.context.id child.context.id)
+         in
+         assert (I.equal_status child.status settled.status);
+         assert (Option.is_none settled.inference_origin);
+         assert (
+           I.equal_observation_status
+             (Option.value_exn settled.observation).status
+             Observed);
+         (match A.Session_actor.apply_moderator_follow_up actor with
+          | Error error ->
+            assert (P.Error.equal_code error.code Permission_denied);
+            assert (
+              String.equal
+                error.message
+                "original observation admission is unavailable or expired")
+          | Ok _ -> failwith "historical observation requested fresh legacy work");
+         [%test_eq: int] 0 !workers;
+         assert (List.is_empty before.jobs);
+         assert (Option.is_none before.active_operation);
+         assert_same_session_snapshot before (A.Session_actor.state actor |> protocol_ok);
+         assert_same_session_snapshot before (A.Memory_backend.state backend)));
+  print_endline
+    "decoded historical absence remains unavailable; native result and observation \
+     settle, Model and Turn deny";
+  [%expect
+    {| decoded historical absence remains unavailable; native result and observation settle, Model and Turn deny |}]
 ;;

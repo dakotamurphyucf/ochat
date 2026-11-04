@@ -1048,12 +1048,14 @@ let public_limit = function
 (* Planning recognizes exactly container-retirement extension conflicts. Other
    document/domain errors propagate. Retrying another eligible row never resets
    a carrier or discards an uninterpreted field. *)
-let retire_attempt (t : Candidate.t) =
+let retire_attempt (t : Candidate.t) ~protected_ordinals =
   let v = Candidate.value t in
   let rec choose protected = function
     | [] -> Ok (None, protected)
     | (ordinal, row) :: rest ->
-      if not (ended (O.Attempt_record.state row.Row.record))
+      if Set.mem protected_ordinals ordinal
+      then choose true rest
+      else if not (ended (O.Attempt_record.state row.Row.record))
       then choose protected rest
       else
         let* retired_attempts = increment v.coverage.retired_attempts in
@@ -1115,7 +1117,15 @@ let capacity_failure = function
   | Invalid_transition -> false
 ;;
 
-let admit t ~source ~relation ~operation_id ~invocation_id ~configuration =
+let admit
+      ?(protected_ordinals = Int64.Set.empty)
+      t
+      ~source
+      ~relation
+      ~operation_id
+      ~invocation_id
+      ~configuration
+  =
   let v = value t in
   let* () =
     observation
@@ -1187,7 +1197,7 @@ let admit t ~source ~relation ~operation_id ~invocation_id ~configuration =
     match admitted with
     | Some next -> Ok (next, handle, Tracked)
     | None ->
-      let* retired, saw_protected = retire_attempt current in
+      let* retired, saw_protected = retire_attempt current ~protected_ordinals in
       (match retired with
        | Some next -> plan next (protected || saw_protected)
        | None ->

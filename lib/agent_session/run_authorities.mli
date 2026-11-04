@@ -28,6 +28,10 @@ val scope : binding -> Run_admission.Scope.t
     host-owned workflow. Current scope authorization decides continuation rights. *)
 val caller : binding -> Run_admission_request.Caller.t
 
+(** Nonyielding membership of this exact process-local capability. Equal source
+    or Run IDs cannot replace a captured binding after its owner retires it. *)
+val is_current : t -> binding -> run_id:Agent_protocol.Id.Run.t -> bool
+
 (** Release closures after every successful durable actor installation. Only
     current-generation live runs keep their binding; terminal, retired source and
     absent run rows release it. O(live bindings * log retained runs), with no copy

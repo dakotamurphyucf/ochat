@@ -51,6 +51,7 @@ let fields = function
     [ "recurrence_origins", `Array (List.map present.rows ~f:(fun row -> row.json)) ]
 ;;
 
+let equal t other = Jsonaf.exactly_equal (`Object (fields t)) (`Object (fields other))
 let invalid message = Error (P.Error.invalid_request message)
 
 let check rows =

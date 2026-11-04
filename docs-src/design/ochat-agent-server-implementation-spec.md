@@ -1788,6 +1788,30 @@ Starting first commits desired state `Running`. Capacity acquisition and
 runtime construction are represented by subsequent observed-state
 transactions.
 
+For an actual pending `Authored_start` Run, the first Starting transaction also
+persists its Run and admission receipt. Before publishing that ACK, the Actor
+installs the live Run binding and transfers the authenticated Scope's original
+proof into the one-shot lifecycle Pending loan. A principal-only Scope does not
+create such a loan. New authored startup rejects any existing Pending or Consumed
+lifecycle slot; receipt retries return the retained data without replacing a slot
+or replaying startup. A failed first write discards only speculative custody. If
+the subsequent Idle write fails, the first acknowledged Run, binding and Pending
+loan remain; the caller's failure does not imply rollback. The resulting
+Running/Starting state is not yet eligible for the idle startup claim, and receipt
+reconciliation does not automatically resume that lifecycle. Existing source,
+Stop and owner retirement still revoke the process-local custody; saved receipts
+never reconstruct it after recovery.
+
+An exact v1 Job or Timer wake resumes at most one Run. Its queued claim also
+stages a loan from that Run's actual live authenticated binding, checks the
+binding's host policy and original proof after preparation, then installs the
+borrow and loan at the same ACK before publication. The resumed Run's parent
+supersedes an unrelated foreground drainer; an absent original stays unavailable
+rather than borrowing the drainer's authority. A failed claim discards speculative
+custody. Callback finalization, Stop and owner closure retire the installed loan;
+retained Run and wake facts cannot rebuild it. Callbacks without a resumed Run
+keep their existing contextual admission.
+
 ### 18.4 Stop
 
 `session.stop` accepts `graceful` or `cancel`.

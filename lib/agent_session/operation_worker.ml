@@ -12,14 +12,14 @@ end
 module Capabilities = struct
   type event_handler =
     executing:Agent_protocol.Moderator_execution.t
+    -> model_jobs:Model_job_admission.t
+    -> allocate_inference:Inference_allocation.Port.t
     -> retirement_reason:string option
     -> event:Session.Snapshot.t
     -> execute:
          (invocation:Agent_protocol.Invocation.t
           -> (dispatched:Agent_protocol.Invocation.t
-              -> borrow_agent_actor:
-                   (invocation:Agent_protocol.Invocation.t
-                    -> (Operator_authorization.t option, Agent_protocol.Error.t) result)
+              -> capabilities:Invocation_capabilities.t
               -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
           -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result)
     -> commit:
@@ -30,6 +30,7 @@ module Capabilities = struct
 
   type t =
     { id_source : History_entry.Id_source.t
+    ; allocate_inference : Inference_allocation.Port.t
     ; original_agent_actor :
         unit -> (Operator_authorization.t option, Agent_protocol.Error.t) result
     ; commit_entry : History_entry.t -> (unit, Agent_protocol.Error.t) result
@@ -50,17 +51,13 @@ module Capabilities = struct
     ; with_invocation :
         invocation:Agent_protocol.Invocation.t
         -> (dispatched:Agent_protocol.Invocation.t
-            -> borrow_agent_actor:
-                 (invocation:Agent_protocol.Invocation.t
-                  -> (Operator_authorization.t option, Agent_protocol.Error.t) result)
+            -> capabilities:Invocation_capabilities.t
             -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
         -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
     ; with_moderator_invocation :
         invocation:Agent_protocol.Invocation.t
         -> (dispatched:Agent_protocol.Invocation.t
-            -> borrow_agent_actor:
-                 (invocation:Agent_protocol.Invocation.t
-                  -> (Operator_authorization.t option, Agent_protocol.Error.t) result)
+            -> capabilities:Invocation_capabilities.t
             -> commit:
                  (resolved:Agent_protocol.Invocation.t
                   -> snapshot:Session.Moderator_state.Identity_snapshot.t
@@ -70,6 +67,7 @@ module Capabilities = struct
     ; with_moderator_observation :
         invocation_id:Agent_protocol.Id.Invocation.t
         -> (observing:Agent_protocol.Invocation.t
+            -> capabilities:Invocation_capabilities.t
             -> commit:
                  (resolved:Agent_protocol.Invocation.t
                   -> snapshot:Session.Moderator_state.Identity_snapshot.t
@@ -79,6 +77,7 @@ module Capabilities = struct
     ; with_next_moderator_observation :
         observer:Agent_protocol.Invocation.observer
         -> (observing:Agent_protocol.Invocation.t
+            -> capabilities:Invocation_capabilities.t
             -> commit:
                  (resolved:Agent_protocol.Invocation.t
                   -> snapshot:Session.Moderator_state.Identity_snapshot.t

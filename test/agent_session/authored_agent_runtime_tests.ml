@@ -413,6 +413,7 @@ let on_event ctx state event = match event with
               ~permission_profile:profile
               ~inference_context:inference.context
               ~inference_identity:inference.identity
+              ~bind_inference_identity:(fun _ -> inference.identity)
               ~on_inference_attempt:ignore
               ~on_inference_observation:ignore
               ~on_inference_completion:ignore
@@ -422,12 +423,16 @@ let on_event ctx state event = match event with
                 ; cancel = (fun ~id:_ -> failwith "unexpected timer")
                 }
               ~job_services:
-                { spawn_model =
-                    (fun ~recipe:_ ~payload:_ -> failwith "unexpected model recipe")
-                ; call_model =
-                    (fun ~recipe:_ ~payload:_ ~execute:_ ->
-                      failwith "unexpected model recipe")
-                }
+                (let initialization : Agent_session.Runtime_model_services.t =
+                   { spawn_model =
+                       (fun ~recipe:_ ~payload:_ -> failwith "unexpected model recipe")
+                   ; call_model =
+                       (fun ~recipe:_ ~payload:_ ~execute:_ ->
+                         failwith "unexpected model recipe")
+                   }
+                 in
+                 Agent_session.Runtime_model_services.
+                   { initialization; for_execution = (fun _ -> initialization) })
           in
           let runtime = build () |> protocol_ok in
           assert (Int.equal 0 !requests && Int.equal 0 !admitted);

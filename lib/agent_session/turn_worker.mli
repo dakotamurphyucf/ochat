@@ -7,7 +7,8 @@ module Config : sig
   type t =
     { env : Eio_unix.Stdenv.base
     ; inference_context : Inference_runtime.Context.t
-    ; inference_identity : Chat_response.Neutral_turn.Identity.t
+    ; inference_identity :
+        Inference_allocation.Port.t -> Chat_response.Neutral_turn.Identity.t
     ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
     ; on_inference_completion : Inference_client.Completion.t -> unit
     ; on_inference_observation : Inference.Observation.t -> unit

@@ -366,7 +366,7 @@ let%test_unit "streamed native and moderator services share pre and post routing
                 ~dispatch_tool
                 { env
                 ; inference_context = inference.context
-                ; inference_identity = inference.identity
+                ; inference_identity = (fun _ -> inference.identity)
                 ; on_inference_attempt = ignore
                 ; on_inference_observation = ignore
                 ; on_inference_completion = ignore
@@ -1057,7 +1057,7 @@ let%test_unit
                 ~dispatch_tool
                 { env
                 ; inference_context = inference.context
-                ; inference_identity = inference.identity
+                ; inference_identity = (fun _ -> inference.identity)
                 ; on_inference_attempt = ignore
                 ; on_inference_observation = ignore
                 ; on_inference_completion = ignore

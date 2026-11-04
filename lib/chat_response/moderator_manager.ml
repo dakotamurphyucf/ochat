@@ -355,6 +355,8 @@ type t =
   ; mutable last_history : History_entry.t list
   ; mutable subscriptions : subscription list
   ; mutable suspended_phase : Moderation.Phase.t option
+  ; invocation_model_recipes :
+      Moderation.Capabilities.model_recipe String.Map.t option ref
   ; invocation_tool_call : tool_call option ref
   ; run_transaction : Run_operations.transaction option ref
   ; job_transaction : Background_job_operations.transaction option ref
@@ -607,6 +609,7 @@ let create
       ()
   : (t, string) result
   =
+  let invocation_model_recipes = ref None in
   let invocation_tool_call = ref None in
   let run_transaction = ref None in
   let job_transaction = ref None in
@@ -649,6 +652,22 @@ let create
     ; on_schedule_cancel =
         (fun session ~id ->
           with_handlers (fun h -> h.Runtime.on_schedule_cancel session ~id))
+    }
+  in
+  let handlers =
+    let selected () =
+      Option.map !invocation_model_recipes ~f:(fun model_recipes ->
+        Moderation.Capabilities.runtime_handlers { capabilities with model_recipes })
+    in
+    { handlers with
+      on_model_call =
+        (fun session ~recipe ~payload ->
+          let current = Option.value (selected ()) ~default:handlers in
+          current.on_model_call session ~recipe ~payload)
+    ; on_model_spawn =
+        (fun session ~recipe ~payload ->
+          let current = Option.value (selected ()) ~default:handlers in
+          current.on_model_spawn session ~recipe ~payload)
     }
   in
   let handlers =
@@ -788,6 +807,7 @@ let create
     ; last_history = []
     ; subscriptions = []
     ; suspended_phase = None
+    ; invocation_model_recipes
     ; invocation_tool_call
     ; run_transaction
     ; job_transaction
@@ -1756,7 +1776,15 @@ let handle_event_entries_transactional_unlocked
     !outcome)
 ;;
 
+let with_execution_model_recipes ?model_recipes t f =
+  with_execution_lock t (fun () ->
+    let previous = !(t.invocation_model_recipes) in
+    t.invocation_model_recipes := model_recipes;
+    Exn.protect ~f ~finally:(fun () -> t.invocation_model_recipes := previous))
+;;
+
 let handle_event_entries_transactional
+      ?model_recipes
       ?run_actions
       ?jobs
       ?subscriptions
@@ -1774,7 +1802,7 @@ let handle_event_entries_transactional
       ~on_tool_call
       ~prepare_event
   =
-  with_execution_lock t (fun () ->
+  with_execution_model_recipes ?model_recipes t (fun () ->
     handle_event_entries_transactional_unlocked
       ?run_actions
       ?jobs
@@ -1796,6 +1824,7 @@ let handle_event_entries_transactional
 ;;
 
 let handle_next_event_entries_transactional
+      ?model_recipes
       ?run_actions
       ?jobs
       ?subscriptions
@@ -1812,7 +1841,7 @@ let handle_next_event_entries_transactional
       ~on_tool_call
       ~prepare_event
   =
-  with_execution_lock t (fun () ->
+  with_execution_model_recipes ?model_recipes t (fun () ->
     let open Result.Let_syntax in
     match Runtime.peek_queued_event t.runtime with
     | None -> Ok None
@@ -1843,6 +1872,7 @@ let handle_next_event_entries_transactional
 ;;
 
 let handle_invocation_entries
+      ?model_recipes
       ?run_actions
       ?jobs
       ?subscriptions
@@ -1863,7 +1893,7 @@ let handle_invocation_entries
       ~validate_work
       ~prepare_resolution
   =
-  with_execution_lock t (fun () ->
+  with_execution_model_recipes ?model_recipes t (fun () ->
     run_controlled ?context:execution_context t.execution (fun () ->
       let open Result.Let_syntax in
       let control = Option.map t.execution ~f:Chatml_execution.runner_control in
@@ -2015,6 +2045,7 @@ let handle_invocation_entries
 ;;
 
 let handle_observation_entries
+      ?model_recipes
       ?run_actions
       ?jobs
       ?subscriptions
@@ -2031,7 +2062,7 @@ let handle_observation_entries
       ~now_ms
       ~prepare_observation
   =
-  with_execution_lock t (fun () ->
+  with_execution_model_recipes ?model_recipes t (fun () ->
     run_controlled t.execution (fun () ->
       let open Result.Let_syntax in
       let control = Option.map t.execution ~f:Chatml_execution.runner_control in

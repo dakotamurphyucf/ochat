@@ -32,7 +32,9 @@ module Identity : sig
       relation is actual known ownership, not inferred nesting.
 
       with_attempt admits one actual allocation and calls f exactly once after
-      successful admission. Its scope includes validation, Prepared.start and all
+      successful admission. The explicit allocation guard is composed with the
+      caller guard and rechecked at actual provider submission. It is not a
+      fresh allocation-count check. Its scope includes validation, Prepared.start and all
       joined dispatch callbacks. Every exit releases local routing; an allocation
       or on_admitted failure before f cleans its registration and separately
       reconciles any acknowledged Prepared row. Cleanup preserves a primary
@@ -46,6 +48,7 @@ module Identity : sig
         -> f:
              (scope:Transcript.Scope.t
               -> accounting_id:Inference.Observation.Observation_id.t
+              -> submission_guard:Inference_runtime.Submission_guard.t
               -> 'a)
         -> 'a
     }

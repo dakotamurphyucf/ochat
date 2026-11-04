@@ -30,9 +30,14 @@ let check ~initial ~admitted ~origin =
     |> protocol_ok
   in
   let before_raw = Index.to_jsonaf before in
+  let roundtrip index = Index.to_jsonaf index |> Index.of_jsonaf |> protocol_ok in
+  assert (Index.equal before (roundtrip before));
   assert (
     D.Json.equal before_raw (Index.of_jsonaf before_raw |> protocol_ok |> Index.to_jsonaf));
   let null_raw = set before_raw "recurrence_origins" `Null in
+  let null = Index.of_jsonaf null_raw |> protocol_ok in
+  assert (not (Index.equal before null));
+  assert (Index.equal null (roundtrip null));
   assert (
     D.Json.equal null_raw (Index.of_jsonaf null_raw |> protocol_ok |> Index.to_jsonaf));
   let empty =
@@ -84,6 +89,25 @@ let check ~initial ~admitted ~origin =
     | [ row ] -> append row "future_wrapper" (`Number "1.00e+2")
     | _ -> assert false
   in
+  let with_origin_unknown =
+    match rows with
+    | [ row ] ->
+      set
+        row
+        "origin"
+        (O.to_json origin |> fun json -> append json "future_origin" (`Number "2.00e1"))
+    | _ -> assert false
+  in
+  (* Each carrier differs only in retained metadata. Equality must inspect both
+     the outer row and its origin, rather than only the known Run/admission. *)
+  List.iter [ retained; with_origin_unknown ] ~f:(fun row ->
+    let annotated =
+      set raw "recurrence_origins" (`Array [ row ]) |> Index.of_jsonaf |> protocol_ok
+    in
+    assert (
+      Option.equal P.Run.equal (Index.find index run.id) (Index.find annotated run.id));
+    assert (not (Index.equal index annotated));
+    assert (Index.equal annotated (roundtrip annotated)));
   let retained =
     set
       retained

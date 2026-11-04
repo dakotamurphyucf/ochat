@@ -385,7 +385,7 @@ let%expect_test
                 (G.identity graph).with_attempt
                   prepared
                   ~relation:Root
-                  ~f:(fun ~scope:_ ~accounting_id:_ -> Error failure))
+                  ~f:(fun ~scope:_ ~accounting_id:_ ~submission_guard:_ -> Error failure))
           ; build_generated = (fun ~sw:_ ~parent:_ _ -> failwith "unexpected descendant")
           }
         in

@@ -128,6 +128,13 @@ val with_submission_guard : 'env t -> Inference_runtime.Submission_guard.t -> 'e
     operation neither authorizes a target change nor recaptures stored selection. *)
 val with_inference : 'env t -> inference_context:Inference_runtime.Context.t -> 'env t
 
+(** Install an explicit host-issued attempt identity, retaining Context selection,
+    observers and all inherited guards. This does not mint or validate its owner. *)
+val with_inference_identity
+  :  'env t
+  -> inference_identity:Inference_client.Identity.t
+  -> 'env t
+
 (** Rebind actual tool-owner correlation on an immutable child context. The
     parent must come from Invocation.inference_parent or another actual owner;
     absent correlation must never be fabricated from a call alias. *)

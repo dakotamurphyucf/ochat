@@ -2,6 +2,10 @@
     historical absence and every unknown field. No runtime/callback is retained. *)
 type t [@@deriving sexp]
 
+(** Compare the complete native index, including private job-delivery disposition
+    and optional-child wire presence. Unknown JSON remains with its document owner. *)
+val equal : t -> t -> bool
+
 (** Compare public run evidence and pending action state with typed equality.
     Private delivery-frame retention/disposition and wire-presence bookkeeping
     do not change the client observation. No IO or validation is performed. *)

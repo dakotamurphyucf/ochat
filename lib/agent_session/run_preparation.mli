@@ -74,6 +74,14 @@ val check_basis
   -> state:Session_state.t
   -> (unit, Agent_protocol.Error.t) result
 
+(** Nonyielding exact issuing owner/revision/generation and original-proof
+    currentness. Does not invoke host policy; use after its separate refresh. *)
+val check_current
+  :  t
+  -> owner:Owner.t
+  -> state:Session_state.t
+  -> (unit, Agent_protocol.Error.t) result
+
 (** Called only after a durable commit carrying this exact preparation. Advances
     one acknowledged revision; a different or skipped basis invalidates custody.
     Ordinary commits close the actor's live preparation instead. *)

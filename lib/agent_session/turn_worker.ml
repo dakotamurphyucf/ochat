@@ -4,7 +4,8 @@ module Config = struct
   type t =
     { env : Eio_unix.Stdenv.base
     ; inference_context : Inference_runtime.Context.t
-    ; inference_identity : Chat_response.Neutral_turn.Identity.t
+    ; inference_identity :
+        Inference_allocation.Port.t -> Chat_response.Neutral_turn.Identity.t
     ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
     ; on_inference_completion : Inference_client.Completion.t -> unit
     ; on_inference_observation : Inference.Observation.t -> unit
@@ -390,7 +391,7 @@ let run
           (Option.map capabilities.root_context ~f:(fun source ->
              Option.value_map root_binding ~default:source ~f:(fun binding ->
                Chat_response.Root_binding.wrap binding source)))
-        ~inference_identity:config.inference_identity
+        ~inference_identity:(config.inference_identity capabilities.allocate_inference)
         ~on_inference_attempt:config.on_inference_attempt
         ~on_inference_completion:config.on_inference_completion
         ~on_inference_observation:config.on_inference_observation

@@ -75,7 +75,7 @@ let prepare
         Some source, if changed then [ Session_delta.Run_state_changed index ] else [])
       else Ok (None, [])
     in
-    let%map decision =
+    let%bind decision =
       Goal_command_transition.prepare
         catalog
         ~request
@@ -86,10 +86,36 @@ let prepare
         ~now
     in
     (match decision with
-     | Retained receipt -> { receipt; delta = None }
+     | Retained receipt -> Ok { receipt; delta = None }
      | Commit { catalog; receipt } ->
+       let%map accounting_delta =
+         match request.mutation with
+         | Create { id; _ } ->
+           let%bind goal =
+             Result.of_option
+               (Goal_catalog.find catalog id)
+               ~error:(P.Error.invalid_request "new goal catalog entry is absent")
+           in
+           let%map accounts =
+             Goal_accounts.bootstrap
+               (Option.value state.goal_accounts ~default:Goal_accounts.empty)
+               ~goal
+               ~ledger:state.inference_ledger
+           in
+           [ Session_delta.Goal_accounts_changed accounts ]
+         | Revise_objective _
+         | Record_progress _
+         | Hold _
+         | Change_budget _
+         | Adopt_source _
+         | Abandon _ -> Ok []
+       in
        { receipt
        ; delta =
-           Some (Session_delta.Batch (source_delta @ [ Goal_catalog_changed catalog ]))
+           Some
+             (Session_delta.Batch
+                (source_delta
+                 @ [ Session_delta.Goal_catalog_changed catalog ]
+                 @ accounting_delta))
        })
 ;;

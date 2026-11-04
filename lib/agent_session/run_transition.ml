@@ -64,17 +64,28 @@ let digest json =
   Jsonaf.to_string json |> Digestif.SHA256.digest_string |> Digestif.SHA256.to_hex
 ;;
 
-let prepare
+type preparation =
+  | Checkpoint of P.Run_action.t option
+  | Running_work
+
+let prepare_internal
+      mode
       (state : Session_state.t)
       ~scope
       ~(executing : P.Moderator_execution.t)
       ~work_state
       ~owned_work
-      ~action
       ~now
   =
   let open Result.Let_syntax in
-  let%bind () = Session_state.validate work_state in
+  let action =
+    match mode with
+    | Checkpoint action -> action
+    | Running_work -> None
+  in
+  (* The work projection may introduce a Job whose immutable Run origin is
+     captured in this same transaction. Its occurrence is added below, so the
+     complete cross-carrier validation belongs after that index is constructed. *)
   let%bind () =
     if
       P.Id.Session.equal
@@ -125,12 +136,38 @@ let prepare
       P.Id.Moderator_execution.equal completed.context.id executing.context.id)
   in
   let initial_single_turn =
-    Run_event_scope.is_initial_single_turn previous executing.context
+    match mode with
+    | Checkpoint _ -> Run_event_scope.is_initial_single_turn previous executing.context
+    | Running_work -> false
   in
   let%bind terminal_work =
-    match completed with
-    | None -> Ok previous.terminal_work
-    | Some completed -> Run_callback_evidence.capture previous ~executing ~completed
+    match mode with
+    | Checkpoint _ ->
+      (match completed with
+       | None -> Ok previous.terminal_work
+       | Some completed -> Run_callback_evidence.capture previous ~executing ~completed)
+    | Running_work ->
+      let%bind () =
+        if
+          (not (List.is_empty owned_work))
+          && (not
+                (List.exists owned_work ~f:(fun work ->
+                   List.mem previous.owned_work work ~equal:P.Run_work.equal)))
+          && Option.exists completed ~f:(fun current ->
+            P.Moderator_execution.equal_context executing.context current.context
+            &&
+            match executing.status, current.status with
+            | Running, Running -> true
+            | _, _ -> false)
+          &&
+          match previous.lifecycle with
+          | Admitted | Active | Waiting _ -> true
+          | Terminal _ -> false
+        then Ok ()
+        else
+          Error (conflict "immediate work requires new occurrences and its live callback")
+      in
+      Ok previous.terminal_work
   in
   let evidence =
     Set.of_list
@@ -285,7 +322,7 @@ let prepare
       in
       Run_state.commit index ~run ~receipt ~intent:(Some intent)
   in
-  let%map index =
+  let%bind index =
     match run.lifecycle with
     | Admitted | Active | Waiting _ -> Ok index
     | Terminal terminal ->
@@ -304,7 +341,23 @@ let prepare
       in
       Run_state.commit index ~run ~receipt:terminal_receipt ~intent:None
   in
+  let%map () = Session_state.validate { work_state with run_state = Some index } in
   { run; delta = Session_delta.Run_state_changed index }
+;;
+
+let prepare state ~scope ~executing ~work_state ~owned_work ~action ~now =
+  prepare_internal
+    (Checkpoint action)
+    state
+    ~scope
+    ~executing
+    ~work_state
+    ~owned_work
+    ~now
+;;
+
+let add_owned_work state ~scope ~executing ~work_state ~owned_work ~now =
+  prepare_internal Running_work state ~scope ~executing ~work_state ~owned_work ~now
 ;;
 
 let settle_operation (state : Session_state.t) ~operation_id ~outcome ~now =

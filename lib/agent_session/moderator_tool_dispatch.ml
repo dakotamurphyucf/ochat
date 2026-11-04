@@ -77,6 +77,7 @@ let prepare_request
 ;;
 
 let dispatch
+      ~model_recipes
       ~revalidate
       ~script_tools
       ~observe_nested
@@ -139,7 +140,7 @@ let dispatch
     in
     capabilities.with_moderator_invocation
       ~invocation
-      (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+      (fun ~dispatched ~capabilities:invocation_capabilities ~commit ->
          let authoring_scope =
            Authoring_reference_scope.capture ~invocation_id:dispatched.I.context.id
          in
@@ -213,6 +214,9 @@ let dispatch
                    ~fallback:validate_work
                in
                M.handle_invocation_entries
+                 ?model_recipes:
+                   (Option.map model_recipes ~f:(fun provide ->
+                      provide invocation_capabilities.Invocation_capabilities.model_jobs))
                  ?jobs
                  ?subscriptions
                  ?schedules
@@ -338,6 +342,7 @@ let dispatch
         let script = EC.script prepared in
         let result =
           Moderator_observation.drain
+            ?model_recipes
             ~capabilities
             ~observer:
               { script_id = script.id; source_sha256 = EC.source_revision prepared }
@@ -375,6 +380,7 @@ let dispatch
 ;;
 
 let create
+      ?model_recipes
       ?(revalidate = fun _ -> Ok ())
       ?script_tools
       ?(observe_nested = false)
@@ -419,6 +425,7 @@ let create
     ; validate_original
     ; run =
         dispatch
+          ~model_recipes
           ~revalidate
           ~script_tools
           ~observe_nested

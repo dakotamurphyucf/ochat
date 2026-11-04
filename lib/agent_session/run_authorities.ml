@@ -18,6 +18,10 @@ let find t id = Map.find t id
 let scope t = t.scope
 let caller t = t.caller
 
+let is_current t binding ~run_id =
+  Option.exists (Map.find t run_id) ~f:(phys_equal binding)
+;;
+
 let add_for_caller t ~(run : P.Run.t) ~scope ~caller =
   if
     P.Id.Principal.equal run.principal_id (Run_admission.Scope.principal_id scope)

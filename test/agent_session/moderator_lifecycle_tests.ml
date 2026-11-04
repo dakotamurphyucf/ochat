@@ -483,7 +483,7 @@ let%expect_test "owned stream events consume requests at provider and terminal b
                     ())
                 { env
                 ; inference_context = inference.context
-                ; inference_identity = inference.identity
+                ; inference_identity = (fun _ -> inference.identity)
                 ; on_inference_attempt = ignore
                 ; on_inference_observation = ignore
                 ; on_inference_completion = ignore

@@ -131,7 +131,7 @@ let%expect_test
                               match
                                 invoke
                                   ~invocation:child
-                                  (fun ~dispatched:_ ~borrow_agent_actor:_ ~commit:_ ->
+                                  (fun ~dispatched:_ ~capabilities:_ ~commit:_ ->
                                      failwith "reentrant callback ran")
                               with
                               | Error error ->
@@ -298,6 +298,7 @@ let run ctx input = Task.bind(Tool.call("review", input), fun result -> match re
                 tools
                 ~dispatch:
                   (Agent_session.Managed_moderator_dispatch.create
+                     ?model_recipes:None
                      ~definition:managed
                      ~manager
                      ~history:(fun () -> input.history)

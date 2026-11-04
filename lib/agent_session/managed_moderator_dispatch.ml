@@ -14,6 +14,7 @@ let message result =
 ;;
 
 let create
+      ?model_recipes
       ~definition
       ~manager
       ~history
@@ -45,12 +46,12 @@ let create
       Error "moderator dispatch check failed"
   in
   let result =
-    execute ~invocation (fun ~dispatched ~borrow_agent_actor ~commit ->
+    execute ~invocation (fun ~dispatched ~capabilities ~commit ->
       let authoring_scope =
         Authoring_reference_scope.capture ~invocation_id:dispatched.I.context.id
       in
       N.with_dispatched_scope
-        ~borrow_agent_actor
+        ~capabilities
         ~execute:native_execute
         ~moderator_execute:execute
         ~selected
@@ -156,6 +157,9 @@ let create
                       ~borrowed
                       (fun on_tool_call ->
                          M.handle_invocation_entries
+                           ?model_recipes:
+                             (Option.map model_recipes ~f:(fun provide ->
+                                provide capabilities.Invocation_capabilities.model_jobs))
                            ?jobs
                            ?subscriptions
                            ?schedules

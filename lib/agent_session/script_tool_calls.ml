@@ -1059,7 +1059,7 @@ let with_scope_results
           in
           let moderation = Native_tool_moderation.capture () in
           let execute ~invocation f =
-            execute ~invocation (fun ~(dispatched : I.t) ~borrow_agent_actor ->
+            execute ~invocation (fun ~(dispatched : I.t) ~capabilities ->
               (* A borrowed executor restores its lending context. This call's
                  actual host pre-hook scope may have been installed afterwards;
                  retain it for descendants without extending its lifetime. *)
@@ -1068,23 +1068,22 @@ let with_scope_results
                   t
                   ~session_id:dispatched.context.session_id
                   ~generation:dispatched.context.generation
-                  (fun () -> f ~dispatched ~borrow_agent_actor)))
+                  (fun () -> f ~dispatched ~capabilities)))
           in
           let%bind resolved =
             checked `Admission (fun () ->
               match prepared.rejection with
               | Some outcome ->
-                execute ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ ->
-                  Ok outcome)
+                execute ~invocation (fun ~dispatched:_ ~capabilities:_ -> Ok outcome)
               | None when Option.is_none prepare && t.requires_active_moderator reference
                 ->
-                execute ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                execute ~invocation (fun ~dispatched:_ ~capabilities:_ ->
                   Ok
                     (fail
                        "moderator_reentrancy"
                        "Tool execution requires a decision from the active moderator."))
               | None when reentrant reference.name ->
-                execute ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                execute ~invocation (fun ~dispatched:_ ~capabilities:_ ->
                   Ok
                     (fail
                        "moderator_reentrancy"
@@ -1886,13 +1885,13 @@ let native_dispatch t ~declared ~input ~capabilities =
       in
       let moderation = Native_tool_moderation.capture () in
       let execute ~invocation f =
-        N.execute_borrowed borrowed ~invocation (fun ~dispatched ~borrow_agent_actor ->
+        N.execute_borrowed borrowed ~invocation (fun ~dispatched ~capabilities ->
           Native_tool_moderation.with_context moderation (fun () ->
             with_native_services
               t
               ~session_id:dispatched.context.session_id
               ~generation:dispatched.context.generation
-              (fun () -> f ~dispatched ~borrow_agent_actor)))
+              (fun () -> f ~dispatched ~capabilities)))
       in
       let moderator_execute = N.moderator_executor borrowed in
       let%bind binding =
@@ -1916,9 +1915,9 @@ let native_dispatch t ~declared ~input ~capabilities =
           rejection, reentrant, C.implementation binding, t.moderator, moderator_execute
         with
         | Some outcome, _, _, _, _ ->
-          execute ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ -> Ok outcome)
+          execute ~invocation (fun ~dispatched:_ ~capabilities:_ -> Ok outcome)
         | None, true, _, _, _ ->
-          execute ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+          execute ~invocation (fun ~dispatched:_ ~capabilities:_ ->
             Ok
               (fail
                  "moderator_reentrancy"

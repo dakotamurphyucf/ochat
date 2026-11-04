@@ -88,7 +88,7 @@ let%expect_test "borrowed native execution retains actor ownership and expires" 
                           (N.execute_borrowed
                              scope
                              ~invocation:(child scope)
-                             (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                             (fun ~dispatched:_ ~capabilities:_ ->
                                 failwith "expired executor reached callback"));
                         Eio.Promise.resolve probed_u ());
                       let candidate = child scope in
@@ -116,7 +116,7 @@ let%expect_test "borrowed native execution retains actor ownership and expires" 
                             (N.execute_borrowed
                                scope
                                ~invocation:(I.create context |> protocol_ok)
-                               (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                               (fun ~dispatched:_ ~capabilities:_ ->
                                   failwith "forged child reached callback")));
                       assert_same_session_snapshot before (A.state actor |> protocol_ok);
                       let resolved =
@@ -125,7 +125,7 @@ let%expect_test "borrowed native execution retains actor ownership and expires" 
                            N.execute_borrowed
                              scope
                              ~invocation:candidate
-                             (fun ~dispatched ~borrow_agent_actor:_ ->
+                             (fun ~dispatched ~capabilities:_ ->
                                 let script_scope = N.borrow () |> protocol_ok in
                                 assert (
                                   I.equal (N.borrowed_invocation script_scope) dispatched);
@@ -172,7 +172,7 @@ let%expect_test "borrowed native execution retains actor ownership and expires" 
                             (N.execute_borrowed
                                nested
                                ~invocation:(child nested)
-                               (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                               (fun ~dispatched:_ ~capabilities:_ ->
                                   failwith "child borrow outlived its native call")))
                     | 1 ->
                       (match mode with
@@ -245,7 +245,7 @@ let%expect_test "borrowed native execution retains actor ownership and expires" 
              (N.execute_borrowed
                 scope
                 ~invocation:(child scope)
-                (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                (fun ~dispatched:_ ~capabilities:_ ->
                    failwith "finished operation retained borrowed authority")));
          assert_same_session_snapshot state (A.state actor |> protocol_ok);
          assert_same_session_snapshot state (Agent_session.Memory_backend.state backend);

@@ -26,8 +26,9 @@ type t
     Owner acknowledgement and binding construction are cancellation-protected.
     A cancelled caller can receive the binding, install its cleanup without
     yielding, and then observe the original cancellation at its next effect.
-    All optional operation/invocation associations remain absent unless actual
-    per-execution ownership is supplied by a future explicit port.
+    The legacy [identity] path leaves optional operation/invocation associations
+    absent. [bind_identity] supplies the actual per-execution allocation port
+    without changing this graph's routing or acknowledgement owner.
 
     [run_preparation] is explicit constructor custody. The constructor clears
     this shared cell on every exit before a runtime escapes; later callbacks use
@@ -47,6 +48,13 @@ val create
     preserves a primary exception/backtrace; normal cleanup failures propagate.
     Only actual in-flight executions occupy the map, not retained ledger rows. *)
 val identity : t -> Inference_client.Identity.t
+
+(** Bind the same graph routing/acknowledgement to the exact actual execution
+    allocator. Owned rejection cannot fall back to the unbound identity. *)
+val bind_identity
+  :  t
+  -> allocate:Agent_session.Inference_allocation.Port.t
+  -> Inference_client.Identity.t
 
 (** Tracking acknowledgement precedes the corresponding strict upstream callback.
     Exact late observations remain admissible through the actor's retained handle

@@ -306,6 +306,9 @@ type t =
         share this owner-backed getter; copying the runtime does not freeze an
         earlier checkpoint. Internal-event drains return their own snapshot values. *)
   ; moderator_manager : Chat_response.Moderator_manager.t option
+  ; model_recipes :
+      Model_job_admission.t
+      -> Chat_response.Moderation.Capabilities.model_recipe String.Map.t
   ; moderator_tools : Openai.Responses.Request.Tool.t list
   ; idle_notifications : (unit -> (bool, Agent_protocol.Error.t) result) option
     (** Qualified bounded idle data/wake producer using the pinned actor and
@@ -355,7 +358,8 @@ type t =
   ; drain_internal_events :
       History_entry.t list -> (moderator_drain, Agent_protocol.Error.t) result
   ; execute_model_job :
-      inference_context:Inference_runtime.Context.t
+      allocate_inference:Inference_allocation.Port.t
+      -> inference_context:Inference_runtime.Context.t
       -> capture_recipe_target:
            (Inference.Request.Target.t -> (unit, Agent_protocol.Error.t) result)
       -> recipe:string
@@ -375,19 +379,7 @@ type schedule_services =
   ; cancel : id:string -> (unit, string) result
   }
 
-type job_services =
-  { spawn_model : recipe:string -> payload:Jsonaf.t -> (string, string) result
-  ; call_model :
-      recipe:string
-      -> payload:Jsonaf.t
-      -> execute:
-           (inference_context:Inference_runtime.Context.t
-            -> before_inference_attempt:(Inference_runtime.Attempt.t -> unit)
-            -> capture_recipe_target:
-                 (Inference.Request.Target.t -> (unit, Agent_protocol.Error.t) result)
-            -> (Chat_response.Moderation.Capabilities.model_call_result, string) result)
-      -> (Chat_response.Moderation.Capabilities.model_call_result, string) result
-  }
+type job_services = Runtime_model_services.factory
 
 (** One actual constructor callback owner, shared by Tool, Schedule and Model.
     Saved checkpoint is exact acknowledged DATA, not an effect-currentness check.
@@ -395,7 +387,7 @@ type job_services =
     state; it does not relax interactive permission eligibility. Claim failure
     cannot fall back to standalone services. No installed callback owner is implied. *)
 type legacy_callback_services =
-  { jobs : job_services
+  { jobs : Runtime_model_services.t
   ; schedules : schedule_services
   ; execute : Native_tool_invocation.executor
   ; executing : Agent_protocol.Moderator_execution.t
@@ -456,6 +448,8 @@ val build
   -> env:Eio_unix.Stdenv.base
   -> inference_context:Inference_runtime.Context.t
   -> inference_identity:Chat_response.Neutral_turn.Identity.t
+  -> bind_inference_identity:
+       (Inference_allocation.Port.t -> Chat_response.Neutral_turn.Identity.t)
   -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
   -> on_inference_completion:(Inference_client.Completion.t -> unit)
   -> on_inference_observation:(Inference.Observation.t -> unit)
@@ -503,6 +497,8 @@ val build_with_extensions
   -> env:Eio_unix.Stdenv.base
   -> inference_context:Inference_runtime.Context.t
   -> inference_identity:Chat_response.Neutral_turn.Identity.t
+  -> bind_inference_identity:
+       (Inference_allocation.Port.t -> Chat_response.Neutral_turn.Identity.t)
   -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
   -> on_inference_completion:(Inference_client.Completion.t -> unit)
   -> on_inference_observation:(Inference.Observation.t -> unit)
@@ -558,6 +554,8 @@ val build_generated
   -> env:Eio_unix.Stdenv.base
   -> inference_context:Inference_runtime.Context.t
   -> inference_identity:Chat_response.Neutral_turn.Identity.t
+  -> bind_inference_identity:
+       (Inference_allocation.Port.t -> Chat_response.Neutral_turn.Identity.t)
   -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
   -> on_inference_completion:(Inference_client.Completion.t -> unit)
   -> on_inference_observation:(Inference.Observation.t -> unit)
@@ -612,6 +610,8 @@ val build_authored_child
   -> env:Eio_unix.Stdenv.base
   -> inference_context:Inference_runtime.Context.t
   -> inference_identity:Chat_response.Neutral_turn.Identity.t
+  -> bind_inference_identity:
+       (Inference_allocation.Port.t -> Chat_response.Neutral_turn.Identity.t)
   -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
   -> on_inference_completion:(Inference_client.Completion.t -> unit)
   -> on_inference_observation:(Inference.Observation.t -> unit)

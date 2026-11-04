@@ -16,3 +16,22 @@ val revision : t -> int64
 val execution_id : t -> Agent_protocol.Id.Moderator_execution.t
 val close : t -> unit
 val is_open : t -> bool
+
+module Host : sig
+  type advance
+
+  (** Prevalidate the single revision step belonging to the same physical open
+      callback and its actual prospective Run transaction. This token grants no
+      execution or persistence authority. The actor alone supplies that candidate. *)
+  val prepare_advance
+    :  t
+    -> previous:Agent_protocol.Run.t
+    -> next:Agent_protocol.Run.t
+    -> execution_id:Agent_protocol.Id.Moderator_execution.t
+    -> (advance, Agent_protocol.Error.t) result
+
+  (** Call only after that exact transaction is durably acknowledged. A failed or
+      uncertain save must discard the token. This nonyielding, one-shot update
+      cannot reopen a scope or skip a revision; stale/closed tokens reject. *)
+  val acknowledge_advance : advance -> (unit, Agent_protocol.Error.t) result
+end

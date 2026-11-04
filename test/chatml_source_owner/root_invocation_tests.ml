@@ -123,6 +123,7 @@ let build env sw root fixture target (state : State.t) revision ~startup ~snapsh
     ~env
     ~inference_context:((Inference_fixture.resolve fixture) target |> ok)
     ~inference_identity:(Inference_fixture.identity fixture)
+    ~bind_inference_identity:(fun _ -> Inference_fixture.identity fixture)
     ~on_inference_attempt:ignore
     ~on_inference_completion:ignore
     ~on_inference_observation:ignore
@@ -145,10 +146,14 @@ let build env sw root fixture target (state : State.t) revision ~startup ~snapsh
       ; cancel = (fun ~id:_ -> failwith "unexpected timer")
       }
     ~job_services:
-      { spawn_model = (fun ~recipe:_ ~payload:_ -> failwith "unexpected model spawn")
-      ; call_model =
-          (fun ~recipe:_ ~payload:_ ~execute:_ -> failwith "unexpected model call")
-      }
+      (let initialization : Agent_session.Runtime_model_services.t =
+         { spawn_model = (fun ~recipe:_ ~payload:_ -> failwith "unexpected model spawn")
+         ; call_model =
+             (fun ~recipe:_ ~payload:_ ~execute:_ -> failwith "unexpected model call")
+         }
+       in
+       Agent_session.Runtime_model_services.
+         { initialization; for_execution = (fun _ -> initialization) })
 ;;
 
 let%expect_test "captured root role survives source removal and real moderator restart" =

@@ -27,8 +27,13 @@ let with_event ?(snapshot = Setup.before) ?(deadline = Some deadline) actor pare
        services.claim_event
          ~event
          ~snapshot:(fun () -> Ok snapshot)
-         (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
-            f (J.Moderator_event executing.context.id) commit))
+         (fun ~executing
+           ~model_jobs:_
+           ~allocate_inference:_
+           ~retirement_reason:_
+           ~event:_
+           ~execute:_
+           ~commit -> f (J.Moderator_event executing.context.id) commit))
 ;;
 
 let save commit =

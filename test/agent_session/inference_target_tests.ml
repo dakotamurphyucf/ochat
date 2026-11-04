@@ -765,3 +765,67 @@ let%test_unit "durable Pending alone cannot restore or revive constructor author
     assert (P.Job.equal_kind queued.kind Model_call);
     A.Session_actor.end_initialization actor ~scope:active |> protocol_ok)
 ;;
+
+let%test_unit "Ready construction keeps its own purpose and original authority" =
+  with_pending_actor
+    ~prepare:(fun state -> { state with runtime_initialization = Ready })
+    (fun actor backend ->
+       let live = Atomic.make true in
+       let principal =
+         P.Principal.create
+           ~id:principal_id
+           ~authentication_kind:"local"
+           ~scopes:(P.Scope.Set.of_list [ Send_messages ])
+           ~attributes:[]
+         |> protocol_ok
+       in
+       let original =
+         Operator_authorization.guarded ~principal ~is_current:(fun () -> Atomic.get live)
+       in
+       let expected = A.Session_actor.state actor |> protocol_ok in
+       let purpose = A.Session_actor.Initialization_scope.Purpose.Runtime_construction in
+       assert (
+         Result.is_error (A.Session_actor.begin_initialization ~purpose actor ~expected));
+       let scope =
+         A.Session_actor.begin_initialization_authenticated
+           ~purpose
+           actor
+           ~actor:original
+           ~expected
+         |> protocol_ok
+       in
+       let port = A.Session_actor.initialization_model_admission actor ~scope in
+       let before = (A.Session_actor.state actor |> protocol_ok).counters.revision in
+       assert (
+         Result.is_error
+           (A.Session_actor.complete_initialization actor ~scope ~candidate:expected));
+       assert (
+         Result.is_error
+           (A.Session_actor.fail_initialization
+              actor
+              ~scope
+              (P.Error.invalid_request "constructor failed")));
+       assert (
+         Int64.equal before (A.Session_actor.state actor |> protocol_ok).counters.revision);
+       let forged = { (job expected) with inference_origin = Some Unbound } in
+       assert (Result.is_error (A.Model_job_admission.admit port forged));
+       let admitted = A.Model_job_admission.admit port (job expected) |> protocol_ok in
+       assert (
+         Option.equal
+           P.Job.Inference_origin.equal
+           admitted.inference_origin
+           (Some Unbound));
+       let stored = A.Memory_backend.state backend in
+       assert (
+         A.Session_state.Runtime_initialization.equal stored.runtime_initialization Ready);
+       assert (Option.is_none stored.failure);
+       assert (List.exists stored.jobs ~f:(fun row -> P.Id.Job.equal row.id admitted.id));
+       Atomic.set live false;
+       let before = (A.Session_actor.state actor |> protocol_ok).counters.revision in
+       assert (Result.is_error (A.Model_job_admission.admit port (job expected)));
+       assert (
+         Int64.equal before (A.Session_actor.state actor |> protocol_ok).counters.revision);
+       A.Session_actor.end_initialization actor ~scope |> protocol_ok;
+       Atomic.set live true;
+       assert (Result.is_error (A.Model_job_admission.admit port (job expected))))
+;;

@@ -27,7 +27,15 @@ type fixture =
   ; activate : unit -> (bool, P.Error.t) result
   }
 
-let with_service ?make_persistence ?(keep_writer = false) ?events f =
+let with_service
+      ?make_persistence
+      ?prepare
+      ?(keep_writer = false)
+      ?events
+      ?worker
+      ?(authorize_hook = fun () -> ())
+      f
+  =
   let events =
     Option.value
       events
@@ -38,6 +46,7 @@ let with_service ?make_persistence ?(keep_writer = false) ?events f =
   in
   Run_admission_tests.with_startup_actor
     ?make_persistence
+    ?prepare
     ~events
     (fun actor _ reject_commit _ _ manager _ reference attachment ->
        if not keep_writer
@@ -86,17 +95,20 @@ let with_service ?make_persistence ?(keep_writer = false) ?events f =
        in
        let parse_hook = ref (fun () -> ()) in
        let worker =
-         A.Operation_worker.create ~run:(fun ~sw:_ ~input capabilities ->
-           let authority =
-             capabilities.original_agent_actor () |> protocol_ok |> Option.value_exn
-           in
-           assert (Operator_authorization.is_current authority);
-           Int.incr workers;
-           A.Operation_worker.Completed
-             { final_history = input.history
-             ; moderator_snapshot = snapshot ()
-             ; runtime_requests = []
-             })
+         Option.value
+           worker
+           ~default:
+             (A.Operation_worker.create ~run:(fun ~sw:_ ~input capabilities ->
+                let authority =
+                  capabilities.original_agent_actor () |> protocol_ok |> Option.value_exn
+                in
+                assert (Operator_authorization.is_current authority);
+                Int.incr workers;
+                A.Operation_worker.Completed
+                  { final_history = input.history
+                  ; moderator_snapshot = snapshot ()
+                  ; runtime_requests = []
+                  }))
        in
        let base = Runtime_lease_tests.runtime ~close:(fun () -> ()) () in
        let runtime =
@@ -153,6 +165,7 @@ let with_service ?make_persistence ?(keep_writer = false) ?events f =
          Service.create
            ~server_id:(P.Session_ref.server_id reference)
            ~authorize:(fun proof state ->
+             authorize_hook ();
              if
                !policy
                && Option.equal

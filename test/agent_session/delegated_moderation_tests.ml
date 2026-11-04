@@ -211,7 +211,12 @@ let%expect_test
              ~event:(policy_event delegated)
              ~authorize:(fun () -> Ok ())
              ~snapshot:(fun () -> Ok !live)
-             (fun ~executing ~event:_ ~execute ~commit ->
+             (fun ~executing
+               ~model_jobs:_
+               ~allocate_inference:_
+               ~event:_
+               ~execute
+               ~commit ->
                 let invocation =
                   P.Invocation.create
                     ~observer:executing.context.source
@@ -228,7 +233,7 @@ let%expect_test
                 in
                 let open Result.Let_syntax in
                 let%bind _ =
-                  execute ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                  execute ~invocation (fun ~dispatched:_ ~capabilities:_ ->
                     Int.incr calls;
                     Ok (P.Invocation.Complete (`String "parent policy effect")))
                 in
@@ -356,7 +361,12 @@ let%expect_test
                   | `Before_handler, _ | _, true -> revoked := true
                   | _ -> ());
                  Ok !live)
-               (fun ~executing ~event:_ ~execute ~commit ->
+               (fun ~executing
+                 ~model_jobs:_
+                 ~allocate_inference:_
+                 ~event:_
+                 ~execute
+                 ~commit ->
                   let open Result.Let_syntax in
                   Int.incr handlers;
                   (match boundary with
@@ -377,7 +387,7 @@ let%expect_test
                     |> protocol_ok
                   in
                   let%bind _ =
-                    execute ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                    execute ~invocation (fun ~dispatched:_ ~capabilities:_ ->
                       Int.incr effects;
                       (match boundary with
                        | `Effect_return ->
@@ -528,7 +538,12 @@ let%expect_test
               ~event:(policy_event delegated)
               ~authorize:(fun () -> Ok ())
               ~snapshot:(fun () -> Ok before)
-              (fun ~executing ~event:_ ~execute ~commit ->
+              (fun ~executing
+                ~model_jobs:_
+                ~allocate_inference:_
+                ~event:_
+                ~execute
+                ~commit ->
                  let open Result.Let_syntax in
                  (match boundary with
                   | `Before_native -> pause ()
@@ -548,7 +563,7 @@ let%expect_test
                    |> protocol_ok
                  in
                  let%bind _ =
-                   execute ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                   execute ~invocation (fun ~dispatched:_ ~capabilities:_ ->
                      (match boundary with
                       | `During_native -> pause ()
                       | _ -> ());
@@ -656,7 +671,12 @@ let%expect_test
               ~event:(policy_event delegated)
               ~authorize:(fun () -> Ok ())
               ~snapshot:(fun () -> Ok before)
-              (fun ~executing:_ ~event:_ ~execute:_ ~commit ->
+              (fun ~executing:_
+                ~model_jobs:_
+                ~allocate_inference:_
+                ~event:_
+                ~execute:_
+                ~commit ->
                  escaped
                  := Some (fun () -> commit ~decision:Approve ~snapshot:before ~requests);
                  Eio.Promise.resolve entered_u ();

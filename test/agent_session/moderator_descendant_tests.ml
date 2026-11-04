@@ -83,12 +83,12 @@ let%expect_test "event and idle descendants require a live parent in the exact o
                 }
               |> protocol_ok
             in
-            let callback ~dispatched:_ ~borrow_agent_actor:_ =
+            let callback ~dispatched:_ ~capabilities:_ =
               incr bodies;
               Ok (I.Complete `Null)
             in
             let resolved =
-              execute ~invocation:root (fun ~dispatched ~borrow_agent_actor:_ ->
+              execute ~invocation:root (fun ~dispatched ~capabilities:_ ->
                 let candidate = child dispatched in
                 let before = A.state actor |> protocol_ok in
                 List.iter
@@ -120,7 +120,13 @@ let%expect_test "event and idle descendants require a live parent in the exact o
               ~operation_id:None
               ~event:Session_start
               ~snapshot:(fun () -> Ok (snapshot ()))
-              (fun ~executing ~retirement_reason:_ ~event:_ ~execute ~commit ->
+              (fun ~executing
+                ~model_jobs:_
+                ~allocate_inference:_
+                ~retirement_reason:_
+                ~event:_
+                ~execute
+                ~commit ->
                  let invocation =
                    I.create ~observer ~parent_event:executing.context.id context
                    |> protocol_ok
@@ -140,7 +146,7 @@ let%expect_test "event and idle descendants require a live parent in the exact o
             A.with_idle_moderator_observation_tools
               actor
               ~observer
-              (fun ~observing ~execute ~commit ->
+              (fun ~observing ~capabilities:_ ~execute ~commit ->
                  assert (
                    Agent_protocol.Id.Invocation.equal
                      observing.context.id

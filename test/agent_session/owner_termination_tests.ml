@@ -330,7 +330,11 @@ let%expect_test
                    ~attempt:parent.attempt
                    ~deadline:(Some Job_fixtures.deadline)
                    (fun services ->
-                      services.execute ~invocation (fun ~dispatched ~borrow_agent_actor ->
+                      services.execute ~invocation (fun ~dispatched ~capabilities ->
+                        let borrow_agent_actor =
+                          capabilities
+                            .Agent_session.Invocation_capabilities.borrow_agent_actor
+                        in
                         retained
                         := Some
                              (borrow_agent_actor ~invocation:dispatched

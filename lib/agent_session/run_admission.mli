@@ -28,6 +28,11 @@ module Scope : sig
   val original_actor : t -> Operator_authorization.t option
 
   val observer : t -> Agent_protocol.Invocation.observer
+
+  (** Nonyielding original-proof currentness only. Host policy must first be
+      refreshed through [authorize]; this check never invokes that callback. *)
+  val check_current : t -> (unit, Agent_protocol.Error.t) result
+
   val authorize : t -> Session_state.t -> (unit, Agent_protocol.Error.t) result
   val startup_pending : t -> bool
 end

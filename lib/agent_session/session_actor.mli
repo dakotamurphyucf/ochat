@@ -25,6 +25,10 @@ type persistence =
 
 type services =
   { now : unit -> Agent_protocol.Timestamp.t
+    (** Trusted NONYIELDING wall-clock sampler, also used by the final provider
+        submission check after all composed refreshes. Implementations must not
+        suspend; this host contract is not mechanically enforced. Unexpected
+        clock exceptions propagate. Final original/physical checks follow it. *)
   ; monotonic_now : unit -> Mtime.t
   ; create_attachment_id : unit -> Agent_protocol.Id.Attachment.t
   ; create_reclaim_token : unit -> string
@@ -132,7 +136,7 @@ val set_compaction_inference
 module Inference_owner : sig
   (** One actual constructed graph, with no model/tool authority. The process-local
       token survives worker detachment and authorized resource borrowing. *)
-  type t
+  type t = Inference_graph_owner.t
 end
 
 (** Open before graph constructors. Fresh graph source, issuing actor and current
@@ -725,6 +729,8 @@ type legacy_callback_claim =
     Does not perform scheduler dispatch or transactional launch admission. *)
 type job_execution =
   { job : Agent_protocol.Job.t
+  ; allocate_inference : Inference_allocation.Port.t
+  ; model_jobs : Model_job_admission.t
   ; execute : Native_tool_invocation.executor
   ; moderator_execute : Native_tool_invocation.moderator_executor
   ; claim_event : event:Chat_response.Moderation.Event.t -> Moderator_event.claim
@@ -947,6 +953,32 @@ val retire_initialization_resource
   -> scope:Initialization_scope.t
   -> moderator_manager:Chat_response.Moderator_manager.t
   -> (unit, Agent_protocol.Error.t) result
+
+(** Actor-issued ports over the same exact constructor token. Admission classifies
+    only new pre-episode work; ambiguous existing Run origin denies. Allocation
+    additionally requires this scope's exact actual Running Model_call attempt,
+    including while Pending initialization has the session stopped. Retained
+    callbacks reject after end/stop/source change; no IDs mint custody. *)
+val initialization_model_admission
+  :  t
+  -> scope:Initialization_scope.t
+  -> Model_job_admission.t
+
+val initialization_model_allocation
+  :  t
+  -> scope:Initialization_scope.t
+  -> job:Agent_protocol.Job.t
+  -> Inference_allocation.Port.t
+
+(** Claim only an already acknowledged immediate Model_call in this exact
+    active initializer's admitted set. Rechecks current source and original
+    custody, retains the existing preparation, and never reclassifies origin. *)
+val claim_initialization_model_job
+  :  t
+  -> scope:Initialization_scope.t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
 
 (** Admit a fresh queued Model_call under the active constructor capability.
     Uses ordinary job validation and atomic source binding. *)
@@ -1371,7 +1403,16 @@ val run_start_receipt
     an old receipt never creates a new execution scope. New admission persists
     run/receipt with the actual history+operation or startup checkpoint before
     existing execution starts. Busy user input is rejected rather than deferred
-    without a bound owner. Persistence uncertainty is reconciled by the same key. *)
+    without a bound owner. Persistence uncertainty is reconciled by the same key.
+
+    A NEW Authored_start rejects any existing admitted lifecycle slot. Its first
+    Starting ACK installs the live Run binding and, only for a genuinely
+    authenticated scope, the one-shot original lifecycle loan before publication.
+    A later Idle-write failure preserves that acknowledged binding/loan and Run
+    receipt; it does not roll back startup. Receipt reconciliation remains DATA
+    and never replays the callback or creates a loan. Running/Starting after that
+    failure is not yet idle-claim eligible; this API adds no automatic recovery.
+    A scope without an original object creates no legacy-None lifecycle loan. *)
 val admit_run
   :  t
   -> scope:Run_admission.Scope.t
@@ -1967,6 +2008,12 @@ val skip_schedule
     The claim is durable before script execution. [commit] atomically persists
     the prospective checkpoint, completed receipt and retained runtime requests;
     ownership remains held until the callback returns after local installation.
+    An exact v1 Job/Timer wake that resumes a Run installs that live Run binding's
+    authenticated original loan at the claim ACK, before publication. This parent
+    takes precedence over an unrelated foreground drainer. Missing original
+    custody remains unavailable; neither retained Run facts nor a drainer lend it.
+    Failed claims discard speculative loans; callback completion, Stop and owner
+    closure retire installed loans. No-wake callbacks retain contextual admission.
 
     Failure or cancellation retains terminal evidence without changing the old
     checkpoint. Unsettled failed/interrupted claims block further queued execution
@@ -2001,6 +2048,8 @@ val with_idle_queued_moderator_event_tools
   :  t
   -> snapshot:Session.Moderator_state.Identity_snapshot.t
   -> (executing:Agent_protocol.Moderator_execution.t
+      -> model_jobs:Model_job_admission.t
+      -> allocate_inference:Inference_allocation.Port.t
       -> retirement_reason:string option
       -> event:Session.Snapshot.t
       -> execute:Native_tool_invocation.executor
@@ -2024,6 +2073,8 @@ val with_ordinary_moderator_event
   -> snapshot:Session.Moderator_state.Identity_snapshot.t
   -> event:Chat_response.Moderation.Event.t
   -> (executing:Agent_protocol.Moderator_execution.t
+      -> model_jobs:Model_job_admission.t
+      -> allocate_inference:Inference_allocation.Port.t
       -> retirement_reason:string option
       -> event:Session.Snapshot.t
       -> execute:Native_tool_invocation.executor
@@ -2077,6 +2128,8 @@ val with_delegated_moderator_event
        (unit
         -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
   -> (executing:Agent_protocol.Moderator_execution.t
+      -> model_jobs:Model_job_admission.t
+      -> allocate_inference:Inference_allocation.Port.t
       -> event:Session.Snapshot.t
       -> execute:Native_tool_invocation.executor
       -> commit:
@@ -2119,7 +2172,12 @@ val callback_agent_actor
     Manager/callback, source and original admission before effect dispatch.
     Historical unavailable custody rejects; genuine admitted None remains distinct.
     Claims and truthful outcomes advance only their exact constructor Invocation
-    ACK projection. Returned outcomes do not renew expired effect authority. *)
+    ACK projection. Model child admission issued to this exact constructor's
+    native invocation retains the same Init/preparation and selects the child
+    only after its actual Job ACK, before publication. Final inference checks
+    use nonyielding original/currentness predicates; host policy refresh belongs
+    to the earlier admission/refresh phase. Returned outcomes do not renew
+    expired effect authority. *)
 val callback_tool_executor
   :  t
   -> scope:Callback_scope.t
@@ -2224,6 +2282,14 @@ val with_queued_moderator_retirement
     The source must also match the committed moderator snapshot. Missing or
     replaced sources fail before a claim, leaving receipts/state unchanged.
 
+    Completed producers may lend their exact original admission through the
+    actor's bounded process-local continuation inventory. Claim ACK transfers that
+    loan once; it never borrows a later draining operation's admission. Reopened
+    historical absence remains unavailable, genuine admitted None stays distinct,
+    and expired original custody cannot authorize fresh Model or follow-up work.
+    Pure observation outcome/cleanup still settles truthfully. No receipt recreates
+    a loan, and failed claim persistence leaves the original loan unconsumed.
+
     The callback must prospectively commit the observation acknowledgement and
     moderator snapshot together. Use [retain_follow_up] in the manager so runtime
     requests survive until a host applies them durably after releasing ownership.
@@ -2237,6 +2303,7 @@ val with_idle_moderator_observation
   :  t
   -> observer:Agent_protocol.Invocation.observer
   -> (observing:Agent_protocol.Invocation.t
+      -> capabilities:Invocation_capabilities.t
       -> commit:
            (resolved:Agent_protocol.Invocation.t
             -> snapshot:Session.Moderator_state.Identity_snapshot.t
@@ -2261,6 +2328,7 @@ val with_idle_moderator_observation_tools
   :  t
   -> observer:Agent_protocol.Invocation.observer
   -> (observing:Agent_protocol.Invocation.t
+      -> capabilities:Invocation_capabilities.t
       -> execute:Native_tool_invocation.executor
       -> commit:
            (resolved:Agent_protocol.Invocation.t

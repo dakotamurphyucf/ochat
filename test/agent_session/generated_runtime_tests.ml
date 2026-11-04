@@ -513,6 +513,7 @@ let%expect_test
               ~permission_profile:profile
               ~inference_context:inference.context
               ~inference_identity:inference.identity
+              ~bind_inference_identity:(fun _ -> inference.identity)
               ~on_inference_attempt:ignore
               ~on_inference_observation:ignore
               ~on_inference_completion:ignore
@@ -522,12 +523,16 @@ let%expect_test
                 ; cancel = (fun ~id:_ -> failwith "unexpected timer")
                 }
               ~job_services:
-                { spawn_model =
-                    (fun ~recipe:_ ~payload:_ -> failwith "unexpected model recipe")
-                ; call_model =
-                    (fun ~recipe:_ ~payload:_ ~execute:_ ->
-                      failwith "unexpected model recipe")
-                }
+                (let initialization : Agent_session.Runtime_model_services.t =
+                   { spawn_model =
+                       (fun ~recipe:_ ~payload:_ -> failwith "unexpected model recipe")
+                   ; call_model =
+                       (fun ~recipe:_ ~payload:_ ~execute:_ ->
+                         failwith "unexpected model recipe")
+                   }
+                 in
+                 Agent_session.Runtime_model_services.
+                   { initialization; for_execution = (fun _ -> initialization) })
           in
           let runtime = build definition |> protocol_ok in
           assert (Int.equal 0 !requests && Int.equal 0 !admitted);
@@ -645,6 +650,9 @@ let%expect_test
                 assert (
                   Result.is_error
                     (runtime.execute_model_job
+                       ~allocate_inference:
+                         Agent_session.Invocation_capabilities.unavailable
+                           .allocate_inference
                        ~inference_context:
                          (B.inference_execution runtime
                           |> Inference_client.Execution.context)

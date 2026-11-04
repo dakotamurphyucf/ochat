@@ -16,7 +16,7 @@ type agent_actor_borrow =
 type executor =
   invocation:I.t
   -> (dispatched:I.t
-      -> borrow_agent_actor:agent_actor_borrow
+      -> capabilities:Invocation_capabilities.t
       -> (I.outcome, Agent_protocol.Error.t) result)
   -> (I.t, Agent_protocol.Error.t) result
 
@@ -28,7 +28,7 @@ type owned_executor =
 type moderator_executor =
   invocation:I.t
   -> (dispatched:I.t
-      -> borrow_agent_actor:agent_actor_borrow
+      -> capabilities:Invocation_capabilities.t
       -> commit:
            (resolved:I.t
             -> snapshot:Session.Moderator_state.Identity_snapshot.t
@@ -53,7 +53,7 @@ type borrowed =
   ; runtime_context : Chat_response.Runtime_request_scope.t option
   ; moderation_context : Native_tool_moderation.t option
   ; authoring_reference_context : Authoring_reference_scope.t option
-  ; borrow_agent_actor : agent_actor_borrow
+  ; capabilities : Invocation_capabilities.t
   }
 
 type owned_borrowed =
@@ -191,7 +191,7 @@ let borrowed_agent_actor (scope : borrowed) =
   then
     Error (Agent_protocol.Error.invalid_request "native invocation scope is not active")
   else (
-    let%bind actor = scope.borrow_agent_actor ~invocation:scope.invocation in
+    let%bind actor = scope.capabilities.borrow_agent_actor ~invocation:scope.invocation in
     let%map () =
       if Atomic.get scope.active
       then Ok ()
@@ -658,7 +658,7 @@ let record_authoring_reference (scope : borrowed) response =
 let with_scope
       ?ceiling
       ?moderator_execute
-      ?(borrow_agent_actor = fun ~invocation:_ -> Ok None)
+      ?(capabilities = Invocation_capabilities.unavailable)
       ?(child_origin = I.Script)
       ?execution_context
       ?runtime_context
@@ -672,7 +672,7 @@ let with_scope
       , ceiling
       , execution_context
       , authoring_reference_context
-      , borrow_agent_actor )
+      , capabilities )
     =
     match Eio.Fiber.get scope_key with
     | Some scope when Atomic.get scope.active && I.equal scope.invocation invocation ->
@@ -683,7 +683,7 @@ let with_scope
       , Option.first_some ceiling scope.ceiling
       , Option.value execution_context ~default:scope.execution_context
       , scope.authoring_reference_context
-      , scope.borrow_agent_actor )
+      , scope.capabilities )
     | None | Some _ ->
       ( execute
       , moderator_execute
@@ -691,7 +691,7 @@ let with_scope
       , Option.value_or_thunk execution_context ~default:(fun () ->
           Chatml_execution.capture_context ())
       , Authoring_reference_scope.capture ~invocation_id:invocation.context.id
-      , borrow_agent_actor )
+      , capabilities )
   in
   let execution_context =
     Chatml_execution.capture_context ~inherited:execution_context ()
@@ -723,7 +723,7 @@ let with_scope
             ; runtime_context
             ; moderation_context
             ; authoring_reference_context
-            ; borrow_agent_actor
+            ; capabilities
             }
             f)))
 ;;
@@ -772,20 +772,20 @@ let execute_borrowed (scope : borrowed) ~invocation f =
   let open Result.Let_syntax in
   let%bind ceiling = check_child scope invocation in
   Chat_response.Execution_gate.with_context scope.coordination_context (fun () ->
-    scope.execute ~invocation (fun ~dispatched ~borrow_agent_actor ->
+    scope.execute ~invocation (fun ~dispatched ~capabilities ->
       (* Actor admission can yield while the native callback returns. A retained
        executor must not start effects after its lending scope has expired. *)
       let%bind () = check_active scope in
       with_scope
         ~ceiling
-        ~borrow_agent_actor
+        ~capabilities
         ?moderator_execute:scope.moderator_execute
         ~execution_context:scope.execution_context
         ~runtime_context:scope.runtime_context
         ~moderation_context:scope.moderation_context
         ~execute:scope.execute
         dispatched
-        (fun () -> f ~dispatched ~borrow_agent_actor)))
+        (fun () -> f ~dispatched ~capabilities)))
 ;;
 
 let execute_owned_borrowed (scope : owned_borrowed) ~invocation f =
@@ -846,18 +846,18 @@ let execute_moderator_borrowed (scope : borrowed) ~invocation f =
            "borrowed moderator executor is unavailable")
   in
   Chat_response.Execution_gate.with_context scope.coordination_context (fun () ->
-    execute ~invocation (fun ~dispatched ~borrow_agent_actor ~commit ->
+    execute ~invocation (fun ~dispatched ~capabilities ~commit ->
       let%bind () = check_active scope in
       with_scope
         ~ceiling
-        ~borrow_agent_actor
+        ~capabilities
         ?moderator_execute:scope.moderator_execute
         ~execution_context:scope.execution_context
         ~runtime_context:scope.runtime_context
         ~moderation_context:scope.moderation_context
         ~execute:scope.execute
         dispatched
-        (fun () -> f ~dispatched ~borrow_agent_actor ~commit)))
+        (fun () -> f ~dispatched ~capabilities ~commit)))
 ;;
 
 let moderator_executor (scope : borrowed) =
@@ -988,7 +988,7 @@ let with_selected_managed_scope execution f =
 let with_dispatched_scope
       ~execute
       ?moderator_execute
-      ?borrow_agent_actor
+      ?capabilities
       ~selected
       ~invocation
       f
@@ -998,14 +998,7 @@ let with_dispatched_scope
   match invocation.status with
   | Dispatching
     when String.equal invocation.context.capability_fingerprint (C.fingerprint selected)
-    ->
-    with_scope
-      ~execute
-      ?moderator_execute
-      ?borrow_agent_actor
-      ~ceiling:selected
-      invocation
-      f
+    -> with_scope ~execute ?moderator_execute ?capabilities ~ceiling:selected invocation f
   | _ ->
     Error
       (Agent_protocol.Error.invalid_request
@@ -1240,8 +1233,8 @@ let run_with_native
       ~prepare_output
   =
   let scoped_execute ~invocation f =
-    execute ~invocation (fun ~dispatched ~borrow_agent_actor ->
-      with_scope ?moderator_execute ~borrow_agent_actor ~execute dispatched (fun () ->
+    execute ~invocation (fun ~dispatched ~capabilities ->
+      with_scope ?moderator_execute ~capabilities ~execute dispatched (fun () ->
         f ~dispatched))
   in
   let managed_revision binding =

@@ -331,6 +331,7 @@ val drain_idle_moderator : t -> (bool, Agent_protocol.Error.t) result
     releases the runtime mutex without poisoning subsequent completion delivery. *)
 val execute_model_job
   :  t
+  -> allocate_inference:Agent_session.Inference_allocation.Port.t
   -> inference_context:Inference_runtime.Context.t
   -> capture_recipe_target:
        (Inference.Request.Target.t -> (unit, Agent_protocol.Error.t) result)

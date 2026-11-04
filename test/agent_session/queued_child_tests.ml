@@ -381,7 +381,7 @@ let%expect_test
          with_job actor issuing (fun ~job:_ ~execute ->
            execute
              ~invocation:(Job_fixtures.root issuing)
-             (fun ~dispatched ~borrow_agent_actor:_ ->
+             (fun ~dispatched ~capabilities:_ ->
                 Jobs.with_scope
                   service
                   ~owner:(Invocation dispatched.context.id)

@@ -115,9 +115,9 @@ let run
       | Some _, Script _ ->
         Error (Agent_protocol.Error.invalid_request "script job cannot select agent code")
     in
-    execute ~invocation:root (fun ~dispatched ~borrow_agent_actor ->
+    execute ~invocation:root (fun ~dispatched ~capabilities ->
       N.with_dispatched_scope
-        ~borrow_agent_actor
+        ~capabilities
         ~execute
         ?moderator_execute
         ~selected

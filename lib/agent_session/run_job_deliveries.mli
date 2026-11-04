@@ -4,6 +4,7 @@
 type t
 
 val empty : t
+val equal : t -> t -> bool
 val entries : t -> Run_job_delivery.t list
 val find : t -> Run_job_delivery.Key.t -> Run_job_delivery.t option
 val add : t -> Run_job_delivery.t -> (t, Agent_protocol.Error.t) result

@@ -503,17 +503,18 @@ let prepare_delegated_tool t ~delegation ~event ~authorize =
           ~event
           ~authorize
           ~snapshot
-          (fun ~executing ~event ~execute ~commit ->
+          (fun ~executing ~model_jobs ~allocate_inference ~event ~execute ~commit ->
              let%bind state = A.state t.actor in
              let%bind entries =
                Agent_session.History_codec.all_of_protocol
                  state.conversation.canonical_history
              in
              history := entries;
-             handle ~executing ~event ~execute ~commit)
+             handle ~executing ~model_jobs ~allocate_inference ~event ~execute ~commit)
       in
       let result =
         Agent_session.Moderator_event.run_delegated
+          ~model_recipes:runtime.model_recipes
           ~event
           ~claim
           ~run_actions:(A.run_actions t.actor)
@@ -931,7 +932,12 @@ let drain_loaded_legacy_events t runtime =
      | Error failure -> fail_idle_moderator t failure)
 ;;
 
-let drain_loaded_queued_events ~max_events t runtime manager =
+let drain_loaded_queued_events
+      ~max_events
+      t
+      (runtime : Agent_session.Runtime_builder.t)
+      manager
+  =
   let module A = Agent_session.Session_actor in
   let module M = Chat_response.Moderator_manager in
   let open Result.Let_syntax in
@@ -940,14 +946,29 @@ let drain_loaded_queued_events ~max_events t runtime manager =
     A.with_current_idle_queued_moderator_event_tools
       t.actor
       ~snapshot
-      (fun ~executing ~retirement_reason ~event ~execute ~commit ->
+      (fun
+          ~executing
+           ~model_jobs
+           ~allocate_inference
+           ~retirement_reason
+           ~event
+           ~execute
+           ~commit
+         ->
          let%bind state = A.state t.actor in
          let%bind entries =
            Agent_session.History_codec.all_of_protocol
              state.conversation.canonical_history
          in
          history := entries;
-         handle ~executing ~retirement_reason ~event ~execute ~commit)
+         handle
+           ~executing
+           ~model_jobs
+           ~allocate_inference
+           ~retirement_reason
+           ~event
+           ~execute
+           ~commit)
   in
   let rec loop remaining handled =
     match remaining with
@@ -963,6 +984,7 @@ let drain_loaded_queued_events ~max_events t runtime manager =
       else (
         let%bind outcome =
           Agent_session.Moderator_event.run_queued_idle
+            ~model_recipes:runtime.model_recipes
             ~claim
             ~run_actions:(A.run_actions t.actor)
             ?script_tools:runtime.Agent_session.Runtime_builder.moderator_script_tools
@@ -1049,6 +1071,7 @@ let drain_loaded_observations t runtime =
          with
          | Some script_tools, Some definition ->
            Agent_session.Moderator_observation.drain_idle_with_tools
+             ~model_recipes:runtime.model_recipes
              ~max_observations
              ~script_tools
              ~definition
@@ -1056,10 +1079,12 @@ let drain_loaded_observations t runtime =
                Agent_session.Session_actor.with_idle_moderator_observation_tools
                  t.actor
                  ~observer
-                 (fun ~observing ~execute ~commit ->
-                    with_history (fun () -> handle ~observing ~execute ~commit)))
+                 (fun ~observing ~capabilities ~execute ~commit ->
+                    with_history (fun () ->
+                      handle ~observing ~capabilities ~execute ~commit)))
          | _ ->
            Agent_session.Moderator_observation.drain_idle
+             ~model_recipes:runtime.model_recipes
              ~max_observations
              ~on_tool_call:(fun ~name:_ ~args:_ ->
                Ok
@@ -1069,8 +1094,8 @@ let drain_loaded_observations t runtime =
                Agent_session.Session_actor.with_idle_moderator_observation
                  t.actor
                  ~observer
-                 (fun ~observing ~commit ->
-                    with_history (fun () -> handle ~observing ~commit)))
+                 (fun ~observing ~capabilities ~commit ->
+                    with_history (fun () -> handle ~observing ~capabilities ~commit)))
        in
        let%map drain =
          drain
@@ -1246,7 +1271,14 @@ module For_testing = struct
   ;;
 end
 
-let execute_model_job t ~inference_context ~capture_recipe_target ~recipe ~payload =
+let execute_model_job
+      t
+      ~allocate_inference
+      ~inference_context
+      ~capture_recipe_target
+      ~recipe
+      ~payload
+  =
   let outcome =
     Eio.Mutex.use_rw ~protect:false t.mutex (fun () ->
       match
@@ -1254,6 +1286,7 @@ let execute_model_job t ~inference_context ~capture_recipe_target ~recipe ~paylo
         let%bind () = Eio.Cancel.protect (fun () -> ensure_loaded_locked t) in
         let runtime = Option.value_exn t.runtime in
         runtime.execute_model_job
+          ~allocate_inference
           ~inference_context
           ~capture_recipe_target
           ~recipe

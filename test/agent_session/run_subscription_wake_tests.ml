@@ -34,7 +34,7 @@ let stage_wait actor manager capabilities =
     (fun services ->
        services.execute
          ~invocation:(Job_fixtures.root parent)
-         (fun ~dispatched:root ~borrow_agent_actor:_ ->
+         (fun ~dispatched:root ~capabilities:_ ->
             let invocation =
               P.Invocation.create
                 { root.context with
@@ -47,7 +47,7 @@ let stage_wait actor manager capabilities =
             in
             services.moderator_execute
               ~invocation
-              (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+              (fun ~dispatched ~capabilities:_ ~commit ->
                  let owner = P.Job.Invocation dispatched.P.Invocation.context.id in
                  let creation, pending =
                    Actor.create_script_subscription
@@ -96,7 +96,13 @@ let stage_wait actor manager capabilities =
     ~operation_id:None
     ~event:Session_start
     ~snapshot:(fun () -> Ok snapshot)
-    (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
+    (fun ~executing
+      ~model_jobs:_
+      ~allocate_inference:_
+      ~retirement_reason:_
+      ~event:_
+      ~execute:_
+      ~commit ->
        let actions =
          Actor.run_actions actor executing |> protocol_ok |> Option.value_exn
        in

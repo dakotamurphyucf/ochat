@@ -78,9 +78,9 @@ let%expect_test
             try
               caps.with_moderator_invocation
                 ~invocation
-                (fun ~dispatched ~borrow_agent_actor ~commit ->
+                (fun ~dispatched ~capabilities ~commit ->
                    N.with_dispatched_scope
-                     ~borrow_agent_actor
+                     ~capabilities
                      ~execute:caps.with_invocation
                      ~selected
                      ~invocation:dispatched
@@ -141,11 +141,9 @@ let%expect_test
             | Exit -> Error (handoff_error "fixture exception")
           in
           let result = ref None in
-          caps.with_invocation
-            ~invocation:parent
-            (fun ~dispatched:_ ~borrow_agent_actor:_ ->
-               result := Some (run ());
-               Ok (I.Complete `Null))
+          caps.with_invocation ~invocation:parent (fun ~dispatched:_ ~capabilities:_ ->
+            result := Some (run ());
+            Ok (I.Complete `Null))
           |> protocol_ok
           |> ignore;
           let result = Option.value_exn !result in
@@ -162,7 +160,7 @@ let%expect_test
              assert (Option.is_some committed.authoring_reference);
              caps.with_moderator_observation
                ~invocation_id:committed.context.id
-               (fun ~observing ~commit ->
+               (fun ~observing ~capabilities:_ ~commit ->
                   assert (
                     Option.is_none (Scope.capture ~invocation_id:observing.context.id));
                   let resolved = I.complete_observation observing |> protocol_ok in

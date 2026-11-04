@@ -300,7 +300,13 @@ let%expect_test "two session event owners reject a wait cycle and release both b
                     ~operation_id:None
                     ~event:Session_start
                     ~snapshot:(fun () -> Ok snapshot)
-                    (fun ~executing:_ ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
+                    (fun ~executing:_
+                      ~model_jobs:_
+                      ~allocate_inference:_
+                      ~retirement_reason:_
+                      ~event:_
+                      ~execute:_
+                      ~commit ->
                        Eio.Promise.resolve (snd held.(index)) ();
                        Eio.Promise.await (fst proceed.(index));
                        let remote, _ = actors.((index + 1) mod 2) in
@@ -973,7 +979,15 @@ let%expect_test "event-owned native calls retain lineage and expire with their c
            A.with_idle_queued_moderator_event_tools
              actor
              ~snapshot:before
-             (fun ~executing ~retirement_reason:_ ~event:_ ~execute ~commit ->
+             (fun
+                 ~executing
+                  ~model_jobs:_
+                  ~allocate_inference:_
+                  ~retirement_reason:_
+                  ~event:_
+                  ~execute
+                  ~commit
+                ->
                 let native_callback = !on_call in
                 (on_call
                  := fun () ->
@@ -1014,7 +1028,7 @@ let%expect_test "event-owned native calls retain lineage and expire with their c
                 in
                 assert (
                   Result.is_error
-                    (execute ~invocation:bad (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                    (execute ~invocation:bad (fun ~dispatched:_ ~capabilities:_ ->
                        assert false)));
                 M.handle_next_event_entries_transactional
                   manager
@@ -1066,7 +1080,7 @@ let%expect_test "event-owned native calls retain lineage and expire with their c
          let execute, child = Option.value_exn !escaped in
          assert (
            Result.is_error
-             (execute ~invocation:(child ()) (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+             (execute ~invocation:(child ()) (fun ~dispatched:_ ~capabilities:_ ->
                 assert false)));
          let state = A.state actor |> protocol_ok in
          let native = List.hd_exn state.invocations in
@@ -1249,13 +1263,28 @@ let%expect_test
              A.with_current_idle_queued_moderator_event_tools
                actor
                ~snapshot
-               (fun ~executing ~retirement_reason ~event ~execute ~commit ->
+               (fun
+                   ~executing
+                    ~model_jobs
+                    ~allocate_inference
+                    ~retirement_reason
+                    ~event
+                    ~execute
+                    ~commit
+                  ->
                   let event =
                     match mode with
                     | `Mismatched_head -> Session.Snapshot.String "wrong head"
                     | _ -> event
                   in
-                  f ~executing ~retirement_reason ~event ~execute ~commit)
+                  f
+                    ~executing
+                    ~model_jobs
+                    ~allocate_inference
+                    ~retirement_reason
+                    ~event
+                    ~execute
+                    ~commit)
            in
            let history () =
              (A.state actor |> protocol_ok).conversation.canonical_history
@@ -3999,7 +4028,7 @@ let%expect_test "Prepared Async dependency delivery retains the parent's origina
                (fun services ->
                   services.execute
                     ~invocation:root
-                    (fun ~dispatched:root ~borrow_agent_actor:_ ->
+                    (fun ~dispatched:root ~capabilities:_ ->
                        let nested =
                          I.create
                            ~observer
@@ -4015,7 +4044,7 @@ let%expect_test "Prepared Async dependency delivery retains the parent's origina
                        let%map () =
                          services.moderator_execute
                            ~invocation:nested
-                           (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+                           (fun ~dispatched ~capabilities:_ ~commit ->
                               let owner = P.Job.Invocation dispatched.context.id in
                               let next =
                                 A.prepare_background_job_launch actor ~owner request
@@ -4984,7 +5013,7 @@ let%expect_test "legacy constructor Tool calls settle only their exact Event-own
                         (execute
                            ~invocation:
                              (child ~parent:(P.Id.Moderator_execution.create ()))
-                           (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                           (fun ~dispatched:_ ~capabilities:_ ->
                               foreign_executed := true;
                               Ok (Complete `Null))))
                  ()
@@ -5080,11 +5109,9 @@ let%expect_test "legacy constructor Tool calls settle only their exact Event-own
              let escaped_ran = ref false in
              assert (
                Result.is_error
-                 (execute
-                    ~invocation:escaped_child
-                    (fun ~dispatched:_ ~borrow_agent_actor:_ ->
-                       escaped_ran := true;
-                       Ok (Complete `Null))));
+                 (execute ~invocation:escaped_child (fun ~dispatched:_ ~capabilities:_ ->
+                    escaped_ran := true;
+                    Ok (Complete `Null))));
              assert (not !escaped_ran);
              assert_same_session_snapshot settled (A.state actor |> protocol_ok);
              assert_same_session_snapshot settled (S.Memory_backend.state backend);

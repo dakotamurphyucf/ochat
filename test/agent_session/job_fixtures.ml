@@ -11,6 +11,7 @@ let deadline = Agent_protocol.Timestamp.of_string "2099-01-01T00:00:00Z" |> prot
 let add_claimed_job
       ?(payload = `Object [ "fixture", `String "owned tool job" ])
       ?(retry_policy = J.Never)
+      ?(inference_origin = Some J.Inference_origin.Unbound)
       actor
   =
   let job =
@@ -29,8 +30,11 @@ let add_claimed_job
       ; completed_at = None
       ; result = None
       ; delivery = Pending
-      ; launch = None
-      ; inference_origin = None
+      ; launch =
+          None
+          (* This fixture explicitly creates unrelated work. Historical-absence
+         cases pass [~inference_origin:None] rather than guessing at restoration. *)
+      ; inference_origin
       ; progress = None
       }
   in

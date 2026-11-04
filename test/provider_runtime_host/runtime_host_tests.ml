@@ -1853,7 +1853,7 @@ let%test_unit
                       identity.with_attempt
                         prepared
                         ~relation:(Transcript.Scope.Nested parent)
-                        ~f:(fun ~scope:nested_scope ~accounting_id ->
+                        ~f:(fun ~scope:nested_scope ~accounting_id ~submission_guard:_ ->
                           let attempt =
                             RT.Prepared.start prepared ~scope:nested_scope ~accounting_id
                             |> ok
@@ -2040,7 +2040,12 @@ let%test_unit
                  identity.with_attempt
                    older_prepared
                    ~relation:Transcript.Scope.Root
-                   ~f:(fun ~scope:older_scope ~accounting_id:older_accounting ->
+                   ~f:
+                     (fun
+                       ~scope:older_scope
+                       ~accounting_id:older_accounting
+                       ~submission_guard:_
+                     ->
                      let older =
                        RT.Prepared.start
                          older_prepared
@@ -2056,7 +2061,12 @@ let%test_unit
                          identity.with_attempt
                            newer_prepared
                            ~relation:Transcript.Scope.Root
-                           ~f:(fun ~scope:newer_scope ~accounting_id:newer_accounting ->
+                           ~f:
+                             (fun
+                               ~scope:newer_scope
+                               ~accounting_id:newer_accounting
+                               ~submission_guard:_
+                             ->
                              let newer =
                                RT.Prepared.start
                                  newer_prepared
@@ -2070,7 +2080,9 @@ let%test_unit
                                  identity.with_attempt
                                    (prepared "overflow-sibling")
                                    ~relation:Transcript.Scope.Root
-                                   ~f:(fun ~scope:_ ~accounting_id:_ ->
+                                   ~f:
+                                     (fun
+                                       ~scope:_ ~accounting_id:_ ~submission_guard:_ ->
                                      overflow_entered := true);
                                  false
                                with
@@ -2155,7 +2167,7 @@ let%test_unit
                     (Root.Model_inference.identity scope).with_attempt
                       prepared
                       ~relation:Transcript.Scope.Root
-                      ~f:(fun ~scope:attempt_scope ~accounting_id ->
+                      ~f:(fun ~scope:attempt_scope ~accounting_id ~submission_guard:_ ->
                         incr close_attempts;
                         let attempt =
                           RT.Prepared.start prepared ~scope:attempt_scope ~accounting_id

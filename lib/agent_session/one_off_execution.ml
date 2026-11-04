@@ -108,7 +108,7 @@ let run
   in
   let requests = ref [] in
   let%map resolved =
-    N.execute_borrowed borrowed ~invocation (fun ~dispatched ~borrow_agent_actor:_ ->
+    N.execute_borrowed borrowed ~invocation (fun ~dispatched ~capabilities:_ ->
       let remaining =
         Time_ns.diff
           (Agent_protocol.Timestamp.to_time_ns deadline)

@@ -69,7 +69,7 @@ let%expect_test
                  (fun services ->
                     services.execute
                       ~invocation:(root parent)
-                      (fun ~dispatched:root ~borrow_agent_actor:_ ->
+                      (fun ~dispatched:root ~capabilities:_ ->
                          let attempted = make_subscription root in
                          assert (
                            Result.is_error
@@ -92,7 +92,7 @@ let%expect_test
                          let result =
                            services.moderator_execute
                              ~invocation
-                             (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+                             (fun ~dispatched ~capabilities:_ ~commit ->
                                 assert (Option.is_none dispatched.observation);
                                 let owner = J.Invocation dispatched.context.id in
                                 let value =
@@ -336,7 +336,13 @@ let%expect_test
            services.claim_event
              ~event
              ~snapshot:(fun () -> Ok before)
-             (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit:save ->
+             (fun ~executing
+               ~model_jobs:_
+               ~allocate_inference:_
+               ~retirement_reason:_
+               ~event:_
+               ~execute:_
+               ~commit:save ->
                 let owner = J.Moderator_event executing.context.id in
                 let current =
                   A.read_script_subscription actor ~owner ~source ~id:value.context.id

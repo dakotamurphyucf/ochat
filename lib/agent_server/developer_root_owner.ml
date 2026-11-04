@@ -3589,7 +3589,8 @@ module Model_inference = struct
                    f
                      ~scope:(Store.Tracking.Registration.scope registration)
                      ~accounting_id:
-                       (Store.Tracking.Registration.accounting_id registration)))
+                       (Store.Tracking.Registration.accounting_id registration)
+                     ~submission_guard:Inference_runtime.Submission_guard.empty))
             with
             | exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
           in

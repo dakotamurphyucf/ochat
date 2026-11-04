@@ -98,7 +98,7 @@ let%expect_test
               N.execute_borrowed
                 borrow
                 ~invocation:child
-                (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                (fun ~dispatched:_ ~capabilities:_ ->
                    S.emit [ R.Request_compaction ] |> Result.ok_or_failwith;
                    let current = H.current () |> Result.ok_or_failwith in
                    handler := Some current;

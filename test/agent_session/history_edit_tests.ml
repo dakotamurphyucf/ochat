@@ -1192,7 +1192,7 @@ let%expect_test "independent background outcome commits against edited current h
          Job_fixtures.with_job actor job (fun ~job:_ ~execute ->
            execute
              ~invocation:(Job_fixtures.root job)
-             (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+             (fun ~dispatched:_ ~capabilities:_ ->
                 let before = A.Session_actor.state actor |> protocol_ok in
                 let saved =
                   A.Session_actor.edit_history

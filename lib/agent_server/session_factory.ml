@@ -2086,20 +2086,6 @@ let extension_services
     }
 ;;
 
-let add_bound_job actor_ref pending ~run_preparation job =
-  match !actor_ref with
-  | Some actor ->
-    (match !run_preparation with
-     | None -> Agent_session.Session_actor.add_job actor job
-     | Some preparation ->
-       Agent_session.Session_actor.add_run_constructor_job actor ~preparation job)
-    |> Result.map ~f:(fun job -> Agent_protocol.Id.Job.to_string job.id)
-    |> Result.map_error ~f:(fun error -> error.message)
-  | None ->
-    pending := !pending @ [ job ];
-    Ok (Agent_protocol.Id.Job.to_string job.id)
-;;
-
 let rec await_call_cancellation t actor initialization_scope (job : Agent_protocol.Job.t) =
   let state = Agent_session.Session_actor.state actor in
   let scope_active =
@@ -2277,21 +2263,11 @@ let job_services
       t
       (state : Agent_session.Session_state.t)
       actor_ref
-      pending
+      _pending
       ~initialization_scope
       ~initialization_jobs
       ~run_preparation
   =
-  let spawn_model ~recipe ~payload =
-    let job = model_job t state ~recipe ~payload ~delivery:Pending in
-    match !actor_ref, !initialization_scope with
-    | Some actor, Some scope ->
-      Agent_session.Session_actor.add_initialization_model_job actor ~scope job
-      |> Result.map ~f:(fun job -> Agent_protocol.Id.Job.to_string job.id)
-      |> Result.map_error ~f:(fun error -> error.message)
-    | _, None -> add_bound_job actor_ref pending ~run_preparation job
-    | None, Some _ -> Error "initialization model admission requires its issuing actor"
-  in
   let capacity_key () =
     let prompt =
       Option.value_map
@@ -2371,92 +2347,137 @@ let job_services
         job
         (Error ("synchronous model call failed: " ^ Exn.to_string exn))
   in
-  let call_model ~recipe ~payload ~execute =
-    match !actor_ref with
-    | None -> Error "synchronous model call requires an initialized session actor"
-    | Some actor ->
-      let open Result.Let_syntax in
-      let%bind current =
-        Agent_session.Session_actor.state actor
-        |> Result.map_error ~f:(fun error -> error.message)
-      in
-      let scope = !initialization_scope in
-      let%bind () =
-        match scope, current.lifecycle.desired with
-        | Some _, (Running | Stopped) | None, Running -> Ok ()
-        | None, Stopped -> Error "synchronous model call requires a running session"
-      in
-      (match Job_capacity.try_acquire t.job_capacity (capacity_key ()) with
-       | Error error -> Error error.message
-       | Ok None -> Error "synchronous model call capacity is currently unavailable"
-       | Ok (Some lease) ->
-         Exn.protect
-           ~finally:(fun () -> Job_capacity.release lease)
-           ~f:(fun () ->
-             let open Result.Let_syntax in
-             let job = model_job t state ~recipe ~payload ~delivery:Not_required in
-             let%bind job =
-               (match scope with
-                | Some scope ->
-                  Agent_session.Session_actor.start_initialization_model_job
-                    actor
-                    ~scope
-                    job
-                | None ->
-                  (match !run_preparation with
-                   | Some preparation ->
-                     Agent_session.Session_actor.start_run_constructor_model_job
-                       actor
-                       ~preparation
-                       job
-                   | None ->
-                     let%bind job = Agent_session.Session_actor.add_job actor job in
-                     let%bind claimed =
-                       Agent_session.Session_actor.claim_job
-                         actor
-                         ~job_id:job.id
-                         ~generation:job.generation
-                     in
-                     Result.of_option
-                       claimed
-                       ~error:
-                         (unavailable
-                            Conflict
-                            "synchronous model call could not claim its durable job")))
-               |> Result.map_error ~f:(fun error -> error.message)
-             in
-             Option.iter scope ~f:(fun _ ->
-               initialization_jobs := job :: !initialization_jobs);
-             let%bind inference =
-               prepare_model_job_inference
-                 ~run_preparation
-                 t
-                 actor
-                 ~initialization_scope:scope
-                 job
-               |> Result.map_error ~f:(fun error -> error.message)
-             in
-             run_call actor scope job (fun () ->
-               execute
-                 ~inference_context:inference.context
-                 ~before_inference_attempt:(fun _attempt ->
-                   match scope with
-                   | None -> ()
-                   | Some scope ->
-                     (match
-                        Agent_session.Session_actor.initialization_model_job_is_current
+  let services ~scope admission : Agent_session.Runtime_model_services.t =
+    let admit job =
+      Agent_session.Model_job_admission.admit admission job
+      |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+    in
+    let spawn_model ~recipe ~payload =
+      model_job t state ~recipe ~payload ~delivery:Pending
+      |> admit
+      |> Result.map ~f:(fun job -> Agent_protocol.Id.Job.to_string job.id)
+    in
+    let call_model ~recipe ~payload ~execute =
+      match !actor_ref with
+      | None -> Error "synchronous model call requires an initialized session actor"
+      | Some actor ->
+        let open Result.Let_syntax in
+        let%bind current =
+          Agent_session.Session_actor.state actor
+          |> Result.map_error ~f:(fun error -> error.message)
+        in
+        let%bind () =
+          match scope, current.lifecycle.desired with
+          | Some _, (Running | Stopped) | None, Running -> Ok ()
+          | None, Stopped -> Error "synchronous model call requires a running session"
+        in
+        (match Job_capacity.try_acquire t.job_capacity (capacity_key ()) with
+         | Error error -> Error error.message
+         | Ok None -> Error "synchronous model call capacity is currently unavailable"
+         | Ok (Some lease) ->
+           Exn.protect
+             ~finally:(fun () -> Job_capacity.release lease)
+             ~f:(fun () ->
+               let open Result.Let_syntax in
+               let job = model_job t state ~recipe ~payload ~delivery:Not_required in
+               let%bind job =
+                 Eio.Cancel.protect (fun () ->
+                   let%bind job = admit job in
+                   (match scope with
+                    | Some scope ->
+                      Agent_session.Session_actor.claim_initialization_model_job
+                        actor
+                        ~scope
+                        ~job_id:job.id
+                        ~generation:job.generation
+                    | None ->
+                      let open Result.Let_syntax in
+                      let%bind claimed =
+                        Agent_session.Session_actor.claim_job
                           actor
-                          ~scope
                           ~job_id:job.id
                           ~generation:job.generation
-                          ~attempt:job.attempt
-                      with
-                      | Ok true -> ()
-                      | Ok false | Error _ ->
-                        raise Chat_response.Ctx.Inference_admission_rejected))
-                 ~capture_recipe_target:inference.capture_recipe_target)))
+                      in
+                      Result.of_option
+                        claimed
+                        ~error:
+                          (unavailable
+                             Conflict
+                             "synchronous model call could not claim its durable job"))
+                   |> Result.map_error ~f:(fun error ->
+                     error.Agent_protocol.Error.message))
+               in
+               Option.iter scope ~f:(fun _ ->
+                 initialization_jobs := job :: !initialization_jobs);
+               run_call actor scope job (fun () ->
+                 (* Preparation can reject or be cancelled after the durable Job
+                    claim. Keep it inside the same terminal-outcome owner as
+                    execution so it cannot strand a Run-owned child. *)
+                 let%bind inference =
+                   prepare_model_job_inference
+                     ~run_preparation
+                     t
+                     actor
+                     ~initialization_scope:scope
+                     job
+                   |> Result.map_error ~f:(fun error -> error.message)
+                 in
+                 let execute_owned allocate_inference =
+                   execute
+                     ~inference_context:inference.context
+                     ~allocate_inference
+                     ~before_inference_attempt:(fun _attempt ->
+                       match scope with
+                       | None -> ()
+                       | Some scope ->
+                         (match
+                            Agent_session.Session_actor
+                            .initialization_model_job_is_current
+                              actor
+                              ~scope
+                              ~job_id:job.id
+                              ~generation:job.generation
+                              ~attempt:job.attempt
+                          with
+                          | Ok true -> ()
+                          | Ok false | Error _ ->
+                            raise Chat_response.Ctx.Inference_admission_rejected))
+                     ~capture_recipe_target:inference.capture_recipe_target
+                 in
+                 match scope with
+                 | Some scope ->
+                   execute_owned
+                     (Agent_session.Session_actor.initialization_model_allocation
+                        actor
+                        ~scope
+                        ~job)
+                 | None ->
+                   Agent_session.Session_actor.with_job_execution
+                     actor
+                     ~job_id:job.id
+                     ~generation:job.generation
+                     ~attempt:job.attempt
+                     ~deadline:None
+                     (fun services -> Ok (execute_owned services.allocate_inference))
+                   |> Result.map_error ~f:(fun error ->
+                     error.Agent_protocol.Error.message)
+                   |> Result.join)))
+    in
+    { spawn_model; call_model }
   in
-  Agent_session.Runtime_builder.{ spawn_model; call_model }
+  let initialization =
+    let scope = !initialization_scope in
+    let admission =
+      match !actor_ref, scope with
+      | Some actor, Some scope ->
+        Agent_session.Session_actor.initialization_model_admission actor ~scope
+      | (None | Some _), None | None, Some _ ->
+        Agent_session.Invocation_capabilities.unavailable.model_jobs
+    in
+    services ~scope admission
+  in
+  Agent_session.Runtime_model_services.
+    { initialization; for_execution = (fun admission -> services ~scope:None admission) }
 ;;
 
 let flush_pending_jobs ?run_preparation actor jobs =
@@ -3742,14 +3763,15 @@ let legacy_construction
       (* Capture this exact Init owner. Returning/closing it cannot retarget these
          services to a later constructor or the ordinary raw Job writer. *)
       let jobs =
-        job_services
-          t
-          state
-          actor_ref
-          pending_jobs
-          ~initialization_scope:(ref (Some constructor))
-          ~initialization_jobs
-          ~run_preparation
+        (job_services
+           t
+           state
+           actor_ref
+           pending_jobs
+           ~initialization_scope:(ref (Some constructor))
+           ~initialization_jobs
+           ~run_preparation)
+          .initialization
       in
       A.with_initialization_callback
         actor
@@ -3762,7 +3784,7 @@ let legacy_construction
              check_current ()
              |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
            in
-           let jobs : B.job_services =
+           let jobs : Agent_session.Runtime_model_services.t =
              { spawn_model =
                  (fun ~recipe ~payload ->
                    let open Result.Let_syntax in
@@ -3873,6 +3895,8 @@ let prepare_runtime_at_paths
         ~env:t.env
         ~inference_context
         ~inference_identity:(Graph_tracking.identity tracking)
+        ~bind_inference_identity:(fun allocate ->
+          Graph_tracking.bind_identity tracking ~allocate)
         ~on_inference_attempt:(Graph_tracking.on_attempt tracking)
         ~on_inference_completion:(Graph_tracking.on_completion tracking)
         ~on_inference_observation:(Graph_tracking.on_observation tracking)
@@ -4236,6 +4260,7 @@ let prepare_runtime_at_paths
                 ~env
                 ~inference_context
                 ~inference_identity
+                ~bind_inference_identity
                 ~on_inference_attempt
                 ~on_inference_completion
                 ~on_inference_observation
@@ -4256,6 +4281,7 @@ let prepare_runtime_at_paths
                   ~env
                   ~inference_context
                   ~inference_identity
+                  ~bind_inference_identity
                   ~on_inference_attempt
                   ~on_inference_completion
                   ~on_inference_observation

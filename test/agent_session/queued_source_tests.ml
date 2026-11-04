@@ -184,9 +184,9 @@ let%expect_test
              |> protocol_ok
            in
            let execute = N.execute_borrowed borrowed in
-           execute ~invocation:child (fun ~dispatched ~borrow_agent_actor ->
+           execute ~invocation:child (fun ~dispatched ~capabilities ->
              N.with_dispatched_scope
-               ~borrow_agent_actor
+               ~capabilities
                ~execute
                ~selected:ceiling
                ~invocation:dispatched
@@ -296,7 +296,7 @@ let%expect_test
     let issuing = add_claimed_job actor in
     let invocation = root issuing in
     with_job actor issuing (fun ~job:_ ~execute ->
-      execute ~invocation (fun ~dispatched ~borrow_agent_actor:_ ->
+      execute ~invocation (fun ~dispatched ~capabilities:_ ->
         Jobs.with_scope
           service
           ~owner:(Invocation dispatched.context.id)

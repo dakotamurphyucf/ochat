@@ -349,7 +349,13 @@ let%expect_test
          ~operation_id:None
          ~event:Session_start
          ~snapshot:(fun () -> Ok (snapshot ()))
-         (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
+         (fun ~executing
+           ~model_jobs:_
+           ~allocate_inference:_
+           ~retirement_reason:_
+           ~event:_
+           ~execute:_
+           ~commit ->
             let owner = P.Job.Moderator_event executing.context.id in
             let source = executing.context.source in
             let revocation, _ =

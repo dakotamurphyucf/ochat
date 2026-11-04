@@ -121,6 +121,9 @@ val with_generation : t -> generation:int -> (t, Error.t) Result.t
     associations come from the actual runtime owner, never provider aliases.
     Configuration identifies actual opaque preparation and chosen transport.
     Oldest terminal rows are eligible for bounded retirement; active rows remain.
+    [protected_ordinals] is an immutable host retention deny-set for actually
+    protected accounting bindings; those rows remain and other eligible rows
+    are tried. It carries no execution authority.
     Only an explicitly recognized unsafe-retirement carrier condition may select
     Protected_future_data. If no safe capacity exists, returns an Untracked handle
     and records partial coverage/limit status instead of deleting future data or
@@ -128,7 +131,8 @@ val with_generation : t -> generation:int -> (t, Error.t) Result.t
     Untracked coverage still require durable ACK before dispatch. Other codec,
     persistence, authentication and cancellation failures are NOT swallowed. *)
 val admit
-  :  t
+  :  ?protected_ordinals:Core.Int64.Set.t
+  -> t
   -> source:Transcript.Source_id.t
   -> relation:Transcript.Scope.relation
   -> operation_id:Agent_protocol.Id.Operation.t option

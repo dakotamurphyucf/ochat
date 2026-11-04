@@ -6,6 +6,7 @@ module Hold : sig
     | Needs_input of Goal_text.Reason.t
     | Budget_gate of Goal_budget.Dimension.t
     | Usage_uncertain of Inference.Observation.Usage.Component.t
+    | Deadline_reached
     | Source_review
   [@@deriving equal, sexp_of]
 end

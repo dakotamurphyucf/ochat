@@ -12,6 +12,15 @@ type t =
   | Present of Run_goal_link.t Map.M(Key).t
 
 let empty = Missing
+
+let equal left right =
+  match left, right with
+  | Missing, Missing | Null, Null -> true
+  | Present left, Present right -> Map.equal Run_goal_link.equal left right
+  | Missing, (Null | Present _) | Null, (Missing | Present _) | Present _, (Missing | Null)
+    -> false
+;;
+
 let invalid message = Error (P.Error.invalid_request message)
 
 let entries = function

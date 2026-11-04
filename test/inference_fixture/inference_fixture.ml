@@ -329,7 +329,10 @@ let create_internal ~request_guidance ~on_prepare ~namespace ~default_model ~pos
           let accounting_id =
             O.Observation_id.of_string (namespace ^ "/usage/" ^ id) |> ok
           in
-          f ~scope ~accounting_id)
+          f
+            ~scope
+            ~accounting_id
+            ~submission_guard:Inference_runtime.Submission_guard.empty)
     }
   in
   let bind target =

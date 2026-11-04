@@ -394,3 +394,12 @@ startup preserves acknowledged queued suffixes for installed per-head delivery a
 never drains them with constructor defaults. Standalone embeddings that explicitly
 supply no construction port retain their existing behavior. Foreground/idle host
 routing and installed Model services remain subsequent composition gates.
+
+Deferred native observations retain a separate process-local admission component
+within the existing bounded continuation inventory. The completed native result
+ACK installs its loan before publication; the exact observation claim ACK transfers
+it once. This preserves the producer's original admission when another operation
+drains the observation. The handler follow-up component has an independent lifetime.
+Historical absence and known expiry remain explicit negative facts: they can settle
+truthful outcomes but cannot authorize a new Model call, Turn, or Compact. Stop,
+source retirement, owner shutdown, and recovery never reconstruct these loans.

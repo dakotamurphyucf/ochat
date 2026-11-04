@@ -12,7 +12,7 @@ type agent_actor_borrow =
 type executor =
   invocation:Agent_protocol.Invocation.t
   -> (dispatched:Agent_protocol.Invocation.t
-      -> borrow_agent_actor:agent_actor_borrow
+      -> capabilities:Invocation_capabilities.t
       -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
   -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
 
@@ -31,7 +31,7 @@ type owned_executor =
 type moderator_executor =
   invocation:Agent_protocol.Invocation.t
   -> (dispatched:Agent_protocol.Invocation.t
-      -> borrow_agent_actor:agent_actor_borrow
+      -> capabilities:Invocation_capabilities.t
       -> commit:
            (resolved:Agent_protocol.Invocation.t
             -> snapshot:Session.Moderator_state.Identity_snapshot.t
@@ -280,7 +280,7 @@ val with_managed_scope
 val with_dispatched_scope
   :  execute:executor
   -> ?moderator_execute:moderator_executor
-  -> ?borrow_agent_actor:agent_actor_borrow
+  -> ?capabilities:Invocation_capabilities.t
   -> selected:Chat_response.Tool_capability.t
   -> invocation:Agent_protocol.Invocation.t
   -> (unit -> ('a, Agent_protocol.Error.t) result)

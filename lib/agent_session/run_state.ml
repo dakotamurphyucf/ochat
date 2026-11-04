@@ -38,6 +38,26 @@ let empty =
   }
 ;;
 
+let equal
+      { installation
+      ; runs
+      ; intents
+      ; receipts
+      ; job_deliveries
+      ; goal_links
+      ; recurrence_origins
+      }
+      other
+  =
+  Run_source_installation.equal installation other.installation
+  && Map.equal P.Run.equal runs other.runs
+  && Map.equal Run_intent.equal intents other.intents
+  && Map.equal P.Run_receipt.equal receipts other.receipts
+  && Run_job_deliveries.equal job_deliveries other.job_deliveries
+  && Run_goal_links.equal goal_links other.goal_links
+  && Run_recurrence_origins.equal recurrence_origins other.recurrence_origins
+;;
+
 let equal_observation t other =
   Run_source_installation.equal t.installation other.installation
   && Map.equal P.Run.equal t.runs other.runs

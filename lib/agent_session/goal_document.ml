@@ -39,6 +39,7 @@ let hold =
   tagged
     [ "operator_pause", obj [ "kind", v ]
     ; "source_review", obj [ "kind", v ]
+    ; "deadline_reached", obj [ "kind", v ]
     ; "needs_input", obj [ "kind", v; "reason", v ]
     ; "budget_gate", obj [ "kind", v; "dimension", v ]
     ; "usage_uncertain", obj [ "kind", v; "component", v ]

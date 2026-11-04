@@ -119,6 +119,25 @@ let check_basis t ~owner ~(state : Session_state.t) =
       else conflict "run preparation was displaced by another state change")
 ;;
 
+let check_current t ~owner ~state =
+  let open Result.Let_syntax in
+  let%bind () = check_basis t ~owner ~state in
+  match t.original_actor with
+  | None -> Ok ()
+  | Some actor ->
+    if
+      Operator_authorization.is_current actor
+      && P.Principal.has_scope (Operator_authorization.principal actor) Send_messages
+    then Ok ()
+    else
+      Error
+        (P.Error.create
+           Permission_denied
+           ~message:"Run preparation authority expired"
+           ~retryable:false
+           ())
+;;
+
 let check t ~owner ~state =
   let open Result.Let_syntax in
   let%bind () = check_basis t ~owner ~state in

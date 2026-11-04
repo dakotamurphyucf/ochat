@@ -32,7 +32,7 @@ let%expect_test
                 | `Handler ->
                   services.execute
                     ~invocation:(root job)
-                    (fun ~dispatched:parent ~borrow_agent_actor:_ ->
+                    (fun ~dispatched:parent ~capabilities:_ ->
                        let observer : I.observer =
                          { script_id = before.script_id
                          ; source_sha256 = before.script_source_hash
@@ -52,7 +52,7 @@ let%expect_test
                        let result =
                          services.moderator_execute
                            ~invocation
-                           (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+                           (fun ~dispatched ~capabilities:_ ~commit ->
                               incr effects;
                               let resolved =
                                 I.resolve
@@ -88,7 +88,13 @@ let%expect_test
                   services.claim_event
                     ~event
                     ~snapshot:(fun () -> Ok before)
-                    (fun ~executing:_ ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
+                    (fun ~executing:_
+                      ~model_jobs:_
+                      ~allocate_inference:_
+                      ~retirement_reason:_
+                      ~event:_
+                      ~execute:_
+                      ~commit ->
                        incr effects;
                        let save () =
                          commit
@@ -153,7 +159,13 @@ let%expect_test
                      ; meta = `Null
                      })
                 ~snapshot:(fun () -> Ok before)
-                (fun ~executing:_ ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
+                (fun ~executing:_
+                  ~model_jobs:_
+                  ~allocate_inference:_
+                  ~retirement_reason:_
+                  ~event:_
+                  ~execute:_
+                  ~commit ->
                    commit
                      ~snapshot:before
                      ~requests:

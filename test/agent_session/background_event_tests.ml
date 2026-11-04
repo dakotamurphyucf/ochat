@@ -57,7 +57,13 @@ let%expect_test
                   services.claim_event
                     ~event
                     ~snapshot:(fun () -> Ok before)
-                    (fun ~executing ~retirement_reason:_ ~event:_ ~execute ~commit ->
+                    (fun ~executing
+                      ~model_jobs:_
+                      ~allocate_inference:_
+                      ~retirement_reason:_
+                      ~event:_
+                      ~execute
+                      ~commit ->
                        let observer = executing.context.source in
                        let invocation =
                          I.create
@@ -76,7 +82,7 @@ let%expect_test
                        in
                        let open Result.Let_syntax in
                        let%bind _ =
-                         execute ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                         execute ~invocation (fun ~dispatched:_ ~capabilities:_ ->
                            incr calls;
                            Ok (I.Complete (`String "effect happened")))
                        in

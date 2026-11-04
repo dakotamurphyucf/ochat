@@ -62,12 +62,9 @@ let with_tracking_actor ?(map_initial = Fn.id) f =
         ~finally:(fun () -> A.shutdown actor)))
 ;;
 
-let prepared () =
+let prepared ?(post_stream = fun ~sw:_ ~inputs:_ -> Seq.empty) () =
   let fixture =
-    Inference_fixture.create
-      ~namespace:"tracked"
-      ~default_model:"fixture"
-      ~post_stream:(fun ~sw:_ ~inputs:_ -> Seq.empty)
+    Inference_fixture.create ~namespace:"tracked" ~default_model:"fixture" ~post_stream
   in
   let target =
     Inference_fixture.capture_config fixture Chat_response.Config.default
@@ -192,7 +189,7 @@ let%expect_test
         (G.identity graph).with_attempt
           prepared
           ~relation:Root
-          ~f:(fun ~scope:_ ~accounting_id:_ -> ());
+          ~f:(fun ~scope:_ ~accounting_id:_ ~submission_guard:_ -> ());
         false
       with
       | G.Rejected _ -> true
@@ -204,7 +201,7 @@ let%expect_test
         (G.identity graph).with_attempt
           prepared
           ~relation:Root
-          ~f:(fun ~scope:_ ~accounting_id:_ -> ());
+          ~f:(fun ~scope:_ ~accounting_id:_ ~submission_guard:_ -> ());
         false
       with
       | Upstream_failed -> true
@@ -562,4 +559,255 @@ let%expect_test "late scope-only callbacks cannot reconstruct a retired admissio
        charge");
   [%expect
     {| scope-only retired callback rejects; actual held admission ignores with no new charge |}]
+;;
+
+let%expect_test "actual worker allocation requires ACK and expires before terminal save" =
+  (* This is ordinary unbound operation execution, not a Goal controller fixture.
+     The associated Goal runtime gate remains a separate composed qualification. *)
+  List.iter [ false; true ] ~f:(fun fail_terminal ->
+    let phase = ref `Accept in
+    let terminal_attempt, terminal_attempt_u = Eio.Promise.create () in
+    let dispatches = ref 0 in
+    let context, request, _ =
+      prepared
+        ~post_stream:(fun ~sw:_ ~inputs:_ ->
+          incr dispatches;
+          Seq.empty)
+        ()
+    in
+    Job_fixtures.with_actor
+      ~reject_save:(fun _ ->
+        match !phase with
+        | `Accept -> false
+        | `Allocation -> true
+        | `Terminal ->
+          ignore (Eio.Promise.try_resolve terminal_attempt_u ());
+          true)
+      (fun _env sw actor writer _backend ->
+         let graph =
+           G.create
+             actor
+             ~source:(source "actual-operation")
+             ~upstream:(upstream (fun ~scope:_ ~accounting_id:_ -> ()))
+           |> protocol_ok
+         in
+         let retained = ref None in
+         let checkpoint, checkpoint_u = Eio.Promise.create () in
+         let dispatch identity =
+           C.run
+             context
+             ~sw
+             ~identity
+             ~relation:Root
+             ~request
+             ~before_dispatch:ignore
+             ~on_attempt:(G.on_attempt graph)
+             ~on_observation:(G.on_observation graph)
+             ~on_completion:(G.on_completion graph)
+             ~on_event:ignore
+           |> Result.map_error ~f:(fun _ -> "fixture inference preparation failed")
+           |> Result.ok_or_failwith
+           |> ignore
+         in
+         let worker =
+           Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input capabilities ->
+             let result =
+               try
+                 let identity =
+                   G.bind_identity graph ~allocate:capabilities.allocate_inference
+                 in
+                 retained := Some identity;
+                 phase := `Allocation;
+                 let rejected =
+                   Exn.protect
+                     ~finally:(fun () -> phase := `Accept)
+                     ~f:(fun () ->
+                       try
+                         dispatch identity;
+                         false
+                       with
+                       | G.Rejected _ -> true)
+                 in
+                 assert rejected;
+                 assert (Int.equal !dispatches 0);
+                 assert (List.is_empty (rows actor));
+                 dispatch identity;
+                 assert (Int.equal !dispatches 1);
+                 assert (Int.equal (List.length (rows actor)) 1);
+                 if fail_terminal then phase := `Terminal;
+                 Ok ()
+               with
+               | exn -> Error exn
+             in
+             Eio.Promise.resolve checkpoint_u result;
+             match result with
+             | Ok () ->
+               Agent_session.Operation_worker.Completed
+                 { final_history = input.history
+                 ; moderator_snapshot = None
+                 ; runtime_requests = []
+                 }
+             | Error _ ->
+               Agent_session.Operation_worker.Failed
+                 (Agent_protocol.Error.invalid_request "worker allocation fixture failed"))
+         in
+         A.set_operation_worker actor (Some worker) |> protocol_ok;
+         A.submit_message
+           actor
+           ~submitting_principal:principal_id
+           ~attachment_id:writer.id
+           actor_entry
+         |> protocol_ok
+         |> ignore;
+         (match Eio.Promise.await checkpoint with
+          | Ok () -> ()
+          | Error exn -> raise exn);
+         if fail_terminal
+         then Eio.Promise.await terminal_attempt
+         else ignore (await_idle actor : S.t);
+         let before = A.state actor |> protocol_ok in
+         assert (Bool.equal (Option.is_some before.active_operation) fail_terminal);
+         let rejected =
+           try
+             dispatch (Option.value_exn !retained);
+             false
+           with
+           | G.Rejected _ -> true
+         in
+         assert rejected;
+         assert (Int.equal !dispatches 1);
+         let after = A.state actor |> protocol_ok in
+         [%test_eq: int64] after.counters.revision before.counters.revision;
+         phase := `Accept;
+         G.seal graph |> protocol_ok;
+         G.finish graph |> protocol_ok));
+  print_endline
+    "failed allocation has no dispatch/charge; exact live worker admits; returned port \
+     expires before terminal ACK";
+  [%expect
+    {| failed allocation has no dispatch/charge; exact live worker admits; returned port expires before terminal ACK |}]
+;;
+
+let%expect_test "actual Run worker refreshes before a nonyielding final authority check" =
+  (* A genuine headless User_submission owns the real Run/operation. This is
+     ordinary Run execution, not a fabricated Goal episode or controller. *)
+  let forbidden_authorization = ref false in
+  let graph_ref = ref None in
+  let expire = ref (fun () -> ()) in
+  let checkpoint, checkpoint_u = Eio.Promise.create () in
+  let await_checkpoint = ref (fun () -> failwith "fixture clock is unavailable") in
+  let dispatches = ref 0 in
+  let refreshes = ref 0 in
+  let final_checks = ref 0 in
+  let context, request, _ =
+    prepared
+      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+        Int.incr dispatches;
+        Seq.empty)
+      ()
+  in
+  let worker =
+    Agent_session.Operation_worker.create ~run:(fun ~sw ~input capabilities ->
+      let result =
+        Result.try_with (fun () ->
+          let graph = Option.value_exn !graph_ref in
+          let identity =
+            G.bind_identity graph ~allocate:capabilities.allocate_inference
+          in
+          let dispatch ~revoke =
+            forbidden_authorization := false;
+            let guard =
+              R.Submission_guard.create ~refresh:(fun () ->
+                Int.incr refreshes;
+                forbidden_authorization := false;
+                Eio.Fiber.yield ();
+                if revoke then !expire ();
+                fun () ->
+                  Int.incr final_checks;
+                  forbidden_authorization := true)
+            in
+            C.run
+              context
+              ~sw
+              ~identity
+              ~submission_guard:guard
+              ~relation:Root
+              ~request
+              ~before_dispatch:ignore
+              ~on_attempt:(G.on_attempt graph)
+              ~on_observation:(G.on_observation graph)
+              ~on_completion:(G.on_completion graph)
+              ~on_event:ignore
+            |> Result.map_error ~f:(fun _ -> "fixture inference preparation failed")
+            |> Result.ok_or_failwith
+            |> ignore
+          in
+          dispatch ~revoke:false;
+          assert (Int.equal !dispatches 1);
+          assert (Int.equal !refreshes 1 && Int.equal !final_checks 1);
+          let rejected =
+            try
+              dispatch ~revoke:true;
+              false
+            with
+            | Agent_session.Inference_allocation.Rejected _ -> true
+          in
+          assert rejected;
+          assert (Int.equal !dispatches 1);
+          assert (Int.equal !refreshes 2 && Int.equal !final_checks 1))
+      in
+      forbidden_authorization := false;
+      Eio.Promise.resolve checkpoint_u result;
+      match result with
+      | Ok () ->
+        Agent_session.Operation_worker.Completed
+          { final_history = input.history
+          ; moderator_snapshot = None
+          ; runtime_requests = []
+          }
+      | Error _ ->
+        Agent_session.Operation_worker.Failed
+          (Agent_protocol.Error.invalid_request "Run final-check fixture failed"))
+  in
+  Headless_run_tests.with_service
+    ~prepare:(fun env ->
+      await_checkpoint
+      := fun () ->
+           Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+             Eio.Promise.await checkpoint))
+    ~worker
+    ~authorize_hook:(fun () ->
+      if !forbidden_authorization then failwith "final check invoked host authorization")
+    (fun fixture ->
+       let graph =
+         G.create
+           fixture.actor
+           ~source:(source "actual-run-final-check")
+           ~upstream:(upstream (fun ~scope:_ ~accounting_id:_ -> ()))
+         |> protocol_ok
+       in
+       graph_ref := Some graph;
+       (expire := fun () -> fixture.auth_now := fixture.expires_at);
+       (* Initialize through the real startup, whose no-work Single_turn
+          completes. User input is then admitted from actual Running/Idle. *)
+       fixture.start (fixture.request ~mode:Single_turn "initialize-final-check")
+       |> Headless_run_tests.admitted
+       |> ignore;
+       assert (fixture.activate () |> protocol_ok);
+       fixture.start
+         (fixture.request
+            ~input:(Headless_run_tests.input "run inference")
+            "owned-final-check")
+       |> Headless_run_tests.admitted
+       |> ignore;
+       (match !await_checkpoint () with
+        | Ok () -> ()
+        | Error exn -> raise exn);
+       G.seal graph |> protocol_ok;
+       G.finish graph |> protocol_ok);
+  print_endline
+    "actual provider admitted once; later composed revocation rejects; final check calls \
+     no host policy";
+  [%expect
+    {| actual provider admitted once; later composed revocation rejects; final check calls no host policy |}]
 ;;

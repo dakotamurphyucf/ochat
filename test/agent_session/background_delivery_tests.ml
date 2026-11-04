@@ -204,7 +204,13 @@ let%expect_test
        A.with_current_idle_queued_moderator_event_tools
          actor
          ~snapshot:(fun () -> Ok append)
-         (fun ~executing:_ ~retirement_reason ~event:_ ~execute:_ ~commit ->
+         (fun ~executing:_
+           ~model_jobs:_
+           ~allocate_inference:_
+           ~retirement_reason
+           ~event:_
+           ~execute:_
+           ~commit ->
             [%test_eq: string option] None retirement_reason;
             commit
               ~snapshot:before

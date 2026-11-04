@@ -288,3 +288,68 @@ let%expect_test "sealed run action composes with actual runtime requests" =
      (turn_rejected true) (stop_preserved true) (continue_stop_rejected true))
     |}]
 ;;
+
+let%expect_test "immediate work basis advances only once after acknowledgement" =
+  let owner = service () in
+  let scope = A.Run_action_service.scope owner in
+  let transaction = A.Run_action_service.transaction owner in
+  let receipt = transaction.handlers.stage Continue |> string_get in
+  let next =
+    P.Run.create
+      ~id:run.id
+      ~session:run.session
+      ~principal_id:run.principal_id
+      ~source:run.source
+      ~mode:run.mode
+      ~lifecycle:run.lifecycle
+      ~revision:2L
+      ~owned_work:run.owned_work
+      ~relinquished_work:run.relinquished_work
+      ~terminal_work:run.terminal_work
+      ~created_at:run.created_at
+      ~updated_at:run.updated_at
+    |> get
+  in
+  let prepare () =
+    A.Run_scope.Host.prepare_advance
+      scope
+      ~previous:run
+      ~next
+      ~execution_id:(A.Run_scope.execution_id scope)
+    |> get
+  in
+  let discarded_on_failed_save = prepare () in
+  ignore discarded_on_failed_save;
+  [%test_eq: int64] (A.Run_scope.revision scope) 1L;
+  let acknowledged = prepare () in
+  A.Run_scope.Host.acknowledge_advance acknowledged |> get;
+  [%test_eq: int64] (A.Run_scope.revision scope) 2L;
+  assert (Result.is_error (A.Run_scope.Host.acknowledge_advance acknowledged));
+  assert (Result.is_error (A.Run_scope.Host.acknowledge_advance discarded_on_failed_save));
+  assert (
+    Result.is_error
+      (A.Run_scope.Host.prepare_advance
+         scope
+         ~previous:run
+         ~next
+         ~execution_id:(A.Run_scope.execution_id scope)));
+  ignore (transaction.prepare [ receipt ] |> string_get : P.Run_action.t option);
+  A.Run_action_service.verify owner (Some Continue) |> string_get;
+  let closed = service () |> A.Run_action_service.scope in
+  let pending =
+    A.Run_scope.Host.prepare_advance
+      closed
+      ~previous:run
+      ~next
+      ~execution_id:(A.Run_scope.execution_id closed)
+    |> get
+  in
+  A.Run_scope.close closed;
+  assert (Result.is_error (A.Run_scope.Host.acknowledge_advance pending));
+  [%test_eq: int64] (A.Run_scope.revision closed) 1L;
+  print_endline
+    "no speculative advance; one acknowledged step; stale/closed reject; staged \
+     selection unchanged";
+  [%expect
+    {| no speculative advance; one acknowledged step; stale/closed reject; staged selection unchanged |}]
+;;

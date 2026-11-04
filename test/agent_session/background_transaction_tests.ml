@@ -13,7 +13,7 @@ let%expect_test "ending the owner between preparation and staging releases capac
        let owner = J.Invocation invocation.context.id in
        let prepared = ref None in
        with_job actor parent (fun ~job:_ ~execute ->
-         execute ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+         execute ~invocation (fun ~dispatched:_ ~capabilities:_ ->
            let job =
              A.prepare_background_job_launch actor ~owner request |> protocol_ok
            in
@@ -50,6 +50,7 @@ let%expect_test "ending the owner between preparation and staging releases capac
 
 let stage actor backend capacity request owner =
   let job = A.prepare_background_job_launch actor ~owner request |> protocol_ok in
+  assert (Option.equal J.Inference_origin.equal job.inference_origin (Some Unbound));
   let quota = Background_admission_tests.key actor job in
   let reservation = Background_admission_tests.reserve capacity quota job in
   A.stage_background_job
@@ -86,7 +87,7 @@ let%expect_test
            let selected = ref None in
            let result =
              with_job actor parent (fun ~job:_ ~execute ->
-               execute ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+               execute ~invocation (fun ~dispatched:_ ~capabilities:_ ->
                  let discarded = stage actor backend capacity request owner in
                  assert (
                    A.has_staged_background_job actor ~owner ~id:discarded.id
@@ -162,6 +163,16 @@ let%expect_test
               Agent_session.Session_state.validate restored |> protocol_ok;
               let decoded = J.of_json (J.to_json stored) |> protocol_ok in
               assert (Option.equal J.equal_launch stored.launch decoded.launch);
+              assert (
+                Option.equal
+                  J.Inference_origin.equal
+                  stored.inference_origin
+                  (Some Unbound));
+              assert (
+                Option.equal
+                  J.Inference_origin.equal
+                  stored.inference_origin
+                  decoded.inference_origin);
               assert (
                 Result.is_error
                   (Agent_session.Session_delta.apply
@@ -240,7 +251,7 @@ let%expect_test "job starts commit atomically with managed handler and event che
                     | `Handler | `Handler_cancelled ->
                       services.execute
                         ~invocation:(root parent)
-                        (fun ~dispatched:root ~borrow_agent_actor:_ ->
+                        (fun ~dispatched:root ~capabilities:_ ->
                            let observer : I.observer =
                              { script_id = before.script_id
                              ; source_sha256 = before.script_source_hash
@@ -260,7 +271,7 @@ let%expect_test "job starts commit atomically with managed handler and event che
                            let result =
                              services.moderator_execute
                                ~invocation
-                               (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+                               (fun ~dispatched ~capabilities:_ ~commit ->
                                   let job = start (J.Invocation dispatched.context.id) in
                                   let outcome =
                                     match mode with
@@ -292,6 +303,8 @@ let%expect_test "job starts commit atomically with managed handler and event che
                         ~event
                         ~snapshot:(fun () -> Ok before)
                         (fun ~executing
+                          ~model_jobs:_
+                          ~allocate_inference:_
                           ~retirement_reason:_
                           ~event:_
                           ~execute:_
@@ -476,7 +489,7 @@ let%expect_test
              let _, invocation = native_context registry invocation in
              caps.commit_invocation_call ~invocation call |> protocol_ok;
              let result =
-               caps.with_invocation ~invocation (fun ~dispatched ~borrow_agent_actor:_ ->
+               caps.with_invocation ~invocation (fun ~dispatched ~capabilities:_ ->
                  let owner = J.Invocation dispatched.context.id in
                  let first = stage owner in
                  let duplicate =
@@ -615,7 +628,10 @@ let%expect_test
              let observed = ref None in
              let resolved =
                with_job actor job (fun ~job:_ ~execute ->
-                 execute ~invocation:(root job) (fun ~dispatched ~borrow_agent_actor ->
+                 execute ~invocation:(root job) (fun ~dispatched ~capabilities ->
+                   let borrow_agent_actor =
+                     capabilities.Agent_session.Invocation_capabilities.borrow_agent_actor
+                   in
                    let borrowed = borrow_agent_actor ~invocation:dispatched in
                    observed
                    := Some
@@ -651,14 +667,12 @@ let%expect_test
            let dependency_call = root first in
            let pending =
              with_job actor first (fun ~job:_ ~execute ->
-               execute
-                 ~invocation:dependency_call
-                 (fun ~dispatched ~borrow_agent_actor:_ ->
-                    let owner = J.Invocation dispatched.context.id in
-                    let job = stage owner in
-                    child := Some job;
-                    A.select_background_jobs actor ~owner ~ids:[ job.id ] |> protocol_ok;
-                    Ok (I.Pending (Job job.id, `Null))))
+               execute ~invocation:dependency_call (fun ~dispatched ~capabilities:_ ->
+                 let owner = J.Invocation dispatched.context.id in
+                 let job = stage owner in
+                 child := Some job;
+                 A.select_background_jobs actor ~owner ~ids:[ job.id ] |> protocol_ok;
+                 Ok (I.Pending (Job job.id, `Null))))
              |> protocol_ok
            in
            let child = Option.value_exn !child in

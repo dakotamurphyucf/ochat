@@ -262,13 +262,21 @@ let run_model_job t entry job =
     let outcome =
       match
         let open Result.Let_syntax in
-        let%bind inference = t.model_job_inference entry job in
-        Runtime_owner.execute_model_job
-          entry.Session_registry.runtime
-          ~inference_context:inference.context
-          ~capture_recipe_target:inference.capture_recipe_target
-          ~recipe
-          ~payload
+        Agent_session.Session_actor.with_job_execution
+          entry.Session_registry.actor
+          ~job_id:job.id
+          ~generation:job.generation
+          ~attempt:job.attempt
+          ~deadline:None
+          (fun services ->
+             let%bind inference = t.model_job_inference entry job in
+             Runtime_owner.execute_model_job
+               entry.Session_registry.runtime
+               ~allocate_inference:services.allocate_inference
+               ~inference_context:inference.context
+               ~capture_recipe_target:inference.capture_recipe_target
+               ~recipe
+               ~payload)
       with
       | Ok outcome -> outcome
       | Error error -> Agent_session.Runtime_builder.Model_failed error.message

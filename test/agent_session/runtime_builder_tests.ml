@@ -525,6 +525,7 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
               ~env
               ~inference_context:inference.context
               ~inference_identity:inference.identity
+              ~bind_inference_identity:(fun _ -> inference.identity)
               ~on_inference_attempt:ignore
               ~on_inference_completion:ignore
               ~on_inference_observation:ignore
@@ -549,10 +550,13 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                   ; cancel = (fun ~id:_ -> assert false)
                   }
               ~job_services:
-                B.
-                  { spawn_model = (fun ~recipe:_ ~payload:_ -> assert false)
-                  ; call_model = (fun ~recipe:_ ~payload:_ ~execute:_ -> assert false)
-                  }
+                (let initialization : Agent_session.Runtime_model_services.t =
+                   { spawn_model = (fun ~recipe:_ ~payload:_ -> assert false)
+                   ; call_model = (fun ~recipe:_ ~payload:_ ~execute:_ -> assert false)
+                   }
+                 in
+                 Agent_session.Runtime_model_services.
+                   { initialization; for_execution = (fun _ -> initialization) })
           in
           (match mode with
            | `One_off_only ->
@@ -1097,6 +1101,7 @@ let on_event : context -> state -> event -> state task =
           ~env
           ~inference_context:inference.context
           ~inference_identity:inference.identity
+          ~bind_inference_identity:(fun _ -> inference.identity)
           ~on_inference_attempt:ignore
           ~on_inference_completion:ignore
           ~on_inference_observation:ignore
@@ -1124,10 +1129,16 @@ let on_event : context -> state -> event -> state task =
             ; cancel = (fun ~id:_ -> failwith "unexpected schedule")
             }
           ~job_services:
-            { spawn_model = (fun ~recipe:_ ~payload:_ -> failwith "unexpected model job")
-            ; call_model =
-                (fun ~recipe:_ ~payload:_ ~execute:_ -> failwith "unexpected model job")
-            }
+            (let initialization : Agent_session.Runtime_model_services.t =
+               { spawn_model =
+                   (fun ~recipe:_ ~payload:_ -> failwith "unexpected model job")
+               ; call_model =
+                   (fun ~recipe:_ ~payload:_ ~execute:_ ->
+                     failwith "unexpected model job")
+               }
+             in
+             Agent_session.Runtime_model_services.
+               { initialization; for_execution = (fun _ -> initialization) })
         |> protocol_ok
       in
       Exn.protect ~finally:runtime.close ~f:(fun () ->

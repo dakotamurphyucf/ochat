@@ -595,7 +595,13 @@ let%expect_test "physical retry carrier survives reopen and complete result coll
              ~operation_id:None
              ~event:Session_start
              ~snapshot:(fun () -> Ok before)
-             (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
+             (fun ~executing
+               ~model_jobs:_
+               ~allocate_inference:_
+               ~retirement_reason:_
+               ~event:_
+               ~execute:_
+               ~commit ->
                 let owner = P.Job.Moderator_event executing.context.id in
                 let captured =
                   Background_execution_tests.capture_tool

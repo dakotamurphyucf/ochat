@@ -240,6 +240,7 @@ let run_agent_prompt_v1_body
       ~(ctx : Eio_unix.Stdenv.base Ctx.t)
       ~request
       ?inference_context
+      ?inference_identity
       ?before_inference_attempt
       ~capture_recipe_target
       ~(config : CM.config)
@@ -258,6 +259,11 @@ let run_agent_prompt_v1_body
     match inference_context with
     | None -> ctx
     | Some inference_context -> Ctx.with_inference ctx ~inference_context
+  in
+  let ctx =
+    match inference_identity with
+    | None -> ctx
+    | Some inference_identity -> Ctx.with_inference_identity ctx ~inference_identity
   in
   let ctx =
     match before_inference_attempt with
@@ -305,6 +311,7 @@ let call_agent_prompt_v1_strict
       (exec_context : exec_context)
       ~request
       ?inference_context
+      ?inference_identity
       ?before_inference_attempt
       ~capture_recipe_target
       ()
@@ -331,6 +338,7 @@ let call_agent_prompt_v1_strict
       ~ctx:exec_context.ctx
       ~request
       ?inference_context
+      ?inference_identity
       ?before_inference_attempt
       ~capture_recipe_target
       ~config:(Config.of_elements elements)
@@ -410,6 +418,7 @@ let recipe_agent_prompt_v1
       (t : t)
       ~(session_id : string)
       ?inference_context
+      ?inference_identity
       ?before_inference_attempt
       ?(capture_recipe_target = fun _ -> Ok ())
       ()
@@ -425,14 +434,16 @@ let recipe_agent_prompt_v1
       let open Result.Let_syntax in
       let%bind request = Model_spawn_request.decode payload in
       let inference_context = if rebound then None else inference_context in
+      let inference_identity = if rebound then None else inference_identity in
       let before_inference_attempt = if rebound then None else before_inference_attempt in
       let run () =
         match t.execution with
         | Ordinary exec_context ->
           call_agent_prompt_v1_strict
-            exec_context
+            { exec_context with ctx = current_ctx }
             ~request
             ?inference_context
+            ?inference_identity
             ?before_inference_attempt
             ~capture_recipe_target
             ()
@@ -442,6 +453,7 @@ let recipe_agent_prompt_v1
               ~ctx:current_ctx
               ~request
               ?inference_context
+              ?inference_identity
               ?before_inference_attempt
               ~capture_recipe_target
               ~config

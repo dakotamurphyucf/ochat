@@ -12,6 +12,7 @@ module Hold = struct
     | Needs_input of Reason.t
     | Budget_gate of Budget.Dimension.t
     | Usage_uncertain of Inference.Observation.Usage.Component.t
+    | Deadline_reached
     | Source_review
   [@@deriving equal, sexp_of]
 end
@@ -74,6 +75,7 @@ let hold_json = function
       ]
   | Usage_uncertain component ->
     tag "usage_uncertain" [ "component", component_json component ]
+  | Deadline_reached -> tag "deadline_reached" []
   | Source_review -> tag "source_review" []
 ;;
 
@@ -84,6 +86,7 @@ let hold_decode json =
   match kind with
   | "operator_pause" -> Ok Hold.Operator_pause
   | "source_review" -> Ok Source_review
+  | "deadline_reached" -> Ok Deadline_reached
   | "needs_input" ->
     Result.map (J.required_as f "reason" Reason.of_json) ~f:(fun x -> Hold.Needs_input x)
   | "budget_gate" ->

@@ -160,6 +160,7 @@ let agent_guidance t =
   | Excluded -> None
 ;;
 
+let with_inference_identity t ~inference_identity = { t with inference_identity }
 let with_agent_prompt_v1_recipe t recipe = { t with agent_prompt_v1_recipe = Some recipe }
 
 let with_submission_guard t guard =

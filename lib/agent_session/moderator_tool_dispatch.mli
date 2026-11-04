@@ -38,7 +38,10 @@ val handler_failure
     for a later safe point. The caller still owns subsequent/idle wakeups and
     ordinary-event tool authority routing before public installation. *)
 val create
-  :  ?revalidate:
+  :  ?model_recipes:
+       (Model_job_admission.t
+        -> Chat_response.Moderation.Capabilities.model_recipe Core.String.Map.t)
+  -> ?revalidate:
        (Chat_response.In_memory_stream.Tool_dispatch.request -> (unit, string) result)
        (** Pure binding/policy revalidation immediately after the final-target
       authorizer returns, before handler execution. Normal extension hosts must

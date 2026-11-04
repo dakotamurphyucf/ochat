@@ -4,7 +4,9 @@ open! Core
     Output is explicitly Reconstructed, never an original provider capture.
     EOF is the fixture's declared completion and usage is explicitly unknown.
     Only finalized DTO items become candidates; announcement is not admission.
-    Observers, cancellation and unexpected mock exceptions propagate unchanged. *)
+    The selected backend checks the actual composed submission guard immediately
+    before invoking [post_stream]. Observers, cancellation and unexpected mock
+    exceptions propagate unchanged. *)
 type post_stream =
   sw:Eio.Switch.t
   -> inputs:Openai.Responses.Item.t list

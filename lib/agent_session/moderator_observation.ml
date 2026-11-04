@@ -11,6 +11,7 @@ type result =
 
 let drain_with_claim
       ?(max_observations = 32)
+      ?model_recipes
       ~claim
       ~retain_follow_up
       ~manager
@@ -36,6 +37,7 @@ let drain_with_claim
         claim
           (fun
               ~observing
+               ~capabilities
                ~commit
                ~on_tool_call
                ~job_scope
@@ -64,6 +66,9 @@ let drain_with_claim
                Option.map ingress_scope ~f:Script_ingress_service.moderator_transaction
              in
              M.handle_observation_entries
+               ?model_recipes:
+                 (Option.map model_recipes ~f:(fun provide ->
+                    provide capabilities.Invocation_capabilities.model_jobs))
                ?jobs
                ?subscriptions
                ?schedules
@@ -116,114 +121,149 @@ let drain_with_claim
   loop max_observations []
 ;;
 
-let drain ?max_observations ?on_tool_call ~capabilities ~observer =
-  drain_with_claim ?max_observations ~retain_follow_up:false ~claim:(fun handle ->
-    capabilities.Operation_worker.Capabilities.with_next_moderator_observation
-      ~observer
-      (fun ~observing ~commit ->
-         handle
-           ~observing
-           ~commit
-           ~on_tool_call
-           ~job_scope:None
-           ~subscription_scope:None
-           ~schedule_scope:None
-           ~notification_scope:None
-           ~ingress_scope:None))
-;;
-
-let drain_idle ?max_observations ?on_tool_call ~claim =
-  drain_with_claim ?max_observations ~retain_follow_up:true ~claim:(fun handle ->
-    claim (fun ~observing ~commit ->
-      handle
-        ~observing
-        ~commit
-        ~on_tool_call
-        ~job_scope:None
-        ~subscription_scope:None
-        ~schedule_scope:None
-        ~notification_scope:None
-        ~ingress_scope:None))
-;;
-
-let drain_idle_with_tools ?max_observations ~script_tools ~definition ~claim =
-  drain_with_claim ?max_observations ~retain_follow_up:true ~claim:(fun handle ->
-    claim (fun ~(observing : P.Invocation.t) ~execute ~commit ->
-      let open Result.Let_syntax in
-      let%bind observation =
-        Result.of_option
-          observing.observation
-          ~error:(failed "observation source is missing")
-      in
-      Script_tool_calls.with_moderator_work
-        script_tools
-        ~owner:(P.Job.Invocation observing.context.id)
-        ~source:observation.observer
-        ~originating:None
-        ~selected:(Chat_response.Extension_compiler.definition_capabilities definition)
-        ~error:failed
-        (fun
-            ~jobs:job_scope
-             ~subscriptions:subscription_scope
-             ~schedules:schedule_scope
-             ~notifications:notification_scope
-             ~ingress:ingress_scope
-           ->
-           Script_tool_calls.with_observation
-             script_tools
-             ~definition
-             ~execute
+let drain ?model_recipes ?max_observations ?on_tool_call ~capabilities ~observer =
+  drain_with_claim
+    ?model_recipes
+    ?max_observations
+    ~retain_follow_up:false
+    ~claim:(fun handle ->
+      capabilities.Operation_worker.Capabilities.with_next_moderator_observation
+        ~observer
+        (fun ~observing ~capabilities:invocation_capabilities ~commit ->
+           handle
              ~observing
-             (fun on_tool_call ->
-                handle
+             ~capabilities:invocation_capabilities
+             ~commit
+             ~on_tool_call
+             ~job_scope:None
+             ~subscription_scope:None
+             ~schedule_scope:None
+             ~notification_scope:None
+             ~ingress_scope:None))
+;;
+
+let drain_idle ?model_recipes ?max_observations ?on_tool_call ~claim =
+  drain_with_claim
+    ?model_recipes
+    ?max_observations
+    ~retain_follow_up:true
+    ~claim:(fun handle ->
+      claim (fun ~observing ~capabilities:invocation_capabilities ~commit ->
+        handle
+          ~observing
+          ~capabilities:invocation_capabilities
+          ~commit
+          ~on_tool_call
+          ~job_scope:None
+          ~subscription_scope:None
+          ~schedule_scope:None
+          ~notification_scope:None
+          ~ingress_scope:None))
+;;
+
+let drain_idle_with_tools
+      ?model_recipes
+      ?max_observations
+      ~script_tools
+      ~definition
+      ~claim
+  =
+  drain_with_claim
+    ?model_recipes
+    ?max_observations
+    ~retain_follow_up:true
+    ~claim:(fun handle ->
+      claim
+        (fun
+            ~(observing : P.Invocation.t)
+             ~capabilities:invocation_capabilities
+             ~execute
+             ~commit
+           ->
+           let open Result.Let_syntax in
+           let%bind observation =
+             Result.of_option
+               observing.observation
+               ~error:(failed "observation source is missing")
+           in
+           Script_tool_calls.with_moderator_work
+             script_tools
+             ~owner:(P.Job.Invocation observing.context.id)
+             ~source:observation.observer
+             ~originating:None
+             ~selected:
+               (Chat_response.Extension_compiler.definition_capabilities definition)
+             ~error:failed
+             (fun
+                 ~jobs:job_scope
+                  ~subscriptions:subscription_scope
+                  ~schedules:schedule_scope
+                  ~notifications:notification_scope
+                  ~ingress:ingress_scope
+                ->
+                Script_tool_calls.with_observation
+                  script_tools
+                  ~definition
+                  ~execute
                   ~observing
-                  ~commit
-                  ~on_tool_call:(Some on_tool_call)
-                  ~job_scope
-                  ~subscription_scope
-                  ~schedule_scope
-                  ~notification_scope
-                  ~ingress_scope))))
+                  (fun on_tool_call ->
+                     handle
+                       ~observing
+                       ~capabilities:invocation_capabilities
+                       ~commit
+                       ~on_tool_call:(Some on_tool_call)
+                       ~job_scope
+                       ~subscription_scope
+                       ~schedule_scope
+                       ~notification_scope
+                       ~ingress_scope))))
 ;;
 
 let drain_foreground_with_tools
+      ?model_recipes
       ?max_observations
       ~script_tools
       ~definition
       ~capabilities
       ~observer
   =
-  drain_with_claim ?max_observations ~retain_follow_up:true ~claim:(fun handle ->
-    capabilities.Operation_worker.Capabilities.with_next_moderator_observation
-      ~observer
-      (fun ~observing ~commit ->
-         Script_tool_calls.with_moderator_work
-           script_tools
-           ~owner:(P.Job.Invocation observing.P.Invocation.context.id)
-           ~source:observer
-           ~originating:None
-           ~selected:(Chat_response.Extension_compiler.definition_capabilities definition)
-           ~error:failed
-           (fun
-               ~jobs:job_scope
-                ~subscriptions:subscription_scope
-                ~schedules:schedule_scope
-                ~notifications:notification_scope
-                ~ingress:ingress_scope
-              ->
-              Script_tool_calls.with_observation
-                script_tools
-                ~definition
-                ~execute:capabilities.with_invocation
-                ~observing
-                (fun on_tool_call ->
-                   handle
-                     ~observing
-                     ~commit
-                     ~on_tool_call:(Some on_tool_call)
-                     ~job_scope
-                     ~subscription_scope
-                     ~schedule_scope
-                     ~notification_scope
-                     ~ingress_scope))))
+  drain_with_claim
+    ?model_recipes
+    ?max_observations
+    ~retain_follow_up:true
+    ~claim:(fun handle ->
+      capabilities.Operation_worker.Capabilities.with_next_moderator_observation
+        ~observer
+        (fun ~observing ~capabilities:invocation_capabilities ~commit ->
+           Script_tool_calls.with_moderator_work
+             script_tools
+             ~owner:(P.Job.Invocation observing.P.Invocation.context.id)
+             ~source:observer
+             ~originating:None
+             ~selected:
+               (Chat_response.Extension_compiler.definition_capabilities definition)
+             ~error:failed
+             (fun
+                 ~jobs:job_scope
+                  ~subscriptions:subscription_scope
+                  ~schedules:schedule_scope
+                  ~notifications:notification_scope
+                  ~ingress:ingress_scope
+                ->
+                Script_tool_calls.with_observation
+                  script_tools
+                  ~definition
+                  ~execute:capabilities.with_invocation
+                  ~observing
+                  (fun on_tool_call ->
+                     handle
+                       ~observing
+                       ~capabilities:invocation_capabilities
+                       ~commit
+                       ~on_tool_call:(Some on_tool_call)
+                       ~job_scope
+                       ~subscription_scope
+                       ~schedule_scope
+                       ~notification_scope
+                       ~ingress_scope))))
 ;;

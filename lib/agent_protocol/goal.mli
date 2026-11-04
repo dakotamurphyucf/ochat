@@ -19,6 +19,7 @@ module Hold : sig
     | Needs_input of Reason.t
     | Budget_gate of Budget.Dimension.t
     | Usage_uncertain of Inference.Observation.Usage.Component.t
+    | Deadline_reached
     | Source_review
   [@@deriving equal, sexp_of]
 end

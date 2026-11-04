@@ -3,6 +3,7 @@
 type t
 
 val empty : t
+val equal : t -> t -> bool
 val entries : t -> Run_goal_link.t list
 val find : t -> Agent_protocol.Id.Run.t -> Run_goal_link.t option
 val add : t -> Run_goal_link.t -> (t, Agent_protocol.Error.t) result

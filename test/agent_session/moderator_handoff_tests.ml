@@ -27,7 +27,7 @@ let%test_unit "actor handoff persists actual manager state and resolution atomic
         let invoke () =
           caps.with_moderator_invocation
             ~invocation:(invocation ())
-            (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+            (fun ~dispatched ~capabilities:_ ~commit ->
                Chat_response.Moderator_manager.handle_invocation_entries
                  manager
                  ~invocation:dispatched
@@ -105,7 +105,7 @@ let%test_unit
         let invocation = invocation_fixture () in
         caps.with_moderator_invocation
           ~invocation
-          (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+          (fun ~dispatched ~capabilities:_ ~commit ->
              saved_commit := Some commit;
              (* Actor reads and unrelated mailbox work continue during the borrow. *)
              let state = Agent_session.Session_actor.state actor |> protocol_ok in
@@ -120,7 +120,7 @@ let%test_unit
                Result.is_error
                  (caps.with_moderator_invocation
                     ~invocation:nested
-                    (fun ~dispatched:_ ~borrow_agent_actor:_ ~commit:_ ->
+                    (fun ~dispatched:_ ~capabilities:_ ~commit:_ ->
                        ran := true;
                        Ok ())));
              assert (not !ran);
@@ -180,7 +180,7 @@ let%test_unit
       Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
         caps.with_moderator_invocation
           ~invocation:(invocation_fixture ())
-          (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+          (fun ~dispatched ~capabilities:_ ~commit ->
              stale_commit := Some commit;
              stale_resolution
              := Some
@@ -236,7 +236,7 @@ let%test_unit "cancellation after the atomic commit preserves its recorded outco
       Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
         caps.with_moderator_invocation
           ~invocation:(invocation_fixture ())
-          (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+          (fun ~dispatched ~capabilities:_ ~commit ->
              let resolved =
                Agent_protocol.Invocation.resolve
                  dispatched
@@ -296,7 +296,7 @@ let%test_unit "independent worker calls queue before actor admission" =
         let run ~invocation count wait =
           caps.with_moderator_invocation
             ~invocation
-            (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+            (fun ~dispatched ~capabilities:_ ~commit ->
                wait ();
                let resolved =
                  Agent_protocol.Invocation.resolve
@@ -380,7 +380,7 @@ let%test_unit "failed admission and handler errors cannot strand a moderator bor
           Result.is_error
             (caps.with_moderator_invocation
                ~invocation:admitted
-               (fun ~dispatched:_ ~borrow_agent_actor:_ ~commit:_ ->
+               (fun ~dispatched:_ ~capabilities:_ ~commit:_ ->
                   ran := true;
                   Ok ())));
         assert (not !ran);
@@ -392,7 +392,7 @@ let%test_unit "failed admission and handler errors cannot strand a moderator bor
           Result.is_error
             (caps.with_moderator_invocation
                ~invocation:admitted
-               (fun ~dispatched:_ ~borrow_agent_actor:_ ~commit:_ -> Ok ())));
+               (fun ~dispatched:_ ~capabilities:_ ~commit:_ -> Ok ())));
         List.iter
           [ ""; String.make 20_000 'x' ]
           ~f:(fun message ->
@@ -400,12 +400,12 @@ let%test_unit "failed admission and handler errors cannot strand a moderator bor
               Result.is_error
                 (caps.with_moderator_invocation
                    ~invocation:(fresh ())
-                   (fun ~dispatched:_ ~borrow_agent_actor:_ ~commit:_ ->
+                   (fun ~dispatched:_ ~capabilities:_ ~commit:_ ->
                       Error (handoff_error message)))));
         (match
            caps.with_moderator_invocation
              ~invocation:(fresh ())
-             (fun ~dispatched:_ ~borrow_agent_actor:_ ~commit:_ -> raise Exit)
+             (fun ~dispatched:_ ~capabilities:_ ~commit:_ -> raise Exit)
          with
          | _ -> assert false
          | exception Exit -> ());
@@ -418,7 +418,7 @@ let%test_unit "failed admission and handler errors cannot strand a moderator bor
             | _ -> false));
         caps.with_moderator_invocation
           ~invocation:(fresh ())
-          (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+          (fun ~dispatched ~capabilities:_ ~commit ->
              let resolved =
                Agent_protocol.Invocation.resolve
                  dispatched
@@ -450,7 +450,7 @@ let%test_unit "graceful stop lets an admitted moderator invocation commit" =
       Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
         caps.with_moderator_invocation
           ~invocation:(invocation_fixture ())
-          (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+          (fun ~dispatched ~capabilities:_ ~commit ->
              Eio.Promise.resolve entered_u ();
              Eio.Promise.await release;
              let resolved =

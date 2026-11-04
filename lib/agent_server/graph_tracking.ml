@@ -76,32 +76,53 @@ let release t handle =
       t.routing <- Map.remove t.routing (Transcript.Scope.key (L.Handle.scope handle)))
 ;;
 
-let with_attempt t prepared ~relation ~f =
-  let handle =
+let with_attempt t ?allocate prepared ~relation ~f =
+  let allocation =
     Eio.Cancel.protect (fun () ->
-      let handle =
-        (constructor_mutation t ~ordinary:A.admit_inference ~prepared:(fun preparation ->
-           A.Constructor_mutations.admit_inference ~preparation))
-          t.actor
-          ~owner:t.owner
-          ~relation
-          ~operation_id:None
-          ~invocation_id:None
-          ~configuration:(R.Prepared.configuration prepared)
-        |> require
+      let allocation =
+        match allocate with
+        | Some allocate ->
+          allocate
+            ~graph:t.owner
+            ~relation
+            ~configuration:(R.Prepared.configuration prepared)
+          |> require
+        | None ->
+          let handle =
+            (constructor_mutation
+               t
+               ~ordinary:A.admit_inference
+               ~prepared:(fun preparation ->
+                 A.Constructor_mutations.admit_inference ~preparation))
+              t.actor
+              ~owner:t.owner
+              ~relation
+              ~operation_id:None
+              ~invocation_id:None
+              ~configuration:(R.Prepared.configuration prepared)
+            |> require
+          in
+          Agent_session.Inference_allocation.Host.create
+            ~handle
+            ~submission_guard:R.Submission_guard.empty
       in
+      let handle = Agent_session.Inference_allocation.handle allocation in
       t.routing
       <- Map.set
            t.routing
            ~key:(Transcript.Scope.key (L.Handle.scope handle))
            ~data:handle;
-      handle)
+      allocation)
   in
+  let handle = Agent_session.Inference_allocation.handle allocation in
   match
     t.upstream.on_admitted
       ~scope:(L.Handle.scope handle)
       ~accounting_id:(L.Handle.accounting_id handle);
-    f ~scope:(L.Handle.scope handle) ~accounting_id:(L.Handle.accounting_id handle)
+    f
+      ~scope:(L.Handle.scope handle)
+      ~accounting_id:(L.Handle.accounting_id handle)
+      ~submission_guard:(Agent_session.Inference_allocation.submission_guard allocation)
   with
   | result ->
     Eio.Cancel.protect (fun () -> release t handle);
@@ -116,6 +137,13 @@ let with_attempt t prepared ~relation ~f =
 let identity t : Inference_client.Identity.t =
   { new_preparation_id = t.upstream.new_preparation_id
   ; with_attempt = (fun prepared ~relation ~f -> with_attempt t prepared ~relation ~f)
+  }
+;;
+
+let bind_identity t ~allocate : Inference_client.Identity.t =
+  { new_preparation_id = t.upstream.new_preparation_id
+  ; with_attempt =
+      (fun prepared ~relation ~f -> with_attempt t ~allocate prepared ~relation ~f)
   }
 ;;
 

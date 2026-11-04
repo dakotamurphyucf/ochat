@@ -15,6 +15,7 @@ let with_background_daemon
       ?(agent = native_agent)
       ?(sources = [])
       ?model_post_stream
+      ?(map_inference_policy = Fn.id)
       ?(runtime_policy = Agent_server.Daemon.default_options.chatml_runtime_policy)
       ?(expected_model_calls = 0)
       ?per_session_jobs
@@ -153,6 +154,7 @@ let with_background_daemon
                         match model_post_stream with
                         | Some post -> post ~sw ~inputs
                         | None -> failwith "background work must not call the model")
+                    |> map_inference_policy
                 }
               ()
             |> protocol_ok
@@ -245,8 +247,19 @@ let with_background_daemon
           stage := "joining fixture switch")))
 ;;
 
-let submit ?created_at entry payload =
+let submit ?created_at ?(inference_origin = Some J.Inference_origin.Unbound) entry payload
+  =
   let state = A.state entry.Agent_server.Session_registry.actor |> protocol_ok in
+  (* This fixture host creates a new, unrelated root Job. It does not restore or
+     infer provenance for historical work. Scoped production launches have their
+     own capture path; tests of unavailable history explicitly pass [None]. *)
+  (match inference_origin with
+   | Some Unbound ->
+     assert (
+       Option.value_map state.run_state ~default:true ~f:(fun index ->
+         List.is_empty (Agent_session.Run_state.runs index)))
+   | None -> ()
+   | Some (Run _) -> failwith "background root fixture cannot claim a Run");
   let job =
     J.
       { id = Agent_protocol.Id.Job.create ()
@@ -265,7 +278,7 @@ let submit ?created_at entry payload =
       ; result = None
       ; delivery = Pending
       ; launch = None
-      ; inference_origin = None
+      ; inference_origin
       ; progress = None
       }
   in

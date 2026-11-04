@@ -21,6 +21,20 @@ val prepare
   -> now:Agent_protocol.Timestamp.t
   -> (t, Agent_protocol.Error.t) result
 
+(** Immediate work admission while the same retained callback is still Running.
+    The actor supplies a validated prospective state containing the actual new
+    occurrences and commits both children together. Requires nonempty newly owned
+    work; preserves prior terminal evidence and emits no action/terminal receipt.
+    It does not complete the parent callback or change its staged action. *)
+val add_owned_work
+  :  Session_state.t
+  -> scope:Run_scope.t
+  -> executing:Agent_protocol.Moderator_execution.t
+  -> work_state:Session_state.t
+  -> owned_work:Agent_protocol.Run_work.t list
+  -> now:Agent_protocol.Timestamp.t
+  -> (t, Agent_protocol.Error.t) result
+
 val run : t -> Agent_protocol.Run.t
 val delta : t -> Session_delta.t
 val payloads : t -> Agent_protocol.Event.Durable.Payload.t list

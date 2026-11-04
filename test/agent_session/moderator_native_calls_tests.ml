@@ -71,27 +71,23 @@ let%expect_test "idle moderator tools preserve authority, outcomes and scope lif
               I.create { (invocation_fixture ()).context with tool_name = "root" }
               |> protocol_ok
             in
-            caps.with_invocation
-              ~invocation:parent
-              (fun ~dispatched:_ ~borrow_agent_actor:_ ->
-                 let child =
-                   I.create
-                     ~observer
-                     { parent.context with
-                       id = Agent_protocol.Id.Invocation.create ()
-                     ; origin = Moderator
-                     ; parent_invocation = Some parent.context.id
-                     ; tool_name = "seed"
-                     }
-                   |> protocol_ok
-                 in
-                 caps.with_invocation
-                   ~invocation:child
-                   (fun ~dispatched:_ ~borrow_agent_actor:_ ->
-                      Ok (Complete (`String "seed")))
-                 |> protocol_ok
-                 |> ignore;
-                 Ok (Complete `Null))
+            caps.with_invocation ~invocation:parent (fun ~dispatched:_ ~capabilities:_ ->
+              let child =
+                I.create
+                  ~observer
+                  { parent.context with
+                    id = Agent_protocol.Id.Invocation.create ()
+                  ; origin = Moderator
+                  ; parent_invocation = Some parent.context.id
+                  ; tool_name = "seed"
+                  }
+                |> protocol_ok
+              in
+              caps.with_invocation ~invocation:child (fun ~dispatched:_ ~capabilities:_ ->
+                Ok (Complete (`String "seed")))
+              |> protocol_ok
+              |> ignore;
+              Ok (Complete `Null))
             |> protocol_ok
             |> ignore;
             Completed
@@ -151,7 +147,7 @@ let%expect_test "idle moderator tools preserve authority, outcomes and scope lif
              A.with_idle_moderator_observation_tools
                actor
                ~observer
-               (fun ~observing ~execute ~commit ->
+               (fun ~observing ~capabilities:_ ~execute ~commit ->
                   let reference = List.hd_exn (C.references !registry) in
                   let child () =
                     I.create
@@ -180,7 +176,7 @@ let%expect_test "idle moderator tools preserve authority, outcomes and scope lif
                      in
                      forged_rejected
                      := Result.is_error
-                          (execute ~invocation (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                          (execute ~invocation (fun ~dispatched:_ ~capabilities:_ ->
                              assert false))
                    | _ -> ());
                   Agent_session.Script_tool_calls.with_observation
@@ -237,7 +233,7 @@ let%expect_test "idle moderator tools preserve authority, outcomes and scope lif
            let execute, child = Option.value_exn !escaped_executor in
            assert (
              Result.is_error
-               (execute ~invocation:(child ()) (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+               (execute ~invocation:(child ()) (fun ~dispatched:_ ~capabilities:_ ->
                   assert false)));
            [%test_eq: int] calls_before_escape !native_calls;
            let state = A.state actor |> protocol_ok in
@@ -721,7 +717,7 @@ let%test_unit "script call scopes bound attempts and reject escaped or closed pa
         in
         caps.with_moderator_invocation
           ~invocation:parent
-          (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+          (fun ~dispatched ~capabilities:_ ~commit ->
              let scope f =
                Agent_session.Script_tool_calls.with_invocation
                  tools
@@ -775,4 +771,409 @@ let%test_unit "script call scopes bound attempts and reject escaped or closed pa
        assert (List.length state.invocations = 2);
        assert (List.length state.conversation.canonical_history = 1);
        assert_same_session_snapshot state (Agent_session.Memory_backend.state backend))
+;;
+
+let%expect_test
+    "native result continuation owns idle Model admission after producer return"
+  =
+  let module A = Agent_session.Session_actor in
+  let module I = Agent_protocol.Invocation in
+  let module P = Agent_protocol in
+  let module M = Chat_response.Moderator_manager in
+  let module N = Agent_session.Native_tool_invocation in
+  List.iter [ `Legacy; `Original ] ~f:(fun mode ->
+    let live = Atomic.make true in
+    let original = Agent_authority_tests.authentication live in
+    let native_calls = ref 0 in
+    let on_native = ref (fun () -> ()) in
+    let registry =
+      native_registry native_calls ~raises:false ~on_call:(fun () -> !on_native ())
+    in
+    let reject_claim = ref false in
+    let rejected_claims = ref 0 in
+    Job_fixtures.with_actor
+      ~reject_save:(fun next ->
+        let observing =
+          List.exists next.Agent_session.Session_transition.state.invocations ~f:(fun i ->
+            match i.P.Invocation.observation with
+            | Some { status = Observing; _ } -> true
+            | None | Some { status = Awaiting | Observed | Observation_failed _; _ } ->
+              false)
+        in
+        if !reject_claim && observing
+        then (
+          reject_claim := false;
+          Int.incr rejected_claims;
+          true)
+        else false)
+      (fun env _sw actor writer backend ->
+         let manager, _, _ =
+           handoff_definition env ~capability_registry:registry ~declare_tool:false
+         in
+         let observer = M.invocation_observer manager |> Option.value_exn in
+         let snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in
+         let encoded =
+           Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot)
+         in
+         let native_child (parent : I.t) ~origin =
+           let reference =
+             List.hd_exn (Chat_response.Tool_capability.references registry)
+           in
+           let invocation =
+             I.create
+               ~observer
+               { parent.context with
+                 id = P.Id.Invocation.create ()
+               ; origin
+               ; parent_invocation = Some parent.context.id
+               ; parent_job = None
+               ; tool_name = "read_file"
+               ; input = `Object []
+               ; implementation_revision = reference.implementation_revision
+               ; capability_fingerprint =
+                   Chat_response.Tool_capability.fingerprint registry
+               }
+             |> protocol_ok
+           in
+           reference, invocation
+         in
+         let escaped_proofs = ref [] in
+         let check_actor result =
+           match mode, result |> protocol_ok with
+           | `Legacy, None -> ()
+           | `Original, Some proof ->
+             assert (Operator_authorization.is_current proof);
+             Atomic.set live false;
+             assert (not (Operator_authorization.is_current proof));
+             Atomic.set live true;
+             assert (Operator_authorization.is_current proof);
+             escaped_proofs := proof :: !escaped_proofs
+           | `Legacy, Some _ | `Original, None ->
+             failwith "observation changed original admission"
+         in
+         let worker_completed = ref false in
+         let follow_up_worker = ref false
+         and worker_probes = ref 0 in
+         let producer_id = ref None in
+         let worker =
+           Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+             caps.commit_moderator encoded |> protocol_ok;
+             if !follow_up_worker
+             then check_actor (caps.original_agent_actor ())
+             else (
+               let parent =
+                 I.create { (invocation_fixture ()).context with tool_name = "producer" }
+                 |> protocol_ok
+               in
+               caps.with_invocation
+                 ~invocation:parent
+                 (fun ~dispatched:_ ~capabilities:_ ->
+                    let reference, invocation = native_child parent ~origin:Moderator in
+                    producer_id := Some invocation.context.id;
+                    let execute ~invocation f =
+                      caps.with_invocation ~invocation (fun ~dispatched ~capabilities ->
+                        check_actor
+                          (capabilities.borrow_agent_actor ~invocation:dispatched);
+                        f ~dispatched ~capabilities)
+                    in
+                    N.run_scoped
+                      ~execute
+                      ~registry:(fun () -> registry)
+                      ~reference
+                      ~invocation
+                      ~is_halted:(fun () -> false)
+                      ~authorize:(fun _ _ -> Ok ())
+                      ~prepare_output:(fun _ -> Ok (`String "native result"))
+                    |> protocol_ok
+                    |> ignore;
+                    Ok (Complete `Null))
+               |> protocol_ok
+               |> ignore);
+             Int.incr worker_probes;
+             worker_completed := true;
+             Completed
+               { final_history = input.history
+               ; moderator_snapshot = encoded
+               ; runtime_requests = []
+               })
+         in
+         A.set_operation_worker actor (Some worker) |> protocol_ok;
+         let before_events = (A.state actor |> protocol_ok).counters.event_sequence in
+         let submitted =
+           (match mode with
+            | `Legacy ->
+              A.submit_message
+                ~submitting_principal:principal_id
+                actor
+                ~attachment_id:writer.id
+                actor_entry
+            | `Original ->
+              A.submit_message_authenticated
+                actor
+                ~actor:original
+                ~attachment_id:writer.id
+                actor_entry)
+           |> protocol_ok
+         in
+         let operation_id = Option.value_exn submitted.operation_id in
+         let before = await_idle actor in
+         assert !worker_completed;
+         assert (
+           List.exists
+             (Agent_session.Memory_backend.events_after backend before_events
+              |> protocol_ok)
+             ~f:(fun event ->
+               match
+                 P.Event.Durable.Payload.of_json
+                   ~kind:event.P.Event.Durable.kind
+                   event.payload
+                 |> protocol_ok
+               with
+               | Operation_completed { id; state = Completed; _ } ->
+                 P.Id.Operation.equal id operation_id
+               | _ -> false));
+         [%test_eq: int] 1 !native_calls;
+         let producer =
+           List.find_exn before.invocations ~f:(fun i ->
+             P.Id.Invocation.equal i.context.id (Option.value_exn !producer_id))
+         in
+         assert (
+           I.equal_observation_status
+             (Option.value_exn producer.observation).status
+             Awaiting);
+         reject_claim := true;
+         let callback_entries = ref 0 in
+         let rejected =
+           A.with_idle_moderator_observation_tools
+             actor
+             ~observer
+             (fun ~observing:_ ~capabilities:_ ~execute:_ ~commit:_ ->
+                Int.incr callback_entries;
+                assert false)
+         in
+         (match rejected with
+          | Error error ->
+            assert (P.Error.equal_code error.code Internal_error);
+            assert (String.equal error.message "injected job transition failure")
+          | Ok _ -> failwith "rejected observation claim succeeded");
+         [%test_eq: int] 1 !rejected_claims;
+         [%test_eq: int] 0 !callback_entries;
+         assert_same_session_snapshot before (A.state actor |> protocol_ok);
+         let admitted = ref [] in
+         let escaped_port = ref None in
+         let admit port =
+           let job =
+             Agent_session.Model_job_admission.admit
+               port
+               (Inference_target_tests.job (A.state actor |> protocol_ok))
+             |> protocol_ok
+           in
+           assert (
+             Option.equal P.Inference_origin.equal job.inference_origin (Some Unbound));
+           admitted := job :: !admitted
+         in
+         let observed =
+           A.with_idle_moderator_observation_tools
+             actor
+             ~observer
+             (fun ~observing ~capabilities ~execute ~commit ->
+                Int.incr callback_entries;
+                check_actor (capabilities.borrow_agent_actor ~invocation:observing);
+                escaped_port := Some capabilities.model_jobs;
+                admit capabilities.model_jobs;
+                let reference, invocation = native_child observing ~origin:Moderator in
+                let execute ~invocation f =
+                  execute ~invocation (fun ~dispatched ~capabilities ->
+                    (on_native
+                     := fun () ->
+                          check_actor
+                            (capabilities.borrow_agent_actor ~invocation:dispatched);
+                          admit capabilities.model_jobs);
+                    f ~dispatched ~capabilities)
+                in
+                N.run_scoped
+                  ~execute
+                  ~registry:(fun () -> registry)
+                  ~reference
+                  ~invocation
+                  ~is_halted:(fun () -> false)
+                  ~authorize:(fun _ _ -> Ok ())
+                  ~prepare_output:(fun _ -> Ok `Null)
+                |> protocol_ok
+                |> ignore;
+                on_native := ignore;
+                commit
+                  ~resolved:(I.complete_observation observing |> protocol_ok)
+                  ~snapshot)
+           |> protocol_ok
+         in
+         assert observed;
+         [%test_eq: int] 1 !callback_entries;
+         [%test_eq: int] 2 !native_calls;
+         [%test_eq: int] 2 (List.length !admitted);
+         let after = A.state actor |> protocol_ok in
+         [%test_eq: int] 2 (List.length after.jobs - List.length before.jobs);
+         assert (Option.is_none after.active_operation);
+         assert_same_session_snapshot after (Agent_session.Memory_backend.state backend);
+         assert (
+           Result.is_error
+             (Agent_session.Model_job_admission.admit
+                (Option.value_exn !escaped_port)
+                (Inference_target_tests.job after)));
+         (* Settle the direct observation's real native child before selecting
+            the new background result; no handler intent was emitted by it. *)
+         let settled =
+           A.with_idle_moderator_observation
+             actor
+             ~observer
+             (fun ~observing ~capabilities ~commit ->
+                check_actor (capabilities.borrow_agent_actor ~invocation:observing);
+                commit
+                  ~resolved:(I.complete_observation observing |> protocol_ok)
+                  ~snapshot)
+           |> protocol_ok
+         in
+         assert settled;
+         let queued = List.hd_exn !admitted in
+         let job =
+           A.claim_job actor ~job_id:queued.id ~generation:queued.generation
+           |> protocol_ok
+           |> Option.value_exn
+         in
+         let background_result = ref None in
+         A.with_job_execution
+           actor
+           ~job_id:job.id
+           ~generation:job.generation
+           ~attempt:job.attempt
+           ~deadline:(Some Job_fixtures.deadline)
+           (fun services ->
+              services.execute
+                ~invocation:(Job_fixtures.root job)
+                (fun ~dispatched:parent ~capabilities:_ ->
+                   let reference, invocation = native_child parent ~origin:Script in
+                   (on_native
+                    := fun () ->
+                         let borrowed = N.borrow () |> protocol_ok in
+                         check_actor (N.borrowed_agent_actor borrowed);
+                         Chat_response.Runtime_request_scope.emit [ Request_turn ]
+                         |> Result.ok_or_failwith);
+                   let resolved =
+                     N.run_scoped
+                       ~execute:services.execute
+                       ~registry:(fun () -> registry)
+                       ~reference
+                       ~invocation
+                       ~is_halted:(fun () -> false)
+                       ~authorize:(fun _ _ -> Ok ())
+                       ~prepare_output:(fun _ -> Ok (`String "background result"))
+                     |> protocol_ok
+                   in
+                   on_native := ignore;
+                   (match resolved.handler_intent with
+                    | Some
+                        { follow_up =
+                            Pending_follow_up
+                              { request_turn = true
+                              ; request_compaction = false
+                              ; end_session = None
+                              }
+                        ; _
+                        } -> ()
+                    | _ ->
+                      raise_s
+                        [%sexp "native handler intent was not retained", (resolved : I.t)]);
+                   background_result := Some resolved;
+                   Ok (Complete `Null))
+              |> Result.map ~f:ignore)
+         |> protocol_ok;
+         A.complete_job
+           actor
+           ~job_id:job.id
+           ~generation:job.generation
+           ~attempt:job.attempt
+           (Agent_session.Runtime_builder.Model_succeeded `Null)
+         |> protocol_ok
+         |> ignore;
+         let background = Option.value_exn !background_result in
+         let callback_completed = ref false in
+         let observed =
+           A.with_idle_moderator_observation
+             actor
+             ~observer
+             (fun ~observing ~capabilities ~commit ->
+                assert (P.Id.Invocation.equal observing.context.id background.context.id);
+                assert (
+                  Option.equal
+                    I.equal_handler_intent
+                    observing.handler_intent
+                    background.handler_intent);
+                check_actor (capabilities.borrow_agent_actor ~invocation:observing);
+                let follow_up : I.follow_up =
+                  { request_turn = true; request_compaction = false; end_session = None }
+                in
+                commit
+                  ~resolved:(I.complete_observation ~follow_up observing |> protocol_ok)
+                  ~snapshot
+                |> protocol_ok;
+                callback_completed := true;
+                Ok ())
+           |> protocol_ok
+         in
+         assert observed;
+         assert !callback_completed;
+         let current = A.state actor |> protocol_ok in
+         let saved =
+           List.find_exn current.invocations ~f:(fun invocation ->
+             P.Id.Invocation.equal invocation.context.id background.context.id)
+         in
+         assert (
+           Option.equal
+             I.equal_handler_intent
+             saved.handler_intent
+             background.handler_intent);
+         worker_completed := false;
+         follow_up_worker := true;
+         let before_follow_up = current.counters.event_sequence in
+         assert (A.apply_moderator_follow_up actor |> protocol_ok);
+         let final = await_idle actor in
+         assert !worker_completed;
+         [%test_eq: int] 2 !worker_probes;
+         [%test_eq: int] 3 !native_calls;
+         let completed =
+           Agent_session.Memory_backend.events_after backend before_follow_up
+           |> protocol_ok
+           |> List.filter_map ~f:(fun event ->
+             match
+               P.Event.Durable.Payload.of_json
+                 ~kind:event.P.Event.Durable.kind
+                 event.payload
+               |> protocol_ok
+             with
+             | Operation_completed
+                 ({ kind = Turn Moderator_request; state = Completed; _ } as operation) ->
+               Some operation
+             | _ -> None)
+         in
+         [%test_eq: int] 1 (List.length completed);
+         assert (Option.is_none final.active_operation);
+         let applied =
+           List.find_exn final.invocations ~f:(fun invocation ->
+             P.Id.Invocation.equal invocation.context.id background.context.id)
+         in
+         (match applied.handler_intent, applied.observation with
+          | ( Some { follow_up = Applied_follow_up _; _ }
+            , Some { follow_up = Some (Applied_follow_up _); _ } ) -> ()
+          | _ ->
+            raise_s
+              [%sexp "same-result follow-ups did not jointly apply", (applied : I.t)]);
+         assert_same_session_snapshot final (Agent_session.Memory_backend.state backend);
+         List.iter !escaped_proofs ~f:(fun proof ->
+           assert (not (Operator_authorization.is_current proof)));
+         assert (Operator_authorization.is_current original)));
+  print_endline
+    "native completion retains genuine None/Some for idle direct/native Model admission; \
+     failed claim ACK preserves the loan";
+  [%expect
+    {| native completion retains genuine None/Some for idle direct/native Model admission; failed claim ACK preserves the loan |}]
 ;;

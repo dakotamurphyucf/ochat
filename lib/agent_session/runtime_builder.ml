@@ -107,6 +107,8 @@ type t =
   ; reserved_history_through : int
   ; moderator_snapshot : unit -> Jsonaf.t option
   ; moderator_manager : Manager.t option
+  ; model_recipes :
+      Model_job_admission.t -> Moderation.Capabilities.model_recipe String.Map.t
   ; moderator_tools : Request.Tool.t list
   ; idle_notifications : (unit -> (bool, Agent_protocol.Error.t) result) option
   ; moderator_script_tools : Script_tool_calls.t option
@@ -130,7 +132,8 @@ type t =
   ; drain_internal_events :
       History_entry.t list -> (moderator_drain, Agent_protocol.Error.t) result
   ; execute_model_job :
-      inference_context:Inference_runtime.Context.t
+      allocate_inference:Inference_allocation.Port.t
+      -> inference_context:Inference_runtime.Context.t
       -> capture_recipe_target:
            (Inference.Request.Target.t -> (unit, Agent_protocol.Error.t) result)
       -> recipe:string
@@ -148,22 +151,10 @@ type schedule_services =
   ; cancel : id:string -> (unit, string) result
   }
 
-type job_services =
-  { spawn_model : recipe:string -> payload:Jsonaf.t -> (string, string) result
-  ; call_model :
-      recipe:string
-      -> payload:Jsonaf.t
-      -> execute:
-           (inference_context:Inference_runtime.Context.t
-            -> before_inference_attempt:(Inference_runtime.Attempt.t -> unit)
-            -> capture_recipe_target:
-                 (Inference.Request.Target.t -> (unit, Agent_protocol.Error.t) result)
-            -> (Moderation.Capabilities.model_call_result, string) result)
-      -> (Moderation.Capabilities.model_call_result, string) result
-  }
+type job_services = Runtime_model_services.factory
 
 type legacy_callback_services =
-  { jobs : job_services
+  { jobs : Runtime_model_services.t
   ; schedules : schedule_services
   ; execute : Native_tool_invocation.executor
   ; executing : Agent_protocol.Moderator_execution.t
@@ -844,7 +835,13 @@ let model_executor ~sw ~ctx ~manifest_authorizer ~approval_provider ~response_di
   Chat_response.Model_executor.create ~sw ~exec_context ()
 ;;
 
-let legacy_model_recipes ~delegated executor ~session_text (jobs : job_services) =
+let legacy_model_recipes
+      ~delegated
+      executor
+      ~session_text
+      ~bind_inference_identity
+      (jobs : Runtime_model_services.t)
+  =
   let durable_recipe : Moderation.Capabilities.model_recipe =
     { call =
         (fun ~payload ->
@@ -853,12 +850,17 @@ let legacy_model_recipes ~delegated executor ~session_text (jobs : job_services)
             ~payload
             ~execute:
               (fun
-                ~inference_context ~before_inference_attempt ~capture_recipe_target ->
+                ~inference_context
+                ~allocate_inference
+                ~before_inference_attempt
+                ~capture_recipe_target
+              ->
               let recipe =
                 Chat_response.Model_executor.recipe_agent_prompt_v1
                   executor
                   ~session_id:session_text
                   ~inference_context
+                  ~inference_identity:(bind_inference_identity allocate_inference)
                   ~before_inference_attempt
                   ~capture_recipe_target:(fun target ->
                     capture_recipe_target target
@@ -885,6 +887,7 @@ let legacy_model_recipes ~delegated executor ~session_text (jobs : job_services)
 
 let run_legacy_constructor
       host
+      ~bind_inference_identity
       ~script_tools
       ~selected
       ~manager
@@ -927,6 +930,7 @@ let run_legacy_constructor
                              ~delegated
                              executor
                              ~session_text
+                             ~bind_inference_identity
                              services.jobs
                        ; tool_call
                        ; after_ms =
@@ -1006,9 +1010,10 @@ let create_moderator
       ~approval_provider
       ~response_dir
       ~schedule_services
-      ~job_services
+      ~(job_services : job_services)
       ~legacy_construction
       ~script_tools
+      ~bind_inference_identity
       ~snapshot
   =
   let open Result.Let_syntax in
@@ -1028,7 +1033,7 @@ let create_moderator
     |> Result.map_error ~f:failure
   in
   match artifact with
-  | None -> Ok (None, fun () -> Ok None)
+  | None -> Ok (None, (fun () -> Ok None), fun _ -> String.Map.empty)
   | Some artifact ->
     let executor =
       model_executor ~sw ~ctx ~manifest_authorizer ~approval_provider ~response_dir
@@ -1037,7 +1042,12 @@ let create_moderator
     let capabilities =
       { Moderation.Capabilities.default with
         model_recipes =
-          legacy_model_recipes ~delegated executor ~session_text job_services
+          legacy_model_recipes
+            ~delegated
+            executor
+            ~session_text
+            ~bind_inference_identity
+            job_services.initialization
       ; on_schedule_after_ms =
           (fun ~delay_ms ~payload ->
             let open Result.Let_syntax in
@@ -1107,6 +1117,7 @@ let create_moderator
           let%map checkpoint =
             run_legacy_constructor
               host
+              ~bind_inference_identity
               ~script_tools
               ~selected
               ~manager
@@ -1160,7 +1171,19 @@ let create_moderator
           started := true;
           snapshot)
     in
-    Ok (Some moderator_pair, start)
+    Ok
+      ( Some moderator_pair
+      , start
+      , fun admission ->
+          if delegated
+          then String.Map.empty
+          else
+            legacy_model_recipes
+              ~delegated
+              executor
+              ~session_text
+              ~bind_inference_identity
+              (job_services.for_execution admission) )
 ;;
 
 let encode_moderator_snapshot = Moderator_checkpoint.encode
@@ -1220,6 +1243,7 @@ let enqueue_internal_event moderator ?prepare payload =
 let execute_model_job
       moderator
       session_id
+      ~inference_identity
       ~inference_context
       ~capture_recipe_target
       ~recipe
@@ -1236,6 +1260,7 @@ let execute_model_job
           executor
           ~session_id:(Agent_protocol.Id.Session.to_string session_id)
           ~inference_context
+          ~inference_identity
           ~capture_recipe_target:(fun target ->
             capture_recipe_target target
             |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message))
@@ -1475,6 +1500,7 @@ let build_with_services
       ~env
       ~inference_context
       ~inference_identity
+      ~bind_inference_identity
       ~on_inference_attempt
       ~on_inference_completion
       ~on_inference_observation
@@ -1875,7 +1901,7 @@ let build_with_services
     | _, None ->
       Option.map legacy_construction ~f:(fun host -> host.script_tools agent_runtime)
   in
-  let%bind moderator, start_moderator_once =
+  let%bind moderator, start_moderator_once, model_recipes =
     create_moderator
       ~definition
       ~delegated
@@ -1899,6 +1925,7 @@ let build_with_services
       ~job_services
       ~legacy_construction
       ~script_tools:base_script_tools
+      ~bind_inference_identity
       ~snapshot:restored_moderator_snapshot
   in
   let%bind moderator_snapshot = moderator_snapshot moderator in
@@ -1923,6 +1950,7 @@ let build_with_services
             tools_service
             ~dispatch:
               (Managed_moderator_dispatch.create
+                 ~model_recipes
                  ~definition
                  ~manager:moderator.manager
                  ~history:services.history
@@ -1946,6 +1974,7 @@ let build_with_services
   in
   let activate lifecycle ~claim ~run_actions ~history =
     Moderator_event.Lifecycle.run
+      ~model_recipes
       lifecycle
       ~claim
       ~run_actions
@@ -1994,6 +2023,7 @@ let build_with_services
             Error (failure "foreground moderator activation was not admitted")
           | Activated _ | Already_active ->
             Moderator_event.foreground_handlers
+              ~model_recipes
               ?script_tools
               ~capabilities
               ~manager:moderator.manager
@@ -2017,6 +2047,7 @@ let build_with_services
       let event_handlers =
         Option.map moderator ~f:(fun (moderator, _) ->
           Moderator_event.foreground_handlers
+            ~model_recipes
             ~script_tools
             ~capabilities
             ~manager:moderator.manager
@@ -2099,6 +2130,7 @@ let build_with_services
         match definition, moderator with
         | Some definition, Some (moderator, _) ->
           [ Moderator_tool_dispatch.create
+              ~model_recipes
               ~script_tools
               ~definition
               ~manager:moderator.manager
@@ -2177,7 +2209,7 @@ let build_with_services
       ?initial_notification_input
       { env
       ; inference_context
-      ; inference_identity
+      ; inference_identity = bind_inference_identity
       ; on_inference_attempt
       ; on_inference_completion
       ; on_inference_observation
@@ -2273,6 +2305,7 @@ let build_with_services
     ; moderator_manager =
         Option.map moderator ~f:(fun (moderator, _) ->
           moderator.Chat_response.In_memory_stream.manager)
+    ; model_recipes
     ; moderator_tools = tools
     ; idle_notifications
     ; moderator_script_tools = script_tools
@@ -2321,6 +2354,7 @@ let build_with_services
                          let event = Moderation.Event.Pre_tool_call call in
                          let%bind outcome =
                            Moderator_event.run_ordinary
+                             ~model_recipes
                              ~event
                              ~claim:(claim_event ~event)
                              ~script_tools
@@ -2392,9 +2426,18 @@ let build_with_services
     ; drain_internal_events = drain_internal_events ~env ~session_id ~tools moderator
     ; execute_model_job =
         (match delegated with
-         | false -> execute_model_job moderator session_id
+         | false ->
+           fun ~allocate_inference ->
+             execute_model_job
+               moderator
+               session_id
+               ~inference_identity:(bind_inference_identity allocate_inference)
          | true ->
-           fun ~inference_context:_ ~capture_recipe_target:_ ~recipe:_ ~payload:_ ->
+           fun ~allocate_inference:_
+             ~inference_context:_
+             ~capture_recipe_target:_
+             ~recipe:_
+             ~payload:_ ->
              Error
                (failure "generated moderators must use inherited tools for model work"))
     ; enqueue_model_job_completion = enqueue_model_job_completion moderator
@@ -2418,6 +2461,7 @@ let build
       ~env
       ~inference_context
       ~inference_identity
+      ~bind_inference_identity
       ~on_inference_attempt
       ~on_inference_completion
       ~on_inference_observation
@@ -2434,6 +2478,7 @@ let build
     ~env
     ~inference_context
     ~inference_identity
+    ~bind_inference_identity
     ~on_inference_attempt
     ~on_inference_completion
     ~on_inference_observation
@@ -2455,6 +2500,7 @@ let build_with_extensions
       ~env
       ~inference_context
       ~inference_identity
+      ~bind_inference_identity
       ~on_inference_attempt
       ~on_inference_completion
       ~on_inference_observation
@@ -2471,6 +2517,7 @@ let build_with_extensions
     ~env
     ~inference_context
     ~inference_identity
+    ~bind_inference_identity
     ~on_inference_attempt
     ~on_inference_completion
     ~on_inference_observation

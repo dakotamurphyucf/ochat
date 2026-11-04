@@ -69,9 +69,9 @@ let%expect_test "original authentication follows real native owners and cannot e
              current operation_actor;
              let exact_borrow = ref None in
              let execute ~invocation f =
-               caps.with_invocation ~invocation (fun ~dispatched ~borrow_agent_actor ->
-                 exact_borrow := Some borrow_agent_actor;
-                 f ~dispatched ~borrow_agent_actor)
+               caps.with_invocation ~invocation (fun ~dispatched ~capabilities ->
+                 exact_borrow := Some capabilities.borrow_agent_actor;
+                 f ~dispatched ~capabilities)
              in
              (on_call
               := fun () ->
@@ -103,13 +103,16 @@ let%expect_test "original authentication follows real native owners and cannot e
                    N.execute_borrowed
                      scope
                      ~invocation:child
-                     (fun ~dispatched ~borrow_agent_actor ->
+                     (fun ~dispatched ~capabilities ->
                         (* Both physical invocations are live. Equal principal and
                        concurrent lifetime do not authorize cross-association. *)
                         assert (Result.is_error (parent_borrow ~invocation:dispatched));
-                        assert (Result.is_error (borrow_agent_actor ~invocation:parent));
+                        assert (
+                          Result.is_error
+                            (capabilities.borrow_agent_actor ~invocation:parent));
                         let proof =
-                          borrow_agent_actor ~invocation:dispatched |> require_actor
+                          capabilities.borrow_agent_actor ~invocation:dispatched
+                          |> require_actor
                         in
                         child_actor := Some proof;
                         current proof;
@@ -379,9 +382,9 @@ let%expect_test
           (fun services ->
              services.execute
                ~invocation:(Job_fixtures.root job)
-               (fun ~dispatched:parent ~borrow_agent_actor ->
+               (fun ~dispatched:parent ~capabilities ->
                   let actor_proof =
-                    borrow_agent_actor ~invocation:parent |> require_actor
+                    capabilities.borrow_agent_actor ~invocation:parent |> require_actor
                   in
                   saved := Some actor_proof;
                   current actor_proof;
@@ -404,15 +407,16 @@ let%expect_test
                   in
                   services.moderator_execute
                     ~invocation:moderator
-                    (fun ~dispatched ~borrow_agent_actor ~commit ->
+                    (fun ~dispatched ~capabilities ~commit ->
                        let moderator_actor =
-                         borrow_agent_actor ~invocation:dispatched |> require_actor
+                         capabilities.borrow_agent_actor ~invocation:dispatched
+                         |> require_actor
                        in
                        current moderator_actor;
                        N.with_dispatched_scope
                          ~execute:services.execute
                          ~moderator_execute:services.moderator_execute
-                         ~borrow_agent_actor
+                         ~capabilities
                          ~selected:registry
                          ~invocation:dispatched
                          (fun () ->
@@ -552,17 +556,16 @@ let%expect_test
              |> Option.value_exn
            in
            Job_fixtures.with_job actor job (fun ~job:_ ~execute ->
-             execute
-               ~invocation:(Job_fixtures.root job)
-               (fun ~dispatched ~borrow_agent_actor ->
-                  let transferred =
-                    borrow_agent_actor ~invocation:dispatched |> require_actor
-                  in
-                  current transferred;
-                  Atomic.set live false;
-                  expired transferred;
-                  assert (Result.is_error (borrow_agent_actor ~invocation:dispatched));
-                  Ok (I.Complete `Null)))
+             execute ~invocation:(Job_fixtures.root job) (fun ~dispatched ~capabilities ->
+               let transferred =
+                 capabilities.borrow_agent_actor ~invocation:dispatched |> require_actor
+               in
+               current transferred;
+               Atomic.set live false;
+               expired transferred;
+               assert (
+                 Result.is_error (capabilities.borrow_agent_actor ~invocation:dispatched));
+               Ok (I.Complete `Null)))
            |> protocol_ok
            |> ignore;
            Job_fixtures.complete actor job |> protocol_ok |> ignore));
@@ -1048,7 +1051,13 @@ let%expect_test
              ~operation_id:None
              ~event:Session_start
              ~snapshot:(fun () -> Ok snapshot)
-             (fun ~executing ~retirement_reason:_ ~event:_ ~execute ~commit ->
+             (fun ~executing
+               ~model_jobs:_
+               ~allocate_inference:_
+               ~retirement_reason:_
+               ~event:_
+               ~execute
+               ~commit ->
                 let invocation =
                   I.create
                     ~observer:Subscription_transaction_tests.source
@@ -1060,9 +1069,9 @@ let%expect_test
                   |> protocol_ok
                 in
                 let result =
-                  execute ~invocation (fun ~dispatched ~borrow_agent_actor ->
+                  execute ~invocation (fun ~dispatched ~capabilities ->
                     called := true;
-                    let actor = borrow_agent_actor ~invocation:dispatched in
+                    let actor = capabilities.borrow_agent_actor ~invocation:dispatched in
                     (match mode, actor with
                      | `Legacy, Ok None -> ()
                      | `Expired_original, Error error ->
@@ -1339,7 +1348,11 @@ let%expect_test
                Job_fixtures.with_job actor job (fun ~job:_ ~execute ->
                  execute
                    ~invocation:(Job_fixtures.root job)
-                   (fun ~dispatched ~borrow_agent_actor ->
+                   (fun ~dispatched ~capabilities ->
+                      let borrow_agent_actor =
+                        capabilities
+                          .Agent_session.Invocation_capabilities.borrow_agent_actor
+                      in
                       let borrowed = borrow_agent_actor ~invocation:dispatched in
                       observed
                       := Some
@@ -1406,7 +1419,11 @@ let%expect_test
              Job_fixtures.with_job actor running (fun ~job:_ ~execute ->
                execute
                  ~invocation:(Job_fixtures.root running)
-                 (fun ~dispatched ~borrow_agent_actor ->
+                 (fun ~dispatched ~capabilities ->
+                    let borrow_agent_actor =
+                      capabilities
+                        .Agent_session.Invocation_capabilities.borrow_agent_actor
+                    in
                     denied := Some (borrow_agent_actor ~invocation:dispatched);
                     Ok (I.Complete `Null)))
              |> protocol_ok

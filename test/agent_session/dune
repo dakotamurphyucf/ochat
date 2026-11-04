@@ -16,6 +16,7 @@
   instruction_selection_persistence_tests
   instruction_clear_capacity_tests
   goal_run_tests
+  goal_work_attribution_tests
   run_terminal_capacity_tests
   run_subscription_wake_tests
   run_persistence_tests

@@ -10,6 +10,8 @@ type claim =
   snapshot:
     (unit -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
   -> (executing:Agent_protocol.Moderator_execution.t
+      -> model_jobs:Model_job_admission.t
+      -> allocate_inference:Inference_allocation.Port.t
       -> retirement_reason:string option
       -> event:Session.Snapshot.t
       -> execute:Native_tool_invocation.executor
@@ -44,6 +46,9 @@ type claim =
     wakeup polling, deadlines, interactive permission ownership or public tools. *)
 val run_queued_idle
   :  claim:claim
+  -> ?model_recipes:
+       (Model_job_admission.t
+        -> Chat_response.Moderation.Capabilities.model_recipe Core.String.Map.t)
   -> ?script_tools:Script_tool_calls.t
   -> ?run_actions:
        (Agent_protocol.Moderator_execution.t
@@ -65,6 +70,9 @@ val run_queued_idle
 val run_ordinary
   :  event:Chat_response.Moderation.Event.t
   -> claim:claim
+  -> ?model_recipes:
+       (Model_job_admission.t
+        -> Chat_response.Moderation.Capabilities.model_recipe Core.String.Map.t)
   -> ?script_tools:Script_tool_calls.t
   -> ?run_actions:
        (Agent_protocol.Moderator_execution.t
@@ -83,6 +91,8 @@ type delegated_claim =
        (unit
         -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
   -> (executing:Agent_protocol.Moderator_execution.t
+      -> model_jobs:Model_job_admission.t
+      -> allocate_inference:Inference_allocation.Port.t
       -> event:Session.Snapshot.t
       -> execute:Native_tool_invocation.executor
       -> commit:
@@ -109,6 +119,9 @@ type delegated_result =
 val run_delegated
   :  event:Chat_response.Moderation.Event.t
   -> claim:delegated_claim
+  -> ?model_recipes:
+       (Model_job_admission.t
+        -> Chat_response.Moderation.Capabilities.model_recipe Core.String.Map.t)
   -> ?script_tools:Script_tool_calls.t
   -> ?run_actions:
        (Agent_protocol.Moderator_execution.t
@@ -156,6 +169,9 @@ module Lifecycle : sig
   val run
     :  t
     -> claim:(event:Chat_response.Moderation.Event.t -> claim)
+    -> ?model_recipes:
+         (Model_job_admission.t
+          -> Chat_response.Moderation.Capabilities.model_recipe Core.String.Map.t)
     -> ?script_tools:Script_tool_calls.t
     -> ?run_actions:
          (Agent_protocol.Moderator_execution.t
@@ -180,7 +196,10 @@ end
     transaction retires unadmitted turns and settles an actual end-session action.
     Install these handlers before emitting the submitted-item event. *)
 val foreground_handlers
-  :  ?script_tools:Script_tool_calls.t
+  :  ?model_recipes:
+       (Model_job_admission.t
+        -> Chat_response.Moderation.Capabilities.model_recipe Core.String.Map.t)
+  -> ?script_tools:Script_tool_calls.t
   -> capabilities:Operation_worker.Capabilities.t
   -> manager:Chat_response.Moderator_manager.t
   -> session_meta:Jsonaf.t

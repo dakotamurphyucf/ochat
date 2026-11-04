@@ -32,6 +32,24 @@ module Scope = struct
   let principal_id t = t.principal_id
   let original_actor t = t.original_actor
   let observer t = t.observer
+
+  let check_current t =
+    match t.original_actor with
+    | None -> Ok ()
+    | Some actor ->
+      if
+        Operator_authorization.is_current actor
+        && P.Principal.has_scope (Operator_authorization.principal actor) Send_messages
+      then Ok ()
+      else
+        Error
+          (P.Error.create
+             Permission_denied
+             ~message:"Run original authority expired"
+             ~retryable:false
+             ())
+  ;;
+
   let authorize t state = t.authorize state
   let startup_pending t = t.startup_pending ()
 end

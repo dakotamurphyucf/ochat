@@ -34,7 +34,7 @@ let%expect_test "nested moderator handoff owns its descendants and permission re
           let expired = ref None in
           caps.with_invocation
             ~invocation:(fresh ~origin:Script ~name:"caller" ())
-            (fun ~dispatched:caller ~borrow_agent_actor:_ ->
+            (fun ~dispatched:caller ~capabilities:_ ->
                let invocation =
                  fresh ~parent:caller.context.id ~origin:Script ~name:"moderated" ()
                in
@@ -50,7 +50,7 @@ let%expect_test "nested moderator handoff owns its descendants and permission re
                    reject
                      (caps.with_moderator_invocation
                         ~invocation:(I.create context |> protocol_ok)
-                        (fun ~dispatched:_ ~borrow_agent_actor:_ ~commit:_ ->
+                        (fun ~dispatched:_ ~capabilities:_ ~commit:_ ->
                            failwith "invalid callback ran")));
                assert_same_session_snapshot before (A.state actor |> protocol_ok);
                let entered, entered_u = Eio.Promise.create () in
@@ -59,7 +59,7 @@ let%expect_test "nested moderator handoff owns its descendants and permission re
                let handoff =
                  caps.with_moderator_invocation
                    ~invocation
-                   (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+                   (fun ~dispatched ~capabilities:_ ~commit ->
                       let permission : P.t =
                         { id = Agent_protocol.Id.Permission.create ()
                         ; session_id = input.session_id
@@ -93,7 +93,7 @@ let%expect_test "nested moderator handoff owns its descendants and permission re
                                  ~origin:Moderator
                                  ~name:"native-child"
                                  ())
-                            (fun ~dispatched:child ~borrow_agent_actor:_ ->
+                            (fun ~dispatched:child ~capabilities:_ ->
                                let grandchild_result =
                                  caps.with_invocation
                                    ~invocation:
@@ -102,7 +102,7 @@ let%expect_test "nested moderator handoff owns its descendants and permission re
                                         ~origin:Script
                                         ~name:"grandchild"
                                         ())
-                                   (fun ~dispatched:_ ~borrow_agent_actor:_ ->
+                                   (fun ~dispatched:_ ~capabilities:_ ->
                                       Eio.Promise.resolve entered_u ();
                                       Eio.Promise.await release;
                                       Ok (I.Complete `Null))
@@ -150,7 +150,7 @@ let%expect_test "nested moderator handoff owns its descendants and permission re
                ~invocation:
                  (I.create { context with id = Agent_protocol.Id.Invocation.create () }
                   |> protocol_ok)
-               (fun ~dispatched:_ ~borrow_agent_actor:_ ~commit:_ ->
+               (fun ~dispatched:_ ~capabilities:_ ~commit:_ ->
                   failwith "expired caller admitted"));
           let state = A.state actor |> protocol_ok in
           Eio.Promise.resolve done_u ();
@@ -223,7 +223,7 @@ let%expect_test "a queued moderator loan cannot outlive its native caller" =
         Eio.Fiber.fork ~sw (fun () ->
           caps.with_moderator_invocation
             ~invocation:fresh
-            (fun ~dispatched ~borrow_agent_actor:_ ~commit ->
+            (fun ~dispatched ~capabilities:_ ~commit ->
                Eio.Promise.resolve held_u ();
                Eio.Promise.await release;
                let resolved =
@@ -257,7 +257,7 @@ let%expect_test "a queued moderator loan cannot outlive its native caller" =
                 let result =
                   execute
                     ~invocation:child
-                    (fun ~dispatched:_ ~borrow_agent_actor:_ ~commit:_ ->
+                    (fun ~dispatched:_ ~capabilities:_ ~commit:_ ->
                        failwith "expired queued caller entered moderator")
                 in
                 rejected := Result.is_error result;

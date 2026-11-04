@@ -152,7 +152,10 @@ let execution ~target ~answer ~on_observation =
               |> ok
             in
             let accounting_id = O.Observation_id.of_string "usage" |> ok in
-            f ~scope ~accounting_id)
+            f
+              ~scope
+              ~accounting_id
+              ~submission_guard:Inference_runtime.Submission_guard.empty)
       }
   in
   let execution =

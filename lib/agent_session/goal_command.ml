@@ -36,6 +36,7 @@ module Mutation = struct
 
   let hold_json = function
     | G.Hold.Operator_pause -> `Object [ "kind", `String "operator_pause" ]
+    | Deadline_reached -> `Object [ "kind", `String "deadline_reached" ]
     | Source_review -> `Object [ "kind", `String "source_review" ]
     | Needs_input reason ->
       `Object [ "kind", `String "needs_input"; "reason", G.Reason.to_json reason ]

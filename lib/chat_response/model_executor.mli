@@ -112,6 +112,7 @@ val call_agent_prompt_v1_strict
   :  exec_context
   -> request:Model_spawn_request.t
   -> ?inference_context:Inference_runtime.Context.t
+  -> ?inference_identity:Inference_client.Identity.t
   -> ?before_inference_attempt:(Inference_runtime.Attempt.t -> unit)
   -> capture_recipe_target:(Inference.Request.Target.t -> (unit, string) result)
   -> unit
@@ -129,6 +130,7 @@ val recipe_agent_prompt_v1
   :  t
   -> session_id:string
   -> ?inference_context:Inference_runtime.Context.t
+  -> ?inference_identity:Inference_client.Identity.t
   -> ?before_inference_attempt:(Inference_runtime.Attempt.t -> unit)
   -> ?capture_recipe_target:(Inference.Request.Target.t -> (unit, string) result)
   -> unit

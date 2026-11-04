@@ -53,7 +53,13 @@ let%expect_test
          capabilities.with_moderator_event
            ~event:Chat_response.Moderation.Event.Turn_end
            ~snapshot:(fun () -> Ok Setup.before)
-           (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
+           (fun ~executing
+             ~model_jobs:_
+             ~allocate_inference:_
+             ~retirement_reason:_
+             ~event:_
+             ~execute:_
+             ~commit ->
               S.with_scope
                 (Notification_access_tests.notices actor)
                 ~owner:(Moderator_event executing.context.id)
