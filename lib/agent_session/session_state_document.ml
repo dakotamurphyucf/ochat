@@ -1025,7 +1025,15 @@ let validate_raw_queue_capacity document =
     | Value raw -> Some raw
     | Absent | Null -> None
   in
-  Moderator_checkpoint.validate_encoded_capacity raw_moderator |> X.document_result
+  let open Result.Let_syntax in
+  let%bind () =
+    Moderator_checkpoint.validate_encoded_capacity raw_moderator |> X.document_result
+  in
+  match D.Json.field (D.Document.payload document) ~name:"moderator_executions" with
+  | Value (`Array receipts) ->
+    List.fold_result receipts ~init:() ~f:(fun () receipt ->
+      Queue_provenance_validation.validate_encoded_event receipt |> X.document_result)
+  | Value _ | Absent | Null -> Ok ()
 ;;
 
 let validate_run_capacity (state : S.t) document ~limits =

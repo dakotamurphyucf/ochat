@@ -52,20 +52,32 @@ let of_job (job : P.Job.t) =
 let of_event ~runs ~jobs (event : P.Moderator_execution.t) =
   let open Result.Let_syntax in
   let%bind causal = Run_event_ancestry.find (all_runs runs) ~executing:event in
-  match causal with
-  | Some run -> Ok (Some (P.Inference_origin.Run run.id))
+  match event.queue_occurrence with
+  | Some occurrence ->
+    let origin = P.Moderator_execution.Queue_occurrence.origin occurrence in
+    (match origin, causal with
+     | Some origin, Some run ->
+       if P.Inference_origin.equal origin (Run run.id)
+       then Ok (Some origin)
+       else invalid "queue occurrence contradicts retained Event Run ownership"
+     | None, _ | Some _, None -> Ok origin)
   | None ->
-    (match event.context.job, event.context.operation_id with
-     | Some parent, _ ->
-       (match
-          List.find jobs ~f:(fun (job : P.Job.t) -> P.Id.Job.equal job.id parent.job_id)
-        with
-        | Some job -> Ok job.inference_origin
-        | None -> invalid "event inference parent Job is unavailable")
-     | None, Some id ->
-       origin_of_owners (operation_owners runs id) |> Result.map ~f:Option.some
-     | None, None ->
-       origin_of_owners (event_owners runs event.context.id) |> Result.map ~f:Option.some)
+    (match causal with
+     | Some run -> Ok (Some (P.Inference_origin.Run run.id))
+     | None ->
+       (match event.context.job, event.context.operation_id with
+        | Some parent, _ ->
+          (match
+             List.find jobs ~f:(fun (job : P.Job.t) ->
+               P.Id.Job.equal job.id parent.job_id)
+           with
+           | Some job -> Ok job.inference_origin
+           | None -> invalid "event inference parent Job is unavailable")
+        | None, Some id ->
+          origin_of_owners (operation_owners runs id) |> Result.map ~f:Option.some
+        | None, None ->
+          origin_of_owners (event_owners runs event.context.id)
+          |> Result.map ~f:Option.some))
 ;;
 
 let validate ~invocations ~jobs ~events ~runs =
@@ -146,30 +158,38 @@ let validate ~invocations ~jobs ~events ~runs =
                  then Ok ()
                  else invalid "invocation inference origin differs from its event source"
              in
-             let%bind causal = Run_event_ancestry.find runs_list ~executing:event in
-             (match causal with
-              | Some run -> compare_origin (Some (P.Inference_origin.Run run.id))
+             (match event.queue_occurrence with
+              | Some _ ->
+                let%bind expected = of_event ~runs ~jobs event in
+                (match expected with
+                 | Some _ -> compare_origin expected
+                 | None ->
+                   invalid "invocation parent queue occurrence has unavailable origin")
               | None ->
-                (* Missing historical Job classification cannot contradict the
+                let%bind causal = Run_event_ancestry.find runs_list ~executing:event in
+                (match causal with
+                 | Some run -> compare_origin (Some (P.Inference_origin.Run run.id))
+                 | None ->
+                   (* Missing historical Job classification cannot contradict the
                   child. A positively retained queued event takes precedence
                   over its physical drainer, including after terminalization. *)
-                (match event.context.job with
-                 | Some parent ->
-                   List.find jobs ~f:(fun (job : P.Job.t) ->
-                     P.Id.Job.equal job.id parent.job_id)
-                   |> Option.value_map ~default:(Ok ()) ~f:(fun job ->
-                     compare_origin job.inference_origin)
-                 | None ->
-                   let owners =
-                     match event.context.operation_id with
-                     | Some id -> operation_owners runs id
-                     | None -> event_owners runs event.context.id
-                   in
-                   if List.is_empty owners
-                   then Ok ()
-                   else (
-                     let%bind expected = origin_of_owners owners in
-                     compare_origin (Some expected)))))
+                   (match event.context.job with
+                    | Some parent ->
+                      List.find jobs ~f:(fun (job : P.Job.t) ->
+                        P.Id.Job.equal job.id parent.job_id)
+                      |> Option.value_map ~default:(Ok ()) ~f:(fun job ->
+                        compare_origin job.inference_origin)
+                    | None ->
+                      let owners =
+                        match event.context.operation_id with
+                        | Some id -> operation_owners runs id
+                        | None -> event_owners runs event.context.id
+                      in
+                      if List.is_empty owners
+                      then Ok ()
+                      else (
+                        let%bind expected = origin_of_owners owners in
+                        compare_origin (Some expected))))))
       in
       let owners =
         List.filter runs_list ~f:(fun run ->

@@ -15,6 +15,13 @@ let shape =
   | Error error -> raise_s [%sexp (error : Document_schema.Error.t)]
 ;;
 
+let digest snapshot =
+  Session.Moderator_state.Identity_snapshot.to_jsonaf snapshot
+  |> Jsonaf.to_string
+  |> Digestif.SHA256.digest_string
+  |> Digestif.SHA256.to_hex
+;;
+
 let encode snapshot =
   `Object
     [ "identity_snapshot", Session.Moderator_state.Identity_snapshot.to_jsonaf snapshot ]
