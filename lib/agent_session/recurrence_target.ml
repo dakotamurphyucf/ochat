@@ -27,6 +27,16 @@ type t =
 
 let view t = t.projection
 let invalid message = Error (P.Error.invalid_request message)
+
+let fresh_definition_json t =
+  match t.projection with
+  | Existing_session _ -> invalid "existing-session target has no captured definition"
+  | Fresh_child _ ->
+    (match D.Json.field (D.Document.payload t.document) ~name:"definition" with
+     | Value json -> Ok json
+     | Absent | Null -> invalid "captured target definition is unavailable")
+;;
+
 let document_result = X.document_result
 
 let protocol_result result =

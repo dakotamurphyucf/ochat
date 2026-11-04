@@ -200,6 +200,15 @@ let encode (s : S.t) =
     ; "history", X.list_json detail_json s.history
     ; "control_history", X.list_json control_json s.control_history
     ]
+  |> fun json ->
+  match json with
+  | `Object fields when not (List.is_empty s.child_associations) ->
+    `Object
+      (fields
+       @ [ ( "child_associations"
+           , X.list_json Recurrence_child_association.to_json s.child_associations )
+         ])
+  | _ -> json
 ;;
 
 let validate (s : S.t) =
@@ -208,7 +217,7 @@ let validate (s : S.t) =
     if
       Int64.(
         s.revision < 0L
-        || s.revision > max_value - of_int (List.length s.protected_children))
+        || s.revision > max_value - of_int (List.length (S.unlinked_children s)))
       || List.is_empty s.marks
       || List.length s.marks > 8
       || List.length s.ready > 32
@@ -255,6 +264,26 @@ let validate (s : S.t) =
     else Ok ()
   in
   let%bind () =
+    if
+      List.length s.child_associations > 256
+      || List.contains_dup
+           (List.map s.child_associations ~f:Recurrence_child_association.occurrence)
+           ~compare:I.Occurrence.compare
+    then invalid "duplicate or excessive child association"
+    else Ok ()
+  in
+  let%bind () =
+    List.fold_result s.child_associations ~init:() ~f:(fun () association ->
+      match
+        List.find s.protected_children ~f:(fun reservation ->
+          I.Occurrence.equal
+            (Recurrence_child_association.occurrence association)
+            (Recurrence_child_reservation.occurrence reservation))
+      with
+      | None -> invalid "child association has no exact retained reservation"
+      | Some reservation -> Recurrence_child_association.validate association ~reservation)
+  in
+  let%bind () =
     if List.contains_dup keys ~compare:I.Occurrence.compare
     then invalid "frontier contains duplicate pending occurrence"
     else Ok ()
@@ -291,6 +320,12 @@ let decode json =
     | Null -> invalid "protected children must be an array"
     | Value json -> list 256 Recurrence_child_reservation.of_json json
   in
+  let%bind child_associations =
+    match D.Json.field json ~name:"child_associations" with
+    | Absent -> Ok []
+    | Null -> invalid "child associations must be an array"
+    | Value json -> list 256 Recurrence_child_association.of_json json
+  in
   let%bind batch = X.required f "batch" (nullable batch_of_json) in
   let%bind lookahead = X.required f "lookahead" (nullable stored_of_json) in
   let%bind alarm = X.required f "alarm" (nullable V.Stored_alarm.of_json) in
@@ -303,6 +338,7 @@ let decode json =
       ; marks
       ; ready
       ; protected_children
+      ; child_associations
       ; batch
       ; lookahead
       ; alarm
@@ -334,6 +370,7 @@ let shape =
              ]) )
     ; "ready", v
     ; "protected_children", v
+    ; "child_associations", v
     ; "batch", v
     ; "lookahead", v
     ; "alarm", v
@@ -349,7 +386,8 @@ let codec =
     ~kind:"ochat.recurrence_frontier"
     ~version:1
     ~shape
-    ~supported_semantics:[ "recurrence.child-reservation.v1" ]
+    ~supported_semantics:
+      [ "recurrence.child-reservation.v1"; "recurrence.child-association.v1" ]
     ~validate:(fun s -> X.document_result (validate s))
     ~decode:(fun j -> X.document_result (decode j))
     ~encode:(fun s -> Ok (encode s))

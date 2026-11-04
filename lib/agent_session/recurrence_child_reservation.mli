@@ -36,6 +36,16 @@ val artifact_revision_id : t -> Agent_protocol.Id.Prompt_revision.t
 val manifest_sha256 : t -> string
 val request_sha256 : t -> string
 
+(** Captured source identity, not a current source permit. *)
+val source : t -> Agent_protocol.Run_source.t
+
+(** Deterministic scoped lower-store locator. Original principal remains audit
+    data on retries by a different freshly authorized caller. This grants no
+    reservation, child existence or execution authority. *)
+val delegation_key
+  :  t
+  -> (Agent_store.Delegation_store.Key.t, Agent_protocol.Error.t) result
+
 (** Exact captured association, never authentication. Retained historical
     definitions remain valid evidence after an edit or source fence. New effects
     additionally require current source, birth, enabled control and fresh policy. *)
@@ -65,4 +75,9 @@ module Association_capacity : sig
       reservation. Never decode, persist or interpret it as a child reference.
       Enclosing frontier/entry/catalog/host/journal owners measure it additively. *)
   val reservation_projection : t -> Jsonaf.t
+
+  (** The same conservative byte/field/node witness without a reservation copy,
+      for an enclosing association array's actual key and wrapper layout. Never
+      decode, persist or interpret this storage-only value as association proof. *)
+  val growth_projection : unit -> Jsonaf.t
 end

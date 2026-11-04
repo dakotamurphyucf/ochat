@@ -12,10 +12,12 @@ module Recurrence_creation = struct
   module Checked = struct
     type t =
       { definition : Recurrence_definition.t
+      ; principal : Agent_protocol.Principal.t
       ; check_current : unit -> (unit, Agent_protocol.Error.t) result
       }
 
     let definition t = t.definition
+    let principal t = t.principal
     let check_current t = t.check_current ()
   end
 
@@ -30,6 +32,17 @@ module Recurrence_creation = struct
     }
 
   let reservation t = t.reservation
+end
+
+module Recurrence_child_link = struct
+  type t =
+    { association : Recurrence_child_association.t
+    ; controller : Recurrence_controller.t
+    ; check_current : unit -> (unit, Agent_protocol.Error.t) result
+    }
+
+  let association t = t.association
+  let check_current t = t.check_current ()
 end
 
 module Runtime_retirement = struct
@@ -688,6 +701,12 @@ type _ request =
   | Check_recurrence_creation :
       Recurrence_creation.t
       -> Recurrence_creation.Checked.t request
+  | Verify_recurrence_child :
+      Recurrence_child_reservation.t
+      -> Recurrence_child_link.t request
+  | Link_recurrence_child :
+      Recurrence_creation.t * Recurrence_child_link.t
+      -> Recurrence_child_association.t request
   | Read_recurrences :
       Operator_authorization.t
       * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
@@ -12860,6 +12879,8 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Apply_recurrence_command _
   | Reserve_recurrence_child _
   | Check_recurrence_creation _
+  | Verify_recurrence_child _
+  | Link_recurrence_child _
   | Read_recurrences _
   | Update_metadata _
   | Stop _
@@ -12988,6 +13009,103 @@ let begin_lifecycle t attachment_id expected_generation expected_revision =
     let fence = Lifecycle_fence.{ owner = t.lifecycle_owner; phase = Reserved } in
     t.lifecycle_fence <- Some fence;
     Ok fence)
+;;
+
+let refresh_recurrence_creation t permit =
+  let open Result.Let_syntax in
+  let%bind () =
+    if phys_equal permit.Recurrence_creation.owner t.recurrence_creation_owner
+    then Ok ()
+    else Error (error Conflict "recurrence creation permit belongs to another actor")
+  in
+  let%bind () = require_runtime_admission t in
+  let%bind controller = require_recurrence_controller t in
+  let%bind prepared =
+    Recurrence_creation_admission.prepare
+      t.state
+      ~controller
+      ~actor:permit.actor
+      ~authorize:permit.authorize
+      ~occurrence:(Recurrence_child_reservation.occurrence permit.reservation)
+      ~expected_control_revision:
+        (Recurrence_child_reservation.control_revision permit.reservation)
+  in
+  let%bind () = check_recurrence_creation_admission t prepared in
+  let%bind () =
+    match Recurrence_creation_admission.reservation prepared with
+    | Some row when Recurrence_child_reservation.equal row permit.reservation -> Ok ()
+    | None | Some _ ->
+      Error (error Conflict "recurrence creation permit lost exact durable reservation")
+  in
+  let definition =
+    Recurrence_entry.current (Recurrence_creation_admission.entry prepared)
+  in
+  let check_current () =
+    let%bind () = check_recurrence_creation_admission t prepared in
+    (* The trusted policy callback is nonyielding. Repeat the original proof
+       and actual owner-state checks after it before the caller's effect. *)
+    let%bind () = permit.authorize t.state definition in
+    check_recurrence_creation_admission t prepared
+  in
+  let checked : Recurrence_creation.Checked.t =
+    { definition
+    ; principal = Operator_authorization.principal permit.actor
+    ; check_current
+    }
+  in
+  Ok checked
+;;
+
+let observe_recurrence_child t reservation =
+  let open Result.Let_syntax in
+  let%bind () = require_runtime_admission t in
+  let%bind controller = require_recurrence_controller t in
+  let%bind reference =
+    Result.of_option
+      t.state.spec.delegation
+      ~error:(error Invalid_state "captured child has no delegation reference")
+  in
+  let%bind record = Recurrence_controller.resolve_delegation controller reference in
+  let%bind () =
+    match record.stage, record.revocation with
+    | (Child_installed | Linked), None -> Ok ()
+    | (Reserved | Artifact_installed), None | _, Some _ ->
+      Error (error Conflict "captured child has no current installed delegation")
+  in
+  let%bind origin = Recurrence_child_origin.of_record record in
+  let%bind () =
+    if
+      Recurrence_child_reservation.equal
+        reservation
+        (Recurrence_child_origin.reservation origin)
+    then Ok ()
+    else Error (error Conflict "captured child belongs to another occurrence")
+  in
+  let%bind () = Recurrence_child_origin.validate_initial_state origin t.state in
+  let%bind current = Recurrence_controller.observe controller t.state in
+  let basis_revision = t.state.counters.revision in
+  let check_current () =
+    let%bind () = require_runtime_admission t in
+    let%bind () =
+      if
+        Option.is_none (Eio.Promise.peek t.finished)
+        && (not t.stopped)
+        && Recurrence_controller.is_current current
+        && Recurrence_controller.automatic current
+        && Int64.equal basis_revision t.state.counters.revision
+      then Ok ()
+      else Error (error Conflict "captured child observation is no longer current")
+    in
+    Recurrence_child_origin.validate_initial_state origin t.state
+  in
+  let%bind () = check_current () in
+  let%map child_association =
+    Recurrence_child_association.create ~reservation ~reference
+  in
+  let proof : Recurrence_child_link.t =
+    { association = child_association; controller; check_current }
+  in
+  proof
 ;;
 
 let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
@@ -13666,45 +13784,58 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         { owner = t.recurrence_creation_owner; actor; authorize; reservation }
       in
       Ok permit
-    | Check_recurrence_creation permit ->
+    | Check_recurrence_creation permit -> refresh_recurrence_creation t permit
+    | Verify_recurrence_child reservation -> observe_recurrence_child t reservation
+    | Link_recurrence_child (permit, child) ->
       let open Result.Let_syntax in
-      let%bind () =
-        if phys_equal permit.Recurrence_creation.owner t.recurrence_creation_owner
-        then Ok ()
-        else Error (error Conflict "recurrence creation permit belongs to another actor")
-      in
-      let%bind () = require_runtime_admission t in
+      let%bind checked = refresh_recurrence_creation t permit in
       let%bind controller = require_recurrence_controller t in
-      let%bind prepared =
-        Recurrence_creation_admission.prepare
-          t.state
-          ~controller
-          ~actor:permit.actor
-          ~authorize:permit.authorize
-          ~occurrence:(Recurrence_child_reservation.occurrence permit.reservation)
-          ~expected_control_revision:
-            (Recurrence_child_reservation.control_revision permit.reservation)
-      in
-      let%bind () = check_recurrence_creation_admission t prepared in
       let%bind () =
-        match Recurrence_creation_admission.reservation prepared with
-        | Some row when Recurrence_child_reservation.equal row permit.reservation -> Ok ()
-        | None | Some _ ->
-          Error
-            (error Conflict "recurrence creation permit lost exact durable reservation")
+        if
+          Recurrence_controller.same_store
+            controller
+            child.Recurrence_child_link.controller
+        then Ok ()
+        else Error (error Conflict "recurrence child belongs to another Store")
       in
-      let definition =
-        Recurrence_entry.current (Recurrence_creation_admission.entry prepared)
+      let association = child.Recurrence_child_link.association in
+      let%bind () =
+        Recurrence_child_association.validate
+          association
+          ~reservation:permit.Recurrence_creation.reservation
       in
-      let check_current () =
-        let%bind () = check_recurrence_creation_admission t prepared in
-        (* The trusted policy callback is nonyielding. Repeat the original proof
-           and actual owner-state checks after it before the caller's effect. *)
-        let%bind () = permit.authorize t.state definition in
-        check_recurrence_creation_admission t prepared
+      let%bind catalog =
+        Result.of_option
+          t.state.recurrence_catalog
+          ~error:(error Conflict "recurrence parent lost its catalog")
       in
-      let checked : Recurrence_creation.Checked.t = { definition; check_current } in
-      Ok checked
+      let%bind next = Recurrence_catalog.link_child catalog association in
+      let check () =
+        let%bind () = Recurrence_creation.Checked.check_current checked in
+        let%bind () = child.check_current () in
+        Recurrence_creation.Checked.check_current checked
+      in
+      let%bind () = check () in
+      let%bind () =
+        if
+          Int64.equal
+            (Recurrence_catalog.revision next)
+            (Recurrence_catalog.revision catalog)
+        then Ok ()
+        else (
+          let%bind transition =
+            prepare_transition
+              t
+              ~delta:(Session_delta.Recurrence_catalog_changed next)
+              ~payloads:[]
+          in
+          let%bind () = check () in
+          let%bind () = persist_transition t transition in
+          install_committed_transition t transition;
+          publish_committed_transition t transition;
+          Ok ())
+      in
+      Ok association
     | Read_recurrences (actor, authorize) ->
       let open Result.Let_syntax in
       let%bind controller = require_recurrence_controller t in
@@ -15512,6 +15643,14 @@ let reserve_recurrence_child t ~actor ~authorize ~occurrence ~expected_control_r
 
 let check_recurrence_creation t permit =
   recurrence_call t (Check_recurrence_creation permit)
+;;
+
+let verify_recurrence_child t ~reservation =
+  recurrence_call t (Verify_recurrence_child reservation)
+;;
+
+let link_recurrence_child t ~permit ~child =
+  recurrence_call t (Link_recurrence_child (permit, child))
 ;;
 
 let sweep_recurrences t =

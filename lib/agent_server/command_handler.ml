@@ -2019,9 +2019,12 @@ let handle_send_message t ~agent_actor ?prepared_writer context command_audit re
     ~attachment_id:request.attachment_id
     (fun entry ->
        let%bind () = require_connection_writer context request.attachment_id in
-       let%bind history_id = Agent_session.History_id_source.allocate entry.history_ids in
        let%bind history_entry =
-         Runtime_owner.parse_user_content entry.runtime ~id:history_id content
+         Runtime_owner.with_loaded_runtime entry.runtime (fun runtime ->
+           let%bind history_id =
+             Agent_session.History_id_source.allocate entry.history_ids
+           in
+           runtime.parse_user_content ~id:history_id content)
        in
        let history_entry = Agent_session.History_codec.to_protocol history_entry in
        let%bind submission =

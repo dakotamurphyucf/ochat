@@ -58,3 +58,12 @@ let automatic t =
 ;;
 
 let is_current t = S.Lifecycle.Current.is_current t.current t.handle
+let same_store a b = phys_equal a.store b.store
+
+let resolve_delegation t reference =
+  if not (S.owns_handle t.store t.handle)
+  then invalid "delegation observation no longer owns its session Handle"
+  else
+    Agent_store.Delegation_store.resolve (S.delegations t.store) reference
+    |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+;;

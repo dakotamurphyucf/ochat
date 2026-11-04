@@ -23,3 +23,14 @@ val revision : observation -> Agent_protocol.Session_lifecycle.Revision.t
 val archived : observation -> bool
 val automatic : observation -> bool
 val is_current : observation -> bool
+
+(** Actual shared root identity, never an ID-based reconstruction or grant. *)
+val same_store : t -> t -> bool
+
+(** Resolve through this controller's existing shared delegation owner while its
+    genuine Handle is owned. Returns immutable data, including revoked records;
+    the caller must check disposition, state and a fresh lifecycle observation. *)
+val resolve_delegation
+  :  t
+  -> Agent_store.Delegation_store.Reference.t
+  -> (Agent_store.Delegation_store.record, Agent_protocol.Error.t) result

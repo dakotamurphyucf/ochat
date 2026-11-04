@@ -379,6 +379,34 @@ let with_runtime_lease ?run_preparation t ~retain_resources f =
     f
 ;;
 
+let with_loaded_runtime t f =
+  with_lease
+    t
+    ~survives_stop:false
+    ~admit:(fun () ->
+      let open Result.Let_syntax in
+      let%bind runtime =
+        match t.closed, t.unloading, t.foreground_retirement, t.runtime with
+        | true, _, _, _ -> Error (closed_error ())
+        | false, Some _, _, _ | false, None, Some _, _ -> Error (background_busy ())
+        | false, None, None, None ->
+          Error
+            (Agent_protocol.Error.create
+               Invalid_state
+               ~message:"session runtime is not already loaded"
+               ~retryable:true
+               ())
+        | false, None, None, Some runtime -> Ok runtime
+      in
+      let%map () =
+        match runtime.Agent_session.Runtime_builder.check_execution with
+        | None -> Ok ()
+        | Some check -> check ()
+      in
+      runtime, None)
+    f
+;;
+
 let with_background_runtime t f = with_runtime_lease t ~retain_resources:false f
 
 let with_prepared_run_runtime t ~preparation f =
@@ -1181,7 +1209,7 @@ let drain_idle_moderator t =
             ()))
 ;;
 
-let with_loaded_runtime t f =
+let with_locked_runtime t f =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     let open Result.Let_syntax in
     let%bind () = ensure_loaded_locked t in
@@ -1199,7 +1227,7 @@ let with_loaded_runtime t f =
 module For_testing = struct
   let with_loaded_runtime t f =
     Eio.Mutex.use_ro t.moderator_work_mutex (fun () ->
-      with_loaded_runtime t (fun _ -> f ()))
+      with_locked_runtime t (fun _ -> f ()))
   ;;
 end
 

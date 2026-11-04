@@ -53,6 +53,10 @@ val reserve_child
   -> occurrence:Recurrence_identity.Occurrence.t
   -> (t * Recurrence_child_reservation.t, Agent_protocol.Error.t) result
 
+(** Immutable parent link candidate while enabled, preserving the current
+    definition/control/cursor. Actual child proof and ACK belong to the actor. *)
+val link_child : t -> Recurrence_child_association.t -> (t, Agent_protocol.Error.t) result
+
 (** Apply one exact-basis opaque pure plan while Enabled. Cursor/frontier advance
     together; control revision and immutable definitions stay unchanged. This is
     not lifecycle/source authorization or a persistence/dispatch operation. *)
@@ -99,7 +103,7 @@ val reserved_growth : t -> (Capacity_growth.t, Agent_protocol.Error.t) result
 
 val required_transition_steps : t -> int
 
-(** Each immutable reservation currently needs one later real association. These
+(** Each immutable reservation without a retained association needs one later link. These
     independent steps add to bulk control obligations even after pause/retirement.
     This count conveys no proof that a child exists or is linked. *)
 val pending_child_associations : t -> int

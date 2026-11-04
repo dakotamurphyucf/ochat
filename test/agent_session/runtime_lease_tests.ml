@@ -871,3 +871,93 @@ let%expect_test "lease cleanup preserves primary failures and reports standalone
   [%expect
     {| typed error and exception retained; cleanup raised only after success; closed once |}]
 ;;
+
+let%expect_test
+    "loaded-only inspection never builds and releases failed or cancelled borrows"
+  =
+  with_actor (fun _env _sw actor _writer _backend ->
+    let builds = ref 0 in
+    let owner =
+      Owner.create ~actor ~initial:None ~build:(fun () ->
+        Int.incr builds;
+        failwith "cold inspection invoked the builder")
+    in
+    Exn.protect
+      ~finally:(fun () -> Owner.close_and_wait owner)
+      ~f:(fun () ->
+        assert (Result.is_error (Owner.with_loaded_runtime owner (fun _ -> Ok ())));
+        [%test_eq: int] 0 !builds));
+  with_actor (fun env sw actor _writer _backend ->
+    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+      let builds = ref 0 in
+      let build () =
+        Int.incr builds;
+        failwith "loaded-only inspection invoked the builder"
+      in
+      let closes = ref 0 in
+      let entered, entered_u = Eio.Promise.create () in
+      let finish, finish_u = Eio.Promise.create () in
+      let owner =
+        Owner.create_with_unload
+          ~actor
+          ~initial:(Some (runtime ~close:(fun () -> Int.incr closes) ()))
+          ~build
+          ~before_unload:(fun ~closing:_ ->
+            if Option.is_none (Eio.Promise.peek entered)
+            then Eio.Promise.resolve entered_u ();
+            Eio.Promise.await finish;
+            Ok ())
+      in
+      let release () =
+        if Option.is_none (Eio.Promise.peek finish) then Eio.Promise.resolve finish_u ()
+      in
+      Exn.protect
+        ~finally:(fun () ->
+          release ();
+          Owner.close_and_wait owner)
+        ~f:(fun () ->
+          let failure =
+            Agent_protocol.Error.create
+              Permission_denied
+              ~message:"fixture rejection"
+              ~retryable:false
+              ()
+          in
+          (match Owner.with_loaded_runtime owner (fun _ -> Error failure) with
+           | Error actual ->
+             [%test_eq: Agent_protocol.Error.code] failure.code actual.code;
+             [%test_eq: string] failure.message actual.message;
+             [%test_eq: bool] failure.retryable actual.retryable;
+             assert (Document_schema.Json.equal failure.data actual.data)
+           | Ok _ -> assert false);
+          let borrowed, borrowed_u = Eio.Promise.create () in
+          let never, _ = Eio.Promise.create () in
+          let caller =
+            Eio.Fiber.fork_promise ~sw (fun () ->
+              Eio.Cancel.sub (fun context ->
+                Owner.with_loaded_runtime owner (fun _ ->
+                  Eio.Promise.resolve borrowed_u context;
+                  Eio.Promise.await never;
+                  Ok ())))
+          in
+          Eio.Cancel.cancel (Eio.Promise.await borrowed) Exit;
+          (match Eio.Promise.await caller with
+           | Error (Eio.Cancel.Cancelled _) -> ()
+           | _ -> failwith "borrow lost caller cancellation");
+          let retired =
+            Eio.Fiber.fork_promise ~sw (fun () -> Owner.unload_and_wait owner)
+          in
+          Eio.Promise.await entered;
+          assert (Result.is_error (Owner.with_loaded_runtime owner (fun _ -> Ok ())));
+          [%test_eq: int] 0 !builds;
+          [%test_eq: int] 0 !closes;
+          release ();
+          Eio.Promise.await_exn retired |> protocol_ok;
+          [%test_eq: int] 1 !closes;
+          assert (Result.is_error (Owner.with_loaded_runtime owner (fun _ -> Ok ())));
+          [%test_eq: int] 0 !builds;
+          print_endline
+            "unloaded/retiring deny; no builder; Error/cancellation release; unload joins")));
+  [%expect
+    {| unloaded/retiring deny; no builder; Error/cancellation release; unload joins |}]
+;;
