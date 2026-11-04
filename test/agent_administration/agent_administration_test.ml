@@ -70,15 +70,24 @@ let principal () =
   |> ok
 ;;
 
-let connection daemon principal =
+let connection ?actor daemon principal =
   let notifications = Eio.Stream.create 256 in
   let context =
-    Agent_server.Connection_context.create
-      ~connection_id:Agent_protocol.Id.Transaction.(create () |> to_string)
-      ~principal
-      ~transport:In_memory
-      ~publish_notification:(Eio.Stream.add notifications)
-      ~max_attachments:8
+    match actor with
+    | None ->
+      Agent_server.Connection_context.create
+        ~connection_id:Agent_protocol.Id.Transaction.(create () |> to_string)
+        ~principal
+        ~transport:In_memory
+        ~publish_notification:(Eio.Stream.add notifications)
+        ~max_attachments:8
+    | Some actor ->
+      Agent_server.Connection_context.create_authenticated
+        ~actor
+        ~connection_id:Agent_protocol.Id.Transaction.(create () |> to_string)
+        ~transport:In_memory
+        ~publish_notification:(Eio.Stream.add notifications)
+        ~max_attachments:8
   in
   let connection =
     Agent_client.In_memory.create
@@ -99,7 +108,7 @@ let connection daemon principal =
   connection
 ;;
 
-let with_daemon ?(options = inference_options ()) f =
+let with_daemon ?(options = inference_options ()) ?after_close f =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
     let root =
@@ -121,22 +130,28 @@ let with_daemon ?(options = inference_options ()) f =
           |> Agent_server.Config_validator.validate ~env
           |> diagnostics
         in
-        Eio.Switch.run (fun sw ->
-          let daemon =
-            Agent_server.Daemon.start
-              ~options
-              ~sw
-              ~env
-              ~config
-              ~tool_dir:(Eio.Path.native_exn root)
-              ~home:(Eio.Path.native_exn root)
-              ~process_start_identity:None
-              ()
-            |> ok
-          in
-          Exn.protect
-            ~finally:(fun () -> Agent_server.Daemon.shutdown daemon |> ok)
-            ~f:(fun () -> f sw env root daemon))))
+        let result =
+          Eio.Switch.run (fun sw ->
+            let daemon =
+              Agent_server.Daemon.start
+                ~options
+                ~sw
+                ~env
+                ~config
+                ~tool_dir:(Eio.Path.native_exn root)
+                ~home:(Eio.Path.native_exn root)
+                ~process_start_identity:None
+                ()
+              |> ok
+            in
+            Exn.protect
+              ~finally:(fun () -> Agent_server.Daemon.shutdown daemon |> ok)
+              ~f:(fun () -> f sw env root daemon))
+        in
+        (* A physical restart hook: shutdown has joined and the first switch has
+           closed, while the test still owns the temporary filesystem root. *)
+        Option.iter after_close ~f:(fun f -> f ~env ~root ~config);
+        result))
 ;;
 
 let create_session connection =
