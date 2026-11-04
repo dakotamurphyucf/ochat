@@ -196,6 +196,16 @@ val require_native_admission
   -> binding:Chat_response.Tool_capability.binding
   -> (unit, Agent_protocol.Error.t) result
 
+(** The SAME admitted native handler's actor-issued inference allocator. The
+    returned port checks both borrowed and native-handler lifetimes on every
+    allocation and composes them with the original final submission guard.
+    An acknowledged handle is returned even if the handler expires during
+    allocation, so its graph can register and release it. Expiry then rejects
+    submission. No source, Run or unrelated operation is selected here. *)
+val borrowed_inference_allocator
+  :  borrowed
+  -> (Inference_allocation.Port.t, Agent_protocol.Error.t) result
+
 module Admission : sig
   (** Captured only inside a genuinely admitted native callback. Carries the
       exact selected binding and borrowed/native callback epochs; it grants no

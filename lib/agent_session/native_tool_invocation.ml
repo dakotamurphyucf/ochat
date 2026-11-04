@@ -247,6 +247,46 @@ let require_native_admission (scope : borrowed) ~binding =
   | Some _, _ | None, _ -> denied ()
 ;;
 
+let borrowed_inference_allocator (scope : borrowed) =
+  let open Result.Let_syntax in
+  let%bind admission =
+    Eio.Fiber.get native_admission_key
+    |> Result.of_option
+         ~error:
+           (Agent_protocol.Error.invalid_request
+              "native inference requires the actual handler admission")
+  in
+  let%bind () = require_native_admission scope ~binding:admission.admitted_binding in
+  let check () =
+    if Atomic.get scope.active && Atomic.get admission.admission_active
+    then Ok ()
+    else Error (Agent_protocol.Error.invalid_request "native inference scope expired")
+  in
+  let require () =
+    match check () with
+    | Ok () -> ()
+    | Error error -> raise (Inference_allocation.Rejected error)
+  in
+  let guard =
+    Inference_runtime.Submission_guard.create ~refresh:(fun () ->
+      require ();
+      require)
+  in
+  Ok
+    (fun ~graph ~relation ~configuration ->
+      let%bind () = check () in
+      let%map allocation =
+        scope.capabilities.allocate_inference ~graph ~relation ~configuration
+      in
+      (* Preserve the actual ACK before any fallible lifetime recheck. *)
+      Inference_allocation.Host.create
+        ~handle:(Inference_allocation.handle allocation)
+        ~submission_guard:
+          (Inference_runtime.Submission_guard.compose
+             guard
+             (Inference_allocation.submission_guard allocation)))
+;;
+
 module Admission = struct
   type t =
     { borrowed : borrowed

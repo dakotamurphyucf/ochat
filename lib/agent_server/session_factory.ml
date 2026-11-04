@@ -579,20 +579,25 @@ let restore_state_profile t (state : Agent_session.Session_state.t) =
   permission_profile_revision t state.spec.permission_profile_digest
 ;;
 
+let parent_moderation_source_for_state (state : Agent_session.Session_state.t) ~read =
+  match state.moderator, state.lifecycle.desired with
+  | None, _ -> Ok None
+  | Some _, Running -> read ()
+  | Some _, Stopped ->
+    Error
+      (unavailable
+         Permission_denied
+         "delegation.owner_mediation_unavailable: stopped parent policy cannot be \
+          activated for a child")
+;;
+
 let parent_moderation_source t session_id =
   match Session_registry.find t.registry session_id with
   | Some parent ->
     let open Result.Let_syntax in
     let%bind state = Agent_session.Session_actor.state parent.actor in
-    (match state.moderator, state.lifecycle.desired with
-     | None, _ -> Ok None
-     | Some _, Running -> Runtime_owner.moderation_source parent.runtime
-     | Some _, Stopped ->
-       Error
-         (unavailable
-            Permission_denied
-            "delegation.owner_mediation_unavailable: stopped parent policy cannot be \
-             activated for a child"))
+    parent_moderation_source_for_state state ~read:(fun () ->
+      Runtime_owner.moderation_source parent.runtime)
   | None ->
     Error
       (unavailable
@@ -3100,7 +3105,7 @@ let prepare_authored_job_source
     |> Result.of_option
          ~error:(unavailable Invalid_state "authored source runtime is not installed")
   in
-  Runtime_owner.with_background_runtime parent.runtime (fun runtime ->
+  Runtime_owner.with_execution_runtime parent.runtime ~owner (fun runtime ->
     let%bind native =
       Result.of_option
         runtime.Agent_session.Runtime_builder.native_runtime
@@ -8528,9 +8533,21 @@ let create_delegated_session
       | _ ->
         Error (unavailable Invalid_state "generated creation requires a qualified parent")
     in
-    Runtime_owner.with_background_runtime parent.runtime (fun runtime ->
+    let with_resources f =
+      match invocation_owner with
+      | None -> Runtime_owner.with_background_runtime parent.runtime f
+      | Some invocation_id ->
+        Runtime_owner.with_execution_runtime
+          parent.runtime
+          ~owner:(Agent_protocol.Job.Invocation invocation_id)
+          f
+    in
+    with_resources (fun runtime ->
       let%bind before = A.state parent.actor in
-      let%bind moderator = parent_moderation_source t parent_session_id in
+      let%bind moderator =
+        parent_moderation_source_for_state before ~read:(fun () ->
+          Agent_session.Runtime_builder.moderation_source runtime)
+      in
       let%bind authority_sha256 =
         Agent_session.Delegation_authority.fingerprint ?moderator before
       in

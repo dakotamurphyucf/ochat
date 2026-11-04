@@ -288,6 +288,39 @@ type background_executor =
       -> (Background_execution.result, Agent_protocol.Error.t) result
   }
 
+module Authored_start : sig
+  (** Runtime-bound startup DATA, never an admission or permission. Legacy data
+      comes only from this runtime's actual host-backed startup/resume ACK;
+      extension data retains the actual unconsumed Session_start lifecycle.
+      The Actor separately validates the installed physical worker/Manager,
+      current full checkpoint/source and its exact held owner. *)
+  type t
+
+  type disposition =
+    | Legacy_acknowledged
+    | Extension_pending
+    | No_callback
+
+  val disposition : t -> disposition
+  val worker : t -> Operation_worker.t
+  val manager : t -> Chat_response.Moderator_manager.t option
+
+  (** Recheck factual eligibility, without authorizing execution. Resumed,
+      completed, failed or interrupted extension startup is unavailable. Legacy
+      cached ACK data is not compared with later checkpoint bytes. *)
+  val check_pending : t -> (unit, Agent_protocol.Error.t) result
+
+  (** Legacy/no-callback data performs no effect. The extension uses its existing
+      lifecycle coordinator and bound runtime services with this exact supplied
+      Actor claim. Only actual Activated succeeds; Unavailable/Already_active
+      reject. Exceptions/cancellation propagate through existing coordinator
+      cleanup; no initializer or lifecycle callback is replayed here. *)
+  val run
+    :  t
+    -> claim:(event:Chat_response.Moderation.Event.t -> Moderator_event.claim)
+    -> (unit, Agent_protocol.Error.t) result
+end
+
 type t =
   { source_lease : Prompt_source_lease.t
   ; worker : Operation_worker.t
@@ -356,6 +389,9 @@ type t =
     (** Internal qualified host resource source for delegation. Access only while
         holding the owning runtime lease; this is not permission to invoke tools.
         Absent for unqualified construction. *)
+  ; authored_start : unit -> (Authored_start.t, Agent_protocol.Error.t) result
+    (** Runtime-bound factual selector. Use [authored_start] on the runtime; fake
+        runtimes without actual startup ownership must return unavailable. *)
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
     (** First startup remains construction-fenced. After an actual host-backed
         legacy startup ACK, repeated calls return that exact acknowledged DATA
@@ -395,6 +431,19 @@ type t =
     (** Caller cancels/drains foreground and borrowed background workers first.
         Closes and joins graph-owned inference channels, then persists cache. *)
   }
+
+(** Select the actual runtime-bound startup DATA. Does not load,
+    initialize or admit work; absence is represented as No_callback and does not
+    broaden held Run admission. Unacknowledged/non-host legacy startup rejects. *)
+val authored_start : t -> (Authored_start.t, Agent_protocol.Error.t) result
+
+(** Read the pinned runtime's moderator source DATA without loading resources,
+    acquiring a Manager gate or granting authority. No manager returns None;
+    legacy mediation rejects. The caller must already retain this exact runtime
+    and separately validate the current Actor lifecycle/source. *)
+val moderation_source
+  :  t
+  -> (Agent_protocol.Invocation.observer option, Agent_protocol.Error.t) result
 
 type schedule_services = Legacy_callback_runtime.Services.schedules =
   { after_ms : delay_ms:int -> payload:Jsonaf.t -> (string, string) result

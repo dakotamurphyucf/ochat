@@ -17,8 +17,13 @@ type t
     pure DATA is not execution authority and must never be decoded as a live
     hold. Ordinary settlement without that owner remains unchanged. *)
 
+(** [authored_start_run] is distinct exact selection DATA from a real
+    actor-owned held Session_start borrow. It must equal the retained Run and
+    executing source/generation; default generic callback selection is unchanged.
+    The actor must validate its physical scope again at the writer. *)
 val prepare
-  :  ?startup_run:Agent_protocol.Run.t
+  :  ?authored_start_run:Agent_protocol.Run.t
+  -> ?startup_run:Agent_protocol.Run.t
   -> Session_state.t
   -> scope:Run_scope.t
   -> executing:Agent_protocol.Moderator_execution.t
@@ -34,7 +39,8 @@ val prepare
     work; preserves prior terminal evidence and emits no action/terminal receipt.
     It does not complete the parent callback or change its staged action. *)
 val add_owned_work
-  :  Session_state.t
+  :  ?authored_start_run:Agent_protocol.Run.t
+  -> Session_state.t
   -> scope:Run_scope.t
   -> executing:Agent_protocol.Moderator_execution.t
   -> work_state:Session_state.t

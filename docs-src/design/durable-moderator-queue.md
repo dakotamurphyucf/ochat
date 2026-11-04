@@ -614,3 +614,42 @@ moderator callbacks. Revoked authorization therefore fails the foreground
 Operation as a non-retryable permission denial. The legacy string-based Manager
 interface does not turn that denial into a retryable internal error. Completed
 history or tool effects remain recorded; rejection does not roll them back.
+
+Held authored startup retains the original Run and admission. A host-backed
+legacy runtime has already acknowledged its startup or resume callback during
+construction; reusing that runtime does not execute the callback again. A v1
+runtime instead uses its actual pending `Session_start` lifecycle and an
+Actor-owned claim. A pending `Session_resume` is not a new authored start.
+
+A captured fresh recurrence child cannot eagerly initialize before its reciprocal
+occurrence admission. Deferred construction requires the actual held owner; a
+successful handoff consumes that occurrence. Cached runtime reuse does not bypass
+this admission rule or make another startup callback available.
+
+The target acknowledges its lifecycle and Run authority before the v1 callback
+can execute. While that callback runs, its actual event or descendant execution
+can retain the installed resources needed to prepare another agent. Ordinary
+background supervisor access remains excluded until startup handoff completes.
+Scheduled descendants remain queued until that handoff is acknowledged;
+synchronous `Model.call` work can still execute within the lifecycle callback.
+This keeps background claims from racing startup's final Store validation without
+discarding queued work or weakening its later authorization checks.
+Resource retention does not replace the tool's own authorization checks.
+Background model work uses a cancellation-aware runtime lease. Stop and close
+cancel and join that work before releasing the runtime's resources.
+
+A native agent tool borrows the executing invocation's inference allocator. Its
+child requests keep the same Run accounting and original authorization, while
+the native callback lifetime is checked again before allocation and submission.
+An expired callback cannot fall back to the runtime's unscoped allocator.
+Selecting a child from current files also requires the captured definition's
+original live source selection; a legacy artifact without that selection does
+not grant access to new local files.
+
+After the callback joins, releasing startup recomputes the whole Run aggregate.
+A quiescent single-turn Run can complete even when it created no work; a workflow
+still needs its explicit Finish intent. Waiting and unresolved child work retain
+their normal meanings. The release acknowledgement records the resulting Run
+and terminal receipt together, when terminal, before startup ownership is
+released. Failed or uncertain writes preserve completed callback and child facts
+without claiming a successful handoff or replaying initialization.

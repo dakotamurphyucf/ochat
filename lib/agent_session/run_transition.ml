@@ -69,6 +69,7 @@ type preparation =
   | Running_work
 
 let prepare_internal
+      ?authored_start_run
       ?startup_run
       mode
       (state : Session_state.t)
@@ -117,7 +118,25 @@ let prepare_internal
     then Ok ()
     else Error (conflict "run callback scope changed before commit")
   in
-  let%bind selected = Run_event_scope.select state ~executing in
+  let%bind selected =
+    match authored_start_run with
+    | None -> Run_event_scope.select state ~executing
+    | Some selected ->
+      (* Exact selection DATA from the actor's physically owned held lifecycle
+         borrow. This does not authenticate a caller or widen generic selection. *)
+      if
+        P.Run.equal selected previous
+        && P.Moderator_execution.equal_phase executing.context.phase Session_start
+        && Option.is_none executing.context.operation_id
+        && Option.is_none executing.context.job
+        && Option.is_none executing.delegation
+        && Int.equal executing.context.generation previous.source.generation
+        && P.Invocation.equal_observer executing.context.source previous.source.observer
+        && List.exists state.moderator_executions ~f:(fun retained ->
+          P.Moderator_execution.equal_context retained.context executing.context)
+      then Ok (Some selected)
+      else Error (conflict "held authored selection differs from its actual callback")
+  in
   let%bind () =
     if Option.exists selected ~f:(fun run -> P.Id.Run.equal run.id previous.id)
     then Ok ()
@@ -353,8 +372,19 @@ let prepare_internal
   { run; delta = Session_delta.Run_state_changed index }
 ;;
 
-let prepare ?startup_run state ~scope ~executing ~work_state ~owned_work ~action ~now =
+let prepare
+      ?authored_start_run
+      ?startup_run
+      state
+      ~scope
+      ~executing
+      ~work_state
+      ~owned_work
+      ~action
+      ~now
+  =
   prepare_internal
+    ?authored_start_run
     ?startup_run
     (Checkpoint action)
     state
@@ -365,8 +395,24 @@ let prepare ?startup_run state ~scope ~executing ~work_state ~owned_work ~action
     ~now
 ;;
 
-let add_owned_work state ~scope ~executing ~work_state ~owned_work ~now =
-  prepare_internal Running_work state ~scope ~executing ~work_state ~owned_work ~now
+let add_owned_work
+      ?authored_start_run
+      state
+      ~scope
+      ~executing
+      ~work_state
+      ~owned_work
+      ~now
+  =
+  prepare_internal
+    ?authored_start_run
+    Running_work
+    state
+    ~scope
+    ~executing
+    ~work_state
+    ~owned_work
+    ~now
 ;;
 
 let settle_operation ?startup_run (state : Session_state.t) ~operation_id ~outcome ~now =

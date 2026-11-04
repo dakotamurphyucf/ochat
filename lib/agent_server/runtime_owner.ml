@@ -99,13 +99,32 @@ type t =
   ; mutable retired_resources : Agent_session.Runtime_builder.t list
   }
 
+module Execution_access = struct
+  type t =
+    { stage : source_stage
+    ; runtime : Agent_session.Runtime_builder.t
+    ; borrow : Agent_session.Session_actor.Held_authored_resource.t
+    }
+end
+
+let execution_access_is_current t (access : Execution_access.t) =
+  Int.equal access.stage.domain (Stdlib.Domain.self () :> int)
+  && (not access.stage.closed)
+  && Option.exists t.prepared_source ~f:(phys_equal access.stage)
+  && Option.exists t.runtime ~f:(phys_equal access.runtime)
+  && Option.exists access.stage.handoff_runtime ~f:(phys_equal access.runtime)
+  && Result.is_ok
+       (Agent_session.Session_actor.Held_authored_resource.check_basis access.borrow)
+;;
+
 (* A root worker can request its actual resources before its submitting caller
    resumes. Only the Actor's immutable same-activation ACK permits coexistence
    with that old lexical stage; installation alone grants no such admission. *)
-let prepared_source_blocks_runtime t =
-  match t.prepared_source with
-  | None -> false
-  | Some stage ->
+let prepared_source_blocks_runtime ?execution_access t =
+  match execution_access, t.prepared_source with
+  | Some access, _ -> not (execution_access_is_current t access)
+  | None, None -> false
+  | None, Some stage ->
     not
       (match stage.continuation, stage.handoff_runtime, t.runtime with
        | Some continuation, Some installed, Some current ->
@@ -262,7 +281,7 @@ let check_original_actor = function
   | Some _ | None -> Ok ()
 ;;
 
-let ensure_loaded_locked ?run_preparation ?original_actor t =
+let ensure_loaded_locked ?execution_access ?run_preparation ?original_actor t =
   let open Result.Let_syntax in
   let original_actor =
     Option.first_some
@@ -277,7 +296,7 @@ let ensure_loaded_locked ?run_preparation ?original_actor t =
   in
   match t.closed, t.runtime with
   | true, _ -> Error (closed_error ())
-  | false, _ when prepared_source_blocks_runtime t ->
+  | false, _ when prepared_source_blocks_runtime ?execution_access t ->
     Error
       (Agent_protocol.Error.create
          Conflict
@@ -411,7 +430,7 @@ module Lease_admission = struct
     | Borrow of 'value * Agent_session.Runtime_builder.t option
 end
 
-let with_lease_internal ?(retire = ignore) t ~survives_stop ~admit f =
+let with_lease_internal ?execution_access ?(retire = ignore) t ~survives_stop ~admit f =
   Eio.Cancel.sub (fun context ->
     let active = Atomic.make true in
     let finished, finish = Eio.Promise.create () in
@@ -433,7 +452,9 @@ let with_lease_internal ?(retire = ignore) t ~survives_stop ~admit f =
       with_owner_lock t ~protect:true (fun () ->
         let open Result.Let_syntax in
         let%bind () =
-          if prepared_source_blocks_runtime t then Error (background_busy ()) else Ok ()
+          if prepared_source_blocks_runtime ?execution_access t
+          then Error (background_busy ())
+          else Ok ()
         in
         let%map decision = admit () in
         match decision with
@@ -503,8 +524,9 @@ let with_lease_internal ?(retire = ignore) t ~survives_stop ~admit f =
          Exn.raise_with_original_backtrace exn backtrace))
 ;;
 
-let with_lease ?retire t ~survives_stop ~admit f =
+let with_lease ?execution_access ?retire t ~survives_stop ~admit f =
   with_lease_internal
+    ?execution_access
     ?retire
     t
     ~survives_stop
@@ -514,13 +536,24 @@ let with_lease ?retire t ~survives_stop ~admit f =
     f
 ;;
 
-let with_runtime_lease ?run_preparation t ~retain_resources f =
+let with_runtime_lease ?execution_access ?run_preparation t ~retain_resources f =
   with_lease
+    ?execution_access
     t
     ~survives_stop:retain_resources
     ~admit:(fun () ->
       let open Result.Let_syntax in
-      let%map () = ensure_loaded_locked ?run_preparation t in
+      let%bind () = ensure_loaded_locked ?execution_access ?run_preparation t in
+      let%map () =
+        match execution_access with
+        | None -> Ok ()
+        | Some access ->
+          (* Runtime validation may invoke its own execution checks. Recheck the
+             exact borrow after those checks, before publishing this lease. *)
+          if execution_access_is_current t access
+          then Ok ()
+          else Error (background_busy ())
+      in
       let runtime = Option.value_exn t.runtime in
       runtime, if retain_resources then Some runtime else None)
     f
@@ -556,6 +589,34 @@ let with_loaded_runtime t f =
 
 let with_background_runtime t f = with_runtime_lease t ~retain_resources:false f
 
+let with_execution_runtime t ~owner f =
+  let open Result.Let_syntax in
+  let%bind selected =
+    with_owner_lock t ~protect:true (fun () ->
+      if not (prepared_source_blocks_runtime t)
+      then Ok None
+      else (
+        match t.prepared_source, t.runtime with
+        | Some stage, Some runtime when not stage.closed ->
+          (match stage.continuation, stage.handoff_runtime with
+           | Some continuation, Some installed when phys_equal installed runtime ->
+             Ok (Some (stage, runtime, continuation))
+           | _ -> Error (background_busy ()))
+        | _ -> Error (background_busy ())))
+  in
+  match selected with
+  | None -> with_background_runtime t f
+  | Some (stage, runtime, continuation) ->
+    (* Selection can refresh the Actor's Store and must stay outside our mutex.
+       The resulting token is a pure, exact execution-borrow check; identifiers
+       supplied by a caller do not themselves authorize access. *)
+    let%bind borrow =
+      Agent_session.Session_actor.held_authored_resource t.actor ~continuation ~owner
+    in
+    let execution_access : Execution_access.t = { stage; runtime; borrow } in
+    with_runtime_lease ~execution_access t ~retain_resources:false f
+;;
+
 let with_prepared_run_runtime t ~preparation f =
   with_runtime_lease ~run_preparation:preparation t ~retain_resources:false f
 ;;
@@ -590,22 +651,7 @@ let with_resource_lifetime t f =
 ;;
 
 let moderation_source t =
-  with_background_runtime t (fun runtime ->
-    let module M = Chat_response.Moderator_manager in
-    match runtime.Agent_session.Runtime_builder.moderator_manager with
-    | None -> Ok None
-    | Some manager ->
-      (match M.extension_definition manager with
-       | Some _ -> Ok (M.invocation_observer manager)
-       | _ ->
-         Error
-           (Agent_protocol.Error.create
-              Invalid_state
-              ~message:
-                "delegation.owner_mediation_unavailable: parent requires an \
-                 extensibility moderator"
-              ~retryable:false
-              ())))
+  with_background_runtime t Agent_session.Runtime_builder.moderation_source
 ;;
 
 let prepare_delegated_tool t ~delegation ~event ~authorize =
@@ -1115,6 +1161,53 @@ let with_held_recurrence_runtime t ~prepared ~held ~checked f =
     f runtime continuation)
 ;;
 
+let install_held_runtime t ~(prepared : Prepared.t) ~runtime ~continuation ~residency =
+  let module A = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let unavailable () =
+    Agent_protocol.Error.create
+      Conflict
+      ~message:"held runtime installation owner was displaced"
+      ~retryable:false
+      ()
+  in
+  let%bind () =
+    with_owner_lock t ~protect:true (fun () ->
+      if
+        t.closed
+        || Option.is_some t.unloading
+        || Option.is_some t.foreground_retirement
+        || prepared.stage.closed
+        || (not (Option.exists t.prepared_source ~f:(phys_equal prepared.stage)))
+        || not (Option.equal phys_equal t.runtime prepared.stage.runtime)
+      then Error (unavailable ())
+      else prepared.basis ())
+  in
+  match !residency with
+  | Some (Held_runtime_residency.Reused existing) when phys_equal existing runtime ->
+    Ok ()
+  | Some (Local existing) when phys_equal existing runtime ->
+    (* Capture actual installation before cancellation or any newly installed
+       execution can observe resources without their retaining owner. *)
+    Eio.Cancel.protect (fun () ->
+      let%bind () =
+        A.install_held_runtime
+          ?automatic_turn_policy:runtime.automatic_turn_policy
+          ?moderator_manager:runtime.moderator_manager
+          t.actor
+          ~continuation
+          ~worker:runtime.worker
+          ~inference:(Agent_session.Runtime_builder.inference_execution runtime)
+      in
+      with_owner_lock t ~protect:true (fun () ->
+        t.runtime <- Some runtime;
+        prepared.stage.handoff_runtime <- Some runtime;
+        residency := Some (Held_runtime_residency.Installed runtime));
+      Ok ())
+  | None | Some (Local _ | Reused _ | Installed _ | Handed_off _) ->
+    Error (unavailable ())
+;;
+
 module Held_input_runtime = struct
   module Phase = struct
     type t =
@@ -1166,43 +1259,12 @@ module Held_input_runtime = struct
         prepare ~runtime:t.runtime ~scope)
       (fun ~scope ~input ->
          let%bind () =
-           with_owner_lock t.owner ~protect:true (fun () ->
-             if
-               t.owner.closed
-               || Option.is_some t.owner.unloading
-               || Option.is_some t.owner.foreground_retirement
-               || t.prepared.stage.closed
-               || (not
-                     (Option.exists
-                        t.owner.prepared_source
-                        ~f:(phys_equal t.prepared.stage)))
-               || not (Option.equal phys_equal t.owner.runtime t.prepared.stage.runtime)
-             then Error (unavailable ())
-             else t.prepared.basis ())
-         in
-         let%bind () =
-           match !(t.residency) with
-           | Some (Reused runtime) when phys_equal runtime t.runtime -> Ok ()
-           | Some (Local runtime) when phys_equal runtime t.runtime ->
-             (* Capture the actual physical-installation ACK and retain resources
-                before pending cancellation or a root writer can observe them. *)
-             Eio.Cancel.protect (fun () ->
-               let%bind () =
-                 A.install_held_runtime
-                   ?automatic_turn_policy:runtime.automatic_turn_policy
-                   ?moderator_manager:runtime.moderator_manager
-                   t.owner.actor
-                   ~continuation:t.continuation
-                   ~worker:runtime.worker
-                   ~inference:(Agent_session.Runtime_builder.inference_execution runtime)
-               in
-               with_owner_lock t.owner ~protect:true (fun () ->
-                 t.owner.runtime <- Some runtime;
-                 t.prepared.stage.handoff_runtime <- Some runtime;
-                 t.residency := Some (Installed runtime));
-               Ok ())
-           | None | Some (Local _ | Reused _ | Installed _ | Handed_off _) ->
-             Error (unavailable ())
+           install_held_runtime
+             t.owner
+             ~prepared:t.prepared
+             ~runtime:t.runtime
+             ~continuation:t.continuation
+             ~residency:t.residency
          in
          Eio.Fiber.check ();
          (* The root ACK precedes this bookkeeping. Keep the exact original
@@ -1230,6 +1292,24 @@ let with_held_input_runtime t ~prepared ~held ~checked f =
     Exn.protect
       ~finally:(fun () -> input_runtime.phase <- Closed)
       ~f:(fun () -> f input_runtime))
+;;
+
+let start_held_authored_runtime t ~prepared ~held ~checked =
+  with_held_runtime t ~prepared ~held ~checked (fun runtime continuation residency ->
+    let open Result.Let_syntax in
+    let%bind startup = Agent_session.Runtime_builder.authored_start runtime in
+    prepared.stage.handoff_runtime <- Some runtime;
+    let%bind () = install_held_runtime t ~prepared ~runtime ~continuation ~residency in
+    Eio.Fiber.check ();
+    (* The Actor joins the actual lifecycle callback and releases the aggregate.
+       Do not shield that work from cancellation. Its immutable ACK also lets
+       ordinary scoped cleanup reconcile a lost post-commit reply. *)
+    let result =
+      Agent_session.Session_actor.start_held_authored_run t.actor ~continuation ~startup
+    in
+    Result.iter result ~f:(fun _ ->
+      residency := Some (Held_runtime_residency.Handed_off runtime));
+    result)
 ;;
 
 let with_unloaded t f =
@@ -1945,26 +2025,13 @@ let execute_model_job
       ~recipe
       ~payload
   =
-  let outcome =
-    Eio.Mutex.use_rw ~protect:false t.mutex (fun () ->
-      match
-        let open Result.Let_syntax in
-        let%bind () = Eio.Cancel.protect (fun () -> ensure_loaded_locked t) in
-        let runtime = Option.value_exn t.runtime in
-        runtime.execute_model_job
-          ~allocate_inference
-          ~inference_context
-          ~capture_recipe_target
-          ~recipe
-          ~payload
-      with
-      | result -> Ok result
-      | exception (Eio.Cancel.Cancelled _ as exn) ->
-        Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
-  in
-  match outcome with
-  | Ok result -> result
-  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+  with_background_runtime t (fun runtime ->
+    runtime.Agent_session.Runtime_builder.execute_model_job
+      ~allocate_inference
+      ~inference_context
+      ~capture_recipe_target
+      ~recipe
+      ~payload)
 ;;
 
 type background_result =

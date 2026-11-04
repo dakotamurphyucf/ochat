@@ -258,7 +258,7 @@ let implementation_sources =
   ; ( "lib/agent_server/managed_output_page.ml"
     , "a14130666a4495de0c35df1c01974922da31daed064f1f7622a9b686b9c38ba5" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "5c185af5dd3614e97f5bf7ba91ff2418e13e0bb28d1f3d0f6d3be79af5f2a53e" )
+    , "68fb6566ab59f0b88786ae2630635fedf98bb0a56e14df5c516132d67ee88d0f" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
@@ -294,7 +294,7 @@ let implementation_sources =
   ; ( "lib/agent_session/managed_wait_tool.ml"
     , "2482da27415b0f542bbf5e2fa61bf97de70fb047790cb6ee5100ced465b43708" )
   ; ( "lib/agent_session/native_tool_invocation.ml"
-    , "61863e12352bb904f68b6c04a8b16554199ef07a769ebccd57fdbd1c305d938e" )
+    , "a620bd629e1a582d80f612ac95debd8fbed317681256b07d449154bebe5e4148" )
   ; ( "lib/agent_session/native_tool_policy.ml"
     , "0d125cf75d5f61aa20a9452c979a70ebb43677e2458c9e9f1c9c2c5ad2c26938" )
   ; ( "lib/agent_session/one_off_execution.ml"
@@ -302,7 +302,7 @@ let implementation_sources =
   ; ( "lib/agent_session/run_chatml_tool.ml"
     , "eadb7cf2ac6622e977db08798fbfce7661062c47883cdf4f28700f1c85249b75" )
   ; ( "lib/agent_session/script_tool_calls.ml"
-    , "1ef19969a6cdf75a8c91cd16d3b1a88aadc222b51886cadc514e8ff23731dc9f" )
+    , "b824ec6a408294f367fb7f955424f294ebfba824f785ce3e32bb62c52c0f0a6f" )
   ; ( "lib/agent_session/session_management.ml"
     , "18431c4fd97a2d24a72b927fe8f0d20b8aea561f1f119d8f122d943f2a137f86" )
   ; ( "lib/agent_session/session_management_native.ml"
@@ -326,7 +326,7 @@ let implementation_sources =
   ; ( "lib/agent_session/prompt_catalog.ml"
     , "a6b86884830197ff69113d8989280ef72bd33b61ccfa10d2e1b91bffbfc82505" )
   ; ( "lib/agent_session/runtime_builder.ml"
-    , "00fe46e5cb6d3e5cd811bc8f7356aa62702f30520e2474ddcc6f0b93f80e7fce" )
+    , "7bdf46e546f9127d003f4f8dd70e9cd3dfa0e88e8e1e16ff2e688ed82be6a7c2" )
   ; ( "lib/agent_session/authored_source_preparation.ml"
     , "d8eea801d69ffa262cfc1d0a9bee45123ce8d4b08f74c25c67df450cd247600c" )
   ; ( "lib/agent_store/prompt_source_receipt.ml"

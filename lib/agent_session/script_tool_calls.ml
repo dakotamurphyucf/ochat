@@ -70,6 +70,8 @@ type t =
   ; generated_creation_service : Generated_session_request.service option
   ; managed_session_service : Managed_session_service.t option
   ; instruction_service : Instruction_service.t option
+  ; bind_inference_identity :
+      (Inference_allocation.Port.t -> Inference_client.Identity.t) option
   ; agent_source_code_view : Agent_source_code_view.t option
   ; shell_code_view : Shell_runtime.Registry.Code_view.t option
   ; agent_artifact :
@@ -464,6 +466,7 @@ let create
   ; generated_creation_service = None
   ; managed_session_service = None
   ; instruction_service = None
+  ; bind_inference_identity = None
   ; agent_source_code_view = None
   ; shell_code_view = None
   ; agent_artifact = None
@@ -474,26 +477,36 @@ let with_shell_context t services = { t with shell_context = Some services }
 let with_instruction_service t service = { t with instruction_service = Some service }
 let instruction_service t = t.instruction_service
 
+let with_inference_identity_binding t ~bind =
+  { t with bind_inference_identity = Some bind }
+;;
+
 let agent_context (ctx : Eio_unix.Stdenv.base Chat_response.Ctx.t) =
-  match ctx.agent_guidance_scope with
-  | Excluded -> ctx
-  | Eligible _ ->
-    (match native_services_scope () with
-     | Unbound -> ctx
-     | Expired -> raise Chat_response.Ctx.Inference_admission_rejected
-     | Active tools ->
-       (match instruction_service tools with
-        | None -> ctx
-        | Some service ->
-          let borrowed =
-            Native_tool_invocation.borrow ()
-            |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
-            |> Result.ok_or_failwith
-          in
-          Chat_response.Ctx.with_agent_guidance
-            ctx
-            (Instruction_service.agent_guidance service ~borrow_actor:(fun () ->
-               Native_tool_invocation.borrowed_agent_actor borrowed))))
+  match native_services_scope () with
+  | Unbound -> ctx
+  | Expired -> raise Chat_response.Ctx.Inference_admission_rejected
+  | Active tools ->
+    let require = function
+      | Ok value -> value
+      | Error error -> raise (Chat_response.Ctx.Effect_rejected error)
+    in
+    let borrowed = Native_tool_invocation.borrow () |> require in
+    let ctx =
+      match tools.bind_inference_identity with
+      | None -> ctx
+      | Some bind ->
+        let allocate =
+          Native_tool_invocation.borrowed_inference_allocator borrowed |> require
+        in
+        Chat_response.Ctx.with_inference_identity ctx ~inference_identity:(bind allocate)
+    in
+    (match ctx.agent_guidance_scope, instruction_service tools with
+     | Excluded, _ | Eligible _, None -> ctx
+     | Eligible _, Some service ->
+       Chat_response.Ctx.with_agent_guidance
+         ctx
+         (Instruction_service.agent_guidance service ~borrow_actor:(fun () ->
+            Native_tool_invocation.borrowed_agent_actor borrowed)))
 ;;
 
 let with_session_helpers t grants = { t with session_helpers = grants }

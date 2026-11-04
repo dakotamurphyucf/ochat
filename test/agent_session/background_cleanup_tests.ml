@@ -181,6 +181,7 @@ let%expect_test
             admitted"));
   [%expect
     {|
+    +native Invocation cleanup failed: injected job transition failure
     Handler
     failed checkpoint retired; effect once; escaped commit rejected; next owner admitted
     +queued moderator cleanup failed: injected job transition failure

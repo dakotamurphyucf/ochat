@@ -68,9 +68,20 @@ let%expect_test "original authentication follows real native owners and cannot e
              worker_actor := Some operation_actor;
              current operation_actor;
              let exact_borrow = ref None in
+             let forwarded_allocations = ref 0 in
+             let escaped_allocator = ref None in
+             let allocator_probe = ref None in
              let execute ~invocation f =
                caps.with_invocation ~invocation (fun ~dispatched ~capabilities ->
                  exact_borrow := Some capabilities.borrow_agent_actor;
+                 let capabilities =
+                   { capabilities with
+                     allocate_inference =
+                       (fun ~graph ~relation ~configuration ->
+                         Int.incr forwarded_allocations;
+                         capabilities.allocate_inference ~graph ~relation ~configuration)
+                   }
+                 in
                  f ~dispatched ~capabilities)
              in
              (on_call
@@ -80,6 +91,8 @@ let%expect_test "original authentication follows real native owners and cannot e
                    let parent_actor = N.borrowed_agent_actor scope |> require_actor in
                    returned_actor := Some parent_actor;
                    current parent_actor;
+                   escaped_allocator
+                   := Some (scope, N.borrowed_inference_allocator scope |> protocol_ok);
                    N.require_native_admission
                      scope
                      ~binding:
@@ -126,7 +139,43 @@ let%expect_test "original authentication follows real native owners and cannot e
              let call, invocation = publication_call caps () in
              let reference, invocation = native_context registry invocation in
              caps.commit_invocation_call ~invocation call |> protocol_ok;
-             let result =
+             let graph =
+               A.open_inference_owner
+                 actor
+                 ~source:
+                   (Transcript.Source_id.of_string "native-handler-epoch"
+                    |> Result.ok_or_failwith)
+               |> protocol_ok
+             in
+             let target =
+               match
+                 Inference.Selection.view
+                   (A.state actor |> protocol_ok).spec.inference_target
+               with
+               | Captured target -> target
+               | Unresolved ->
+                 failwith "native epoch fixture needs its actual captured target"
+             in
+             let configuration =
+               Inference.Observation.Configuration.of_target
+                 target
+                 ~preparation_id:"native-handler-epoch"
+                 ~transport:Http_sse
+                 ~capabilities:[]
+                 ~limits:Inference.Observation.Admission.observation
+               |> Result.map_error ~f:(fun error ->
+                 Sexp.to_string_hum (Inference.Observation.Error.sexp_of_t error))
+               |> Result.ok_or_failwith
+             in
+             let ledger_json () =
+               (A.state actor |> protocol_ok).inference_ledger
+               |> Agent_session.Inference_ledger.to_document
+               |> Result.map_error ~f:(fun error ->
+                 Sexp.to_string_hum (Agent_session.Inference_ledger.Error.sexp_of_t error))
+               |> Result.ok_or_failwith
+               |> Document_schema.Document.json
+             in
+             let run () =
                N.run_scoped
                  ~execute
                  ~registry:(fun () -> registry)
@@ -134,8 +183,72 @@ let%expect_test "original authentication follows real native owners and cannot e
                  ~invocation
                  ~is_halted:(fun () -> false)
                  ~authorize:(fun _ _ -> Ok ())
-                 ~prepare_output:(fun _ -> Ok (`String "disclosed"))
+                 ~prepare_output:(fun _ ->
+                   let borrowed, allocate = Option.value_exn !escaped_allocator in
+                   let before = ledger_json () in
+                   let allocation = allocate ~graph ~relation:Root ~configuration in
+                   (* Record inside the adapter, assert outside its exception
+                      conversion even when failed-save is the expected result. *)
+                   allocator_probe
+                   := Some
+                        ( (let proof = N.borrowed_agent_actor borrowed in
+                           ( proof
+                           , match proof with
+                             | Ok (Some proof) -> Operator_authorization.is_current proof
+                             | Ok None | Error _ -> false ))
+                        , N.borrowed_capabilities borrowed
+                        , N.require_native_admission
+                            borrowed
+                            ~binding:
+                              (C.find registry ~name:"read_file"
+                               |> Result.map_error ~f:(fun error -> error.C.message)
+                               |> Result.ok_or_failwith)
+                        , allocation
+                        , Jsonaf.exactly_equal before (ledger_json ()) );
+                   Ok (`String "disclosed"))
              in
+             let result =
+               let outcome =
+                 try Ok (run ()) with
+                 | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+               in
+               let cleanup =
+                 try
+                   Eio.Cancel.protect (fun () ->
+                     reject := false;
+                     A.seal_inference_owner actor ~owner:graph |> protocol_ok;
+                     A.finish_inference_owner actor ~owner:graph |> protocol_ok);
+                   Ok ()
+                 with
+                 | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+               in
+               match outcome, cleanup with
+               | Error (exn, backtrace), _ | Ok _, Error (exn, backtrace) ->
+                 Exn.raise_with_original_backtrace exn backtrace
+               | Ok result, Ok () -> result
+             in
+             let ( (proof, proof_was_current)
+                 , capabilities
+                 , native_admission
+                 , allocation
+                 , unchanged )
+               =
+               Option.value_exn !allocator_probe
+             in
+             (* The SAME outer native invocation was still borrowed while only
+                its inner handler admission had ended. *)
+             (match proof with
+              | Ok (Some proof) ->
+                assert proof_was_current;
+                expired proof
+              | Ok None | Error _ -> failwith "outer native borrow expired too early");
+             assert (Result.is_ok capabilities);
+             assert (Result.is_error native_admission);
+             (match allocation with
+              | Error failure -> [%test_eq: P.Error.code] Invalid_request failure.code
+              | Ok _ -> failwith "returned native allocator outlived its handler");
+             [%test_eq: int] 0 !forwarded_allocations;
+             assert unchanged;
              reject := false;
              (match mode, result with
               | `Success, Ok resolved ->
@@ -191,9 +304,10 @@ let%expect_test "original authentication follows real native owners and cannot e
          [%test_eq: int] 1 !calls));
   print_endline
     "real dispatcher; exact live invocation; failed save and retained proof expire; same \
-     principal cannot renew";
+     principal cannot renew; native epoch rejects before allocator while outer borrow \
+     lives";
   [%expect
-    {| real dispatcher; exact live invocation; failed save and retained proof expire; same principal cannot renew |}]
+    {| real dispatcher; exact live invocation; failed save and retained proof expire; same principal cannot renew; native epoch rejects before allocator while outer borrow lives |}]
 ;;
 
 let%expect_test

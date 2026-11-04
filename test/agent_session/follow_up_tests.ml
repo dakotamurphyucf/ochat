@@ -937,6 +937,14 @@ let%expect_test "runtime owner drains observation batches and applies durable te
            ; activity = None
            ; native_runtime = None
            ; moderator_activation = None
+           ; authored_start =
+               (fun () ->
+                 Error
+                   (Agent_protocol.Error.create
+                      Invalid_state
+                      ~message:"fixture has no authored startup"
+                      ~retryable:false
+                      ()))
            ; start_moderator = (fun () -> failwith "unexpected startup")
            ; enqueue_internal_event =
                (fun ?prepare:_ _ -> failwith "unexpected external event")
@@ -1350,6 +1358,14 @@ let%expect_test
                ; activity = None
                ; native_runtime = None
                ; moderator_activation = None
+               ; authored_start =
+                   (fun () ->
+                     Error
+                       (Agent_protocol.Error.create
+                          Invalid_state
+                          ~message:"fixture has no authored startup"
+                          ~retryable:false
+                          ()))
                ; start_moderator = (fun () -> failwith "unexpected startup")
                ; enqueue_internal_event =
                    (fun ?prepare:_ _ -> failwith "unexpected external event")
@@ -1675,6 +1691,7 @@ let%expect_test
     ((mode Permission_cancel) (result (Ok false)) (calls 0) (authorized 1)
      (completed 0) (failed 1) (observed 1) (queued 1) (state 100)
      (desired Running) (permissions (Cancelled)))
+    +native Invocation cleanup failed: injected invocation save failure
     ((mode Permission_cancel_save) (result (Error failed)) (calls 0)
      (authorized 1) (completed 0) (failed 1) (observed 0) (queued 1) (state 0)
      (desired Running) (permissions (Cancelled)))

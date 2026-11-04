@@ -296,6 +296,7 @@ let%expect_test
   [%expect
     {|
     ("unfinished job callback" Conflict)
+    +native Invocation cleanup failed: invocation callback no longer owns its result
     (cancelled)
     |}]
 ;;

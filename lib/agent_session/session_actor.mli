@@ -1954,6 +1954,11 @@ val add_job
   -> Agent_protocol.Job.t
   -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
 
+(** Scheduled [Queued] descendants with [Pending] or [Delivered] delivery
+    remain queued ([Ok None], without a write) while their exact acknowledged
+    held-authored startup owner is still live. After its final handoff ACK,
+    ordinary Job claiming applies. Synchronous [Not_required] calls and factual
+    completion/cancellation are unchanged; no deferral creates execution rights. *)
 val claim_job
   :  t
   -> job_id:Agent_protocol.Id.Job.t
@@ -3249,6 +3254,44 @@ val set_recurrence_planning_host
     Cancellation joins preparation cleanup; stale cleanup cannot release a new
     token. Called by the existing sole daemon scheduler, never a new timer. *)
 val sweep_recurrences : t -> (unit, Agent_protocol.Error.t) result
+
+(** A scoped resource borrow selected from the actual executing authored
+    lifecycle Event or one of its native Invocation descendants. IDs, source
+    snapshots and Run membership cannot construct it. Its pure check is valid on
+    the issuing Eio domain without an Actor request, host callback or Store read;
+    stop and owner replacement revoke it. An Event-owned borrow ends with that
+    callback; an actual admitted Job execution descendant retains only its own
+    physical borrow until that execution ends or startup hands off. It grants no
+    new execution permission. Runtime_owner still validates its exact registered
+    source stage, physical runtime and ordinary lease admission. This token
+    retains resource DATA only; canonical Job effect guards recheck deadlines
+    after waits before new effects. It does not sample a clock under Owner locks. *)
+module Held_authored_resource : sig
+  type t
+
+  val check_basis : t -> (unit, Agent_protocol.Error.t) result
+end
+
+val held_authored_resource
+  :  t
+  -> continuation:Recurrence_activation.Continuation.t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> (Held_authored_resource.t, Agent_protocol.Error.t) result
+
+(** Start the original Authored_start of this same held Run. The runtime-bound
+    selection is factual DATA: actual installed worker/Manager, source, current
+    checkpoint and genuine pending lifecycle are revalidated under the issued
+    owner. Acknowledged legacy startup is never replayed. A real v1 Session_start
+    is joined through this exact owner and original custody, then the shared Run
+    aggregate is settled without the startup hold. Only the actual final ACK
+    installs immutable handoff proof and returns the original Admission. Reached
+    writer errors/exceptions consume the startup attempt; factual cleanup does
+    not reauthorize expired effects or imply rollback. *)
+val start_held_authored_run
+  :  t
+  -> continuation:Recurrence_activation.Continuation.t
+  -> startup:Runtime_builder.Authored_start.t
+  -> (Agent_protocol.Run_receipt.t, Agent_protocol.Error.t) result
 
 (** First owned startup write: final policy refresh has occurred outside the
     mailbox; the real writer repeats clock/original and joint pure bases. Own ACK

@@ -25,10 +25,19 @@ val with_instruction_service : t -> Instruction_service.t -> t
 
 val instruction_service : t -> Instruction_service.t option
 
-(** Rebind eligible agent-conversation guidance to the existing actual native
+(** Bind native Agent inference to the exact invoking handler's expiring
+    actor-issued allocator, using this runtime's existing graph identity.
+    The binding creates no authority and leaves unbound/selected contexts alone. *)
+val with_inference_identity_binding
+  :  t
+  -> bind:(Inference_allocation.Port.t -> Inference_client.Identity.t)
+  -> t
+
+(** Rebind native Agent inference and eligible agent-conversation guidance to the existing actual native
     invocation's checked borrow. Constructor contexts cannot lend their expired
-    initialization owner to a later child. Independent Model exclusions remain
-    sticky; unbound standalone contexts acquire no session port. *)
+    initialization owner to a later child. Guidance exclusions remain sticky
+    independently of inference binding; unbound contexts acquire no session port.
+    An expired native services binding never falls back to an unbound identity. *)
 val agent_context
   :  Eio_unix.Stdenv.base Chat_response.Ctx.t
   -> Eio_unix.Stdenv.base Chat_response.Ctx.t

@@ -163,6 +163,18 @@ val with_background_runtime
   -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
+(** Retain resources for an actual executing tool/event owner. During held
+    authored startup, the Actor must select the exact live callback or descendant
+    borrow before this lease can use the installed runtime. Supplied identifiers
+    alone grant no access. The ordinary supervisor remains excluded until final
+    startup handoff. Outside that staged lifetime this uses the normal background
+    lease. This is resource retention, not permission to execute an effect. *)
+val with_execution_runtime
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
 (** Borrow only an already installed runtime, admitted under the existing owner
     gate and cancellable/joined by stop or close. Closed, unloading, retiring and
     unloaded owners reject; this never invokes the builder or initializer.
@@ -276,6 +288,20 @@ val with_held_input_runtime
   -> checked:Agent_session.Session_actor.Recurrence_activation.Checked.t
   -> (Held_input_runtime.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
+
+(** Complete the same held authored Run using its actual runtime startup.
+    Already acknowledged legacy initialization is not replayed. A pending v1
+    startup uses the Actor's exact lifecycle claim and joins before aggregate
+    release. Returns the original Admission only after final handoff ACK; this
+    never admits another Run. Installation and negative cleanup share the input
+    consumer's resource ownership rules. Cancellation remains observable during
+    startup, and completed effects are not rolled back on failure. *)
+val start_held_authored_runtime
+  :  t
+  -> prepared:Prepared.t
+  -> held:Agent_session.Session_actor.Held_run.t
+  -> checked:Agent_session.Session_actor.Recurrence_activation.Checked.t
+  -> (Agent_protocol.Run_receipt.t, Agent_protocol.Error.t) result
 
 (** Cancellable auxiliary inference lifetime without loading a runtime. A loaded
     runtime is retained and its selected execution supplied; otherwise f receives
@@ -455,9 +481,10 @@ val deliver_schedule
     remains separate; this does not enable public features. *)
 val drain_idle_moderator : t -> (bool, Agent_protocol.Error.t) result
 
-(** [execute_model_job t ~recipe ~payload] executes nested model work while
-    retaining runtime ownership. Cancellation interrupts the provider wait and
-    releases the runtime mutex without poisoning subsequent completion delivery. *)
+(** [execute_model_job t ~recipe ~payload] executes nested model work under a
+    stop-sensitive runtime lease, without holding the owner mutex during provider
+    work. Cancellation releases the lease; Stop and close join it before releasing
+    runtime resources. The original failure or cancellation remains primary. *)
 val execute_model_job
   :  t
   -> allocate_inference:Agent_session.Inference_allocation.Port.t

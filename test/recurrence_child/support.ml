@@ -268,10 +268,10 @@ let await_ready env parent =
 ;;
 
 let start_parent_settled env sw connection parent =
-  let changed = Eio.Condition.create () in
+  let initial = state parent in
   let already_loaded = Agent_server.Runtime_owner.is_loaded parent.Registry.runtime in
   let previous =
-    (state parent).moderator_executions
+    initial.moderator_executions
     |> List.map ~f:(fun receipt -> receipt.P.Moderator_execution.context.id)
   in
   let handle =
@@ -279,21 +279,35 @@ let start_parent_settled env sw connection parent =
       ~sw
       ~clock:(Eio.Stdenv.clock env)
       ~connection
-      ~session_id:(state parent).identity.session_id
+      ~session_id:initial.identity.session_id
       ~mode:Read_write
-      ~on_update:(fun _ -> Eio.Condition.broadcast changed)
+      ~subscribe:false
       ()
     |> protocol_ok
   in
   protect_cleanup
     ~finally:(fun () -> Agent_client.Session_handle.close handle)
     (fun () ->
-       Agent_client.Session_handle.start handle ~queue_if_limited:false
-       |> protocol_ok
-       |> ignore;
+       (match initial.lifecycle.desired with
+        | Running ->
+          (* Creation may already have started the real callback. Join loading
+             without issuing a redundant Start against that owned borrow. *)
+          Agent_server.Runtime_owner.ensure_loaded_authenticated
+            parent.runtime
+            ~actor:proof
+          |> protocol_ok
+        | Stopped ->
+          Agent_client.Session_handle.start handle ~queue_if_limited:false
+          |> protocol_ok
+          |> ignore);
        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
-         Eio.Condition.loop_no_mutex changed (fun () ->
-           let current = state parent in
+         let rec await () =
+           (* A no-op callback ACK need not emit a public notification. *)
+           let current =
+             Actor.with_moderator_checkpoint parent.actor (fun () ->
+               Actor.state parent.actor)
+             |> protocol_ok
+           in
            let started =
              List.exists current.moderator_executions ~f:(fun receipt ->
                (already_loaded
@@ -330,8 +344,12 @@ let start_parent_settled env sw connection parent =
              && P.Session.equal_desired_state current.lifecycle.desired Running
              && T.observed_idle current.lifecycle.observed
              && Option.is_none current.active_operation
-           then Some ()
-           else None)))
+           then ()
+           else (
+             Eio.Fiber.yield ();
+             await ())
+         in
+         await ()))
 ;;
 
 let assert_dormant daemon id =
