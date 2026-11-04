@@ -299,6 +299,14 @@ type t =
       id:History_entry.Id.t
       -> Agent_protocol.Session.Message_content.t
       -> (History_entry.t, Agent_protocol.Error.t) result
+  ; parse_prepared_input :
+      execution:Runtime_input_preparation.Execution.t
+      -> tracking:Runtime_input_preparation.Tracking.t
+      -> (Runtime_input_preparation.Prepared_input.t, Agent_protocol.Error.t) result
+    (** Explicit selected input execution and lexical graph. The host finishes
+      the graph before recording the returned DATA; no future Operation or
+      constructor graph is borrowed. Typed execution failures are retained and
+      cancellation propagates. Ordinary parse_user_content is unchanged. *)
   ; initial_history : History_entry.t list
   ; initial_prompt_entry_count : int
   ; reserved_history_through : int

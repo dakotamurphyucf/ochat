@@ -53,6 +53,14 @@ val generated_filesystem_checked
   -> sources:(string * string) list
   -> t
 
+(** Append a strict checkpoint immediately before content reads, after source
+    resolution and existing bound callbacks. Retained backends keep their own
+    checkpoints and repeat this selected check after them. Existing unbounded
+    and bounded policies, source identity and capture observers are unchanged.
+    Callback exceptions/cancellation propagate; checks are not an atomic lease
+    across an entire parse or a grant of filesystem authority. *)
+val with_checkpoint : t -> checkpoint:(unit -> unit) -> t
+
 (** Add a per-read byte ceiling without replacing an existing ceiling. The
     callback returns0..8MiB and is evaluated before any read; installing multiple
     bounds takes their minimum. Observer/agent wrappers preserve it. Callback

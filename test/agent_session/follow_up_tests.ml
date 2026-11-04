@@ -910,6 +910,14 @@ let%expect_test "runtime owner drains observation batches and applies durable te
                  failwith "unexpected model turn")
            ; inference_execution = Inference_ports.execution inference
            ; now = Agent_protocol.Timestamp.now
+           ; parse_prepared_input =
+               (fun ~execution:_ ~tracking:_ ->
+                 Error
+                   (Agent_protocol.Error.create
+                      Invalid_state
+                      ~message:"fixture has no held input parser"
+                      ~retryable:false
+                      ()))
            ; parse_user_content = (fun ~id:_ _ -> failwith "unexpected input")
            ; initial_history = []
            ; initial_prompt_entry_count = 0
@@ -1315,6 +1323,14 @@ let%expect_test
                      failwith "unexpected model turn")
                ; inference_execution = Inference_ports.execution inference
                ; now = Agent_protocol.Timestamp.now
+               ; parse_prepared_input =
+                   (fun ~execution:_ ~tracking:_ ->
+                     Error
+                       (Agent_protocol.Error.create
+                          Invalid_state
+                          ~message:"fixture has no held input parser"
+                          ~retryable:false
+                          ()))
                ; parse_user_content = (fun ~id:_ _ -> failwith "unexpected input")
                ; initial_history = []
                ; initial_prompt_entry_count = 0

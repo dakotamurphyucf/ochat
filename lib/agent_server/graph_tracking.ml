@@ -18,9 +18,15 @@ end
 
 exception Rejected of Agent_protocol.Error.t
 
+module Mutation_owner = struct
+  type t =
+    | Runtime of Agent_session.Run_preparation.t option ref
+    | Held_input of A.Held_input_scope.t
+end
+
 type t =
   { actor : A.t
-  ; run_preparation : Agent_session.Run_preparation.t option ref
+  ; mutation_owner : Mutation_owner.t
   ; owner : A.Inference_owner.t
   ; upstream : Upstream.t
   ; mutable routing : L.Handle.t Map.M(Transcript.Scope.Key).t
@@ -36,7 +42,19 @@ let create ?(run_preparation = ref None) actor ~source ~upstream =
   Eio.Cancel.protect (fun () ->
     Result.map (A.open_inference_owner actor ~source) ~f:(fun owner ->
       { actor
-      ; run_preparation
+      ; mutation_owner = Runtime run_preparation
+      ; owner
+      ; upstream
+      ; routing = Map.empty (module Transcript.Scope.Key)
+      ; finished = false
+      }))
+;;
+
+let create_for_held_input actor ~scope ~source ~upstream =
+  Eio.Cancel.protect (fun () ->
+    Result.map (A.Input_graph.open_owner actor ~scope ~source) ~f:(fun owner ->
+      { actor
+      ; mutation_owner = Held_input scope
       ; owner
       ; upstream
       ; routing = Map.empty (module Transcript.Scope.Key)
@@ -57,17 +75,24 @@ let route t scope =
             ()))
 ;;
 
-let constructor_mutation t ~ordinary ~prepared =
-  match !(t.run_preparation) with
-  | None -> ordinary
-  | Some preparation -> prepared preparation
+let ledger_mutation t ~ordinary ~prepared ~input =
+  match t.mutation_owner with
+  | Held_input scope -> input scope
+  | Runtime preparation ->
+    (match !preparation with
+     | None -> ordinary
+     | Some preparation -> prepared preparation)
 ;;
 
 let release t handle =
   Exn.protect
     ~f:(fun () ->
-      (constructor_mutation t ~ordinary:A.release_inference ~prepared:(fun preparation ->
-         A.Constructor_mutations.release_inference ~preparation))
+      (ledger_mutation
+         t
+         ~ordinary:A.release_inference
+         ~prepared:(fun preparation ->
+           A.Constructor_mutations.release_inference ~preparation)
+         ~input:(fun scope -> A.Input_graph.release_inference ~scope))
         t.actor
         ~owner:t.owner
         ~handle
@@ -88,12 +113,23 @@ let with_attempt t ?allocate prepared ~relation ~f =
             ~configuration:(R.Prepared.configuration prepared)
           |> require
         | None ->
+          let admit =
+            match t.mutation_owner with
+            | Held_input _ ->
+              raise
+                (Rejected
+                   (Agent_protocol.Error.create
+                      Permission_denied
+                      ~message:"held input requires its exact execution allocator"
+                      ~retryable:false
+                      ()))
+            | Runtime preparation ->
+              (match !preparation with
+               | None -> A.admit_inference
+               | Some preparation -> A.Constructor_mutations.admit_inference ~preparation)
+          in
           let handle =
-            (constructor_mutation
-               t
-               ~ordinary:A.admit_inference
-               ~prepared:(fun preparation ->
-                 A.Constructor_mutations.admit_inference ~preparation))
+            admit
               t.actor
               ~owner:t.owner
               ~relation
@@ -149,8 +185,12 @@ let bind_identity t ~allocate : Inference_client.Identity.t =
 
 let on_attempt t attempt =
   let handle = route t (R.Attempt.scope attempt) in
-  (constructor_mutation t ~ordinary:A.acknowledge_inference ~prepared:(fun preparation ->
-     A.Constructor_mutations.acknowledge_inference ~preparation))
+  (ledger_mutation
+     t
+     ~ordinary:A.acknowledge_inference
+     ~prepared:(fun preparation ->
+       A.Constructor_mutations.acknowledge_inference ~preparation)
+     ~input:(fun scope -> A.Input_graph.acknowledge_inference ~scope))
     t.actor
     ~owner:t.owner
     ~handle
@@ -164,18 +204,23 @@ let on_observation t incoming =
   (match Map.find t.routing (Transcript.Scope.key scope) with
    | Some _ ->
      let handle = route t scope in
-     (constructor_mutation t ~ordinary:A.observe_inference ~prepared:(fun preparation ->
-        A.Constructor_mutations.observe_inference ~preparation))
+     (ledger_mutation
+        t
+        ~ordinary:A.observe_inference
+        ~prepared:(fun preparation ->
+          A.Constructor_mutations.observe_inference ~preparation)
+        ~input:(fun scope -> A.Input_graph.observe_inference ~scope ~owner:t.owner))
        t.actor
        ~handle
        incoming
      |> require
    | None ->
-     (constructor_mutation
+     (ledger_mutation
         t
         ~ordinary:A.observe_owned_inference
         ~prepared:(fun preparation ->
-          A.Constructor_mutations.observe_owned_inference ~preparation))
+          A.Constructor_mutations.observe_owned_inference ~preparation)
+        ~input:(fun scope -> A.Input_graph.observe_owned_inference ~scope))
        t.actor
        ~owner:t.owner
        incoming
@@ -187,8 +232,12 @@ let on_completion t completion =
   let handle =
     route t (R.Attempt.scope (Inference_client.Completion.attempt completion))
   in
-  (constructor_mutation t ~ordinary:A.complete_inference ~prepared:(fun preparation ->
-     A.Constructor_mutations.complete_inference ~preparation))
+  (ledger_mutation
+     t
+     ~ordinary:A.complete_inference
+     ~prepared:(fun preparation ->
+       A.Constructor_mutations.complete_inference ~preparation)
+     ~input:(fun scope -> A.Input_graph.complete_inference ~scope))
     t.actor
     ~owner:t.owner
     ~handle
@@ -197,7 +246,14 @@ let on_completion t completion =
   t.upstream.on_completion completion
 ;;
 
-let seal t = if t.finished then Ok () else A.seal_inference_owner t.actor ~owner:t.owner
+let seal t =
+  if t.finished
+  then Ok ()
+  else (
+    match t.mutation_owner with
+    | Runtime _ -> A.seal_inference_owner t.actor ~owner:t.owner
+    | Held_input scope -> A.Input_graph.seal_inference_owner t.actor ~scope ~owner:t.owner)
+;;
 
 let finish t =
   if t.finished
@@ -212,11 +268,12 @@ let finish t =
          ())
   else
     Result.map
-      ((constructor_mutation
+      ((ledger_mutation
           t
           ~ordinary:A.finish_inference_owner
           ~prepared:(fun preparation ->
-            A.Constructor_mutations.finish_inference_owner ~preparation))
+            A.Constructor_mutations.finish_inference_owner ~preparation)
+          ~input:(fun scope -> A.Input_graph.finish_inference_owner ~scope))
          t.actor
          ~owner:t.owner)
       ~f:(fun () -> t.finished <- true)

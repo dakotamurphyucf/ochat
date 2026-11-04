@@ -41,6 +41,17 @@ val create
   -> upstream:Upstream.t
   -> (t, Agent_protocol.Error.t) Result.t
 
+(** One lexical input graph under the actual Actor-issued Parsing scope. All
+    ledger callbacks select that same scope and graph for factual ACKs, including
+    after original expiry. Fresh allocations still require its execution port;
+    [identity] alone cannot allocate. Finish before returning parsed input DATA. *)
+val create_for_held_input
+  :  Agent_session.Session_actor.t
+  -> scope:Agent_session.Session_actor.Held_input_scope.t
+  -> source:Transcript.Source_id.t
+  -> upstream:Upstream.t
+  -> (t, Agent_protocol.Error.t) result
+
 (** Sole durable allocator. Prepared admission, including an Untracked ordinal,
     is acknowledged before on_admitted and f. f runs exactly once and encloses
     scope validation, Prepared.start, acknowledgement, run and completion.

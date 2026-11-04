@@ -186,6 +186,29 @@ val with_prepared_run_source
   -> (Runtime_owner.Prepared.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
+(** Parse the genuine held input with its own lexical inference graph. Call only
+    from [Session_actor.with_held_input]'s preparation callback, while retaining
+    the selected runtime and its source/parent leases. The supplied runtime is
+    the one selected by that live runtime owner, not a substitute parser.
+    The exact issued execution services are obtained from [scope]; the entry's
+    actual actor validates scope and graph ownership. No future Operation or
+    expired constructor tracking is borrowed.
+
+    The parser joins its child calls before returning; this function seals and
+    finishes their graph before the actor records the parsed result. Fresh
+    effects require current authorization; exact completed outcomes and cleanup
+    remain factual. Primary errors and cancellation survive cleanup, while a
+    cleanup failure after successful parsing is reported. Parsed data alone
+    neither starts the Run nor grants a successful activation handoff. *)
+val prepare_held_input
+  :  t
+  -> entry:Session_registry.entry
+  -> runtime:Agent_session.Runtime_builder.t
+  -> scope:Agent_session.Session_actor.Held_input_scope.t
+  -> ( Agent_session.Runtime_input_preparation.Prepared_input.t
+       , Agent_protocol.Error.t )
+       result
+
 (** Startup-only once binding of the SAME retained Authoring_installation source
     port, before scheduler/client execution exposure. Repeated installation
     rejects. Existing lazy-runtime services consult it at use, so recovery does

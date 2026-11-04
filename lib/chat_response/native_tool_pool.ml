@@ -382,7 +382,7 @@ let create
       | exn ->
         let backtrace = Stdlib.Printexc.get_raw_backtrace () in
         (match exn with
-         | Eio.Cancel.Cancelled _ | Eio.Time.Timeout ->
+         | Eio.Cancel.Cancelled _ | Eio.Time.Timeout | Ctx.Effect_rejected _ ->
            Stdlib.Printexc.raise_with_backtrace exn backtrace
          | _ -> Error (error "agent.tool_construction_failed" (Exn.to_string exn))))
     ~host

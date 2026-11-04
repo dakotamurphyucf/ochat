@@ -1,3 +1,5 @@
+open! Core
+
 (** Shared execution context used by the {!Chat_response} sub-modules.
 
     The module provides a thin, immutable record bundling together:
@@ -59,6 +61,7 @@ type 'env t =
   ; on_admitted_call : In_memory_stream.Admitted_call.t -> unit
   ; submission_guard : Inference_runtime.Submission_guard.t
   ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
+  ; effect_checkpoint : (unit -> unit) option
   ; agent_prompt_v1_recipe : Moderation.Capabilities.model_recipe option
   ; agent_guidance_scope : Agent_guidance.Scope.t
   ; env : 'env
@@ -98,6 +101,7 @@ let create
   ; on_admitted_call
   ; submission_guard = Inference_runtime.Submission_guard.empty
   ; before_inference_dispatch
+  ; effect_checkpoint = None
   ; agent_prompt_v1_recipe
   ; agent_guidance_scope = Eligible None
   ; env
@@ -139,6 +143,28 @@ let of_env
 ;;
 
 exception Inference_admission_rejected
+exception Effect_rejected of Agent_protocol.Error.t
+
+let check_effect t = Option.iter t.effect_checkpoint ~f:(fun check -> check ())
+
+let with_effect_checkpoint t ~check =
+  { t with
+    effect_checkpoint =
+      Some
+        (fun () ->
+          check_effect t;
+          check ())
+  }
+;;
+
+let with_inference_tracking t ~identity ~on_attempt ~on_observation ~on_completion =
+  { t with
+    inference_identity = identity
+  ; on_inference_attempt = on_attempt
+  ; on_inference_observation = on_observation
+  ; on_inference_completion = on_completion
+  }
+;;
 
 let with_inference t ~inference_context = { t with inference_context }
 

@@ -58,6 +58,12 @@ module Source_binding = struct
   ;;
 end
 
+module Input_attempt = struct
+  type t =
+    | Available
+    | Claimed
+end
+
 module Held_run = struct
   type t =
     { admission : Agent_protocol.Run_receipt.t
@@ -84,6 +90,7 @@ module Held_run = struct
       ; admission : Agent_protocol.Run_receipt.t
       ; scope : Run_admission.Scope.t
       ; phase : phase ref
+      ; input_attempt : Input_attempt.t ref
       ; owned_basis : unit -> (unit, Agent_protocol.Error.t) result
       ; basis : unit -> (unit, Agent_protocol.Error.t) result
       ; policy : unit -> (unit, Agent_protocol.Error.t) result
@@ -182,6 +189,63 @@ module Recurrence_activation = struct
       else t.check_basis ()
     ;;
   end
+end
+
+module Held_input_scope = struct
+  type phase =
+    | Parsing
+    | Parsed_ready of Runtime_input_preparation.Prepared_input.t
+    | Consumed
+    | Closed
+
+  type t =
+    { domain : int
+    ; issuing_actor : unit ref
+    ; continuation : Recurrence_activation.Continuation.t
+    ; request : Run_admission_request.t
+    ; id : History_entry.Id.t
+    ; mutable phase : phase
+    ; mutable graphs : Inference_graph_owner.t list
+    ; mutable issued_execution : Runtime_input_preparation.Execution.t option
+    ; basis : unit -> (unit, Agent_protocol.Error.t) result
+    }
+
+  let parsing t =
+    let open Result.Let_syntax in
+    let%bind () =
+      if Int.equal t.domain (Stdlib.Domain.self () :> int)
+      then Ok ()
+      else
+        Error
+          (Agent_protocol.Error.invalid_request
+             "held input belongs to another Eio domain")
+    in
+    let%bind () =
+      match t.phase with
+      | Parsing -> Ok ()
+      | Parsed_ready _ | Consumed | Closed ->
+        Error
+          (Agent_protocol.Error.create
+             Conflict
+             ~message:"held input excludes new effects"
+             ~retryable:false
+             ())
+    in
+    t.basis ()
+  ;;
+
+  let execution t =
+    let open Result.Let_syntax in
+    let%bind () = parsing t in
+    Result.of_option
+      t.issued_execution
+      ~error:
+        (Agent_protocol.Error.create
+           Invalid_state
+           ~message:"held input execution is not issued"
+           ~retryable:false
+           ())
+  ;;
 end
 
 module Recurrence_planning_read = struct
@@ -1033,6 +1097,7 @@ type inference_execution =
   | Inference_moderator of moderator_borrow
   | Inference_event of queued_event_borrow
   | Inference_job of job_scope
+  | Inference_held_input of Held_input_scope.t
   | Inference_initialization of Initialization_scope.t
   | Inference_initialization_job of Initialization_scope.t * Agent_protocol.Job.t
 
@@ -1064,8 +1129,45 @@ module Lifecycle_fence = struct
     }
 end
 
+module Input_graph_request = struct
+  type _ t =
+    | Open : Held_input_scope.t * Transcript.Source_id.t -> Inference_owner.t t
+    | Acknowledge :
+        Held_input_scope.t
+        * Inference_owner.t
+        * Inference_ledger.Handle.t
+        * Inference_runtime.Attempt.t
+        -> unit t
+    | Observe :
+        Held_input_scope.t
+        * Inference_owner.t
+        * Inference_ledger.Handle.t
+        * Inference.Observation.t
+        -> unit t
+    | Observe_owned :
+        Held_input_scope.t * Inference_owner.t * Inference.Observation.t
+        -> unit t
+    | Complete :
+        Held_input_scope.t
+        * Inference_owner.t
+        * Inference_ledger.Handle.t
+        * Inference_client.Completion.t
+        -> unit t
+    | Release :
+        Held_input_scope.t * Inference_owner.t * Inference_ledger.Handle.t
+        -> unit t
+    | Seal : Held_input_scope.t * Inference_owner.t -> unit t
+    | Finish : Held_input_scope.t * Inference_owner.t -> unit t
+end
+
 module Held_startup_request = struct
   type _ t =
+    | Input_graph : 'a Input_graph_request.t -> 'a t
+    | Begin_input : Recurrence_activation.Continuation.t -> Held_input_scope.t t
+    | Ready_input :
+        Held_input_scope.t * Runtime_input_preparation.Prepared_input.t
+        -> unit t
+    | Close_input : Held_input_scope.t -> unit t
     | Begin_held_recurrence_activation :
         Source_binding.t * Held_run.t * Recurrence_activation.Checked.t
         -> Recurrence_activation.Continuation.t t
@@ -2026,6 +2128,7 @@ type t =
   ; mutable run_preparation : Run_preparation.t option
   ; mutable run_source_binding : Source_binding.t option
   ; mutable held_activation : Held_run.Activation.t option
+  ; mutable held_input_scope : Held_input_scope.t option
   ; mutable foreground_moderator :
       (Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.observer) option
   ; mutable invocation_executions : invocation_execution list
@@ -2437,6 +2540,7 @@ let held_startup_effect t preparation =
 ;;
 
 let close_run_preparation t =
+  Option.iter t.held_input_scope ~f:(fun scope -> scope.Held_input_scope.phase <- Closed);
   Option.iter t.held_activation ~f:Held_run.Activation.close;
   (* Closed startup disposition survives a failed factual retirement ACK. It
      cannot authorize effects; the exact retained Run is still pending retirement. *)
@@ -2558,7 +2662,10 @@ let held_initialization_of_execution t = function
              Option.map (initialization_held_run t scope) ~f:(fun run -> scope, run))
          else None)
      | Foreground _ | Background_job _ | Invocation_moderator _ -> None)
-  | Inference_operation _ | Inference_moderator _ | Inference_job _ -> None
+  | Inference_held_input _
+  | Inference_operation _
+  | Inference_moderator _
+  | Inference_job _ -> None
 ;;
 
 let check_run_preparation t preparation =
@@ -3220,18 +3327,87 @@ let reconcile_recurrences_internal t =
 
 let inference_error _ = error Invalid_state "inference tracking admission failed"
 
-let commit_inference_ledger ?run_preparation ?admission ?check_before_commit t ledger =
+let input_scope_basis t (scope : Held_input_scope.t) =
+  let open Result.Let_syntax in
+  let activation = Recurrence_activation.Continuation.target scope.continuation in
+  let%bind () =
+    if
+      phys_equal scope.issuing_actor t.inference_owner_identity
+      && Option.exists t.held_input_scope ~f:(phys_equal scope)
+      && Option.exists t.held_activation ~f:(phys_equal activation)
+      && Option.exists t.run_preparation ~f:(phys_equal activation.preparation)
+    then Ok ()
+    else Error (error Conflict "held input owner was displaced")
+  in
+  Run_preparation.check_basis
+    activation.preparation
+    ~owner:t.run_preparation_owner
+    ~state:t.state
+;;
+
+let input_graph_basis t (scope : Held_input_scope.t) owner =
+  if
+    phys_equal scope.Held_input_scope.issuing_actor t.inference_owner_identity
+    && List.mem scope.graphs owner ~equal:phys_equal
+    && List.mem t.inference_owners owner ~equal:phys_equal
+    && phys_equal t.inference_owner_identity (Graph_owner.issuing_actor owner)
+  then Ok ()
+  else Error (error Conflict "inference graph does not belong to this held input")
+;;
+
+module Input_graph_mutation = struct
+  type acknowledgement =
+    | Preserve
+    | Acknowledge of Inference_owner.Registration.t * Inference_runtime.Attempt.t
+    | Finish
+
+  type t =
+    { scope : Held_input_scope.t
+    ; owner : Inference_owner.t
+    ; acknowledgement : acknowledgement
+    }
+end
+
+let install_input_graph_acknowledgement t (mutation : Input_graph_mutation.t) =
+  match mutation.acknowledgement with
+  | Preserve -> ()
+  | Acknowledge (registration, attempt) ->
+    Inference_owner.Registration.acknowledge registration attempt
+  | Finish ->
+    Graph_owner.finish mutation.owner;
+    t.inference_owners
+    <- List.filter t.inference_owners ~f:(fun owner ->
+         not (phys_equal owner mutation.owner));
+    mutation.scope.graphs
+    <- List.filter mutation.scope.graphs ~f:(fun owner ->
+         not (phys_equal owner mutation.owner))
+;;
+
+let commit_inference_ledger
+      ?input_graph
+      ?run_preparation
+      ?admission
+      ?check_before_commit
+      t
+      ledger
+  =
   let open Result.Let_syntax in
   let%bind () =
-    match run_preparation with
-    | None -> Ok ()
-    | Some preparation -> check_run_preparation t preparation
+    match input_graph with
+    | Some mutation ->
+      input_graph_basis t mutation.Input_graph_mutation.scope mutation.owner
+    | None ->
+      (match run_preparation with
+       | None -> Ok ()
+       | Some preparation -> check_run_preparation t preparation)
   in
   if
     Int64.equal
       (Inference_ledger.revision ledger)
       (Inference_ledger.revision t.state.inference_ledger)
-  then Ok ()
+  then (
+    Option.iter input_graph ~f:(install_input_graph_acknowledgement t);
+    Ok ())
   else (
     let%bind accounting =
       Goal_ledger_reconciliation.prepare
@@ -3249,16 +3425,67 @@ let commit_inference_ledger ?run_preparation ?admission ?check_before_commit t l
         ]
       else []
     in
-    transition
-      ?check_before_commit
-      ?run_preparation
-      t
-      ~delta:(Session_delta.Batch (Inference_ledger_changed ledger :: accounting_delta))
-      ~payloads:
-        [ Agent_protocol.Event.Durable.Payload.Session_updated
-            (Session_state.summary { t.state with inference_ledger = ledger })
-        ]
-    |> Result.map ~f:ignore)
+    let delta =
+      Session_delta.Batch (Inference_ledger_changed ledger :: accounting_delta)
+    in
+    let payloads =
+      [ Agent_protocol.Event.Durable.Payload.Session_updated
+          (Session_state.summary { t.state with inference_ledger = ledger })
+      ]
+    in
+    match input_graph with
+    | None ->
+      transition ?check_before_commit ?run_preparation t ~delta ~payloads
+      |> Result.map ~f:ignore
+    | Some mutation ->
+      let scope = mutation.Input_graph_mutation.scope in
+      let owner = mutation.owner in
+      (* This selected factual path never reauthorizes a produced result. The
+         exact graph and preparation are retained, and only their basis advances
+         after ACK. Preparing without a preparation avoids fresh-effect policy. *)
+      let revision = t.state.counters.revision in
+      let%bind candidate = prepare_transition t ~delta ~payloads in
+      let preparation =
+        (Recurrence_activation.Continuation.target scope.continuation).preparation
+      in
+      let run_preparation =
+        if
+          Option.exists t.run_preparation ~f:(phys_equal preparation)
+          && Result.is_ok
+               (Run_preparation.check_basis
+                  preparation
+                  ~owner:t.run_preparation_owner
+                  ~state:t.state)
+        then Some preparation
+        else None
+      in
+      let%bind () =
+        persist_transition
+          ?run_preparation
+          ~check_before_commit:(fun () ->
+            let%bind () = input_graph_basis t scope owner in
+            let%bind () =
+              match run_preparation with
+              | None -> Ok ()
+              | Some preparation ->
+                if Option.exists t.run_preparation ~f:(phys_equal preparation)
+                then
+                  Run_preparation.check_basis
+                    preparation
+                    ~owner:t.run_preparation_owner
+                    ~state:t.state
+                else Error (error Conflict "input factual preparation changed before ACK")
+            in
+            if Int64.equal revision t.state.counters.revision
+            then Ok ()
+            else Error (error Conflict "held input ledger basis changed before ACK"))
+          t
+          candidate
+      in
+      install_committed_transition ?run_preparation t candidate;
+      install_input_graph_acknowledgement t mutation;
+      publish_committed_transition t candidate;
+      Ok ())
 ;;
 
 let validate_inference_owner t (owner : Inference_owner.t) =
@@ -3362,7 +3589,7 @@ let validate_inference_attempt registration attempt =
   else Error (error Conflict "inference attempt differs from its admitted identity")
 ;;
 
-let acknowledge_inference ?run_preparation t owner handle attempt =
+let acknowledge_inference ?input_graph ?run_preparation t owner handle attempt =
   let open Result.Let_syntax in
   let%bind registration = inference_registration t owner handle in
   let%bind () = validate_inference_attempt registration attempt in
@@ -3371,19 +3598,19 @@ let acknowledge_inference ?run_preparation t owner handle attempt =
     Inference_ledger.set_state t.state.inference_ledger handle Running
     |> Result.map_error ~f:inference_error
   in
-  commit_inference_ledger ?run_preparation t ledger
+  commit_inference_ledger ?input_graph ?run_preparation t ledger
 ;;
 
-let observe_inference ?run_preparation t handle incoming =
+let observe_inference ?input_graph ?run_preparation t handle incoming =
   let open Result.Let_syntax in
   let%bind ledger, _disposition =
     Inference_ledger.observe t.state.inference_ledger handle incoming
     |> Result.map_error ~f:inference_error
   in
-  commit_inference_ledger ?run_preparation t ledger
+  commit_inference_ledger ?input_graph ?run_preparation t ledger
 ;;
 
-let observe_owned_inference ?run_preparation t owner incoming =
+let observe_owned_inference ?input_graph ?run_preparation t owner incoming =
   let open Result.Let_syntax in
   let%bind () = validate_inference_owner t owner in
   let scope = Inference.Observation.scope incoming in
@@ -3406,10 +3633,15 @@ let observe_owned_inference ?run_preparation t owner incoming =
   with
   | None -> Error (error Conflict "observation has no retained admitted scope")
   | Some row ->
-    observe_inference ?run_preparation t (Inference_ledger.Row.handle row) incoming
+    observe_inference
+      ?input_graph
+      ?run_preparation
+      t
+      (Inference_ledger.Row.handle row)
+      incoming
 ;;
 
-let complete_inference ?run_preparation t owner handle completion =
+let complete_inference ?input_graph ?run_preparation t owner handle completion =
   let open Result.Let_syntax in
   let%bind registration = inference_registration t owner handle in
   let%bind () =
@@ -3426,7 +3658,7 @@ let complete_inference ?run_preparation t owner handle completion =
     Inference_ledger.set_state t.state.inference_ledger handle state
     |> Result.map_error ~f:inference_error
   in
-  commit_inference_ledger ?run_preparation t ledger
+  commit_inference_ledger ?input_graph ?run_preparation t ledger
 ;;
 
 let interrupt_inference_row ledger handle ~delivery =
@@ -3451,7 +3683,7 @@ let interrupt_inference_row ledger handle ~delivery =
      | Running -> interrupt Inference.Event.Terminal.Possibly_submitted)
 ;;
 
-let release_inference ?run_preparation t owner handle =
+let release_inference ?input_graph ?run_preparation t owner handle =
   let open Result.Let_syntax in
   let%bind registration = inference_registration t owner handle in
   Exn.protect
@@ -3465,7 +3697,7 @@ let release_inference ?run_preparation t owner handle =
                (Inference_owner.Registration.attempt registration)
                ~f:Inference_runtime.Attempt.delivery)
       in
-      commit_inference_ledger ?run_preparation t ledger)
+      commit_inference_ledger ?input_graph ?run_preparation t ledger)
     ~finally:(fun () ->
       Graph_owner.release owner ~ordinal:(Inference_ledger.Handle.ordinal handle))
 ;;
@@ -3476,7 +3708,7 @@ let seal_inference_owner t owner =
   Graph_owner.seal owner
 ;;
 
-let finish_inference_owner ?run_preparation t owner =
+let finish_inference_owner ?input_graph ?run_preparation t owner =
   let open Result.Let_syntax in
   let%bind () = validate_inference_owner t owner in
   let%bind () =
@@ -3506,10 +3738,82 @@ let finish_inference_owner ?run_preparation t owner =
              |> Option.map ~f:Inference_runtime.Attempt.delivery)
       | Some _ | None -> Ok ledger)
   in
-  let%map () = commit_inference_ledger ?run_preparation t ledger in
-  Graph_owner.finish owner;
-  t.inference_owners
-  <- List.filter t.inference_owners ~f:(fun current -> not (phys_equal current owner))
+  let%map () = commit_inference_ledger ?input_graph ?run_preparation t ledger in
+  match input_graph with
+  | Some _ -> ()
+  | None ->
+    Graph_owner.finish owner;
+    t.inference_owners
+    <- List.filter t.inference_owners ~f:(fun current -> not (phys_equal current owner))
+;;
+
+let input_graph_request
+  : type a. t -> a Input_graph_request.t -> (a, Agent_protocol.Error.t) result
+  =
+  fun t request ->
+  let open Result.Let_syntax in
+  match request with
+  | Open (scope, source) ->
+    let%bind () = input_scope_basis t scope in
+    let%bind () = Held_input_scope.parsing scope in
+    let%bind () = check_held_effect scope.continuation in
+    let%bind () = input_scope_basis t scope in
+    let%map owner = open_inference_owner t source in
+    scope.graphs <- owner :: scope.graphs;
+    owner
+  | Acknowledge (scope, owner, handle, attempt) ->
+    let%bind () = input_graph_basis t scope owner in
+    let%bind registration = inference_registration t owner handle in
+    let%bind () = validate_inference_attempt registration attempt in
+    let%bind ledger =
+      Inference_ledger.set_state t.state.inference_ledger handle Running
+      |> Result.map_error ~f:inference_error
+    in
+    commit_inference_ledger
+      ~input_graph:
+        Input_graph_mutation.
+          { scope; owner; acknowledgement = Acknowledge (registration, attempt) }
+      t
+      ledger
+  | Observe (scope, owner, handle, incoming) ->
+    let%bind _ = inference_registration t owner handle in
+    let%bind () = input_graph_basis t scope owner in
+    observe_inference
+      ~input_graph:Input_graph_mutation.{ scope; owner; acknowledgement = Preserve }
+      t
+      handle
+      incoming
+  | Observe_owned (scope, owner, incoming) ->
+    let%bind () = input_graph_basis t scope owner in
+    observe_owned_inference
+      ~input_graph:Input_graph_mutation.{ scope; owner; acknowledgement = Preserve }
+      t
+      owner
+      incoming
+  | Complete (scope, owner, handle, completion) ->
+    let%bind () = input_graph_basis t scope owner in
+    complete_inference
+      ~input_graph:Input_graph_mutation.{ scope; owner; acknowledgement = Preserve }
+      t
+      owner
+      handle
+      completion
+  | Release (scope, owner, handle) ->
+    let%bind () = input_graph_basis t scope owner in
+    release_inference
+      ~input_graph:Input_graph_mutation.{ scope; owner; acknowledgement = Preserve }
+      t
+      owner
+      handle
+  | Seal (scope, owner) ->
+    let%bind () = input_graph_basis t scope owner in
+    seal_inference_owner t owner
+  | Finish (scope, owner) ->
+    let%bind () = input_graph_basis t scope owner in
+    finish_inference_owner
+      ~input_graph:Input_graph_mutation.{ scope; owner; acknowledgement = Finish }
+      t
+      owner
 ;;
 
 let reconcile_inference_recovery t =
@@ -15215,6 +15519,17 @@ let execution_basis t (origins : execution_origin_lookup) execution =
     | Inference_job scope ->
       let%bind run = job scope in
       basis run
+    | Inference_held_input scope ->
+      let%bind () = Held_input_scope.parsing scope in
+      let%bind () = input_scope_basis t scope in
+      let%bind () = check_held_effect scope.continuation in
+      let activation = Recurrence_activation.Continuation.target scope.continuation in
+      let%bind run =
+        Option.bind t.state.run_state ~f:(fun index ->
+          Run_state.find index activation.run.id)
+        |> Result.of_option ~error:(error Conflict "held input Run is absent")
+      in
+      basis ~preparation:activation.preparation (Some run)
     | Inference_initialization_job (scope, expected) ->
       let%bind () = validate_initialization_scope_current t scope in
       let%bind () = check_initialization_agent_actor scope in
@@ -15353,8 +15668,10 @@ let native_child_basis_of_execution t execution (basis : inference_basis) =
         | Some _ -> Ok None
       in
       classification, parent
-    | Inference_operation _ | Inference_initialization _ | Inference_initialization_job _
-      ->
+    | Inference_held_input _
+    | Inference_operation _
+    | Inference_initialization _
+    | Inference_initialization_job _ ->
       Ok
         ( Some
             (match basis.run with
@@ -15584,8 +15901,8 @@ let child_parent t execution =
      | Background_job scope -> job scope
      | Invocation_moderator borrow -> moderator borrow
      | Event_moderator borrow -> Ok (Parent_event borrow))
-  | Inference_initialization _ | Inference_initialization_job _ ->
-    Error (error Invalid_state "initializer has no reserved Run child parent")
+  | Inference_held_input _ | Inference_initialization _ | Inference_initialization_job _
+    -> Error (error Invalid_state "input or initializer has no reserved Run child parent")
 ;;
 
 (* The returned callback runs only after the exact Job/Run transaction ACK.
@@ -15714,6 +16031,7 @@ let prepare_selected_child_run t execution job_deltas =
       | Inference_invocation invocation ->
         authorize_native_child_basis t ~read_current:(fun () ->
           selected_invocation_basis t invocation)
+      | Inference_held_input _
       | Inference_operation _
       | Inference_moderator _
       | Inference_event _
@@ -15735,6 +16053,8 @@ let prepare_selected_child_run t execution job_deltas =
 ;;
 
 let inference_agent_admission t = function
+  | Inference_held_input _ ->
+    Error (error Permission_denied "input scope has no callback agent admission")
   | Inference_operation (operation, _) -> operation_agent_admission t operation.id
   | Inference_invocation execution -> execution_agent_admission t execution
   | Inference_moderator borrow -> moderator_agent_admission t borrow
@@ -15768,7 +16088,10 @@ let initialization_of_inference_execution t execution =
     (match execution.owner with
      | Event_moderator borrow -> callback borrow
      | Foreground _ | Background_job _ | Invocation_moderator _ -> Ok None)
-  | Inference_operation _ | Inference_job _ | Inference_moderator _ -> Ok None
+  | Inference_held_input _
+  | Inference_operation _
+  | Inference_job _
+  | Inference_moderator _ -> Ok None
 ;;
 
 let admit_model_job t execution candidate =
@@ -15801,6 +16124,8 @@ let admit_model_job t execution candidate =
   in
   let%bind () =
     match execution with
+    | Inference_held_input _ ->
+      Error (error Permission_denied "input parsing cannot admit a callback Model Job")
     | Inference_initialization _ | Inference_initialization_job _ ->
       if
         Option.is_none (held_initialization_of_execution t execution)
@@ -16418,6 +16743,23 @@ let check_inference_allocation t (current : inference_currentness) owner handle 
               else Error (error Conflict "held inference owner changed during checks"))
         else None))
   in
+  let input_basis =
+    Option.map t.held_input_scope ~f:(fun scope ->
+      if
+        Option.exists
+          current.basis.preparation
+          ~f:
+            (phys_equal
+               (Recurrence_activation.Continuation.target scope.continuation).preparation)
+      then
+        Some
+          (fun () ->
+            let%bind () = input_graph_basis t scope owner in
+            let%bind () = Held_input_scope.parsing scope in
+            Recurrence_activation.Continuation.check_basis scope.continuation)
+      else None)
+    |> Option.join
+  in
   let%bind registration = inference_registration t owner handle in
   (* Final checks run after every composed refresh. Sample only an actual
      registered Goal deadline, before original/physical/policy checks. Sampling
@@ -16470,7 +16812,8 @@ let check_inference_allocation t (current : inference_currentness) owner handle 
   in
   (* Original checks above may run trusted callbacks. Recheck the exact captured
      startup owner last, without policy, clock, Store access or reselection. *)
-  Option.value_map held_basis ~default:(Ok ()) ~f:(fun check -> check ())
+  let%bind () = Option.value_map held_basis ~default:(Ok ()) ~f:(fun check -> check ()) in
+  Option.value_map input_basis ~default:(Ok ()) ~f:(fun check -> check ())
 ;;
 
 let allocate_inference t execution owner relation configuration =
@@ -16482,6 +16825,7 @@ let allocate_inference t execution owner relation configuration =
         (error
            Permission_denied
            "initializer inference requires its exact admitted running model Job")
+    | Inference_held_input _
     | Inference_initialization_job _
     | Inference_operation _
     | Inference_invocation _
@@ -16499,6 +16843,17 @@ let allocate_inference t execution owner relation configuration =
       | Sealed | Finished -> false
     then Ok ()
     else Error (error Conflict "inference graph excludes new attempts")
+  in
+  let%bind () =
+    match execution with
+    | Inference_held_input scope -> input_graph_basis t scope owner
+    | Inference_initialization _
+    | Inference_initialization_job _
+    | Inference_operation _
+    | Inference_invocation _
+    | Inference_moderator _
+    | Inference_event _
+    | Inference_job _ -> Ok ()
   in
   let%bind current = authorized_inference_execution_basis t execution in
   let basis = current.basis in
@@ -16555,7 +16910,21 @@ let allocate_inference t execution owner relation configuration =
       commit_inference_ledger
         ?run_preparation:basis.preparation
         ?admission
-        ?check_before_commit:(held_startup_effect t basis.preparation)
+        ?check_before_commit:
+          (match execution with
+           | Inference_held_input scope ->
+             Some
+               (fun () ->
+                 let%bind () = check_held_effect scope.continuation in
+                 let%bind () = Held_input_scope.parsing scope in
+                 input_graph_basis t scope owner)
+           | Inference_initialization _
+           | Inference_initialization_job _
+           | Inference_operation _
+           | Inference_invocation _
+           | Inference_moderator _
+           | Inference_event _
+           | Inference_job _ -> held_startup_effect t basis.preparation)
         t
         ledger
     in
@@ -19399,6 +19768,16 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Seal_inference_owner _
   | Finish_inference_owner _
   | Close_run_preparation _
+  | Held_startup
+      (Input_graph
+         ( Acknowledge _
+         | Observe _
+         | Observe_owned _
+         | Complete _
+         | Release _
+         | Seal _
+         | Finish _ ))
+  | Held_startup (Close_input _)
   | Held_startup (End_held_activation _)
   | Release_recurrence_due _
   | Run_start_receipt _
@@ -19476,6 +19855,9 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Checkpoint _
   | Quiescent_checkpoint _
   | Shutdown -> true
+  | Held_startup (Input_graph (Open _))
+  | Held_startup (Begin_input _)
+  | Held_startup (Ready_input _)
   | Open_inference_owner _
   | Admit_inference _
   | Allocate_inference _
@@ -20628,6 +21010,7 @@ let begin_held_recurrence_activation_internal t binding (held : Held_run.t) chec
     ; admission = held.admission
     ; scope
     ; phase
+    ; input_attempt = ref Input_attempt.Available
     ; owned_basis =
         (fun () ->
           let%bind () = require_runtime_admission t in
@@ -20727,7 +21110,7 @@ let begin_held_recurrence_activation_internal t binding (held : Held_run.t) chec
   Ok continuation
 ;;
 
-let reserve_held_history_block_internal t continuation count =
+let prepare_held_history_reservation t continuation count =
   let open Result.Let_syntax in
   let target = Recurrence_activation.Continuation.target continuation in
   let%bind () = target.Held_run.Activation.owned_basis () in
@@ -20768,9 +21151,21 @@ let reserve_held_history_block_internal t continuation count =
       ~delta:(Session_delta.History_block_reserved reserved_through)
       ~payloads:[]
   in
+  Ok
+    ( target
+    , authorities
+    , candidate
+    , History_id_source.{ first_sequence; reserved_through } )
+;;
+
+let reserve_held_history_block_internal t continuation count =
+  let open Result.Let_syntax in
+  let%bind target, authorities, candidate, reservation =
+    prepare_held_history_reservation t continuation count
+  in
   let%bind () =
     persist_transition
-      ~run_preparation:target.preparation
+      ~run_preparation:target.Held_run.Activation.preparation
       ~check_before_commit:(fun () ->
         let%map () = check_held_effect continuation in
         target.phase := Constructing)
@@ -20780,7 +21175,123 @@ let reserve_held_history_block_internal t continuation count =
   install_committed_transition ~run_preparation:target.preparation t candidate;
   t.run_authorities <- authorities;
   publish_committed_transition t candidate;
-  Ok History_id_source.{ first_sequence; reserved_through }
+  Ok reservation
+;;
+
+let begin_held_input_internal t continuation =
+  let open Result.Let_syntax in
+  let activation = Recurrence_activation.Continuation.target continuation in
+  let request = Run_preparation.request activation.preparation in
+  let%bind () =
+    match request.input with
+    | Authored_start ->
+      Error (error Invalid_request "authored start has no user input to parse")
+    | User_submission _ -> Ok ()
+  in
+  let%bind () =
+    match !(activation.input_attempt) with
+    | Input_attempt.Available -> Ok ()
+    | Claimed -> Error (error Conflict "held input attempt has already been consumed")
+  in
+  let%bind () =
+    match t.held_input_scope with
+    | None -> Ok ()
+    | Some _ -> Error (error Conflict "held input already has an owner")
+  in
+  let%bind () =
+    if Int64.(t.state.conversation.next_history_sequence <= of_int Int.max_value)
+    then Ok ()
+    else Error (error Invalid_state "held input history sequence is exhausted")
+  in
+  let%bind _, authorities, candidate, reservation =
+    prepare_held_history_reservation t continuation 1
+  in
+  let%bind id =
+    History_entry.Id.create
+      ~namespace:(Agent_protocol.Id.Session.to_string t.state.identity.session_id)
+      ~sequence:(Int64.to_int_exn reservation.first_sequence)
+    |> Result.map_error ~f:(error Invalid_state)
+  in
+  let selected = ref None in
+  let scope =
+    { Held_input_scope.domain = (Stdlib.Domain.self () :> int)
+    ; issuing_actor = t.inference_owner_identity
+    ; continuation
+    ; request
+    ; id
+    ; phase = Parsing
+    ; graphs = []
+    ; issued_execution = None
+    ; basis =
+        (fun () ->
+          match !selected with
+          | None -> Error (error Invalid_state "held input has not been installed")
+          | Some scope -> input_scope_basis t scope)
+    }
+  in
+  selected := Some scope;
+  let attempted = ref false in
+  let result =
+    Exn.protect
+      ~finally:(fun () ->
+        (* A failed or exceptional writer may already have committed. This
+           actual attempt remains consumed even when no reply reaches its caller. *)
+        if !attempted then activation.input_attempt := Claimed)
+      ~f:(fun () ->
+        persist_transition
+          ~run_preparation:activation.preparation
+          ~commit_attempted:attempted
+          ~check_before_commit:(fun () ->
+            let%bind () = check_held_effect continuation in
+            if
+              Option.is_none t.held_input_scope
+              &&
+              match !(activation.input_attempt) with
+              | Available -> true
+              | Claimed -> false
+            then Ok ()
+            else Error (error Conflict "held input was selected during admission"))
+          t
+          candidate)
+  in
+  let%bind () = result in
+  install_committed_transition ~run_preparation:activation.preparation t candidate;
+  activation.phase := Constructing;
+  t.run_authorities <- authorities;
+  t.held_input_scope <- Some scope;
+  publish_committed_transition t candidate;
+  Ok scope
+;;
+
+let ready_held_input_internal t (scope : Held_input_scope.t) input =
+  let open Result.Let_syntax in
+  let%bind () = input_scope_basis t scope in
+  let%bind () = Held_input_scope.parsing scope in
+  let%bind () = check_held_effect scope.continuation in
+  let%bind () = input_scope_basis t scope in
+  let%bind () =
+    Runtime_input_preparation.Prepared_input.validate
+      input
+      ~request:scope.request
+      ~id:scope.id
+  in
+  if List.is_empty scope.graphs
+  then (
+    scope.phase <- Parsed_ready input;
+    Ok ())
+  else Error (error Conflict "held input graph must join before parsing completes")
+;;
+
+let close_held_input_internal t (scope : Held_input_scope.t) =
+  if not (Option.exists t.held_input_scope ~f:(phys_equal scope))
+  then Error (error Conflict "held input belongs to another actor")
+  else (
+    scope.phase <- Closed;
+    if List.is_empty scope.graphs
+    then (
+      t.held_input_scope <- None;
+      Ok ())
+    else Error (error Conflict "held input graph did not join before scope exit"))
 ;;
 
 let end_held_activation_internal t (activation : Held_run.Activation.t) =
@@ -22168,6 +22679,10 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       bind_run_source_internal t ~preparation ~source
     | Held_startup request ->
       (match request with
+       | Input_graph request -> input_graph_request t request
+       | Begin_input continuation -> begin_held_input_internal t continuation
+       | Ready_input (scope, input) -> ready_held_input_internal t scope input
+       | Close_input scope -> close_held_input_internal t scope
        | End_held_activation activation -> end_held_activation_internal t activation
        | Begin_held_recurrence_activation (binding, held, checked) ->
          begin_held_recurrence_activation_internal t binding held checked
@@ -22590,6 +23105,7 @@ let create_with_owner_lease_duration
     ; run_preparation = None
     ; run_source_binding = None
     ; held_activation = None
+    ; held_input_scope = None
     ; foreground_moderator = None
     ; invocation_executions = []
     ; inference_owner_identity = ref ()
@@ -22756,6 +23272,40 @@ let complete_inference t ~owner ~handle completion =
 let release_inference t ~owner ~handle = call t (Release_inference (None, owner, handle))
 let seal_inference_owner t ~owner = call t (Seal_inference_owner owner)
 let finish_inference_owner t ~owner = call t (Finish_inference_owner (None, owner))
+
+module Input_graph = struct
+  let open_owner t ~scope ~source =
+    call t (Held_startup (Input_graph (Open (scope, source))))
+  ;;
+
+  let acknowledge_inference t ~scope ~owner ~handle attempt =
+    call t (Held_startup (Input_graph (Acknowledge (scope, owner, handle, attempt))))
+  ;;
+
+  let observe_inference t ~scope ~owner ~handle incoming =
+    call t (Held_startup (Input_graph (Observe (scope, owner, handle, incoming))))
+  ;;
+
+  let observe_owned_inference t ~scope ~owner incoming =
+    call t (Held_startup (Input_graph (Observe_owned (scope, owner, incoming))))
+  ;;
+
+  let complete_inference t ~scope ~owner ~handle completion =
+    call t (Held_startup (Input_graph (Complete (scope, owner, handle, completion))))
+  ;;
+
+  let release_inference t ~scope ~owner ~handle =
+    call t (Held_startup (Input_graph (Release (scope, owner, handle))))
+  ;;
+
+  let seal_inference_owner t ~scope ~owner =
+    call t (Held_startup (Input_graph (Seal (scope, owner))))
+  ;;
+
+  let finish_inference_owner t ~scope ~owner =
+    call t (Held_startup (Input_graph (Finish (scope, owner))))
+  ;;
+end
 
 module Constructor_mutations = struct
   let admit_inference
@@ -23860,4 +24410,79 @@ let reserve_held_history_block t ~continuation ~count =
 
 let end_held_activation t ~activation =
   call t (Held_startup (End_held_activation activation))
+;;
+
+let with_held_input t ~continuation ~prepare f =
+  let open Result.Let_syntax in
+  let%bind scope =
+    Eio.Cancel.protect (fun () -> call t (Held_startup (Begin_input continuation)))
+  in
+  let final_check () =
+    let%bind () = Held_input_scope.parsing scope in
+    let%bind () = check_held_effect continuation in
+    let%bind () = input_scope_basis t scope in
+    Recurrence_activation.Continuation.check_basis continuation
+  in
+  let refresh () =
+    let%bind () = Held_input_scope.parsing scope in
+    let%bind () = Recurrence_activation.Continuation.refresh continuation in
+    let%map () = final_check () in
+    final_check
+  in
+  let checkpoint () =
+    let%bind check = refresh () in
+    check ()
+  in
+  let allocate_inference ~graph ~relation ~configuration =
+    let%bind () = checkpoint () in
+    let%map allocation =
+      inference_port t (Inference_held_input scope) ~graph ~relation ~configuration
+    in
+    (* Register this acknowledged handle before any fallible refresh. The composed
+       guard refreshes Store custody only at the real submission boundary. *)
+    let guard =
+      Inference_runtime.Submission_guard.create ~refresh:(fun () ->
+        match refresh () with
+        | Error error -> raise (Inference_allocation.Rejected error)
+        | Ok check ->
+          fun () ->
+            (match check () with
+             | Ok () -> ()
+             | Error error -> raise (Inference_allocation.Rejected error)))
+    in
+    Inference_allocation.Host.create
+      ~handle:(Inference_allocation.handle allocation)
+      ~submission_guard:
+        (Inference_runtime.Submission_guard.compose
+           guard
+           (Inference_allocation.submission_guard allocation))
+  in
+  let execution : Runtime_input_preparation.Execution.t =
+    { request = scope.request; id = scope.id; checkpoint; refresh; allocate_inference }
+  in
+  scope.issued_execution <- Some execution;
+  let cleanup () =
+    scope.phase <- Closed;
+    Eio.Cancel.protect (fun () -> call t (Held_startup (Close_input scope)))
+  in
+  let run () =
+    let%bind () = checkpoint () in
+    let%bind input = prepare ~scope execution in
+    let%bind () = checkpoint () in
+    let%bind () = call t (Held_startup (Ready_input (scope, input))) in
+    f ~scope ~input
+  in
+  match run () with
+  | Ok value ->
+    let%map () = cleanup () in
+    value
+  | Error _ as result ->
+    (try ignore (cleanup () : (unit, Agent_protocol.Error.t) result) with
+     | _ -> ());
+    result
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    (try ignore (cleanup () : (unit, Agent_protocol.Error.t) result) with
+     | _ -> ());
+    Exn.raise_with_original_backtrace exn backtrace
 ;;

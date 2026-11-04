@@ -103,6 +103,10 @@ type t =
       id:History_entry.Id.t
       -> Agent_protocol.Session.Message_content.t
       -> (History_entry.t, Agent_protocol.Error.t) result
+  ; parse_prepared_input :
+      execution:Runtime_input_preparation.Execution.t
+      -> tracking:Runtime_input_preparation.Tracking.t
+      -> (Runtime_input_preparation.Prepared_input.t, Agent_protocol.Error.t) result
   ; initial_history : History_entry.t list
   ; initial_prompt_entry_count : int
   ; reserved_history_through : int
@@ -1383,6 +1387,142 @@ let parse_user_content ~ctx ~manifest_authorizer ~approval_provider ~response_di
     Openai.Responses_history.create_with_id_exn ~id item
 ;;
 
+(* The caller owns and seals one actual input graph around this parser. No
+   constructor tracker or future Operation is borrowed for these effects. *)
+let parse_prepared_input
+      ~ctx
+      ~manifest_authorizer
+      ~approval_provider
+      ~response_dir
+      ~delegated
+      paths
+      ~(execution : Runtime_input_preparation.Execution.t)
+      ~(tracking : Runtime_input_preparation.Tracking.t)
+  =
+  let require = function
+    | Ok value -> value
+    | Error error -> raise (Chat_response.Ctx.Effect_rejected error)
+  in
+  let checkpoint () = require (execution.checkpoint ()) in
+  let refresh () =
+    let final = require (execution.refresh ()) in
+    fun () -> require (final ())
+  in
+  let ctx =
+    Chat_response.Ctx.without_agent_guidance ctx
+    |> fun ctx ->
+    Chat_response.Ctx.with_inference_tracking
+      ctx
+      ~identity:tracking.identity
+      ~on_attempt:tracking.on_attempt
+      ~on_observation:tracking.on_observation
+      ~on_completion:tracking.on_completion
+    |> fun ctx ->
+    Chat_response.Ctx.with_effect_checkpoint ctx ~check:checkpoint
+    |> fun ctx ->
+    Chat_response.Ctx.with_submission_guard
+      ctx
+      (Inference_runtime.Submission_guard.create ~refresh)
+  in
+  let convert content =
+    let open Result.Let_syntax in
+    checkpoint ();
+    let%bind item =
+      match content.Agent_protocol.Session.Message_content.kind with
+      | Plain_text ->
+        if delegated && not (List.is_empty content.attachments)
+        then
+          Error
+            (failure
+               "generated sessions accept plain_text messages without implicit resource \
+                loading")
+        else Ok (plain_user_item content.text)
+      | Chatmd ->
+        if delegated
+        then
+          Error
+            (failure
+               "generated sessions accept plain_text messages without implicit resource \
+                loading")
+        else (
+          let xml =
+            if String.is_prefix (String.strip content.text) ~prefix:"<"
+            then content.text
+            else sprintf "<user>\n%s\n</user>" content.text
+          in
+          let%bind elements =
+            try
+              let source_loader =
+                Source_loader.with_checkpoint
+                  (Source_loader.filesystem ~root:paths.Runtime_paths.workspace)
+                  ~checkpoint
+              in
+              Ok
+                (Prompt.Chat_markdown.parse_chat_inputs
+                   ~source_loader
+                   ~dir:paths.Runtime_paths.workspace
+                   xml)
+            with
+            | Chat_response.Ctx.Effect_rejected _ as exn ->
+              Exn.raise_with_original_backtrace exn (Stdlib.Printexc.get_raw_backtrace ())
+            | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn ->
+              Exn.raise_with_original_backtrace exn (Stdlib.Printexc.get_raw_backtrace ())
+            | exn -> Error (failure ("ChatMD input parse failed: " ^ Exn.to_string exn))
+          in
+          checkpoint ();
+          List.find_map elements ~f:(function
+            | Prompt.Chat_markdown.User message ->
+              Some
+                (Converter.convert_user_msg
+                   ~ctx
+                   ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
+                     checkpoint ();
+                     run_agent
+                       ~manifest_authorizer
+                       ~approval_provider
+                       ~response_dir
+                       ?prompt_dir
+                       ?session_id
+                       ~source:"session-input.chatmd"
+                       ~ctx
+                       prompt
+                       items)
+                   message)
+            | _ -> None)
+          |> Result.of_option
+               ~error:(failure "ChatMD input does not contain a user message"))
+    in
+    checkpoint ();
+    let entry = Openai.Responses_history.create_with_id_exn ~id:execution.id item in
+    Runtime_input_preparation.Prepared_input.create
+      ~request:execution.request
+      ~id:execution.id
+      ~entry:(History_codec.to_canonical entry)
+  in
+  try
+    checkpoint ();
+    let open Result.Let_syntax in
+    let%bind content =
+      match execution.request.input with
+      | User_submission content -> Ok content
+      | Authored_start -> Error (failure "prepared input requires User_submission")
+    in
+    Shell_runtime.Call_context.with_narrowed_check
+      ~refresh:(fun () ->
+        let check = refresh () in
+        Ok
+          (fun () ->
+            check ();
+            Ok ()))
+      (fun () -> convert content)
+    |> Result.map_error ~f:failure
+    |> Result.join
+  with
+  | Chat_response.Ctx.Effect_rejected error
+  | Inference_allocation.Rejected error
+  | Converter.Source_error error -> Error error
+;;
+
 type inherited_managed =
   { delegation : Chat_response.Managed_tool_registry.delegation
   ; current : unit -> Chat_response.Tool_capability.t
@@ -2332,6 +2472,18 @@ let build_with_services
     ; inference_execution = Chat_response.Ctx.inference_execution ctx
     ; now
     ; parse_user_content
+    ; parse_prepared_input =
+        (fun ~execution ~tracking ->
+          with_activity (fun () ->
+            parse_prepared_input
+              ~ctx
+              ~manifest_authorizer
+              ~approval_provider
+              ~response_dir
+              ~delegated
+              paths
+              ~execution
+              ~tracking))
     ; initial_history
     ; initial_prompt_entry_count = List.length initial_history
     ; reserved_history_through

@@ -271,7 +271,7 @@ let implementation_sources =
   ; ( "lib/chatmd/prompt.ml"
     , "9d35e23e50ad499469c2a6c067d9c20ae8683c23d0c26c8b6dcc1883e7feef6d" )
   ; ( "lib/chatmd/source_loader.ml"
-    , "82bf509199938ddef8dec39ca7450968b11f4f63e94d1f90b142fa0ed225a77b" )
+    , "12c1ef9c5380aef91967e1e33a918678d6cac6b3d74594b4496834ddff2e3c12" )
   ; ( "lib/chatmd_shell_spec/authoring_metadata.ml"
     , "8fa283f545896b7efbaab8bcf17a3ab7549d61c04873403c94961fc4ca0b789d" )
   ; ( "lib/chatmd_shell_spec/duration.ml"
@@ -287,13 +287,13 @@ let implementation_sources =
   ; ( "lib/chat_response/converter.ml"
     , "c6cdff248b4433655daa72064ce42e90d9522a7e2a632b78f555f86961bc0b0e" )
   ; ( "lib/chat_response/fetch.ml"
-    , "170db560c0693c7ec37f2a34c1907133feaffddd079571fcc32552bab59549ca" )
+    , "4a05211b42c66f2191cbf264002358f8eda48794c10ccc6bd40923b5f0cb3907" )
   ; ( "lib/chat_response/mcp_discovery_cache.ml"
     , "9365e8d63b16864e3535ec8c961282d259797cb84f8046691691f2c98eaecc8a" )
   ; ( "lib/chat_response/shell_tool.ml"
     , "2450c632c18067d0c984087461b9085f24314dd79a026a42a4f35b1014816f92" )
   ; ( "lib/chat_response/tool.ml"
-    , "794ed9c2a672118538f328a07a2ca627282291c405a939f1ec864295aa489761" )
+    , "4a66070afda659db5db9f99f35435be1894bb8424476e0ba96c161d8a3b8f12f" )
   ; ( "lib/chatmd/chatmd_read_file_declaration.ml"
     , "446e56ceec98db2b0eeabed3b6f86e37127d71c03fb0594380b3daba9ba78eba" )
   ; ( "lib/chatmd/chatmd_read_file_spec.ml"

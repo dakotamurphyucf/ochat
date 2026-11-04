@@ -8,6 +8,7 @@
   inference_allocation
   model_job_admission
   runtime_model_services
+  runtime_input_preparation
   legacy_callback_runtime
   invocation_capabilities
   workspace_definition

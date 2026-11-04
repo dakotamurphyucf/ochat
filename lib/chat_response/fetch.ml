@@ -103,7 +103,10 @@ let get_impl ~(ctx : _ Ctx.t) url ~is_local ~cleanup_html =
            process’ CWD.
     *)
     let try_load ~dir =
+      Ctx.check_effect ctx;
       try Some (Io.load_doc ~dir url) with
+      | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn ->
+        Exn.raise_with_original_backtrace exn (Stdlib.Printexc.get_raw_backtrace ())
       | _ -> None
     in
     match try_load ~dir:(Ctx.dir ctx) with
@@ -123,12 +126,16 @@ let get_impl ~(ctx : _ Ctx.t) url ~is_local ~cleanup_html =
            (* If the path is absolute, we assume it exists and load it.  This
               allows users to refer to files outside of the current working
               directory. *)
+           Ctx.check_effect ctx;
            try Io.load_doc ~dir:(Eio.Stdenv.fs (Ctx.env ctx)) url with
+           | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn ->
+             Exn.raise_with_original_backtrace exn (Stdlib.Printexc.get_raw_backtrace ())
            | _ ->
              (* File does not exist or is inaccessible. *)
              failwithf "Could not resolve local document path %s" url ())))
   else (
     let net = Ctx.net ctx in
+    Ctx.check_effect ctx;
     let raw = get_remote ~net url in
     if cleanup_html then clean_html raw else raw)
 ;;
@@ -145,10 +152,13 @@ let get_html ~ctx url ~is_local = get_impl ~ctx url ~is_local ~cleanup_html:true
 
 let resolve_local_dir ~(ctx : _ Ctx.t) (url : string) : Eio.Fs.dir_ty Eio.Path.t option =
   let resolve_if_exists base =
+    Ctx.check_effect ctx;
     try
       ignore (Io.load_doc ~dir:base url : string);
       Some Eio.Path.(base / Filename.dirname url)
     with
+    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn ->
+      Exn.raise_with_original_backtrace exn (Stdlib.Printexc.get_raw_backtrace ())
     | _ -> None
   in
   match resolve_if_exists (Ctx.dir ctx) with

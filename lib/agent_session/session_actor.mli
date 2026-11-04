@@ -139,6 +139,81 @@ module Inference_owner : sig
   type t = Inference_graph_owner.t
 end
 
+module Held_input_scope : sig
+  (** One actor-issued rich input attempt. Same Eio domain only. Parsing ports
+      expire once the joined parsed result is recorded, consumed, or closed.
+      Parsed DATA is not authority and cannot reconstruct this scope. *)
+  type t
+
+  (** Return the SAME issued immutable service record, only while Parsing and
+      still owned. Never accepts a caller-supplied record as execution proof. *)
+  val execution
+    :  t
+    -> (Runtime_input_preparation.Execution.t, Agent_protocol.Error.t) result
+end
+
+module Input_graph : sig
+  (** Selected factual ACKs for an actual graph registered to this input scope.
+      Original expiry denies new effects but does not reauthorize or prevent
+      completion/release of already admitted work. Foreign/displaced custody
+      rejects; ordinary and constructor graph APIs retain their own contracts. *)
+  val open_owner
+    :  t
+    -> scope:Held_input_scope.t
+    -> source:Transcript.Source_id.t
+    -> (Inference_owner.t, Agent_protocol.Error.t) result
+
+  val acknowledge_inference
+    :  t
+    -> scope:Held_input_scope.t
+    -> owner:Inference_owner.t
+    -> handle:Inference_ledger.Handle.t
+    -> Inference_runtime.Attempt.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val observe_inference
+    :  t
+    -> scope:Held_input_scope.t
+    -> owner:Inference_owner.t
+    -> handle:Inference_ledger.Handle.t
+    -> Inference.Observation.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val observe_owned_inference
+    :  t
+    -> scope:Held_input_scope.t
+    -> owner:Inference_owner.t
+    -> Inference.Observation.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val complete_inference
+    :  t
+    -> scope:Held_input_scope.t
+    -> owner:Inference_owner.t
+    -> handle:Inference_ledger.Handle.t
+    -> Inference_client.Completion.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val release_inference
+    :  t
+    -> scope:Held_input_scope.t
+    -> owner:Inference_owner.t
+    -> handle:Inference_ledger.Handle.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val seal_inference_owner
+    :  t
+    -> scope:Held_input_scope.t
+    -> owner:Inference_owner.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val finish_inference_owner
+    :  t
+    -> scope:Held_input_scope.t
+    -> owner:Inference_owner.t
+    -> (unit, Agent_protocol.Error.t) result
+end
+
 (** Open before graph constructors. Fresh graph source, issuing actor and current
     generation are captured; it cannot be reconstructed from durable state. *)
 val open_inference_owner
@@ -3183,3 +3258,23 @@ val end_held_activation
   :  t
   -> activation:Held_run.Activation.t
   -> (unit, Agent_protocol.Error.t) result
+
+(** Parse the original User_submission of this exact held continuation once.
+    Reserves a real history ID before input effects. [prepare] runs outside the
+    mailbox and must join/seal/finish its actual scope-bound input graph before
+    returning DATA. Only then is the exact result recorded as Parsed_ready and
+    passed to [f]; escaped execution services cannot perform further effects.
+    Scope exit closes admission without rolling back input effects. Primary
+    errors/cancellation retain their outcome; failed factual ACKs remain durable
+    recovery evidence and never imply no effects. No Operation is created here. *)
+val with_held_input
+  :  t
+  -> continuation:Recurrence_activation.Continuation.t
+  -> prepare:
+       (scope:Held_input_scope.t
+        -> Runtime_input_preparation.Execution.t
+        -> (Runtime_input_preparation.Prepared_input.t, Agent_protocol.Error.t) result)
+  -> (scope:Held_input_scope.t
+      -> input:Runtime_input_preparation.Prepared_input.t
+      -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result

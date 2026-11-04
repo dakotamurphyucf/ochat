@@ -2567,6 +2567,14 @@ let runtime_inference_ports t actor_ref =
       (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
 ;;
 
+let create_graph_source () =
+  Transcript.Source_id.of_string
+    ("graph/"
+     ^ (Agent_protocol.Id.Transaction.create () |> Agent_protocol.Id.Transaction.to_string)
+    )
+  |> Result.map_error ~f:(unavailable Internal_error)
+;;
+
 let create_graph_tracking ?run_preparation t actor_ref =
   let open Result.Let_syntax in
   let%bind actor =
@@ -2576,13 +2584,7 @@ let create_graph_tracking ?run_preparation t actor_ref =
         (unavailable Invalid_state "inference graph requires an actual durable actor")
   in
   let%bind upstream = runtime_inference_ports t actor_ref in
-  let%bind source =
-    Transcript.Source_id.of_string
-      ("graph/"
-       ^ (Agent_protocol.Id.Transaction.create ()
-          |> Agent_protocol.Id.Transaction.to_string))
-    |> Result.map_error ~f:(unavailable Internal_error)
-  in
+  let%bind source = create_graph_source () in
   Graph_tracking.create ?run_preparation actor ~source ~upstream
 ;;
 
@@ -2616,7 +2618,7 @@ let with_auxiliary_graph tracking f =
         try Ok (callback ()) with
         | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
       in
-      (* The compactor's request scopes have joined before returning. Both
+      (* The request scopes have joined before returning. Both
          tracking steps are attempted while its actor and writer remain live. *)
       let sealed = capture (fun () -> Graph_tracking.seal tracking) in
       let finished = capture (fun () -> Graph_tracking.finish tracking) in
@@ -2628,6 +2630,56 @@ let with_auxiliary_graph tracking f =
       let%bind () = unwrap sealed in
       let%map () = unwrap finished in
       value)
+;;
+
+let prepare_held_input
+      t
+      ~(entry : Session_registry.entry)
+      ~(runtime : Agent_session.Runtime_builder.t)
+      ~scope
+  =
+  let module A = Agent_session in
+  let module Store = Agent_store.Session_store in
+  let open Result.Let_syntax in
+  let%bind execution = A.Session_actor.Held_input_scope.execution scope in
+  let%bind () = execution.checkpoint () in
+  let%bind handle =
+    Result.of_option
+      entry.store_handle
+      ~error:(unavailable Invalid_state "held input requires an owned session store")
+  in
+  let%bind () =
+    if
+      Store.owns_handle t.store handle
+      && Agent_protocol.Id.Session.equal
+           (Store.Handle.session_id handle)
+           execution.request.session_id
+    then Ok ()
+    else Error (unavailable Permission_denied "held input has a foreign session store")
+  in
+  let%bind _ =
+    Store.Handle.metadata_checked handle |> Result.map_error ~f:protocol_of_store
+  in
+  let%bind upstream = runtime_inference_ports t (ref (Some entry.actor)) in
+  let%bind source = create_graph_source () in
+  let%bind tracking =
+    Graph_tracking.create_for_held_input entry.actor ~scope ~source ~upstream
+  in
+  (* This graph belongs to the actual input scope, not to the constructor's
+     already-cleared preparation cell. Join and finish it before the Actor can
+     publish Parsed_ready or transfer startup into a root Operation. *)
+  with_auxiliary_graph tracking (fun () ->
+    let%bind () = execution.checkpoint () in
+    let services : A.Runtime_input_preparation.Tracking.t =
+      { identity =
+          Graph_tracking.bind_identity tracking ~allocate:execution.allocate_inference
+      ; on_attempt = Graph_tracking.on_attempt tracking
+      ; on_observation = Graph_tracking.on_observation tracking
+      ; on_completion = Graph_tracking.on_completion tracking
+      }
+    in
+    try runtime.parse_prepared_input ~execution ~tracking:services with
+    | Graph_tracking.Rejected error -> Error error)
 ;;
 
 let tracked_runtime tracking (runtime : Agent_session.Runtime_builder.t) =

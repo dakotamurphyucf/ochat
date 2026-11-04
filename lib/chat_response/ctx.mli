@@ -37,6 +37,7 @@ type 'env t = private
   ; on_admitted_call : In_memory_stream.Admitted_call.t -> unit
   ; submission_guard : Inference_runtime.Submission_guard.t
   ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
+  ; effect_checkpoint : (unit -> unit) option
   ; agent_prompt_v1_recipe : Moderation.Capabilities.model_recipe option
   ; agent_guidance_scope : Agent_guidance.Scope.t
   ; env : 'env (** Underlying Eio standard environment. *)
@@ -185,3 +186,27 @@ val cache : _ t -> Cache.t
     directory when spawning tools.  When the caller did not override
     the value it is equal to {!dir}. *)
 val tool_dir : _ t -> Eio.Fs.dir_ty Eio.Path.t
+
+(** Strict selected-execution rejection, propagated without observer suppression
+    or conversion to a tool-construction diagnostic. Cancellation is distinct. *)
+exception Effect_rejected of Agent_protocol.Error.t
+
+(** Append an inherited selected-effect checkpoint. Context copies retain it;
+    ordinary contexts have no checkpoint. Composition is sequential; each
+    selected host callback must establish its own complete final owner checks.
+    This callback is not a grant. *)
+val with_effect_checkpoint : 'env t -> check:(unit -> unit) -> 'env t
+
+val check_effect : 'env t -> unit
+
+(** Replace one lexical graph's identity and all of its tracking callbacks
+    together; inherited submission/dispatch/effect guards remain unchanged.
+    The caller selects the graph callbacks explicitly; this is not a way to
+    preserve independent policy checks hidden inside a replaced observer. *)
+val with_inference_tracking
+  :  'env t
+  -> identity:Inference_client.Identity.t
+  -> on_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_observation:(Inference.Observation.t -> unit)
+  -> on_completion:(Inference_client.Completion.t -> unit)
+  -> 'env t

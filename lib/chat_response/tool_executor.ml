@@ -36,6 +36,7 @@ let run
       ~name
       ~payload
       ~runner
+      ?before_effect
       ?inference_parent
       ?on_tool_execution
       ?on_execution_event
@@ -56,7 +57,10 @@ let run
       on_execution_event
       (Event.Finished { call_id; outcome; output })
   in
-  match runner ~invocation payload with
+  match
+    Option.iter before_effect ~f:(fun check -> check ());
+    runner ~invocation payload
+  with
   | result ->
     terminal Returned (Some result);
     result

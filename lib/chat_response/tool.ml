@@ -45,6 +45,14 @@
 open Core
 module CM = Prompt.Chat_markdown
 
+module Native_error = struct
+  type t =
+    { code : string
+    ; message : string
+    }
+  [@@deriving sexp, compare, equal]
+end
+
 let agent_page_classification (decl : CM.tool) =
   match decl with
   | CM.Agent { name; _ } -> Some (name, Tool_execution_event.Subagent)
@@ -311,6 +319,7 @@ end
 
       When [decl.names] is [`Some list`] only the named tools are wrapped;
       otherwise the full catalog is exposed. *)
+
 let mcp_tool
       ?(check_preparation_now = fun () -> Ok ())
       ~sw
@@ -362,10 +371,16 @@ let mcp_tool
       run =
         (fun input ->
           check_catalog ();
+          (match check_preparation_now () with
+           | Ok () -> ()
+           | Error error -> failwithf "%s: %s" error.Native_error.code error.message ());
           function_.run input)
     ; run_with_progress =
         (fun ~invocation input ->
           check_catalog ();
+          (match check_preparation_now () with
+           | Ok () -> ()
+           | Error error -> failwithf "%s: %s" error.Native_error.code error.message ());
           function_.run_with_progress ~invocation input)
     }
   in
@@ -473,14 +488,6 @@ let default_read_file ~env ~tool_dir =
   Functions.get_contents_scoped ~fs:(Eio.Stdenv.fs env) ~dir:tool_dir ~roots:[ root ] ()
 ;;
 
-module Native_error = struct
-  type t =
-    { code : string
-    ; message : string
-    }
-  [@@deriving sexp, compare, equal]
-end
-
 let inference_required message =
   Error Native_error.{ code = "agent.inference_required"; message }
 ;;
@@ -587,6 +594,10 @@ let of_declaration
       ~sw
       ~env:(Ctx.env ctx)
       ~tool_dir:(Ctx.tool_dir ctx)
+      ?check_preparation_now:
+        (Option.map ctx.effect_checkpoint ~f:(fun check () ->
+           check ();
+           Ok ()))
       ~agent:(Some (ctx, run_agent))
       decl
   with

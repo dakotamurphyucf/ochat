@@ -559,3 +559,18 @@ Idle polling that finds no pending work does not publish an execution lease.
 The decision happens under the same runtime-owner mutex used to select, load and
 lease real work. This lets queued source preparation proceed after an empty
 poll, while actual background work continues to exclude incompatible startup.
+
+Preparing submitted ChatMD is a separate lifetime from constructing the runtime.
+An implicit Agent in the input can run tools or call a model before the root
+Operation exists. Held input therefore uses its own actor-issued scope, reserved
+history ID and inference graph under the same admitted Run. It does not borrow
+the constructor's completed tracking lifetime or the future Operation's guidance.
+Checks accompany the actual nested Agent, tool and provider effects, including
+effects delayed by approval or resource discovery.
+
+The parser joins its child calls and finishes the input graph before its scope
+records the parsed result. At that point, escaped parsing services cannot start
+more work. The recorded result is data; consuming it still requires the same
+live input scope and an acknowledged root-Operation handoff. Revoking permission
+prevents new effects but does not erase completed outcomes, and cleanup cannot
+claim that no effects occurred merely because parsing failed.

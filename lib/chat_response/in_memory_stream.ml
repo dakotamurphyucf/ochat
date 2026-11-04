@@ -236,6 +236,7 @@ type ctx =
   ; agent_guidance : Agent_guidance.t option
   ; submission_guard : Inference_runtime.Submission_guard.t
   ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
+  ; before_tool_effect : (unit -> unit) option
   ; resolve_inference_assets : History_entry.t list -> Inference.Request.Asset.t list
   ; sw : Eio.Switch.t
   ; datadir : Eio.Fs.dir_ty Eio.Path.t
@@ -306,6 +307,7 @@ type args =
   ; agent_guidance : Agent_guidance.t option
   ; submission_guard : Inference_runtime.Submission_guard.t
   ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
+  ; before_tool_effect : (unit -> unit) option
   ; resolve_inference_assets : History_entry.t list -> Inference.Request.Asset.t list
   ; datadir : Eio.Fs.dir_ty Eio.Path.t option
   ; history : History_entry.t list
@@ -2032,6 +2034,7 @@ let accept_inference_candidate
              (* Bind delayed tool execution to the admitted candidate, rather
                 than the mutable current stream scope. *)
              Tool_call.run_tool
+               ?before_effect:c.before_tool_effect
                ~inference_parent
                ~kind
                ~name:moderated.name
@@ -2424,6 +2427,7 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
     ; agent_guidance = a.agent_guidance
     ; submission_guard = a.submission_guard
     ; before_inference_dispatch = a.before_inference_dispatch
+    ; before_tool_effect = a.before_tool_effect
     ; resolve_inference_assets = a.resolve_inference_assets
     ; sw
     ; datadir
@@ -2496,6 +2500,7 @@ let run_completion_stream_in_memory_entries
       ?(inference_relation = Transcript.Scope.Root)
       ?(on_inference_observation = fun _ -> ())
       ?(on_admitted_call = fun _ -> ())
+      ?before_tool_effect
       ?(before_inference_dispatch = fun _ -> ())
       ?(resolve_inference_assets = fun _ -> [])
       ?datadir
@@ -2612,6 +2617,7 @@ let run_completion_stream_in_memory_entries
     ; agent_guidance
     ; submission_guard
     ; before_inference_dispatch
+    ; before_tool_effect
     ; resolve_inference_assets
     ; datadir
     ; history

@@ -398,6 +398,9 @@ val run_completion_stream_in_memory_entries
   -> ?inference_relation:Transcript.Scope.relation
   -> ?on_inference_observation:(Inference.Observation.t -> unit)
   -> ?on_admitted_call:(Admitted_call.t -> unit)
+  -> ?before_tool_effect:(unit -> unit)
+       (** Strict selected-owner check after Started and before each native runner,
+      including delayed calls. Existing admission and moderation still apply. *)
   -> ?before_inference_dispatch:(Inference_runtime.Prepared.t -> unit)
   -> ?resolve_inference_assets:(History_entry.t list -> Inference.Request.Asset.t list)
   -> ?datadir:Eio.Fs.dir_ty Eio.Path.t

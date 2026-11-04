@@ -193,7 +193,7 @@ let reserve_occurrence ?(actor = proof) parent occurrence =
   |> protocol_ok
 ;;
 
-let reserve parent target =
+let ready_nominal parent target =
   let period =
     Recurrence_rules.Rule.Period.create_ms 600_000L
     |> Result.map_error ~f:(fun error ->
@@ -214,9 +214,11 @@ let reserve parent target =
   command parent "enable-captured" (Enable recurrence_id) |> ignore;
   Actor.sweep_recurrences parent.actor |> protocol_ok;
   let recurrence = entry parent in
-  let nominal =
-    Frontier.ready (Entry.frontier recurrence |> protocol_ok) |> List.hd_exn
-  in
+  Frontier.ready (Entry.frontier recurrence |> protocol_ok) |> List.hd_exn
+;;
+
+let reserve parent target =
+  let nominal = ready_nominal parent target in
   reserve_occurrence parent (A.Recurrence_nominal.key nominal)
 ;;
 
