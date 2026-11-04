@@ -149,14 +149,24 @@ let%expect_test
               armed := true;
               let result, resolve = Eio.Promise.create () in
               Eio.Fiber.fork ~sw:fixture.sw (fun () ->
-                Eio.Promise.resolve resolve (A.Session_actor.sweep_recurrences actor));
+                let outcome =
+                  match A.Session_actor.sweep_recurrences actor with
+                  | result -> Ok result
+                  | exception exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+                in
+                Eio.Promise.resolve resolve outcome);
               Eio.Time.with_timeout_exn (Eio.Stdenv.clock fixture.env) 5. (fun () ->
                 Eio.Promise.await entered;
                 Eio.Cancel.cancel cancel Exit;
                 Eio.Promise.await exited;
+                (* The in-flight request retains the owner's cancellation.
+                   Capture it in the surviving fiber so the outer switch and
+                   durable ACK/replay assertions remain observable. *)
                 match Eio.Promise.await result with
-                | Error { code = Server_shutting_down; _ } -> ()
-                | result -> raise_s [%sexp (result : (unit, P.Error.t) result)]);
+                | Error (Eio.Cancel.Cancelled _, _) -> ()
+                | Error (exn, backtrace) ->
+                  Exn.raise_with_original_backtrace exn backtrace
+                | Ok _ -> failwith "cancelled in-flight sweep returned ordinarily");
               (match A.Session_actor.sweep_recurrences actor with
                | Error { code = Server_shutting_down; _ } -> ()
                | result -> raise_s [%sexp (result : (unit, P.Error.t) result)]);
