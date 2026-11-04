@@ -8,6 +8,48 @@ type background_lease =
   ; mutable resources : Agent_session.Runtime_builder.t option
   }
 
+type source_stage =
+  { domain : int
+  ; runtime : Agent_session.Runtime_builder.t option
+  ; mutable binding : Agent_session.Session_actor.Source_binding.t option
+  ; mutable closed : bool
+  }
+
+let close_source_stage stage =
+  stage.closed <- true;
+  Option.iter stage.binding ~f:Agent_session.Session_actor.Source_binding.close
+;;
+
+module Prepared = struct
+  type t =
+    { stage : source_stage
+    ; binding : Agent_session.Session_actor.Source_binding.t
+    ; basis : unit -> (unit, Agent_protocol.Error.t) result
+    }
+
+  let binding t = t.binding
+
+  let check_basis t =
+    if not (Int.equal t.stage.domain (Stdlib.Domain.self () :> int))
+    then
+      Error
+        (Agent_protocol.Error.invalid_request
+           "prepared source belongs to another Eio domain")
+    else if t.stage.closed
+    then
+      Error
+        (Agent_protocol.Error.create
+           Conflict
+           ~message:"prepared source lifetime is closed"
+           ~retryable:false
+           ())
+    else
+      let open Result.Let_syntax in
+      let%bind () = t.basis () in
+      Agent_session.Session_actor.Source_binding.check_basis t.binding
+  ;;
+end
+
 type cleanup_outcome = (unit, exn * Stdlib.Printexc.raw_backtrace) result
 
 type unload_outcome =
@@ -32,6 +74,7 @@ type t =
   ; mutex : Eio.Mutex.t
   ; moderator_work_mutex : Eio.Mutex.t
   ; mutable runtime : Agent_session.Runtime_builder.t option
+  ; mutable prepared_source : source_stage option
   ; mutable closed : bool
   ; mutable close_finished : bool
   ; mutable foreground_retirement :
@@ -48,6 +91,7 @@ let create_internal ~before_unload ~actor ~initial ~build =
   ; mutex = Eio.Mutex.create ()
   ; moderator_work_mutex = Eio.Mutex.create ()
   ; runtime = initial
+  ; prepared_source = None
   ; closed = false
   ; close_finished = false
   ; foreground_retirement = None
@@ -178,6 +222,13 @@ let ensure_loaded_locked ?run_preparation ?original_actor t =
   in
   match t.closed, t.runtime with
   | true, _ -> Error (closed_error ())
+  | false, _ when Option.is_some t.prepared_source ->
+    Error
+      (Agent_protocol.Error.create
+         Conflict
+         ~message:"session runtime has an exclusive prepared source lifetime"
+         ~retryable:true
+         ())
   | false, _ when Option.is_some t.unloading ->
     Error
       (Agent_protocol.Error.create
@@ -290,7 +341,7 @@ let foreground_retirement_finished t =
     | Error error -> raise (Cleanup_failed error))
 ;;
 
-let with_lease t ~survives_stop ~admit f =
+let with_lease ?(retire = ignore) t ~survives_stop ~admit f =
   Eio.Cancel.sub (fun context ->
     let active = Atomic.make true in
     let finished, finish = Eio.Promise.create () in
@@ -302,13 +353,18 @@ let with_lease t ~survives_stop ~admit f =
       ; cancel =
           (fun () ->
             match Atomic.get active with
-            | true -> Eio.Cancel.cancel context Exit
+            | true ->
+              retire ();
+              Eio.Cancel.cancel context Exit
             | false -> ())
       }
     in
     let admitted =
       with_owner_lock t ~protect:true (fun () ->
         let open Result.Let_syntax in
+        let%bind () =
+          if Option.is_some t.prepared_source then Error (background_busy ()) else Ok ()
+        in
         let%map value, resources = admit () in
         lease.resources <- resources;
         t.background_leases <- lease :: t.background_leases;
@@ -323,6 +379,7 @@ let with_lease t ~survives_stop ~admit f =
         (* Cleanup must survive cancellation while waiting for another owner. *)
         Eio.Cancel.protect (fun () ->
           Atomic.set active false;
+          retire ();
           Exn.protect
             ~finally:(fun () -> Eio.Promise.resolve lease.finish ())
             ~f:(fun () ->
@@ -411,6 +468,79 @@ let with_background_runtime t f = with_runtime_lease t ~retain_resources:false f
 
 let with_prepared_run_runtime t ~preparation f =
   with_runtime_lease ~run_preparation:preparation t ~retain_resources:false f
+;;
+
+let with_prepared_source t ~preparation ~source f =
+  let reserved = ref None in
+  let retire () = Option.iter !reserved ~f:close_source_stage in
+  let cleanup () =
+    Eio.Cancel.protect (fun () ->
+      retire ();
+      with_owner_lock t ~protect:true (fun () ->
+        match t.prepared_source, !reserved with
+        | Some current, Some owned when phys_equal current owned ->
+          t.prepared_source <- None
+        | Some _, (Some _ | None) | None, (Some _ | None) -> ()))
+  in
+  Exn.protect ~finally:cleanup ~f:(fun () ->
+    with_lease
+      t
+      ~survives_stop:false
+      ~retire
+      ~admit:(fun () ->
+        match t.closed, t.unloading, t.foreground_retirement, t.prepared_source with
+        | true, _, _, _ -> Error (closed_error ())
+        | false, Some _, _, _ | false, None, Some _, _ | false, None, None, Some _ ->
+          Error (background_busy ())
+        | false, None, None, None when not (List.is_empty t.background_leases) ->
+          Error (background_busy ())
+        | false, None, None, None ->
+          let stage =
+            { domain = (Stdlib.Domain.self () :> int)
+            ; runtime = t.runtime
+            ; binding = None
+            ; closed = false
+            }
+          in
+          reserved := Some stage;
+          t.prepared_source <- Some stage;
+          Ok (stage, t.runtime))
+      (fun stage ->
+         let open Result.Let_syntax in
+         (* The mailbox call may yield. No owner mutex is held, and accepted
+           retirement closes this stage before cancelling the lease. *)
+         let%bind binding =
+           Eio.Cancel.protect (fun () ->
+             let result =
+               Agent_session.Session_actor.bind_run_source t.actor ~preparation ~source
+             in
+             Result.iter result ~f:(fun binding -> stage.binding <- Some binding);
+             result)
+         in
+         let prepared : Prepared.t =
+           { stage
+           ; binding
+           ; basis =
+               (fun () ->
+                 if
+                   t.closed
+                   || Option.is_some t.unloading
+                   || Option.is_some t.foreground_retirement
+                   || (not (Option.exists t.prepared_source ~f:(phys_equal stage)))
+                   || not (Option.equal phys_equal t.runtime stage.runtime)
+                 then
+                   Error
+                     (Agent_protocol.Error.create
+                        Conflict
+                        ~message:"prepared runtime owner was displaced"
+                        ~retryable:false
+                        ())
+                 else Ok ())
+           }
+         in
+         let%bind () = Prepared.check_basis prepared in
+         Eio.Fiber.check ();
+         f prepared))
 ;;
 
 let with_delegation_resources t f = with_runtime_lease t ~retain_resources:true f
@@ -563,6 +693,7 @@ let unload_and_wait t =
         | Some finished -> Ok (`Join finished)
         | None ->
           let finished, finish = Eio.Promise.create () in
+          Option.iter t.prepared_source ~f:close_source_stage;
           t.unloading <- Some finished;
           Ok (`Retire (t.background_leases, t.closed, finish)))
     in
@@ -1478,6 +1609,7 @@ let close t =
       Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
         if not t.closed then t.foreground_retirement <- None;
         t.closed <- true;
+        Option.iter t.prepared_source ~f:close_source_stage;
         match t.before_unload, t.unloading, t.background_leases with
         | Some _, _, _ -> []
         | None, _, leases -> leases)

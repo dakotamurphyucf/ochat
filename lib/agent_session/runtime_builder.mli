@@ -1,4 +1,5 @@
 open! Core
+module Source = Runtime_source_preparation
 
 (** Constructs the live ChatMD runtime shared by daemon and embedded session
     hosts. All filesystem coordinates are explicit runtime paths. *)

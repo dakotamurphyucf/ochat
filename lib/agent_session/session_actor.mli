@@ -1258,6 +1258,38 @@ val begin_headless_run_preparation
 
 val end_run_preparation : t -> Run_preparation.t -> (unit, Agent_protocol.Error.t) result
 
+module Source_binding : sig
+  (** Actor-issued captured source/preparation custody, not a runtime lease or
+      execution authority. No serialization or caller-supplied guard issuer.
+      Belongs to the issuing Eio domain; release is irreversible and idempotent. *)
+  type t
+
+  val source : t -> Runtime_source_preparation.t
+  val close : t -> unit
+
+  (** Repeats the original policy, then the callback-free basis. *)
+  val check_current : t -> (unit, Agent_protocol.Error.t) result
+
+  (** Non-yielding and callback-free: original proof presence, live
+      actor/preparation, exact retained source selection and current revision.
+      Original authentication currentness and policy run in [check_current];
+      this basis alone grants neither. *)
+  val check_basis : t -> (unit, Agent_protocol.Error.t) result
+end
+
+(** Bind one authentic static source selection to the exact live authenticated
+    preparation. Requires no active operation or moderator borrow and an Idle or
+    Stopped target. Checks the pinned definition/revision/invocation; installed-tree
+    verification remains the host source owner's responsibility. Ordinary ACKs,
+    lifecycle/runtime retirement, replacement and owner exit close the binding.
+    An exact owned preparation ACK can advance its basis. A closed binding cannot
+    be rebound. This neither constructs nor proves a Runtime_owner lease. *)
+val bind_run_source
+  :  t
+  -> preparation:Run_preparation.t
+  -> source:Runtime_source_preparation.t
+  -> (Source_binding.t, Agent_protocol.Error.t) result
+
 (** Current host policy, target and writer are checked in one mailbox read before
     receipt lookup. [authorize] is host-owned and non-yielding. No runtime load,
     history allocation or authority reconstruction occurs on this path. *)
@@ -2461,16 +2493,32 @@ module Recurrence_activation : sig
         through the actor. A revoked cell is never refreshed or revived. *)
     type t
 
-    (** First reject closed/stale custody without invoking its stored policy.
-        Then run trusted nonyielding original controller and target-read policies,
-        followed by both callback-free current bases. No permission survives a yield. *)
+    (** Complete check: reject closed/stale custody, run all controller/target-read
+        policies, repeat both originals, sample fresh grace timing, then check both
+        pure bases. Callbacks are trusted nonyielding host code; exceptions
+        propagate. No permission survives a yield. *)
     val check_current : t -> (unit, Agent_protocol.Error.t) result
 
-    (** Callback-free final original proofs, exact owner/source/control/attempt,
-        actual target Admitted Run, Store Current and nominal-grace checks.
-        The target consumer must run ALL its policies before these final bases,
-        and repeat its own callback-free held-owner check after our policies.
-        Same Eio domain; no yield before its actual first-effect boundary. *)
+    (** Controller and target-read policies, retaining their original-proof checks.
+        First rejects closed/stale custody without invoking stored host code. *)
+    val check_policy : t -> (unit, Agent_protocol.Error.t) result
+
+    (** Both original authentication guards and immutable scopes, without host
+        policy. Executes trusted nonyielding host code after a pure preflight. *)
+    val check_authority : t -> (unit, Agent_protocol.Error.t) result
+
+    (** Sample supplied wall/monotonic clocks and validate fresh nominal grace.
+        Executes host callbacks after a pure preflight; this is not a durable
+        timing certificate or a substitute for policy/original authentication. *)
+    val check_timing : t -> (unit, Agent_protocol.Error.t) result
+
+    (** Callback-free exact owner/source/control/attempt, actual target Admitted
+        Run and Store Current. Invokes no original, policy or clock callback.
+        The target consumer must compose ALL host policies, ALL originals, fresh
+        timing, then BOTH pure target/controller bases immediately before the
+        first effect. Both genuine held ownership and this view are required;
+        this basis alone authenticates neither. Same Eio domain, with no yield
+        or callback after the final bases. *)
     val check_basis : t -> (unit, Agent_protocol.Error.t) result
   end
 end

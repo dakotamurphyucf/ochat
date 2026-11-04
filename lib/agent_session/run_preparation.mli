@@ -63,6 +63,14 @@ val check
   -> state:Session_state.t
   -> (unit, Agent_protocol.Error.t) result
 
+(** Callback-free exact owner/revision/generation check. Does not run host policy
+    or grant admission. The actor uses this after all policy callbacks. *)
+val check_basis
+  :  t
+  -> owner:Owner.t
+  -> state:Session_state.t
+  -> (unit, Agent_protocol.Error.t) result
+
 (** Called only after a durable commit carrying this exact preparation. Advances
     one acknowledged revision; a different or skipped basis invalidates custody.
     Ordinary commits close the actor's live preparation instead. *)

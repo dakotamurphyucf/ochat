@@ -295,6 +295,154 @@ let%test_unit "owned revisions require explicit policy and actual parser attachm
 ;;
 
 let%expect_test
+    "deferred source selection retains captured identity without initialization"
+  =
+  let module Source = Agent_session.Runtime_builder.Source in
+  let module C = Chatml_prompt_programs in
+  let legacy id =
+    sprintf
+      {|<script id="%s" language="chatml" kind="moderator">let initial_state = fail("legacy initializer ran")
+let on_event = fun event state -> Task.pure(state)</script>|}
+      id
+  in
+  let extension project =
+    sprintf
+      {|<script id="owner" language="chatml" kind="moderator" api="extensibility-v1" %s>let poison = fail("extension initializer ran")
+let initial_state = %s
+let on_event = fun ctx state event -> Task.pure(state)</script>|}
+      project
+      (if String.is_empty project then "0" else "Graph.seed")
+  in
+  List.iter
+    [ "none", "<user>no moderator</user>", `None
+    ; "legacy", legacy "last", `Legacy
+    ; "extension", extension "", `Extension
+    ; "linked", extension {|project="chatml.project.json"|}, `Linked
+    ]
+    ~f:(fun (name, text, kind) ->
+      with_workspace (fun env parent root ->
+        save root "root.chatmd" text;
+        save root "graph.chatml" "let seed = fail(\"dependency initializer ran\")";
+        save
+          root
+          "chatml.project.json"
+          {|{"schema_version":1,"namespace":"deferred_source","modules":{"Graph":{"implementation":"graph.chatml"}}}|};
+        Eio.Switch.run (fun sw ->
+          let definition = definition root in
+          let catalog = catalog env parent in
+          let capture_revision () =
+            let candidate =
+              prepare catalog sw [ definition ] ~prepare_programs:(fun scope captured ->
+                let parsed = Builder.Capture.root (Owner.Capture.value captured) in
+                Script_tests.prepare env scope captured [ Script_tests.plan parsed ])
+              |> ok
+            in
+            Catalog.install_owned catalog candidate |> ok;
+            match Catalog.find catalog definition.id with
+            | Some { availability = Ready revision; _ } -> revision
+            | Some { availability = Unavailable diagnostics; _ } ->
+              raise_s [%sexp (name : string), (diagnostics : Builder.Diagnostic.t list)]
+            | None | Some { availability = Disabled; _ } ->
+              failwith "source fixture was not enabled"
+          in
+          let original = capture_revision () in
+          let checkpoints = ref 0 in
+          let select revision =
+            Source.prepare
+              revision
+              ~script_preparation:(Some (policy ()))
+              ~invocation:Ui
+              ~env
+              ~checkpoint:(fun () -> incr checkpoints)
+            |> function
+            | Ok selected -> selected
+            | Error error ->
+              raise_s
+                [%sexp "source preparation failed", (name : string), (error : P.Error.t)]
+          in
+          let selected = select original in
+          assert (!checkpoints > 0);
+          assert (phys_equal (Source.revision selected) original);
+          assert (Preparation.Invocation.equal (Source.invocation selected) Ui);
+          let identity =
+            match kind, Source.moderator selected with
+            | `None, No_moderator -> None
+            | `Legacy, Legacy identity ->
+              [%test_eq: string] "last" identity.script_id;
+              Some identity
+            | (`Extension | `Linked), Extension identity ->
+              [%test_eq: string] "owner" identity.script_id;
+              Some identity
+            | _ -> failwith "source selection changed the actual moderator kind"
+          in
+          Option.iter identity ~f:(fun identity ->
+            let expected =
+              match kind, Source.programs selected with
+              | (`Legacy | `Extension), None ->
+                let declaration =
+                  Revision.parser_context original
+                  |> Option.value_exn
+                  |> Prompt.Chat_markdown.Parsed.declarations
+                  |> List.find_exn ~f:(fun declaration ->
+                    String.equal
+                      (Prompt.Chat_markdown.Declaration.script_id declaration)
+                      identity.script_id)
+                in
+                Prompt.Chat_markdown.Declaration.script_body declaration
+                |> Chatml_source.Digest.of_contents ~checkpoint:ignore
+                |> Chatml_source.Digest.to_hex
+              | `Linked, Some programs ->
+                C.Restored.programs programs
+                |> List.find_exn ~f:(fun program ->
+                  String.equal
+                    (C.Binding.script_id (C.Restored.Program.binding program))
+                    identity.script_id)
+                |> C.Restored.Program.prepared
+                |> Chatml_prepared_program.fingerprint
+                |> Chatml_source.Digest.to_hex
+              | _ -> failwith "source selection changed Single versus Prepared custody"
+            in
+            [%test_eq: string] expected identity.source_sha256);
+          (match kind with
+           | `Linked ->
+             save root "graph.chatml" "let seed = 8";
+             let changed = capture_revision () |> select in
+             assert (
+               not
+                 (Source.Moderator.equal
+                    (Source.moderator selected)
+                    (Source.moderator changed)))
+           | `None | `Legacy | `Extension -> ());
+          save root "root.chatmd" "<user>mutable replacement</user>";
+          List.iter (Eio.Path.read_dir root) ~f:(fun file ->
+            Eio.Path.unlink Eio.Path.(root / file));
+          assert (
+            Source.Moderator.equal
+              (Source.moderator selected)
+              (Source.moderator (select original)));
+          let sentinel = Failure "original source checkpoint" in
+          (match
+             Source.prepare
+               original
+               ~script_preparation:(Some (policy ()))
+               ~invocation:Ui
+               ~env
+               ~checkpoint:(fun () -> raise sentinel)
+           with
+           | _ -> failwith "source preparation swallowed its original checkpoint"
+           | exception exn -> assert (phys_equal exn sentinel));
+          print_endline
+            (name ^ ": captured selection, inert initializers, no source reread"))));
+  [%expect
+    {|
+    none: captured selection, inert initializers, no source reread
+    legacy: captured selection, inert initializers, no source reread
+    extension: captured selection, inert initializers, no source reread
+    linked: captured selection, inert initializers, no source reread
+    |}]
+;;
+
+let%expect_test
     "resource preparation compiles captured modules and checks the handler's tool subset"
   =
   with_workspace (fun env parent root ->

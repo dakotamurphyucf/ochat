@@ -911,10 +911,52 @@ and owner shutdown close custody before external effects. A successful runtime
 reconfiguration with an existing worker also closes pending permits; initial
 worker installation alone does not reopen or revoke prior closed custody.
 
-All policy callbacks precede final callback-free checks of both original proofs
-and exact evidence bases. The eventual target consumer must also retain its own
-genuine held owner and check after all yielding preparation, persistence, history
-reconciliation and scheduling, immediately before the actual first effect on the
-same Eio domain. Current source-level custody does not qualify that deferred
-startup/activation integration. Release neither cancels an already activated Run
-nor claims that an uncertain effect did not occur.
+The checked view exposes separate policy, original-authentication, fresh timing
+and pure basis checks. Original guards and supplied clocks execute trusted host
+code, even when they do not yield. The complete check first rejects stale or
+closed custody, runs both controller and target-read policies, repeats both
+originals, samples fresh wall/monotonic time for nominal grace, then checks both
+pure owner/evidence bases. Those final bases invoke no policy, original guard or
+clock. A callback closing custody cannot escape that final check.
+
+The eventual target consumer must retain its own genuine held owner and compose
+all policies, all original guards, fresh timing, and both pure target/controller
+bases after yielding preparation, persistence, history reconciliation and
+scheduling. No callback or yield may intervene between the final bases and the
+actual first effect on the same Eio domain. The basis alone grants neither
+authentication nor held ownership. Current source-level custody does not qualify
+that deferred startup/activation integration. Release neither cancels an already
+activated Run nor claims that an uncertain effect did not occur.
+
+### Source selection before deferred activation
+
+`Runtime_builder.Source` selects the actual retained revision and invocation role
+through the existing bounded parser/program restoration owner. Its explicit
+`Legacy`, `Extension` and `No_moderator` outcomes separate source identity from
+versioned invocation capability. A legacy script's genuine identity does not
+become a versioned observer or handler receipt. Single-file source identity and
+complete linked-program identity use the same recipe as the live Registry.
+
+This immutable selection performs no Manager construction, Agent-content
+conversion, history allocation, native shell initialization or MCP connection.
+It grants no tool ABI or execution authority. Native resource discovery, live
+required-tool admission and full compilation still belong to the real activation
+path after the held Run and reciprocal controller acknowledgements. A source
+selection alone cannot authorize an inert admission or bypass the target's
+physical runtime lifetime. The held admission and first-effect owner integration
+remains a separate qualification boundary.
+
+The actor can bind that source to its exact authenticated Run preparation.
+`Session_actor.Source_binding` owns only this source/preparation custody; it does
+not establish a runtime lease. `Runtime_owner.with_prepared_source` separately
+reserves the actual owner without loading a runtime, and lends a `Prepared`
+lifetime with the actor-issued binding. Competing leases and eager loading are
+excluded while it is reserved. Original authentication, pinned selection, actor
+basis and runtime resource identity remain independently checked.
+
+An ordinary validated persistence attempt closes bound preparation before its
+write yields; an explicitly owned preparation acknowledgement may advance its
+same basis. Accepted lifecycle/runtime retirement and replacement close custody
+before cancellation or cleanup joins. Closing either lifetime never reopens it
+or proves rollback. These ownership seams still do not admit a held Run, issue a
+no-effects retry proof or start deferred effects.

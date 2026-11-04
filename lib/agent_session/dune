@@ -286,6 +286,7 @@
   operation_worker
   turn_worker
   runtime_script_preparation
+  runtime_source_preparation
   developer_child_preflight
   selected_agent_depth
   captured_agent_runner

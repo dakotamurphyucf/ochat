@@ -169,7 +169,14 @@ let with_store f =
                 }))))
 ;;
 
-let create_actor t ~sw ?(before_observe = ignore) ?(published = fun _ -> ()) () =
+let create_actor
+      t
+      ~sw
+      ?(before_observe = ignore)
+      ?(published = fun _ -> ())
+      ?(clock_read = fun () -> ())
+      ()
+  =
   let persistence : A.Session_actor.persistence =
     { archive_reference
     ; commit =
@@ -195,9 +202,13 @@ let create_actor t ~sw ?(before_observe = ignore) ?(published = fun _ -> ()) () 
       ~persistence
       ~operation_worker:None
       ~services:
-        { now = (fun () -> !(t.wall))
+        { now =
+            (fun () ->
+              clock_read ();
+              !(t.wall))
         ; monotonic_now =
             (fun () ->
+              clock_read ();
               Mtime.add_span
                 Mtime.min_stamp
                 (Mtime.Span.of_uint64_ns Int64.(of_int !(t.elapsed_ms) * 1_000_000L))

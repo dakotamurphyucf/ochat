@@ -4,6 +4,149 @@ open Job_fixtures
 module Owner = Agent_server.Runtime_owner
 module Builder = Agent_session.Runtime_builder
 
+type source_stage_fixture =
+  { actor : Agent_session.Session_actor.t
+  ; writer_id : Agent_protocol.Id.Attachment.t
+  ; environment : Eio_unix.Stdenv.base * Agent_session.Workspace_instance.t
+  ; source : Builder.Source.t
+  ; proof : Operator_authorization.t
+  ; guards : int ref
+  ; policies : int ref
+  ; guard : (unit -> bool) ref
+  ; reject : bool ref
+  ; backend : Agent_session.Memory_backend.t
+  }
+
+let with_source_stage_actor ?environment ?(source_name = "staged-source") f =
+  let with_workspace f =
+    match environment with
+    | None -> with_actor_workspace f
+    | Some (env, workspace) -> f env workspace
+  in
+  with_workspace (fun env workspace ->
+    let root = Eio.Path.(Eio.Stdenv.fs env / workspace.canonical_root.native_path) in
+    let source_root = Eio.Path.(root / source_name) in
+    Eio.Path.mkdir ~perm:0o700 source_root;
+    let root_file = Eio.Path.(source_root / "root.chatmd") in
+    Eio.Path.save
+      ~create:(`Exclusive 0o600)
+      root_file
+      {|<script id="staged" language="chatml" kind="moderator">let initial_state = fail("source-stage initializer ran")
+let on_event = fun event state -> Task.pure(state)</script>|};
+    let definition =
+      Agent_session.Prompt_definition.create
+        ~root_invocation:Ui
+        ~id:(Agent_protocol.Id.Prompt_definition.of_string "prd_staged" |> protocol_ok)
+        ~config_name:"staged"
+        ~root_file:(Eio.Path.native_exn root_file)
+        ~allowed_workspaces:[]
+        ~permission_profile:"interactive"
+        ~runtime_policy:None
+        ~enabled:true
+        ~description:None
+      |> store_ok
+    in
+    let artifacts =
+      Agent_store.Prompt_artifact_store.create
+        ~env
+        ~root:(Eio.Path.native_exn Eio.Path.(root / "artifacts"))
+      |> store_ok
+    in
+    let revision =
+      match
+        Agent_session.Prompt_revision_builder.build
+          ~env
+          ~artifact_store:artifacts
+          ~transaction_id
+          ~created_at:timestamp
+          definition
+      with
+      | Ok revision -> revision
+      | Error diagnostics ->
+        raise_s
+          [%sexp (diagnostics : Agent_session.Prompt_revision_builder.Diagnostic.t list)]
+    in
+    let source =
+      Builder.Source.prepare
+        revision
+        ~script_preparation:(Some (script_preparation ()))
+        ~invocation:Ui
+        ~env
+        ~checkpoint:Eio.Fiber.check
+      |> protocol_ok
+    in
+    Eio.Path.unlink root_file;
+    let reject = ref false in
+    with_actor
+      ~environment:(env, workspace)
+      ~start:false
+      ~reject_save:(fun _ -> !reject)
+      ~prepare_state:(fun state ->
+        { state with
+          spec =
+            { state.spec with
+              prompt_definition_id = Some definition.id
+            ; prompt_revision_id = Agent_session.Prompt_revision.id revision
+            }
+        })
+      (fun _env _sw actor writer backend ->
+         let guards = ref 0
+         and policies = ref 0
+         and guard = ref (fun () -> true) in
+         let principal =
+           Agent_protocol.Principal.create
+             ~id:principal_id
+             ~authentication_kind:"local"
+             ~scopes:(Agent_protocol.Scope.Set.of_list [ Send_messages ])
+             ~attributes:[]
+           |> protocol_ok
+         in
+         let proof =
+           Operator_authorization.guarded ~principal ~is_current:(fun () ->
+             Int.incr guards;
+             !guard ())
+         in
+         f
+           { actor
+           ; writer_id = writer.id
+           ; environment = env, workspace
+           ; source
+           ; proof
+           ; guards
+           ; policies
+           ; guard
+           ; reject
+           ; backend
+           }))
+;;
+
+let source_stage_preparation fixture key =
+  let module A = Agent_session.Session_actor in
+  let state = A.state fixture.actor |> protocol_ok in
+  let request =
+    Agent_session.Run_admission_request.Headless.create
+      ~session_id:state.identity.session_id
+      ~generation:state.identity.generation
+      ~expected_revision:state.counters.revision
+      ~mode:Single_turn
+      ~input:Authored_start
+      ~key:(Agent_protocol.Idempotency_key.of_string key |> protocol_ok)
+    |> protocol_ok
+  in
+  match
+    A.begin_headless_run_preparation
+      fixture.actor
+      ~actor:fixture.proof
+      ~authorize:(fun _ ->
+        Int.incr fixture.policies;
+        Ok ())
+      ~request
+    |> protocol_ok
+  with
+  | Prepare preparation -> preparation
+  | Retained _ -> failwith "source-stage fixture unexpectedly retained an admission"
+;;
+
 let runtime ?script_tools ?check_execution ?activity ~close () : Builder.t =
   let inference = Inference_ports.create ~config:Chat_response.Config.default () in
   { worker =
@@ -38,6 +181,327 @@ let runtime ?script_tools ?check_execution ?activity ~close () : Builder.t =
   ; enqueue_model_job_completion = (fun ?prepare:_ _ -> failwith "unexpected completion")
   ; close
   }
+;;
+
+let%expect_test
+    "source stages retain exact actor custody without loading or calling policy from \
+     basis"
+  =
+  let module A = Agent_session.Session_actor in
+  let module Binding = A.Source_binding in
+  with_source_stage_actor (fun fixture ->
+    let builds = ref 0 in
+    let owner =
+      Owner.create ~actor:fixture.actor ~initial:None ~build:(fun () ->
+        Int.incr builds;
+        failwith "source stage invoked the runtime builder")
+    in
+    let conflict (result : (_, Agent_protocol.Error.t) result) =
+      match result with
+      | Error error -> [%test_eq: Agent_protocol.Error.code] Conflict error.code
+      | Ok _ -> failwith "source stage unexpectedly retained authority"
+    in
+    let reset_calls () =
+      fixture.guards := 0;
+      fixture.policies := 0
+    in
+    let no_calls () =
+      [%test_eq: int] 0 !(fixture.guards);
+      [%test_eq: int] 0 !(fixture.policies)
+    in
+    let with_stage key f =
+      let preparation = source_stage_preparation fixture key in
+      Exn.protect
+        ~finally:(fun () ->
+          A.end_run_preparation fixture.actor preparation |> protocol_ok)
+        ~f:(fun () ->
+          Owner.with_prepared_source
+            owner
+            ~preparation
+            ~source:fixture.source
+            (f preparation)
+          |> protocol_ok)
+    in
+    Exn.protect
+      ~finally:(fun () -> Owner.close_and_wait owner)
+      ~f:(fun () ->
+        let escaped = ref None in
+        with_stage "stage-own-commit" (fun preparation prepared ->
+          let binding = Owner.Prepared.binding prepared in
+          reset_calls ();
+          Binding.check_basis binding |> protocol_ok;
+          Owner.Prepared.check_basis prepared |> protocol_ok;
+          no_calls ();
+          Binding.check_current binding |> protocol_ok;
+          [%test_eq: int] 1 !(fixture.policies);
+          assert (!(fixture.guards) > 0);
+          conflict (Owner.ensure_loaded owner);
+          conflict (Owner.with_loaded_runtime owner (fun _ -> failwith "borrow entered"));
+          conflict
+            (Owner.with_prepared_source
+               owner
+               ~preparation
+               ~source:fixture.source
+               (fun _ -> failwith "competing source stage entered"));
+          [%test_eq: int] 0 !builds;
+          A.reserve_run_history_block fixture.actor ~preparation ~count:1
+          |> protocol_ok
+          |> ignore;
+          reset_calls ();
+          Binding.check_basis binding |> protocol_ok;
+          Owner.Prepared.check_basis prepared |> protocol_ok;
+          no_calls ();
+          assert (phys_equal (Binding.source binding) fixture.source);
+          escaped := Some prepared;
+          Ok ());
+        reset_calls ();
+        let ended = Option.value_exn !escaped in
+        conflict (Binding.check_basis (Owner.Prepared.binding ended));
+        conflict (Owner.Prepared.check_basis ended);
+        no_calls ();
+        print_endline
+          "basis: zero callbacks; current: one policy; own ACK retained; eager loads \
+           excluded";
+        with_stage "stage-rejected-write" (fun _ prepared ->
+          let binding = Owner.Prepared.binding prepared in
+          let json state = state_document state |> Document_schema.Document.json in
+          let before = A.state fixture.actor |> protocol_ok |> json in
+          let saved = Agent_session.Memory_backend.state fixture.backend |> json in
+          fixture.reject := true;
+          let result =
+            Exn.protect
+              ~finally:(fun () -> fixture.reject := false)
+              ~f:(fun () -> A.reserve_history_block fixture.actor ~count:1)
+          in
+          (match result with
+           | Error error ->
+             [%test_eq: Agent_protocol.Error.code] Internal_error error.code;
+             [%test_eq: string] "injected job transition failure" error.message;
+             [%test_eq: bool] false error.retryable
+           | Ok _ -> failwith "injected write unexpectedly committed");
+          assert (
+            Jsonaf.exactly_equal before (A.state fixture.actor |> protocol_ok |> json));
+          assert (
+            Jsonaf.exactly_equal
+              saved
+              (Agent_session.Memory_backend.state fixture.backend |> json));
+          reset_calls ();
+          conflict (Binding.check_current binding);
+          conflict (Owner.Prepared.check_basis prepared);
+          no_calls ();
+          Ok ());
+        print_endline
+          "rejected ordinary write: exact state retained; source custody irreversibly \
+           closed";
+        with_stage "stage-guard-close" (fun _ prepared ->
+          let binding = Owner.Prepared.binding prepared in
+          (fixture.guard
+           := fun () ->
+                Binding.close binding;
+                true);
+          Exn.protect
+            ~finally:(fun () -> fixture.guard := fun () -> true)
+            ~f:(fun () ->
+              reset_calls ();
+              conflict (Binding.check_current binding);
+              [%test_eq: int] 1 !(fixture.policies);
+              assert (!(fixture.guards) > 0);
+              reset_calls ();
+              conflict (Binding.check_basis binding);
+              conflict (Owner.Prepared.check_basis prepared);
+              no_calls ());
+          Ok ());
+        [%test_eq: int] 0 !builds;
+        print_endline
+          "guard closure: final basis rejects; callback exit closes lifetime; builder \
+           never entered"));
+  [%expect
+    {|
+    basis: zero callbacks; current: one policy; own ACK retained; eager loads excluded
+    rejected ordinary write: exact state retained; source custody irreversibly closed
+    guard closure: final basis rejects; callback exit closes lifetime; builder never entered |}]
+;;
+
+let%expect_test
+    "source stage stop and retirement close custody before joining; foreign owners never \
+     enter"
+  =
+  let module A = Agent_session.Session_actor in
+  let module Binding = A.Source_binding in
+  let module Failure = struct
+    exception Primary
+  end
+  in
+  with_source_stage_actor (fun fixture ->
+    let builds = ref 0 in
+    let barrier, barrier_u = Eio.Promise.create () in
+    let release, release_u = Eio.Promise.create () in
+    let release_barrier () =
+      if Option.is_none (Eio.Promise.peek release) then Eio.Promise.resolve release_u ()
+    in
+    let owner =
+      Owner.create_with_unload
+        ~actor:fixture.actor
+        ~initial:None
+        ~build:(fun () ->
+          Int.incr builds;
+          failwith "source-stage retirement invoked builder")
+        ~before_unload:(fun ~closing:_ ->
+          if Option.is_none (Eio.Promise.peek barrier)
+          then Eio.Promise.resolve barrier_u ();
+          Eio.Promise.await release;
+          Ok ())
+    in
+    let conflict (result : (_, Agent_protocol.Error.t) result) =
+      match result with
+      | Error error -> [%test_eq: Agent_protocol.Error.code] Conflict error.code
+      | Ok _ -> failwith "closed or foreign source stage was admitted"
+    in
+    let with_preparation key f =
+      let preparation = source_stage_preparation fixture key in
+      Exn.protect
+        ~finally:(fun () ->
+          A.end_run_preparation fixture.actor preparation |> protocol_ok)
+        ~f:(fun () -> f preparation)
+    in
+    Exn.protect
+      ~finally:(fun () ->
+        release_barrier ();
+        Owner.close_and_wait owner)
+      ~f:(fun () ->
+        with_source_stage_actor
+          ~environment:fixture.environment
+          ~source_name:"foreign-source"
+          (fun foreign ->
+             with_preparation "stage-foreign-owner" (fun preparation ->
+               let other = source_stage_preparation foreign "other-source-owner" in
+               Exn.protect
+                 ~finally:(fun () ->
+                   A.end_run_preparation foreign.actor other |> protocol_ok)
+                 ~f:(fun () ->
+                   assert (
+                     not
+                       (Agent_protocol.Id.Prompt_revision.equal
+                          (Agent_session.Prompt_revision.id
+                             (Builder.Source.revision fixture.source))
+                          (Agent_session.Prompt_revision.id
+                             (Builder.Source.revision foreign.source))));
+                   fixture.guards := 0;
+                   fixture.policies := 0;
+                   foreign.guards := 0;
+                   foreign.policies := 0;
+                   conflict
+                     (Owner.with_prepared_source
+                        owner
+                        ~preparation:other
+                        ~source:foreign.source
+                        (fun _ -> failwith "foreign actor stage entered"));
+                   conflict
+                     (Owner.with_prepared_source
+                        owner
+                        ~preparation
+                        ~source:foreign.source
+                        (fun _ -> failwith "foreign captured source entered"));
+                   List.iter [ fixture; foreign ] ~f:(fun fixture ->
+                     [%test_eq: int] 0 !(fixture.guards);
+                     [%test_eq: int] 0 !(fixture.policies)))));
+        print_endline
+          "foreign actor and captured source: rejected before original/policy callbacks";
+        with_preparation "stage-primary-failure" (fun preparation ->
+          let escaped = ref None in
+          let primary = Failure.Primary in
+          let observed =
+            Result.try_with (fun () ->
+              Owner.with_prepared_source
+                owner
+                ~preparation
+                ~source:fixture.source
+                (fun prepared ->
+                   escaped := Some prepared;
+                   raise primary))
+          in
+          (match observed with
+           | Error observed -> assert (phys_equal observed primary)
+           | Ok _ -> failwith "stage primary exception disappeared");
+          let ended = Option.value_exn !escaped in
+          conflict (Binding.check_basis (Owner.Prepared.binding ended));
+          conflict (Owner.Prepared.check_basis ended));
+        A.start fixture.actor ~attachment_id:fixture.writer_id |> protocol_ok |> ignore;
+        with_preparation "stage-public-stop" (fun preparation ->
+          Owner.with_prepared_source
+            owner
+            ~preparation
+            ~source:fixture.source
+            (fun prepared ->
+               A.stop fixture.actor ~attachment_id:fixture.writer_id ~mode:Cancel
+               |> protocol_ok
+               |> ignore;
+               let stopped = A.state fixture.actor |> protocol_ok in
+               (match stopped.lifecycle.observed with
+                | Stopped -> ()
+                | observed ->
+                  raise_s
+                    [%sexp
+                      "public Stop did not stop source-stage actor"
+                    , (observed : Agent_protocol.Session.observed_state)]);
+               let binding = Owner.Prepared.binding prepared in
+               conflict (Binding.check_basis binding);
+               conflict (Owner.Prepared.check_basis prepared);
+               assert (phys_equal (Binding.source binding) fixture.source);
+               Ok ())
+          |> protocol_ok);
+        print_endline
+          "primary exception preserved; actual public Stop closes exact source custody";
+        with_preparation "stage-retirement-cancel" (fun preparation ->
+          Eio.Switch.run (fun sw ->
+            Exn.protect ~finally:release_barrier ~f:(fun () ->
+              let entered, entered_u = Eio.Promise.create () in
+              let leaving, leaving_u = Eio.Promise.create () in
+              let never, _ = Eio.Promise.create () in
+              let caller =
+                Eio.Fiber.fork_promise ~sw (fun () ->
+                  Owner.with_prepared_source
+                    owner
+                    ~preparation
+                    ~source:fixture.source
+                    (fun prepared ->
+                       Eio.Promise.resolve entered_u prepared;
+                       Exn.protect
+                         ~finally:(fun () -> Eio.Promise.resolve leaving_u ())
+                         ~f:(fun () ->
+                           Eio.Promise.await never;
+                           Ok ())))
+              in
+              let prepared = Eio.Promise.await entered in
+              let stopping =
+                Eio.Fiber.fork_promise ~sw (fun () -> Owner.unload_and_wait owner)
+              in
+              Eio.Promise.await barrier;
+              fixture.guards := 0;
+              fixture.policies := 0;
+              conflict (Binding.check_current (Owner.Prepared.binding prepared));
+              conflict (Owner.Prepared.check_basis prepared);
+              [%test_eq: int] 0 !(fixture.guards);
+              [%test_eq: int] 0 !(fixture.policies);
+              assert (Option.is_none (Eio.Promise.peek leaving));
+              assert (Option.is_none (Eio.Promise.peek stopping));
+              release_barrier ();
+              Eio.Promise.await_exn stopping |> protocol_ok;
+              (match Eio.Promise.await caller with
+               | Error (Eio.Cancel.Cancelled _) -> ()
+               | _ -> failwith "source-stage retirement lost cancellation");
+              assert (Option.is_some (Eio.Promise.peek leaving));
+              conflict (Owner.Prepared.check_basis prepared))));
+        [%test_eq: int] 0 !builds;
+        assert (not (Owner.is_loaded owner));
+        print_endline
+          "retirement: custody closed before barrier/cancellation; callback joined; no \
+           runtime built"));
+  [%expect
+    {|
+    foreign actor and captured source: rejected before original/policy callbacks
+    primary exception preserved; actual public Stop closes exact source custody
+    retirement: custody closed before barrier/cancellation; callback joined; no runtime built |}]
 ;;
 
 let%expect_test

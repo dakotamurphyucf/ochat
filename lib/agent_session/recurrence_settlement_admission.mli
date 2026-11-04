@@ -47,10 +47,11 @@ val hold : t -> (t, Agent_protocol.Error.t) result
     this precommit witness must not be reused as a postACK target read proof. *)
 val check_current : t -> Session_state.t -> (unit, Agent_protocol.Error.t) result
 
-(** Callback-free final original Send_messages proof/scope, exact captured
+(** Final original Send_messages proof/scope, exact captured
     controller/session/catalog/entry/Current and automatic-eligibility check.
-    Invokes neither evidence nor automatic policy. A joint importer runs all
-    target/controller policy callbacks first, then both owners' callback-free
-    basis checks immediately before its effect, so either policy can revoke the
-    other proof without escaping the final fence. Does not replace policy checks. *)
+    Original currentness executes trusted nonyielding host code; invokes neither
+    evidence nor automatic policy. A joint importer runs all policies first,
+    repeats both originals and rechecks the target's pure basis after this
+    original callback immediately before its effect. Does not replace policy
+    checks or establish a callback-free activation boundary. *)
 val check_basis : t -> Session_state.t -> (unit, Agent_protocol.Error.t) result

@@ -36,8 +36,14 @@ val same_occurrence : t -> t -> bool
 (** Trusted nonyielding current original host policy, not a pure predicate. *)
 val check_policy : t -> Session_state.t -> (unit, Agent_protocol.Error.t) result
 
-(** No host policy callbacks: original proof/scope, owner/live cell and exact
-    semantic controller basis. Store Current and target basis remain actor-owned. *)
+(** Repeat original authentication currentness and Send_messages scope, without
+    the execution-selection policy. Currentness executes trusted nonyielding host
+    code; the actor must check the pure basis after all such callbacks. *)
+val check_authority : t -> (unit, Agent_protocol.Error.t) result
+
+(** Callback-free owner/live cell and exact semantic controller basis. Checks no
+    original authentication, policy or clock callback and grants no authority by
+    itself. Store Current and target basis remain actor-owned. *)
 val check_basis
   :  t
   -> owner:Owner.t

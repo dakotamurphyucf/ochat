@@ -93,10 +93,10 @@ let complete_target target (intent, attempt) =
 (* Actual Store/opaque observations and controller ACK, but seeded target Run
    constructors are DATA. No Run_authorities, held initialization owner, provider
    or first-effect consumer is fabricated by this fixture. *)
-let with_admitted_target f =
+let with_admitted_target ?clock_read f =
   with_store (fun base ->
     Import_tests.with_target base (fun target source ->
-      let controller = create_actor base ~sw:base.sw () in
+      let controller = create_actor base ~sw:base.sw ?clock_read () in
       Exn.protect
         ~finally:(fun () ->
           base.reject := false;
@@ -174,8 +174,13 @@ let with_admitted_target f =
               Exn.protect
                 ~finally:(fun () -> A.Session_actor.shutdown target_owner.actor)
                 ~f:(fun () ->
-                  let observe ?(authorize = authorize) (intent, attempt) =
-                    Import_tests.observe target_owner.actor ~authorize intent attempt
+                  let observe ?actor_proof ?(authorize = authorize) (intent, attempt) =
+                    Import_tests.observe
+                      target_owner.actor
+                      ?actor_proof
+                      ~authorize
+                      intent
+                      attempt
                   in
                   List.iter requests ~f:(fun request ->
                     Import_tests.import controller (observe request)
@@ -184,102 +189,187 @@ let with_admitted_target f =
                   f base controller observe requests target_owner)))))
 ;;
 
-let with_admitted f =
-  with_admitted_target (fun base controller observe requests _target ->
+let with_admitted ?clock_read f =
+  with_admitted_target ?clock_read (fun base controller observe requests _target ->
     f base controller observe requests)
 ;;
 
 let%expect_test "actual controller permits separate live custody from checked Current" =
-  with_admitted (fun fixture controller observe requests ->
-    let request_a, request_b =
-      match requests with
-      | [ a; b ] -> a, b
-      | _ -> assert false
-    in
-    let current = ref true in
-    let revoke_in_policy = ref false in
-    let policy_calls = ref 0 in
-    let read_calls = ref 0 in
-    let original =
-      Operator_authorization.guarded ~principal ~is_current:(fun () -> !current)
-    in
-    let policy state definition =
-      Int.incr policy_calls;
-      let result = Record_tests.authorize_record state definition in
-      if !revoke_in_policy then current := false;
-      result
-    in
-    let read state =
-      Int.incr read_calls;
-      authorize state
-    in
-    let observe_a () = observe ~authorize:read request_a in
-    let observation_a = observe_a () in
-    let permit_a =
-      acquire controller ~actor_proof:original ~authorize:policy observation_a
-      |> protocol_ok
-    in
-    let observation_b = observe request_b in
-    let permit_b = acquire controller observation_b |> protocol_ok in
-    let checked_a = refresh controller permit_a observation_a |> protocol_ok in
-    Checked.check_current checked_a |> protocol_ok;
-    with_store (fun foreign ->
-      let other = create_actor foreign ~sw:foreign.sw () in
-      Exn.protect
-        ~finally:(fun () -> A.Session_actor.shutdown other)
-        ~f:(fun () ->
-          policy_calls := 0;
-          read_calls := 0;
-          Record_tests.assert_code Conflict (refresh other permit_a observation_a);
-          [%test_eq: int] !policy_calls 0;
-          [%test_eq: int] !read_calls 0));
-    (* B's actual Pause changes the physical controller Current but not A's
+  let clocks = ref 0 in
+  with_admitted
+    ~clock_read:(fun () -> Int.incr clocks)
+    (fun fixture controller observe requests ->
+       let request_a, request_b =
+         match requests with
+         | [ a; b ] -> a, b
+         | _ -> assert false
+       in
+       let current = ref true in
+       let revoke_in_policy = ref false in
+       let policy_calls = ref 0 in
+       let read_calls = ref 0 in
+       let original =
+         Operator_authorization.guarded ~principal ~is_current:(fun () -> !current)
+       in
+       let policy state definition =
+         Int.incr policy_calls;
+         let result = Record_tests.authorize_record state definition in
+         if !revoke_in_policy then current := false;
+         result
+       in
+       let read state =
+         Int.incr read_calls;
+         authorize state
+       in
+       let observe_a () = observe ~authorize:read request_a in
+       let observation_a = observe_a () in
+       let permit_a =
+         acquire controller ~actor_proof:original ~authorize:policy observation_a
+         |> protocol_ok
+       in
+       let observation_b = observe request_b in
+       let permit_b = acquire controller observation_b |> protocol_ok in
+       let checked_a = refresh controller permit_a observation_a |> protocol_ok in
+       Checked.check_current checked_a |> protocol_ok;
+       with_store (fun foreign ->
+         let other = create_actor foreign ~sw:foreign.sw () in
+         Exn.protect
+           ~finally:(fun () -> A.Session_actor.shutdown other)
+           ~f:(fun () ->
+             policy_calls := 0;
+             read_calls := 0;
+             Record_tests.assert_code Conflict (refresh other permit_a observation_a);
+             [%test_eq: int] !policy_calls 0;
+             [%test_eq: int] !read_calls 0));
+       (* B's actual Pause changes the physical controller Current but not A's
        immutable control/attempt/source. Only B's cell is irrevocably closed. *)
-    mutate controller "pause-activation-b" (Pause (id "activation_b")) |> ignore;
-    Record_tests.assert_code Conflict (Checked.check_basis checked_a);
-    let checked_a = refresh controller permit_a (observe_a ()) |> protocol_ok in
-    Checked.check_current checked_a |> protocol_ok;
-    policy_calls := 0;
-    read_calls := 0;
-    Record_tests.assert_code Conflict (refresh controller permit_b observation_b);
-    [%test_eq: int] !policy_calls 0;
-    [%test_eq: int] !read_calls 0;
-    release controller permit_a;
-    release controller permit_a;
-    policy_calls := 0;
-    read_calls := 0;
-    Record_tests.assert_code Conflict (Checked.check_current checked_a);
-    Record_tests.assert_code Conflict (refresh controller permit_a observation_a);
-    [%test_eq: int] !policy_calls 0;
-    [%test_eq: int] !read_calls 0;
-    let permit_a =
-      acquire controller ~actor_proof:original ~authorize:policy (observe_a ())
-      |> protocol_ok
-    in
-    let checked_a = refresh controller permit_a (observe_a ()) |> protocol_ok in
-    let before = state controller in
-    revoke_in_policy := true;
-    Record_tests.assert_code Permission_denied (Checked.check_current checked_a);
-    assert (not !current);
-    assert (equal_state before (state controller));
-    release controller permit_a;
-    (* Reauthorization uses a fresh actual host proof, never resurrects the
+       mutate controller "pause-activation-b" (Pause (id "activation_b")) |> ignore;
+       Record_tests.assert_code Conflict (Checked.check_basis checked_a);
+       let checked_a = refresh controller permit_a (observe_a ()) |> protocol_ok in
+       Checked.check_current checked_a |> protocol_ok;
+       policy_calls := 0;
+       read_calls := 0;
+       Record_tests.assert_code Conflict (refresh controller permit_b observation_b);
+       [%test_eq: int] !policy_calls 0;
+       [%test_eq: int] !read_calls 0;
+       release controller permit_a;
+       release controller permit_a;
+       policy_calls := 0;
+       read_calls := 0;
+       Record_tests.assert_code Conflict (Checked.check_current checked_a);
+       Record_tests.assert_code Conflict (refresh controller permit_a observation_a);
+       [%test_eq: int] !policy_calls 0;
+       [%test_eq: int] !read_calls 0;
+       let permit_a =
+         acquire controller ~actor_proof:original ~authorize:policy (observe_a ())
+         |> protocol_ok
+       in
+       let checked_a = refresh controller permit_a (observe_a ()) |> protocol_ok in
+       let before = state controller in
+       revoke_in_policy := true;
+       Record_tests.assert_code Permission_denied (Checked.check_current checked_a);
+       assert (not !current);
+       assert (equal_state before (state controller));
+       release controller permit_a;
+       (* Both real original proofs are sampled after all policy callbacks. Each
+       cut gets fresh originals; a revoked proof or closed permit is never reused. *)
+       List.iter [ `Controller_revokes_target; `Target_revokes_controller ] ~f:(fun cut ->
+         let controller_current = ref true
+         and target_current = ref true in
+         let controller_reads = ref 0
+         and target_reads = ref 0 in
+         let controller_policies = ref 0
+         and target_policies = ref 0 in
+         let armed = ref false in
+         let original current reads =
+           Operator_authorization.guarded ~principal ~is_current:(fun () ->
+             Int.incr reads;
+             !current)
+         in
+         let controller_original = original controller_current controller_reads in
+         let target_original = original target_current target_reads in
+         let controller_policy state definition =
+           Int.incr controller_policies;
+           let result = Record_tests.authorize_record state definition in
+           (match cut with
+            | `Controller_revokes_target when !armed -> target_current := false
+            | `Controller_revokes_target | `Target_revokes_controller -> ());
+           result
+         in
+         let target_policy state =
+           Int.incr target_policies;
+           let result = authorize state in
+           (match cut with
+            | `Target_revokes_controller when !armed -> controller_current := false
+            | `Target_revokes_controller | `Controller_revokes_target -> ());
+           result
+         in
+         let observation =
+           observe ~actor_proof:target_original ~authorize:target_policy request_a
+         in
+         let permit =
+           acquire
+             controller
+             ~actor_proof:controller_original
+             ~authorize:controller_policy
+             observation
+           |> protocol_ok
+         in
+         let checked = refresh controller permit observation |> protocol_ok in
+         let reset () =
+           controller_reads := 0;
+           target_reads := 0;
+           controller_policies := 0;
+           target_policies := 0;
+           clocks := 0
+         in
+         let no_callbacks () =
+           List.iter
+             [ controller_reads
+             ; target_reads
+             ; controller_policies
+             ; target_policies
+             ; clocks
+             ]
+             ~f:(fun calls -> [%test_eq: int] 0 !calls)
+         in
+         reset ();
+         Checked.check_basis checked |> protocol_ok;
+         no_callbacks ();
+         armed := true;
+         Record_tests.assert_code Permission_denied (Checked.check_current checked);
+         (match cut with
+          | `Controller_revokes_target -> assert (not !target_current)
+          | `Target_revokes_controller -> assert (not !controller_current));
+         assert (equal_state before (state controller));
+         release controller permit;
+         reset ();
+         Record_tests.assert_code Conflict (Checked.check_current checked);
+         Record_tests.assert_code Conflict (Checked.check_authority checked);
+         Record_tests.assert_code Conflict (Checked.check_timing checked);
+         no_callbacks ());
+       (* Reauthorization uses a fresh actual host proof, never resurrects the
        revoked original or changes the durable attempt's audit principal. *)
-    let permit_a = acquire controller (observe request_a) |> protocol_ok in
-    let checked_a = refresh controller permit_a (observe request_a) |> protocol_ok in
-    Checked.check_basis checked_a |> protocol_ok;
-    fixture.elapsed_ms := 61_001;
-    fixture.wall := wall_at_ms 1000;
-    Record_tests.assert_code Conflict (Checked.check_current checked_a);
-    Record_tests.assert_code Conflict (refresh controller permit_a (observe request_a));
-    assert (equal_state before (state controller));
-    release controller permit_a;
-    assert (equal_state before (replayed fixture)));
+       let permit_a = acquire controller (observe request_a) |> protocol_ok in
+       let checked_a = refresh controller permit_a (observe request_a) |> protocol_ok in
+       Checked.check_basis checked_a |> protocol_ok;
+       fixture.elapsed_ms := 61_001;
+       fixture.wall := wall_at_ms 1000;
+       clocks := 0;
+       Checked.check_basis checked_a |> protocol_ok;
+       [%test_eq: int] 0 !clocks;
+       Record_tests.assert_code Conflict (Checked.check_timing checked_a);
+       [%test_eq: int] 2 !clocks;
+       Record_tests.assert_code Conflict (Checked.check_current checked_a);
+       Record_tests.assert_code Conflict (refresh controller permit_a (observe request_a));
+       assert (equal_state before (state controller));
+       release controller permit_a;
+       assert (equal_state before (replayed fixture)));
   print_endline
     "Admitted DATA; reciprocal ACK; foreign/closed policy0; unrelated Current refresh; \
-     original proof; elapsed grace";
+     cross-original revocation; pure basis callback0; fresh elapsed grace";
   [%expect
-    {| Admitted DATA; reciprocal ACK; foreign/closed policy0; unrelated Current refresh; original proof; elapsed grace |}]
+    {| Admitted DATA; reciprocal ACK; foreign/closed policy0; unrelated Current refresh; cross-original revocation; pure basis callback0; fresh elapsed grace |}]
 ;;
 
 module Hook = struct

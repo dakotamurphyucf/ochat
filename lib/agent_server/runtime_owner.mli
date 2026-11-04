@@ -156,6 +156,33 @@ val with_prepared_run_runtime
   -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
+module Prepared : sig
+  (** Exclusive staged lifetime under this actual runtime owner. It contains the
+      actor's separate source binding; neither value alone permits execution.
+      No runtime/native setup or initializer has run by acquiring this lease. *)
+  type t
+
+  val binding : t -> Agent_session.Session_actor.Source_binding.t
+
+  (** Non-yielding callback-free check in the creating Eio domain. Checks the
+      exact owner/stage/runtime resource and actor source binding. *)
+  val check_basis : t -> (unit, Agent_protocol.Error.t) result
+end
+
+(** Reserve a staged source lifetime without loading a runtime. Binding happens
+    outside the owner mutex; stop/close/replacement irrevocably closes it before
+    cancellation or joins. Ordinary eager loading and competing stages reject
+    while this lease exists. [f] cannot retain Prepared or its borrowed runtime
+    lifetime after return. The caller still ends its original Run preparation.
+    Errors/cancellation release the existing lease and preserve original failures.
+    Acquisition is not held Run admission or permission to start effects. *)
+val with_prepared_source
+  :  t
+  -> preparation:Agent_session.Run_preparation.t
+  -> source:Agent_session.Runtime_builder.Source.t
+  -> (Prepared.t -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
 (** Cancellable auxiliary inference lifetime without loading a runtime. A loaded
     runtime is retained and its selected execution supplied; otherwise f receives
     None and must use explicit host selection. Stop/administration excludes and
