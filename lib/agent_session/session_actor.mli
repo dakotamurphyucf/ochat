@@ -2447,6 +2447,69 @@ module Recurrence_run_observation : sig
   val check_current : t -> (unit, Agent_protocol.Error.t) result
 end
 
+module Recurrence_activation : sig
+  (** Revocable process-local controller custody for one exact acknowledged
+      occurrence/attempt/Run. No constructor or decoder. The actual target's
+      held admission/initialization owner remains separately required. *)
+  type t
+
+  val origin : t -> Recurrence_run_origin.t
+
+  module Checked : sig
+    (** A fresh genuine Store/Current view of a still-live permit. Unrelated
+        controller ACKs may stale this view without revoking the permit; refresh
+        through the actor. A revoked cell is never refreshed or revived. *)
+    type t
+
+    (** First reject closed/stale custody without invoking its stored policy.
+        Then run trusted nonyielding original controller and target-read policies,
+        followed by both callback-free current bases. No permission survives a yield. *)
+    val check_current : t -> (unit, Agent_protocol.Error.t) result
+
+    (** Callback-free final original proofs, exact owner/source/control/attempt,
+        actual target Admitted Run, Store Current and nominal-grace checks.
+        The target consumer must run ALL its policies before these final bases,
+        and repeat its own callback-free held-owner check after our policies.
+        Same Eio domain; no yield before its actual first-effect boundary. *)
+    val check_basis : t -> (unit, Agent_protocol.Error.t) result
+  end
+end
+
+(** Acquire only after actual target admission AND reciprocal controller ACK.
+    Requires current Send_messages and trusted nonyielding execution-selection
+    policy, genuine Active+Automatic controller lifecycle/birth, enabled current
+    source/control/definition, current grace and exact opaque same-Store target
+    observation of an Admitted Run. The stored intent's caller/control revision
+    remain audit data. No runtime loads, target preparation, initialization or
+    worker launch occurs. At most one live cell per actual retained current
+    execution; reacquisition closes only that occurrence's old cell. *)
+val acquire_recurrence_activation
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:
+       (Session_state.t
+        -> Recurrence_definition.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> observation:Recurrence_run_observation.t
+  -> (Recurrence_activation.t, Agent_protocol.Error.t) result
+
+(** Actual Store refresh may yield; repeat original policy and exact still-live
+    custody afterwards. Fresh target observation required, including after a
+    self-target's own ACK. Caller/principal cannot be replaced by this operation. *)
+val check_recurrence_activation
+  :  t
+  -> Recurrence_activation.t
+  -> observation:Recurrence_run_observation.t
+  -> (Recurrence_activation.Checked.t, Agent_protocol.Error.t) result
+
+(** Idempotent issuer-bound release, including already closed owner custody.
+    No external cancellation, join, durable erasure or no-effects/retry claim.
+    Actual target single activation remains owned by its held Run capability. *)
+val release_recurrence_activation
+  :  t
+  -> Recurrence_activation.t
+  -> (unit, Agent_protocol.Error.t) result
+
 module Recurrence_import : sig
   module Timing : sig
     type t =

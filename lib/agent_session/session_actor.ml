@@ -1,4 +1,21 @@
 open! Core
+module Activation_custody = Recurrence_activation_custody
+
+module Recurrence_activation = struct
+  type t = Activation_custody.t
+
+  let origin = Activation_custody.origin
+
+  module Checked = struct
+    type t =
+      { check_current : unit -> (unit, Agent_protocol.Error.t) result
+      ; check_basis : unit -> (unit, Agent_protocol.Error.t) result
+      }
+
+    let check_current t = t.check_current ()
+    let check_basis t = t.check_basis ()
+  end
+end
 
 module Recurrence_planning_read = struct
   type t =
@@ -55,6 +72,7 @@ module Recurrence_run_observation = struct
     ; validate_reference :
         Recurrence_run_reference.t -> (unit, Agent_protocol.Error.t) result
     ; completion : Recurrence_runtime.Completion.t option
+    ; check_admitted : unit -> (unit, Agent_protocol.Error.t) result
     }
 
   let origin t = t.origin
@@ -766,6 +784,17 @@ type _ request =
          -> (bool, Agent_protocol.Error.t) result)
       * Recurrence_run_observation.t
       -> Recurrence_import.t request
+  | Acquire_recurrence_activation :
+      Operator_authorization.t
+      * (Session_state.t
+         -> Recurrence_definition.t
+         -> (unit, Agent_protocol.Error.t) result)
+      * Recurrence_run_observation.t
+      -> Recurrence_activation.t request
+  | Check_recurrence_activation :
+      Recurrence_activation.t * Recurrence_run_observation.t
+      -> Recurrence_activation.Checked.t request
+  | Release_recurrence_activation : Recurrence_activation.t -> unit request
   | Verify_recurrence_child :
       Recurrence_child_reservation.t
       -> Recurrence_child_link.t request
@@ -1183,6 +1212,8 @@ type t =
   ; mutable recurrence_controller : Recurrence_controller.t option
   ; recurrence_runtime : Recurrence_runtime.t
   ; recurrence_creation_owner : unit ref
+  ; recurrence_activation_owner : Activation_custody.Owner.t
+  ; mutable recurrence_activations : Activation_custody.t list
   ; configuration_update_owner : Configuration_update.Owner.t
   ; configuration_capture : Configuration_capture.t
   ; mutable operation_worker : Operation_worker.t option
@@ -1504,7 +1535,20 @@ let install_live_run_agent_custody t =
   | Some _, _, _ | None, None, _ | None, Some _, (Some _ | None) -> ()
 ;;
 
+let close_recurrence_activations t =
+  List.iter t.recurrence_activations ~f:Activation_custody.close;
+  t.recurrence_activations <- []
+;;
+
+let retain_recurrence_activations t state =
+  t.recurrence_activations
+  <- Activation_custody.retain_candidates t.recurrence_activations state
+;;
+
 let persist_transition t transition =
+  (* Prepared normalized candidate; revocation precedes any yielding write.
+     A failed write cannot revive cells retired by this candidate. *)
+  retain_recurrence_activations t transition.Session_transition.state;
   t.persistence.commit ~command_audit:t.command_audit ~previous:t.state transition
 ;;
 
@@ -2474,6 +2518,7 @@ let set_operation_worker t worker =
     | None, Some _, _ -> Error (error Conflict "cannot unload an active runtime")
     | None, None, true -> Error (error Conflict "cannot unload a borrowed moderator")
     | None, None, false | Some _, _, _ ->
+      if Option.is_some t.operation_worker then close_recurrence_activations t;
       t.operation_worker <- worker;
       t.inference_execution <- None;
       (match worker with
@@ -2505,6 +2550,7 @@ let retire_runtime_worker t ~closing =
     let pending_operation =
       Option.map t.state.active_operation ~f:(fun operation -> operation.id)
     in
+    close_recurrence_activations t;
     t.runtime_retirement <- Some { finished; finish; pending_operation; closing };
     retire_instruction_continuations t;
     Option.iter t.operation_agent_custody ~f:(fun (_, custody) ->
@@ -13000,6 +13046,9 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Check_recurrence_creation _
   | Record_recurrence_execution _
   | Verify_recurrence_child _
+  | Acquire_recurrence_activation _
+  | Check_recurrence_activation _
+  | Release_recurrence_activation _
   | Observe_recurrence_run _
   | Import_recurrence_execution _
   | Link_recurrence_child _
@@ -13221,6 +13270,7 @@ let begin_lifecycle t attachment_id expected_generation expected_revision =
   then Error (error Conflict "session lifecycle canonical anchor changed")
   else (
     let fence = Lifecycle_fence.{ owner = t.lifecycle_owner; phase = Reserved } in
+    close_recurrence_activations t;
     t.lifecycle_fence <- Some fence;
     Ok fence)
 ;;
@@ -13421,6 +13471,13 @@ let observe_recurrence_run_internal t ~actor ~authorize ~intent ~attempt =
       ; check_basis
       ; validate_reference
       ; completion
+      ; check_admitted =
+          (fun () ->
+            let%bind () = check_basis () in
+            match observed_run.lifecycle with
+            | Admitted -> Ok ()
+            | Active | Waiting _ | Terminal _ ->
+              Error (error Conflict "activation target Run is no longer Admitted"))
       }
     in
     Some observation
@@ -13615,6 +13672,110 @@ let import_recurrence_execution_internal
     else Error (error Conflict "settlement controller visibility changed after ACK")
 ;;
 
+let check_recurrence_activation_internal
+      t
+      custody
+      (observation : Recurrence_run_observation.t)
+  =
+  let open Result.Let_syntax in
+  let%bind controller = require_recurrence_controller t in
+  let owner () =
+    let%bind () = check_recurrence_import_owner t in
+    require_runtime_admission t
+  in
+  let%bind () = owner () in
+  (* Reject foreign, closed or stale custody before its policy sees this state. *)
+  let%bind () =
+    Activation_custody.check_basis custody ~owner:t.recurrence_activation_owner t.state
+  in
+  let%bind () = Activation_custody.check_policy custody t.state in
+  let%bind () =
+    if
+      Recurrence_controller.same_store controller observation.controller
+      && Recurrence_run_origin.equal
+           (Activation_custody.origin custody)
+           observation.origin
+    then Ok ()
+    else
+      Error (error Conflict "activation requires the exact same-Store target observation")
+  in
+  let%bind () = observation.check_current () in
+  let%bind current = Recurrence_controller.observe controller t.state in
+  let check_basis () =
+    let%bind () = owner () in
+    let%bind () =
+      Activation_custody.check_basis custody ~owner:t.recurrence_activation_owner t.state
+    in
+    let%bind () = observation.check_basis () in
+    let%bind () = observation.check_admitted () in
+    let definition = Activation_custody.definition custody in
+    let%bind () =
+      if
+        Recurrence_controller.is_current current
+        && Recurrence_controller.automatic current
+        && Agent_protocol.Session_lifecycle.Revision.equal
+             (Recurrence_controller.revision current)
+             (Recurrence_definition.birth_lifecycle_revision definition)
+      then Ok ()
+      else Error (error Conflict "activation controller lifecycle observation changed")
+    in
+    let%bind entry = Activation_custody.entry custody t.state in
+    let%bind snapshot =
+      Recurrence_runtime.snapshot
+        t.recurrence_runtime
+        ~wall:(t.services.now ())
+        ~monotonic:(t.services.monotonic_now ())
+    in
+    let%bind late =
+      Recurrence_runtime.selection_lateness
+        t.recurrence_runtime
+        ~entry
+        ~nominal:(Activation_custody.nominal custody)
+        ~snapshot
+    in
+    let%bind () =
+      match late with
+      | Some late
+        when Int64.(
+               late
+               <= Recurrence_policy.grace_ns (Recurrence_definition.policy definition)) ->
+        Ok ()
+      | None | Some _ ->
+        Error (error Conflict "activation nominal is outside current grace")
+    in
+    owner ()
+  in
+  let check_current () =
+    (* A returned view may outlive its cell. Never invoke its stored policy then. *)
+    let%bind () = check_basis () in
+    let%bind () = Activation_custody.check_policy custody t.state in
+    let%bind () = observation.check_current () in
+    check_basis ()
+  in
+  let%map () = check_current () in
+  let checked : Recurrence_activation.Checked.t = { check_current; check_basis } in
+  checked
+;;
+
+let acquire_recurrence_activation_internal t ~actor ~authorize ~observation =
+  let open Result.Let_syntax in
+  let%bind custody =
+    Activation_custody.create
+      ~owner:t.recurrence_activation_owner
+      ~state:t.state
+      ~actor
+      ~authorize
+      ~origin:observation.Recurrence_run_observation.origin
+  in
+  let%bind _checked = check_recurrence_activation_internal t custody observation in
+  (* One live cell per actual retained current execution; no independent quota. *)
+  List.iter t.recurrence_activations ~f:(fun old ->
+    if Activation_custody.same_occurrence old custody then Activation_custody.close old);
+  t.recurrence_activations
+  <- custody :: List.filter t.recurrence_activations ~f:Activation_custody.is_live;
+  Ok custody
+;;
+
 let observe_recurrence_child t reservation =
   let open Result.Let_syntax in
   let%bind () = require_runtime_admission t in
@@ -13671,6 +13832,7 @@ let observe_recurrence_child t reservation =
    owner exit. This does not persist, invoke callbacks, cancel/join work or claim
    rollback of already committed effects. *)
 let retire_execution_custody t =
+  close_recurrence_activations t;
   retire_instruction_continuations t;
   Option.iter t.operation_agent_custody ~f:(fun (_, custody) ->
     retire_agent_custody custody);
@@ -14378,6 +14540,18 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         ~authorize
         ~automatic_policy
         ~observation
+    | Acquire_recurrence_activation (actor, authorize, observation) ->
+      acquire_recurrence_activation_internal t ~actor ~authorize ~observation
+    | Check_recurrence_activation (custody, observation) ->
+      check_recurrence_activation_internal t custody observation
+    | Release_recurrence_activation custody ->
+      if Activation_custody.belongs_to custody ~owner:t.recurrence_activation_owner
+      then (
+        Activation_custody.close custody;
+        t.recurrence_activations
+        <- List.filter t.recurrence_activations ~f:Activation_custody.is_live;
+        Ok ())
+      else Error (error Conflict "activation custody belongs to another actor")
     | Verify_recurrence_child reservation -> observe_recurrence_child t reservation
     | Link_recurrence_child (permit, child) ->
       let open Result.Let_syntax in
@@ -15179,6 +15353,8 @@ let create_with_owner_lease_duration
     ; recurrence_controller = None
     ; recurrence_runtime = Recurrence_runtime.create ~origin:(services.monotonic_now ())
     ; recurrence_creation_owner = ref ()
+    ; recurrence_activation_owner = Activation_custody.Owner.create ()
+    ; recurrence_activations = []
     ; configuration_update_owner = Configuration_update.Owner.create ()
     ; configuration_capture = Configuration_capture.create ()
     ; operation_worker
@@ -16259,6 +16435,25 @@ let import_recurrence_execution t ~actor ~authorize ~automatic_policy ~observati
   recurrence_call
     t
     (Import_recurrence_execution (actor, authorize, automatic_policy, observation))
+;;
+
+let acquire_recurrence_activation t ~actor ~authorize ~observation =
+  recurrence_call t (Acquire_recurrence_activation (actor, authorize, observation))
+;;
+
+let check_recurrence_activation t custody ~observation =
+  recurrence_call t (Check_recurrence_activation (custody, observation))
+;;
+
+let release_recurrence_activation t custody =
+  if
+    Activation_custody.belongs_to custody ~owner:t.recurrence_activation_owner
+    && ((not (Activation_custody.is_live custody))
+        || Option.is_some (Eio.Promise.peek t.finished))
+  then (
+    Activation_custody.close custody;
+    Ok ())
+  else recurrence_call t ~priority:Priority (Release_recurrence_activation custody)
 ;;
 
 let verify_recurrence_child t ~reservation =
