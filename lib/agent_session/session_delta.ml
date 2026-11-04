@@ -220,6 +220,11 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
         ~previous:state.invocations
         ~incoming:created.invocations
     in
+    let%bind () =
+      Queue_provenance_validation.validate_event_retention
+        ~previous:(Session_state.queue_provenance state)
+        (Session_state.queue_provenance created)
+    in
     let%map () =
       match state.run_state, created.run_state with
       | None, _ -> Ok ()
@@ -1207,7 +1212,15 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
              ~retryable:false
              ())
     in
-    let%map () = E.validate_transition ~previous execution in
+    let%bind () = E.validate_transition ~previous execution in
+    let%map () =
+      match previous with
+      | Some _ -> Ok ()
+      | None ->
+        Queue_provenance_validation.validate_event_admission
+          (Session_state.queue_provenance state)
+          execution
+    in
     { state with
       moderator_executions =
         replace_by

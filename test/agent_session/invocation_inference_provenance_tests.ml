@@ -366,3 +366,101 @@ let%expect_test "genuine unavailable parent allows native work without inventing
   print_endline "real parent absence propagates; strict attribution remains unavailable";
   [%expect {| real parent absence propagates; strict attribution remains unavailable |}]
 ;;
+
+let%expect_test
+    "consumed occurrence receipts preserve original attribution and strict codec"
+  =
+  let module E = P.Moderator_execution in
+  let module Q = E.Queue_occurrence in
+  let source =
+    P.Run_source.create
+      ~observer:{ script_id = "queue-capture"; source_sha256 = String.make 64 'a' }
+      ~generation:0
+      ~installation_epoch:1L
+    |> protocol_ok
+  in
+  let context : E.context =
+    { id = P.Id.Moderator_execution.of_string "mex_capture" |> protocol_ok
+    ; session_id
+    ; generation = 0
+    ; source = source.observer
+    ; operation_id = Some (P.Id.Operation.of_string "op_physical_drainer" |> protocol_ok)
+    ; job = None
+    ; phase = Internal_event
+    ; event = `Null
+    ; checkpoint_sha256 = String.make 64 'b'
+    ; created_at = timestamp
+    }
+  in
+  let historical = E.create context |> protocol_ok in
+  let run_id = P.Id.Run.of_string "run_original_queue" |> protocol_ok in
+  let remove json name =
+    match json with
+    | `Object fields ->
+      `Object (List.filter fields ~f:(fun (field, _) -> not (String.equal name field)))
+    | _ -> assert false
+  in
+  (* Context-free evidence fixtures only. Named Run retention and actual head
+     admission belong to the complete carrier checks; these confer no authority. *)
+  List.iter [ None; Some P.Inference_origin.Unbound; Some (Run run_id) ] ~f:(fun origin ->
+    let occurrence = Q.create ~source ~ordinal:7L ~origin |> protocol_ok in
+    let admitted = E.create_queued ~queue_occurrence:occurrence context |> protocol_ok in
+    let wire = E.to_json admitted in
+    assert (D.Json.equal (member wire "schema_version") (`Number "5"));
+    assert (E.equal admitted (E.of_json wire |> protocol_ok));
+    assert (Q.equal occurrence (Q.t_of_sexp (Q.sexp_of_t occurrence)));
+    let expected =
+      A.Invocation_inference_provenance.of_event ~runs:None ~jobs:[] admitted
+      |> protocol_ok
+    in
+    assert (Option.equal P.Inference_origin.equal expected origin);
+    List.iter
+      [ remove wire "queue_occurrence"
+      ; set wire "queue_occurrence" `Null
+      ; set wire "schema_version" (`Number "4")
+      ; set wire "queue_occurrence" (remove (Q.to_json occurrence) "origin")
+      ; set wire "queue_occurrence" (set (Q.to_json occurrence) "ordinal" (`String "-1"))
+      ; set wire "queue_occurrence" (set (Q.to_json occurrence) "ordinal" (`String "07"))
+      ]
+      ~f:(fun malformed -> assert (Result.is_error (E.of_json malformed)));
+    let malformed =
+      Q.to_json occurrence |> fun json -> set json "ordinal" (`String "-1")
+    in
+    assert (Exn.does_raise (fun () -> Q.t_of_sexp (Jsonaf.sexp_of_t malformed) |> ignore));
+    let other = Q.create ~source ~ordinal:8L ~origin |> protocol_ok in
+    let reassigned = E.create_queued ~queue_occurrence:other context |> protocol_ok in
+    List.iter
+      [ historical, admitted; admitted, historical; admitted, reassigned ]
+      ~f:(fun (previous, incoming) ->
+        assert (Result.is_error (E.validate_transition ~previous:(Some previous) incoming)));
+    let completed =
+      E.complete
+        admitted
+        ~checkpoint_sha256:(String.make 64 'c')
+        ~requests:{ request_turn = false; request_compaction = false; end_session = None }
+      |> protocol_ok
+    in
+    assert (Option.equal Q.equal completed.queue_occurrence (Some occurrence));
+    let completed = E.to_json completed |> E.of_json |> protocol_ok in
+    assert (
+      Option.equal
+        P.Inference_origin.equal
+        origin
+        (A.Invocation_inference_provenance.of_event ~runs:None ~jobs:[] completed
+         |> protocol_ok));
+    assert (
+      Result.is_error
+        (E.create_queued ~queue_occurrence:occurrence { context with phase = Turn_start }));
+    assert (
+      Result.is_error
+        (E.create_queued ~queue_occurrence:occurrence { context with generation = 1 })));
+  List.iter [ 1; 2; 3; 4 ] ~f:(fun version ->
+    let old =
+      E.to_json historical
+      |> fun json -> set json "schema_version" (`Number (Int.to_string version))
+    in
+    assert (Option.is_none (E.of_json old |> protocol_ok).queue_occurrence));
+  assert (Result.is_error (Q.create ~source ~ordinal:(-1L) ~origin:None));
+  print_endline "strict v5 capture; unknown stays unknown; immutable through completion";
+  [%expect {| strict v5 capture; unknown stays unknown; immutable through completion |}]
+;;

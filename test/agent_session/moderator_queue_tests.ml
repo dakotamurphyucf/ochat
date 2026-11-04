@@ -561,3 +561,626 @@ let%expect_test
     print_endline "owned and unowned v4 survive event and replacement snapshot codecs");
   [%expect {| owned and unowned v4 survive event and replacement snapshot codecs |}]
 ;;
+
+module Consumed_receipt = struct
+  module E = P.Moderator_execution
+  module C = E.Queue_occurrence
+
+  let encoded_event event = `Object [ "snapshot", Session.Snapshot.to_jsonaf event ]
+
+  let rec idle actor remaining =
+    if remaining = 0
+    then failwith "queue drainer did not settle within bounded actor polls";
+    let state = A.Session_actor.state actor |> protocol_ok in
+    match state.active_operation with
+    | None -> state
+    | Some _ ->
+      Eio.Fiber.yield ();
+      idle actor (remaining - 1)
+  ;;
+
+  let empty_requests : P.Invocation.follow_up =
+    { request_turn = false; request_compaction = false; end_session = None }
+  ;;
+
+  let with_actual_drainer f =
+    Headless_run_tests.with_service (fun fixture ->
+      let original =
+        fixture.start (fixture.request "queue-original-run")
+        |> Headless_run_tests.admitted
+      in
+      assert (fixture.activate () |> protocol_ok);
+      let admitted =
+        fixture.request
+          ~mode:Single_turn
+          ~input:(Headless_run_tests.input "physical queue drainer")
+          "queue-drainer-run"
+        |> fixture.start
+        |> Headless_run_tests.admitted
+      in
+      let basis = idle fixture.actor 256 in
+      let index = Option.value_exn basis.run_state in
+      let drainer = A.Run_state.find index admitted.run_id |> Option.value_exn in
+      let operation =
+        drainer.owned_work
+        @ drainer.relinquished_work
+        @ List.map drainer.terminal_work ~f:(fun proof -> proof.P.Run_work.Terminal.work)
+        |> List.find_map ~f:(fun work ->
+          match work.P.Run_work.key with
+          | Operation id -> Some id
+          | Retained _ -> None)
+        |> Option.value_exn
+      in
+      assert (not (P.Id.Run.equal drainer.id original.run_id));
+      f basis original.source original.run_id drainer.id operation)
+  ;;
+
+  let before basis source operation origin =
+    (* The real host above admitted both Runs and the drainer operation. This
+       imported producer/queue is storage evidence, not another execution permit. *)
+    let parent =
+      let parent = invocation_fixture () in
+      let parent =
+        P.Invocation.create
+          { parent.context with
+            id = P.Id.Invocation.of_string "inv_queue_producer_parent" |> protocol_ok
+          }
+        |> protocol_ok
+      in
+      Option.value_map origin ~default:parent ~f:(fun origin ->
+        P.Invocation.capture_inference_origin parent origin |> protocol_ok)
+    in
+    let invocation =
+      let context = (invocation_fixture ()).context in
+      let invocation =
+        P.Invocation.create
+          ~observer:source.P.Run_source.observer
+          { context with parent_invocation = Some parent.context.id }
+        |> protocol_ok
+      in
+      let invocation =
+        Option.value_map origin ~default:invocation ~f:(fun origin ->
+          P.Invocation.capture_inference_origin invocation origin |> protocol_ok)
+      in
+      let invocation = P.Invocation.dispatch invocation |> protocol_ok in
+      P.Invocation.resolve
+        invocation
+        ~session_id
+        ~generation:basis.A.Session_state.identity.generation
+        (Complete `Null)
+      |> protocol_ok
+    in
+    let snapshot =
+      A.Moderator_checkpoint.decode basis.moderator |> protocol_ok |> Option.value_exn
+    in
+    let queue = values 2 in
+    let producer =
+      Q.Capture.create ~producer:(Invocation invocation.context.id) ~origin |> protocol_ok
+    in
+    let metadata =
+      Q.bootstrap ~source ~queue:[]
+      |> protocol_ok
+      |> fun metadata ->
+      Q.advance
+        metadata
+        ~before:[]
+        ~after:queue
+        ~consume:Keep
+        ~appended:[ producer; producer ]
+      |> protocol_ok
+    in
+    let moderator =
+      A.Moderator_checkpoint.encode_with_queue
+        { snapshot with queued_internal_events = queue }
+        ~queue:metadata
+      |> protocol_ok
+    in
+    let before =
+      { basis with
+        moderator = Some moderator
+      ; invocations = invocation :: parent :: basis.invocations
+      }
+    in
+    A.Session_state.validate before |> protocol_ok;
+    before, operation
+  ;;
+
+  let running before operation =
+    let snapshot =
+      A.Moderator_checkpoint.decode before.A.Session_state.moderator
+      |> protocol_ok
+      |> Option.value_exn
+    in
+    let metadata =
+      A.Moderator_checkpoint.queue before.moderator |> protocol_ok |> Option.value_exn
+    in
+    let entry = List.hd_exn (Q.entries metadata) in
+    let occurrence =
+      C.create
+        ~source:(Q.source metadata)
+        ~ordinal:(Q.Entry.ordinal entry)
+        ~origin:(Q.Entry.origin entry)
+      |> protocol_ok
+    in
+    E.create_queued
+      ~queue_occurrence:occurrence
+      { id = P.Id.Moderator_execution.of_string "mex_consumed_queue" |> protocol_ok
+      ; session_id
+      ; generation = before.identity.generation
+      ; source = (Q.source metadata).observer
+      ; operation_id = operation
+      ; job = None
+      ; phase = Internal_event
+      ; event = encoded_event (List.hd_exn snapshot.queued_internal_events)
+      ; checkpoint_sha256 = A.Moderator_checkpoint.digest snapshot
+      ; created_at = timestamp
+      }
+    |> protocol_ok
+  ;;
+
+  let completion ?(emit = true) before running =
+    let snapshot =
+      A.Moderator_checkpoint.decode before.A.Session_state.moderator
+      |> protocol_ok
+      |> Option.value_exn
+    in
+    let metadata =
+      A.Moderator_checkpoint.queue before.moderator |> protocol_ok |> Option.value_exn
+    in
+    let origin = C.origin (Option.value_exn running.E.queue_occurrence) in
+    let after_queue =
+      List.tl_exn snapshot.queued_internal_events @ if emit then values 1 else []
+    in
+    let capture =
+      Q.Capture.create ~producer:(Event running.context.id) ~origin |> protocol_ok
+    in
+    let next =
+      Q.advance
+        metadata
+        ~before:snapshot.queued_internal_events
+        ~after:after_queue
+        ~consume:Consume_head
+        ~appended:(if emit then [ capture ] else [])
+      |> protocol_ok
+    in
+    let snapshot = { snapshot with queued_internal_events = after_queue } in
+    let completed =
+      E.complete
+        running
+        ~checkpoint_sha256:(A.Moderator_checkpoint.digest snapshot)
+        ~requests:empty_requests
+      |> protocol_ok
+    in
+    let moderator =
+      A.Moderator_checkpoint.encode_with_queue snapshot ~queue:next |> protocol_ok
+    in
+    completed, moderator
+  ;;
+
+  let document state =
+    SD.authored state |> SD.encode ~limits:document_limits |> document_ok
+  ;;
+
+  let decode raw =
+    D.Document.inspect ~limits:document_limits raw
+    |> document_ok
+    |> SD.decode ~limits:document_limits
+  ;;
+
+  let replace_event raw event =
+    let payload = member raw "payload" in
+    let events =
+      match member payload "moderator_executions" with
+      | `Array events -> events
+      | _ -> assert false
+    in
+    let events =
+      List.map events ~f:(fun candidate ->
+        if
+          D.Json.equal
+            (member candidate "id")
+            (P.Id.Moderator_execution.to_json event.E.context.id)
+        then E.to_json event
+        else candidate)
+    in
+    set raw "payload" (set payload "moderator_executions" (`Array events))
+  ;;
+end
+
+let%expect_test
+    "consumed receipts follow original queue facts under an actual Run drainer"
+  =
+  let module F = Consumed_receipt in
+  let module E = P.Moderator_execution in
+  let module C = E.Queue_occurrence in
+  F.with_actual_drainer (fun basis source original drainer operation ->
+    List.iter
+      [ None; Some P.Inference_origin.Unbound; Some (Run original) ]
+      ~f:(fun origin ->
+        let before, _ = F.before basis source operation origin in
+        let running = F.running before (Some operation) in
+        let completed, moderator = F.completion before running in
+        let transition =
+          A.Session_transition.apply
+            ~now:timestamp
+            before
+            ~delta:
+              (Batch
+                 [ Moderator_execution_changed running
+                 ; Moderator_execution_changed completed
+                 ; Moderator_changed (Some moderator)
+                 ])
+            ~payloads:[]
+          |> protocol_ok
+        in
+        let after = transition.state in
+        let expected =
+          A.Invocation_inference_provenance.of_event
+            ~runs:after.run_state
+            ~jobs:after.jobs
+            completed
+          |> protocol_ok
+        in
+        assert (Option.equal P.Inference_origin.equal origin expected);
+        assert (
+          Option.equal
+            P.Id.Operation.equal
+            completed.context.operation_id
+            (Some operation));
+        assert (not (Option.equal P.Inference_origin.equal expected (Some (Run drainer))));
+        let encoded = F.document after |> D.Document.json in
+        let decoded = F.decode encoded |> document_ok |> SD.value in
+        let saved =
+          List.find_exn decoded.moderator_executions ~f:(fun event ->
+            P.Id.Moderator_execution.equal event.context.id completed.context.id)
+        in
+        assert (E.equal saved completed);
+        let contradict event =
+          assert (Result.is_error (F.decode (F.replace_event encoded event)))
+        in
+        contradict running;
+        contradict (E.interrupt running ~reason:"honest failed callback" |> protocol_ok);
+        let occurrence = Option.value_exn completed.queue_occurrence in
+        let wrong = C.create ~source ~ordinal:1L ~origin |> protocol_ok in
+        let wrong =
+          E.create_queued ~queue_occurrence:wrong running.context
+          |> protocol_ok
+          |> fun running ->
+          E.complete
+            running
+            ~checkpoint_sha256:(String.make 64 'a')
+            ~requests:F.empty_requests
+          |> protocol_ok
+        in
+        contradict wrong;
+        let missing_frontier =
+          set
+            encoded
+            "payload"
+            (set
+               (member encoded "payload")
+               "moderator"
+               (A.Moderator_checkpoint.decode after.moderator
+                |> protocol_ok
+                |> Option.value_exn
+                |> A.Moderator_checkpoint.encode))
+        in
+        assert (Result.is_error (F.decode missing_frontier));
+        let duplicate =
+          E.to_json completed
+          |> fun json ->
+          set
+            json
+            "id"
+            (P.Id.Moderator_execution.to_json
+               (P.Id.Moderator_execution.of_string "mex_duplicate_occurrence"
+                |> protocol_ok))
+        in
+        let payload = member encoded "payload" in
+        let events =
+          match member payload "moderator_executions" with
+          | `Array events -> events
+          | _ -> assert false
+        in
+        assert (
+          Result.is_error
+            (F.decode
+               (set
+                  encoded
+                  "payload"
+                  (set payload "moderator_executions" (`Array (duplicate :: events))))));
+        (* Removing metadata cannot lend the new receipt a guessed original origin.
+         Genuine bootstrap only assigns structural IDs with unavailable capture. *)
+        let snapshot =
+          A.Moderator_checkpoint.decode before.moderator
+          |> protocol_ok
+          |> Option.value_exn
+        in
+        let historical =
+          { before with moderator = Some (A.Moderator_checkpoint.encode snapshot) }
+        in
+        let admitted =
+          A.Session_delta.apply historical (Moderator_execution_changed running)
+        in
+        assert (Bool.equal (Result.is_ok admitted) (Option.is_none origin));
+        let foreign_checkpoint =
+          E.create_queued
+            ~queue_occurrence:occurrence
+            { running.context with checkpoint_sha256 = String.make 64 'c' }
+          |> protocol_ok
+        in
+        assert (
+          Result.is_error
+            (A.Session_delta.apply
+               before
+               (Moderator_execution_changed foreign_checkpoint)));
+        let other_payload =
+          E.create_queued
+            ~queue_occurrence:occurrence
+            { running.context with
+              event = F.encoded_event (Session.Snapshot.String "other")
+            }
+          |> protocol_ok
+        in
+        assert (
+          Result.is_error
+            (A.Session_delta.apply before (Moderator_execution_changed other_payload)));
+        let cleared =
+          A.Run_retirement.replace
+            (Option.value_exn after.run_state)
+            ~change:Remove
+            ~session_revision:Int64.(after.counters.revision + 1L)
+            ~now:timestamp
+          |> protocol_ok
+        in
+        let older = { after with moderator = None; run_state = Some cleared } in
+        F.document older |> D.Document.json |> F.decode |> document_ok |> ignore;
+        let historical_failure =
+          E.interrupt running ~reason:"old interrupted callback" |> protocol_ok
+        in
+        let older_failure =
+          { older with
+            moderator_executions = historical_failure :: basis.moderator_executions
+          }
+        in
+        let older_carrier =
+          F.document older_failure |> D.Document.json |> F.decode |> document_ok
+        in
+        SD.encode
+          (SD.with_value
+             older_carrier
+             { older_failure with moderator_executions = basis.moderator_executions })
+          ~limits:document_limits
+        |> document_ok
+        |> ignore;
+        assert (
+          Result.is_error
+            (F.decode (F.replace_event (F.document older |> D.Document.json) running)));
+        let future_source =
+          P.Run_source.create
+            ~observer:source.observer
+            ~generation:source.generation
+            ~installation_epoch:Int64.(source.installation_epoch + 1L)
+          |> protocol_ok
+        in
+        let future = C.create ~source:future_source ~ordinal:0L ~origin |> protocol_ok in
+        let future =
+          E.create_queued ~queue_occurrence:future running.context
+          |> protocol_ok
+          |> fun running ->
+          E.complete
+            running
+            ~checkpoint_sha256:(String.make 64 'a')
+            ~requests:F.empty_requests
+          |> protocol_ok
+        in
+        contradict future));
+  print_endline
+    "three original origins; exact head; standalone frontier; honest older terminal";
+  [%expect
+    {| three original origins; exact head; standalone frontier; honest older terminal |}]
+;;
+
+let%expect_test
+    "receipt capture carriers preserve unfamiliar children and reject reclassification"
+  =
+  let module F = Consumed_receipt in
+  let module E = P.Moderator_execution in
+  let module C = E.Queue_occurrence in
+  F.with_actual_drainer (fun basis source _ _ operation ->
+    let before, _ = F.before basis source operation None in
+    let running = F.running before (Some operation) in
+    (* Known-only carrier: unfamiliar-field protection must not mask the domain
+       rule against erasing an unsettled receipt and reclaiming its same head. *)
+    List.iter
+      [ running; E.interrupt running ~reason:"blocked callback" |> protocol_ok ]
+      ~f:(fun unsettled ->
+        let claimed =
+          { before with moderator_executions = unsettled :: before.moderator_executions }
+        in
+        let carrier = F.document claimed |> D.Document.json |> F.decode |> document_ok in
+        let erased = F.document before |> D.Document.json |> F.decode |> document_ok in
+        assert (
+          Result.is_error
+            (SD.encode (SD.with_value carrier before) ~limits:document_limits));
+        assert (Result.is_error (SD.adopt carrier ~limits:document_limits erased));
+        let fresh =
+          E.to_json running
+          |> fun json ->
+          set
+            json
+            "id"
+            (P.Id.Moderator_execution.to_json
+               (P.Id.Moderator_execution.of_string "mex_reclaimed_head" |> protocol_ok))
+          |> E.of_json
+          |> protocol_ok
+        in
+        assert (
+          Result.is_error
+            (A.Session_delta.apply
+               claimed
+               (Batch [ Created before; Moderator_execution_changed fresh ]))));
+    let settled, settled_moderator = F.completion ~emit:false before running in
+    let settled_state =
+      A.Session_transition.apply
+        ~now:timestamp
+        before
+        ~delta:
+          (Batch
+             [ Moderator_execution_changed running
+             ; Moderator_execution_changed settled
+             ; Moderator_changed (Some settled_moderator)
+             ])
+        ~payloads:[]
+      |> protocol_ok
+      |> fun (transition : A.Session_transition.t) -> transition.state
+    in
+    let settled_carrier =
+      F.document settled_state |> D.Document.json |> F.decode |> document_ok
+    in
+    let pruned =
+      { settled_state with moderator_executions = before.moderator_executions }
+    in
+    SD.encode (SD.with_value settled_carrier pruned) ~limits:document_limits
+    |> document_ok
+    |> ignore;
+    A.Session_delta.apply settled_state (Created pruned) |> protocol_ok |> ignore;
+    let completed, moderator = F.completion before running in
+    let transition =
+      A.Session_transition.apply
+        ~now:timestamp
+        before
+        ~delta:
+          (Batch
+             [ Moderator_execution_changed running
+             ; Moderator_execution_changed completed
+             ; Moderator_changed (Some moderator)
+             ])
+        ~payloads:[]
+      |> protocol_ok
+    in
+    let raw = F.document transition.state |> D.Document.json in
+    let map_receipt raw ~f =
+      let payload = member raw "payload" in
+      let receipts =
+        match member payload "moderator_executions" with
+        | `Array receipts -> receipts
+        | _ -> assert false
+      in
+      let receipts =
+        List.map receipts ~f:(fun receipt ->
+          if
+            D.Json.equal
+              (member receipt "id")
+              (P.Id.Moderator_execution.to_json completed.context.id)
+          then f receipt
+          else receipt)
+      in
+      set raw "payload" (set payload "moderator_executions" (`Array receipts))
+    in
+    let future raw value =
+      map_receipt raw ~f:(fun receipt ->
+        set
+          receipt
+          "queue_occurrence"
+          (set (member receipt "queue_occurrence") "future_occurrence" value))
+    in
+    let retained = future raw (`String "retained") in
+    let carrier = F.decode retained |> document_ok in
+    assert (
+      D.Json.equal
+        retained
+        (SD.encode carrier ~limits:document_limits |> document_ok |> D.Document.json));
+    let current = SD.value carrier in
+    SD.with_value carrier { current with stop_epoch = Int64.succ current.stop_epoch }
+    |> SD.encode ~limits:document_limits
+    |> document_ok
+    |> ignore;
+    let conflict = F.decode (future raw (`String "conflicting")) |> document_ok in
+    assert (Result.is_error (SD.adopt carrier ~limits:document_limits conflict));
+    assert (Result.is_error (F.decode (future raw (`String (String.make 4096 'x')))));
+    let changed = C.create ~source ~ordinal:0L ~origin:(Some Unbound) |> protocol_ok in
+    let changed =
+      E.create_queued ~queue_occurrence:changed running.context
+      |> protocol_ok
+      |> fun event ->
+      E.complete
+        event
+        ~checkpoint_sha256:
+          (A.Moderator_checkpoint.digest
+             (A.Moderator_checkpoint.decode current.moderator
+              |> protocol_ok
+              |> Option.value_exn))
+        ~requests:F.empty_requests
+      |> protocol_ok
+    in
+    let erased =
+      E.create running.context
+      |> protocol_ok
+      |> fun event ->
+      E.complete
+        event
+        ~checkpoint_sha256:
+          (A.Moderator_checkpoint.digest
+             (A.Moderator_checkpoint.decode current.moderator
+              |> protocol_ok
+              |> Option.value_exn))
+        ~requests:F.empty_requests
+      |> protocol_ok
+    in
+    List.iter [ changed; erased ] ~f:(fun alternative ->
+      let incoming = F.decode (F.replace_event raw alternative) |> document_ok in
+      assert (Result.is_error (SD.adopt carrier ~limits:document_limits incoming));
+      let alternative = SD.value incoming in
+      assert (
+        Result.is_error
+          (SD.encode (SD.with_value carrier alternative) ~limits:document_limits));
+      assert (
+        Result.is_error
+          (A.Session_transition.apply
+             ~now:timestamp
+             current
+             ~delta:(Created alternative)
+             ~payloads:[])));
+    (* A preserved child belongs to the capture, not to a new occurrence. No
+       unknown data is moved from a consumed queue head into the receipt. *)
+    let delta =
+      A.Session_delta_document.create
+        transition.delta
+        ~limits:document_limits
+        ~state_document:SD.authored
+      |> document_ok
+      |> A.Session_delta_document.document
+      |> D.Document.json
+    in
+    let payload = member delta "payload" in
+    let changes =
+      match member payload "changes" with
+      | `Array changes -> changes
+      | _ -> assert false
+    in
+    let changes =
+      List.map changes ~f:(fun change ->
+        match D.Json.field change ~name:"kind" with
+        | Value (`String "moderator_execution_changed") ->
+          let receipt = member change "value" in
+          set
+            change
+            "value"
+            (set
+               receipt
+               "queue_occurrence"
+               (set
+                  (member receipt "queue_occurrence")
+                  "future_occurrence"
+                  (`String (String.make 4096 'x'))))
+        | Value _ | Absent | Null -> change)
+    in
+    let malformed = set delta "payload" (set payload "changes" (`Array changes)) in
+    assert (
+      Result.is_error
+        (D.Document.inspect ~limits:document_limits malformed
+         |> Result.bind ~f:(A.Session_delta_document.decode ~limits:document_limits))));
+  print_endline "unknown capture custody; no late adoption/removal; full raw child bound";
+  [%expect {| unknown capture custody; no late adoption/removal; full raw child bound |}]
+;;

@@ -29,3 +29,7 @@ val encode_with_queue
 
 (** Complete raw optional queue child bounds, including its unknown fields. *)
 val validate_encoded_capacity : Jsonaf.t option -> (unit, Agent_protocol.Error.t) result
+
+(** Existing receipt checkpoint digest over the complete known identity snapshot.
+    This is a data comparison, not proof of an installed runtime or authority. *)
+val digest : Session.Moderator_state.Identity_snapshot.t -> string
