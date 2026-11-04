@@ -190,8 +190,365 @@ let validate_producer t source entry =
           invalid "queued Schedule original source is unavailable or differs"))
 ;;
 
+module Occurrence_identity = struct
+  type t = string * string * int * int64 * int64 [@@deriving compare, hash, sexp]
+end
+
+let occurrence_identity occurrence =
+  let module Q = P.Moderator_execution.Queue_occurrence in
+  let source = Q.source occurrence in
+  ( source.observer.script_id
+  , source.observer.source_sha256
+  , source.generation
+  , source.installation_epoch
+  , Q.ordinal occurrence )
+;;
+
+let installed_source t source =
+  let open Result.Let_syntax in
+  match t.runs with
+  | None -> invalid "captured queue claim has no source installation"
+  | Some index ->
+    let%bind captured =
+      Run_source_installation.captured
+        (Run_state.installation index)
+        ~generation:t.generation
+    in
+    if P.Run_source.equal source captured
+    then Ok ()
+    else invalid "captured queue claim differs from installed source"
+;;
+
+let previous_head t source =
+  let open Result.Let_syntax in
+  let%bind snapshot = Moderator_checkpoint.decode t.moderator in
+  let%bind snapshot =
+    match snapshot with
+    | None -> invalid "captured queue claim has no previous checkpoint"
+    | Some snapshot -> Ok snapshot
+  in
+  let%bind () =
+    source_matches
+      source
+      { script_id = snapshot.script_id; source_sha256 = snapshot.script_source_hash }
+  in
+  let%bind metadata = Moderator_checkpoint.queue t.moderator in
+  let%bind metadata =
+    match metadata with
+    | Some metadata ->
+      if P.Run_source.equal source (Moderator_queue.source metadata)
+      then Ok metadata
+      else invalid "captured queue claim differs from previous queue lifetime"
+    | None ->
+      (* Number only the genuine previous queue. No incoming capture or drainer
+         may lend producer/origin facts to this historical structural bootstrap. *)
+      Moderator_queue.bootstrap ~source ~queue:snapshot.queued_internal_events
+  in
+  match snapshot.queued_internal_events, Moderator_queue.entries metadata with
+  | head :: _, entry :: _ -> Ok (snapshot, head, entry)
+  | [], _ | _, [] -> invalid "captured queue claim has no previous head"
+;;
+
+let validate_head_payload (event : P.Moderator_execution.t) occurrence ~head ~entry =
+  let open Result.Let_syntax in
+  let module Q = P.Moderator_execution.Queue_occurrence in
+  let%bind () =
+    if
+      Int64.equal (Q.ordinal occurrence) (Moderator_queue.Entry.ordinal entry)
+      && Option.equal
+           P.Inference_origin.equal
+           (Q.origin occurrence)
+           (Moderator_queue.Entry.origin entry)
+    then Ok ()
+    else invalid "captured queue claim differs from head ordinal or origin"
+  in
+  let%bind captured = Queue_payload.receipt_snapshot event in
+  let%bind captured =
+    match captured with
+    | None -> invalid "captured queue claim has no snapshot payload"
+    | Some captured -> Ok captured
+  in
+  let%bind hashes = Queue_payload.digests [ head; captured ] in
+  match hashes with
+  | [ expected; actual ]
+    when String.equal expected actual
+         && String.equal expected (Moderator_queue.Entry.payload_sha256 entry) -> Ok ()
+  | _ -> invalid "captured queue claim differs from head payload"
+;;
+
+let validate_head t (event : P.Moderator_execution.t) occurrence =
+  let open Result.Let_syntax in
+  let module Q = P.Moderator_execution.Queue_occurrence in
+  let%bind snapshot, head, entry = previous_head t (Q.source occurrence) in
+  let%bind () =
+    if String.equal event.context.checkpoint_sha256 (Moderator_checkpoint.digest snapshot)
+    then Ok ()
+    else invalid "captured queue claim differs from previous checkpoint"
+  in
+  validate_head_payload event occurrence ~head ~entry
+;;
+
+let validate_event_admission t (event : P.Moderator_execution.t) =
+  let open Result.Let_syntax in
+  match event.queue_occurrence with
+  | None -> Ok ()
+  | Some occurrence ->
+    let%bind () = P.Moderator_execution.validate event in
+    let%bind () =
+      match event.status with
+      | Running -> Ok ()
+      | Completed _ | Failed _ | Interrupted _ ->
+        invalid "fresh queue claim must start Running"
+    in
+    let%bind () = same_identity t event.context.session_id event.context.generation in
+    let%bind () =
+      installed_source t (P.Moderator_execution.Queue_occurrence.source occurrence)
+    in
+    let%bind () =
+      if
+        List.exists t.events ~f:(fun old ->
+          Option.exists old.P.Moderator_execution.queue_occurrence ~f:(fun old ->
+            Occurrence_identity.compare
+              (occurrence_identity old)
+              (occurrence_identity occurrence)
+            = 0))
+      then invalid "previous queue occurrence already has an Event receipt"
+      else Ok ()
+    in
+    validate_head t event occurrence
+;;
+
+let validate_disposition incoming (event : P.Moderator_execution.t) occurrence =
+  let open Result.Let_syntax in
+  let module Q = P.Moderator_execution.Queue_occurrence in
+  let%bind metadata = Moderator_checkpoint.queue incoming.moderator in
+  let%bind metadata =
+    match metadata with
+    | Some metadata
+      when P.Run_source.equal (Moderator_queue.source metadata) (Q.source occurrence) ->
+      Ok metadata
+    | Some _ | None -> invalid "captured queue claim lost its source frontier"
+  in
+  let consumed =
+    match event.status, event.retirement with
+    | Completed _, _ | (Failed _ | Interrupted _), Some _ -> true
+    | Running, _ | (Failed _ | Interrupted _), None -> false
+  in
+  let ordinal = Q.ordinal occurrence in
+  let%bind expected =
+    if consumed
+    then
+      if Int64.equal ordinal Int64.max_value
+      then invalid "queue occurrence frontier overflow"
+      else Ok (Int64.succ ordinal)
+    else Ok ordinal
+  in
+  let%bind () =
+    if Int64.equal expected (Moderator_queue.head_ordinal metadata)
+    then Ok ()
+    else invalid "queue Event disposition differs from consumed frontier"
+  in
+  let checkpoint =
+    match event.status, event.retirement with
+    | Completed checkpoint, _ -> Some checkpoint
+    | (Failed _ | Interrupted _), Some retirement -> Some retirement.checkpoint_sha256
+    | Running, _ | (Failed _ | Interrupted _), None -> None
+  in
+  match checkpoint with
+  | None -> Ok ()
+  | Some checkpoint ->
+    let%bind snapshot = Moderator_checkpoint.decode incoming.moderator in
+    (match snapshot with
+     | Some snapshot when String.equal checkpoint (Moderator_checkpoint.digest snapshot)
+       -> Ok ()
+     | Some _ | None ->
+       invalid "queue Event disposition differs from committed checkpoint")
+;;
+
+let validate_event_retention ~previous incoming =
+  let open Result.Let_syntax in
+  let module E = P.Moderator_execution in
+  List.fold_result previous.events ~init:() ~f:(fun () old ->
+    match old.E.queue_occurrence with
+    | None -> Ok ()
+    | Some occurrence ->
+      (match
+         List.find incoming.events ~f:(fun event ->
+           P.Id.Moderator_execution.equal old.context.id event.E.context.id)
+       with
+       | Some event ->
+         if
+           Option.equal
+             E.Queue_occurrence.equal
+             old.queue_occurrence
+             event.queue_occurrence
+         then Ok ()
+         else invalid "retained queue occurrence capture changed"
+       | None ->
+         (match old.status, old.retirement with
+          | Running, _ -> invalid "Running captured queue Event cannot disappear"
+          | (Failed _ | Interrupted _), None ->
+            let source = E.Queue_occurrence.source occurrence in
+            (match previous.runs, incoming.runs with
+             | Some before, Some after
+               when Int64.(
+                      (Run_state.installation after).epoch > source.installation_epoch)
+                    && incoming.generation >= source.generation ->
+               (* Only retained actual installation progression makes the old
+                  terminal occurrence unreclaimable; decoded observer names do not. *)
+               Run_state.validate_transition ~previous:before after
+             | (None | Some _), (None | Some _) ->
+               invalid "unretired captured queue Event still blocks its occurrence")
+          | Completed _, _ | (Failed _ | Interrupted _), Some _ -> Ok ())))
+;;
+
+let validate_event_updates ~previous incoming =
+  let open Result.Let_syntax in
+  let%bind () = validate_event_retention ~previous incoming in
+  List.fold_result incoming.events ~init:() ~f:(fun () event ->
+    let module E = P.Moderator_execution in
+    match
+      List.find previous.events ~f:(fun old ->
+        P.Id.Moderator_execution.equal old.E.context.id event.E.context.id)
+    with
+    | Some old ->
+      let%bind () =
+        if
+          Option.equal
+            E.Queue_occurrence.equal
+            old.queue_occurrence
+            event.queue_occurrence
+        then Ok ()
+        else invalid "queue occurrence cannot be adopted, removed or reassigned"
+      in
+      (match event.queue_occurrence with
+       | None -> Ok ()
+       | Some occurrence ->
+         let%bind () = E.validate_transition ~previous:(Some old) event in
+         let newly_settled =
+           match old.status, event.status with
+           | Running, (Completed _ | Failed _ | Interrupted _) -> true
+           | Running, Running
+           | ( (Completed _ | Failed _ | Interrupted _)
+             , (Running | Completed _ | Failed _ | Interrupted _) ) ->
+             Option.is_none old.retirement && Option.is_some event.retirement
+         in
+         if newly_settled then validate_disposition incoming event occurrence else Ok ())
+    | None ->
+      (match event.queue_occurrence with
+       | None -> Ok ()
+       | Some occurrence ->
+         let%bind () =
+           same_identity incoming event.context.session_id event.context.generation
+         in
+         let%bind () = installed_source incoming (E.Queue_occurrence.source occurrence) in
+         let%bind () =
+           match
+             List.find previous.events ~f:(fun old ->
+               Option.exists old.E.queue_occurrence ~f:(fun old ->
+                 Occurrence_identity.compare
+                   (occurrence_identity old)
+                   (occurrence_identity occurrence)
+                 = 0))
+           with
+           | None -> Ok ()
+           | Some _ -> invalid "previous queue occurrence already has an Event receipt"
+         in
+         (* The final receipt may already be Completed after valid ordered
+            Running/Completed leaves. Compare against ORIGINAL previous facts. *)
+         let%bind () = validate_head previous event occurrence in
+         validate_disposition incoming event occurrence))
+;;
+
+let validate_retained_position t metadata (event : P.Moderator_execution.t) occurrence =
+  let open Result.Let_syntax in
+  let module Q = P.Moderator_execution.Queue_occurrence in
+  let source = Q.source occurrence in
+  let%bind installation =
+    match t.runs with
+    | None -> invalid "captured queue Event lost its installation history"
+    | Some index -> Ok (Run_state.installation index)
+  in
+  let%bind () =
+    if source.generation <= t.generation
+    then Ok ()
+    else invalid "captured queue Event names a future generation"
+  in
+  if Int64.(source.installation_epoch > installation.epoch)
+  then invalid "captured queue Event names a future installation"
+  else if Int64.(source.installation_epoch < installation.epoch)
+  then (
+    (* An actual later retained epoch also covers source removal, where
+       installation.source is None. Do not call captured before this branch.
+       Terminal history needs no invented old queue or renewed permission. *)
+    match event.status with
+    | Running -> invalid "Running captured queue Event outlived its installation"
+    | Completed _ | Failed _ | Interrupted _ -> Ok ())
+  else (
+    let%bind current =
+      Run_source_installation.captured installation ~generation:t.generation
+    in
+    let%bind () =
+      if P.Run_source.equal source current
+      then Ok ()
+      else invalid "captured queue Event differs from its installation identity"
+    in
+    let%bind metadata =
+      match metadata with
+      | Some metadata when P.Run_source.equal source (Moderator_queue.source metadata) ->
+        Ok metadata
+      | Some _ | None -> invalid "captured queue Event lost its current lifetime frontier"
+    in
+    match event.status, event.retirement with
+    | Running, _ | (Failed _ | Interrupted _), None ->
+      let%bind _, head, entry = previous_head t source in
+      (* Unrelated later checkpoint edits can preserve this exact blocked head;
+         final consistency does not compare the old context checkpoint hash. *)
+      validate_head_payload event occurrence ~head ~entry
+    | Completed _, _ | (Failed _ | Interrupted _), Some _ ->
+      if Int64.(Q.ordinal occurrence < Moderator_queue.head_ordinal metadata)
+      then Ok ()
+      else invalid "terminal captured queue Event occurrence was not consumed")
+;;
+
+let validate_captured_events t =
+  let open Result.Let_syntax in
+  let%bind metadata = Moderator_checkpoint.queue t.moderator in
+  let seen = Hash_set.create (module Occurrence_identity) in
+  List.fold_result t.events ~init:() ~f:(fun () event ->
+    match event.P.Moderator_execution.queue_occurrence with
+    | None -> Ok ()
+    | Some occurrence ->
+      let%bind () = P.Moderator_execution.validate event in
+      let%bind () =
+        if
+          P.Id.Session.equal t.session_id event.context.session_id
+          && event.context.generation <= t.generation
+        then Ok ()
+        else
+          invalid "captured queue Event belongs to another session or future generation"
+      in
+      let%bind () =
+        validate_origin
+          t
+          (P.Moderator_execution.Queue_occurrence.source occurrence)
+          (P.Moderator_execution.Queue_occurrence.origin occurrence)
+      in
+      let%bind _ =
+        Invocation_inference_provenance.of_event ~runs:t.runs ~jobs:t.jobs event
+      in
+      let%bind () = validate_retained_position t metadata event occurrence in
+      let identity = occurrence_identity occurrence in
+      if Hash_set.mem seen identity
+      then invalid "queue occurrence has multiple Event receipts"
+      else (
+        Hash_set.add seen identity;
+        Ok ()))
+;;
+
 let validate t =
   let open Result.Let_syntax in
+  let%bind () = validate_captured_events t in
   let%bind () =
     List.fold_result t.schedules ~init:() ~f:(fun () schedule ->
       validate_schedule t schedule)
@@ -241,6 +598,7 @@ let rotated ~previous incoming =
 
 let validate_transition ~previous incoming =
   let open Result.Let_syntax in
+  let%bind () = validate_event_updates ~previous incoming in
   let%bind () =
     List.fold_result previous.schedules ~init:() ~f:(fun () old ->
       match old.P.Schedule.inference_provenance with
@@ -324,4 +682,11 @@ let validate_transition ~previous incoming =
   | Some _, (Some _ | None) ->
     invalid
       "captured queue lifetime reset requires explicit source/reset carrier handling"
+;;
+
+let validate_encoded_event raw =
+  match Document_schema.Json.field raw ~name:"queue_occurrence" with
+  | Absent | Null -> Ok ()
+  | Value capture ->
+    P.Moderator_execution.Queue_occurrence.validate_encoded_capacity capture
 ;;

@@ -127,6 +127,87 @@ module Decision = struct
   ;;
 end
 
+module Queue_occurrence = struct
+  type t =
+    { source : Run_source.t
+    ; ordinal : int64
+    ; origin : Inference_origin.t option
+    }
+  [@@deriving equal]
+
+  let source t = t.source
+  let ordinal t = t.ordinal
+  let origin t = t.origin
+
+  let validate t =
+    let open Result.Let_syntax in
+    let%bind () = Run_source.validate t.source in
+    let%bind () =
+      if Int64.(t.ordinal < 0L)
+      then invalid "negative queue occurrence ordinal"
+      else Ok ()
+    in
+    match t.origin with
+    | None -> Ok ()
+    | Some origin -> Inference_origin.validate origin
+  ;;
+
+  let create ~source ~ordinal ~origin =
+    let t = { source; ordinal; origin } in
+    Result.map (validate t) ~f:(fun () -> t)
+  ;;
+
+  let to_json t =
+    `Object
+      [ "source", Run_source.to_json t.source
+      ; "ordinal", `String (Int64.to_string t.ordinal)
+      ; "origin", Option.value_map t.origin ~default:`Null ~f:Inference_origin.to_json
+      ]
+  ;;
+
+  let validate_encoded_capacity json = validate_json ~max_bytes:4096 ~max_depth:8 json
+
+  let of_json json =
+    let open Result.Let_syntax in
+    let%bind () = validate_encoded_capacity json in
+    let%bind fields = Json_codec.fields json in
+    let%bind () = closed fields [ "source"; "ordinal"; "origin" ] in
+    let%bind source =
+      Json_codec.required_as fields "source" (fun json ->
+        let%bind fields = Json_codec.fields json in
+        let%bind () =
+          closed
+            fields
+            [ "script_id"; "source_sha256"; "generation"; "installation_epoch" ]
+        in
+        Run_source.of_json json)
+    in
+    let%bind ordinal =
+      Json_codec.required_as fields "ordinal" (function
+        | `String encoded when String.length encoded <= 19 ->
+          (match Int64.of_string_opt encoded with
+           | Some ordinal when String.equal encoded (Int64.to_string ordinal) ->
+             Ok ordinal
+           | Some _ | None -> invalid "invalid queue occurrence ordinal")
+        | _ -> invalid "queue occurrence ordinal must be a decimal string")
+    in
+    let%bind origin =
+      Json_codec.required_as fields "origin" (function
+        | `Null -> Ok None
+        | json -> Inference_origin.of_json json |> Result.map ~f:Option.some)
+    in
+    create ~source ~ordinal ~origin
+  ;;
+
+  let sexp_of_t t = Jsonaf.sexp_of_t (to_json t)
+
+  let t_of_sexp sexp =
+    match of_json (Jsonaf.t_of_sexp sexp) with
+    | Ok t -> t
+    | Error error -> Sexplib.Conv.of_sexp_error error.Protocol_error.message sexp
+  ;;
+end
+
 type t =
   { context : context
   ; status : status
@@ -136,6 +217,7 @@ type t =
   ; retirement : retirement option [@sexp.option]
   ; delegation : delegation option [@sexp.option]
   ; decision : Decision.t option [@sexp.option]
+  ; queue_occurrence : Queue_occurrence.t option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
@@ -180,6 +262,22 @@ let validate t =
   let%bind () = text ~name:"moderator script ID" ~max:256 c.source.script_id in
   let%bind () = digest c.source.source_sha256 in
   let%bind () = digest c.checkpoint_sha256 in
+  let%bind () =
+    match t.queue_occurrence with
+    | None -> Ok ()
+    | Some occurrence ->
+      let%bind () = Queue_occurrence.validate occurrence in
+      let source = Queue_occurrence.source occurrence in
+      (match c.phase, c.job, t.delegation with
+       | Internal_event, None, None ->
+         if
+           Invocation.equal_observer c.source source.observer
+           && Int.equal c.generation source.generation
+         then Ok ()
+         else invalid "queued event source differs from its consumed occurrence"
+       | _ ->
+         invalid "queue occurrence requires an internal event without Job or delegation")
+  in
   let%bind () =
     match t.delegation, c.phase, c.operation_id, c.job with
     | None, _, _, _ -> Ok ()
@@ -270,7 +368,7 @@ let validate t =
   | _ -> invalid "runtime intent requires a completed event and matching requests"
 ;;
 
-let create_record ?delegation context =
+let create_record ?delegation ?queue_occurrence context =
   let t =
     { context
     ; status = Running
@@ -280,6 +378,7 @@ let create_record ?delegation context =
     ; retirement = None
     ; delegation
     ; decision = None
+    ; queue_occurrence
     }
   in
   Result.map (validate t) ~f:(fun () -> t)
@@ -287,6 +386,7 @@ let create_record ?delegation context =
 
 let create context = create_record context
 let create_delegated ~delegation context = create_record ~delegation context
+let create_queued ~queue_occurrence context = create_record ~queue_occurrence context
 
 let validate_transition ~previous next =
   let open Result.Let_syntax in
@@ -300,7 +400,12 @@ let validate_transition ~previous next =
     let%bind () = validate previous in
     if
       (not (equal_context previous.context next.context))
-      || not (Option.equal equal_delegation previous.delegation next.delegation)
+      || (not (Option.equal equal_delegation previous.delegation next.delegation))
+      || not
+           (Option.equal
+              Queue_occurrence.equal
+              previous.queue_occurrence
+              next.queue_occurrence)
     then failure Conflict "event execution context is immutable"
     else if equal previous next
     then Ok ()
@@ -457,10 +562,11 @@ let to_json t =
   `Object
     ([ ( "schema_version"
        , `Number
-           (match t.delegation, c.job with
-            | Some _, _ -> "4"
-            | None, None -> "2"
-            | None, Some _ -> "3") )
+           (match t.queue_occurrence, t.delegation, c.job with
+            | Some _, _, _ -> "5"
+            | None, Some _, _ -> "4"
+            | None, None, None -> "2"
+            | None, None, Some _ -> "3") )
      ; "id", Id.Moderator_execution.to_json c.id
      ; "session_id", Id.Session.to_json c.session_id
      ; "generation", `Number (Int.to_string c.generation)
@@ -491,6 +597,7 @@ let to_json t =
          ; "admission_sha256", `String delegation.admission_sha256
          ])
      @ optional "decision" t.decision Decision.to_json
+     @ optional "queue_occurrence" t.queue_occurrence Queue_occurrence.to_json
      @ optional "intent" t.intent intent_to_json
      @ optional "compaction_operation_id" t.compaction_operation_id Id.Operation.to_json
      @ optional "retirement" t.retirement (fun retired ->
@@ -587,10 +694,11 @@ let of_json json =
       ; "retirement"
       ; "delegation"
       ; "decision"
+      ; "queue_occurrence"
       ]
   in
   let%bind version =
-    Json_codec.required_as fields "schema_version" (Json_codec.bounded_int ~min:1 ~max:4)
+    Json_codec.required_as fields "schema_version" (Json_codec.bounded_int ~min:1 ~max:5)
   in
   let%bind () =
     if
@@ -599,6 +707,16 @@ let of_json json =
           || Option.is_some (Json_codec.optional fields "decision"))
     then invalid "delegated moderation requires schema version 4"
     else Ok ()
+  in
+  let%bind queue_occurrence =
+    if version = 5
+    then
+      Json_codec.required_as fields "queue_occurrence" Queue_occurrence.of_json
+      |> Result.map ~f:Option.some
+    else (
+      match Json_codec.optional fields "queue_occurrence" with
+      | None -> Ok None
+      | Some _ -> invalid "queue occurrence requires schema version 5")
   in
   let%bind delegation =
     Json_codec.optional_as fields "delegation" (fun json ->
@@ -714,6 +832,7 @@ let of_json json =
     ; retirement
     ; delegation
     ; decision
+    ; queue_occurrence
     }
   in
   let%map () = validate t in

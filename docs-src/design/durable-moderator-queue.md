@@ -84,3 +84,59 @@ The implementation separates pure data from actual owners:
 - `Agent_protocol.Schedule_provenance` retains Schedule source/origin facts. Its
   protocol codec grants no execution permission; final carrier validation resolves
   any named Run against its actual retained Schedule occurrence.
+
+
+## Consumed occurrence receipts
+
+A queued moderator Event can retain a `queue_occurrence` capture: the original
+source installation, nonnegative ordinal and nullable original inference origin.
+The physical `operation_id` remains the operation that drained the queue. If
+operation A drains an occurrence originally attributed to Run B, the completed
+Event and its emitted child retain B. Explicitly unbound stays unbound, and an
+explicitly unavailable captured origin stays unavailable. Neither case is
+reclassified from the drainer. A capture does not create Run-owned work, grant a
+live callback borrow or authorize a Model request.
+
+Positive captures use Event receipt wire version 5. That version requires a
+capture; missing or null rejects. Older receipt encodings remain absent and keep
+their existing causal lookup. A capture cannot be added to an existing receipt,
+removed or reassigned. Its structured universal child preserves compatible
+unfamiliar fields, bounded together with known fields to 4 KiB and depth 8.
+State and journal deltas retain the receipt version, so an older reader cannot
+silently discard the new capture and fall back to the physical drainer.
+
+Fresh Running admission checks the exact previous source, head ordinal, nullable
+origin, payload and known checkpoint digest. If the previous queue has no
+metadata, structural bootstrap numbers only its actual old values; all their
+original captures remain unavailable. Incoming fields cannot certify their own
+origin. Ordered completion saves the completed receipt, consumed frontier and
+resulting checkpoint together; equal reemission receives a fresh ordinal. The
+complete before/after validators accept this ordered Running-to-Completed batch,
+while standalone snapshot validation also rejects contradictory dispositions.
+
+In the current source lifetime, a Running or unretired failed/interrupted receipt
+must still identify the actual head and its exact origin and payload. A completed
+or retired receipt must precede the current head. Later checkpoint edits and
+consumption do not require an old receipt's checkpoint digest to equal the new
+checkpoint. A strictly later retained installation epoch permits truthful
+terminal history, including after source removal; a Running receipt cannot
+survive as live work from an older installation. Future epochs and same-epoch
+source or generation mismatches reject. A named Run must remain retained in the
+same session and exact original source lifetime, even after it becomes terminal.
+
+A known Running receipt cannot disappear as implicit termination. An unretired
+failure cannot be erased while its occurrence is still reclaimable. Terminal
+history may follow ordinary retention once a later actual installation makes the
+old occurrence unavailable, or once completion/retirement has consumed it. Queue
+producer references still prevent pruning a referenced receipt. These rules
+apply to whole-state replacement and document adoption as well as ordinary
+ordered deltas; protected unfamiliar fields retain their existing safeguards.
+
+Disk qualification uses the existing physical journal, commit writer and snapshot
+recovery adapters, including save rejection and an acknowledged commit whose
+response is lost. Those tests qualify durable facts and exact preservation.
+Actual opaque Manager claim stamping, live emitted-child custody, current
+authority and provider execution remain separate integration gates. Reopening
+these receipts restores evidence without reviving a permission or replaying an
+effect. The existing positive source/reset metadata pause remains in force until
+the live retirement integration handles it explicitly.

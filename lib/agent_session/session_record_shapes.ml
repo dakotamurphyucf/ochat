@@ -473,6 +473,9 @@ let moderator_execution =
           ; "admission_sha256"
           ] )
     ; "decision", decision
+    ; ( "queue_occurrence"
+      , o [ "source", Run_record_shapes.source; "ordinal", v; "origin", inference_origin ]
+      )
     ; ( "intent"
       , tag
           "kind"

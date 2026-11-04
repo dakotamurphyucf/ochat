@@ -1118,7 +1118,31 @@ let validate_raw_queues document =
            | Absent | Null -> None)
         | Value _ | Absent | Null -> None
       in
-      Moderator_checkpoint.validate_encoded_capacity moderator |> X.document_result)
+      let%bind () =
+        Moderator_checkpoint.validate_encoded_capacity moderator |> X.document_result
+      in
+      let receipts =
+        match D.Json.field change ~name:"kind" with
+        | Value
+            (`String ("moderator_execution_changed" | "moderator_execution_reconciled"))
+          ->
+          (match D.Json.field change ~name:"value" with
+           | Value raw -> [ raw ]
+           | Absent | Null -> [])
+        | Value (`String "created") ->
+          (match D.Json.field change ~name:"state" with
+           | Value state ->
+             (match D.Json.field state ~name:"payload" with
+              | Value payload ->
+                (match D.Json.field payload ~name:"moderator_executions" with
+                 | Value (`Array receipts) -> receipts
+                 | Value _ | Absent | Null -> [])
+              | Absent | Null -> [])
+           | Absent | Null -> [])
+        | Value _ | Absent | Null -> []
+      in
+      List.fold_result receipts ~init:() ~f:(fun () receipt ->
+        Queue_provenance_validation.validate_encoded_event receipt |> X.document_result))
   | Value _ | Absent | Null -> Ok ()
 ;;
 

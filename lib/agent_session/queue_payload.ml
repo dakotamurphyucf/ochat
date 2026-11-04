@@ -72,3 +72,21 @@ let digests queue =
       Digestif.SHA256.digest_string bytes |> Digestif.SHA256.to_hex))
   |> Result.all
 ;;
+
+let encoded_event event = `Object [ "snapshot", S.to_jsonaf event ]
+
+let receipt_snapshot (receipt : P.Moderator_execution.t) =
+  let open Result.Let_syntax in
+  match receipt.context.phase, receipt.context.event with
+  | Internal_event, `Object fields ->
+    (match List.Assoc.find fields ~equal:String.equal "snapshot" with
+     | Some json ->
+       let%bind event =
+         Session.Snapshot.of_jsonaf json
+         |> Result.map_error ~f:(fun error ->
+           P.Error.invalid_request ("invalid captured queued event snapshot: " ^ error))
+       in
+       Ok (Some event)
+     | _ -> Ok None)
+  | _ -> Ok None
+;;

@@ -21,12 +21,12 @@ val of_job
   :  Agent_protocol.Job.t
   -> (Agent_protocol.Inference_origin.t, Agent_protocol.Error.t) result
 
-(** Select only this exact actual event's Run, operation or acknowledged Job
-    ancestry. Positive retained queued-event evidence takes precedence over its
-    physical drainer operation and remains named after terminal disposition.
-    This is immutable evidence, not permission to execute. A genuine parent Job
-    may have unavailable evidence; native admission
-    preserves that absence. The caller authenticates its registered event borrow. *)
+(** Select this exact event's immutable captured origin before its physical
+    drainer. Explicitly unavailable captured attribution stays unavailable;
+    contradictory positive retained Event ownership rejects. Receipts without
+    a capture keep causal-first Run/operation/acknowledged Job lookup. Genuine
+    historical parents may have unavailable evidence. The caller must separately
+    authenticate the registered event borrow; this lookup grants no permission. *)
 val of_event
   :  runs:Run_state.t option
   -> jobs:Agent_protocol.Job.t list
