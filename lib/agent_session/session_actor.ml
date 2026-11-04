@@ -1091,9 +1091,7 @@ and compaction_outcome =
 
 type packed =
   | Pack :
-      Document_schema.Document.t option
-      * 'a request
-      * ('a, Agent_protocol.Error.t) result Eio.Promise.u
+      Document_schema.Document.t option * 'a request * 'a Actor_reply.t Eio.Promise.u
       -> packed
 
 type permission_waiter =
@@ -1357,7 +1355,7 @@ let call t ?(priority = Mailbox.Normal) ?command_audit request =
   let%bind () =
     Mailbox.push t.mailbox ~priority (Pack (command_audit, request, resolver))
   in
-  Eio.Promise.await promise
+  Actor_reply.await promise
 ;;
 
 let publish_durable t events =
@@ -9578,7 +9576,7 @@ let schedule_permission_expiry t permission timeout_seconds fallback =
         with
         | Error _ -> ()
         | Ok () ->
-          ignore (Eio.Promise.await promise : (unit, Agent_protocol.Error.t) result)))
+          ignore (Actor_reply.await promise : (unit, Agent_protocol.Error.t) result)))
 ;;
 
 let open_permission t (permission : Agent_protocol.Permission.t) timeout_seconds fallback =
@@ -12437,7 +12435,7 @@ let schedule_owner_expiry_at t generation deadline =
       match Mailbox.push t.mailbox ~priority:Priority packed with
       | Error _ -> ()
       | Ok () ->
-        ignore (Eio.Promise.await promise : (unit, Agent_protocol.Error.t) result)))
+        ignore (Actor_reply.await promise : (unit, Agent_protocol.Error.t) result)))
 ;;
 
 let schedule_owner_lease t lease =
@@ -13123,6 +13121,29 @@ let observe_recurrence_child t reservation =
     { association = child_association; controller; check_current }
   in
   proof
+;;
+
+(* Nonyielding owner-epoch retirement, shared by orderly Shutdown and exceptional
+   owner exit. This does not persist, invoke callbacks, cancel/join work or claim
+   rollback of already committed effects. *)
+let retire_execution_custody t =
+  retire_instruction_continuations t;
+  Option.iter t.operation_agent_custody ~f:(fun (_, custody) ->
+    retire_agent_custody custody);
+  List.iter t.pending_agent_custody ~f:(fun (_, custody) -> retire_agent_custody custody);
+  List.iter t.job_agent_custody ~f:(fun (_, custody) -> retire_agent_custody custody);
+  Option.iter t.initialization_scope ~f:(fun scope ->
+    Option.iter scope.agent_custody ~f:retire_agent_custody);
+  List.iter t.invocation_executions ~f:(fun execution ->
+    Atomic.set execution.authority_live false);
+  List.iter t.job_scopes ~f:(fun scope -> Atomic.set scope.authority_live false);
+  Option.iter t.moderator_borrow ~f:(fun borrow -> Atomic.set borrow.authority_live false);
+  Option.iter t.queued_event_borrow ~f:(fun borrow ->
+    Option.iter borrow.agent_custody ~f:retire_agent_custody;
+    borrow.callback_active <- false;
+    Atomic.set borrow.authority_live false);
+  close_run_preparation t;
+  t.initialization_scope <- None
 ;;
 
 let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
@@ -14488,18 +14509,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       finish_inference_owner ?run_preparation t owner
     | Reconcile_inference_recovery -> reconcile_inference_recovery t
     | Shutdown ->
-      retire_instruction_continuations t;
-      Option.iter t.operation_agent_custody ~f:(fun (_, custody) ->
-        retire_agent_custody custody);
-      List.iter t.pending_agent_custody ~f:(fun (_, custody) ->
-        retire_agent_custody custody);
-      List.iter t.job_agent_custody ~f:(fun (_, custody) -> retire_agent_custody custody);
-      Option.iter t.initialization_scope ~f:(fun scope ->
-        Option.iter scope.agent_custody ~f:retire_agent_custody);
-      List.iter t.invocation_executions ~f:(fun execution ->
-        Atomic.set execution.authority_live false);
-      close_run_preparation t;
-      t.initialization_scope <- None;
+      retire_execution_custody t;
       abort_all_staged_work t;
       Option.iter t.owner_timer_cancel ~f:(fun resolver ->
         Eio.Promise.resolve resolver ());
@@ -14532,7 +14542,7 @@ let rec reject_pending mailbox =
   match Mailbox.pop mailbox with
   | None -> ()
   | Some (Pack (_, _, resolver)) ->
-    Eio.Promise.resolve
+    Actor_reply.resolve
       resolver
       (Error
          (Agent_protocol.Error.create
@@ -14543,18 +14553,30 @@ let rec reject_pending mailbox =
     reject_pending mailbox
 ;;
 
+let close_owner t =
+  t.stopped <- true;
+  t.command_audit <- None;
+  retire_execution_custody t;
+  Mailbox.close t.mailbox
+;;
+
 let rec run t =
   match Mailbox.pop t.mailbox with
   | None -> ()
   | Some (Pack (command_audit, request, resolver)) ->
     t.command_audit <- command_audit;
-    Eio.Promise.resolve resolver (handle t request);
-    t.command_audit <- None;
-    if t.stopped
-    then (
-      Mailbox.close t.mailbox;
-      reject_pending t.mailbox)
-    else run t
+    (match handle t request with
+     | result ->
+       t.command_audit <- None;
+       if t.stopped then Mailbox.close t.mailbox;
+       Actor_reply.resolve resolver result;
+       if not t.stopped then run t
+     | exception exn ->
+       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+       Eio.Cancel.protect (fun () ->
+         close_owner t;
+         Actor_reply.resolve_exception resolver exn backtrace);
+       Exn.raise_with_original_backtrace exn backtrace)
 ;;
 
 let create_with_owner_lease_duration
@@ -14655,7 +14677,15 @@ let create_with_owner_lease_duration
      this caller's lexical ChatML frame would poison them after creation ends. *)
   Chatml_execution.without_ambient_context (fun () ->
     Eio.Fiber.fork ~sw (fun () ->
-      Exn.protect ~f:(fun () -> run t) ~finally:(fun () -> Eio.Promise.resolve finish ())));
+      Exn.protect
+        ~f:(fun () -> run t)
+        ~finally:(fun () ->
+          Eio.Cancel.protect (fun () ->
+            Exn.protect
+              ~f:(fun () ->
+                close_owner t;
+                reject_pending t.mailbox)
+              ~finally:(fun () -> Eio.Promise.resolve finish ())))));
   Option.iter (owner_attachment t) ~f:(fun attachment ->
     Option.iter attachment.owner_lease ~f:(schedule_owner_lease t));
   t

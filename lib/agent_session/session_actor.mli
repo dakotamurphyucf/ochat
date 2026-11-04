@@ -1,6 +1,14 @@
 open! Core
 
-(** Single-owner session actor shared by embedded and daemon execution. *)
+(** Single-owner session actor shared by embedded and daemon execution.
+
+    Requests return typed domain failures. An unexpected owner exception or
+    cancellation instead terminates the actor and is re-raised by its in-flight
+    caller with the original backtrace; it also propagates to the owning switch.
+    Queued and later calls return Server_shutting_down. The owner closes its
+    mailbox and retires process-local execution proofs before releasing callers.
+    A failure after persistence may already have committed the request; an
+    exceptional reply neither rolls it back nor permits automatic replay. *)
 
 type persistence =
   { commit :

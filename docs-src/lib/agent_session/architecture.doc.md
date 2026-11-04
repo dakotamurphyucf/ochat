@@ -2,6 +2,17 @@
 
 Single-writer session actors, immutable prompt/workspace revisions, runtime builders, workers, subscriptions, quotas and transitions. Commit state through the actor; keep blocking work outside it.
 
+An unexpected request-handler exception terminates the actor. Its in-flight
+caller receives the original exception and backtrace, while queued and later
+requests receive `Server_shutting_down`. Cancellation of the actor owner follows
+the same termination boundary; cancelling an individual waiting caller does not
+terminate the actor. Owner exit closes the mailbox and retires process-local
+execution proofs, including retained initialization proofs. This cleanup does
+not persist new state or run effectful shutdown callbacks. A publication failure
+after a successful commit leaves that commit intact: an exceptional reply is not
+rollback evidence or permission to replay the request. Ordinary `shutdown`
+retains its existing cleanup and return behavior.
+
 `Administration` constructs detached reset/rebuild/upgrade candidates. Commit
 prepared candidates through `Session_actor.commit_administration`, which rechecks
 authority/revision/lifecycle and retains the previous state before replacement.
