@@ -650,6 +650,7 @@ type queued_event_borrow =
   ; authority_live : bool Atomic.t
   ; mutable run_actions : Run_action_service.t option
   ; mutable committed : bool
+  ; mutable stop_retirement : Agent_protocol.Moderator_execution.t option
   ; mutable cancel : (unit -> unit) option
   ; mutable cancel_requested : bool
   }
@@ -2266,6 +2267,190 @@ let invalidate_goal_inference_policy ?admission_hold t (current : Session_state.
         if changed then Inference_owner.Registration.invalidate_policy registration)))
 ;;
 
+(* Stop retires only the actual constructor callback already held by this actor.
+   This is factual terminal DATA, not an initialization acknowledgement or an
+   assertion that an external native effect was rolled back. *)
+module Constructor_stop_acknowledgement = struct
+  type actor = t
+
+  module Child = struct
+    type t =
+      { execution : invocation_execution
+      ; previous : Agent_protocol.Invocation.t
+      ; cancelled : Agent_protocol.Invocation.t option
+      }
+  end
+
+  type t =
+    { constructor : Initialization_scope.t
+    ; callback : Callback_scope.t
+    ; borrow : queued_event_borrow
+    ; previous : Agent_protocol.Moderator_execution.t
+    ; interrupted : Agent_protocol.Moderator_execution.t
+    ; children : Child.t list
+    ; previous_executions : invocation_execution list
+    ; revision : int64
+    }
+
+  let owned_children (actor : actor) borrow =
+    List.filter actor.invocation_executions ~f:(fun execution ->
+      match execution.owner with
+      | Event_moderator owner -> phys_equal owner borrow
+      | Foreground _ | Invocation_moderator _ | Background_job _ -> false)
+  ;;
+
+  let check t ~(actor : actor) =
+    let open Result.Let_syntax in
+    let%bind _, source = Moderator_source_installation.capture actor.state in
+    let%bind () =
+      if
+        phys_equal actor.initialization_owner t.constructor.owner
+        && Option.exists actor.initialization_scope ~f:(phys_equal t.constructor)
+        && Option.exists actor.legacy_callback_scope ~f:(phys_equal t.callback)
+        && Option.exists t.callback.constructor_scope ~f:(phys_equal t.constructor)
+        && phys_equal t.callback.borrow t.borrow
+        && Option.exists actor.queued_event_borrow ~f:(phys_equal t.borrow)
+        && actor.idle_moderator_borrowed
+        && phys_equal actor.invocation_executions t.previous_executions
+        && (not t.borrow.committed)
+        && Option.is_none t.borrow.stop_retirement
+        && (match t.constructor.callback with
+            | Claimed id ->
+              Agent_protocol.Id.Moderator_execution.equal id t.previous.context.id
+            | Unclaimed | Settled _ -> false)
+        && Agent_protocol.Id.Session.equal
+             actor.state.identity.session_id
+             t.previous.context.session_id
+        && Int.equal actor.state.identity.generation t.previous.context.generation
+        && Agent_protocol.Moderator_execution.equal_context
+             t.previous.context
+             t.borrow.receipt.context
+        && Agent_protocol.Invocation.equal_observer
+             t.previous.context.source
+             t.callback.source.observer
+        && Agent_protocol.Run_source.equal source t.callback.source
+        && List.exists
+             actor.state.moderator_executions
+             ~f:(Agent_protocol.Moderator_execution.equal t.previous)
+        && List.equal
+             phys_equal
+             (owned_children actor t.borrow)
+             (List.map t.children ~f:(fun child -> child.Child.execution))
+        && Int64.equal actor.state.counters.revision t.revision
+      then Ok ()
+      else Error (error Conflict "constructor Stop no longer owns its exact receipt")
+    in
+    if
+      List.for_all t.children ~f:(fun child ->
+        Agent_protocol.Invocation.equal_context
+          child.Child.previous.context
+          child.execution.dispatched.context
+        && Option.equal
+             Agent_protocol.Id.Moderator_execution.equal
+             child.previous.parent_event
+             child.execution.dispatched.parent_event
+        && List.exists
+             actor.state.invocations
+             ~f:(Agent_protocol.Invocation.equal child.previous))
+    then Ok ()
+    else Error (error Conflict "constructor Stop native outcome changed before commit")
+  ;;
+
+  let prepare (actor : actor) =
+    let open Result.Let_syntax in
+    match
+      actor.initialization_scope, actor.legacy_callback_scope, actor.queued_event_borrow
+    with
+    | Some constructor, Some callback, Some borrow
+      when Option.exists callback.constructor_scope ~f:(phys_equal constructor)
+           && phys_equal callback.borrow borrow
+           && (not borrow.committed)
+           && Option.is_none borrow.stop_retirement ->
+      let%bind previous =
+        List.find actor.state.moderator_executions ~f:(fun receipt ->
+          Agent_protocol.Id.Moderator_execution.equal
+            receipt.context.id
+            borrow.receipt.context.id)
+        |> Result.of_option
+             ~error:(error Conflict "constructor Stop receipt is unavailable")
+      in
+      (match previous.status with
+       | Completed _ | Failed _ | Interrupted _ -> Ok None
+       | Running ->
+         let%bind interrupted =
+           Agent_protocol.Moderator_execution.interrupt
+             previous
+             ~reason:"constructor retired by Stop before checkpoint acknowledgement"
+         in
+         let%bind children =
+           owned_children actor borrow
+           |> List.map ~f:(fun execution ->
+             let%bind previous =
+               List.find actor.state.invocations ~f:(fun invocation ->
+                 Agent_protocol.Id.Invocation.equal
+                   invocation.context.id
+                   execution.dispatched.context.id)
+               |> Result.of_option
+                    ~error:(error Conflict "constructor Stop native row is unavailable")
+             in
+             let%map cancelled =
+               match previous.status with
+               | Resolved _ | Published _ -> Ok None
+               | Admitted | Dispatching ->
+                 Agent_protocol.Invocation.cancel
+                   previous
+                   ~reason:
+                     "constructor retired by Stop before native result acknowledgement"
+                 |> Result.map ~f:Option.some
+             in
+             { Child.execution; previous; cancelled })
+           |> Result.all
+         in
+         let acknowledgement =
+           { constructor
+           ; callback
+           ; borrow
+           ; previous
+           ; interrupted
+           ; children
+           ; previous_executions = actor.invocation_executions
+           ; revision = actor.state.counters.revision
+           }
+         in
+         let%map () = check acknowledgement ~actor in
+         Some acknowledgement)
+    | (Some _ | None), (Some _ | None), (Some _ | None) -> Ok None
+  ;;
+
+  let deltas t =
+    List.filter_map t.children ~f:(fun child ->
+      Option.map child.Child.cancelled ~f:(fun invocation ->
+        Session_delta.Invocation_changed invocation))
+    @ [ Session_delta.Moderator_execution_changed t.interrupted ]
+  ;;
+
+  let install t ~(actor : actor) =
+    (* Already validated before the sole writer. Assignment/retirement only;
+       never mark a stopped callback as a successful Manager checkpoint. *)
+    t.borrow.stop_retirement <- Some t.interrupted;
+    t.borrow.callback_active <- false;
+    Atomic.set t.borrow.authority_live false;
+    List.iter t.children ~f:(fun child ->
+      child.Child.execution.accepts_children <- false;
+      Atomic.set child.execution.authority_live false);
+    (* Keep these exact closed execution cells until the existing callback unwind
+       aborts their Invocation-owned provisional work and releases the borrow.
+       Graceful Stop does not synchronously cancel the external call. The unwind
+       never persists another outcome after [stop_retirement]. *)
+    t.constructor.callback <- Settled t.interrupted.context.id;
+    retire_agent_admission t.constructor.agent_admission;
+    (match t.callback.custody with
+     | Unavailable -> ()
+     | Admitted admission -> retire_agent_admission admission);
+    actor.initialization_scope <- None
+  ;;
+end
+
 let install_committed_transition
       ?queued_claim_acknowledgement
       ?authored_run_acknowledgement
@@ -2275,6 +2460,7 @@ let install_committed_transition
       ?run_preparation
       ?job_custody
       ?initialization_acknowledgement
+      ?constructor_stop_acknowledgement
       ?admission_hold
       t
       (transition : Session_transition.t)
@@ -2300,6 +2486,9 @@ let install_committed_transition
   t.command_audit <- None;
   invalidate_goal_inference_policy ?admission_hold t transition.state;
   t.state <- transition.state;
+  Option.iter
+    constructor_stop_acknowledgement
+    ~f:(Constructor_stop_acknowledgement.install ~actor:t);
   Option.iter authored_run_acknowledgement ~f:(fun acknowledgement ->
     let authorities, lifecycle = Authored_run_acknowledgement.install acknowledgement in
     t.run_authorities <- authorities;
@@ -2435,6 +2624,7 @@ let install
       ?queued_claim_acknowledgement
       ?authored_run_acknowledgement
       ?initialization_acknowledgement
+      ?constructor_stop_acknowledgement
       ?check_before_commit
       ?admission_hold
       ?retire_legacy_custody
@@ -2457,6 +2647,7 @@ let install
     ?queued_claim_acknowledgement
     ?authored_run_acknowledgement
     ?initialization_acknowledgement
+    ?constructor_stop_acknowledgement
     ?admission_hold
     ?retire_legacy_custody
     ?run_preparation
@@ -2566,6 +2757,7 @@ let check_constructor_job_handoff
 
 let transition
       ?check_before_commit
+      ?constructor_stop_acknowledgement
       ?admission_hold
       ?retire_legacy_custody
       ?run_preparation
@@ -2584,6 +2776,7 @@ let transition
       let%map () =
         install
           ?check_before_commit
+          ?constructor_stop_acknowledgement
           ?admission_hold
           ?retire_legacy_custody
           ?run_preparation
@@ -3929,6 +4122,9 @@ let stop_transition
       payloads
   =
   let open Result.Let_syntax in
+  let%bind constructor_stop_acknowledgement =
+    Constructor_stop_acknowledgement.prepare t
+  in
   let%bind discarded =
     Observation_follow_up.discard t.state.invocations ~reason:"session stopped"
   in
@@ -3945,6 +4141,12 @@ let stop_transition
   in
   let%map result =
     transition
+      ?constructor_stop_acknowledgement
+      ~check_before_commit:(fun () ->
+        Option.value_map
+          constructor_stop_acknowledgement
+          ~default:(Ok ())
+          ~f:(Constructor_stop_acknowledgement.check ~actor:t))
       ~retire_legacy_custody:()
       ~job_custody
       t
@@ -3960,6 +4162,10 @@ let stop_transition
             @ Option.to_list
                 (Option.map parent_stop_epoch ~f:(fun epoch ->
                    Session_delta.Parent_stop_epoch_changed epoch))
+            @ Option.value_map
+                constructor_stop_acknowledgement
+                ~default:[]
+                ~f:Constructor_stop_acknowledgement.deltas
             @ List.map discarded ~f:Observation_follow_up.delta
             @ List.map events ~f:Observation_follow_up.event_delta
             @ List.map permissions ~f:(fun permission ->
@@ -4049,6 +4255,10 @@ let stop_internal ?parent_stop_epoch ?managed_receipt t mode =
       | Stopped, Stopped
         when (not recurrence_paused)
              && (not t.state.pending_initial_start)
+             && Option.for_all t.initialization_scope ~f:(fun scope ->
+               match scope.Initialization_scope.callback with
+               | Unclaimed | Settled _ -> true
+               | Claimed _ -> false)
              && Option.is_none parent_stop_epoch
              && Option.is_none managed_receipt
              && List.is_empty (stopped_jobs t mode)
@@ -6102,6 +6312,7 @@ let claim_queued_event
       ; callback_active = true
       ; authority_live = Atomic.make true
       ; committed = false
+      ; stop_retirement = None
       ; cancel = None
       ; cancel_requested = false
       }
@@ -6281,6 +6492,7 @@ let claim_ordinary_event t id operation_id snapshot event =
           ; callback_active = true
           ; authority_live = Atomic.make true
           ; committed = false
+          ; stop_retirement = None
           ; cancel = None
           ; cancel_requested = false
           }
@@ -6348,6 +6560,7 @@ let claim_delegated_event t id delegation snapshot event =
           ; callback_active = true
           ; authority_live = Atomic.make true
           ; committed = false
+          ; stop_retirement = None
           ; cancel = None
           ; cancel_requested = false
           }
@@ -6390,6 +6603,7 @@ let claim_job_event t scope id snapshot event =
     ; callback_active = true
     ; authority_live = Atomic.make true
     ; committed = false
+    ; stop_retirement = None
     ; cancel = None
     ; cancel_requested = false
     }
@@ -6580,6 +6794,7 @@ let claim_initialization_callback
         ; callback_active = true
         ; authority_live = Atomic.make true
         ; committed = false
+        ; stop_retirement = None
         ; cancel = None
         ; cancel_requested = false
         }
@@ -6737,6 +6952,7 @@ let claim_legacy_boundary t manager callback parent event =
             ; authority_live = Atomic.make true
             ; run_actions = None
             ; committed = false
+            ; stop_retirement = None
             ; cancel = None
             ; cancel_requested = false
             }
@@ -6875,6 +7091,7 @@ let claim_legacy_head t manager callback operation_id =
           ; callback_active = true
           ; authority_live = Atomic.make true
           ; committed = false
+          ; stop_retirement = None
           ; cancel = None
           ; cancel_requested = false
           }
@@ -6967,6 +7184,7 @@ let claim_queued_retirement t id snapshot reason =
       ; callback_active = true
       ; authority_live = Atomic.make true
       ; committed = false
+      ; stop_retirement = None
       ; cancel = None
       ; cancel_requested = false
       }
@@ -7804,9 +8022,16 @@ let finish_queued_event t borrow interrupted =
     |> Result.all
   in
   let%bind () =
-    match borrow.committed, borrow.retirement_reason with
-    | true, _ | false, Some _ -> Ok ()
-    | false, None ->
+    match borrow.committed, borrow.retirement_reason, borrow.stop_retirement with
+    | _, _, Some terminal ->
+      if
+        List.exists
+          t.state.moderator_executions
+          ~f:(Agent_protocol.Moderator_execution.equal terminal)
+      then Ok ()
+      else Error (error Conflict "stopped constructor receipt changed before release")
+    | true, _, None | false, Some _, None -> Ok ()
+    | false, None, None ->
       let%bind terminal =
         match interrupted || borrow.cancel_requested with
         | true ->
@@ -11277,9 +11502,14 @@ let run_queued_event_borrow t borrow f =
     Error failure
   | Ok () ->
     let%bind () = finish false in
-    (match borrow.committed with
-     | true -> Ok true
-     | false ->
+    (match borrow.stop_retirement, borrow.committed with
+     | Some _, _ ->
+       Error
+         (error
+            Interrupted
+            "constructor retired by Stop before checkpoint acknowledgement")
+     | None, true -> Ok true
+     | None, false ->
        Error (error Invalid_state "queued event returned without a checkpoint commit"))
   | exception exn ->
     let backtrace = Stdlib.Printexc.get_raw_backtrace () in

@@ -480,3 +480,19 @@ advances only that same preparation's owned revision. Opening and approval keep
 their currentness checks. Native-result cleanup likewise retains its existing
 settlement-only checks, so a negative outcome can unblock its waiter without
 renewing authentication or reviving a closed scope.
+
+Stop retires an actual in-flight constructor in both Graceful and Cancel modes.
+Its existing durable transaction records the exact owned Running Event as
+Interrupted and its still-unresolved native children as Cancelled, preserving any
+already resolved winners and unrelated metadata. These outcomes mean retirement
+before result acknowledgement; external effects may already have occurred.
+Graceful does not acquire physical cancellation or rollback, and its existing Job
+and Schedule policies remain unchanged. After ACK and before publication, the
+actor installs a distinct terminal-disposal receipt, closes the selected child
+custody and retires that exact constructor. A failed Stop write changes none of
+those live owners. The exact closed native execution cells remain owned until actual callback
+unwind, where existing cleanup releases their provisional resources and the
+borrow without another terminal write. Graceful therefore retains that owned
+resource lifetime until the callback returns; it does not claim immediate
+external cancellation. Disposal never counts as a successful Manager checkpoint or
+refreshes the constructor's acknowledged basis.

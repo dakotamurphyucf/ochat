@@ -5197,3 +5197,569 @@ let%expect_test "legacy constructor Tool calls settle only their exact Event-own
   [%expect
     {| same Event two-call ACKs; foreign and escaped closures deny; claim rejection has no effect; result rejection settles honestly; expired original retains completed outcome |}]
 ;;
+
+let%expect_test
+    "constructor permission ACKs preserve exact owners and negative settlement"
+  =
+  let module L = Legacy_emit in
+  let module A = L.A in
+  let module S = Agent_session in
+  let module P = Agent_protocol in
+  let module C = Chat_response.Tool_capability in
+  let module Capacity = Agent_server.Job_capacity in
+  List.iter
+    [ `Ack_retry
+    ; `Revoked_preparation
+    ; `Stopped
+    ; `Unrelated P.Session.Cancel
+    ; `Unrelated P.Session.Graceful
+    ]
+    ~f:(fun mode ->
+      with_actor_workspace (fun env workspace_instance ->
+        let live = Atomic.make true in
+        let original = L.authentication live in
+        let effects = ref 0 in
+        let effect_proof = ref None in
+        let registry =
+          native_registry effects ~raises:false ~on_call:(fun () ->
+            let borrowed = S.Native_tool_invocation.borrow () |> protocol_ok in
+            let proof =
+              S.Native_tool_invocation.borrowed_agent_actor borrowed
+              |> protocol_ok
+              |> Option.value_exn
+            in
+            effect_proof := Some (proof, Operator_authorization.is_current proof))
+        in
+        let manager =
+          prepared_legacy_callback_managers
+            ~capability_registry:registry
+            env
+            ~id:"constructor-permission"
+            ~source:
+              {|type event = [ `Session_resume ]
+            let initial_state = 0
+            let on_event ctx state event =
+              Task.bind(Tool.call("read_file", `Object([])), fun result ->
+                match result with
+                | `Ok(value) -> Task.pure(state + 1)
+                | `Error(message) -> Task.fail(message))|}
+            ()
+        in
+        let reject_open = ref false in
+        let reject_resolution = ref false in
+        let reject_stop = ref false in
+        let stop_rejections = ref 0 in
+        let open_rejections = ref 0 in
+        let resolution_rejections = ref 0 in
+        Job_fixtures.with_actor
+          ~environment:(env, workspace_instance)
+          ~start:
+            (match mode with
+             | `Stopped -> false
+             | `Ack_retry | `Unrelated _ | `Revoked_preparation -> true)
+          ~reject_save:(fun transition ->
+            let permissions = transition.S.Session_transition.state.permissions in
+            if
+              !reject_open
+              && List.exists permissions ~f:(fun permission ->
+                P.Permission.equal_state permission.state Pending)
+            then (
+              reject_open := false;
+              incr open_rejections;
+              true)
+            else if
+              !reject_resolution
+              && List.exists permissions ~f:(fun permission ->
+                P.Permission.equal_state permission.state Approved)
+            then (
+              reject_resolution := false;
+              incr resolution_rejections;
+              true)
+            else if
+              !reject_stop
+              && P.Session.equal_desired_state transition.state.lifecycle.desired Stopped
+            then (
+              reject_stop := false;
+              incr stop_rejections;
+              true)
+            else false)
+          (fun _env _sw actor writer backend ->
+             let capacity =
+               Capacity.create
+                 ~limits:
+                   { daemon_total = 1
+                   ; per_principal = 1
+                   ; per_prompt = 1
+                   ; per_workspace = 1
+                   ; per_session = 1
+                   ; per_kind = 1
+                   ; max_nested_depth = 1
+                   }
+             in
+             let staged = ref None in
+             let published = ref 0 in
+             let capacity_aborted = ref false in
+             let retained_staging () =
+               let _job, _owner, quota = Option.value_exn !staged in
+               assert (Option.is_none (Capacity.try_acquire capacity quota |> protocol_ok));
+               assert (not !capacity_aborted);
+               [%test_eq: int] !published 0;
+               assert (List.is_empty (A.state actor |> protocol_ok).jobs)
+             in
+             let expected = A.state actor |> protocol_ok in
+             let preparation =
+               match mode with
+               | `Revoked_preparation ->
+                 let request =
+                   P.Run_start.create
+                     ~session_id
+                     ~attachment_id:writer.id
+                     ~generation:expected.identity.generation
+                     ~expected_revision:expected.counters.revision
+                     ~mode:Single_turn
+                     ~input:
+                       (User_submission
+                          { kind = Plain_text
+                          ; text = "prepare constructor permission"
+                          ; attachments = []
+                          })
+                     ~key:
+                       (P.Idempotency_key.of_string "constructor-permission-expiry"
+                        |> protocol_ok)
+                   |> protocol_ok
+                 in
+                 let request_sha256 =
+                   P.Run_start.to_json request
+                   |> Jsonaf.to_string
+                   |> Digestif.SHA256.digest_string
+                   |> Digestif.SHA256.to_hex
+                 in
+                 (match
+                    A.begin_run_preparation_authenticated
+                      actor
+                      ~actor:original
+                      ~authorize:(fun _ -> Ok ())
+                      ~request
+                      ~request_sha256
+                    |> protocol_ok
+                  with
+                  | S.Run_preparation.Decision.Prepare preparation -> Some preparation
+                  | Retained _ -> failwith "fresh permission preparation replayed")
+               | `Ack_retry | `Unrelated _ | `Stopped -> None
+             in
+             let constructor =
+               match preparation with
+               | Some preparation ->
+                 A.begin_run_initialization
+                   ~purpose:Runtime_construction
+                   actor
+                   ~preparation
+                   ~expected
+                 |> protocol_ok
+               | None ->
+                 A.begin_initialization_authenticated
+                   ~purpose:Runtime_construction
+                   actor
+                   ~actor:original
+                   ~expected
+                 |> protocol_ok
+             in
+             Fun.protect
+               ~finally:(fun () ->
+                 Eio.Cancel.protect (fun () ->
+                   A.end_initialization actor ~scope:constructor |> protocol_ok;
+                   Option.iter preparation ~f:(fun preparation ->
+                     A.end_run_preparation actor preparation |> protocol_ok)))
+               (fun () ->
+                  Eio.Switch.run (fun sw ->
+                    let callback = ref None in
+                    let authorization_returned = ref false in
+                    let authorization_denied = ref false in
+                    let open_checked = ref false in
+                    let resolution_checked = ref false in
+                    let unchanged before =
+                      assert_same_session_snapshot before (A.state actor |> protocol_ok);
+                      assert_same_session_snapshot before (S.Memory_backend.state backend);
+                      assert (
+                        List.is_empty
+                          (S.Memory_backend.events_after
+                             backend
+                             before.counters.event_sequence
+                           |> protocol_ok))
+                    in
+                    let injected_error = function
+                      | Error { P.Error.code = Internal_error; message; _ } ->
+                        [%test_eq: string] message "injected job transition failure"
+                      | Error error ->
+                        raise_s
+                          [%sexp "unexpected permission save error", (error : P.Error.t)]
+                      | Ok _ -> failwith "rejected permission save succeeded"
+                    in
+                    let tools =
+                      S.Script_tool_calls.create
+                        ~registry:(fun () -> registry)
+                        ~moderator_names:String.Set.empty
+                        ~now:P.Timestamp.now
+                        ~is_halted:(fun () -> false)
+                        ~requires_active_moderator:(fun _ -> false)
+                        ~authorize:(fun invocation binding ->
+                          (match mode with
+                           | `Unrelated P.Session.Graceful ->
+                             let owner =
+                               P.Job.Invocation invocation.P.Invocation.context.id
+                             in
+                             let request =
+                               Background_execution_tests.capture_tool
+                                 registry
+                                 Chat_response.One_off_request.default_policy
+                             in
+                             let job =
+                               A.prepare_background_job_launch actor ~owner request
+                               |> protocol_ok
+                             in
+                             let quota = Background_admission_tests.key actor job in
+                             let reservation =
+                               Background_admission_tests.reserve capacity quota job
+                             in
+                             A.stage_background_job
+                               actor
+                               ~job
+                               ~capacity:
+                                 { publish =
+                                     (fun () ->
+                                       Int.incr published;
+                                       Capacity.publish reservation)
+                                 ; abort =
+                                     (fun () ->
+                                       capacity_aborted := true;
+                                       Capacity.abort reservation)
+                                 }
+                             |> protocol_ok;
+                             staged := Some (job, owner, quota)
+                           | `Ack_retry | `Revoked_preparation | `Stopped
+                           | `Unrelated P.Session.Cancel -> ());
+                          let permission =
+                            { (Job_fixtures.permission invocation) with
+                              session_id = invocation.context.session_id
+                            ; generation = invocation.context.generation
+                            ; call_id = P.Id.Invocation.to_string invocation.context.id
+                            ; runtime_identity = Some (C.permission_fingerprint binding)
+                            ; choices = [ Approve_session; Deny ]
+                            }
+                          in
+                          let request () =
+                            A.request_permission
+                              actor
+                              ~permission
+                              ~timeout_seconds:None
+                              ~fallback:Deny
+                          in
+                          (match mode with
+                           | `Ack_retry ->
+                             let before = A.state actor |> protocol_ok in
+                             reject_open := true;
+                             request () |> injected_error;
+                             unchanged before;
+                             A.check_callback_current actor (Option.value_exn !callback)
+                             |> protocol_ok;
+                             [%test_eq: int] !effects 0;
+                             open_checked := true
+                           | `Unrelated _ | `Revoked_preparation | `Stopped -> ());
+                          let result = request () in
+                          let result =
+                            match mode, result with
+                            | `Stopped, Error { code = Conflict; message; _ } ->
+                              [%test_eq: string]
+                                message
+                                "permission requires a live invocation owner";
+                              authorization_denied := true;
+                              Error
+                                (P.Error.create
+                                   Permission_denied
+                                   ~message:"stopped constructor denied"
+                                   ~retryable:false
+                                   ())
+                            | `Stopped, Error error ->
+                              raise_s
+                                [%sexp "unexpected stopped Ask", (error : P.Error.t)]
+                            | `Stopped, Ok _ ->
+                              failwith "Stopped constructor opened a permission"
+                            | ( (`Ack_retry | `Unrelated _ | `Revoked_preparation)
+                              , Ok resolution ) ->
+                              (match resolution.P.Permission.choice with
+                               | Approve_session -> Ok ()
+                               | Deny ->
+                                 authorization_denied := true;
+                                 Error
+                                   (P.Error.create
+                                      Permission_denied
+                                      ~message:"actual constructor permission denied"
+                                      ~retryable:false
+                                      ())
+                               | Approve_once | Approve_prefix | Durable_exact ->
+                                 failwith "unexpected constructor approval choice")
+                            | ( (`Ack_retry | `Unrelated _ | `Revoked_preparation)
+                              , Error error ) -> Error error
+                          in
+                          authorization_returned := true;
+                          result)
+                        ~prepare_output:(fun _ -> Ok (`String "approved native result"))
+                        ~defer_observation:(fun _ -> Ok ())
+                    in
+                    let stopped_callback = ref false in
+                    let stop_requested = ref false in
+                    let run () =
+                      try
+                        L.invoke
+                          ~tools:(tools, registry)
+                          ~claim:
+                            (A.with_initialization_callback
+                               actor
+                               ~scope:constructor
+                               ~manager)
+                          ~actor
+                          ~manager
+                          ~selection:(Boundary Session_resume)
+                          ~operation_id:None
+                          ~inspect:(fun scope ->
+                            let proof =
+                              A.callback_agent_actor actor ~scope
+                              |> protocol_ok
+                              |> Option.value_exn
+                            in
+                            assert (Operator_authorization.is_current proof);
+                            callback := Some scope)
+                          ()
+                      with
+                      | Eio.Cancel.Cancelled _ when !stop_requested ->
+                        stopped_callback := true;
+                        Error "constructor cancelled by its actual Stop"
+                    in
+                    let loading = Eio.Fiber.fork_promise ~sw run in
+                    let metadata = ref None in
+                    (match mode with
+                     | `Stopped -> ()
+                     | `Ack_retry | `Unrelated _ | `Revoked_preparation ->
+                       let rec await_permission () =
+                         let state = A.state actor |> protocol_ok in
+                         match
+                           List.filter state.permissions ~f:(fun permission ->
+                             P.Permission.equal_state permission.state Pending)
+                         with
+                         | [ permission ] -> permission
+                         | [] ->
+                           (match Eio.Promise.peek loading with
+                            | None ->
+                              Eio.Fiber.yield ();
+                              await_permission ()
+                            | Some _ ->
+                              (match Eio.Promise.await_exn loading with
+                               | Ok _ ->
+                                 failwith
+                                   "constructor returned without its permission wait"
+                               | Error message ->
+                                 failwith
+                                   ("constructor exited before its permission wait: "
+                                    ^ message)))
+                         | permissions ->
+                           raise_s [%sexp (permissions : P.Permission.t list)]
+                       in
+                       let permission = await_permission () in
+                       let respond choice =
+                         A.respond_permission
+                           actor
+                           ~attachment_id:writer.id
+                           ~principal_id:(Some principal_id)
+                           ~permission_id:permission.id
+                           ~permission_generation:permission.generation
+                           ~choice
+                           ~reason:None
+                       in
+                       (match mode with
+                        | `Ack_retry ->
+                          let before = A.state actor |> protocol_ok in
+                          reject_resolution := true;
+                          respond Approve_session |> injected_error;
+                          unchanged before;
+                          A.check_callback_current actor (Option.value_exn !callback)
+                          |> protocol_ok;
+                          [%test_eq: int] !effects 0;
+                          resolution_checked := true;
+                          respond Approve_session |> protocol_ok |> ignore
+                        | `Revoked_preparation ->
+                          assert (Option.is_some preparation);
+                          Atomic.set live false;
+                          assert (not (Operator_authorization.is_current original));
+                          let denied = respond Deny |> protocol_ok in
+                          assert (P.Permission.equal_state denied.state Denied)
+                        | `Unrelated stop_mode ->
+                          (match stop_mode with
+                           | Graceful ->
+                             let job, owner, _quota = Option.value_exn !staged in
+                             assert (
+                               A.has_staged_background_job actor ~owner ~id:job.P.Job.id
+                               |> protocol_ok);
+                             retained_staging ()
+                           | Cancel -> ());
+                          let before = A.state actor |> protocol_ok in
+                          let patch =
+                            P.Session_metadata.Patch.create
+                              ~name:(Set "independent owner edit")
+                              ~set_labels:[]
+                              ~remove_labels:[]
+                            |> protocol_ok
+                          in
+                          A.update_metadata
+                            actor
+                            ~attachment_id:writer.id
+                            ~expected_metadata_revision:before.identity.metadata_revision
+                            ~patch
+                            ()
+                          |> protocol_ok
+                          |> ignore;
+                          let edited = A.state actor |> protocol_ok in
+                          metadata := Some edited.identity;
+                          (match respond Approve_session with
+                           | Error { code = Conflict; message; _ } ->
+                             [%test_eq: string]
+                               message
+                               "initialization basis changed while resources were \
+                                prepared"
+                           | Error error -> raise_s [%sexp (error : P.Error.t)]
+                           | Ok _ ->
+                             failwith
+                               "permission ACK adopted unrelated constructor metadata");
+                          unchanged edited;
+                          (match stop_mode with
+                           | Graceful -> retained_staging ()
+                           | Cancel -> ());
+                          reject_stop := true;
+                          A.stop actor ~attachment_id:writer.id ~mode:stop_mode
+                          |> injected_error;
+                          unchanged edited;
+                          [%test_eq: int] !stop_rejections 1;
+                          (match stop_mode with
+                           | Graceful -> retained_staging ()
+                           | Cancel -> ());
+                          assert (Option.is_none (Eio.Promise.peek loading));
+                          [%test_eq: int] !effects 0;
+                          stop_requested := true;
+                          A.stop actor ~attachment_id:writer.id ~mode:stop_mode
+                          |> protocol_ok
+                          |> ignore
+                        | `Stopped -> assert false));
+                    let result = Eio.Promise.await_exn loading in
+                    (match mode with
+                     | `Unrelated P.Session.Graceful ->
+                       let _job, _owner, quota = Option.value_exn !staged in
+                       assert !capacity_aborted;
+                       [%test_eq: int] !published 0;
+                       assert (List.is_empty (A.state actor |> protocol_ok).jobs);
+                       let lease =
+                         Capacity.try_acquire capacity quota
+                         |> protocol_ok
+                         |> Option.value_exn
+                       in
+                       Capacity.release lease
+                     | `Ack_retry | `Revoked_preparation | `Stopped
+                     | `Unrelated P.Session.Cancel -> ());
+                    (match mode with
+                     | `Unrelated _ ->
+                       assert (!authorization_returned || !stopped_callback)
+                     | `Ack_retry | `Revoked_preparation | `Stopped ->
+                       assert !authorization_returned);
+                    let settled = A.state actor |> protocol_ok in
+                    assert_same_session_snapshot settled (S.Memory_backend.state backend);
+                    assert (Option.is_none settled.active_operation);
+                    let native =
+                      match settled.invocations with
+                      | [ native ] -> native
+                      | native -> raise_s [%sexp (native : P.Invocation.t list)]
+                    in
+                    (match mode with
+                     | `Ack_retry ->
+                       result |> Result.ok_or_failwith |> ignore;
+                       assert (!open_checked && !resolution_checked);
+                       [%test_eq: int] !open_rejections 1;
+                       [%test_eq: int] !resolution_rejections 1;
+                       [%test_eq: int] !effects 1;
+                       let proof, was_current = Option.value_exn !effect_proof in
+                       assert was_current;
+                       assert (not (Operator_authorization.is_current proof));
+                       (match native.status with
+                        | Resolved (Complete (`String "approved native result")) -> ()
+                        | _ -> raise_s [%sexp (native : P.Invocation.t)]);
+                       (match (List.hd_exn settled.moderator_executions).status with
+                        | Completed _ -> ()
+                        | _ -> failwith "permission retries failed constructor completion");
+                       [%test_eq: int] (List.length settled.grants) 1
+                     | `Revoked_preparation ->
+                       assert (Result.is_error result);
+                       assert !authorization_denied;
+                       [%test_eq: int] !effects 0;
+                       assert (List.is_empty settled.grants);
+                       assert (
+                         P.Permission.equal_state
+                           (List.hd_exn settled.permissions).state
+                           Denied);
+                       (match native.status with
+                        | Resolved (Fail failure) ->
+                          [%test_eq: string] failure.code "invocation.permission_denied"
+                        | _ ->
+                          raise_s
+                            [%sexp
+                              "expired Run preparation did not settle native denial"
+                            , (native : P.Invocation.t)]);
+                       (match (List.hd_exn settled.moderator_executions).status with
+                        | Failed _ | Interrupted _ -> ()
+                        | Running | Completed _ ->
+                          failwith "expired constructor did not retain truthful failure")
+                     | `Stopped ->
+                       assert (Result.is_error result);
+                       assert !authorization_denied;
+                       [%test_eq: int] !effects 0;
+                       assert (List.is_empty settled.permissions);
+                       assert (List.is_empty settled.grants);
+                       (match native.status with
+                        | Resolved (Fail failure) ->
+                          [%test_eq: string] failure.code "invocation.permission_denied"
+                        | _ -> raise_s [%sexp (native : P.Invocation.t)])
+                     | `Unrelated _ ->
+                       assert (Result.is_error result);
+                       [%test_eq: int] !effects 0;
+                       [%test_eq: int] !stop_rejections 1;
+                       assert (List.is_empty settled.grants);
+                       (match (List.hd_exn settled.moderator_executions).status with
+                        | Interrupted _ -> ()
+                        | _ -> failwith "Stop did not retain interrupted constructor");
+                       (match native.status with
+                        | Resolved (Fail _ | Cancelled _) -> ()
+                        | Admitted | Dispatching | Published _
+                        | Resolved (Complete _ | Pending _) ->
+                          raise_s
+                            [%sexp
+                              "cancelled stale constructor left a native row active"
+                            , (native : P.Invocation.t)]);
+                       [%test_eq: string option]
+                         settled.identity.display_name
+                         (Option.value_exn !metadata).display_name;
+                       [%test_eq: int64]
+                         settled.identity.metadata_revision
+                         (Option.value_exn !metadata).metadata_revision;
+                       assert (
+                         P.Permission.equal_state
+                           (List.hd_exn settled.permissions).state
+                           Cancelled));
+                    assert (
+                      Bool.equal
+                        (Operator_authorization.is_current original)
+                        (match mode with
+                         | `Revoked_preparation -> false
+                         | `Ack_retry | `Unrelated _ | `Stopped -> true)))))));
+  print_endline
+    "permission ACK retries preserve owner; unrelated basis and Stopped Ask reject; \
+     expired Run preparation settles Deny without native effect; both Stops ACK \
+     interruption";
+  [%expect
+    {| permission ACK retries preserve owner; unrelated basis and Stopped Ask reject; expired Run preparation settles Deny without native effect; both Stops ACK interruption |}]
+;;
