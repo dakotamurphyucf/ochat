@@ -598,6 +598,9 @@ let rotated ~previous incoming =
 
 let validate_transition ~previous incoming =
   let open Result.Let_syntax in
+  let%bind () =
+    Moderator_checkpoint.validate_update ~previous:previous.moderator incoming.moderator
+  in
   let%bind () = validate_event_updates ~previous incoming in
   let%bind () =
     List.fold_result previous.schedules ~init:() ~f:(fun () old ->

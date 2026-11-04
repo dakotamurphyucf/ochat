@@ -181,6 +181,16 @@ let complete_event before =
       Option.is_some receipt.P.Moderator_execution.queue_occurrence)
   in
   let completed, moderator = F.completion before running in
+  let snapshot =
+    A.Moderator_checkpoint.decode (Some moderator) |> protocol_ok |> Option.value_exn
+  in
+  let queue =
+    A.Moderator_checkpoint.queue (Some moderator) |> protocol_ok |> Option.value_exn
+  in
+  let moderator =
+    A.Moderator_checkpoint.update_with_queue before.moderator ~snapshot ~queue
+    |> protocol_ok
+  in
   A.Session_transition.apply
     ~now:timestamp
     before
@@ -221,8 +231,9 @@ let delivery before =
     |> protocol_ok
   in
   let moderator =
-    A.Moderator_checkpoint.encode_with_queue
-      { snapshot with queued_internal_events = after }
+    A.Moderator_checkpoint.update_with_queue
+      before.moderator
+      ~snapshot:{ snapshot with queued_internal_events = after }
       ~queue:metadata
     |> protocol_ok
   in
@@ -254,8 +265,9 @@ let append before =
     |> protocol_ok
   in
   let moderator =
-    A.Moderator_checkpoint.encode_with_queue
-      { snapshot with queued_internal_events = after }
+    A.Moderator_checkpoint.update_with_queue
+      before.moderator
+      ~snapshot:{ snapshot with queued_internal_events = after }
       ~queue:metadata
     |> protocol_ok
   in

@@ -1,9 +1,48 @@
 open Core
 
-(** Named-field nested checkpoint component. Its enclosing state/delta document
-    owns conversion and the extension carrier using [shape]. *)
-val encode : Session.Moderator_state.Identity_snapshot.t -> Jsonaf.t
+(** Complete checkpoint custody. The parent state/delta treats this validated
+    child as a value; [shape] belongs to this checkpoint's preservation codec. *)
+type t
 
+val of_jsonaf : Jsonaf.t -> (t, Agent_protocol.Error.t) result
+val to_jsonaf : t -> Jsonaf.t
+val snapshot : t -> Session.Moderator_state.Identity_snapshot.t
+
+module Queue_update : sig
+  type t =
+    | Keep
+    | Replace of Moderator_queue.t
+end
+
+(** Update known state while retaining all compatible raw extensions. [Keep]
+    preserves queue absence/null/value. Incompatible deletion, array alignment
+    or source changes with retained extensions fail before returning a value.
+    This operation grants no source, Manager or execution authority. *)
+val update
+  :  t
+  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+  -> queue:Queue_update.t
+  -> (t, Agent_protocol.Error.t) result
+
+(** A first checkpoint is authored when absent; otherwise update the actual full
+    previous checkpoint. The supplied queue still requires its real owner's
+    producer/consumption admission. *)
+val update_with_queue
+  :  Jsonaf.t option
+  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+  -> queue:Moderator_queue.t
+  -> (Jsonaf.t, Agent_protocol.Error.t) result
+
+(** Native/durable no-loss law. Compatible raw fields must already be present in
+    the incoming native value: no hidden parent carrier repairs a dropped field.
+    Nullable removal and source changes retain universal protection. Queue
+    producer, ordinal-transition and source-installation laws remain separate. *)
+val validate_update
+  :  previous:Jsonaf.t option
+  -> Jsonaf.t option
+  -> (unit, Agent_protocol.Error.t) result
+
+val encode : Session.Moderator_state.Identity_snapshot.t -> Jsonaf.t
 val shape : Document_schema.Shape.t
 
 (** Shared identity-safe decoding for runtime restoration and delegated authority.
