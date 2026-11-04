@@ -41,7 +41,10 @@ val payloads : t -> Agent_protocol.Event.Durable.Payload.t list
 
 (** Join the actual root terminal transaction. Captures immutable owner evidence
     and resolves a pending Finish only after all retained owned work has settled.
-    This never starts another worker or stops the session. *)
+    The same aggregate law is used when an actual Job is the final owned work,
+    so child-before-root and child-after-root orderings agree. Waiting is never
+    bypassed; successful Workflow still requires a pending Finish. This never
+    starts another worker or stops the session. *)
 val settle_operation
   :  Session_state.t
   -> operation_id:Agent_protocol.Id.Operation.t

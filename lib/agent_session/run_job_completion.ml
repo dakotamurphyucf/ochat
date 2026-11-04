@@ -129,22 +129,16 @@ let prepare
                   (P.Error.invalid_request "terminal job successor is still executing")
               | Succeeded | Failed _ | Cancelled | Interrupted _ -> Ok previous.owned_work
             in
-            let%bind next =
-              P.Run.create
-                ~id:previous.id
-                ~session:previous.session
-                ~principal_id:previous.principal_id
-                ~source:previous.source
-                ~mode:previous.mode
-                ~lifecycle:previous.lifecycle
-                ~revision
+            let%bind index =
+              Run_work_settlement.prepare
+                index
+                ~state
+                ~previous
                 ~owned_work
-                ~relinquished_work:previous.relinquished_work
                 ~terminal_work:(proof :: previous.terminal_work)
-                ~created_at:previous.created_at
-                ~updated_at:now
+                ~operation_id:None
+                ~now
             in
-            let%bind index = Run_state.advance index ~run:next ~intents:[] in
             if not (exact_wait previous running)
             then Ok index
             else (
@@ -153,6 +147,11 @@ let prepare
                   ~source:previous.source.observer
                   terminal
                 |> Result.map_error ~f:P.Error.invalid_request
+              in
+              let%bind next =
+                Result.of_option
+                  (Run_state.find index previous.id)
+                  ~error:(P.Error.invalid_request "job settlement lost its Run")
               in
               let%bind delivery = Run_job_delivery.capture next ~frame in
               Run_state.add_job_delivery index delivery)))
@@ -164,7 +163,9 @@ let cancel_queued (state : Session_state.t) ~job ~now =
   let open Result.Let_syntax in
   let%bind () =
     if
-      P.Job.equal_kind job.P.Job.kind Async_tool
+      (match job.P.Job.kind with
+       | Async_tool | Model_call -> true
+       | Nested_agent | Scheduled_event | Shell_process | Compaction -> false)
       && (match job.status with
           | Queued -> true
           | Running
@@ -232,6 +233,16 @@ let cancel_queued (state : Session_state.t) ~job ~now =
                 ~run_id:run.id
                 ~evidence:[ proof ]
                 ~session_revision:(Int64.succ state.counters.revision)
+                ~now
+            else if P.Job.equal_kind job.kind Model_call
+            then
+              Run_work_settlement.prepare
+                index
+                ~state
+                ~previous:run
+                ~owned_work:run.owned_work
+                ~terminal_work:(proof :: run.terminal_work)
+                ~operation_id:None
                 ~now
             else (
               let%bind run =

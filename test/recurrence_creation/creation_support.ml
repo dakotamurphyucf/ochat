@@ -155,7 +155,7 @@ let restored_journal fixture =
   journal, restored, last_hash
 ;;
 
-let reopen_fixture fixture =
+let reopen_fixture ?(index_projection = index_entry) fixture =
   Agent_store.Commit_writer.close fixture.writer;
   let journal, restored, previous_transaction_hash = restored_journal fixture in
   let initial = A.Session_persistence.Restored.state restored in
@@ -180,7 +180,7 @@ let reopen_fixture fixture =
                fixture.store
                fixture.handle
                ~metadata:(metadata state)
-               ~entry:(index_entry state)
+               ~entry:(index_projection state)
              |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error))
       ~command_accepted:(fun _ _ -> ())
       ~writer

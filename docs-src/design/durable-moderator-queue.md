@@ -496,3 +496,38 @@ borrow without another terminal write. Graceful therefore retains that owned
 resource lifetime until the callback returns; it does not claim immediate
 external cancellation. Disposal never counts as a successful Manager checkpoint or
 refreshes the constructor's acknowledged basis.
+
+
+Actual Model Job completion joins the owning Run's immutable attempt evidence in
+the same Job transaction. The raw Model result remains unchanged and is validated
+through the existing terminal-result adapter. A failed attempt and its queued
+retry successor are distinct owned occurrences; the unresolved successor prevents
+premature completion. Operation and Job completion use one aggregate settlement
+law and create at most one next Run revision with its canonical terminal receipt.
+This handles both a synchronous child finishing before its root and a spawned
+child finishing last. Waiting still requires its actual callback; successful
+Workflow requires a retained Finish, while quiescent Single_turn completes.
+Existing failure precedence includes retained failed attempts.
+
+A Job-driven terminal Run uses a genuine paired wall/monotonic completion sample
+and installs its live timing plan only after the same durable ACK. An invalid live
+sample does not erase a truthful completion or become a recovered wall anchor.
+An actual initialization Model owner advances its exact acknowledged Run projection
+only with that ACK, retaining its original authentication and Run preparation;
+failed persistence cannot freshen that constructor basis.
+
+
+Owned Model cancellation and interruption join that same transaction law. A
+queued cancellation records its exact planned next attempt without inventing an
+execution; a running cancellation or interruption records the actual current
+attempt. Either may settle the owning Run when all work is known terminal. The
+Job, custody retirement, Run proof and any terminal receipt share one ACK, with
+the genuine clock pair and existing Run preparation forwarded by the actual
+writer. Late success cannot overwrite a terminal attempt, and cancelling an
+already Interrupted Model is a no-op preserving that winner. These statuses do
+not promise rollback of external effects.
+
+The existing queued Async_tool policy is preserved: an exact Wait retires with
+truthful cancellation evidence, while non-waiting queued cancellation retains
+its Run lifecycle. Actual completed Async_tool attempts use the shared aggregate
+settlement described above.

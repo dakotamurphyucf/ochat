@@ -14,14 +14,14 @@ module Revocation = struct
     | Target_revokes_controller
 end
 
-let publish fixture previous delta =
+let publish ?(index_projection = index_entry) fixture previous delta =
   let transition =
     A.Session_transition.apply ~now:timestamp previous ~delta ~payloads:[] |> protocol_ok
   in
   A.Session_persistence.commit fixture.durable ~command_audit:None ~previous transition
   |> protocol_ok;
   S.write_metadata
-    ~entry:(index_entry transition.state)
+    ~entry:(index_projection transition.state)
     fixture.store
     fixture.handle
     (metadata transition.state)
@@ -648,4 +648,184 @@ let%expect_test
      fresh historical caller";
   [%expect
     {| separate real Handle; same-store fence; actual ACK/no reply; recovered pending0; fresh historical caller |}]
+;;
+
+let%expect_test "actual Model completion installs its fixed-delay clock only after ACK" =
+  let index_projection = Agent_server.Session_projection.index_entry in
+  with_store (fun base ->
+    let seed = create_actor base ~sw:base.sw () in
+    let intent, attempt =
+      Exn.protect
+        ~finally:(fun () -> A.Session_actor.shutdown seed)
+        ~f:(fun () ->
+          let host = open_host base () in
+          Exn.protect
+            ~finally:(fun () -> Host.close_and_wait host)
+            ~f:(fun () ->
+              install seed host;
+              create
+                seed
+                "job-clock"
+                (interval
+                   ~mode:Fixed_delay
+                   ~first_due:(P.Timestamp.to_time_ns timestamp)
+                   ())
+              |> ignore;
+              sweep seed;
+              let intent, attempt = Record_tests.original_request seed "job-clock" in
+              Record_tests.record seed intent attempt |> protocol_ok |> ignore;
+              intent, attempt))
+    in
+    let journal = reopen_fixture ~index_projection base in
+    Exn.protect
+      ~finally:(fun () -> Agent_store.Commit_writer.close journal.writer)
+      ~f:(fun () ->
+        (* These are legal retained Admission/origin and Running Job DATA,
+           published by the existing pure fixture owners. They grant no runtime
+           admission, provider execution or activation. Only the actual Actor
+           completion below constructs the terminal proof, receipt and clock. *)
+        let admitted, index, origin, run, _ =
+          publish_admitted journal journal.initial "job-clock" intent attempt
+        in
+        let job : P.Job.t =
+          { id = P.Id.Job.of_string "job_recurrence_completion_clock" |> protocol_ok
+          ; session_id
+          ; generation = admitted.identity.generation
+          ; kind = Model_call
+          ; payload = `Object [ "recipe", `String "agent_prompt.v1"; "payload", `Null ]
+          ; status = Running
+          ; retry_policy = Never
+          ; attempt = 1
+          ; created_at = timestamp
+          ; started_at = Some timestamp
+          ; next_run_at = None
+          ; completed_at = None
+          ; result = None
+          ; delivery = Not_required
+          ; launch = None
+          ; inference_origin = Some (Run (Origin.run_id origin))
+          ; progress = None
+          }
+        in
+        let work = A.Run_job_occurrence.work job |> protocol_ok in
+        let previous = run Active 1L in
+        let running =
+          P.Run.create
+            ~id:previous.id
+            ~session:previous.session
+            ~principal_id:previous.principal_id
+            ~source:previous.source
+            ~mode:previous.mode
+            ~lifecycle:previous.lifecycle
+            ~revision:previous.revision
+            ~owned_work:[ work ]
+            ~relinquished_work:[]
+            ~terminal_work:[]
+            ~created_at:previous.created_at
+            ~updated_at:previous.updated_at
+          |> protocol_ok
+        in
+        let index = A.Run_state.advance index ~run:running ~intents:[] |> protocol_ok in
+        let initial =
+          publish
+            ~index_projection
+            journal
+            admitted
+            (Batch [ Job_changed job; Run_state_changed index ])
+        in
+        let actor =
+          create_actor { journal with initial } ~sw:base.sw ~index_projection ()
+        in
+        Exn.protect
+          ~finally:(fun () -> A.Session_actor.shutdown actor)
+          ~f:(fun () ->
+            let complete () =
+              A.Session_actor.complete_job
+                actor
+                ~job_id:job.id
+                ~generation:job.generation
+                ~attempt:job.attempt
+                (A.Runtime_builder.Model_succeeded (`String "actual terminal result"))
+            in
+            journal.wall := wall_at_ms 500;
+            journal.elapsed_ms := 500;
+            let before = state actor in
+            journal.reject := true;
+            Record_tests.assert_code Persistence_error (complete ());
+            journal.reject := false;
+            assert (equal_state before (state actor));
+            assert (equal_state before (replayed base));
+            journal.wall := wall_at_ms 1000;
+            journal.elapsed_ms := 1000;
+            let completed = complete () |> protocol_ok in
+            (match completed.status with
+             | Succeeded -> ()
+             | _ -> failwith "actual Model completion did not succeed");
+            assert (
+              Option.equal
+                Jsonaf.exactly_equal
+                completed.result
+                (Some (`String "actual terminal result")));
+            let final = state actor in
+            [%test_eq: int64]
+              final.counters.transaction_sequence
+              Int64.(before.counters.transaction_sequence + 1L);
+            let index = Option.value_exn final.run_state in
+            let settled = A.Run_state.find index running.id |> Option.value_exn in
+            (match settled.lifecycle with
+             | Terminal (Completed None) -> ()
+             | _ -> failwith "last actual Job did not settle its Run");
+            [%test_eq: int] (List.length settled.terminal_work) 1;
+            let terminal = List.hd_exn settled.terminal_work in
+            assert (P.Run_work.equal terminal.work work);
+            assert (P.Run_work.Terminal.equal_outcome terminal.outcome Succeeded);
+            let receipts =
+              List.filter (A.Run_state.receipts index) ~f:(fun receipt ->
+                P.Id.Run.equal receipt.run_id running.id
+                && P.Run_receipt.Kind.equal receipt.kind Terminal)
+            in
+            [%test_eq: int] (List.length receipts) 1;
+            assert (
+              P.Timestamp.equal (List.hd_exn receipts).committed_at (wall_at_ms 1000));
+            journal.wall := wall_at_ms 30_000;
+            journal.elapsed_ms := 1500;
+            let observation = observe actor intent attempt in
+            let imported = import actor observation |> protocol_ok in
+            (match imported.timing with
+             | Live_phase -> ()
+             | No_successor | Recovery_adoption | Held _ ->
+               failwith "actual completion lost its paired live clock");
+            (match imported.settlement with
+             | Imported { next = Successor basis; _ } ->
+               assert (
+                 P.Timestamp.equal
+                   (A.Recurrence_delay_basis.completed_at basis)
+                   (wall_at_ms 1000))
+             | Imported { next = Evidence_only | Review_hold _; _ }
+             | Retained_exact _ | Detail_not_retained _ ->
+               failwith "actual terminal import did not advance fixed delay");
+            (match A.Recurrence_cursor.position (E.cursor (entry actor "job-clock")) with
+             | Interval cursor ->
+               [%test_eq: int64] (R.Cursor.Interval.slot cursor) 1L;
+               assert (
+                 Time_ns.equal
+                   (R.Cursor.Interval.due_at cursor)
+                   (P.Timestamp.to_time_ns (wall_at_ms 2000)))
+             | Calendar _ | Awaiting_completion _ | Exhausted -> assert false);
+            let host = open_host journal () in
+            Exn.protect
+              ~finally:(fun () -> Host.close_and_wait host)
+              ~f:(fun () ->
+                install actor host;
+                sweep actor;
+                assert (List.is_empty (H.ready (frontier actor "job-clock")));
+                journal.elapsed_ms := 2000;
+                sweep actor;
+                [%test_eq: int] (List.length (H.ready (frontier actor "job-clock"))) 1);
+            assert (equal_state (state actor) (replayed base)))));
+  print_endline
+    "real Job terminal ACK and receipt; rejected write unchanged; live fixed delay uses \
+     completion elapsed time despite later wall";
+  [%expect
+    {| real Job terminal ACK and receipt; rejected write unchanged; live fixed delay uses completion elapsed time despite later wall |}]
 ;;

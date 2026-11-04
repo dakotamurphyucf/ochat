@@ -1784,8 +1784,10 @@ val claim_job
   -> generation:int
   -> (Agent_protocol.Job.t option, Agent_protocol.Error.t) result
 
-(** Complete only the exact claimed attempt. Late callbacks from an older retry
-    cannot finish or mutate the newer attempt, including its delivery state. *)
+(** Complete only the exact claimed attempt. The actual terminal Job, retry
+    custody and owning Run evidence/aggregate settlement share one durable ACK;
+    the raw Model result is preserved. No original authority is renewed. Late
+    callbacks cannot mutate a newer retry or an already terminal winner. *)
 val complete_job
   :  t
   -> job_id:Agent_protocol.Id.Job.t
@@ -1880,8 +1882,11 @@ val authorize_writer
   -> (unit, Agent_protocol.Error.t) result
 
 (** [cancel_job t ~attachment_id ~job_id ()] authorizes the attachment and its
-    live lease atomically with cancellation. Internal schedulers use the
-    separate privileged operation below. *)
+    live lease atomically with cancellation. Owned Model cancellation records
+    the exact current or planned occurrence and Run settlement in that same ACK.
+    An already Interrupted Model remains unchanged. Cancellation does not imply
+    rollback of external effects. Internal schedulers use the privileged operation
+    below. *)
 val cancel_job
   :  t
   -> ?command_audit:Document_schema.Document.t
@@ -1903,8 +1908,11 @@ val cancel_job_internal_with_command_audit
   -> job_id:Agent_protocol.Id.Job.t
   -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
 
-(** Interrupt only the exact claimed attempt; stale cancellation/cleanup must not
-    interrupt a newer retry. Recovered workers use the persisted attempt. *)
+(** Interrupt only the exact claimed attempt; stale cleanup cannot interrupt a
+    newer retry or overwrite a terminal winner. An owned Model's actual attempt
+    evidence and Run settlement share its Job ACK without renewing execution
+    authority or claiming effect rollback. Recovered workers use the persisted
+    attempt. *)
 val interrupt_job
   :  t
   -> job_id:Agent_protocol.Id.Job.t

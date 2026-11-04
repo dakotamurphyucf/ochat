@@ -169,7 +169,14 @@ let with_store f =
                 }))))
 ;;
 
-let create_actor t ~sw ?(before_observe = ignore) ?(published = fun _ -> ()) () =
+let create_actor
+      t
+      ~sw
+      ?(index_projection = index_entry)
+      ?(before_observe = ignore)
+      ?(published = fun _ -> ())
+      ()
+  =
   let persistence : A.Session_actor.persistence =
     { archive_reference
     ; commit =
@@ -207,7 +214,7 @@ let create_actor t ~sw ?(before_observe = ignore) ?(published = fun _ -> ()) () 
         ; state_committed =
             (fun state _ ->
               S.write_metadata
-                ~entry:(index_entry state)
+                ~entry:(index_projection state)
                 t.store
                 t.handle
                 (metadata state)
@@ -226,7 +233,7 @@ let create_actor t ~sw ?(before_observe = ignore) ?(published = fun _ -> ()) () 
       ~handle:t.handle
       ~entry_projection:(fun state ->
         before_observe ();
-        index_entry state)
+        index_projection state)
     |> protocol_ok
   in
   A.Session_actor.set_recurrence_controller actor controller |> protocol_ok;

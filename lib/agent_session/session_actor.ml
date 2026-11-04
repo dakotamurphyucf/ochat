@@ -13316,6 +13316,8 @@ let validate_job_generation t (job : Agent_protocol.Job.t) generation =
 ;;
 
 let update_jobs
+      ?initialization_scope
+      ?completion_sample
       ?run_preparation
       ?job_custody
       ?(subscriptions = [])
@@ -13372,26 +13374,81 @@ let update_jobs
        | _ -> [])
   in
   let open Result.Let_syntax in
+  let delta =
+    Session_delta.Batch
+      (List.map jobs ~f:(fun job -> Session_delta.Job_changed job)
+       @ List.map subscriptions ~f:(fun value -> Session_delta.Subscription_changed value)
+       @ List.map cancelled_timers ~f:(fun value -> Session_delta.Schedule_changed value)
+       @ deltas
+       @ run_deltas)
+  in
+  let payloads =
+    List.map jobs ~f:(fun job ->
+      Agent_protocol.Event.Durable.Payload.Job_state_changed job)
+    @ payloads
+    @ List.map cancelled_timers ~f:(fun schedule ->
+      Agent_protocol.Event.Durable.Payload.Schedule_cancelled schedule)
+  in
   let%map session =
-    transition
-      ?run_preparation
-      ?job_custody
-      t
-      ~delta:
-        (Session_delta.Batch
-           (List.map jobs ~f:(fun job -> Session_delta.Job_changed job)
-            @ List.map subscriptions ~f:(fun value ->
-              Session_delta.Subscription_changed value)
-            @ List.map cancelled_timers ~f:(fun value ->
-              Session_delta.Schedule_changed value)
-            @ deltas
-            @ run_deltas))
-      ~payloads:
-        (List.map jobs ~f:(fun job ->
-           Agent_protocol.Event.Durable.Payload.Job_state_changed job)
-         @ payloads
-         @ List.map cancelled_timers ~f:(fun schedule ->
-           Agent_protocol.Event.Durable.Payload.Schedule_cancelled schedule))
+    match initialization_scope with
+    | None ->
+      transition ?run_preparation ?job_custody ?completion_sample t ~delta ~payloads
+    | Some scope ->
+      (* Only actual owned initialization Model completion supplies this scope.
+         Its immutable control projection remains strict; acknowledging a result
+         does not renew original authority for subsequent provider work. *)
+      Exn.protect
+        ~finally:(fun () -> Option.iter job_custody ~f:Job_custody.Update.discard)
+        ~f:(fun () ->
+          let revision = t.state.counters.revision in
+          let check_basis () =
+            let%bind () = validate_initialization_owner t scope in
+            let%bind () =
+              match t.initialization_scope with
+              | Some active when phys_equal active scope -> Ok ()
+              | Some _ | None ->
+                Error (error Conflict "initialization Model owner retired")
+            in
+            let%bind () =
+              validate_initialization_basis
+                ~scope
+                t
+                ~purpose:scope.purpose
+                (Initialization_scope.Acknowledged.apply
+                   scope.acknowledged
+                   scope.expected)
+            in
+            Option.value_map scope.run_preparation ~default:(Ok ()) ~f:(fun preparation ->
+              Run_preparation.check_basis
+                preparation
+                ~owner:t.run_preparation_owner
+                ~state:t.state)
+          in
+          let%bind () = check_basis () in
+          let%bind prepared = prepare_transition ?run_preparation t ~delta ~payloads in
+          let acknowledgement =
+            Initialization_scope.Acknowledgement.prepare scope prepared.state
+          in
+          let check_before_commit () =
+            let%bind () = check_basis () in
+            let%bind () =
+              Initialization_scope.Acknowledgement.check_basis acknowledgement
+            in
+            if Int64.equal revision t.state.counters.revision
+            then Ok ()
+            else Error (error Conflict "initialization Model completion basis changed")
+          in
+          let%map () =
+            install
+              ~initialization_acknowledgement:acknowledgement
+              ~check_before_commit
+              ?run_preparation
+              ?job_custody
+              ?completion_sample
+              t
+              prepared
+          in
+          Agent_protocol.Session.(Session_state.summary t.state))
   in
   cancel_job_scopes t cancelled;
   resolve_cleaned_permission_waiters t permissions;
@@ -13574,14 +13631,15 @@ let retry_job t (job : Agent_protocol.Job.t) message backoff_ms =
   }
 ;;
 
-let terminal_job t (job : Agent_protocol.Job.t) status result =
+let terminal_job ?now t (job : Agent_protocol.Job.t) status result =
   let delivery =
     match job.delivery with
     | Agent_protocol.Job.Not_required -> Agent_protocol.Job.Not_required
     | Pending | Delivered _ -> Pending
     | Discarded _ as delivery -> delivery
   in
-  { job with status; result; completed_at = Some (t.services.now ()); delivery }
+  let now = Option.value_or_thunk now ~default:t.services.now in
+  { job with status; result; completed_at = Some now; delivery }
 ;;
 
 let validate_job_dependency t job =
@@ -13646,16 +13704,6 @@ let cancelled_work_dependencies t (parent : Agent_protocol.Job.t) =
     | _ -> Ok ([], [])
   in
   walk (String.Set.singleton (Agent_protocol.Id.Job.to_string parent.id)) parent
-;;
-
-let complete_job_outcome t (job : Agent_protocol.Job.t) = function
-  | Runtime_builder.Model_succeeded result ->
-    terminal_job t job Agent_protocol.Job.Succeeded (Some result)
-  | Model_failed message ->
-    (match retry_limits job.retry_policy with
-     | Some (max_attempts, backoff_ms) when job.attempt < max_attempts ->
-       retry_job t job message backoff_ms
-     | None | Some _ -> terminal_job t job (Failed (job_failure message)) None)
 ;;
 
 let validate_job_attempt (job : Agent_protocol.Job.t) attempt =
@@ -13853,10 +13901,42 @@ let running_job_for_completion t job_id generation attempt =
     Error (error Already_resolved "job is already terminal")
 ;;
 
-let complete_job ?run_preparation t job_id generation attempt outcome =
+let complete_job
+      ?initialization_scope
+      ?run_preparation
+      t
+      job_id
+      generation
+      attempt
+      outcome
+  =
   let open Result.Let_syntax in
   let%bind previous = running_job_for_completion t job_id generation attempt in
-  let job = complete_job_outcome t previous outcome in
+  let now, completion_sample = completion_clock_pair t in
+  let terminal, job, outcome =
+    match outcome with
+    | Runtime_builder.Model_succeeded result ->
+      let terminal = terminal_job ~now t previous Succeeded (Some result) in
+      terminal, terminal, Agent_protocol.Run_work.Terminal.Succeeded
+    | Model_failed message ->
+      let terminal = terminal_job ~now t previous (Failed (job_failure message)) None in
+      let successor =
+        match retry_limits previous.retry_policy with
+        | Some (max_attempts, backoff_ms) when previous.attempt < max_attempts ->
+          retry_job t previous message backoff_ms
+        | None | Some _ -> terminal
+      in
+      terminal, successor, Agent_protocol.Run_work.Terminal.Failed
+  in
+  let%bind run_deltas =
+    Run_job_completion.prepare
+      t.state
+      ~running:previous
+      ~terminal
+      ~successor:job
+      ~outcome
+      ~now
+  in
   let%bind job_custody =
     match job.status with
     | Queued ->
@@ -13868,7 +13948,16 @@ let complete_job ?run_preparation t job_id generation attempt outcome =
     | Running | Waiting_permission _ | Waiting_completion _ ->
       Error (error Invalid_state "completed Job retained an active state")
   in
-  let%map _ = update_job ?run_preparation ?job_custody t job in
+  let%map _ =
+    update_jobs
+      ?initialization_scope
+      ?run_preparation
+      ?job_custody
+      ~completion_sample
+      ~run_deltas
+      t
+      [ job ]
+  in
   job
 ;;
 
@@ -15649,6 +15738,7 @@ let complete_initialization_model_job t scope job_id generation attempt outcome 
     else Error (error Conflict "initialization does not own this running model attempt")
   in
   complete_job
+    ~initialization_scope:scope
     ?run_preparation:scope.Initialization_scope.run_preparation
     t
     job_id
@@ -15818,6 +15908,7 @@ let complete_background_job
                  ())))
   in
   let persist stored =
+    let now, completion_sample = completion_clock_pair t in
     let status =
       match job.status, stored with
       | Failed failure, Agent_protocol.Stored_completion.Artifact _ ->
@@ -15873,13 +15964,7 @@ let complete_background_job
          | Expired -> Limited)
     in
     let%bind run_deltas =
-      Run_job_completion.prepare
-        t.state
-        ~running
-        ~terminal
-        ~successor:job
-        ~outcome
-        ~now:(t.services.now ())
+      Run_job_completion.prepare t.state ~running ~terminal ~successor:job ~outcome ~now
     in
     let%bind job_custody =
       match job.status with
@@ -15893,7 +15978,13 @@ let complete_background_job
         Error (error Invalid_state "completed background Job retained an active state")
     in
     let%map _ =
-      update_jobs ?job_custody ~subscriptions ~run_deltas t (job :: cancelled)
+      update_jobs
+        ?job_custody
+        ~completion_sample
+        ~subscriptions
+        ~run_deltas
+        t
+        (job :: cancelled)
     in
     job
   in
@@ -16416,6 +16507,9 @@ let cancel_job_internal t job_id =
   let owned = Run_job_completion.owns t.state job in
   match job.status, job.delivery with
   | _, Agent_protocol.Job.Discarded _ -> Ok job
+  | Interrupted _, _ when Agent_protocol.Job.equal_kind job.kind Model_call ->
+    (* A factual interrupted Model attempt is already an immutable winner. *)
+    Ok job
   | (Running | Waiting_permission _ | Waiting_completion _), _
     when owned && Agent_protocol.Job.equal_kind job.kind Async_tool ->
     let waiting =
@@ -16439,10 +16533,40 @@ let cancel_job_internal t job_id =
       (Cancelled "job cancelled")
   | (Queued | Running | Waiting_permission _ | Waiting_completion _ | Interrupted _), _ ->
     let%bind cancelled, subscriptions = cancelled_work_dependencies t job in
+    let running = job in
+    let model_owned = owned && Agent_protocol.Job.equal_kind running.kind Model_call in
+    let now, completion_sample =
+      if model_owned
+      then (
+        let now, sample = completion_clock_pair t in
+        now, Some sample)
+      else t.services.now (), None
+    in
+    let job =
+      { job with
+        status = Cancelled
+      ; result = background_terminal_result job (Cancelled "job cancelled")
+      ; completed_at = Some now
+      ; delivery =
+          (match job.delivery with
+           | Not_required -> Not_required
+           | _ -> Pending)
+      }
+    in
     let%bind run_deltas =
-      match job.status with
-      | Queued when owned && Agent_protocol.Job.equal_kind job.kind Async_tool ->
-        Run_job_completion.cancel_queued t.state ~job ~now:(t.services.now ())
+      match running.status with
+      | Queued
+        when owned
+             && (Agent_protocol.Job.equal_kind running.kind Async_tool || model_owned) ->
+        Run_job_completion.cancel_queued t.state ~job:running ~now
+      | (Running | Waiting_permission _ | Waiting_completion _) when model_owned ->
+        Run_job_completion.prepare
+          t.state
+          ~running
+          ~terminal:job
+          ~successor:job
+          ~outcome:Cancelled
+          ~now
       | Queued
       | Running
       | Waiting_permission _
@@ -16452,20 +16576,15 @@ let cancel_job_internal t job_id =
       | Cancelled
       | Interrupted _ -> Ok []
     in
-    let job =
-      { job with
-        status = Cancelled
-      ; result = background_terminal_result job (Cancelled "job cancelled")
-      ; completed_at = Some (t.services.now ())
-      ; delivery =
-          (match job.delivery with
-           | Not_required -> Not_required
-           | _ -> Pending)
-      }
-    in
     let%bind job_custody = prepare_terminal_job_custody t (job :: cancelled) in
     let%map _ =
-      update_jobs ~job_custody ~subscriptions ~run_deltas t (job :: cancelled)
+      update_jobs
+        ?completion_sample
+        ~job_custody
+        ~subscriptions
+        ~run_deltas
+        t
+        (job :: cancelled)
     in
     job
   | (Succeeded | Failed _ | Cancelled), _ -> Ok job
@@ -16493,6 +16612,18 @@ let interrupt_job ?run_preparation t job_id generation attempt reason =
          ; details = `Null
          })
   | Agent_protocol.Job.Running ->
+    let running = job in
+    let model_owned =
+      Agent_protocol.Job.equal_kind running.kind Model_call
+      && Run_job_completion.owns t.state running
+    in
+    let now, completion_sample =
+      if model_owned
+      then (
+        let now, sample = completion_clock_pair t in
+        now, Some sample)
+      else t.services.now (), None
+    in
     let job =
       { job with
         status = Interrupted reason
@@ -16505,15 +16636,29 @@ let interrupt_job ?run_preparation t job_id generation attempt reason =
                ; retryable = false
                ; details = `Null
                })
-      ; completed_at = Some (t.services.now ())
+      ; completed_at = Some now
       ; delivery =
           (match job.delivery with
            | Not_required -> Not_required
            | _ -> Pending)
       }
     in
+    let%bind run_deltas =
+      if model_owned
+      then
+        Run_job_completion.prepare
+          t.state
+          ~running
+          ~terminal:job
+          ~successor:job
+          ~outcome:Interrupted
+          ~now
+      else Ok []
+    in
     let%bind job_custody = prepare_terminal_job_custody t [ job ] in
-    let%map _ = update_job ?run_preparation ~job_custody t job in
+    let%map _ =
+      update_jobs ?run_preparation ?completion_sample ~job_custody ~run_deltas t [ job ]
+    in
     job
   | Queued
   | Waiting_permission _

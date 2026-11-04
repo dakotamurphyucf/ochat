@@ -3456,3 +3456,555 @@ let%expect_test "unavailable legacy lookalike cannot consume a registered timer 
     print_endline "raw lookalike runs without consuming Wait or lending Run actions");
   [%expect {|raw lookalike runs without consuming Wait or lending Run actions|}]
 ;;
+
+let%test_unit
+    "actual Model children settle Runs by completion order and acknowledged attempts"
+  =
+  List.iter
+    [ `Child_first
+    ; `Root_first_ack_retry
+    ; `Safe_retry
+    ; `Workflow_success
+    ; `Queued_cancel
+    ; `Current_cancel
+    ; `Current_interrupt
+    ]
+    ~f:(fun case ->
+      let callback, signal_callback = Eio.Promise.create () in
+      let release, signal_release = Eio.Promise.create () in
+      let released = ref false in
+      let release_root () =
+        if not !released
+        then (
+          released := true;
+          Eio.Promise.resolve signal_release ())
+      in
+      let actor_ref = ref None in
+      let backend_ref = ref None in
+      let reject_terminal = ref false in
+      let rejected = ref false in
+      let handler_completed = ref false in
+      let within = ref (fun (f : unit -> unit) -> f ()) in
+      let original =
+        Operator_authorization.nonexpiring_static
+          (P.Principal.create
+             ~id:principal_id
+             ~authentication_kind:"local"
+             ~scopes:(P.Scope.Set.of_list [ Send_messages ])
+             ~attributes:[]
+           |> protocol_ok)
+      in
+      let mode =
+        match case with
+        | `Workflow_success -> P.Run.Mode.Workflow
+        | _ -> Single_turn
+      in
+      let make_persistence _env _sw initial =
+        let backend =
+          A.Memory_backend.create ~event_capacity:512 ~initial_state:initial
+        in
+        backend_ref := Some backend;
+        let persistence = A.Memory_backend.persistence backend in
+        { persistence with
+          commit =
+            (fun ~command_audit ~previous (candidate : A.Session_transition.t) ->
+              if
+                !reject_terminal
+                && List.exists candidate.state.jobs ~f:(fun job ->
+                  match job.P.Job.kind, job.status with
+                  | Model_call, Succeeded -> true
+                  | _ -> false)
+              then (
+                rejected := true;
+                Error
+                  (P.Error.create
+                     Persistence_error
+                     ~message:"injected final Model completion ACK failure"
+                     ~retryable:true
+                     ()))
+              else persistence.commit ~command_audit ~previous candidate)
+        }
+      in
+      let make_worker manager =
+        A.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+          let result =
+            try
+              let actor = Option.value_exn !actor_ref in
+              let child = ref None in
+              let ran =
+                caps.with_moderator_event
+                  ~event:Turn_start
+                  ~snapshot:(fun () ->
+                    Chat_response.Moderator_manager.identity_snapshot manager
+                    |> Result.map_error ~f:P.Error.invalid_request)
+                  (fun ~executing
+                    ~model_jobs
+                    ~allocate_inference:_
+                    ~retirement_reason
+                    ~event:_
+                    ~execute:_
+                    ~commit ->
+                     assert (Option.is_none retirement_reason);
+                     [%test_eq: P.Id.Operation.t option]
+                       (Some input.operation.id)
+                       executing.context.operation_id;
+                     let current = A.Session_actor.state actor |> protocol_ok in
+                     let admitted =
+                       A.Model_job_admission.admit
+                         model_jobs
+                         (Inference_target_tests.job current)
+                       |> protocol_ok
+                     in
+                     [%test_eq: int] 0 admitted.attempt;
+                     child := Some admitted;
+                     let actions =
+                       caps.run_actions executing |> protocol_ok |> Option.value_exn
+                     in
+                     let transaction = A.Run_action_service.transaction actions in
+                     ignore
+                       (transaction.prepare [] |> Result.ok_or_failwith
+                        : P.Run_action.t option);
+                     let snapshot =
+                       Chat_response.Moderator_manager.identity_snapshot manager
+                       |> Result.ok_or_failwith
+                     in
+                     commit
+                       ~snapshot
+                       ~requests:
+                         { request_turn = false
+                         ; request_compaction = false
+                         ; end_session = None
+                         })
+                |> protocol_ok
+              in
+              assert ran;
+              let child = Option.value_exn !child in
+              handler_completed := true;
+              Ok (child, input.operation.id)
+            with
+            | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+          in
+          Eio.Promise.resolve signal_callback result;
+          match result with
+          | Error _ ->
+            A.Operation_worker.Failed
+              (P.Error.create
+                 Internal_error
+                 ~message:"Model owner callback failed"
+                 ~retryable:false
+                 ())
+          | Ok _ ->
+            Eio.Promise.await release;
+            (* This worker owns no aggregate moderator borrow. Return the exact
+               acknowledged carrier instead of clearing the installed source. *)
+            let current =
+              A.Session_actor.state (Option.value_exn !actor_ref) |> protocol_ok
+            in
+            Completed
+              { final_history = input.history
+              ; moderator_snapshot = current.moderator
+              ; runtime_requests = []
+              })
+      in
+      with_startup_actor
+        ~original_actor:original
+        ~mode
+        ~make_persistence
+        ~make_worker
+        ~prepare:(fun env ->
+          within := fun f -> Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. f)
+        (fun actor _ _ _ _ _ scope reference attachment ->
+           actor_ref := Some actor;
+           Exn.protect ~finally:release_root ~f:(fun () ->
+             !within (fun () ->
+               let backend = Option.value_exn !backend_ref in
+               let state () = A.Session_actor.state actor |> protocol_ok in
+               let rec idle () =
+                 let current = state () in
+                 match
+                   current.active_operation, current.lifecycle.observed, current.failure
+                 with
+                 | None, Idle, None -> current
+                 | _, _, Some error -> raise_s [%sexp (error : P.Error.t)]
+                 | _ ->
+                   Eio.Fiber.yield ();
+                   idle ()
+               in
+               A.Session_actor.start ~actor:original actor ~attachment_id:attachment.id
+               |> protocol_ok
+               |> ignore;
+               let before = idle () in
+               let request =
+                 P.Run_start.create
+                   ~session_id
+                   ~attachment_id:attachment.id
+                   ~generation:before.identity.generation
+                   ~expected_revision:before.counters.revision
+                   ~mode
+                   ~input:
+                     (User_submission
+                        { kind = Plain_text; text = "hello"; attachments = [] })
+                   ~key:
+                     (P.Idempotency_key.of_string "model-completion-order" |> protocol_ok)
+                 |> protocol_ok
+               in
+               let receipt =
+                 A.Session_actor.admit_run
+                   actor
+                   ~scope
+                   ~request
+                   ~session:reference
+                   ~request_sha256:
+                     (P.Run_start.to_json request
+                      |> Jsonaf.to_string
+                      |> Digestif.SHA256.digest_string
+                      |> Digestif.SHA256.to_hex)
+                   ~entry:(Some actor_entry)
+                 |> protocol_ok
+               in
+               let admitted, operation_id =
+                 match Eio.Promise.await callback with
+                 | Ok result -> result
+                 | Error (exn, backtrace) ->
+                   Exn.raise_with_original_backtrace exn backtrace
+               in
+               assert !handler_completed;
+               (* Generic Model admission deliberately starts with Never. Only the
+                  existing authorized host update configures this retry case,
+                  after its real Event ACK and before any attempt is claimed. *)
+               (match case with
+                | `Safe_retry ->
+                  A.Session_actor.change_job
+                    actor
+                    ~attachment_id:attachment.id
+                    { admitted with
+                      retry_policy = Safe_retry { max_attempts = 2; backoff_ms = 0 }
+                    }
+                  |> protocol_ok
+                  |> ignore
+                | `Child_first
+                | `Root_first_ack_retry
+                | `Workflow_success
+                | `Queued_cancel
+                | `Current_cancel
+                | `Current_interrupt -> ());
+               let queued =
+                 List.find_exn (state ()).jobs ~f:(fun job ->
+                   P.Id.Job.equal job.id admitted.id)
+               in
+               [%test_eq: int] 0 queued.attempt;
+               assert (
+                 Option.equal
+                   P.Inference_origin.equal
+                   admitted.inference_origin
+                   queued.inference_origin);
+               assert (Option.equal P.Job.equal_launch admitted.launch queued.launch);
+               let child =
+                 match case with
+                 | `Queued_cancel -> queued
+                 | `Child_first
+                 | `Root_first_ack_retry
+                 | `Safe_retry
+                 | `Workflow_success
+                 | `Current_cancel
+                 | `Current_interrupt ->
+                   A.Session_actor.claim_job
+                     actor
+                     ~job_id:queued.id
+                     ~generation:queued.generation
+                   |> protocol_ok
+                   |> Option.value_exn
+               in
+               [%test_eq: int]
+                 (match case with
+                  | `Queued_cancel -> 0
+                  | _ -> 1)
+                 child.attempt;
+               assert (
+                 Option.equal
+                   P.Inference_origin.equal
+                   child.inference_origin
+                   (Some (Run receipt.run_id)));
+               let root_work =
+                 P.Run_work.create
+                   ~key:(Operation operation_id)
+                   ~generation:child.generation
+                 |> protocol_ok
+               in
+               let child_work = A.Run_job_occurrence.work child |> protocol_ok in
+               let run current =
+                 A.Run_state.find
+                   (Option.value_exn current.A.Session_state.run_state)
+                   receipt.run_id
+                 |> Option.value_exn
+               in
+               let terminal_receipts current =
+                 A.Run_state.receipts (Option.value_exn current.A.Session_state.run_state)
+                 |> List.filter ~f:(fun item ->
+                   P.Id.Run.equal item.run_id receipt.run_id
+                   && P.Run_receipt.Kind.equal item.kind Terminal)
+               in
+               let proof current work outcome =
+                 match
+                   List.filter (run current).terminal_work ~f:(fun item ->
+                     P.Run_work.equal item.work work)
+                 with
+                 | [ item ] ->
+                   assert (P.Run_work.Terminal.equal_outcome item.outcome outcome)
+                 | items ->
+                   raise_s
+                     [%sexp
+                       "expected exact immutable work proof"
+                     , (items : P.Run_work.Terminal.t list)]
+               in
+               let live current =
+                 (match (run current).lifecycle with
+                  | Admitted | Active | Waiting _ -> ()
+                  | Terminal _ -> failwith "Run completed with unresolved work");
+                 assert (List.is_empty (terminal_receipts current))
+               in
+               let same left right =
+                 match
+                   A.Session_state_document.equal_values
+                     left
+                     ~limits:Document_schema.Limits.default
+                     right
+                 with
+                 | Ok true -> ()
+                 | Ok false -> failwith "rejected completion changed full state"
+                 | Error error -> raise_s [%sexp (error : Document_schema.Error.t)]
+               in
+               let unchanged previous =
+                 same previous (state ());
+                 same previous (A.Memory_backend.state backend);
+                 assert (
+                   List.is_empty
+                     (A.Memory_backend.events_after
+                        backend
+                        previous.counters.event_sequence
+                      |> protocol_ok))
+               in
+               let finish job outcome =
+                 A.Session_actor.complete_job
+                   actor
+                   ~job_id:job.P.Job.id
+                   ~generation:job.generation
+                   ~attempt:job.attempt
+                   outcome
+               in
+               let success job =
+                 finish job (Model_succeeded (`String "actual child result"))
+                 |> protocol_ok
+               in
+               let root_done () =
+                 release_root ();
+                 let current = idle () in
+                 let events =
+                   A.Memory_backend.events_after backend before.counters.event_sequence
+                   |> protocol_ok
+                 in
+                 assert (
+                   List.exists events ~f:(fun event ->
+                     match
+                       P.Event.Durable.Payload.of_json ~kind:event.kind event.payload
+                       |> protocol_ok
+                     with
+                     | Operation_completed { id; state = Completed; _ } ->
+                       P.Id.Operation.equal id operation_id
+                     | _ -> false));
+                 proof current root_work Succeeded;
+                 current
+               in
+               let final, expected_work =
+                 match case with
+                 | `Child_first | `Workflow_success ->
+                   let completed = success child in
+                   assert (
+                     Option.equal
+                       Jsonaf.exactly_equal
+                       completed.result
+                       (Some (`String "actual child result")));
+                   let pending = state () in
+                   proof pending child_work Succeeded;
+                   live pending;
+                   assert (Option.is_some pending.active_operation);
+                   root_done (), [ root_work; child_work ]
+                 | `Root_first_ack_retry ->
+                   let pending = root_done () in
+                   live pending;
+                   [%test_eq: int] 1 (List.length (run pending).terminal_work);
+                   same pending (A.Memory_backend.state backend);
+                   reject_terminal := true;
+                   (match
+                      finish child (Model_succeeded (`String "actual child result"))
+                    with
+                    | Error error ->
+                      assert (P.Error.equal_code error.code Persistence_error);
+                      [%test_eq: string]
+                        "injected final Model completion ACK failure"
+                        error.message
+                    | Ok _ -> failwith "rejected terminal ACK unexpectedly succeeded");
+                   assert !rejected;
+                   unchanged pending;
+                   reject_terminal := false;
+                   let completed = success child in
+                   (match completed.status with
+                    | Succeeded -> ()
+                    | _ -> assert false);
+                   let current = state () in
+                   (match finish child (Model_succeeded (`String "late overwrite")) with
+                    | Error error ->
+                      assert (P.Error.equal_code error.code Already_resolved)
+                    | Ok _ -> failwith "duplicate terminal completion was accepted");
+                   unchanged current;
+                   current, [ root_work; child_work ]
+                 | `Safe_retry ->
+                   let queued =
+                     finish child (Model_failed "actual attempt one failed")
+                     |> protocol_ok
+                   in
+                   (match queued.status with
+                    | Queued -> ()
+                    | _ -> assert false);
+                   let pending = state () in
+                   proof pending child_work Failed;
+                   live pending;
+                   let next_work = A.Run_job_occurrence.work queued |> protocol_ok in
+                   assert (not (P.Run_work.equal next_work child_work));
+                   assert (
+                     List.mem (run pending).owned_work next_work ~equal:P.Run_work.equal);
+                   live (root_done ());
+                   let next =
+                     A.Session_actor.claim_job
+                       actor
+                       ~job_id:queued.id
+                       ~generation:queued.generation
+                     |> protocol_ok
+                     |> Option.value_exn
+                   in
+                   [%test_eq: int] 2 next.attempt;
+                   let before_obsolete = state () in
+                   (match
+                      finish child (Model_succeeded (`String "obsolete attempt one"))
+                    with
+                    | Error error -> assert (P.Error.equal_code error.code Conflict)
+                    | Ok _ -> failwith "obsolete attempt completed the successor");
+                   unchanged before_obsolete;
+                   ignore (success next : P.Job.t);
+                   proof (state ()) next_work Succeeded;
+                   state (), [ root_work; child_work; next_work ]
+                 | `Queued_cancel | `Current_cancel | `Current_interrupt ->
+                   live (root_done ());
+                   let terminal =
+                     match case with
+                     | `Queued_cancel | `Current_cancel ->
+                       A.Session_actor.cancel_job_internal actor ~job_id:child.id
+                       |> protocol_ok
+                     | `Current_interrupt ->
+                       A.Session_actor.interrupt_job
+                         actor
+                         ~job_id:child.id
+                         ~generation:child.generation
+                         ~attempt:child.attempt
+                         ~reason:"actual Model attempt interrupted"
+                       |> protocol_ok
+                     | `Child_first
+                     | `Root_first_ack_retry
+                     | `Safe_retry
+                     | `Workflow_success ->
+                       failwith "non-control scenario reached control writer"
+                   in
+                   [%test_eq: int] child.attempt terminal.attempt;
+                   (match case, terminal.status with
+                    | (`Queued_cancel | `Current_cancel), Cancelled ->
+                      proof (state ()) child_work Cancelled
+                    | `Current_interrupt, Interrupted reason ->
+                      [%test_eq: string] "actual Model attempt interrupted" reason;
+                      proof (state ()) child_work Interrupted
+                    | _ -> raise_s [%sexp (terminal : P.Job.t)]);
+                   let current = state () in
+                   (match case with
+                    | `Current_interrupt ->
+                      let repeated =
+                        A.Session_actor.cancel_job_internal actor ~job_id:child.id
+                        |> protocol_ok
+                      in
+                      assert (
+                        Jsonaf.exactly_equal
+                          (P.Job.to_json terminal)
+                          (P.Job.to_json repeated));
+                      unchanged current
+                    | `Queued_cancel | `Current_cancel -> ()
+                    | `Child_first
+                    | `Root_first_ack_retry
+                    | `Safe_retry
+                    | `Workflow_success ->
+                      failwith "non-control scenario reached control duplicate check");
+                   (match
+                      finish child (Model_succeeded (`String "late control overwrite"))
+                    with
+                    | Error error ->
+                      assert (P.Error.equal_code error.code Already_resolved)
+                    | Ok _ -> failwith "late completion replaced terminal control outcome");
+                   unchanged current;
+                   current, [ root_work; child_work ]
+               in
+               assert (Option.is_none final.active_operation);
+               let saved_child =
+                 List.find_exn final.jobs ~f:(fun job -> P.Id.Job.equal job.id child.id)
+               in
+               (match case, saved_child.status with
+                | ( ( `Child_first
+                    | `Root_first_ack_retry
+                    | `Safe_retry
+                    | `Workflow_success )
+                  , Succeeded ) ->
+                  [%test_eq: int]
+                    (match case with
+                     | `Safe_retry -> 2
+                     | _ -> 1)
+                    saved_child.attempt;
+                  assert (
+                    Option.equal
+                      Jsonaf.exactly_equal
+                      saved_child.result
+                      (Some (`String "actual child result")))
+                | (`Queued_cancel | `Current_cancel), Cancelled -> ()
+                | `Current_interrupt, Interrupted reason ->
+                  [%test_eq: string] "actual Model attempt interrupted" reason
+                | _ -> raise_s [%sexp (saved_child : P.Job.t)]);
+               assert (
+                 List.equal
+                   P.Run_work.equal
+                   (List.sort expected_work ~compare:P.Run_work.compare)
+                   (List.map (run final).terminal_work ~f:(fun item -> item.work)
+                    |> List.sort ~compare:P.Run_work.compare));
+               (match case, (run final).lifecycle with
+                | `Workflow_success, (Admitted | Active) ->
+                  assert (List.is_empty (terminal_receipts final));
+                  assert (
+                    List.is_empty (A.Run_state.intents (Option.value_exn final.run_state)))
+                | `Safe_retry, Terminal (Failed _) ->
+                  [%test_eq: int] 1 (List.length (terminal_receipts final))
+                | (`Child_first | `Root_first_ack_retry), Terminal (Completed _) ->
+                  [%test_eq: int] 1 (List.length (terminal_receipts final))
+                | (`Queued_cancel | `Current_cancel), Terminal Cancelled
+                | `Current_interrupt, Terminal Interrupted ->
+                  [%test_eq: int] 1 (List.length (terminal_receipts final))
+                | _ -> raise_s [%sexp (run final : P.Run.t)]);
+               List.iter (terminal_receipts final) ~f:(fun (terminal : P.Run_receipt.t) ->
+                 let retained = run final in
+                 [%test_eq: int64] retained.revision terminal.run_revision;
+                 assert (P.Id.Principal.equal retained.principal_id terminal.principal_id);
+                 assert (P.Run_source.equal retained.source terminal.source);
+                 match retained.lifecycle with
+                 | Terminal outcome ->
+                   [%test_eq: string]
+                     (P.Run.Terminal.to_json outcome
+                      |> Jsonaf.to_string
+                      |> Digestif.SHA256.digest_string
+                      |> Digestif.SHA256.to_hex)
+                     terminal.request_sha256
+                 | Admitted | Active | Waiting _ -> assert false);
+               same final (A.Memory_backend.state backend)))))
+;;

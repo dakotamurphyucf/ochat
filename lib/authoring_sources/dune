@@ -327,6 +327,9 @@
     lib/agent_session/prompt_catalog.ml %{dep:../agent_session/prompt_catalog.ml}
     lib/agent_session/runtime_builder.ml %{dep:../agent_session/runtime_builder.ml}
     lib/agent_session/legacy_callback_runtime.ml %{dep:../agent_session/legacy_callback_runtime.ml}
+    lib/agent_session/run_job_completion.ml %{dep:../agent_session/run_job_completion.ml}
+    lib/agent_session/run_transition.ml %{dep:../agent_session/run_transition.ml}
+    lib/agent_session/run_work_settlement.ml %{dep:../agent_session/run_work_settlement.ml}
     lib/agent_session/constructor_permission_checkpoint.ml %{dep:../agent_session/constructor_permission_checkpoint.ml}
     lib/agent_session/authored_source_preparation.ml %{dep:../agent_session/authored_source_preparation.ml}
     lib/agent_store/prompt_source_receipt.ml %{dep:../agent_store/prompt_source_receipt.ml}
