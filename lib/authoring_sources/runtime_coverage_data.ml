@@ -651,7 +651,7 @@ let implementation_sources =
   ; ( "lib/chat_response/in_memory_stream.ml"
     , "e246a224d598a61fc78d93197cdf3e933fa41539bb37bc1d68471eb55573f145" )
   ; ( "lib/agent_session/runtime_builder.ml"
-    , "859cc986ddc010a466fb94dc8b23887f9367bdf56dfd476cbea74dcc29cfe11b" )
+    , "07a198ff270c4215c95e16601f5a3b12820f61d75aa126565e8cb07b94bc6399" )
   ; ( "lib/context_compaction/compactor.ml"
     , "7b11eae5ce4d929bf1ab4702111d03f70fe97cfe8543135c73782c2b92391ff0" )
   ; ( "lib/agent_session/session_transition.ml"
@@ -689,7 +689,7 @@ let implementation_sources =
   ; ( "bin/ochat_agent_stdio.ml"
     , "8d134cd11c7df2a60e6b4b77a5ff7f9ea0c28a8a2674a3dd9f573adaa7623902" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "df27c6331b3e89c9fa143bee6405961b0408ae6bc7c8314c84fd0d35d5165132" )
+    , "2667efb6e95db92f3baef11cc8308c519f2c51616b4a1901ea8c440a427a8f8c" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"
@@ -935,7 +935,7 @@ let implementation_sources =
   ; ( "lib/agent_session/script_subscription_service.ml"
     , "54c775836b551733687e907ff46a2a7a0cc26bd46ff915cc6fd5f0cf5116f069" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "152954c227567105ef352f65e6a6e6333b014015e3d12a1f2b0440223d4a6303" )
+    , "c1b39301161bd038ae5efa9df025cce1ae111e98d68789ee9ed1a7057ea7677e" )
   ; ( "lib/agent_session/job_custody.ml"
     , "3f3a132b6fd32f11eba332ec3ae9f6ff4dbfb771dd542ab12cab5a1316e8f3b3" )
   ; ( "lib/agent_session/staged_jobs.ml"

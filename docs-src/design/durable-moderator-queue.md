@@ -378,3 +378,19 @@ An explicit successful Stop retires these loans before publication, including
 Stop while already Stopped; rejected persistence preserves them. Constructor
 selected-subset transfer and failed-resource cleanup still require their actual
 owner integration.
+
+The actual host constructor supplies an explicit CPS port to both ordinary and
+qualified legacy builds. Tool, immediate Schedule and constructor Model services
+share that exact actor callback. Ordinary builds obtain their native services from
+the same host policy construction as qualified builds; they do not invent a v1
+definition. A genuine constructor can run while initially Stopped, but its callback
+still checks the actual halt/failure flags, original admission and exact scope.
+Interactive approval retains its existing running-owner requirement.
+
+A successful callback records its exact full checkpoint as acknowledged data before
+publication. Reading it after commit neither re-encodes Manager state nor reuses
+closed effect authority. Repeated startup calls return that same checkpoint. Owned
+startup preserves acknowledged queued suffixes for installed per-head delivery and
+never drains them with constructor defaults. Standalone embeddings that explicitly
+supply no construction port retain their existing behavior. Foreground/idle host
+routing and installed Model services remain subsequent composition gates.

@@ -188,6 +188,7 @@ let%expect_test
       and selection = ref None in
       let runtime =
         B.build
+          ~legacy_construction:None
           ~agent_source:None
           ~startup:None
           ~root_invocation:Ui

@@ -389,6 +389,37 @@ type job_services =
       -> (Chat_response.Moderation.Capabilities.model_call_result, string) result
   }
 
+(** One actual constructor callback owner, shared by Tool, Schedule and Model.
+    Saved checkpoint is exact acknowledged DATA, not an effect-currentness check.
+    [is_halted] checks this same live constructor owner and actual failure/halt
+    state; it does not relax interactive permission eligibility. Claim failure
+    cannot fall back to standalone services. No installed callback owner is implied. *)
+type legacy_callback_services =
+  { jobs : job_services
+  ; schedules : schedule_services
+  ; execute : Native_tool_invocation.executor
+  ; executing : Agent_protocol.Moderator_execution.t
+  ; check_current : unit -> (unit, Agent_protocol.Error.t) result
+  ; is_halted : unit -> bool
+  ; checkpoint : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
+  }
+
+type legacy_callback_claim =
+  manager:Chat_response.Moderator_manager.t
+  -> callback:Chat_response.Moderator_manager.Callback.t
+  -> (services:legacy_callback_services
+      -> commit:
+           (snapshot:Session.Moderator_state.Identity_snapshot.t
+            -> requests:Agent_protocol.Invocation.follow_up
+            -> (unit, Agent_protocol.Error.t) result)
+      -> (unit, Agent_protocol.Error.t) result)
+  -> (bool, Agent_protocol.Error.t) result
+
+type legacy_construction =
+  { claim : legacy_callback_claim
+  ; script_tools : Chat_response.Agent_runtime.t -> Script_tool_calls.t
+  }
+
 (** Encode an already prepared identity snapshot in the durable moderator
     envelope, without re-entering the live manager. *)
 val encode_moderator_snapshot : Session.Moderator_state.Identity_snapshot.t -> Jsonaf.t
@@ -416,6 +447,7 @@ val moderator_snapshot_observer
     effects on external tools/files are not rolled back by session transactions. *)
 val build
   :  startup:Chat_response.Startup_compilation.t option
+  -> legacy_construction:legacy_construction option
   -> agent_source:Captured_agent_runner.Source_binding.t option
   -> root_invocation:
        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
@@ -460,6 +492,7 @@ val build
     ordinary hosts continue using [build]. *)
 val build_with_extensions
   :  startup:Chat_response.Startup_compilation.t option
+  -> legacy_construction:legacy_construction option
   -> agent_source:Captured_agent_runner.Source_binding.t option
   -> root_invocation:
        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t

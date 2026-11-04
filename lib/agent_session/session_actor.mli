@@ -674,6 +674,12 @@ module Callback_scope : sig
   val executing : t -> Agent_protocol.Moderator_execution.t
   val source : t -> Agent_protocol.Run_source.t
   val origin : t -> Agent_protocol.Inference_origin.t option
+
+  (** Exact full checkpoint captured at this callback's successful ACK, before
+      publication. None means no ACK; Some None is an acknowledged absent
+      checkpoint. This is retained factual data, including after callback expiry,
+      and grants no effect authority. It never queries or re-encodes a Manager. *)
+  val committed_checkpoint : t -> Jsonaf.t option option
 end
 
 (** A callback holds its actual actor borrow through checkpoint commit and

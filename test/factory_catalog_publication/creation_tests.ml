@@ -16,6 +16,7 @@ let ok = function
 let with_daemon
       ?(prompt_text = "<developer>Pinned source during creation.</developer>")
       ?(schemas = false)
+      ?(qualify_chatml_extensions = false)
       ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
       ~policy
       f
@@ -64,7 +65,11 @@ let with_daemon
                ~tool_dir:root
                ~home:root
                ~process_start_identity:None
-               ~options:{ Daemon.default_options with inference_policy = policy }
+               ~options:
+                 { Daemon.default_options with
+                   inference_policy = policy
+                 ; qualify_chatml_extensions
+                 }
                ()
              |> protocol_ok
            in
@@ -112,12 +117,12 @@ let%test_unit
        [%test_eq: Chatml_compilation.Tool_contract.t]
          (Agent_session.Prompt_definition.tool_contract entry.definition)
          Chatml_compilation.Tool_contract.Developer_model_spawn;
-      assert (Option.is_some (Agent_session.Prompt_revision.programs revision));
+       assert (Option.is_some (Agent_session.Prompt_revision.programs revision));
        Eio.Path.unlink Eio.Path.(env#fs / root / "parent.chatmd");
        Eio.Path.unlink Eio.Path.(env#fs / root / "input.json");
        Eio.Path.unlink Eio.Path.(env#fs / root / "output.json");
-      Eio.Path.unlink Eio.Path.(env#fs / root / "handler.chatml");
-      Eio.Path.unlink Eio.Path.(env#fs / root / "chatml.project.json");
+       Eio.Path.unlink Eio.Path.(env#fs / root / "handler.chatml");
+       Eio.Path.unlink Eio.Path.(env#fs / root / "chatml.project.json");
        let preparation = Option.value_exn Daemon.default_options.script_preparation in
        (match
           Agent_session.Runtime_script_preparation.with_revision_plan
@@ -127,16 +132,19 @@ let%test_unit
             ~env
             ~invocation:Agent_session.Runtime_script_preparation.Invocation.Ui
             ~checkpoint:Eio.Fiber.check
-           ~f:(fun _ ~compilation_limits:_ ~plan ~programs ->
-             Ok
-               ( Option.value_map plan ~default:0 ~f:(fun plan ->
-                   List.length (Chat_response.Script_contract_plan.programs plan))
-               , Option.is_some programs ))
+            ~f:(fun _ ~compilation_limits:_ ~plan ~programs ->
+              Ok
+                ( Option.value_map plan ~default:0 ~f:(fun plan ->
+                    List.length (Chat_response.Script_contract_plan.programs plan))
+                , Option.is_some programs ))
         with
-       | Ok (count, true) when count > 0 -> ()
-       | Ok (count, restored) ->
-         raise_s [%sexp "retained developer graph did not restore", (count : int), (restored : bool)]
-       | Error error -> raise_s [%sexp "retained developer restore", (error : Agent_protocol.Error.t)]);
+        | Ok (count, true) when count > 0 -> ()
+        | Ok (count, restored) ->
+          raise_s
+            [%sexp
+              "retained developer graph did not restore", (count : int), (restored : bool)]
+        | Error error ->
+          raise_s [%sexp "retained developer restore", (error : Agent_protocol.Error.t)]);
        assert (
          Result.is_error
            (Agent_session.Runtime_script_preparation.with_revision_plan
@@ -345,4 +353,184 @@ let%test_unit "sealed and uncertain catalog admission rejects before the capture
         Catalog.Seal.mark_uncertain planned |> ok;
         reject Invalid_state;
         Catalog.Seal.retire planned |> ok))
+;;
+
+let%test_unit "legacy Factory startup owns native calls and saves its emitted suffix" =
+  let module P = Agent_protocol in
+  let module Checkpoint = Agent_session.Moderator_checkpoint in
+  let module Queue = Agent_session.Moderator_queue in
+  let prompt_text =
+    {|<developer>Offline constructor callback fixture.</developer>
+<tool name="read_file"><read id="data" path="${workspace}"/></tool>
+<script id="owner" language="chatml" kind="moderator">
+let initial_state = 0
+let on_event = fun ctx state event -> match event with
+| `Session_start ->
+  Task.bind(Tool.call("read_file", `Object([{key = "root"; value = `String("data")}; {key = "file"; value = `String("startup.txt")}])), fun result ->
+    match result with
+    | `Error(code) -> Task.fail(code)
+    | `Ok(value) ->
+      Task.bind(Runtime.emit(`String("constructor suffix")), fun ignored ->
+        Task.bind(Schedule.after_ms(60000, `String("constructor timer")), fun timer ->
+          Task.pure(state + 1))))
+| _ -> Task.pure(state)
+</script>|}
+  in
+  List.iter [ false; true ] ~f:(fun qualify_chatml_extensions ->
+    let model_calls = ref 0 in
+    let policy =
+      inference_policy ~default_model:"fixture-model" ~post_stream:(fun ~sw:_ ~inputs:_ ->
+        incr model_calls;
+        failwith "constructor fixture must not dispatch a provider")
+    in
+    with_daemon ~prompt_text ~qualify_chatml_extensions ~policy (fun env _ root daemon ->
+      Eio.Path.save
+        ~create:(`Exclusive 0o600)
+        Eio.Path.(env#fs / root / "startup.txt")
+        "actual startup native result";
+      let entry =
+        Factory.create_session
+          (Daemon.factory daemon)
+          ~command_audit:None
+          ~principal:(principal ())
+          (create_request ())
+        |> protocol_ok
+      in
+      let closed = ref false in
+      let close () =
+        if not !closed
+        then (
+          entry.close ();
+          closed := true)
+      in
+      Fun.protect ~finally:close (fun () ->
+        let state = Actor.state entry.actor |> protocol_ok in
+        assert (
+          Option.is_none
+            (Agent_server.Session_registry.find
+               (Daemon.registry daemon)
+               state.identity.session_id));
+        assert (
+          Agent_session.Session_state.Runtime_initialization.equal
+            state.runtime_initialization
+            Ready);
+        [%test_eq: P.Session.desired_state] state.lifecycle.desired Stopped;
+        assert (Option.is_none state.active_operation);
+        assert (Option.is_none state.failure);
+        let receipt =
+          match state.moderator_executions with
+          | [ receipt ] -> receipt
+          | receipts ->
+            raise_s
+              [%sexp
+                "expected one constructor receipt"
+              , (receipts : P.Moderator_execution.t list)]
+        in
+        assert (P.Moderator_execution.equal_phase receipt.context.phase Session_start);
+        (match receipt.status with
+         | Completed _ -> ()
+         | Running | Failed _ | Interrupted _ ->
+           raise_s
+             [%sexp "constructor did not complete", (receipt : P.Moderator_execution.t)]);
+        let invocation = List.hd_exn state.invocations in
+        [%test_eq: int] (List.length state.invocations) 1;
+        [%test_eq: P.Id.Moderator_execution.t option]
+          invocation.parent_event
+          (Some receipt.context.id);
+        let observation = Option.value_exn invocation.observation in
+        assert (P.Invocation.equal_observer observation.observer receipt.context.source);
+        (match invocation.status with
+         | Resolved (Complete result) ->
+           assert (
+             String.is_substring
+               (Jsonaf.to_string result)
+               ~substring:"actual startup native result")
+         | Admitted | Dispatching | Published _
+         | Resolved (Pending _ | Fail _ | Cancelled _) ->
+           raise_s [%sexp "unexpected native outcome", (invocation : P.Invocation.t)]);
+        let snapshot =
+          Checkpoint.decode state.moderator |> protocol_ok |> Option.value_exn
+        in
+        assert (
+          Jsonaf.exactly_equal
+            (Session.Snapshot.to_jsonaf snapshot.current_state)
+            (Session.Snapshot.to_jsonaf (Int 1)));
+        assert (
+          List.equal
+            (fun left right ->
+               Jsonaf.exactly_equal
+                 (Session.Snapshot.to_jsonaf left)
+                 (Session.Snapshot.to_jsonaf right))
+            snapshot.queued_internal_events
+            [ Variant ("String", [ String "constructor suffix" ]) ]);
+        let queue = Checkpoint.queue state.moderator |> protocol_ok |> Option.value_exn in
+        [%test_eq: int64] (Queue.head_ordinal queue) 0L;
+        [%test_eq: int64] (Queue.next_ordinal queue) 1L;
+        let occurrence = List.hd_exn (Queue.entries queue) in
+        assert (
+          Option.equal
+            Agent_session.Queue_producer.equal
+            (Queue.Entry.producer occurrence)
+            (Some (Event receipt.context.id)));
+        assert (
+          Option.equal
+            P.Inference_origin.equal
+            (Queue.Entry.origin occurrence)
+            (Some Unbound));
+        assert (
+          P.Invocation.equal_observer (Queue.source queue).observer receipt.context.source);
+        let timer = List.hd_exn state.schedules in
+        [%test_eq: int] (List.length state.schedules) 1;
+        (match timer.status with
+         | Scheduled -> ()
+         | Delivering | Delivered | Cancelled | Failed _ ->
+           raise_s [%sexp "unexpected constructor timer status", (timer : P.Schedule.t)]);
+        let provenance = Option.value_exn timer.inference_provenance in
+        assert (
+          P.Run_source.equal
+            (P.Schedule_provenance.source provenance)
+            (Queue.source queue));
+        assert (
+          Option.equal
+            P.Inference_origin.equal
+            (P.Schedule_provenance.origin provenance)
+            (Queue.Entry.origin occurrence));
+        [%test_eq: int] !model_calls 0;
+        let snapshot_directory =
+          entry.store_handle
+          |> Option.value_exn
+          |> Agent_store.Session_store.Handle.snapshot_directory
+        in
+        (* Direct Factory admission leaves registration and owner closure to the
+         caller. Close this exact entry to join its runtime and install the latest
+         journal-backed checkpoint before inspecting CURRENT. *)
+        close ();
+        let installed =
+          match
+            Agent_store.Snapshot.load_current
+              ~env
+              ~directory:snapshot_directory
+              ~max_payload_length:(64 * 1024 * 1024)
+          with
+          | Ok installed -> Option.value_exn installed
+          | Error error -> raise_s [%sexp (error : Agent_store.Store_error.t)]
+        in
+        let saved =
+          match
+            Agent_session.Session_state_document.decode
+              ~limits:Document_schema.Limits.default
+              installed.snapshot.payload
+          with
+          | Ok saved -> Agent_session.Session_state_document.value saved
+          | Error error -> raise_s [%sexp (error : Document_schema.Error.t)]
+        in
+        assert (Option.equal Jsonaf.exactly_equal saved.moderator state.moderator);
+        assert (List.equal P.Invocation.equal saved.invocations state.invocations);
+        assert (
+          List.equal
+            (fun left right ->
+               Jsonaf.exactly_equal (P.Schedule.to_json left) (P.Schedule.to_json right))
+            saved.schedules
+            state.schedules);
+        [%test_eq: int] !model_calls 0)))
 ;;

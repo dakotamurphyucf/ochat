@@ -1803,12 +1803,12 @@ let instruction_service t actor_ref =
       | Ok actor -> A.instruction_selection_current actor basis)
 ;;
 
-let extension_services
+let native_script_tools
       t
       profile
       actor_ref
-      ~initialization_scope
       ~(state : Agent_session.Session_state.t)
+      native
   =
   let module A = Agent_session.Session_actor in
   let shell_provider = shell_approval_provider t profile actor_ref in
@@ -1844,6 +1844,85 @@ let extension_services
       ; check
       }
   in
+  let registry =
+    Lazy.force native.Chat_response.Agent_runtime.capabilities
+    |> Result.map_error ~f:(fun error -> error.Chat_response.Tool_capability.message)
+    |> Result.ok_or_failwith
+  in
+  Agent_session.Script_tool_calls.create
+    ~registry:(fun () -> registry)
+    ~moderator_names:String.Set.empty
+    ~now:(fun () -> now t)
+    ~is_halted:(fun () ->
+      match Result.bind (extension_actor actor_ref) ~f:A.state with
+      | Error _ -> true
+      | Ok state ->
+        state.halted
+        || Option.is_some state.failure
+        || Agent_protocol.Session.equal_desired_state state.lifecycle.desired Stopped
+        || Option.exists state.active_operation ~f:(fun operation ->
+          match operation.state with
+          | Cancelling | Cancelled | Failed _ | Interrupted _ -> true
+          | Starting | Running | Completed -> false))
+    ~requires_active_moderator:(fun _ -> false)
+    ~authorize:(authorize_extension_native t actor_ref profile native)
+    ~prepare_output:(function
+      | Openai.Responses.Tool_output.Output.Text text -> Ok (`String text)
+      | output -> Ok (Openai.Responses.Tool_output.Output.jsonaf_of_t output))
+    ~defer_observation:(fun _ -> Ok ())
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_admission_check
+    tools
+    ~check:(fun invocation _binding ->
+      check_extension_native actor_ref profile invocation |> Result.map ~f:ignore)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_generated_creation_service
+    tools
+    t.generated_creation
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_managed_session_service tools t.managed_sessions
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_instruction_service
+    tools
+    (instruction_service t actor_ref)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_shell_context tools shell_context
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_session_helpers tools t.session_helpers
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_job_service
+    tools
+    (extension_jobs t actor_ref registry native)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_subscription_service
+    tools
+    (extension_subscriptions t actor_ref)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_schedule_service
+    tools
+    (extension_schedules actor_ref)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_notification_service
+    tools
+    (extension_notifications actor_ref)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_ingress_service tools (extension_ingress actor_ref)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_progress tools ~emit:(fun invocation progress ->
+    match extension_actor actor_ref with
+    | Error _ -> ()
+    | Ok actor ->
+      A.publish_job_progress actor ~invocation_id:invocation.context.id progress)
+;;
+
+let extension_services
+      t
+      profile
+      actor_ref
+      ~initialization_scope
+      ~(state : Agent_session.Session_state.t)
+  =
+  let module A = Agent_session.Session_actor in
   let notification_snapshot () =
     let open Result.Let_syntax in
     let%bind actor = extension_actor actor_ref in
@@ -1880,86 +1959,7 @@ let extension_services
         (match state.automatic_turn_budget with
          | Some budget -> budget.policy
          | None -> t.chatml_runtime_policy)
-    ; script_tools =
-        (fun native ->
-          let registry =
-            Lazy.force native.Chat_response.Agent_runtime.capabilities
-            |> Result.map_error ~f:(fun error ->
-              error.Chat_response.Tool_capability.message)
-            |> Result.ok_or_failwith
-          in
-          Agent_session.Script_tool_calls.create
-            ~registry:(fun () -> registry)
-            ~moderator_names:String.Set.empty
-            ~now:(fun () -> now t)
-            ~is_halted:(fun () ->
-              match Result.bind (extension_actor actor_ref) ~f:A.state with
-              | Error _ -> true
-              | Ok state ->
-                state.halted
-                || Option.is_some state.failure
-                || Agent_protocol.Session.equal_desired_state
-                     state.lifecycle.desired
-                     Stopped
-                || Option.exists state.active_operation ~f:(fun operation ->
-                  match operation.state with
-                  | Cancelling | Cancelled | Failed _ | Interrupted _ -> true
-                  | Starting | Running | Completed -> false))
-            ~requires_active_moderator:(fun _ -> false)
-            ~authorize:(authorize_extension_native t actor_ref profile native)
-            ~prepare_output:(function
-              | Openai.Responses.Tool_output.Output.Text text -> Ok (`String text)
-              | output -> Ok (Openai.Responses.Tool_output.Output.jsonaf_of_t output))
-            ~defer_observation:(fun _ -> Ok ())
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_admission_check
-            tools
-            ~check:(fun invocation _binding ->
-              check_extension_native actor_ref profile invocation |> Result.map ~f:ignore)
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_generated_creation_service
-            tools
-            t.generated_creation
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_managed_session_service
-            tools
-            t.managed_sessions
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_instruction_service
-            tools
-            (instruction_service t actor_ref)
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_shell_context tools shell_context
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_session_helpers tools t.session_helpers
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_job_service
-            tools
-            (extension_jobs t actor_ref registry native)
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_subscription_service
-            tools
-            (extension_subscriptions t actor_ref)
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_schedule_service
-            tools
-            (extension_schedules actor_ref)
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_notification_service
-            tools
-            (extension_notifications actor_ref)
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_ingress_service
-            tools
-            (extension_ingress actor_ref)
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_progress
-            tools
-            ~emit:(fun invocation progress ->
-              match extension_actor actor_ref with
-              | Error _ -> ()
-              | Ok actor ->
-                A.publish_job_progress actor ~invocation_id:invocation.context.id progress))
+    ; script_tools = native_script_tools t profile actor_ref ~state
     ; standalone_execution_limits =
         Agent_session.Standalone_tool_dispatch.declared_execution_limits
     ; standalone_completion =
@@ -3724,6 +3724,97 @@ let delegated_tool_preparation
   result
 ;;
 
+let legacy_construction
+      t
+      profile
+      actor_ref
+      state
+      pending_jobs
+      ~initialization_scope
+      ~initialization_jobs
+      ~run_preparation
+  =
+  let module A = Agent_session.Session_actor in
+  let module B = Agent_session.Runtime_builder in
+  let claim ~manager ~callback f =
+    match !actor_ref, !initialization_scope with
+    | Some actor, Some constructor ->
+      (* Capture this exact Init owner. Returning/closing it cannot retarget these
+         services to a later constructor or the ordinary raw Job writer. *)
+      let jobs =
+        job_services
+          t
+          state
+          actor_ref
+          pending_jobs
+          ~initialization_scope:(ref (Some constructor))
+          ~initialization_jobs
+          ~run_preparation
+      in
+      A.with_initialization_callback
+        actor
+        ~scope:constructor
+        ~manager
+        ~callback
+        (fun ~scope ~commit ->
+           let check_current () = A.check_callback_current actor scope in
+           let check_service () =
+             check_current ()
+             |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+           in
+           let jobs : B.job_services =
+             { spawn_model =
+                 (fun ~recipe ~payload ->
+                   let open Result.Let_syntax in
+                   let%bind () = check_service () in
+                   jobs.spawn_model ~recipe ~payload)
+             ; call_model =
+                 (fun ~recipe ~payload ~execute ->
+                   let open Result.Let_syntax in
+                   let%bind () = check_service () in
+                   jobs.call_model ~recipe ~payload ~execute)
+             }
+           in
+           let is_halted () =
+             match check_current () with
+             | Error _ -> true
+             | Ok () ->
+               (match A.state actor with
+                | Error _ -> true
+                | Ok current ->
+                  current.halted
+                  || Option.is_some current.failure
+                  || Result.is_error (check_current ()))
+           in
+           let checkpoint () =
+             match A.Callback_scope.committed_checkpoint scope with
+             | Some checkpoint -> Ok checkpoint
+             | None ->
+               Error
+                 (unavailable
+                    Invalid_state
+                    "legacy constructor has not acknowledged its checkpoint")
+           in
+           let services : B.legacy_callback_services =
+             { jobs
+             ; schedules = A.callback_schedule_services actor ~scope
+             ; execute = A.callback_tool_executor actor ~scope
+             ; executing = A.Callback_scope.executing scope
+             ; check_current
+             ; is_halted
+             ; checkpoint
+             }
+           in
+           f ~services ~commit)
+    | None, _ | Some _, None ->
+      Error
+        (unavailable
+           Permission_denied
+           "legacy constructor callback requires its actual initialization owner")
+  in
+  B.{ claim; script_tools = native_script_tools t profile actor_ref ~state }
+;;
+
 let prepare_runtime_at_paths
       t
       paths
@@ -3758,6 +3849,18 @@ let prepare_runtime_at_paths
   in
   let%bind inference_context = resolve_state_inference_context t state in
   let%bind tracking = create_graph_tracking ~run_preparation t actor_ref in
+  let legacy_construction =
+    Some
+      (legacy_construction
+         t
+         profile
+         actor_ref
+         state
+         pending_jobs
+         ~initialization_scope
+         ~initialization_jobs
+         ~run_preparation)
+  in
   let prepare () =
     let shell_state = ref state.Agent_session.Session_state.shell in
     let approval_provider = shell_approval_provider t profile actor_ref in
@@ -3829,6 +3932,7 @@ let prepare_runtime_at_paths
                   construct
                     sw
                     (Agent_session.Runtime_builder.build
+                       ~legacy_construction
                        ~agent_source
                        ~startup:(Some startup)
                        ~root_invocation:
@@ -3870,6 +3974,7 @@ let prepare_runtime_at_paths
                     construct
                       sw
                       (B.build_with_extensions
+                         ~legacy_construction
                          ~agent_source
                          ~startup:(Some startup)
                          ~root_invocation:

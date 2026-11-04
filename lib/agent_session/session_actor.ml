@@ -483,11 +483,13 @@ module Callback_scope = struct
     ; source : Agent_protocol.Run_source.t
     ; origin : Agent_protocol.Inference_origin.t option
     ; custody : custody
+    ; mutable committed_checkpoint : Jsonaf.t option option
     }
 
   let executing t = t.borrow.receipt
   let source t = t.source
   let origin t = t.origin
+  let committed_checkpoint t = t.committed_checkpoint
 end
 
 type legacy_callback_handler =
@@ -5863,6 +5865,7 @@ let claim_initialization_callback
       let scope : Callback_scope.t =
         { manager
         ; constructor_scope = Some constructor
+        ; committed_checkpoint = None
         ; callback
         ; borrow
         ; source = checkpoint.source
@@ -6019,6 +6022,7 @@ let claim_legacy_boundary t manager callback parent event =
           let scope : Callback_scope.t =
             { manager
             ; constructor_scope = None
+            ; committed_checkpoint = None
             ; callback
             ; borrow
             ; source
@@ -6156,6 +6160,7 @@ let claim_legacy_head t manager callback operation_id =
         let scope : Callback_scope.t =
           { manager
           ; constructor_scope = None
+          ; committed_checkpoint = None
           ; callback
           ; borrow
           ; source
@@ -6952,6 +6957,8 @@ let commit_queued_event t borrow snapshot requests decision notifications =
                completion_plan
                ~f:(Recurrence_runtime.install_completions t.recurrence_runtime);
              borrow.committed <- true;
+             Option.iter legacy_scope ~f:(fun scope ->
+               scope.Callback_scope.committed_checkpoint <- Some prepared.state.moderator);
              acknowledged := true;
              acknowledge ();
              publish_committed_transition t prepared;
