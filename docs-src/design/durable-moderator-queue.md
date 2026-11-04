@@ -28,14 +28,17 @@ positively unbound or a choice of the current Goal.
 The universal document carrier owns unfamiliar row fields by ordinal. Fields on a
 retained row follow that occurrence through a head removal or equal-value
 append. Consuming a row with protected unfamiliar fields fails closed rather than
-discarding their meaning. Replacing or removing a captured queue lifetime is also
-currently closed: the live source/reset integration must provide explicit carrier
-handling, rather than move old unfamiliar data onto a new source's ordinal zero.
-This intermediate boundary includes Clear/reset paths that would retire the
-positive metadata. The live source/reset integration must provide explicit
-protected-carrier handling before enabling this facility as a complete lifecycle
-feature. This restriction is temporary. Ordinary historical absence remains
-unaffected, and metadata does not become mandatory on historical queues.
+discarding their meaning. A known queue can be removed or replaced only through
+an actual source/reset transition: its original full source must match the
+retained installation, that installation must advance exactly one epoch, and the
+session generation must stay unchanged or advance once. Existing Run retirement
+and immutable receipt rules still apply. The destination checkpoint and any new
+queue must match the actual new installation. A new queue starts at ordinal zero
+and independently validates its payloads and retained producer references; an
+epoch change alone cannot certify arbitrary rows. A prior Running queue occurrence
+cannot be retired through this path. Truthful terminal history retains its
+existing later-epoch rules. Ordinary historical absence remains unaffected, and
+metadata does not become mandatory on historical queues.
 
 The checkpoint owns its complete raw preservation carrier, including unfamiliar
 outer fields and identity-snapshot fields as well as queue metadata. Its parent
@@ -53,7 +56,9 @@ metadata bootstrap may preserve same-observer historical extensions, without
 inventing a prior installation epoch. A known source/lifetime change cannot move
 retained extensions; incompatible deletion and ordinal reassignment fail before
 commit. This data operation grants no Manager resource, source admission or
-execution permission, and does not relax the source/reset restriction above.
+execution permission. Protected unfamiliar checkpoint data still prevents a
+source/reset transition from removing it or moving it onto a new lifetime;
+known-only retirement does not weaken this preservation rule.
 
 The initial metadata profile admits at most 256 rows and a complete encoded child
 of at most 1 MiB, including unfamiliar fields. Hashing accepts a bounded raw queue

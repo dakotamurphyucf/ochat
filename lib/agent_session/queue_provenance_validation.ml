@@ -582,6 +582,16 @@ let validate t =
 ;;
 
 let rotated ~previous incoming =
+  let open Result.Let_syntax in
+  let%bind () =
+    if
+      P.Id.Session.equal previous.session_id incoming.session_id
+      && (Int.equal previous.generation incoming.generation
+          || (previous.generation < Int.max_value
+              && Int.equal (previous.generation + 1) incoming.generation))
+    then Ok ()
+    else invalid "queued lifetime reset belongs to another session or generation"
+  in
   match previous.runs, incoming.runs with
   | Some old, Some next ->
     let%bind.Result () = Run_state.validate_transition ~previous:old next in
@@ -594,6 +604,76 @@ let rotated ~previous incoming =
     else invalid "queued lifetime reset requires an installation rotation"
   | None, _ | Some _, None ->
     invalid "queued lifetime reset discarded its installation evidence"
+;;
+
+let validate_queue_start incoming metadata ~before =
+  let open Result.Let_syntax in
+  let%bind snapshot = Moderator_checkpoint.decode incoming.moderator in
+  let%bind snapshot =
+    Result.of_option
+      snapshot
+      ~error:(P.Error.invalid_request "queued adoption has no identity checkpoint")
+  in
+  let%bind baseline =
+    Moderator_queue.bootstrap ~source:(Moderator_queue.source metadata) ~queue:before
+  in
+  Moderator_queue.validate_transition
+    ~previous:baseline
+    ~before
+    ~incoming:metadata
+    ~after:snapshot.queued_internal_events
+;;
+
+let validate_queue_retirement ~previous incoming ~old ~next =
+  let open Result.Let_syntax in
+  let source = Moderator_queue.source old in
+  let%bind () = installed_source previous source in
+  let%bind snapshot = Moderator_checkpoint.decode previous.moderator in
+  let%bind snapshot =
+    Result.of_option
+      snapshot
+      ~error:
+        (P.Error.invalid_request "retiring queue has no original identity checkpoint")
+  in
+  let observer : P.Invocation.observer =
+    { script_id = snapshot.script_id; source_sha256 = snapshot.script_source_hash }
+  in
+  let%bind () = source_matches source observer in
+  let%bind () = Moderator_queue.validate_queue old snapshot.queued_internal_events in
+  let%bind () = rotated ~previous incoming in
+  let%bind installation =
+    match incoming.runs with
+    | Some index -> Ok (Run_state.installation index)
+    | None -> invalid "queue retirement lost its destination installation"
+  in
+  let%bind observer = Moderator_checkpoint.observer incoming.moderator in
+  let%bind () =
+    if Option.equal P.Invocation.equal_observer installation.source observer
+    then Ok ()
+    else invalid "queue retirement destination differs from its installed source"
+  in
+  let%bind () =
+    if
+      List.exists previous.events ~f:(fun event ->
+        match event.P.Moderator_execution.status, event.queue_occurrence with
+        | Running, Some occurrence ->
+          P.Run_source.equal
+            source
+            (P.Moderator_execution.Queue_occurrence.source occurrence)
+        | Running, None | (Completed _ | Failed _ | Interrupted _), _ -> false)
+    then invalid "Running queue occurrence cannot be retired by a source change"
+    else Ok ()
+  in
+  let%bind () =
+    match next with
+    | None -> Ok ()
+    | Some metadata ->
+      let%bind () = installed_source incoming (Moderator_queue.source metadata) in
+      validate_queue_start incoming metadata ~before:[]
+  in
+  (* A new epoch supplies no producer evidence: authenticate the actual final
+     references as well as the ordinal-zero structural frontier. *)
+  validate incoming
 ;;
 
 let validate_transition ~previous incoming =
@@ -645,7 +725,6 @@ let validate_transition ~previous incoming =
   | None, None -> Ok ()
   | None, Some next ->
     let%bind before = Moderator_checkpoint.decode previous.moderator in
-    let%bind after = Moderator_checkpoint.decode incoming.moderator in
     let%bind before_queue =
       match before with
       | None -> Ok []
@@ -659,17 +738,7 @@ let validate_transition ~previous incoming =
           let%map () = rotated ~previous incoming in
           [])
     in
-    let%bind baseline =
-      Moderator_queue.bootstrap ~source:(Moderator_queue.source next) ~queue:before_queue
-    in
-    (match after with
-     | None -> invalid "queued adoption has no identity checkpoint"
-     | Some after ->
-       Moderator_queue.validate_transition
-         ~previous:baseline
-         ~before:before_queue
-         ~incoming:next
-         ~after:after.queued_internal_events)
+    validate_queue_start incoming next ~before:before_queue
   | Some old, Some next
     when P.Run_source.equal (Moderator_queue.source old) (Moderator_queue.source next) ->
     let%bind before = Moderator_checkpoint.decode previous.moderator in
@@ -682,9 +751,8 @@ let validate_transition ~previous incoming =
          ~incoming:next
          ~after:after.queued_internal_events
      | _ -> invalid "queued transition has no identity checkpoint")
-  | Some _, (Some _ | None) ->
-    invalid
-      "captured queue lifetime reset requires explicit source/reset carrier handling"
+  | Some old, ((Some _ | None) as next) ->
+    validate_queue_retirement ~previous incoming ~old ~next
 ;;
 
 let validate_encoded_event raw =
