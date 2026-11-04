@@ -40,6 +40,10 @@ val reserve_child
   -> occurrence:Recurrence_identity.Occurrence.t
   -> (t * Recurrence_child_reservation.t, Agent_protocol.Error.t) result
 
+(** One exact existing reservation acquires its immutable child locator. No
+    keyed command receipt, control edit or execution authority is introduced. *)
+val link_child : t -> Recurrence_child_association.t -> (t, Agent_protocol.Error.t) result
+
 val apply_due
   :  t
   -> recurrence_id:Agent_protocol.Id.Recurrence.t

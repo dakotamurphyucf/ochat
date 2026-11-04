@@ -578,6 +578,40 @@ let reserve_child
       incoming, row)
 ;;
 
+let link_child t association =
+  let open Result.Let_syntax in
+  let recurrence_id =
+    Recurrence_child_association.occurrence association
+    |> Recurrence_identity.Occurrence.definition
+    |> Recurrence_identity.Definition.recurrence_id
+  in
+  let%bind old =
+    Result.of_option
+      (find t recurrence_id)
+      ~error:(P.Error.invalid_request "linked recurrence identity is not retained")
+  in
+  let%bind entry = E.link_child old association in
+  let%bind next = Stored.create entry in
+  match stored t recurrence_id with
+  | Some previous when same_entry previous next -> Ok t
+  | Some _ | None ->
+    if Int64.equal t.revision Int64.max_value
+    then full "recurrence linkage catalog frontier exhausted"
+    else (
+      let incoming =
+        { t with
+          revision = Int64.succ t.revision
+        ; entries =
+            List.map t.entries ~f:(fun previous ->
+              if P.Id.Recurrence.equal (E.id previous.Stored.value) recurrence_id
+              then next
+              else previous)
+        }
+      in
+      let%map () = validate_transition t ~incoming in
+      incoming)
+;;
+
 let disposition t ~f =
   let open Result.Let_syntax in
   let%bind changed, entries =

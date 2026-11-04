@@ -419,7 +419,7 @@ let rec remove_staging t path =
   | _ -> raise_s [%sexp "invalid private prompt cleanup entry", (path : string)]
 ;;
 
-let install t ~transaction_id artifact =
+let install ?(before_publish = fun () -> ()) t ~transaction_id artifact =
   let open Result.Let_syntax in
   let%bind () = validate_artifact artifact in
   let destination = revision_directory t artifact.Artifact.revision_id in
@@ -438,13 +438,33 @@ let install t ~transaction_id artifact =
           try remove_staging t staging with
           | _ -> ())
     in
+    let install_io f =
+      try f () with
+      | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+        Error
+          (Store_error.of_exn ~operation:"install prompt artifact" ~path:destination exn)
+    in
     let perform () =
-      Eio.Path.mkdir ~perm:0o700 (eio_path t staging);
-      created := true;
-      install_files t staging artifact;
-      let%bind () = sync_staging t staging in
-      Eio.Path.rename (eio_path t staging) (eio_path t destination);
-      Durable_file.sync_directory ~env:t.env ~path:t.root
+      let%bind () =
+        install_io (fun () ->
+          Eio.Cancel.protect (fun () ->
+            Eio.Path.mkdir ~perm:0o700 (eio_path t staging);
+            created := true);
+          install_files t staging artifact;
+          sync_staging t staging)
+      in
+      Eio.Fiber.check ();
+      let%bind () =
+        Eio.Cancel.protect (fun () ->
+          (* The caller's synchronous check is outside IO classification: even
+             an IO-shaped callback exception must retain its original identity. *)
+          before_publish ();
+          install_io (fun () ->
+            Eio.Path.rename (eio_path t staging) (eio_path t destination);
+            created := false;
+            Ok ()))
+      in
+      install_io (fun () -> Durable_file.sync_directory ~env:t.env ~path:t.root)
     in
     (try
        match perform () with
@@ -453,10 +473,6 @@ let install t ~transaction_id artifact =
          cleanup ();
          Error failure
      with
-     | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
-       cleanup ();
-       Error
-         (Store_error.of_exn ~operation:"install prompt artifact" ~path:destination exn)
      | exn ->
        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
        cleanup ();
@@ -736,7 +752,7 @@ let install_or_reuse t ~transaction_id candidate ~checkpoint =
   | `Directory -> verified_retained ()
   | `Not_found ->
     checkpoint ();
-    (match install t ~transaction_id candidate with
+    (match install ~before_publish:checkpoint t ~transaction_id candidate with
      | Ok () -> verified_retained ()
      | Error original ->
        (* A competing publisher, or uncertainty after our rename, is resolved

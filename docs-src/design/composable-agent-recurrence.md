@@ -495,12 +495,12 @@ A fresh target retains the complete validated captured artifact, original prompt
 definition, workspace/profile selectors and selected inference target once per
 revision. The artifact includes exact manifest publication, authored sources and
 program/content payload custody. Reuse that captured closure per occurrence;
-never reopen the definition’s provenance-only root path. The future creation owner
-must use actual authored preparation with protected creation and linking, then
-establish current-authorized parent linkage and reciprocal occurrence origin
-before activation. The existing restricted generated-definition path does not
-accept every authored program or captured project closure. Ordinary creation
-cannot bypass these protected admission requirements.
+never reopen the definition’s provenance-only root path. The captured-child
+factory uses the existing captured parser/program/content replay and artifact
+owners, then establishes current-authorized parent linkage and reciprocal
+occurrence origin before activation. It does not reinterpret a full captured
+program as the restricted generated-definition subset. Ordinary creation cannot
+bypass these protected admission requirements.
 
 The lower delegation ledger can retain a bounded immutable captured origin:
 the exact original reservation and prompt-definition JSON plus the initial
@@ -517,6 +517,65 @@ identical to the controller's source. Only the captured-recurrence source kind
 permits the same parent and child artifact revision. The creation owner must
 verify that exact admitted revision and complete manifest, rather than fork or
 replace the already reserved artifact. Session identities remain distinct.
+
+The stopped-child creation boundary accepts an actor-issued reservation permit,
+not decoded reservation data. After yielding preparation, it refreshes the
+controller's original proof and current host policy, then performs a synchronous
+final check immediately before each owned mutation. The reservation's original
+principal remains immutable audit data; a different freshly authorized caller
+may reconcile the same identities. Current creation scope, workspace/profile,
+configuration, selected inference target and native pins must still match. The
+planning-only automation principal does not supply target creation authority.
+
+Artifact and child-directory publishers repeat that synchronous check after
+all yielding staging and projection preparation, immediately before their atomic
+rename. A denial cleans only staging acquired by that call. Any already
+published destination remains durable evidence after a later failure; no denied
+caller may remove it. If child publication already retained a projection intent,
+the existing projection and index owners conservatively require recovery before
+another attempt. A fresh authorized host may reconcile the same reservation and
+identities; the old denied proof supplies no retry authority.
+
+Native-pin and parent-moderation inspection borrows only an already installed
+runtime through its existing owner gate and cancellable lease. Unloaded,
+unloading or retiring parents reject without constructing a runtime. The short
+borrow returns only validation and an immutable policy fingerprint; no native
+resource or callback escapes. A captured Config preview likewise replays only
+retained bytes, including per-script project and content custody. It grants no
+installed-tree assurance; the complete installed inventory and exact publication
+are verified again through ordinary captured reparse.
+
+The factory reserves the existing lower delegation record, installs or reuses
+the exact admitted manifest, and creates or reopens its one stopped child. The
+new child's canonical history and allocators remain empty, runtime initialization
+remains pending, and automatic initial start is false. No initializer, provider,
+tool effect or Run is admitted. Recovery preserves that dormant state only when
+the exact captured origin, initial Spec and reference match and all history,
+Run, inference, host-turn and uncertainty evidence is pristine. Ordinary
+interrupted initialization retains its existing failure behavior. Ordinary
+execution remains fenced until reciprocal occurrence Run admission is supplied
+by the execution owner. Sending a message requires an already loaded runtime
+before allocating a history ID, so a rejected message cannot consume the
+dormant child's history reservation or prevent its later captured recovery.
+
+A genuine same-store child actor observation supplies the immutable reference
+and a synchronous currentness check. The parent commits the exact association
+before the lower record becomes Linked and before registry publication. An
+association is stored beside its protected reservation in the same frontier;
+`recurrence.child-association.v1` is required whenever it is present. Complete
+association unknowns remain within the reserved 4 KiB profile. Capacity reserves
+its outer array, required semantics, structural counters and coexistence with an
+existing alarm, as well as independent control obligations. An association is
+not terminal evidence and does not release serial pending capacity.
+
+Failures or uncertain acknowledgements preserve original child, transaction and
+artifact identities under the existing writer/recovery fences. Retrying verifies
+the same actual effects; a missing child after its installed stage is not replaced.
+Legacy generated-child recovery leaves captured records protected rather than
+loading a parent or inventing reciprocal linkage. A fresh current permit is
+required to reconcile them. This boundary creates and links stopped children;
+actual target dispatch, Run admission, activation and terminal reconciliation
+remain separate execution work.
 
 Captured origins require the supported
 `delegation.captured-recurrence.v1` document semantics marker. Older readers must

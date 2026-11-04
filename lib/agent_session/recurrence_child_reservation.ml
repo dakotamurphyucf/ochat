@@ -37,9 +37,23 @@ let transaction_id t = t.projection.transaction_id
 let artifact_revision_id t = t.projection.artifact_revision_id
 let manifest_sha256 t = t.projection.manifest_sha256
 let request_sha256 t = t.projection.request_sha256
+let source t = t.projection.source
 let to_json t = t.json
 let equal a b = D.Json.equal a.json b.json
 let invalid message = Error (P.Error.invalid_request message)
+
+let delegation_key t =
+  let%map.Result idempotency_key =
+    P.Idempotency_key.of_string ("recurrence-child:" ^ request_sha256 t)
+  in
+  let definition = I.Occurrence.definition (occurrence t) in
+  Agent_store.Delegation_store.Key.
+    { parent_session_id = P.Session_ref.session_id (I.Definition.controller definition)
+    ; parent_generation = (source t).generation
+    ; principal_id = principal_id t
+    ; idempotency_key
+    }
+;;
 
 let limits =
   D.Limits.create ~max_bytes:65536 ~max_depth:32 ~max_fields:512 ~max_nodes:1024
@@ -255,18 +269,18 @@ module Association_capacity = struct
 
   let validate json = D.Json.validate ~limits json |> protocol
 
-  let reservation_projection t =
+  let growth_projection () =
     `Object
-      [ "reservation", to_json t
-      ; ( "storage_link_growth"
+      [ "bytes", `String (String.make (D.Limits.max_bytes limits) 'x')
+      ; ( "fields"
         , `Object
-            [ "bytes", `String (String.make (D.Limits.max_bytes limits) 'x')
-            ; ( "fields"
-              , `Object
-                  (List.init (D.Limits.max_fields limits) ~f:(fun i ->
-                     Int.to_string i, `Null)) )
-            ; "nodes", `Array (List.init (D.Limits.max_nodes limits) ~f:(fun _ -> `Null))
-            ] )
+            (List.init (D.Limits.max_fields limits) ~f:(fun i -> Int.to_string i, `Null))
+        )
+      ; "nodes", `Array (List.init (D.Limits.max_nodes limits) ~f:(fun _ -> `Null))
       ]
+  ;;
+
+  let reservation_projection t =
+    `Object [ "reservation", to_json t; "storage_link_growth", growth_projection () ]
   ;;
 end

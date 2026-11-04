@@ -34,6 +34,8 @@ let initial definition =
 
 let ready t = List.map (value t).ready ~f:V.Stored_nominal.value
 let protected_children t = (value t).protected_children
+let child_associations t = (value t).child_associations
+let unlinked_children t = S.unlinked_children (value t)
 let pending_count t = List.length (value t).ready + List.length (protected_children t)
 
 let candidates t =
@@ -61,6 +63,7 @@ let validate t ~definitions ~cursor =
    no maximum-spelling counter or synthetic range is admitted as evidence. Keeping
    all current history is conservative even when ordinary retention would prune. *)
 let withdrawal_probe (s : S.t) =
+  let missing_associations = not (List.is_empty (S.unlinked_children s)) in
   let pending =
     s.ready @ Option.value_map s.batch ~default:[] ~f:(fun b -> b.candidates)
   in
@@ -110,7 +113,24 @@ let withdrawal_probe (s : S.t) =
            match name with
            | "revision" -> X.int64_json Int64.max_value
            | "ready" -> `Array []
-           | "batch" | "alarm" -> `Null
+           | "alarm" ->
+             (* Linking can retain the current control container. Do not spend
+                its removal as structural credit for an independent association.
+                Extended containers already move their complete raw value into
+                control_history, with additional wrapper growth. *)
+             if
+               missing_associations
+               && Option.exists s.alarm ~f:(fun alarm ->
+                 not (V.Stored_alarm.has_extensions alarm))
+             then json
+             else `Null
+           | "batch" ->
+             if
+               missing_associations
+               && Option.exists s.batch ~f:(fun batch ->
+                 not (Codec.batch_has_extensions batch))
+             then json
+             else `Null
            | "control_history" ->
              (match json with
               | `Array old -> `Array (List.map archives ~f:Codec.control_json @ old)
@@ -119,14 +139,6 @@ let withdrawal_probe (s : S.t) =
              (match json with
               | `Array old -> `Array (rows @ old)
               | _ -> assert false)
-           | "protected_children" ->
-             (* These are storage-only wrappers, never installed/decoded proof. *)
-             `Array
-               (List.map
-                  s.protected_children
-                  ~f:
-                    Recurrence_child_reservation.Association_capacity
-                    .reservation_projection)
            | "marks" ->
              (match json with
               | `Array marks ->
@@ -147,7 +159,19 @@ let withdrawal_probe (s : S.t) =
               | _ -> assert false)
            | _ -> json
          in
-         name, json))
+         name, json)
+       |> fun fields ->
+       let associations =
+         List.map s.child_associations ~f:Recurrence_child_association.to_json
+         @ List.map (S.unlinked_children s) ~f:(fun _ ->
+           Recurrence_child_reservation.Association_capacity.growth_projection ())
+       in
+       if List.is_empty associations
+       then fields
+       else
+         List.filter fields ~f:(fun (name, _) ->
+           not (String.equal name "child_associations"))
+         @ [ "child_associations", `Array associations ])
   | _ -> assert false
 ;;
 
@@ -157,24 +181,38 @@ let probe_codec =
     ~kind:"ochat.recurrence_frontier"
     ~version:1
     ~shape:Codec.shape
-    ~supported_semantics:[ "recurrence.child-reservation.v1" ]
+    ~supported_semantics:
+      [ "recurrence.child-reservation.v1"; "recurrence.child-association.v1" ]
     ~decode:(fun j -> Ok j)
     ~encode:(fun j -> Ok j)
   |> Result.map_error ~f:(fun e -> Sexp.to_string_hum (D.Error.sexp_of_t e))
   |> Result.ok_or_failwith
 ;;
 
-let require_creation_semantics t document =
-  if List.is_empty (protected_children t)
+let require_creation_semantics ?(capacity = false) t document =
+  let required =
+    (if List.is_empty (protected_children t)
+     then []
+     else [ "recurrence.child-reservation.v1" ])
+    @
+    if
+      List.is_empty (child_associations t)
+      && not (capacity && not (List.is_empty (protected_children t)))
+    then []
+    else [ "recurrence.child-association.v1" ]
+  in
+  if
+    List.for_all required ~f:(fun marker ->
+      List.mem (D.Document.required_semantics document) marker ~equal:String.equal)
   then Ok document
   else (
-    let json = D.Document.json document in
-    match json with
+    match D.Document.json document with
     | `Object fields ->
       let semantics =
-        "recurrence.child-reservation.v1"
-        :: List.filter (D.Document.required_semantics document) ~f:(fun text ->
-          not (String.equal text "recurrence.child-reservation.v1"))
+        D.Document.required_semantics document
+        @ List.filter required ~f:(fun marker ->
+          not
+            (List.mem (D.Document.required_semantics document) marker ~equal:String.equal))
       in
       D.Document.inspect
         ~limits
@@ -192,7 +230,7 @@ let capacity_projection t =
   let%bind document =
     D.Domain_codec.encode probe_codec (C.with_value t (withdrawal_probe (value t)))
   in
-  let%map document = require_creation_semantics t document in
+  let%map document = require_creation_semantics ~capacity:true t document in
   D.Document.json document
 ;;
 
@@ -232,6 +270,17 @@ let of_document document =
     else
       Error (D.Error.Required_semantics_unknown "missing recurrence.child-reservation.v1")
   in
+  let%bind () =
+    if
+      List.is_empty (child_associations t)
+      || List.mem
+           (D.Document.required_semantics document)
+           "recurrence.child-association.v1"
+           ~equal:String.equal
+    then Ok ()
+    else
+      Error (D.Error.Required_semantics_unknown "missing recurrence.child-association.v1")
+  in
   let%map _ = to_document t in
   t
 ;;
@@ -244,9 +293,33 @@ let admit previous state =
 
 let bump (state : S.t) =
   let%bind.Result revision = V.add state.revision 1L in
-  if Int64.(revision > max_value - of_int (List.length state.protected_children))
+  if Int64.(revision > max_value - of_int (List.length (S.unlinked_children state)))
   then invalid "frontier lacks reserved control and child association revisions"
   else Ok { state with revision }
+;;
+
+let link_child t association =
+  let open Result.Let_syntax in
+  let occurrence = Recurrence_child_association.occurrence association in
+  let%bind reservation =
+    Result.of_option
+      (List.find (protected_children t) ~f:(fun row ->
+         I.Occurrence.equal occurrence (Recurrence_child_reservation.occurrence row)))
+      ~error:(P.Error.invalid_request "linked child has no retained reservation")
+  in
+  let%bind () = Recurrence_child_association.validate association ~reservation in
+  match
+    List.find (child_associations t) ~f:(fun old ->
+      I.Occurrence.equal occurrence (Recurrence_child_association.occurrence old))
+  with
+  | Some old when Recurrence_child_association.equal old association -> Ok t
+  | Some _ -> invalid "linked child association cannot be replaced"
+  | None ->
+    let state = value t in
+    let%bind state =
+      bump { state with child_associations = state.child_associations @ [ association ] }
+    in
+    admit t state
 ;;
 
 let reserve_child
@@ -298,7 +371,7 @@ let reserve_child
       if
         Int64.(
           state.revision
-          <= max_value - of_int Int.(2 + List.length state.protected_children))
+          <= max_value - of_int Int.(2 + List.length (S.unlinked_children state)))
       then Ok ()
       else invalid "creation frontier lacks independent control/association credits"
     in
@@ -521,7 +594,7 @@ module Work = struct
       if
         Int64.(
           state.revision
-          > max_value - of_int Int.(2 + List.length state.protected_children))
+          > max_value - of_int Int.(2 + List.length (S.unlinked_children state)))
       then invalid "due frontier lacks reserved control revision steps"
       else admit t.original state)
   ;;
@@ -627,6 +700,40 @@ let validate_transition previous ~incoming ~definitions ~cursor =
       | None | Some _ -> invalid "protected creation evidence was erased or replaced")
   in
   let%bind () =
+    List.fold_result p.child_associations ~init:() ~f:(fun () old ->
+      match
+        List.find n.child_associations ~f:(fun row ->
+          I.Occurrence.equal
+            (Recurrence_child_association.occurrence old)
+            (Recurrence_child_association.occurrence row))
+      with
+      | Some row when Recurrence_child_association.equal old row -> Ok ()
+      | None | Some _ -> invalid "immutable child association was erased or replaced")
+  in
+  let added_associations =
+    List.filter n.child_associations ~f:(fun association ->
+      not
+        (List.exists p.child_associations ~f:(fun old ->
+           I.Occurrence.equal
+             (Recurrence_child_association.occurrence association)
+             (Recurrence_child_association.occurrence old))))
+  in
+  let%bind () =
+    if List.length added_associations > 1
+    then invalid "one transition cannot link multiple children"
+    else
+      List.fold_result added_associations ~init:() ~f:(fun () association ->
+        match
+          List.find p.protected_children ~f:(fun reservation ->
+            I.Occurrence.equal
+              (Recurrence_child_association.occurrence association)
+              (Recurrence_child_reservation.occurrence reservation))
+        with
+        | None -> invalid "child linkage requires a previously protected reservation"
+        | Some reservation ->
+          Recurrence_child_association.validate association ~reservation)
+  in
+  let%bind () =
     List.fold_result p.history ~init:() ~f:(fun () old ->
       match
         List.find n.history ~f:(fun row ->
@@ -637,6 +744,18 @@ let validate_transition previous ~incoming ~definitions ~cursor =
         Ok ()
       | Some _ -> invalid "retained disposition detail changed immutable bytes")
   in
+  (* The native candidate can still carry the envelope from before its first
+     protected reservation or child link. Persistence, by contrast, has decoded
+     the marker-bearing wire returned by [to_document]. Materialize the same
+     validated candidate value through each preservation basis before adoption:
+     only this owner's positive facts may add its required semantics. All prior
+     envelope fields and unknown payload fields still pass strict adoption. *)
+  let materialize candidate =
+    let%bind document = to_document candidate |> protocol in
+    D.Domain_codec.decode Codec.codec document |> protocol
+  in
+  let%bind previous = materialize (C.with_value previous n) in
+  let%bind incoming = materialize incoming in
   let%bind adopted = D.Domain_codec.adopt Codec.codec ~previous ~incoming |> protocol in
   let%bind adopted = to_document adopted |> protocol in
   let%bind incoming = to_document incoming |> protocol in

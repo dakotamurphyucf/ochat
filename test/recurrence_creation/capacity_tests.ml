@@ -74,6 +74,99 @@ let%expect_test "actual maximal Reference wire fits the explicit association quo
   [%expect {| validated store wire; quota only, no child authority |}]
 ;;
 
+let%expect_test "actual child link coexists with its alarm within all reserved counters" =
+  with_actor_workspace (fun _ workspace ->
+    let initial =
+      Domain_tests.captured_definition workspace (Due.definition "association_fields")
+      |> Due.enabled
+    in
+    let selected, _, _ =
+      Due.step initial ~phase:None (Due.snapshot ~wall:(Due.at_ms 0) ~elapsed_ms:0)
+    in
+    let reserved, row = Domain_tests.reserve_entry selected 0L in
+    let frontier = Due.frontier reserved in
+    assert (Option.is_some (H.alarm frontier));
+    let key = Reservation.delegation_key row |> protocol_ok in
+    let reference =
+      Store.Delegation_store.reference_of_jsonaf
+        (`Object
+            [ ( "key"
+              , `Object
+                  [ "parent_session_id", P.Id.Session.to_json key.parent_session_id
+                  ; "parent_generation", `Number (Int.to_string key.parent_generation)
+                  ; "principal_id", P.Id.Principal.to_json key.principal_id
+                  ; "idempotency_key", P.Idempotency_key.to_json key.idempotency_key
+                  ] )
+            ; "child_session_id", P.Id.Session.to_json (Reservation.child_session_id row)
+            ; ( "revision_id"
+              , P.Id.Prompt_revision.to_json (Reservation.artifact_revision_id row) )
+            ; "request_sha256", `String (Reservation.request_sha256 row)
+            ; "admission_sha256", `String (String.make 64 'a')
+            ])
+      |> store_ok
+    in
+    let module Association = A.Recurrence_child_association in
+    let association = Association.create ~reservation:row ~reference |> protocol_ok in
+    (* Discover the exact maximum accepted field count through the real decoder.
+       Unknowns remain literal null fields; the expected growth is measured from
+       the actual before/after documents, independently of the reserve witness. *)
+    let rec saturate json count =
+      if count > 256 then failwith "association field contract unexpectedly expanded";
+      let candidate = Due.append json ("future_" ^ Int.to_string count) `Null in
+      match Association.of_json candidate with
+      | Ok _ -> saturate candidate (count + 1)
+      | Error _ -> Association.of_json json |> protocol_ok
+    in
+    let association = saturate (Association.to_json association) 0 in
+    let linked = H.link_child frontier association |> protocol_ok in
+    assert (Option.is_some (H.alarm linked));
+    let measure frontier =
+      H.to_document frontier
+      |> document_ok
+      |> D.Document.json
+      |> A.Capacity_growth.measure ~limits:document_limits
+      |> protocol_ok
+    in
+    let actual =
+      A.Capacity_growth.positive_difference (measure linked) ~previous:(measure frontier)
+    in
+    let reserve = H.reserved_growth frontier |> protocol_ok in
+    List.iter
+      [ A.Capacity_growth.encoded_bytes
+      ; A.Capacity_growth.fields
+      ; A.Capacity_growth.nodes
+      ]
+      ~f:(fun counter -> assert (counter actual <= counter reserve));
+    let restored = H.to_document linked |> document_ok |> H.of_document |> document_ok in
+    assert (Association.equal association (List.hd_exn (H.child_associations restored)));
+    let restored_reserved =
+      H.to_document frontier |> document_ok |> H.of_document |> document_ok
+    in
+    (* Actor candidates retain their original carrier; persistence decodes the
+       required-semantics wire. Both representations must admit the same exact
+       state and the same reservation-to-link transition without losing unknowns. *)
+    List.iter
+      [ frontier, restored_reserved
+      ; restored_reserved, frontier
+      ; linked, restored
+      ; restored, linked
+      ; restored_reserved, linked
+      ; frontier, restored
+      ]
+      ~f:(fun (previous, incoming) ->
+        H.validate_transition
+          previous
+          ~incoming
+          ~definitions:(E.definitions reserved)
+          ~cursor:(E.cursor reserved)
+        |> protocol_ok);
+    assert (Association.equal association (List.hd_exn (H.child_associations linked)));
+    print_endline
+      "maximum compatible association; alarm retained; bytes/fields/nodes covered");
+  [%expect
+    {| maximum compatible association; alarm retained; bytes/fields/nodes covered |}]
+;;
+
 let add_padding document count =
   let json = D.Document.json document in
   let payload = Due.field json "payload" in

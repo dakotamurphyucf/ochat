@@ -165,10 +165,17 @@ let%expect_test
            ~definitions:(E.definitions reserved)
            ~cursor:(E.cursor reserved)));
     let capacity = H.capacity_projection frontier |> document_ok in
-    assert (
-      D.Json.equal
-        (Due.field capacity "required_semantics")
-        (Due.field json "required_semantics")));
+    let original_markers = D.Document.required_semantics document in
+    let association_marker = "recurrence.child-association.v1" in
+    assert (not (List.mem original_markers association_marker ~equal:String.equal));
+    let capacity_document = D.Document.inspect ~limits:H.limits capacity |> document_ok in
+    [%test_eq: string list]
+      (original_markers @ [ association_marker ])
+      (D.Document.required_semantics capacity_document);
+    (* Reservation accounting charges the later association fence without
+       publishing an association or mutating the current document semantics. *)
+    assert (List.is_empty (H.child_associations frontier));
+    assert (D.Json.equal json (H.to_document frontier |> document_ok |> D.Document.json)));
   print_endline
     "13-slot serial model, exact retry, nested lexemes, controls and required semantics";
   [%expect

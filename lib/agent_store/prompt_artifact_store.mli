@@ -109,9 +109,15 @@ val discard_interrupted_installs
     flushes files and staging directories, then renames it to the revision ID and
     flushes the artifact parent before acknowledgment. Uncertain final publication
     never deletes an installed destination. Directories remain owner-managed
-    for pruning. File permissions are not a sandbox against the owning account. *)
+    for pruning. File permissions are not a sandbox against the owning account.
+    Optional [before_publish] runs after staging is flushed, immediately before
+    the final rename in the protected ownership transfer. It must be synchronous
+    and non-yielding. Its exceptions propagate unchanged after owned-staging
+    cleanup; it grants no authority after a subsequent yield. The default adds
+    no authorization policy. *)
 val install
-  :  t
+  :  ?before_publish:(unit -> unit)
+  -> t
   -> transaction_id:Agent_protocol.Id.Transaction.t
   -> Artifact.t
   -> (unit, Store_error.t) result
@@ -128,7 +134,9 @@ val install
     conflicting content fails closed. The caller owns normal artifact-root
     publication/pruning lifetime; this operation creates no new authority.
     [checkpoint] is called around the bounded admission and verification
-    phases, and its exception/cancellation propagates unchanged. Raw [install]
+    phases and immediately before a new artifact's final rename. The final
+    publication checkpoint must be synchronous and non-yielding; its original
+    exception/cancellation propagates unchanged. Raw [install]
     retains its exclusive, reject-existing contract. *)
 val install_or_reuse
   :  t
