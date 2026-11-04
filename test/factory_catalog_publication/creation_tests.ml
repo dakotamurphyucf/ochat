@@ -367,11 +367,12 @@ let%test_unit "legacy Factory startup owns native calls and saves its emitted su
   let prompt_text =
     {|<developer>Offline constructor callback fixture.</developer>
 <tool name="read_file"><read id="data" path="${workspace}"/></tool>
+<tool name="append_to_file"/>
 <script id="owner" language="chatml" kind="moderator">
 let initial_state = 0
 let on_event = fun ctx state event -> match event with
 | `Session_start ->
-  Task.bind(Tool.call("read_file", `Object([{key = "root"; value = `String("data")}; {key = "file"; value = `String("startup.txt")}])), fun result ->
+  Task.bind(Tool.call("read_file", `Object([{key = "root"; value = `String("data")}, {key = "file"; value = `String("startup.txt")}])), fun result ->
     match result with
     | `Error(code) -> Task.fail(code)
     | `Ok(value) ->
@@ -380,12 +381,21 @@ let on_event = fun ctx state event -> match event with
           Task.bind(Ui.notify("constructor notification"), fun ignored ->
             Task.pure(state + 1)))))
 | `Session_resume ->
-  Task.bind(Tool.call("read_file", `Object([{key = "root"; value = `String("data")}; {key = "file"; value = `String("resume.txt")}])), fun result ->
+  Task.bind(Tool.call("read_file", `Object([{key = "root"; value = `String("data")}, {key = "file"; value = `String("resume.txt")}])), fun result ->
     match result with
     | `Error(code) -> Task.fail(code)
     | `Ok(value) ->
-      Task.bind(Runtime.emit(`String("resume suffix")), fun ignored ->
-        Task.pure(state + 1)))
+      Task.bind(Tool.call("append_to_file", `Object([{key = "path"; value = `String("prefix-marker.txt")}, {key = "content"; value = `String("fresh-resume")}])), fun appended ->
+        match appended with
+        | `Error(code) -> Task.fail(code)
+        | `Ok(value) ->
+          Task.bind(Runtime.emit(`String("resume suffix")), fun ignored ->
+            Task.pure(state + 1))))
+| `String("constructor suffix") ->
+  Task.bind(Tool.call("append_to_file", `Object([{key = "path"; value = `String("prefix-marker.txt")}, {key = "content"; value = `String("forbidden-old-head")}])), fun result ->
+    match result with
+    | `Error(code) -> Task.fail(code)
+    | `Ok(value) -> Task.pure(state + 1))
 | _ -> Task.pure(state)
 </script>|}
   in
@@ -405,6 +415,8 @@ let on_event = fun ctx state event -> match event with
         ~create:(`Exclusive 0o600)
         Eio.Path.(env#fs / root / "resume.txt")
         "actual cold resume native result";
+      let marker = Eio.Path.(env#fs / root / "prefix-marker.txt") in
+      Eio.Path.save ~create:(`Exclusive 0o600) marker "sentinel";
       let entry =
         Factory.create_session
           (Daemon.factory daemon)
@@ -555,8 +567,21 @@ let on_event = fun ctx state event -> match event with
               ~principal:(principal ())
               ~is_current:(fun () -> Atomic.get resume_live)
           in
-          Owner.ensure_loaded_authenticated entry.runtime ~actor:resume_original
-          |> protocol_ok;
+          (match
+             Owner.ensure_loaded_authenticated entry.runtime ~actor:resume_original
+           with
+           | Ok () -> ()
+           | Error failure ->
+             let failed = Actor.state entry.actor |> protocol_ok in
+             let calls =
+               List.filter failed.invocations ~f:(fun invocation ->
+                 String.equal invocation.context.tool_name "append_to_file")
+             in
+             raise_s
+               [%sexp
+                 "cold Resume failed"
+               , (failure : P.Error.t)
+               , (calls : P.Invocation.t list)]);
           assert (Owner.is_loaded entry.runtime);
           let resumed = Actor.state entry.actor |> protocol_ok in
           [%test_eq: P.Session.desired_state] resumed.lifecycle.desired Stopped;
@@ -601,7 +626,11 @@ let on_event = fun ctx state event -> match event with
           let resumed_native =
             match
               List.filter resumed.invocations ~f:(fun candidate ->
-                not (P.Id.Invocation.equal candidate.context.id invocation.context.id))
+                Option.equal
+                  P.Id.Moderator_execution.equal
+                  candidate.parent_event
+                  (Some resume_receipt.context.id)
+                && String.equal candidate.context.tool_name "read_file")
             with
             | [ invocation ] -> invocation
             | invocations ->
@@ -610,6 +639,28 @@ let on_event = fun ctx state event -> match event with
                   "expected one cold Resume native call"
                 , (invocations : P.Invocation.t list)]
           in
+          [%test_eq: int] 3 (List.length resumed.invocations);
+          let resumed_append =
+            match
+              List.filter resumed.invocations ~f:(fun candidate ->
+                Option.equal
+                  P.Id.Moderator_execution.equal
+                  candidate.parent_event
+                  (Some resume_receipt.context.id)
+                && String.equal candidate.context.tool_name "append_to_file")
+            with
+            | [ invocation ] -> invocation
+            | invocations ->
+              raise_s
+                [%sexp
+                  "expected one cold Resume append", (invocations : P.Invocation.t list)]
+          in
+          (match resumed_append.status with
+           | Resolved (Complete _) -> ()
+           | Admitted | Dispatching | Published _
+           | Resolved (Pending _ | Fail _ | Cancelled _) ->
+             raise_s [%sexp (resumed_append : P.Invocation.t)]);
+          [%test_eq: string] "sentinel\nfresh-resume" (Eio.Path.load marker);
           assert (List.exists resumed.invocations ~f:(P.Invocation.equal invocation));
           [%test_eq: P.Id.Moderator_execution.t option]
             resumed_native.parent_event
@@ -694,7 +745,84 @@ let on_event = fun ctx state event -> match event with
            | Ok true -> ()
            | Ok false -> failwith "already loaded runtime replayed cold construction"
            | Error error -> raise_s [%sexp (error : Document_schema.Error.t)]);
-          let state = repeated in
+          let writer, _ =
+            Actor.attach entry.actor ~mode:Read_write ~subscribe:false |> protocol_ok
+          in
+          Actor.start ~actor:resume_original entry.actor ~attachment_id:writer.id
+          |> protocol_ok
+          |> ignore;
+          let rec await_idle () =
+            let current = Actor.state entry.actor |> protocol_ok in
+            match
+              current.active_operation, current.lifecycle.observed, current.failure
+            with
+            | None, Idle, None -> current
+            | _, _, Some failure -> raise_s [%sexp (failure : P.Error.t)]
+            | _ ->
+              Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+              await_idle ()
+          in
+          let running = await_idle () in
+          [%test_eq: P.Session.desired_state] Running running.lifecycle.desired;
+          (* A fresh constructor can use this exact tool, but reopening does not
+             lend its authority to the retained queue prefix. *)
+          (match Owner.drain_idle_moderator entry.runtime with
+           | Error failure ->
+             [%test_eq: P.Error.code] Invalid_state failure.code;
+             assert (
+               String.is_substring
+                 failure.message
+                 ~substring:"invocation.admission_failed")
+           | Ok progress ->
+             raise_s [%sexp "old prefix unexpectedly drained", (progress : bool)]);
+          let state = Actor.state entry.actor |> protocol_ok in
+          let failed =
+            match
+              List.filter state.moderator_executions ~f:(fun candidate ->
+                not
+                  (List.exists running.moderator_executions ~f:(fun previous ->
+                     P.Id.Moderator_execution.equal
+                       candidate.context.id
+                       previous.context.id)))
+            with
+            | [ failed ] -> failed
+            | receipts ->
+              raise_s
+                [%sexp
+                  "expected one failed old queue head"
+                , (receipts : P.Moderator_execution.t list)]
+          in
+          assert (P.Moderator_execution.equal_phase failed.context.phase Internal_event);
+          assert (Option.is_none failed.context.operation_id);
+          (match failed.status with
+           | Failed failure -> [%test_eq: string] "event.handler_failed" failure.code
+           | Running | Completed _ | Interrupted _ ->
+             raise_s [%sexp (failed : P.Moderator_execution.t)]);
+          let consumed = Option.value_exn failed.queue_occurrence in
+          [%test_eq: int64]
+            (Queue.head_ordinal resumed_queue)
+            (P.Moderator_execution.Queue_occurrence.ordinal consumed);
+          assert (
+            P.Run_source.equal
+              (Queue.source resumed_queue)
+              (P.Moderator_execution.Queue_occurrence.source consumed));
+          assert (P.Invocation.equal_observer failed.context.source receipt.context.source);
+          assert (
+            Option.equal
+              P.Inference_origin.equal
+              (P.Moderator_execution.Queue_occurrence.origin consumed)
+              (Queue.Entry.origin occurrence));
+          assert (Option.equal Jsonaf.exactly_equal repeated.moderator state.moderator);
+          [%test_eq: string] "sentinel\nfresh-resume" (Eio.Path.load marker);
+          [%test_eq: bool] false (Owner.drain_idle_moderator entry.runtime |> protocol_ok);
+          let blocked = Actor.state entry.actor |> protocol_ok in
+          assert (
+            List.equal
+              P.Moderator_execution.equal
+              state.moderator_executions
+              blocked.moderator_executions);
+          assert (Option.equal Jsonaf.exactly_equal state.moderator blocked.moderator);
+          [%test_eq: string] "sentinel\nfresh-resume" (Eio.Path.load marker);
           [%test_eq: int] !model_calls 0;
           let snapshot_directory =
             entry.store_handle
