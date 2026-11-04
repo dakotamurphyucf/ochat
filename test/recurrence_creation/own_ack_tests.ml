@@ -13,7 +13,7 @@ module Manager = Chat_response.Moderator_manager
 (* The controller was initialized BEFORE this staged admission. Its real Manager
    checkpoint is compiled from the exact captured revision, then installed by the
    actual Actor. This is not the Factory/cold-Ready initialization path. *)
-let with_controller ?clock_read ?before_commit f =
+let with_controller ?clock_read ?before_commit ?published ?before_observe f =
   Held_tests.with_captured_target ~controller:true (fun fixture source root_file ->
     let revision =
       match Builder.Source.selection source with
@@ -51,7 +51,16 @@ let with_controller ?clock_read ?before_commit f =
     (match Builder.Source.moderator source with
      | Legacy expected -> assert (P.Invocation.equal_observer expected observer)
      | Extension _ | No_moderator -> failwith "expected captured legacy controller");
-    let actor = create_actor fixture ~sw:fixture.sw ?clock_read ?before_commit () in
+    let actor =
+      create_actor
+        fixture
+        ~sw:fixture.sw
+        ?clock_read
+        ?before_commit
+        ?published
+        ?before_observe
+        ()
+    in
     Exn.protect
       ~finally:(fun () -> A.Session_actor.shutdown actor)
       ~f:(fun () ->

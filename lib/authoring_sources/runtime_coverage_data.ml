@@ -83,6 +83,7 @@ let shared_features =
   ; ( "lifecycle.stop"
     , "Graceful and cancel dispositions, joined cleanup and independent child lifetimes"
     , [ "lib/agent_session/session_actor.ml"
+      ; "lib/agent_session/recurrence_activation_custody.ml"
       ; "lib/agent_session/actor_reply.ml"
       ; "lib/agent_session/background_execution.ml"
       ; "lib/agent_server/runtime_owner.ml"
@@ -528,11 +529,16 @@ let moderator_features =
       ; "lib/agent_session/legacy_queue_checkpoint.ml"
       ; "lib/agent_session/legacy_schedule_custody.ml"
       ; "lib/agent_session/moderator_source_installation.ml"
+      ; "lib/agent_session/pending_turn.ml"
+      ; "lib/agent_session/run_input_handoff.ml"
+      ; "lib/agent_session/recurrence_activation_custody.ml"
       ]
     , "runtime.invocations.moderator"
     , [ "test/agent_session/event_delivery_tests.ml"
       ; "test/chatml_composition/moderator_pending_tests.ml"
       ; "test/factory_catalog_publication/creation_tests.ml"
+      ; "test/recurrence_creation/handoff_tests.ml"
+      ; "test/recurrence_child/input_tests.ml"
       ; "test/agent_server_restart_test.ml"
       ; "test/chatml_script_routing/routing_tests.ml"
       ] )
@@ -635,7 +641,13 @@ let moderator_features =
 ;;
 
 let implementation_sources =
-  [ ( "lib/agent_session/actor_reply.ml"
+  [ ( "lib/agent_session/pending_turn.ml"
+    , "0cacc56da4b2a17f822d25dd25501096b2ac7184888f9ef3b09093023192c178" )
+  ; ( "lib/agent_session/run_input_handoff.ml"
+    , "b13a379fdd240a7f764043cf69e3e9c3888a28611a4f2e5c22d742b876427d96" )
+  ; ( "lib/agent_session/recurrence_activation_custody.ml"
+    , "a91e3ff910020a422ef3f23a29262ea36029b7a21a96536c4e6a83c2b99ef99a" )
+  ; ( "lib/agent_session/actor_reply.ml"
     , "00e0abeb3120d71ddd4fc0dc109b0d584da3ba8b771f6d0c02aad525df984fb4" )
   ; ( "lib/agent_session/execution_custody.ml"
     , "8d64b47d0385c80013963ffdf886519fe04c3058d543a79b6d9934f4573d5133" )
@@ -954,7 +966,7 @@ let implementation_sources =
   ; ( "lib/agent_session/script_subscription_service.ml"
     , "54c775836b551733687e907ff46a2a7a0cc26bd46ff915cc6fd5f0cf5116f069" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "618f4e9551a2eb38a2bbc0e469e15be4a73fc5430a9c4a44155756d7eb9063d4" )
+    , "31390751271b6ebb89d56f3dedc149af4a1c048ceffc3d9ae1b215a18cae2b26" )
   ; ( "lib/agent_session/job_custody.ml"
     , "3f3a132b6fd32f11eba332ec3ae9f6ff4dbfb771dd542ab12cab5a1316e8f3b3" )
   ; ( "lib/agent_session/staged_jobs.ml"

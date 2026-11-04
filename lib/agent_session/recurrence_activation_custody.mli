@@ -58,3 +58,40 @@ val check_basis
 val retain_candidates : t list -> Session_state.t -> t list
 
 val close : t -> unit
+
+(** Lexical release of the original permit. After an acknowledged transfer this
+    does not close its Operation owner. [close] remains unconditional retirement. *)
+val release_original : t -> unit
+
+module Operation : sig
+  type t
+
+  val check_basis
+    :  t
+    -> owner:Owner.t
+    -> Session_state.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val check_policy : t -> Session_state.t -> (unit, Agent_protocol.Error.t) result
+  val check_authority : t -> (unit, Agent_protocol.Error.t) result
+  val close : t -> unit
+end
+
+module Transfer : sig
+  type custody = t
+  type t
+
+  (** Validated staged transfer of the same registered cell. No ownership changes
+      before the actual root ACK. An intervening close is never undone. *)
+  val prepare
+    :  custody
+    -> owner:Owner.t
+    -> Session_state.t
+    -> (t, Agent_protocol.Error.t) result
+
+  val operation : t -> Operation.t
+
+  (** ACK-only synchronous installation; the original permit becomes consumed.
+      Existing invalidation and inventory retention apply to the transferred cell. *)
+  val install : t -> unit
+end

@@ -58,6 +58,56 @@ module Source_binding = struct
   ;;
 end
 
+module Activation_controller = struct
+  module Operation = struct
+    type t =
+      { install : unit -> unit
+      ; close : unit -> unit
+      ; refresh : unit -> (unit, Agent_protocol.Error.t) result
+      ; policy : unit -> (unit, Agent_protocol.Error.t) result
+      ; timing : unit -> (unit, Agent_protocol.Error.t) result
+      ; authority : unit -> (unit, Agent_protocol.Error.t) result
+      ; basis : unit -> (unit, Agent_protocol.Error.t) result
+      }
+  end
+
+  type t = { transfer : unit -> (Operation.t, Agent_protocol.Error.t) result }
+end
+
+module Held_operation = struct
+  module Proof = struct
+    type t =
+      { preparation : Run_preparation.t
+      ; scope : Run_admission.Scope.t
+      ; run : Agent_protocol.Run.t
+      ; admission : Agent_protocol.Run_receipt.t
+      ; origin : Recurrence_run_origin.t
+      ; source : Runtime_source_preparation.t
+      ; operation : Agent_protocol.Operation.t
+      ; worker : Operation_worker.t
+      ; binding : Run_authorities.binding
+      ; controller : Activation_controller.Operation.t
+      }
+  end
+
+  type phase =
+    | Staged
+    | Pending_first_effect
+    | Started
+    | Retired
+
+  type t =
+    { proof : Proof.t
+    ; mutable phase : phase
+    ; mutable target_current : Recurrence_controller.observation option
+    }
+
+  let retire t =
+    t.phase <- Retired;
+    t.proof.controller.close ()
+  ;;
+end
+
 module Input_attempt = struct
   type t =
     | Available
@@ -79,7 +129,7 @@ module Held_run = struct
     type phase =
       | Reserved
       | Constructing
-      | Handed_off
+      | Handed_off of Held_operation.Proof.t
       | Closed
 
     type t =
@@ -107,7 +157,7 @@ module Held_run = struct
       else (
         match !(t.phase) with
         | Reserved | Constructing -> t.basis ()
-        | Handed_off | Closed ->
+        | Handed_off _ | Closed ->
           Error
             (Agent_protocol.Error.create
                Conflict
@@ -121,7 +171,7 @@ module Held_run = struct
       then invalid_arg "held activation belongs to another Eio domain";
       match !(t.phase) with
       | Reserved | Constructing -> t.phase := Closed
-      | Handed_off | Closed -> ()
+      | Handed_off _ | Closed -> ()
     ;;
   end
 
@@ -144,6 +194,7 @@ module Recurrence_activation = struct
   module Continuation = struct
     type t =
       { target : Held_run.Activation.t
+      ; controller : Activation_controller.t
       ; refresh : unit -> (unit, Agent_protocol.Error.t) result
       ; policy : unit -> (unit, Agent_protocol.Error.t) result
       ; timing : unit -> (unit, Agent_protocol.Error.t) result
@@ -195,7 +246,8 @@ module Held_input_scope = struct
   type phase =
     | Parsing
     | Parsed_ready of Runtime_input_preparation.Prepared_input.t
-    | Consumed
+    | Consumed of Held_operation.Proof.t
+    | Root_attempt_unconfirmed
     | Closed
 
   type t =
@@ -223,7 +275,7 @@ module Held_input_scope = struct
     let%bind () =
       match t.phase with
       | Parsing -> Ok ()
-      | Parsed_ready _ | Consumed | Closed ->
+      | Parsed_ready _ | Consumed _ | Root_attempt_unconfirmed | Closed ->
         Error
           (Agent_protocol.Error.create
              Conflict
@@ -374,6 +426,19 @@ let create_agent_admission = Execution_custody.Admission.create
 let retire_agent_admission = Execution_custody.Admission.retire
 let check_agent_admission = Execution_custody.Admission.check
 let transfer_agent_admission = Execution_custody.Admission.transfer
+
+module Operation_owner = struct
+  type t =
+    { operation_id : Agent_protocol.Id.Operation.t
+    ; admission : agent_admission
+    ; held : Held_operation.t option
+    }
+
+  let retire t =
+    retire_agent_admission t.admission;
+    Option.iter t.held ~f:Held_operation.retire
+  ;;
+end
 
 type lifecycle_continuation =
   | Pending of agent_admission
@@ -1164,6 +1229,9 @@ module Held_startup_request = struct
   type _ t =
     | Input_graph : 'a Input_graph_request.t -> 'a t
     | Begin_input : Recurrence_activation.Continuation.t -> Held_input_scope.t t
+    | Submit_input :
+        Held_input_scope.t * Runtime_input_preparation.Prepared_input.t
+        -> submission t
     | Ready_input :
         Held_input_scope.t * Runtime_input_preparation.Prepared_input.t
         -> unit t
@@ -2117,8 +2185,7 @@ type t =
   ; mutable legacy_callback_scope : Callback_scope.t option
   ; mutable legacy_queue_custody : Legacy_queue_custody.t
   ; mutable legacy_schedule_custody : Legacy_schedule_custody.t
-  ; mutable operation_agent_custody :
-      (Agent_protocol.Id.Operation.t * agent_admission) option
+  ; mutable operation_agent_custody : Operation_owner.t option
   ; mutable lifecycle_agent_custody : lifecycle_agent_custody
   ; mutable intent_agent_custody : agent_intent_custody list
   ; mutable pending_agent_custody : (Agent_protocol.History.entry * agent_custody) list
@@ -2323,8 +2390,9 @@ let retained_agent_custody t =
       | Cancelling | Completed | Failed _ | Cancelled | Interrupted _ -> false)
   in
   (match t.operation_agent_custody with
-   | Some (id, admission) when not (operation_current id) ->
-     retire_agent_admission admission;
+   | Some ({ Operation_owner.operation_id = id; _ } as owner)
+     when not (operation_current id) ->
+     Operation_owner.retire owner;
      t.operation_agent_custody <- None
    | Some _ | None -> ());
   t.job_agent_custody
@@ -2338,7 +2406,8 @@ let retained_agent_custody t =
 
 let operation_agent_actor t id =
   match t.operation_agent_custody with
-  | Some (owner, admission) when Agent_protocol.Id.Operation.equal owner id ->
+  | Some { Operation_owner.operation_id = owner; admission; _ }
+    when Agent_protocol.Id.Operation.equal owner id ->
     (match Execution_custody.Admission.custody admission with
      | Some custody -> Result.map (Execution_custody.actor custody) ~f:Option.some
      | None -> Ok None)
@@ -2346,10 +2415,13 @@ let operation_agent_actor t id =
 ;;
 
 let install_operation_agent_custody t operation custody =
-  Option.iter t.operation_agent_custody ~f:(fun (_, admission) ->
-    retire_agent_admission admission);
+  Option.iter t.operation_agent_custody ~f:Operation_owner.retire;
   t.operation_agent_custody
-  <- Some (operation.Agent_protocol.Operation.id, create_agent_admission custody)
+  <- Some
+       { Operation_owner.operation_id = operation.Agent_protocol.Operation.id
+       ; admission = create_agent_admission custody
+       ; held = None
+       }
 ;;
 
 let job_scope_current t scope =
@@ -2609,7 +2681,7 @@ let pending_held_startup_run t =
       (* Negative custody only: a failed retirement write must not turn a later
          child ACK into successful completion of input that never started. *)
       Result.ok (retained ())
-    | Handed_off -> None
+    | Handed_off _ -> None
     | Reserved | Constructing ->
       let exact_scope =
         match t.initialization_scope with
@@ -2638,7 +2710,7 @@ let initialization_held_run t (scope : Initialization_scope.t) =
          && Option.exists scope.run_preparation ~f:(phys_equal activation.preparation) ->
     (match !(activation.phase) with
      | Reserved | Constructing -> pending_held_startup_run t
-     | Handed_off | Closed -> None)
+     | Handed_off _ | Closed -> None)
   | (Some _ | None), (Some _ | None) -> None
 ;;
 
@@ -2699,8 +2771,10 @@ let install_live_run_agent_custody t =
            ~f:(fun actor ->
              t.operation_agent_custody
              <- Some
-                  ( operation.id
-                  , create_agent_admission (Some (create_agent_custody actor)) )))
+                  { Operation_owner.operation_id = operation.id
+                  ; admission = create_agent_admission (Some (create_agent_custody actor))
+                  ; held = None
+                  }))
      | [] | _ :: _ :: _ -> ())
   | Some _, _, _ | None, None, _ | None, Some _, (Some _ | None) -> ()
 ;;
@@ -2931,7 +3005,55 @@ module Constructor_stop_acknowledgement = struct
   ;;
 end
 
+module Held_operation_acknowledgement = struct
+  type actor = t
+
+  type t =
+    { input_scope : Held_input_scope.t
+    ; input : Runtime_input_preparation.Prepared_input.t
+    ; activation : Held_run.Activation.t
+    ; held : Held_operation.t
+    ; owner : Operation_owner.t
+    ; previous : Session_state.t
+    ; candidate : Session_transition.t
+    }
+
+  let check t ~(actor : actor) ~candidate =
+    let open Result.Let_syntax in
+    let%bind () =
+      if
+        phys_equal t.previous actor.state
+        && phys_equal t.candidate candidate
+        && Option.exists actor.held_input_scope ~f:(phys_equal t.input_scope)
+        && Option.exists actor.held_activation ~f:(phys_equal t.activation)
+        && Option.is_none actor.operation_agent_custody
+      then Ok ()
+      else Error (error Conflict "held root acknowledgement owner changed")
+    in
+    match t.input_scope.phase, t.held.phase with
+    | Parsed_ready input, Staged
+      when Runtime_input_preparation.Prepared_input.equal input t.input
+           && Option.exists actor.operation_worker ~f:(phys_equal t.held.proof.worker)
+           && Run_authorities.is_current
+                actor.run_authorities
+                t.held.proof.binding
+                ~run_id:t.held.proof.run.id -> Ok ()
+    | (Parsing | Parsed_ready _ | Consumed _ | Root_attempt_unconfirmed | Closed), _ ->
+      Error (error Conflict "held root input or physical worker changed")
+  ;;
+
+  let install t ~(actor : actor) =
+    t.held.proof.controller.install ();
+    t.held.phase <- Pending_first_effect;
+    t.input_scope.phase <- Consumed t.held.proof;
+    t.activation.phase := Handed_off t.held.proof;
+    actor.operation_agent_custody <- Some t.owner;
+    actor.held_input_scope <- None
+  ;;
+end
+
 let install_committed_transition
+      ?held_operation_acknowledgement
       ?queued_claim_acknowledgement
       ?authored_run_acknowledgement
       ?legacy_queue_custody
@@ -2966,6 +3088,9 @@ let install_committed_transition
   t.command_audit <- None;
   invalidate_goal_inference_policy ?admission_hold t transition.state;
   t.state <- transition.state;
+  Option.iter
+    held_operation_acknowledgement
+    ~f:(Held_operation_acknowledgement.install ~actor:t);
   Option.iter
     constructor_stop_acknowledgement
     ~f:(Constructor_stop_acknowledgement.install ~actor:t);
@@ -4455,8 +4580,7 @@ let retire_runtime_worker t ~closing =
          t.job_agent_custody
          ~incoming:(Job_custody.retain_runtime t.job_agent_custody ~manager:None);
     retire_instruction_continuations t;
-    Option.iter t.operation_agent_custody ~f:(fun (_, admission) ->
-      retire_agent_admission admission);
+    Option.iter t.operation_agent_custody ~f:Operation_owner.retire;
     Option.iter t.active_cancel ~f:(fun cancel -> cancel ());
     if Option.is_none pending_operation then Eio.Promise.resolve finish (Ok (Ok ()));
     Ok finished
@@ -6348,7 +6472,7 @@ let job_callback_admission t scope ~manager ~source =
 let operation_agent_admission t id =
   match t.operation_agent_custody with
   | None -> Ok None
-  | Some (owner, admission) ->
+  | Some { Operation_owner.operation_id = owner; admission; _ } ->
     if Agent_protocol.Id.Operation.equal owner id
     then Ok (Some admission)
     else Error (error Conflict "operation admission belongs to another owner")
@@ -7414,8 +7538,10 @@ let legacy_boundary_admission t parent ~manager ~source =
   match parent with
   | Callback_operation (Some id) ->
     Ok
-      ( Option.bind t.operation_agent_custody ~f:(fun (owner, admission) ->
-          Option.some_if (Agent_protocol.Id.Operation.equal owner id) admission)
+      ( Option.bind
+          t.operation_agent_custody
+          ~f:(fun { Operation_owner.operation_id = owner; admission; _ } ->
+            Option.some_if (Agent_protocol.Id.Operation.equal owner id) admission)
       , false )
   | Callback_operation None ->
     (match t.lifecycle_agent_custody with
@@ -11309,8 +11435,10 @@ let launch_compaction t operation allocator history =
   let port = t.compaction_inference in
   let installed = t.inference_execution in
   let admission =
-    Option.bind t.operation_agent_custody ~f:(fun (owner, admission) ->
-      Option.some_if (Agent_protocol.Id.Operation.equal owner operation_id) admission)
+    Option.bind
+      t.operation_agent_custody
+      ~f:(fun { Operation_owner.operation_id = owner; admission; _ } ->
+        Option.some_if (Agent_protocol.Id.Operation.equal owner operation_id) admission)
   in
   Eio.Fiber.fork ~sw:t.sw (fun () ->
     let outcome =
@@ -12734,7 +12862,113 @@ let worker_capabilities t operation live id_source buffer =
     }
 ;;
 
-let run_worker_operation worker input capabilities cancelled =
+(* This owner continues only the actual root ACK. Startup preparation and old
+   target Current are not used after Worker_ready advances its own actor state. *)
+let held_operation_basis t (held : Held_operation.t) =
+  let open Result.Let_syntax in
+  let proof = held.proof in
+  let%bind () = require_runtime_admission t in
+  let%bind () =
+    match held.phase, t.operation_agent_custody, t.state.active_operation with
+    | Pending_first_effect, Some owner, Some operation
+      when Option.exists owner.held ~f:(phys_equal held)
+           && Agent_protocol.Id.Operation.equal operation.id proof.operation.id
+           && Int.equal operation.generation proof.operation.generation
+           && (match operation.state with
+               | Starting | Running -> true
+               | Cancelling | Completed | Failed _ | Cancelled | Interrupted _ -> false)
+           && Option.exists t.operation_worker ~f:(phys_equal proof.worker)
+           && Run_authorities.is_current
+                t.run_authorities
+                proof.binding
+                ~run_id:proof.run.id -> Ok ()
+    | _ -> Error (error Conflict "held root first-effect owner was retired or replaced")
+  in
+  let%bind () = Runtime_source_preparation.validate_target proof.source t.state in
+  let%bind index =
+    Result.of_option
+      t.state.run_state
+      ~error:(error Conflict "held root Run index disappeared")
+  in
+  let%bind run =
+    Result.of_option
+      (Run_state.find index proof.run.id)
+      ~error:(error Conflict "held root Run disappeared")
+  in
+  let%bind admission =
+    Run_state.receipt
+      index
+      ~principal_id:proof.admission.principal_id
+      ~key:proof.admission.key
+      ~request_sha256:proof.admission.request_sha256
+  in
+  let%bind () =
+    if
+      Option.exists admission ~f:(Agent_protocol.Run_receipt.equal proof.admission)
+      && Option.exists
+           (Run_state.recurrence_origin index run.id)
+           ~f:(Recurrence_run_origin.equal proof.origin)
+    then Recurrence_run_origin.validate_run proof.origin ~run ~admission:proof.admission
+    else Error (error Conflict "held root Admission or reciprocal origin changed")
+  in
+  let%bind work =
+    Agent_protocol.Run_work.create
+      ~key:(Operation proof.operation.id)
+      ~generation:proof.operation.generation
+  in
+  let%bind () =
+    if
+      List.mem run.owned_work work ~equal:Agent_protocol.Run_work.equal
+      && not
+           (List.exists run.terminal_work ~f:(fun terminal ->
+              Agent_protocol.Run_work.equal
+                terminal.Agent_protocol.Run_work.Terminal.work
+                work))
+    then Ok ()
+    else Error (error Conflict "held root no longer owns its unresolved Operation")
+  in
+  match run.lifecycle with
+  | Admitted | Active -> Ok ()
+  | Waiting _ | Terminal _ -> Error (error Conflict "held root Run cannot start")
+;;
+
+let start_held_operation t held cancelled =
+  let open Result.Let_syntax in
+  let controller = held.Held_operation.proof.controller in
+  let cancelled_check () =
+    match Eio.Promise.peek cancelled with
+    | None -> Ok ()
+    | Some () -> Error (error Conflict "held root was cancelled before its first effect")
+  in
+  let pure () =
+    let%bind () = cancelled_check () in
+    let%bind () = held_operation_basis t held in
+    let%bind () = controller.basis () in
+    match held.target_current with
+    | Some current when Recurrence_controller.is_current current -> Ok ()
+    | Some _ | None -> Error (error Conflict "held root needs fresh target Store custody")
+  in
+  let%bind () = cancelled_check () in
+  let%bind () = held_operation_basis t held in
+  let%bind target = require_recurrence_controller t in
+  let%bind current = Recurrence_controller.observe target t.state in
+  held.target_current <- Some current;
+  let%bind () = controller.refresh () in
+  (* Store refresh above may yield. Every host policy runs again before fresh
+     clocks, originals, and the joint callback-free fence. *)
+  let%bind () = pure () in
+  let%bind () = Run_admission.Scope.authorize held.proof.scope t.state in
+  let%bind () = controller.policy () in
+  let%bind () = controller.timing () in
+  let%bind () = Run_admission.Scope.check_current held.proof.scope in
+  let%bind () = controller.authority () in
+  let%bind () = pure () in
+  held.phase <- Started;
+  controller.close ();
+  Ok ()
+;;
+
+let run_worker_operation ?held t worker input capabilities cancelled =
   match
     Eio.Fiber.first
       (fun () ->
@@ -12744,7 +12978,13 @@ let run_worker_operation worker input capabilities cancelled =
               competing cancellation fiber has a chance to run. *)
            match Eio.Promise.peek cancelled with
            | Some () -> `Cancelled
-           | None -> `Finished (Operation_worker.run worker ~sw ~input capabilities)))
+           | None ->
+             (match
+                Option.value_map held ~default:(Ok ()) ~f:(fun held ->
+                  start_held_operation t held cancelled)
+              with
+              | Error failure -> `Finished (Operation_worker.Failed failure)
+              | Ok () -> `Finished (Operation_worker.run worker ~sw ~input capabilities))))
       (fun () ->
          Eio.Promise.await cancelled;
          `Cancelled)
@@ -12753,7 +12993,7 @@ let run_worker_operation worker input capabilities cancelled =
   | `Cancelled -> Operation_worker.Cancelled { reason = "operation cancelled" }
 ;;
 
-let run_worker t worker operation live history =
+let run_worker ?held t worker operation live history =
   let operation_id = operation.Agent_protocol.Operation.id in
   let id_source =
     History_id_source.create
@@ -12784,7 +13024,7 @@ let run_worker t worker operation live history =
     (try
        match call t ~priority:Priority (Worker_ready (operation_id, cancel)) with
        | Error failure -> Operation_worker.Failed failure
-       | Ok () -> run_worker_operation worker input capabilities cancelled
+       | Ok () -> run_worker_operation ?held t worker input capabilities cancelled
      with
      | Eio.Cancel.Cancelled reason ->
        Operation_worker.Cancelled { reason = Exn.to_string reason }
@@ -12796,15 +13036,24 @@ let launch_worker t operation =
   (* Capture the physical worker's cell, not a later operation's mutable slot.
      A failed terminal save cannot extend the callback that already returned. *)
   let custody =
-    Option.bind t.operation_agent_custody ~f:(fun (owner, admission) ->
-      if Agent_protocol.Id.Operation.equal owner operation_id
-      then Some admission
+    Option.bind
+      t.operation_agent_custody
+      ~f:(fun { Operation_owner.operation_id = owner; admission; _ } ->
+        if Agent_protocol.Id.Operation.equal owner operation_id
+        then Some admission
+        else None)
+  in
+  let held =
+    Option.bind t.operation_agent_custody ~f:(fun owner ->
+      if Agent_protocol.Id.Operation.equal owner.operation_id operation_id
+      then owner.held
       else None)
   in
   let inference_live = Atomic.make true in
   let retire_authority () =
     Atomic.set inference_live false;
-    Option.iter custody ~f:retire_agent_admission
+    Option.iter custody ~f:retire_agent_admission;
+    Option.iter held ~f:Held_operation.retire
   in
   let history =
     let open Result.Let_syntax in
@@ -12824,8 +13073,12 @@ let launch_worker t operation =
       let outcome =
         Exn.protect ~finally:retire_authority ~f:(fun () ->
           let outcome =
-            match t.operation_worker with
-            | Some worker -> run_worker t worker operation inference_live history
+            match
+              match held with
+              | Some held -> Some held.proof.worker
+              | None -> t.operation_worker
+            with
+            | Some worker -> run_worker ?held t worker operation inference_live history
             | None ->
               Operation_worker.Failed
                 (error Invalid_state "session has no foreground operation worker")
@@ -12947,33 +13200,21 @@ let submit_idle_message
   let%bind () = require_runtime_admission t in
   let%bind () = reconcile_foreground_invocations t in
   let%bind enqueue = prepare_pending_inputs t ~owner timing [ entry ] in
-  let%bind queued = Pending_plan.apply (Pending_transition.plan enqueue) t.state in
-  let retention = Pending_disposition.Retention.default in
-  let%bind adoption =
-    Pending_transition.prepare
-      queued
-      ~change:
-        (Adopt
-           { boundary = Idle_start; runtime_admission_open = runtime_admission_open t })
-      ~retention
-      ~archive:None
-      ~limits:Session_delta.native_limits
+  let%bind pending =
+    Pending_turn.prepare
+      t.state
+      ~enqueue
+      ~entry
+      ~runtime_admission_open:(runtime_admission_open t)
   in
-  let entries = Pending_plan.adopted_entries (Pending_transition.plan adoption) in
+  let entries = Pending_turn.entries pending in
   let%bind operation_custody =
     match operation, original_actor with
     | Some _, Some actor -> Ok (Some (create_agent_custody actor))
     | Some _, None | None, _ -> adopted_agent_custody t entries entry original_actor
   in
-  let accepted =
-    List.exists entries ~f:(fun candidate ->
-      Agent_protocol.History.Id.equal candidate.id entry.id)
-  in
-  let deferred_payloads =
-    if accepted
-    then []
-    else [ Agent_protocol.Event.Durable.Payload.History_message_deferred entry ]
-  in
+  let accepted = Pending_turn.accepted pending in
+  let deferred_payloads = Pending_turn.deferred_payloads pending in
   let%bind () =
     if Option.is_some operation && not accepted
     then
@@ -12988,7 +13229,8 @@ let submit_idle_message
         ?run_preparation
         ?commit_attempted
         t
-        ~delta:(Session_delta.Batch (extra_deltas @ [ Pending_transition.delta enqueue ]))
+        ~delta:
+          (Session_delta.Batch (extra_deltas @ [ Pending_turn.enqueue_delta pending ]))
         ~payloads:deferred_payloads
     in
     remember_pending_agent_actor t entry original_actor;
@@ -13002,9 +13244,8 @@ let submit_idle_message
     let delta =
       Session_delta.Batch
         (extra_deltas
-         @ [ Pending_transition.delta enqueue
-           ; Pending_transition.delta adoption
-           ; Active_operation_changed (Some operation)
+         @ Pending_turn.turn_deltas pending
+         @ [ Session_delta.Active_operation_changed (Some operation)
            ; Lifecycle_changed lifecycle
            ])
     in
@@ -19857,6 +20098,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Shutdown -> true
   | Held_startup (Input_graph (Open _))
   | Held_startup (Begin_input _)
+  | Held_startup (Submit_input _)
   | Held_startup (Ready_input _)
   | Open_inference_owner _
   | Admit_inference _
@@ -20925,7 +21167,73 @@ let check_recurrence_activation_internal
       let%bind () = target.authority () in
       basis ()
     in
-    ({ target; refresh; policy; timing; authority; basis }
+    let transfer () =
+      let%bind () = basis () in
+      let%map transfer =
+        Activation_custody.Transfer.prepare
+          custody
+          ~owner:t.recurrence_activation_owner
+          t.state
+      in
+      let operation = Activation_custody.Transfer.operation transfer in
+      let current = ref None in
+      let owned () =
+        let%bind () = owner () in
+        Activation_custody.Operation.check_basis
+          operation
+          ~owner:t.recurrence_activation_owner
+          t.state
+      in
+      let basis () =
+        let%bind () = owned () in
+        match !current with
+        | Some current
+          when Recurrence_controller.is_current current
+               && Recurrence_controller.automatic current
+               && Agent_protocol.Session_lifecycle.Revision.equal
+                    (Recurrence_controller.revision current)
+                    (Recurrence_definition.birth_lifecycle_revision
+                       (Activation_custody.definition custody)) -> Ok ()
+        | Some _ | None ->
+          Error (error Conflict "operation needs fresh controller Store custody")
+      in
+      let policy () =
+        let%bind () = basis () in
+        let%bind () = Activation_custody.Operation.check_policy operation t.state in
+        let%bind () = observation.check_policy () in
+        basis ()
+      in
+      let refresh () =
+        let%bind () = owned () in
+        let%bind () = Activation_custody.Operation.check_policy operation t.state in
+        let%bind () = observation.check_policy () in
+        let%bind observed = Recurrence_controller.observe controller t.state in
+        current := Some observed;
+        policy ()
+      in
+      let timing () =
+        let%bind () = basis () in
+        let%bind () = sample_timing () in
+        basis ()
+      in
+      let authority () =
+        let%bind () = basis () in
+        let%bind () = Activation_custody.Operation.check_authority operation in
+        let%bind () = observation.check_authority () in
+        basis ()
+      in
+      ({ install = (fun () -> Activation_custody.Transfer.install transfer)
+       ; close = (fun () -> Activation_custody.Operation.close operation)
+       ; refresh
+       ; policy
+       ; timing
+       ; authority
+       ; basis
+       }
+       : Activation_controller.Operation.t)
+    in
+    let controller : Activation_controller.t = { transfer } in
+    ({ target; controller; refresh; policy; timing; authority; basis }
      : Recurrence_activation.Continuation.t)
   in
   ({ check_current
@@ -20985,7 +21293,7 @@ let begin_held_recurrence_activation_internal t binding (held : Held_run.t) chec
   let startup_pending () =
     (match !phase with
      | Reserved | Constructing -> true
-     | Handed_off | Closed -> false)
+     | Handed_off _ | Closed -> false)
     && Option.exists t.held_activation ~f:(fun active ->
       Option.exists !owned ~f:(phys_equal active))
   in
@@ -20997,7 +21305,7 @@ let begin_held_recurrence_activation_internal t binding (held : Held_run.t) chec
       ~startup_pending
       ~authorize:(fun state ->
         match !phase with
-        | Held_run.Activation.Reserved | Constructing | Handed_off ->
+        | Held_run.Activation.Reserved | Constructing | Handed_off _ ->
           Run_preparation.Authorization.check authorization state
         | Closed -> Error (error Conflict "held startup authority was retired"))
   in
@@ -21021,7 +21329,7 @@ let begin_held_recurrence_activation_internal t binding (held : Held_run.t) chec
               &&
               match !phase with
               | Reserved | Constructing -> true
-              | Handed_off | Closed -> false
+              | Handed_off _ | Closed -> false
             then Ok ()
             else Error (error Conflict "held activation owner was retired")
           in
@@ -21283,15 +21591,200 @@ let ready_held_input_internal t (scope : Held_input_scope.t) input =
 ;;
 
 let close_held_input_internal t (scope : Held_input_scope.t) =
-  if not (Option.exists t.held_input_scope ~f:(phys_equal scope))
+  if not (phys_equal scope.issuing_actor t.inference_owner_identity)
   then Error (error Conflict "held input belongs to another actor")
   else (
-    scope.phase <- Closed;
-    if List.is_empty scope.graphs
-    then (
-      t.held_input_scope <- None;
-      Ok ())
-    else Error (error Conflict "held input graph did not join before scope exit"))
+    match scope.phase with
+    | Consumed _ when Option.is_none t.held_input_scope -> Ok ()
+    | Parsing | Parsed_ready _ | Consumed _ | Root_attempt_unconfirmed | Closed ->
+      if not (Option.exists t.held_input_scope ~f:(phys_equal scope))
+      then Error (error Conflict "held input was displaced before scope exit")
+      else (
+        (match scope.phase with
+         | Parsing | Parsed_ready _ -> scope.phase <- Closed
+         | Consumed _ | Root_attempt_unconfirmed | Closed -> ());
+        if List.is_empty scope.graphs
+        then (
+          t.held_input_scope <- None;
+          Ok ())
+        else Error (error Conflict "held input graph did not join before scope exit")))
+;;
+
+let submit_held_run_input_internal t (scope : Held_input_scope.t) input =
+  let open Result.Let_syntax in
+  let activation = Recurrence_activation.Continuation.target scope.continuation in
+  let%bind () = input_scope_basis t scope in
+  let%bind () =
+    match scope.phase with
+    | Parsed_ready recorded
+      when Runtime_input_preparation.Prepared_input.equal recorded input -> Ok ()
+    | Parsing | Parsed_ready _ | Consumed _ | Root_attempt_unconfirmed | Closed ->
+      Error (error Conflict "held root requires its unconsumed recorded parsed input")
+  in
+  let%bind () =
+    match
+      t.state.lifecycle.desired, t.state.lifecycle.observed, t.state.active_operation
+    with
+    | Running, Idle, None
+      when (not t.idle_moderator_borrowed)
+           && Option.is_none t.state.failure
+           && (not t.state.halted)
+           && List.is_empty scope.graphs -> Ok ()
+    | _ -> Error (error Conflict "held root requires an idle running target")
+  in
+  let%bind () = check_held_effect scope.continuation in
+  let%bind worker =
+    Result.of_option
+      t.operation_worker
+      ~error:(error Invalid_state "held root has no actual foreground worker")
+  in
+  let%bind index =
+    Result.of_option
+      t.state.run_state
+      ~error:(error Conflict "held root Run index disappeared")
+  in
+  let%bind run =
+    Result.of_option
+      (Run_state.find index activation.run.id)
+      ~error:(error Conflict "held root Run disappeared")
+  in
+  let%bind binding =
+    Result.of_option
+      (Run_authorities.find t.run_authorities run.id)
+      ~error:(error Permission_denied "held root lost its actual Run authority")
+  in
+  let%bind () =
+    if phys_equal (Run_authorities.scope binding) activation.scope
+    then Ok ()
+    else Error (error Conflict "held root Run binding was replaced")
+  in
+  let%bind origin =
+    Result.of_option
+      (Run_state.recurrence_origin index run.id)
+      ~error:(error Conflict "held root lost its reciprocal origin")
+  in
+  let%bind () =
+    Recurrence_run_origin.validate_run origin ~run ~admission:activation.admission
+  in
+  let%bind original =
+    Result.of_option
+      (Run_admission.Scope.original_actor activation.scope)
+      ~error:(error Permission_denied "held root requires its genuine original")
+  in
+  let entry = Runtime_input_preparation.Prepared_input.entry input in
+  let%bind () =
+    Runtime_input_preparation.Prepared_input.validate
+      input
+      ~request:scope.request
+      ~id:scope.id
+  in
+  let%bind enqueue =
+    prepare_pending_inputs t ~owner:Host_internal Safe_boundary [ entry ]
+  in
+  let%bind pending =
+    Pending_turn.prepare
+      t.state
+      ~enqueue
+      ~entry
+      ~runtime_admission_open:(runtime_admission_open t)
+  in
+  let operation = create_turn_operation t User_submit in
+  let%bind handoff =
+    Run_input_handoff.prepare
+      t.state
+      ~run
+      ~request:scope.request
+      ~input
+      ~operation
+      ~pending
+      ~now:operation.started_at
+  in
+  let lifecycle = lifecycle_for_operation t operation.id in
+  let%bind candidate =
+    prepare_transition
+      ~run_preparation:activation.preparation
+      t
+      ~delta:
+        (Session_delta.Batch
+           ((Run_input_handoff.delta handoff :: Pending_turn.turn_deltas pending)
+            @ [ Active_operation_changed (Some operation); Lifecycle_changed lifecycle ]))
+      ~payloads:
+        (Pending_turn.deferred_payloads pending
+         @ [ History_appended (Pending_turn.entries pending)
+           ; Operation_started operation
+           ; Session_state_changed
+               { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
+           ])
+  in
+  let%bind controller = scope.continuation.controller.transfer () in
+  let proof : Held_operation.Proof.t =
+    { preparation = activation.preparation
+    ; scope = activation.scope
+    ; run
+    ; admission = activation.admission
+    ; origin
+    ; source = activation.source
+    ; operation
+    ; worker
+    ; binding
+    ; controller
+    }
+  in
+  let held : Held_operation.t = { proof; phase = Staged; target_current = None } in
+  let owner : Operation_owner.t =
+    { operation_id = operation.id
+    ; admission = create_agent_admission (Some (create_agent_custody original))
+    ; held = Some held
+    }
+  in
+  let acknowledgement : Held_operation_acknowledgement.t =
+    { input_scope = scope; input; activation; held; owner; previous = t.state; candidate }
+  in
+  let attempted = ref false in
+  let persisted =
+    Exn.protect
+      ~finally:(fun () ->
+        if !attempted
+        then (
+          match scope.phase with
+          | Parsed_ready _ -> scope.phase <- Root_attempt_unconfirmed
+          | Parsing | Consumed _ | Root_attempt_unconfirmed | Closed -> ());
+        match held.phase with
+        | Staged -> retire_agent_admission owner.admission
+        | Pending_first_effect | Started | Retired -> ())
+      ~f:(fun () ->
+        let%bind () =
+          persist_transition
+            ~run_preparation:activation.preparation
+            ~commit_attempted:attempted
+            ~check_before_commit:(fun () ->
+              let%bind () = check_held_effect scope.continuation in
+              let%bind () =
+                Held_operation_acknowledgement.check acknowledgement ~actor:t ~candidate
+              in
+              let%bind () = input_scope_basis t scope in
+              Recurrence_activation.Continuation.check_basis scope.continuation)
+            t
+            candidate
+        in
+        install_committed_transition
+          ~held_operation_acknowledgement:acknowledgement
+          ~run_preparation:activation.preparation
+          t
+          candidate;
+        Ok ())
+  in
+  let%bind () = persisted in
+  (* A failed publisher preserves the acknowledged proof but starts no worker;
+     existing owner termination/recovery handles that truthful Starting row. *)
+  publish_committed_transition t candidate;
+  launch_worker t operation;
+  Ok
+    { session = Session_state.summary t.state
+    ; history_id = entry.id
+    ; disposition = Started
+    ; operation_id = Some operation.id
+    }
 ;;
 
 let end_held_activation_internal t (activation : Held_run.Activation.t) =
@@ -21305,6 +21798,14 @@ let end_held_activation_internal t (activation : Held_run.Activation.t) =
   | None -> Ok ()
   | Some other when not (phys_equal activation other) ->
     Error (error Conflict "another held startup owner replaced this cleanup")
+  | Some _
+    when match !(activation.phase) with
+         | Handed_off _ -> true
+         | Reserved | Constructing | Closed -> false ->
+    (* The immutable root ACK proof, not the pending gate's mutable lifetime,
+       makes startup cleanup independent from the actual Operation owner. *)
+    t.held_activation <- None;
+    Ok ()
   | Some _ ->
     Held_run.Activation.close activation;
     let previous = t.state in
@@ -21490,8 +21991,7 @@ let retire_execution_custody t =
   t.legacy_callback_scope <- None;
   t.moderator_manager <- None;
   retire_instruction_continuations t;
-  Option.iter t.operation_agent_custody ~f:(fun (_, admission) ->
-    retire_agent_admission admission);
+  Option.iter t.operation_agent_custody ~f:Operation_owner.retire;
   List.iter t.pending_agent_custody ~f:(fun (_, custody) -> retire_agent_custody custody);
   Job_custody.retire t.job_agent_custody;
   Option.iter t.initialization_scope ~f:(fun scope ->
@@ -22231,7 +22731,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Release_recurrence_activation custody ->
       if Activation_custody.belongs_to custody ~owner:t.recurrence_activation_owner
       then (
-        Activation_custody.close custody;
+        Activation_custody.release_original custody;
         t.recurrence_activations
         <- List.filter t.recurrence_activations ~f:Activation_custody.is_live;
         Ok ())
@@ -22682,6 +23182,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        | Input_graph request -> input_graph_request t request
        | Begin_input continuation -> begin_held_input_internal t continuation
        | Ready_input (scope, input) -> ready_held_input_internal t scope input
+       | Submit_input (scope, input) -> submit_held_run_input_internal t scope input
        | Close_input scope -> close_held_input_internal t scope
        | End_held_activation activation -> end_held_activation_internal t activation
        | Begin_held_recurrence_activation (binding, held, checked) ->
@@ -24315,7 +24816,7 @@ let release_recurrence_activation t custody =
     && ((not (Activation_custody.is_live custody))
         || Option.is_some (Eio.Promise.peek t.finished))
   then (
-    Activation_custody.close custody;
+    Activation_custody.release_original custody;
     Ok ())
   else recurrence_call t ~priority:Priority (Release_recurrence_activation custody)
 ;;
@@ -24412,6 +24913,27 @@ let end_held_activation t ~activation =
   call t (Held_startup (End_held_activation activation))
 ;;
 
+let submit_held_run_input t ~scope ~input =
+  let open Result.Let_syntax in
+  let%bind () =
+    if
+      Int.equal scope.Held_input_scope.domain (Stdlib.Domain.self () :> int)
+      && phys_equal scope.issuing_actor t.inference_owner_identity
+    then Ok ()
+    else Error (error Conflict "held input belongs to another actor or domain")
+  in
+  let%bind () =
+    match scope.phase with
+    | Parsed_ready recorded
+      when Runtime_input_preparation.Prepared_input.equal recorded input -> Ok ()
+    | Parsing | Parsed_ready _ | Consumed _ | Root_attempt_unconfirmed | Closed ->
+      Error
+        (error Conflict "held root input has already been submitted or is unavailable")
+  in
+  let%bind () = Recurrence_activation.Continuation.refresh scope.continuation in
+  Eio.Cancel.protect (fun () -> call t (Held_startup (Submit_input (scope, input))))
+;;
+
 let with_held_input t ~continuation ~prepare f =
   let open Result.Let_syntax in
   let%bind scope =
@@ -24462,7 +24984,9 @@ let with_held_input t ~continuation ~prepare f =
   in
   scope.issued_execution <- Some execution;
   let cleanup () =
-    scope.phase <- Closed;
+    (match scope.phase with
+     | Parsing | Parsed_ready _ -> scope.phase <- Closed
+     | Consumed _ | Root_attempt_unconfirmed | Closed -> ());
     Eio.Cancel.protect (fun () -> call t (Held_startup (Close_input scope)))
   in
   let run () =

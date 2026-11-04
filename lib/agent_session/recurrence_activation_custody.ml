@@ -12,6 +12,12 @@ module Owner = struct
   let create () = ref ()
 end
 
+module Ownership = struct
+  type t =
+    | Original
+    | Operation of unit ref
+end
+
 type t =
   { owner : Owner.t
   ; actor : Operator_authorization.t
@@ -23,6 +29,7 @@ type t =
   ; generation : int
   ; control_revision : int64
   ; mutable live : bool
+  ; mutable ownership : Ownership.t
   }
 
 let conflict message = Error (P.Error.create Conflict ~message ~retryable:false ())
@@ -32,6 +39,14 @@ let nominal t = Intent.nominal t.intent
 let is_live t = t.live
 let belongs_to t ~owner = phys_equal t.owner owner
 let close t = t.live <- false
+
+let original t =
+  match t.ownership with
+  | Original -> true
+  | Operation _ -> false
+;;
+
+let release_original t = if original t then close t
 
 let same_occurrence a b =
   I.Occurrence.equal (Intent.occurrence a.intent) (Intent.occurrence b.intent)
@@ -140,14 +155,14 @@ let semantic_basis t state =
   semantic_basis_with t state facts
 ;;
 
-let check_policy t state =
+let policy t state =
   Recurrence_command_admission.check_write
     t.actor
     ~authorize:(fun state -> t.authorize state t.definition)
     state
 ;;
 
-let check_authority t =
+let authority t =
   if not t.live
   then conflict "activation custody is closed or belongs to another owner"
   else if
@@ -166,12 +181,79 @@ let check_authority t =
 let check_basis t ~owner state =
   let open Result.Let_syntax in
   let%bind () =
-    if belongs_to t ~owner && t.live
+    if belongs_to t ~owner && t.live && original t
     then Ok ()
     else conflict "activation custody is closed or belongs to another owner"
   in
   semantic_basis t state
 ;;
+
+let check_policy t state =
+  if t.live && original t
+  then policy t state
+  else conflict "activation original custody was closed or transferred"
+;;
+
+let check_authority t =
+  if original t
+  then authority t
+  else conflict "activation original custody was transferred"
+;;
+
+module Operation = struct
+  type custody = t
+
+  type t =
+    { custody : custody
+    ; token : unit ref
+    }
+
+  let owned t =
+    t.custody.live
+    &&
+    match t.custody.ownership with
+    | Operation token -> phys_equal token t.token
+    | Original -> false
+  ;;
+
+  let close t = close t.custody
+
+  let check_basis t ~owner state =
+    if owned t && belongs_to t.custody ~owner
+    then semantic_basis t.custody state
+    else conflict "transferred controller custody is closed or unavailable"
+  ;;
+
+  let check_policy t state =
+    if owned t
+    then policy t.custody state
+    else conflict "transferred controller custody is closed or unavailable"
+  ;;
+
+  let check_authority t =
+    if owned t
+    then authority t.custody
+    else conflict "transferred controller custody is closed or unavailable"
+  ;;
+end
+
+module Transfer = struct
+  type custody = t
+  type t = Operation.t
+
+  let prepare custody ~owner state =
+    Result.map (check_basis custody ~owner state) ~f:(fun () ->
+      { Operation.custody; token = ref () })
+  ;;
+
+  let operation t = t
+
+  let install t =
+    match t.Operation.custody.ownership with
+    | Original -> t.custody.ownership <- Operation t.token
+    | Operation _ -> close t.custody
+  ;;
+end
 
 let create ~owner ~state ~actor ~authorize ~origin =
   let open Result.Let_syntax in
@@ -187,6 +269,7 @@ let create ~owner ~state ~actor ~authorize ~origin =
     ; generation = state.identity.generation
     ; control_revision = E.control_revision entry
     ; live = true
+    ; ownership = Original
     }
   in
   let%bind () =

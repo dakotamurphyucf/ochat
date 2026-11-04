@@ -574,3 +574,19 @@ more work. The recorded result is data; consuming it still requires the same
 live input scope and an acknowledged root-Operation handoff. Revoking permission
 prevents new effects but does not erase completed outcomes, and cleanup cannot
 claim that no effects occurred merely because parsing failed.
+
+The root handoff consumes that recorded input once. It adds the actual Operation
+to the existing Run in the same transaction that adopts the pending message and
+starts the Operation. Earlier child outcomes, the original admission and the
+Run's source remain intact. Ownership transfers only after persistence confirms
+that transaction. An attempted write with an unconfirmed outcome consumes the
+submission right; retrying the same parsed input cannot create another root.
+
+An acknowledged Operation may still be waiting for its worker to start. The
+handoff therefore transfers the controller's existing activation ownership to
+the pending Operation. Releasing the caller's startup resources does not revoke
+that transferred ownership. Stopping the controller, changing the selected
+recurrence or revoking authorization still prevents new work. After worker
+readiness, the actual worker branch refreshes both owners and checks them before
+its first effect. Failure settles the real Operation through normal terminal
+handling; it cannot erase effects already completed while preparing the input.

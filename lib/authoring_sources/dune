@@ -204,6 +204,9 @@
     lib/agent_session/script_schedule_service.ml %{dep:../agent_session/script_schedule_service.ml}
     lib/agent_session/script_subscription_service.ml %{dep:../agent_session/script_subscription_service.ml}
     lib/agent_session/session_actor.ml %{dep:../agent_session/session_actor.ml}
+    lib/agent_session/pending_turn.ml %{dep:../agent_session/pending_turn.ml}
+    lib/agent_session/run_input_handoff.ml %{dep:../agent_session/run_input_handoff.ml}
+    lib/agent_session/recurrence_activation_custody.ml %{dep:../agent_session/recurrence_activation_custody.ml}
     lib/agent_session/actor_reply.ml %{dep:../agent_session/actor_reply.ml}
     lib/agent_session/execution_custody.ml %{dep:../agent_session/execution_custody.ml}
     lib/agent_session/legacy_queue_custody.ml %{dep:../agent_session/legacy_queue_custody.ml}

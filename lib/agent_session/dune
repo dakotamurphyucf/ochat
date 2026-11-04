@@ -137,6 +137,7 @@
   pending_archive
   pending_archive_transition
   pending_transition
+  pending_turn
   session_document_transition
   session_state
   configuration_transition
@@ -221,6 +222,7 @@
   run_admission_request
   run_command_authorization
   run_admission
+  run_input_handoff
   run_preparation
   run_admission_outcome
   run_authorities
@@ -342,7 +344,7 @@
   goal_host_turn_admission
   inference_ledger)
  (private_modules run_work_settlement recurrence_activation_custody actor_reply recurrence_execution_capacity recurrence_executions run_recurrence_origins queue_payload recurrence_runtime recurrence_execution_record recurrence_frontier_records recurrence_frontier_codec recurrence_frontier_transition recurrence_frontier_settlement agent_authority_scope goal_accounting_state goal_accounting_stored instruction_selection_capacity instruction_selection_record workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles legacy_queue_checkpoint legacy_job_delivery execution_custody observation_continuation job_custody constructor_job_handoff constructor_callback_checkpoint constructor_invocation_checkpoint constructor_permission_checkpoint legacy_queue_custody legacy_schedule_custody
-  prompt_project_baseline_record prompt_project_baseline_document native_tool_policy)
+  prompt_project_baseline_record prompt_project_baseline_document native_tool_policy pending_turn run_input_handoff)
  (libraries ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript
   core
   core_unix

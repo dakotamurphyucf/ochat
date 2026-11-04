@@ -3051,7 +3051,10 @@ val check_recurrence_activation
   -> observation:Recurrence_run_observation.t
   -> (Recurrence_activation.Checked.t, Agent_protocol.Error.t) result
 
-(** Idempotent issuer-bound release, including already closed owner custody.
+(** Idempotent issuer-bound lexical release, including closed owner custody.
+    An actual root ACK transfers the same registered controller cell to its
+    pending Operation; releasing the consumed original permit does not retire
+    that owner. Internal Stop/source/control invalidation still closes it.
     No external cancellation, join, durable erasure or no-effects/retry claim.
     Actual target single activation remains owned by its held Run capability. *)
 val release_recurrence_activation
@@ -3278,3 +3281,19 @@ val with_held_input
       -> input:Runtime_input_preparation.Prepared_input.t
       -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
+
+(** Attach the exact recorded Parsed_ready input to its SAME held Run and launch
+    the existing foreground worker. No parse, admission, receipt or root replay.
+    Only the actual root ACK transfers Run/original/controller custody to the
+    Operation, before publication. A reached writer Error/exception consumes the
+    submission right without claiming whether it committed. Before-writer denial
+    installs no owner. Returns the root ACK, not a first-effect or completion ACK.
+    Input/startup/preparation and original controller-permit scopes may then exit;
+    the transferred cell remains subject to controller Stop/source/control and
+    original revocation until the actual winning worker branch's final fence.
+    Factual worker termination follows the existing Run settlement law. *)
+val submit_held_run_input
+  :  t
+  -> scope:Held_input_scope.t
+  -> input:Runtime_input_preparation.Prepared_input.t
+  -> (submission, Agent_protocol.Error.t) result
