@@ -65,6 +65,87 @@ let%expect_test "retained revisions keep their definition on cache hits and rest
     |}]
 ;;
 
+let%expect_test "verified cache reads preserve custody and reject changed retained files" =
+  with_workspace (fun env parent root ->
+    let module Revision = Agent_session.Prompt_revision in
+    let module P = Agent_protocol in
+    save root "root.chatmd" "<user>captured source</user>";
+    let definition = definition root in
+    Eio.Switch.run (fun sw ->
+      let catalog = catalog env parent in
+      Catalog.install_owned catalog (prepare catalog sw [ definition ] |> ok) |> ok;
+      let retained = revision catalog definition in
+      let revision_id = Revision.id retained in
+      let artifact = Revision.artifact retained in
+      let verify () =
+        Catalog.restore_verified_revision
+          catalog
+          ~definition_id:definition.id
+          ~revision_id
+      in
+      let rejected code =
+        match verify () with
+        | Ok _ -> failwith "changed retained artifact was accepted from cache"
+        | Error diagnostics ->
+          [%test_eq: string list]
+            (List.map diagnostics ~f:(fun diagnostic ->
+               diagnostic.Builder.Diagnostic.code))
+            [ code ]
+      in
+      Eio.Path.unlink Eio.Path.(root / "root.chatmd");
+      assert (phys_equal retained (verify () |> ok));
+      let selected_file =
+        Eio.Path.(Revision.materialized_tree retained / artifact.root_relative_path)
+      in
+      Eio.Path.unlink selected_file;
+      Eio.Path.save ~create:(`Exclusive 0o600) selected_file "changed tree";
+      rejected "prompt.retained_artifact_unavailable";
+      Eio.Path.unlink selected_file;
+      Eio.Path.save ~create:(`Exclusive 0o600) selected_file artifact.root_chatmd;
+      assert (phys_equal retained (verify () |> ok));
+      (* A fully valid replacement with the same ID and code still cannot replace
+         the exact admitted publication held by the cached parser. *)
+      let replacement =
+        Artifact.Artifact.with_identity
+          artifact
+          ~revision_id
+          ~created_at:(P.Timestamp.add_ms artifact.created_at 1 |> ok)
+        |> ok
+      in
+      assert (Artifact.Artifact.same_content artifact replacement);
+      assert (not (String.equal artifact.manifest_sha256 replacement.manifest_sha256));
+      let replacement_store =
+        Artifact.create ~env ~root:(Eio.Path.native_exn Eio.Path.(parent / "replacement"))
+        |> ok
+      in
+      Artifact.install
+        replacement_store
+        ~transaction_id:(P.Id.Transaction.create ())
+        replacement
+      |> ok;
+      let name = P.Id.Prompt_revision.to_string revision_id in
+      Eio.Path.rename
+        Eio.Path.(parent / "artifacts" / name)
+        Eio.Path.(parent / "original");
+      Eio.Path.rename
+        Eio.Path.(parent / "replacement" / name)
+        Eio.Path.(parent / "artifacts" / name);
+      rejected "prompt.revision_conflict";
+      assert (
+        phys_equal
+          retained
+          (Catalog.restore_revision catalog ~definition_id:definition.id ~revision_id
+           |> ok));
+      print_endline
+        "original authoring files are unnecessary; cached parser custody is retained";
+      print_endline "changed tree and valid same-ID replacement publication both reject"));
+  [%expect
+    {|
+    original authoring files are unnecessary; cached parser custody is retained
+    changed tree and valid same-ID replacement publication both reject
+    |}]
+;;
+
 let live loan =
   match Loan.availability loan with
   | Live -> ()
