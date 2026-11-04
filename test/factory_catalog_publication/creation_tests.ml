@@ -871,12 +871,20 @@ let%test_unit
   let module Checkpoint = Agent_session.Moderator_checkpoint in
   let module Queue = Agent_session.Moderator_queue in
   let module Res = Openai.Responses in
-  let prompt_text =
-    {|<developer>525_ROOT_PROMPT. Use the requested native tool, then answer.</developer>
+  let module Mode = struct
+    type t =
+      | Ordinary
+      | Named_run
+  end
+  in
+  let prompt_text ~named_run =
+    Printf.sprintf
+      {|<developer>525_ROOT_PROMPT. Use the requested native tool, then answer.</developer>
 <tool name="read_file"><read id="data" path="${workspace}"/></tool>
 <tool name="recipe_source" agent="recipe.chatmd" local/>
 <script id="owner" language="chatml" kind="moderator">
 let initial_state = 0
+let named_run = %b
 let read file = Tool.call("read_file", `Object([
   {key = "root"; value = `String("data")},
   {key = "file"; value = `String(file)}
@@ -904,8 +912,10 @@ let on_event ctx state event = match event with
 | `Turn_start ->
   if state == 1 then
     let* next = phase(state, "525_PHASE_TURN", "turn.txt") in
-    let* timer = Schedule.after_ms(0, `String("idle-queued")) in
-    Task.pure(next)
+    if named_run then Task.pure(next)
+    else
+      let* timer = Schedule.after_ms(0, `String("idle-queued")) in
+      Task.pure(next)
   else Task.pure(state)
 | `Pre_tool_call(p) ->
   if state == 2 then
@@ -917,6 +927,7 @@ let on_event ctx state event = match event with
   else Task.fail("idle callback did not follow the foreground")
 | _ -> Task.pure(state)
 </script>|}
+      named_run
   in
   let answer ~id text =
     let message : Res.Output_message.t =
@@ -971,7 +982,14 @@ let on_event ctx state event = match event with
     ]
     |> Stdlib.List.to_seq
   in
-  List.iter [ false; true ] ~f:(fun qualify_chatml_extensions ->
+  let modes = [ false, Mode.Ordinary; true, Ordinary; false, Named_run ] in
+  List.iter modes ~f:(fun (qualify_chatml_extensions, mode) ->
+    let named_run =
+      match mode with
+      | Ordinary -> false
+      | Named_run -> true
+    in
+    let admitted_jobs = ref [] in
     let constructor_live = Atomic.make true in
     let foreground_live = Atomic.make true in
     let original live =
@@ -1015,15 +1033,45 @@ let on_event ctx state event = match event with
           assert (String.is_substring transcript ~substring:"525_ROOT_REQUEST");
           incr root_calls;
           [%test_eq: int] 1 (calls "525_PHASE_TURN");
-          match !root_calls with
-          | 1 -> root_tool ()
-          | 2 ->
+          match named_run, !root_calls with
+          | true, 1 -> answer ~id:"525-root-answer" "525-root-completed"
+          | false, 1 -> root_tool ()
+          | false, 2 ->
             [%test_eq: int] 1 (calls "525_PHASE_TOOL");
             answer ~id:"525-root-answer" "525-root-completed"
-          | count -> raise_s [%sexp "unexpected root provider count", (count : int)]))
+          | _, count -> raise_s [%sexp "unexpected root provider count", (count : int)]))
+    in
+    let policy =
+      if not named_run
+      then policy
+      else
+        { policy with
+          runtime_inference_ports =
+            (fun actor ->
+              Result.map
+                (policy.runtime_inference_ports actor)
+                ~f:(fun (upstream : Agent_server.Graph_tracking.Upstream.t) ->
+                  { upstream with
+                    on_admitted =
+                      (fun ~scope ~accounting_id ->
+                        let state = Actor.state actor |> protocol_ok in
+                        let active_jobs =
+                          List.filter state.jobs ~f:(fun job ->
+                            P.Job.equal_kind job.kind Model_call
+                            &&
+                            match job.status with
+                            | Running -> true
+                            | _ -> false)
+                          |> List.map ~f:(fun job -> job.id)
+                        in
+                        upstream.on_admitted ~scope ~accounting_id;
+                        admitted_jobs
+                        := (scope, accounting_id, active_jobs) :: !admitted_jobs)
+                  }))
+        }
     in
     with_daemon
-      ~prompt_text
+      ~prompt_text:(prompt_text ~named_run)
       ~sources:
         [ ( "recipe.chatmd"
           , "<developer>525_CHILD_PROMPT. Answer the phase marker.</developer>" )
@@ -1096,15 +1144,95 @@ let on_event ctx state event = match event with
                |> protocol_ok
                |> Agent_session.History_codec.to_protocol
              in
-             let submission =
-               Actor.submit_message_authenticated
-                 entry.actor
-                 ~actor:foreground
-                 ~attachment_id:writer.id
-                 message
-               |> protocol_ok
+             let operation_id, run_receipt =
+               match mode with
+               | Ordinary ->
+                 let submission =
+                   Actor.submit_message_authenticated
+                     entry.actor
+                     ~actor:foreground
+                     ~attachment_id:writer.id
+                     message
+                   |> protocol_ok
+                 in
+                 Option.value_exn submission.operation_id, None
+               | Named_run ->
+                 let before = Actor.state entry.actor |> protocol_ok in
+                 let observer =
+                   Checkpoint.observer before.moderator |> protocol_ok |> Option.value_exn
+                 in
+                 let scope =
+                   Agent_session.Run_admission.Scope.create_authenticated
+                     ~actor:foreground
+                     ~observer
+                     ~startup_pending:(fun () -> false)
+                     ~authorize:(fun _ -> Ok ())
+                   |> protocol_ok
+                 in
+                 let request =
+                   P.Run_start.create
+                     ~session_id:before.identity.session_id
+                     ~attachment_id:writer.id
+                     ~generation:before.identity.generation
+                     ~expected_revision:before.counters.revision
+                     ~mode:Single_turn
+                     ~input:
+                       (User_submission
+                          { kind = Plain_text
+                          ; text = "525_ROOT_REQUEST"
+                          ; attachments = []
+                          })
+                     ~key:(P.Idempotency_key.of_string "525-named-run" |> protocol_ok)
+                   |> protocol_ok
+                 in
+                 let session =
+                   P.Session_ref.create
+                     ~server_id:
+                       (Daemon.store daemon |> Agent_store.Session_store.server_id)
+                     ~session_id:before.identity.session_id
+                 in
+                 let receipt =
+                   Actor.admit_run
+                     entry.actor
+                     ~scope
+                     ~request
+                     ~session
+                     ~request_sha256:
+                       (P.Run_start.to_json request
+                        |> Jsonaf.to_string
+                        |> Digestif.SHA256.digest_string
+                        |> Digestif.SHA256.to_hex)
+                     ~entry:(Some message)
+                   |> protocol_ok
+                 in
+                 let admitted = Actor.state entry.actor |> protocol_ok in
+                 let run =
+                   Agent_session.Run_state.find
+                     (Option.value_exn admitted.run_state)
+                     receipt.run_id
+                   |> Option.value_exn
+                 in
+                 let operations =
+                   run.owned_work
+                   @ List.map run.terminal_work ~f:(fun (item : P.Run_work.Terminal.t) ->
+                     item.work)
+                   |> List.filter_map ~f:(fun (work : P.Run_work.t) ->
+                     match work.key with
+                     | Operation id -> Some id
+                     | Retained _ -> None)
+                   |> List.dedup_and_sort ~compare:P.Id.Operation.compare
+                 in
+                 let operation =
+                   match operations with
+                   | [ id ] -> id
+                   | ids ->
+                     raise_s
+                       [%sexp
+                         "expected one admitted Run operation"
+                       , (ids : P.Id.Operation.t list)]
+                 in
+                 operation, Some receipt
              in
-             let operation_id = Option.value_exn submission.operation_id in
              let foreground_state = await_idle () in
              let events =
                match
@@ -1143,9 +1271,9 @@ let on_event ctx state event = match event with
                    "installed foreground operation did not complete"
                  , (operation_id : P.Id.Operation.t)
                  , (operations : P.Event.Durable.t list)]);
-             [%test_eq: int] 2 !root_calls;
+             [%test_eq: int] (if named_run then 1 else 2) !root_calls;
              [%test_eq: int] 1 (calls "525_PHASE_TURN");
-             [%test_eq: int] 1 (calls "525_PHASE_TOOL");
+             [%test_eq: int] (if named_run then 0 else 1) (calls "525_PHASE_TOOL");
              [%test_eq: int] 0 (calls "525_PHASE_IDLE");
              assert (Option.is_none foreground_state.failure);
              assert (not foreground_state.halted);
@@ -1160,73 +1288,86 @@ let on_event ctx state event = match event with
              assert (
                Jsonaf.exactly_equal
                  (state_value foreground_state)
-                 (Session.Snapshot.to_jsonaf (Int 3)));
-             let observed, due = Actor.due_schedules entry.actor |> protocol_ok in
-             (match observed with
-              | Idle -> ()
-              | _ -> raise_s [%sexp (observed : P.Session.observed_state)]);
-             let timer =
-               match due with
-               | [ timer ] -> timer
-               | timers -> raise_s [%sexp (timers : P.Schedule.t list)]
+                 (Session.Snapshot.to_jsonaf (Int (if named_run then 2 else 3))));
+             let final, queue =
+               if named_run
+               then foreground_state, None
+               else (
+                 let observed, due = Actor.due_schedules entry.actor |> protocol_ok in
+                 (match observed with
+                  | Idle -> ()
+                  | _ -> raise_s [%sexp (observed : P.Session.observed_state)]);
+                 let timer =
+                   match due with
+                   | [ timer ] -> timer
+                   | timers -> raise_s [%sexp (timers : P.Schedule.t list)]
+                 in
+                 let claimed =
+                   Actor.claim_schedule
+                     entry.actor
+                     ~schedule_id:timer.id
+                     ~generation:timer.generation
+                   |> protocol_ok
+                   |> Option.value_exn
+                 in
+                 Owner.deliver_schedule entry.runtime claimed |> protocol_ok;
+                 let delivered = Actor.state entry.actor |> protocol_ok in
+                 let queue =
+                   Checkpoint.queue delivered.moderator |> protocol_ok |> Option.value_exn
+                 in
+                 [%test_eq: int64] 0L (Queue.head_ordinal queue);
+                 [%test_eq: int64] 1L (Queue.next_ordinal queue);
+                 let occurrence =
+                   match Queue.entries queue with
+                   | [ occurrence ] -> occurrence
+                   | _ -> failwith "timer did not append exactly one occurrence"
+                 in
+                 (match Queue.Entry.producer occurrence with
+                  | Some (Schedule_delivery actual) ->
+                    assert (P.Id.Schedule.equal actual.id timer.id);
+                    [%test_eq: int] timer.generation actual.generation;
+                    [%test_eq: int] 1 actual.delivery_count
+                  | _ -> failwith "idle head did not retain the actual Schedule producer");
+                 assert (
+                   Option.equal
+                     P.Inference_origin.equal
+                     (Queue.Entry.origin occurrence)
+                     (Some Unbound));
+                 let provenance = Option.value_exn timer.inference_provenance in
+                 assert (
+                   P.Run_source.equal
+                     (P.Schedule_provenance.source provenance)
+                     (Queue.source queue));
+                 assert (Owner.drain_idle_moderator entry.runtime |> protocol_ok);
+                 let final = Actor.state entry.actor |> protocol_ok in
+                 assert (
+                   Jsonaf.exactly_equal
+                     (state_value final)
+                     (Session.Snapshot.to_jsonaf (Int 4)));
+                 [%test_eq: int] 1 (calls "525_PHASE_IDLE");
+                 [%test_eq: int] 2 !root_calls;
+                 assert (not (Owner.drain_idle_moderator entry.runtime |> protocol_ok));
+                 let repeated = Actor.state entry.actor |> protocol_ok in
+                 assert (
+                   Option.equal Jsonaf.exactly_equal repeated.moderator final.moderator);
+                 [%test_eq: int] 2 !root_calls;
+                 List.iter
+                   [ "525_PHASE_TURN"; "525_PHASE_TOOL"; "525_PHASE_IDLE" ]
+                   ~f:(fun phase -> [%test_eq: int] 1 (calls phase));
+                 let final_queue =
+                   Checkpoint.queue final.moderator |> protocol_ok |> Option.value_exn
+                 in
+                 [%test_eq: int64] 1L (Queue.head_ordinal final_queue);
+                 [%test_eq: int64] 1L (Queue.next_ordinal final_queue);
+                 assert (List.is_empty (Queue.entries final_queue));
+                 final, Some queue)
              in
-             let claimed =
-               Actor.claim_schedule
-                 entry.actor
-                 ~schedule_id:timer.id
-                 ~generation:timer.generation
-               |> protocol_ok
-               |> Option.value_exn
+             let expected_origin =
+               Option.value_map
+                 run_receipt
+                 ~default:P.Inference_origin.Unbound
+                 ~f:(fun receipt -> P.Inference_origin.Run receipt.run_id)
              in
-             Owner.deliver_schedule entry.runtime claimed |> protocol_ok;
-             let delivered = Actor.state entry.actor |> protocol_ok in
-             let queue =
-               Checkpoint.queue delivered.moderator |> protocol_ok |> Option.value_exn
-             in
-             [%test_eq: int64] 0L (Queue.head_ordinal queue);
-             [%test_eq: int64] 1L (Queue.next_ordinal queue);
-             let occurrence =
-               match Queue.entries queue with
-               | [ occurrence ] -> occurrence
-               | _ -> failwith "timer did not append exactly one occurrence"
-             in
-             (match Queue.Entry.producer occurrence with
-              | Some (Schedule_delivery actual) ->
-                assert (P.Id.Schedule.equal actual.id timer.id);
-                [%test_eq: int] timer.generation actual.generation;
-                [%test_eq: int] 1 actual.delivery_count
-              | _ -> failwith "idle head did not retain the actual Schedule producer");
-             assert (
-               Option.equal
-                 P.Inference_origin.equal
-                 (Queue.Entry.origin occurrence)
-                 (Some Unbound));
-             let provenance = Option.value_exn timer.inference_provenance in
-             assert (
-               P.Run_source.equal
-                 (P.Schedule_provenance.source provenance)
-                 (Queue.source queue));
-             assert (Owner.drain_idle_moderator entry.runtime |> protocol_ok);
-             let final = Actor.state entry.actor |> protocol_ok in
-             assert (
-               Jsonaf.exactly_equal
-                 (state_value final)
-                 (Session.Snapshot.to_jsonaf (Int 4)));
-             [%test_eq: int] 1 (calls "525_PHASE_IDLE");
-             [%test_eq: int] 2 !root_calls;
-             assert (not (Owner.drain_idle_moderator entry.runtime |> protocol_ok));
-             let repeated = Actor.state entry.actor |> protocol_ok in
-             assert (Option.equal Jsonaf.exactly_equal repeated.moderator final.moderator);
-             [%test_eq: int] 2 !root_calls;
-             List.iter
-               [ "525_PHASE_TURN"; "525_PHASE_TOOL"; "525_PHASE_IDLE" ]
-               ~f:(fun phase -> [%test_eq: int] 1 (calls phase));
-             let final_queue =
-               Checkpoint.queue final.moderator |> protocol_ok |> Option.value_exn
-             in
-             [%test_eq: int64] 1L (Queue.head_ordinal final_queue);
-             [%test_eq: int64] 1L (Queue.next_ordinal final_queue);
-             assert (List.is_empty (Queue.entries final_queue));
              let check_native file phase expected_operation =
                let invocation =
                  List.filter final.invocations ~f:(fun invocation ->
@@ -1265,7 +1406,10 @@ let on_event ctx state event = match event with
                  Option.equal
                    P.Inference_origin.equal
                    invocation.inference_origin
-                   (Some Unbound));
+                   (Some
+                      (if P.Moderator_execution.equal_phase phase Session_start
+                       then Unbound
+                       else expected_origin)));
                receipt
              in
              ignore
@@ -1274,48 +1418,52 @@ let on_event ctx state event = match event with
              ignore
                (check_native "turn.txt" Turn_start (Some operation_id)
                 : P.Moderator_execution.t);
-             ignore
-               (check_native "pretool.txt" Pre_tool_call (Some operation_id)
-                : P.Moderator_execution.t);
-             let root_invocation =
-               List.filter final.invocations ~f:(fun invocation ->
+             if not named_run
+             then (
+               ignore
+                 (check_native "pretool.txt" Pre_tool_call (Some operation_id)
+                  : P.Moderator_execution.t);
+               let root_invocation =
+                 List.filter final.invocations ~f:(fun invocation ->
+                   Option.equal
+                     String.equal
+                     invocation.context.provider_call_id
+                     (Some "525-root-call"))
+                 |> function
+                 | [ invocation ] -> invocation
+                 | invocations -> raise_s [%sexp (invocations : P.Invocation.t list)]
+               in
+               [%test_eq: string] "read_file" root_invocation.context.tool_name;
+               assert (P.Invocation.equal_origin root_invocation.context.origin Model);
+               (match root_invocation.status with
+                | Resolved (Complete result) | Published (Complete result) ->
+                  assert (
+                    String.is_substring
+                      (Jsonaf.to_string result)
+                      ~substring:"525-native-root.txt")
+                | _ -> raise_s [%sexp (root_invocation : P.Invocation.t)]);
+               let idle_receipt = check_native "idle.txt" Internal_event None in
+               let consumed = Option.value_exn idle_receipt.queue_occurrence in
+               [%test_eq: int64]
+                 0L
+                 (P.Moderator_execution.Queue_occurrence.ordinal consumed);
+               assert (
+                 P.Run_source.equal
+                   (P.Moderator_execution.Queue_occurrence.source consumed)
+                   (Queue.source (Option.value_exn queue)));
+               assert (
                  Option.equal
-                   String.equal
-                   invocation.context.provider_call_id
-                   (Some "525-root-call"))
-               |> function
-               | [ invocation ] -> invocation
-               | invocations -> raise_s [%sexp (invocations : P.Invocation.t list)]
-             in
-             [%test_eq: string] "read_file" root_invocation.context.tool_name;
-             assert (P.Invocation.equal_origin root_invocation.context.origin Model);
-             (match root_invocation.status with
-              | Resolved (Complete result) | Published (Complete result) ->
-                assert (
-                  String.is_substring
-                    (Jsonaf.to_string result)
-                    ~substring:"525-native-root.txt")
-              | _ -> raise_s [%sexp (root_invocation : P.Invocation.t)]);
-             let idle_receipt = check_native "idle.txt" Internal_event None in
-             let consumed = Option.value_exn idle_receipt.queue_occurrence in
-             [%test_eq: int64]
-               0L
-               (P.Moderator_execution.Queue_occurrence.ordinal consumed);
-             assert (
-               P.Run_source.equal
-                 (P.Moderator_execution.Queue_occurrence.source consumed)
-                 (Queue.source queue));
-             assert (
-               Option.equal
-                 P.Inference_origin.equal
-                 (P.Moderator_execution.Queue_occurrence.origin consumed)
-                 (Some Unbound));
+                   P.Inference_origin.equal
+                   (P.Moderator_execution.Queue_occurrence.origin consumed)
+                   (Some Unbound)));
              let model_jobs =
                List.filter final.jobs ~f:(fun job -> P.Job.equal_kind job.kind Model_call)
              in
-             [%test_eq: int] 3 (List.length model_jobs);
+             [%test_eq: int] (if named_run then 1 else 3) (List.length model_jobs);
              List.iter
-               [ "525_PHASE_TURN"; "525_PHASE_TOOL"; "525_PHASE_IDLE" ]
+               (if named_run
+                then [ "525_PHASE_TURN" ]
+                else [ "525_PHASE_TURN"; "525_PHASE_TOOL"; "525_PHASE_IDLE" ])
                ~f:(fun phase ->
                  let job =
                    List.filter model_jobs ~f:(fun job ->
@@ -1336,13 +1484,166 @@ let on_event ctx state event = match event with
                    Option.equal
                      P.Inference_origin.equal
                      job.inference_origin
-                     (Some Unbound));
+                     (Some expected_origin));
                  let result = Option.value_exn job.result in
                  assert (
                    Option.equal
                      Jsonaf.exactly_equal
                      (Jsonaf.member "final_text" result)
                      (Some (`String (phase ^ "-ok")))));
+             Option.iter run_receipt ~f:(fun (receipt : P.Run_receipt.t) ->
+               let module Ledger = Agent_session.Inference_ledger in
+               let module Observation = Inference.Observation in
+               let run =
+                 Agent_session.Run_state.find
+                   (Option.value_exn final.run_state)
+                   receipt.run_id
+                 |> Option.value_exn
+               in
+               (match run.lifecycle with
+                | Terminal (Completed _) -> ()
+                | _ -> raise_s [%sexp (run : P.Run.t)]);
+               assert (P.Run_source.equal run.source receipt.source);
+               let child = List.hd_exn model_jobs in
+               let child_key =
+                 P.Run_work.Key.Retained
+                   (P.Session_work.Key.Job { id = child.id; attempt = child.attempt })
+               in
+               assert (
+                 List.exists
+                   run.terminal_work
+                   ~f:(fun (terminal : P.Run_work.Terminal.t) ->
+                     P.Run_work.Key.equal terminal.work.key child_key
+                     && P.Run_work.Terminal.equal_outcome terminal.outcome Succeeded));
+               let turn =
+                 List.filter final.moderator_executions ~f:(fun event ->
+                   P.Moderator_execution.equal_phase event.context.phase Turn_start
+                   && Option.equal
+                        P.Id.Operation.equal
+                        event.context.operation_id
+                        (Some operation_id))
+                 |> function
+                 | [ event ] -> event
+                 | events -> raise_s [%sexp (events : P.Moderator_execution.t list)]
+               in
+               assert (
+                 Option.equal
+                   P.Inference_origin.equal
+                   (Agent_session.Invocation_inference_provenance.of_event
+                      ~runs:final.run_state
+                      ~jobs:final.jobs
+                      turn
+                    |> protocol_ok)
+                   (Some expected_origin));
+               let child_admission =
+                 List.filter !admitted_jobs ~f:(fun (_, _, jobs) ->
+                   List.mem jobs child.id ~equal:P.Id.Job.equal)
+                 |> function
+                 | [ admission ] -> admission
+                 | _ -> failwith "actual child lacks its unique acknowledged scope"
+               in
+               let child_scope, child_accounting, active_jobs = child_admission in
+               [%test_eq: P.Id.Job.t list] [ child.id ] active_jobs;
+               let rows = Ledger.rows final.inference_ledger in
+               let child_row =
+                 List.filter rows ~f:(fun row ->
+                   Transcript.Scope.equal
+                     (Ledger.Handle.scope (Ledger.Row.handle row))
+                     child_scope)
+                 |> function
+                 | [ row ] -> row
+                 | _ -> failwith "child scope lacks its unique retained ledger row"
+               in
+               let require_completed label record =
+                 match Observation.Attempt_record.state record with
+                 | Terminal terminal ->
+                   assert (
+                     Transcript.Scope.equal
+                       (Observation.Attempt_record.scope record)
+                       (Inference.Event.Terminal.scope terminal));
+                   (match Inference.Event.Terminal.outcome terminal with
+                    | Completed -> ()
+                    | (Refused | Incomplete _ | Failed _) as outcome ->
+                      raise_s
+                        [%sexp
+                          (label : string), (outcome : Inference.Event.Terminal.outcome)])
+                 | Prepared | Running | Interrupted _ ->
+                   failwith (label ^ " attempt has no acknowledged completed terminal")
+               in
+               let handle = Ledger.Row.handle child_row in
+               let record = Ledger.Row.record child_row in
+               (* The actual Inference_job service supplies no operation or
+                  invocation association; its on_admitted scope is recorded while
+                  this exact synchronous child is Running. *)
+               assert (Option.is_none (Ledger.Handle.operation_id handle));
+               assert (Option.is_none (Ledger.Handle.invocation_id handle));
+               assert (
+                 Transcript.Scope.equal
+                   child_scope
+                   (Observation.Attempt_record.scope record));
+               assert (
+                 Observation.Observation_id.equal
+                   child_accounting
+                   (Ledger.Handle.accounting_id handle));
+               assert (
+                 Observation.Observation_id.equal
+                   child_accounting
+                   (Observation.Attempt_record.accounting_id record));
+               assert (
+                 P.Id.Session.equal
+                   final.identity.session_id
+                   (Ledger.Handle.session_id handle));
+               [%test_eq: int] child.generation (Ledger.Handle.generation handle);
+               require_completed "child" record;
+               let root_rows =
+                 List.filter rows ~f:(fun row ->
+                   Option.equal
+                     P.Id.Operation.equal
+                     (Ledger.Handle.operation_id (Ledger.Row.handle row))
+                     (Some operation_id))
+               in
+               assert (not (List.is_empty root_rows));
+               List.iter root_rows ~f:(fun row ->
+                 let root_handle = Ledger.Row.handle row in
+                 let acknowledged =
+                   List.filter !admitted_jobs ~f:(fun (scope, accounting, jobs) ->
+                     Transcript.Scope.equal scope (Ledger.Handle.scope root_handle)
+                     && Observation.Observation_id.equal
+                          accounting
+                          (Ledger.Handle.accounting_id root_handle)
+                     && List.is_empty jobs)
+                 in
+                 [%test_eq: int] 1 (List.length acknowledged);
+                 assert (
+                   not
+                     (Transcript.Scope.equal
+                        child_scope
+                        (Ledger.Handle.scope root_handle)));
+                 assert (
+                   Transcript.Scope.equal
+                     (Ledger.Handle.scope root_handle)
+                     (Observation.Attempt_record.scope (Ledger.Row.record row)));
+                 assert (
+                   Observation.Observation_id.equal
+                     (Ledger.Handle.accounting_id root_handle)
+                     (Observation.Attempt_record.accounting_id (Ledger.Row.record row)));
+                 assert (Option.is_none (Ledger.Handle.invocation_id root_handle));
+                 require_completed "root" (Ledger.Row.record row));
+               let answers =
+                 Agent_session.History_codec.all_of_protocol
+                   final.conversation.canonical_history
+                 |> protocol_ok
+                 |> List.filter_map ~f:(fun entry ->
+                   match
+                     History_entry.payload entry
+                     |> History_entry.Payload.semantic
+                     |> History_entry.Payload.Semantic.view
+                   with
+                   | Message { role = Assistant; content = [ Text { text; _ } ]; _ } ->
+                     Some text
+                   | _ -> None)
+               in
+               [%test_eq: string list] [ "525-root-completed" ] answers);
              assert (not (Operator_authorization.is_current constructor));
              assert (Operator_authorization.is_current foreground);
              let directory =
@@ -1367,6 +1668,24 @@ let on_event ctx state event = match event with
                | Ok value -> Agent_session.Session_state_document.value value
                | Error error -> raise_s [%sexp (error : Document_schema.Error.t)]
              in
+             if named_run
+             then (
+               assert (
+                 Option.equal
+                   Agent_session.Run_state.equal
+                   saved.run_state
+                   final.run_state);
+               let ledger_json ledger =
+                 Agent_session.Inference_ledger.to_document ledger
+                 |> function
+                 | Ok document -> Document_schema.Document.json document
+                 | Error error ->
+                   raise_s [%sexp (error : Agent_session.Inference_ledger.Error.t)]
+               in
+               assert (
+                 Jsonaf.exactly_equal
+                   (ledger_json saved.inference_ledger)
+                   (ledger_json final.inference_ledger)));
              assert (Option.equal Jsonaf.exactly_equal saved.moderator final.moderator);
              assert (List.equal P.Invocation.equal saved.invocations final.invocations);
              assert (
