@@ -2126,7 +2126,7 @@ let%expect_test "acknowledged legacy emits carry live custody across exact queue
          assert_same_session_snapshot emitted (A.state actor |> protocol_ok);
          let worker_oracle = ref false in
          (during
-          := fun input _caps ->
+          := fun input caps ->
                inspected := false;
                (reject_checkpoint
                 := match mode with
@@ -2180,6 +2180,73 @@ let%expect_test "acknowledged legacy emits carry live custody across exact queue
                       Agent_protocol.Inference_origin.equal
                       (Agent_session.Moderator_queue.Entry.origin first)
                       (Agent_session.Moderator_queue.Entry.origin second));
+                  (match mode with
+                   | `Fresh_none ->
+                     let module C = Agent_session.Moderator_checkpoint in
+                     let observer =
+                       C.observer state.moderator |> protocol_ok |> Option.value_exn
+                     in
+                     caps.manage_moderator_follow_up ~observer |> protocol_ok;
+                     let unchanged () =
+                       assert_same_session_snapshot state (A.state actor |> protocol_ok);
+                       assert_same_session_snapshot
+                         state
+                         (Agent_session.Memory_backend.state backend);
+                       assert (
+                         List.is_empty
+                           (Agent_session.Memory_backend.events_after
+                              backend
+                              state.counters.event_sequence
+                            |> protocol_ok))
+                     in
+                     let snapshot =
+                       M.identity_snapshot manager |> Result.ok_or_failwith
+                     in
+                     (* A registered worker confirms the Event ACK; it cannot
+                        replace that complete carrier with its bare projection. *)
+                     caps.commit_moderator state.moderator |> protocol_ok;
+                     unchanged ();
+                     caps.commit_moderator (Some (C.encode snapshot)) |> protocol_ok;
+                     unchanged ();
+                     let fields =
+                       match Option.value_exn state.moderator with
+                       | `Object fields -> fields
+                       | _ -> failwith "acknowledged checkpoint must be an object"
+                     in
+                     let changed_queue =
+                       `Object
+                         (List.map fields ~f:(fun (name, value) ->
+                            ( name
+                            , if String.equal name "queue_provenance"
+                              then `Null
+                              else value )))
+                     in
+                     let changed_extension =
+                       assert (
+                         not (List.Assoc.mem fields "future_worker" ~equal:String.equal));
+                       `Object (fields @ [ "future_worker", `String "unacknowledged" ])
+                     in
+                     List.iter
+                       [ C.encode
+                           { snapshot with current_state = Session.Snapshot.Int 99 }
+                       ; changed_queue
+                       ; changed_extension
+                       ]
+                       ~f:(fun incoming ->
+                         (match caps.commit_moderator (Some incoming) with
+                          | Error { code = Conflict; message; _ } ->
+                            [%test_eq: string]
+                              "foreground moderator checkpoint differs from its Event ACK"
+                              message
+                          | Error error ->
+                            raise_s
+                              [%sexp
+                                "unexpected worker checkpoint rejection"
+                              , (error : Agent_protocol.Error.t)]
+                          | Ok () -> failwith "worker changed its Event checkpoint ACK");
+                         unchanged ())
+                   | `Original -> ()
+                   | `Rejected_checkpoint -> assert false);
                   let completed = ref false in
                   let result =
                     L.invoke

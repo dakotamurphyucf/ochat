@@ -932,6 +932,7 @@ let%expect_test "runtime owner drains observation batches and applies durable te
            ; start_moderator = (fun () -> failwith "unexpected startup")
            ; enqueue_internal_event =
                (fun ?prepare:_ _ -> failwith "unexpected external event")
+           ; legacy_events = None
            ; drain_internal_events =
                (fun _ ->
                  Int.incr internal_batches;
@@ -1336,6 +1337,7 @@ let%expect_test
                ; start_moderator = (fun () -> failwith "unexpected startup")
                ; enqueue_internal_event =
                    (fun ?prepare:_ _ -> failwith "unexpected external event")
+               ; legacy_events = None
                ; drain_internal_events = (fun _ -> failwith "legacy event drain used")
                ; execute_model_job =
                    (fun ~allocate_inference:_

@@ -67,3 +67,43 @@ val run
   -> session_meta:Jsonaf.t
   -> now_ms:int
   -> (t option, Agent_protocol.Error.t) result
+
+(** Installed per-head host adapter. [run] is already bound to one actual
+    foreground operation or to the idle claim; construction grants no authority.
+    Every selected callback must acknowledge its own Event before returning. *)
+module Installed : sig
+  type callback =
+    selection:Chat_response.Moderator_manager.Callback.Selection.t
+    -> history:History_entry.t list
+    -> available_tools:Openai.Responses.Request.Tool.t list
+    -> now_ms:int
+    -> (t option, Agent_protocol.Error.t) result
+
+  type t
+
+  val create : Chat_response.Moderator_manager.t -> run:callback -> t
+
+  (** Consume only Queue_head, bounded to 0..256 callbacks, ending on empty queue,
+      halt, End_session or failure. Each successful outcome's notifications were
+      published by its own Event ACK and are removed from the returned DATA.
+      Returned requests remain durable facts, never a second scheduling command.
+      Failed/interrupted claims are rejected by the bound Actor claim. *)
+  val drain
+    :  t
+    -> history:History_entry.t list
+    -> available_tools:Openai.Responses.Request.Tool.t list
+    -> now_ms:int
+    -> max_events:int
+    -> (Chat_response.Moderation.Outcome.t list, Agent_protocol.Error.t) result
+
+  (** Use the ACTUAL foreground capabilities for follow-up ownership and the
+      provider-before-model acknowledgement. Normalizes already-durable
+      compaction/dependent-turn requests using the common foreground policy.
+      Idle consumers cannot obtain this adapter from a bare operation ID. *)
+  val foreground_handlers
+    :  t
+    -> capabilities:Operation_worker.Capabilities.t
+    -> ( Chat_response.In_memory_stream.moderator_event_handlers
+         , Agent_protocol.Error.t )
+         result
+end

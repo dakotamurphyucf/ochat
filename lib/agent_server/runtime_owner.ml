@@ -1007,6 +1007,58 @@ let drain_loaded_queued_events
   loop max_events false
 ;;
 
+let drain_loaded_owned_legacy_events ~max_events t drain =
+  let module A = Agent_session.Session_actor in
+  let module B = Agent_session.Runtime_builder in
+  let open Result.Let_syntax in
+  let rec loop remaining handled =
+    match remaining with
+    | 0 -> Ok true
+    | _ ->
+      let%bind state = A.state t.actor in
+      (* Legacy source identity is real checkpoint DATA, not a v1 invocation
+         capability. Use the same retained failed/interrupted-head guard as
+         admission before EACH selection, including callbacks after a yield. *)
+      let%bind observer = B.moderator_snapshot_observer state.moderator in
+      let%bind halted = B.moderator_snapshot_is_halted state.moderator in
+      let%bind observer =
+        observer
+        |> Result.of_option
+             ~error:
+               (Agent_protocol.Error.create
+                  Conflict
+                  ~message:"installed legacy drain requires its retained moderator source"
+                  ~retryable:false
+                  ())
+      in
+      if
+        halted
+        || Agent_session.Queued_moderator_event.has_unsettled_claim ~state ~observer
+      then Ok handled
+      else (
+        let%bind history =
+          Agent_session.History_codec.all_of_protocol state.conversation.canonical_history
+        in
+        let%bind outcomes = drain ~max_events:1 ~history in
+        match outcomes with
+        | [] -> Ok handled
+        | [ (outcome : Chat_response.Moderation.Outcome.t) ] ->
+          (match
+             Chat_response.Runtime_semantics.should_end_session outcome.runtime_requests
+           with
+           | Some _ -> Ok true
+           | None -> loop (remaining - 1) true)
+        | _ ->
+          Error
+            (Agent_protocol.Error.create
+               Conflict
+               ~message:"installed legacy drain exceeded its selected head budget"
+               ~retryable:false
+               ()))
+  in
+  loop max_events false
+;;
+
 let drain_loaded_idle_moderator t runtime =
   let open Result.Let_syntax in
   let%bind max_events = idle_callback_limit t in
@@ -1021,7 +1073,15 @@ let drain_loaded_idle_moderator t runtime =
        let%bind more = drain_loaded_queued_events ~max_events t runtime manager in
        let%map applied = Agent_session.Session_actor.apply_moderator_follow_up t.actor in
        more || applied
-     | Some _ -> Eio.Cancel.protect (fun () -> drain_loaded_legacy_events t runtime)
+     | Some _ ->
+       (match runtime.legacy_events with
+        | Some drain ->
+          let%bind more = drain_loaded_owned_legacy_events ~max_events t drain in
+          let%map applied =
+            Agent_session.Session_actor.apply_moderator_follow_up t.actor
+          in
+          more || applied
+        | None -> Eio.Cancel.protect (fun () -> drain_loaded_legacy_events t runtime))
      | None -> Ok false)
 ;;
 

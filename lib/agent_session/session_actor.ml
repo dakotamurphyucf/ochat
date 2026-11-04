@@ -9271,9 +9271,39 @@ let commit_worker_moderator t operation_id moderator =
   let%bind _ = running_operation ~allow_stopping:true t operation_id in
   if moderator_is_borrowed t
   then Error (error Conflict "moderator invocation owns the moderator checkpoint")
-  else if Option.equal Jsonaf.exactly_equal t.state.moderator moderator
-  then Ok ()
-  else Result.map (change_moderator t moderator) ~f:(fun _ -> ())
+  else (
+    match t.foreground_moderator with
+    | Some (managed_operation, observer) ->
+      let%bind installed =
+        Runtime_builder.moderator_snapshot_observer t.state.moderator
+      in
+      let%bind () =
+        if
+          Agent_protocol.Id.Operation.equal managed_operation operation_id
+          && Option.equal
+               Agent_protocol.Invocation.equal_observer
+               installed
+               (Some observer)
+        then Ok ()
+        else Error (error Conflict "foreground moderator checkpoint owner changed")
+      in
+      (* Owned handlers already acknowledged the full checkpoint. A worker may
+         confirm only its unchanged bare Manager projection or that exact full
+         carrier; explicit queue/extension changes must not disappear here. *)
+      let%bind acknowledged =
+        Moderator_checkpoint.reuse_unchanged_snapshot
+          ~previous:t.state.moderator
+          ~incoming:moderator
+      in
+      if Option.equal Jsonaf.exactly_equal t.state.moderator acknowledged
+      then Ok ()
+      else
+        Error
+          (error Conflict "foreground moderator checkpoint differs from its Event ACK")
+    | None ->
+      if Option.equal Jsonaf.exactly_equal t.state.moderator moderator
+      then Ok ()
+      else Result.map (change_moderator t moderator) ~f:(fun _ -> ()))
 ;;
 
 let configuration_view t =

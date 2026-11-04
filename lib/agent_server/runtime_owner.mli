@@ -299,7 +299,7 @@ val deliver_schedule
     runtime's deferred startup/resume activation is also polled while runnable,
     before observation/queued-event handling. It never activates a stopped actor;
     failed activation is not bypassed by later idle event work. Each
-    observation and v1 event batch is bounded to 32 handlers; durable follow-up
+    observation and owned event batch is bounded to 32 handlers; durable follow-up
     requests are consumed together before another event drain, even when no
     internal event or observation is queued. Only the installed v1 source can
     handle an observation. Failed handlers retain their separate failure and
@@ -307,9 +307,13 @@ val deliver_schedule
     exhausts its budget, queued events remain, or follow-up work was scheduled.
     When the runtime supplies script-tool services, every observation gets its
     own actor-bound native scope using the manager's exact admitted definition.
-    Queued v1 events use the same scoped service through persisted event claims;
-    the legacy drain is used only for managers without a v1 definition. Event
-    requests are applied after the batch, with termination ending the batch early.
+    Queued v1 events use the same scoped service through persisted event claims.
+    Host-backed legacy events use their installed per-head claim and never the
+    aggregate idle borrow: each head reads current canonical history, checks the
+    retained source's failed/interrupted claims, and owns its checkpoint/request/
+    notification ACK. Explicit standalone embeddings without that adapter keep
+    the aggregate legacy compatibility path. Event requests are applied once
+    after the batch, with termination ending the batch early.
     Unretired failed/interrupted event claims suppress further queue polling for
     their source/generation, while saved native outcomes remain observable.
     Native child results join subsequent bounded observation work. A runtime
@@ -321,8 +325,9 @@ val deliver_schedule
     moderator work. Cancellation confined to
     the owned event returns Interrupted, keeping the shared scheduler alive;
     cancellation of the caller still propagates. Later polling and administration
-    remain usable. Runtime installation and legacy draining
-    retain their protected lifecycle boundaries. Normal v1 declaration admission
+    remain usable. Runtime installation and each callback's ownership transfer
+    retain protected lifecycle boundaries; owned legacy batches remain cancellable
+    between and during handlers. Normal v1 declaration admission
     remains separate; this does not enable public features. *)
 val drain_idle_moderator : t -> (bool, Agent_protocol.Error.t) result
 

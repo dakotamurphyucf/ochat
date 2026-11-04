@@ -16,6 +16,7 @@ let ok = function
 let with_daemon
       ?(prompt_text = "<developer>Pinned source during creation.</developer>")
       ?(schemas = false)
+      ?(sources = [])
       ?(qualify_chatml_extensions = false)
       ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
       ~policy
@@ -30,6 +31,8 @@ let with_daemon
       (fun () ->
          let prompt = Filename.concat root "parent.chatmd" in
          Eio.Path.save ~create:(`Exclusive 0o600) Eio.Path.(env#fs / prompt) prompt_text;
+         List.iter sources ~f:(fun (name, source) ->
+           Eio.Path.save ~create:(`Exclusive 0o600) Eio.Path.(env#fs / root / name) source);
          if schemas
          then (
            Eio.Path.save
@@ -563,4 +566,526 @@ let on_event = fun ctx state event -> match event with
             saved.schedules
             state.schedules);
         [%test_eq: int] !model_calls 0)))
+;;
+
+let%test_unit
+    "installed legacy Factory callbacks own foreground and idle Tool and Model calls"
+  =
+  let module P = Agent_protocol in
+  let module Owner = Agent_server.Runtime_owner in
+  let module Checkpoint = Agent_session.Moderator_checkpoint in
+  let module Queue = Agent_session.Moderator_queue in
+  let module Res = Openai.Responses in
+  let prompt_text =
+    {|<developer>525_ROOT_PROMPT. Use the requested native tool, then answer.</developer>
+<tool name="read_file"><read id="data" path="${workspace}"/></tool>
+<tool name="recipe_source" agent="recipe.chatmd" local/>
+<script id="owner" language="chatml" kind="moderator">
+let initial_state = 0
+let read file = Tool.call("read_file", `Object([
+  {key = "root"; value = `String("data")},
+  {key = "file"; value = `String(file)}
+]))
+let phase state name file =
+  let* native = read(file) in
+  match native with
+  | `Error(code) -> Task.fail(code)
+  | `Ok(value) ->
+    let* model = Model.call("agent_prompt_v1", `Object([
+      {key = "prompt"; value = `String("recipe.chatmd")},
+      {key = "input"; value = `String(name)},
+      {key = "is_local"; value = `Bool(true)}
+    ])) in
+    (match model with
+    | `Ok(value) -> Task.pure(state + 1)
+    | `Refused(message) -> Task.fail(message)
+    | `Error(message) -> Task.fail(message))
+let on_event ctx state event = match event with
+| `Session_start ->
+  let* result = read("constructor.txt") in
+  (match result with
+  | `Ok(value) -> Task.pure(state + 1)
+  | `Error(code) -> Task.fail(code))
+| `Turn_start ->
+  if state == 1 then
+    let* next = phase(state, "525_PHASE_TURN", "turn.txt") in
+    let* timer = Schedule.after_ms(0, `String("idle-queued")) in
+    Task.pure(next)
+  else Task.pure(state)
+| `Pre_tool_call(p) ->
+  if state == 2 then
+    if p.name == "read_file" then phase(state, "525_PHASE_TOOL", "pretool.txt")
+    else Task.pure(state)
+  else Task.pure(state)
+| `String("idle-queued") ->
+  if state == 3 then phase(state, "525_PHASE_IDLE", "idle.txt")
+  else Task.fail("idle callback did not follow the foreground")
+| _ -> Task.pure(state)
+</script>|}
+  in
+  let answer ~id text =
+    let message : Res.Output_message.t =
+      { role = Assistant
+      ; id
+      ; status = "completed"
+      ; content = [ { annotations = []; text; _type = "output_text" } ]
+      ; phase = None
+      ; _type = "message"
+      }
+    in
+    let item = Res.Response_stream.Item.Output_message message in
+    [ Res.Response_stream.Output_item_added
+        { item; output_index = 0; type_ = "response.output_item.added" }
+    ; Output_text_delta
+        { item_id = id
+        ; output_index = 0
+        ; content_index = 0
+        ; delta = text
+        ; type_ = "response.output_text.delta"
+        }
+    ; Output_item_done { item; output_index = 0; type_ = "response.output_item.done" }
+    ]
+    |> Stdlib.List.to_seq
+  in
+  let root_tool () =
+    let open Res.Response_stream in
+    let args = {|{"root":"data","file":"root.txt"}|} in
+    let item arguments status =
+      Item.Function_call
+        { name = "read_file"
+        ; arguments
+        ; call_id = "525-root-call"
+        ; _type = "function_call"
+        ; id = Some "525-root-tool-item"
+        ; status
+        }
+    in
+    [ Output_item_added
+        { item = item "" None; output_index = 0; type_ = "response.output_item.added" }
+    ; Function_call_arguments_done
+        { arguments = args
+        ; item_id = "525-root-tool-item"
+        ; output_index = 0
+        ; type_ = "response.function_call_arguments.done"
+        }
+    ; Output_item_done
+        { item = item args (Some "completed")
+        ; output_index = 0
+        ; type_ = "response.output_item.done"
+        }
+    ]
+    |> Stdlib.List.to_seq
+  in
+  List.iter [ false; true ] ~f:(fun qualify_chatml_extensions ->
+    let constructor_live = Atomic.make true in
+    let foreground_live = Atomic.make true in
+    let original live =
+      Operator_authorization.guarded ~principal:(principal ()) ~is_current:(fun () ->
+        Atomic.get live)
+    in
+    let constructor = original constructor_live in
+    let foreground = original foreground_live in
+    let child_calls = Hashtbl.create (module String) in
+    let root_calls = ref 0 in
+    let calls phase = Option.value (Hashtbl.find child_calls phase) ~default:0 in
+    let policy =
+      inference_policy ~default_model:"fixture-model" ~post_stream:(fun ~sw:_ ~inputs ->
+        let transcript =
+          `Array (List.map inputs ~f:Res.Item.jsonaf_of_t) |> Jsonaf.to_string
+        in
+        let child =
+          List.exists inputs ~f:(fun item ->
+            let json = Res.Item.jsonaf_of_t item in
+            match Jsonaf.member "role" json with
+            | Some (`String "developer") ->
+              String.is_substring (Jsonaf.to_string json) ~substring:"525_CHILD_PROMPT"
+            | _ -> false)
+        in
+        assert (not (Operator_authorization.is_current constructor));
+        assert (Operator_authorization.is_current foreground);
+        if child
+        then (
+          let phase =
+            List.filter
+              [ "525_PHASE_TURN"; "525_PHASE_TOOL"; "525_PHASE_IDLE" ]
+              ~f:(fun phase -> String.is_substring transcript ~substring:phase)
+            |> function
+            | [ phase ] -> phase
+            | phases ->
+              raise_s [%sexp "unexpected child provider input", (phases : string list)]
+          in
+          Hashtbl.incr child_calls phase;
+          answer ~id:(phase ^ "-answer") (phase ^ "-ok"))
+        else (
+          assert (String.is_substring transcript ~substring:"525_ROOT_REQUEST");
+          incr root_calls;
+          [%test_eq: int] 1 (calls "525_PHASE_TURN");
+          match !root_calls with
+          | 1 -> root_tool ()
+          | 2 ->
+            [%test_eq: int] 1 (calls "525_PHASE_TOOL");
+            answer ~id:"525-root-answer" "525-root-completed"
+          | count -> raise_s [%sexp "unexpected root provider count", (count : int)]))
+    in
+    with_daemon
+      ~prompt_text
+      ~sources:
+        [ ( "recipe.chatmd"
+          , "<developer>525_CHILD_PROMPT. Answer the phase marker.</developer>" )
+        ]
+      ~qualify_chatml_extensions
+      ~policy
+      (fun env _ root daemon ->
+         List.iter
+           [ "constructor.txt"; "turn.txt"; "pretool.txt"; "idle.txt"; "root.txt" ]
+           ~f:(fun name ->
+             Eio.Path.save
+               ~create:(`Exclusive 0o600)
+               Eio.Path.(env#fs / root / name)
+               ("525-native-" ^ name));
+         let entry =
+           Factory.create_session_authenticated
+             (Daemon.factory daemon)
+             ~command_audit:None
+             ~actor:constructor
+             (create_request ~start_immediately:true ())
+           |> protocol_ok
+         in
+         let closed = ref false in
+         let close () =
+           if not !closed
+           then (
+             entry.close ();
+             closed := true)
+         in
+         Fun.protect ~finally:close (fun () ->
+           Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 45. (fun () ->
+             let rec await_idle () =
+               let state = Actor.state entry.actor |> protocol_ok in
+               match state.active_operation, state.lifecycle.observed, state.failure with
+               | None, Idle, None -> state
+               | _, _, Some error -> raise_s [%sexp (error : P.Error.t)]
+               | _ ->
+                 Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                 await_idle ()
+             in
+             let initial = await_idle () in
+             assert (
+               Option.is_none
+                 (Agent_server.Session_registry.find
+                    (Daemon.registry daemon)
+                    initial.identity.session_id));
+             [%test_eq: P.Session.desired_state] Running initial.lifecycle.desired;
+             assert (
+               Agent_session.Session_state.Runtime_initialization.equal
+                 initial.runtime_initialization
+                 Ready);
+             [%test_eq: int] 0 !root_calls;
+             [%test_eq: int] 0 (Hashtbl.length child_calls);
+             Atomic.set constructor_live false;
+             assert (not (Operator_authorization.is_current constructor));
+             let writer, _ =
+               Actor.attach entry.actor ~mode:Read_write ~subscribe:false |> protocol_ok
+             in
+             Actor.start ~actor:foreground entry.actor ~attachment_id:writer.id
+             |> protocol_ok
+             |> ignore;
+             let history_id =
+               Agent_session.History_id_source.allocate entry.history_ids |> protocol_ok
+             in
+             let message =
+               Owner.parse_user_content
+                 entry.runtime
+                 ~id:history_id
+                 { kind = Plain_text; text = "525_ROOT_REQUEST"; attachments = [] }
+               |> protocol_ok
+               |> Agent_session.History_codec.to_protocol
+             in
+             let submission =
+               Actor.submit_message_authenticated
+                 entry.actor
+                 ~actor:foreground
+                 ~attachment_id:writer.id
+                 message
+               |> protocol_ok
+             in
+             let operation_id = Option.value_exn submission.operation_id in
+             let foreground_state = await_idle () in
+             let events =
+               match
+                 Agent_session.Durable_event_log.replay
+                   entry.durable_events
+                   ~after_sequence:initial.counters.event_sequence
+                   ~through_sequence:foreground_state.counters.event_sequence
+               with
+               | Available events -> events
+               | Snapshot_required ->
+                 failwith "installed fixture exceeded event replay window"
+             in
+             if
+               not
+                 (List.exists events ~f:(fun event ->
+                    match
+                      P.Event.Durable.Payload.of_json ~kind:event.kind event.payload
+                      |> protocol_ok
+                    with
+                    | Operation_completed { id; state = Completed; _ } ->
+                      P.Id.Operation.equal id operation_id
+                    | _ -> false))
+             then (
+               let operations =
+                 List.filter events ~f:(fun event ->
+                   match
+                     P.Event.Durable.Payload.of_json ~kind:event.kind event.payload
+                     |> protocol_ok
+                   with
+                   | Operation_started _ | Operation_completed _ | Operation_failed _ ->
+                     true
+                   | _ -> false)
+               in
+               raise_s
+                 [%sexp
+                   "installed foreground operation did not complete"
+                 , (operation_id : P.Id.Operation.t)
+                 , (operations : P.Event.Durable.t list)]);
+             [%test_eq: int] 2 !root_calls;
+             [%test_eq: int] 1 (calls "525_PHASE_TURN");
+             [%test_eq: int] 1 (calls "525_PHASE_TOOL");
+             [%test_eq: int] 0 (calls "525_PHASE_IDLE");
+             assert (Option.is_none foreground_state.failure);
+             assert (not foreground_state.halted);
+             let state_value state =
+               let snapshot =
+                 Checkpoint.decode state.Agent_session.Session_state.moderator
+                 |> protocol_ok
+                 |> Option.value_exn
+               in
+               Session.Snapshot.to_jsonaf snapshot.current_state
+             in
+             assert (
+               Jsonaf.exactly_equal
+                 (state_value foreground_state)
+                 (Session.Snapshot.to_jsonaf (Int 3)));
+             let observed, due = Actor.due_schedules entry.actor |> protocol_ok in
+             (match observed with
+              | Idle -> ()
+              | _ -> raise_s [%sexp (observed : P.Session.observed_state)]);
+             let timer =
+               match due with
+               | [ timer ] -> timer
+               | timers -> raise_s [%sexp (timers : P.Schedule.t list)]
+             in
+             let claimed =
+               Actor.claim_schedule
+                 entry.actor
+                 ~schedule_id:timer.id
+                 ~generation:timer.generation
+               |> protocol_ok
+               |> Option.value_exn
+             in
+             Owner.deliver_schedule entry.runtime claimed |> protocol_ok;
+             let delivered = Actor.state entry.actor |> protocol_ok in
+             let queue =
+               Checkpoint.queue delivered.moderator |> protocol_ok |> Option.value_exn
+             in
+             [%test_eq: int64] 0L (Queue.head_ordinal queue);
+             [%test_eq: int64] 1L (Queue.next_ordinal queue);
+             let occurrence =
+               match Queue.entries queue with
+               | [ occurrence ] -> occurrence
+               | _ -> failwith "timer did not append exactly one occurrence"
+             in
+             (match Queue.Entry.producer occurrence with
+              | Some (Schedule_delivery actual) ->
+                assert (P.Id.Schedule.equal actual.id timer.id);
+                [%test_eq: int] timer.generation actual.generation;
+                [%test_eq: int] 1 actual.delivery_count
+              | _ -> failwith "idle head did not retain the actual Schedule producer");
+             assert (
+               Option.equal
+                 P.Inference_origin.equal
+                 (Queue.Entry.origin occurrence)
+                 (Some Unbound));
+             let provenance = Option.value_exn timer.inference_provenance in
+             assert (
+               P.Run_source.equal
+                 (P.Schedule_provenance.source provenance)
+                 (Queue.source queue));
+             assert (Owner.drain_idle_moderator entry.runtime |> protocol_ok);
+             let final = Actor.state entry.actor |> protocol_ok in
+             assert (
+               Jsonaf.exactly_equal
+                 (state_value final)
+                 (Session.Snapshot.to_jsonaf (Int 4)));
+             [%test_eq: int] 1 (calls "525_PHASE_IDLE");
+             [%test_eq: int] 2 !root_calls;
+             assert (not (Owner.drain_idle_moderator entry.runtime |> protocol_ok));
+             let repeated = Actor.state entry.actor |> protocol_ok in
+             assert (Option.equal Jsonaf.exactly_equal repeated.moderator final.moderator);
+             [%test_eq: int] 2 !root_calls;
+             List.iter
+               [ "525_PHASE_TURN"; "525_PHASE_TOOL"; "525_PHASE_IDLE" ]
+               ~f:(fun phase -> [%test_eq: int] 1 (calls phase));
+             let final_queue =
+               Checkpoint.queue final.moderator |> protocol_ok |> Option.value_exn
+             in
+             [%test_eq: int64] 1L (Queue.head_ordinal final_queue);
+             [%test_eq: int64] 1L (Queue.next_ordinal final_queue);
+             assert (List.is_empty (Queue.entries final_queue));
+             let check_native file phase expected_operation =
+               let invocation =
+                 List.filter final.invocations ~f:(fun invocation ->
+                   String.equal invocation.context.tool_name "read_file"
+                   && Option.equal
+                        Jsonaf.exactly_equal
+                        (Jsonaf.member "file" invocation.context.input)
+                        (Some (`String file)))
+                 |> function
+                 | [ invocation ] -> invocation
+                 | invocations -> raise_s [%sexp (invocations : P.Invocation.t list)]
+               in
+               assert (P.Invocation.equal_origin invocation.context.origin Moderator);
+               let parent = Option.value_exn invocation.parent_event in
+               let receipt =
+                 List.find_exn final.moderator_executions ~f:(fun receipt ->
+                   P.Id.Moderator_execution.equal receipt.context.id parent)
+               in
+               assert (P.Moderator_execution.equal_phase receipt.context.phase phase);
+               assert (
+                 Option.equal
+                   P.Id.Operation.equal
+                   receipt.context.operation_id
+                   expected_operation);
+               (match receipt.status with
+                | Completed _ -> ()
+                | _ -> raise_s [%sexp (receipt : P.Moderator_execution.t)]);
+               (match invocation.status with
+                | Resolved (Complete result) | Published (Complete result) ->
+                  assert (
+                    String.is_substring
+                      (Jsonaf.to_string result)
+                      ~substring:("525-native-" ^ file))
+                | _ -> raise_s [%sexp (invocation : P.Invocation.t)]);
+               assert (
+                 Option.equal
+                   P.Inference_origin.equal
+                   invocation.inference_origin
+                   (Some Unbound));
+               receipt
+             in
+             ignore
+               (check_native "constructor.txt" Session_start None
+                : P.Moderator_execution.t);
+             ignore
+               (check_native "turn.txt" Turn_start (Some operation_id)
+                : P.Moderator_execution.t);
+             ignore
+               (check_native "pretool.txt" Pre_tool_call (Some operation_id)
+                : P.Moderator_execution.t);
+             let root_invocation =
+               List.filter final.invocations ~f:(fun invocation ->
+                 Option.equal
+                   String.equal
+                   invocation.context.provider_call_id
+                   (Some "525-root-call"))
+               |> function
+               | [ invocation ] -> invocation
+               | invocations -> raise_s [%sexp (invocations : P.Invocation.t list)]
+             in
+             [%test_eq: string] "read_file" root_invocation.context.tool_name;
+             assert (P.Invocation.equal_origin root_invocation.context.origin Model);
+             (match root_invocation.status with
+              | Resolved (Complete result) | Published (Complete result) ->
+                assert (
+                  String.is_substring
+                    (Jsonaf.to_string result)
+                    ~substring:"525-native-root.txt")
+              | _ -> raise_s [%sexp (root_invocation : P.Invocation.t)]);
+             let idle_receipt = check_native "idle.txt" Internal_event None in
+             let consumed = Option.value_exn idle_receipt.queue_occurrence in
+             [%test_eq: int64]
+               0L
+               (P.Moderator_execution.Queue_occurrence.ordinal consumed);
+             assert (
+               P.Run_source.equal
+                 (P.Moderator_execution.Queue_occurrence.source consumed)
+                 (Queue.source queue));
+             assert (
+               Option.equal
+                 P.Inference_origin.equal
+                 (P.Moderator_execution.Queue_occurrence.origin consumed)
+                 (Some Unbound));
+             let model_jobs =
+               List.filter final.jobs ~f:(fun job -> P.Job.equal_kind job.kind Model_call)
+             in
+             [%test_eq: int] 3 (List.length model_jobs);
+             List.iter
+               [ "525_PHASE_TURN"; "525_PHASE_TOOL"; "525_PHASE_IDLE" ]
+               ~f:(fun phase ->
+                 let job =
+                   List.filter model_jobs ~f:(fun job ->
+                     Option.equal
+                       Jsonaf.exactly_equal
+                       (Jsonaf.member "payload" job.payload
+                        |> Option.bind ~f:(Jsonaf.member "input"))
+                       (Some (`String phase)))
+                   |> function
+                   | [ job ] -> job
+                   | jobs -> raise_s [%sexp (jobs : P.Job.t list)]
+                 in
+                 [%test_eq: int] 1 job.attempt;
+                 (match job.status, job.delivery with
+                  | Succeeded, Not_required -> ()
+                  | _ -> raise_s [%sexp (job : P.Job.t)]);
+                 assert (
+                   Option.equal
+                     P.Inference_origin.equal
+                     job.inference_origin
+                     (Some Unbound));
+                 let result = Option.value_exn job.result in
+                 assert (
+                   Option.equal
+                     Jsonaf.exactly_equal
+                     (Jsonaf.member "final_text" result)
+                     (Some (`String (phase ^ "-ok")))));
+             assert (not (Operator_authorization.is_current constructor));
+             assert (Operator_authorization.is_current foreground);
+             let directory =
+               Option.value_exn entry.store_handle
+               |> Agent_store.Session_store.Handle.snapshot_directory
+             in
+             close ();
+             let installed =
+               Agent_store.Snapshot.load_current
+                 ~env
+                 ~directory
+                 ~max_payload_length:(64 * 1024 * 1024)
+               |> function
+               | Ok value -> Option.value_exn value
+               | Error error -> raise_s [%sexp (error : Agent_store.Store_error.t)]
+             in
+             let saved =
+               Agent_session.Session_state_document.decode
+                 ~limits:Document_schema.Limits.default
+                 installed.snapshot.payload
+               |> function
+               | Ok value -> Agent_session.Session_state_document.value value
+               | Error error -> raise_s [%sexp (error : Document_schema.Error.t)]
+             in
+             assert (Option.equal Jsonaf.exactly_equal saved.moderator final.moderator);
+             assert (List.equal P.Invocation.equal saved.invocations final.invocations);
+             assert (
+               List.equal
+                 (fun left right ->
+                    Jsonaf.exactly_equal (P.Job.to_json left) (P.Job.to_json right))
+                 saved.jobs
+                 final.jobs);
+             assert (
+               List.equal
+                 (fun left right ->
+                    Jsonaf.exactly_equal
+                      (P.Schedule.to_json left)
+                      (P.Schedule.to_json right))
+                 saved.schedules
+                 final.schedules)))))
 ;;

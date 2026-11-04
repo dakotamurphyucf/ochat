@@ -355,6 +355,15 @@ type t =
     (** Raw event JSON passes existing bounded Session snapshot admission before
         runtime value conversion or [prepare]. Rejection leaves the live moderator
         snapshot/queue unchanged and uses the existing Invalid_state error mapping. *)
+  ; legacy_events :
+      (max_events:int
+       -> history:History_entry.t list
+       -> (Chat_response.Moderation.Outcome.t list, Agent_protocol.Error.t) result)
+        option
+    (** Installed legacy idle adapter: each exact head has its own Event ACK.
+        Notifications/request intents are already durable. No foreground
+        operation, constructor fallback or provider-before-model hook is exposed.
+        None retains explicit standalone embedding behavior. *)
   ; drain_internal_events :
       History_entry.t list -> (moderator_drain, Agent_protocol.Error.t) result
   ; execute_model_job :
@@ -401,11 +410,15 @@ type legacy_callback_claim = Legacy_callback_runtime.claim
 (** Constructor and installed claims have separate exact lifetimes. [claim]
     requires the actual initialization owner. [installed_claim] requires the
     supplied operation or exact idle Queue_head and must never reuse constructor
-    services. Providing this host does not itself install foreground/idle routing. *)
+    services. [history] reads the actual Actor's current canonical history before
+    native-tool boundary moderation; the later exact callback claim still checks
+    current ownership. Host-backed legacy foreground and idle adapters use these
+    services one acknowledged callback at a time. *)
 type legacy_construction =
   { claim : legacy_callback_claim
   ; installed_claim :
       operation_id:Agent_protocol.Id.Operation.t option -> legacy_callback_claim
+  ; history : unit -> (History_entry.t list, Agent_protocol.Error.t) result
   ; script_tools : Chat_response.Agent_runtime.t -> Script_tool_calls.t
   }
 

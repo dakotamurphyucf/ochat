@@ -3866,9 +3866,19 @@ let legacy_construction
           let jobs = installed_jobs.for_execution (A.callback_model_jobs actor ~scope) in
           with_services actor scope jobs ~commit f))
   in
+  let history () =
+    let open Result.Let_syntax in
+    match !actor_ref with
+    | None ->
+      Error (unavailable Permission_denied "installed legacy history requires its actor")
+    | Some actor ->
+      let%bind current = A.state actor in
+      Agent_session.History_codec.all_of_protocol current.conversation.canonical_history
+  in
   B.
     { claim
     ; installed_claim
+    ; history
     ; script_tools = native_script_tools t profile actor_ref ~state
     }
 ;;

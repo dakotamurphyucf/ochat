@@ -129,6 +129,11 @@ type t =
       ?prepare:prepare_enqueue
       -> Jsonaf.t
       -> (Jsonaf.t option, Agent_protocol.Error.t) result
+  ; legacy_events :
+      (max_events:int
+       -> history:History_entry.t list
+       -> (Chat_response.Moderation.Outcome.t list, Agent_protocol.Error.t) result)
+        option
   ; drain_internal_events :
       History_entry.t list -> (moderator_drain, Agent_protocol.Error.t) result
   ; execute_model_job :
@@ -169,6 +174,7 @@ type legacy_construction =
   { claim : legacy_callback_claim
   ; installed_claim :
       operation_id:Agent_protocol.Id.Operation.t option -> legacy_callback_claim
+  ; history : unit -> (History_entry.t list, Agent_protocol.Error.t) result
   ; script_tools : Agent_runtime.t -> Script_tool_calls.t
   }
 
@@ -1878,6 +1884,55 @@ let build_with_services
                  ~now)
         | _ -> tools_service)
   in
+  let%bind legacy_callbacks =
+    match legacy_construction, moderator, base_script_tools with
+    | Some host, Some (moderator, executor), Some script_tools
+      when Option.is_none (Manager.extension_definition moderator.manager) ->
+      let%map selected =
+        Lazy.force agent_runtime.capabilities
+        |> Result.map_error ~f:(fun error ->
+          failure error.Chat_response.Tool_capability.message)
+      in
+      Some
+        (fun ~operation_id ->
+          Legacy_callback_runtime.Installed.create
+            moderator.manager
+            ~run:(fun ~selection ~history ~available_tools ~now_ms ->
+              Legacy_callback_runtime.run
+                moderator.manager
+                ~claim:(host.installed_claim ~operation_id)
+                ~model_recipes:
+                  (legacy_model_recipes
+                     ~delegated
+                     executor
+                     ~session_text:(Agent_protocol.Id.Session.to_string session_id)
+                     ~bind_inference_identity)
+                ~script_tools
+                ~selected
+                ~selection
+                ~session_id:(Agent_protocol.Id.Session.to_string session_id)
+                ~history
+                ~available_tools
+                ~session_meta:`Null
+                ~now_ms))
+    | _ -> Ok None
+  in
+  let now_ms () =
+    Agent_protocol.Timestamp.to_time_ns (now ())
+    |> Time_ns.to_int_ns_since_epoch
+    |> fun n -> n / 1_000_000
+  in
+  let legacy_events =
+    Option.map legacy_callbacks ~f:(fun callbacks ->
+      let idle = callbacks ~operation_id:None in
+      fun ~max_events ~history ->
+        Legacy_callback_runtime.Installed.drain
+          idle
+          ~max_events
+          ~history
+          ~available_tools:tools
+          ~now_ms:(now_ms ()))
+  in
   let lifecycle =
     match definition, moderator, extension_services with
     | Some _, Some (moderator, _), Some services
@@ -1925,8 +1980,14 @@ let build_with_services
     | _ -> None
   in
   let moderator_events =
-    match lifecycle, moderator with
-    | Some lifecycle, Some (moderator, _) ->
+    match lifecycle, moderator, legacy_callbacks with
+    | _, _, Some callbacks ->
+      Some
+        (fun ~input ~capabilities ->
+          Legacy_callback_runtime.Installed.foreground_handlers
+            (callbacks ~operation_id:(Some input.Operation_worker.Input.operation.id))
+            ~capabilities)
+    | Some lifecycle, Some (moderator, _), None ->
       Some
         (fun ~input ~capabilities ->
           let%bind activation =
@@ -1951,8 +2012,13 @@ let build_with_services
               ())
     | _ -> None
   in
+  let dispatch_tools =
+    match legacy_callbacks with
+    | Some _ -> base_script_tools
+    | None -> script_tools
+  in
   let%bind advertised_dispatch =
-    match script_tools with
+    match dispatch_tools with
     | None -> Ok None
     | Some script_tools ->
       Lazy.force agent_runtime.capabilities
@@ -1964,15 +2030,18 @@ let build_with_services
     Option.map advertised_dispatch ~f:(fun (script_tools, declared) ->
       fun ~input ~capabilities ->
       let event_handlers =
-        Option.map moderator ~f:(fun (moderator, _) ->
-          Moderator_event.foreground_handlers
-            ~model_recipes
-            ~script_tools
-            ~capabilities
-            ~manager:moderator.manager
-            ~session_meta:`Null
-            ~now
-            ())
+        match legacy_callbacks, moderator_events with
+        | Some _, Some handlers -> Some (handlers ~input ~capabilities)
+        | _ ->
+          Option.map moderator ~f:(fun (moderator, _) ->
+            Moderator_event.foreground_handlers
+              ~model_recipes
+              ~script_tools
+              ~capabilities
+              ~manager:moderator.manager
+              ~session_meta:`Null
+              ~now
+              ())
       in
       let observer =
         Option.bind moderator ~f:(fun (moderator, _) ->
@@ -1982,16 +2051,21 @@ let build_with_services
         match event_handlers, extension_services with
         | None, _ -> Ok None
         | Some (Error error), _ -> Error error.Agent_protocol.Error.message
-        | Some (Ok handlers), Some services ->
+        | Some (Ok handlers), services ->
+          let open Result.Let_syntax in
+          let%bind history =
+            match legacy_callbacks, legacy_construction, services with
+            | Some _, Some host, _ ->
+              host.history ()
+              |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+            | _, _, Some services -> Ok (services.history ())
+            | _, _, None -> Error "moderator services are not installed"
+          in
           handlers.handle
-            ~history:(services.history ())
+            ~history
             ~available_tools:tools
-            ~now_ms:
-              (Agent_protocol.Timestamp.to_time_ns (now ())
-               |> Time_ns.to_int_ns_since_epoch
-               |> fun n -> n / 1_000_000)
+            ~now_ms:(now_ms ())
             ~event:(Moderation.Event.Pre_tool_call call)
-        | Some _, None -> Error "moderator services are not installed"
       in
       let native =
         Script_tool_calls.native_dispatch script_tools ~declared ~input ~capabilities
@@ -2342,6 +2416,7 @@ let build_with_services
           published_moderator_snapshot := snapshot;
           snapshot)
     ; enqueue_internal_event = enqueue_internal_event moderator
+    ; legacy_events
     ; drain_internal_events = drain_internal_events ~env ~session_id ~tools moderator
     ; execute_model_job =
         (match delegated with

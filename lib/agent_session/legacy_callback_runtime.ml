@@ -146,3 +146,112 @@ let run
   | Some outcome, Some checkpoint -> Ok (Some { outcome; checkpoint })
   | Some _, None -> Error (failure "legacy callback did not acknowledge its checkpoint")
 ;;
+
+module Installed = struct
+  type callback =
+    selection:Manager.Callback.Selection.t
+    -> history:History_entry.t list
+    -> available_tools:Openai.Responses.Request.Tool.t list
+    -> now_ms:int
+    -> (t option, Agent_protocol.Error.t) result
+
+  type t =
+    { manager : Manager.t
+    ; run : callback
+    }
+
+  let create manager ~run = { manager; run }
+
+  let halted t =
+    let open Result.Let_syntax in
+    let%map snapshot =
+      Manager.identity_snapshot t.manager |> Result.map_error ~f:failure
+    in
+    match snapshot.halted with
+    | false -> None
+    | true ->
+      Some
+        { Moderation.Outcome.empty with
+          runtime_requests =
+            [ End_session
+                (Option.value snapshot.halted_reason ~default:"moderator halted")
+            ]
+        }
+  ;;
+
+  let acknowledged_outcome result =
+    (* The exact Event ACK has already published these notifications. Keep the
+       actual outcome's other facts for its one downstream consumption policy. *)
+    { result.outcome with ui_notifications = [] }
+  ;;
+
+  let drain t ~history ~available_tools ~now_ms ~max_events =
+    let open Result.Let_syntax in
+    let rec loop remaining outcomes =
+      match remaining with
+      | 0 -> Ok (List.rev outcomes)
+      | _ ->
+        let%bind stopped = halted t in
+        (match stopped with
+         | Some outcome -> Ok (List.rev (outcome :: outcomes))
+         | None ->
+           let%bind next =
+             t.run ~selection:Queue_head ~history ~available_tools ~now_ms
+           in
+           (match next with
+            | None -> Ok (List.rev outcomes)
+            | Some result ->
+              let outcome = acknowledged_outcome result in
+              (match
+                 Chat_response.Runtime_semantics.should_end_session
+                   outcome.runtime_requests
+               with
+               | Some _ -> Ok (List.rev (outcome :: outcomes))
+               | None -> loop (remaining - 1) (outcome :: outcomes))))
+    in
+    loop (Int.clamp_exn max_events ~min:0 ~max:256) []
+  ;;
+
+  let foreground_handlers t ~capabilities =
+    let open Result.Let_syntax in
+    let%bind snapshot =
+      Manager.identity_snapshot t.manager |> Result.map_error ~f:failure
+    in
+    let observer : Agent_protocol.Invocation.observer =
+      { script_id = snapshot.script_id; source_sha256 = snapshot.script_source_hash }
+    in
+    let%bind () =
+      capabilities.Operation_worker.Capabilities.manage_moderator_follow_up ~observer
+    in
+    let handle ~history ~available_tools ~now_ms ~event =
+      (let%bind stopped = halted t in
+       match stopped with
+       | Some outcome -> Ok (Some outcome)
+       | None ->
+         (match t.run ~selection:(Boundary event) ~history ~available_tools ~now_ms with
+          | Ok (Some result) ->
+            Ok (Some (Moderator_event.foreground_outcome (acknowledged_outcome result)))
+          | Ok None -> Error (failure "foreground legacy callback was not admitted")
+          | Error error ->
+            let%bind stopped = halted t in
+            (match stopped with
+             | Some outcome -> Ok (Some outcome)
+             | None -> Error error)))
+      |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+    in
+    let drain ~history ~available_tools ~now_ms ~max_events =
+      drain t ~history ~available_tools ~now_ms ~max_events
+      |> Result.map ~f:(List.map ~f:Moderator_event.foreground_outcome)
+      |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+    in
+    Ok
+      Chat_response.In_memory_stream.
+        { handle
+        ; drain
+        ; before_model_call =
+            (fun () ->
+              capabilities.admit_moderator_turn ()
+              |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message))
+        }
+  ;;
+end

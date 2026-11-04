@@ -392,8 +392,9 @@ publication. Reading it after commit neither re-encodes Manager state nor reuses
 closed effect authority. Repeated startup calls return that same checkpoint. Owned
 startup preserves acknowledged queued suffixes for installed per-head delivery and
 never drains them with constructor defaults. Standalone embeddings that explicitly
-supply no construction port retain their existing behavior. Foreground/idle host
-routing and installed Model services remain subsequent composition gates.
+supply no construction port retain their existing behavior. Installed host routing
+uses the separate callback services described below; its actual foreground and
+idle execution qualification remains a distinct gate from constructor tests.
 
 The shared legacy callback bridge returns the actual committed outcome together
 with that acknowledged checkpoint. Its explicit notification list commits in the
@@ -407,8 +408,38 @@ callback Model admission port. Every admission rejects constructor scopes and
 rechecks the actual callback, installed Manager, source and original custody.
 Ordinary synchronous child Jobs retain their existing claimed execution and
 inference lifetime. Constructor services keep their genuine initialization owner;
-a missing installed owner cannot fall back to it. Exposing this shared bridge and
-service adapter does not itself qualify the foreground or idle host consumers.
+a missing installed owner cannot fall back to it.
+
+The host-backed foreground adapter binds the actual operation capabilities before
+any submitted-item event. The stream hooks and native `Pre_tool_call` moderation
+use that same handler factory; native boundaries read current canonical history
+from the Actor rather than a captured operation history. Each selected callback
+uses its exact installed claim, never the constructor's closed services. The
+provider-before-model hook acknowledges the retained turn intent. Foreground
+compaction and dependent-turn requests follow the same durable consumption policy
+as v1; notifications are removed from returned outcomes only after their Event ACK
+has already published them. Worker checkpoint boundaries confirm agreement with
+that same durable checkpoint: under the actual registered foreground operation
+and installed source, an unchanged bare Manager snapshot reuses the full retained
+carrier without writing. An exact full carrier is also unchanged; altered queue
+metadata, extensions or known state are rejected. Terminal completion retains the
+same owned full carrier before releasing foreground registration. The unowned
+embedding checkpoint path keeps its existing strict transition behavior.
+
+The runtime exposes a separate idle drain with no operation-ID argument or
+foreground provider hook. Runtime_owner checks the actual retained legacy source
+and its failed/interrupted claims before every head, reads current canonical
+history and invokes one per-head ACK under its cancellable runtime lease. It
+clamps the batch to the existing idle callback budget, stops on empty queue, halt,
+End_session or failure, and consumes durable follow-up once after the batch. It
+does not acquire an aggregate idle callback or publish notifications twice.
+Standalone embeddings without the explicit host adapter retain their existing
+aggregate compatibility path. Legacy source identity does not become a v1 native
+observation capability; that separate delivery path remains unchanged.
+
+These source contracts do not by themselves qualify actual host Tool/Model
+execution, cold Ready resume, or genuine constructor Model.call/Model.spawn through
+the existing dedicated initialization services.
 
 Deferred native observations retain a separate process-local admission component
 within the existing bounded continuation inventory. The completed native result

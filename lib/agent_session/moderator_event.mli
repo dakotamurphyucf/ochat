@@ -184,6 +184,13 @@ module Lifecycle : sig
     -> (outcome, Agent_protocol.Error.t) result
 end
 
+(** Remove requests already owned by the durable compaction scheduler, including
+    a dependent turn. Leaves notifications and all other outcome DATA unchanged.
+    Both legacy and v1 foreground adapters use this same consumption policy. *)
+val foreground_outcome
+  :  Chat_response.Moderation.Outcome.t
+  -> Chat_response.Moderation.Outcome.t
+
 (** Bind ordinary events, queued events and deferred observations to an actual
     foreground worker. The installed checkpoint/source must already match the
     actor. Native calls use scoped invocation executors; missing native services

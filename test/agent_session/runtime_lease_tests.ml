@@ -32,6 +32,7 @@ let runtime ?script_tools ?check_execution ?activity ~close () : Builder.t =
   ; moderator_activation = None
   ; start_moderator = (fun () -> Ok None)
   ; enqueue_internal_event = (fun ?prepare:_ _ -> failwith "unexpected event")
+  ; legacy_events = None
   ; drain_internal_events = (fun _ -> failwith "unexpected event drain")
   ; execute_model_job =
       (fun ~allocate_inference:_
