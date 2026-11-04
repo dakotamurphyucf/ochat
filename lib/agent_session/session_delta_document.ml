@@ -887,9 +887,8 @@ let shape =
                , X.shape_exn [ "kind", D.Shape.value; "value", External_ingress.shape ] )
              ; ( "moderator_changed"
                , X.shape_exn
-                   [ "kind", D.Shape.value
-                   ; "moderator", D.Shape.nullable Moderator_checkpoint.shape
-                   ] )
+                   [ "kind", D.Shape.value; "moderator", D.Shape.nullable D.Shape.value ]
+               )
              ; ( "shell_changed"
                , X.shape_exn [ "kind", D.Shape.value; "shell", Session.Shell_state.shape ]
                )
@@ -1531,8 +1530,7 @@ let apply t ?transaction_metadata ~limits previous =
           Automatic_turn_budget.policy_shape
       | "active_operation_changed" ->
         scalar [ "active_operation" ] "operation" Session_record_shapes.operation
-      | "moderator_changed" ->
-        scalar [ "moderator" ] "moderator" Moderator_checkpoint.shape
+      | "moderator_changed" -> scalar [ "moderator" ] "moderator" D.Shape.value
       | "shell_changed" -> scalar [ "shell" ] "shell" Session.Shell_state.shape
       | "failure_changed" -> scalar [ "failure" ] "failure" Session_record_shapes.error
       | _ -> Ok payload)

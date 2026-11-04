@@ -37,6 +37,24 @@ protected-carrier handling before enabling this facility as a complete lifecycle
 feature. This restriction is temporary. Ordinary historical absence remains
 unaffected, and metadata does not become mandatory on historical queues.
 
+The checkpoint owns its complete raw preservation carrier, including unfamiliar
+outer fields and identity-snapshot fields as well as queue metadata. Its parent
+state and delta documents retain this validated child as a complete value. A
+native update must already contain every compatible retained field; persistence
+does not silently repair a stripped Actor or Memory candidate. Native state,
+immutable delta replay and the reopened Store therefore expose the same raw
+checkpoint, including field order and unfamiliar number spellings.
+
+To preserve this contract, live owners must update the actual previous checkpoint
+through the validated checkpoint operation. Keeping the queue preserves its absent, null or present
+form. Replacing known snapshot or queue state uses the existing structured
+universal codec to capture incoming fields and adopt retained custody. A first
+metadata bootstrap may preserve same-observer historical extensions, without
+inventing a prior installation epoch. A known source/lifetime change cannot move
+retained extensions; incompatible deletion and ordinal reassignment fail before
+commit. This data operation grants no Manager resource, source admission or
+execution permission, and does not relax the source/reset restriction above.
+
 The initial metadata profile admits at most 256 rows and a complete encoded child
 of at most 1 MiB, including unfamiliar fields. Hashing accepts a bounded raw queue
 of at most 8 MiB, with finite depth and node limits. Existing whole-session and

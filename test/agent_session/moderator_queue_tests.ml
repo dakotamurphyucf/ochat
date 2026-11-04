@@ -281,7 +281,10 @@ let%expect_test "queue occurrence unknowns follow ordinals through equal reemit"
     in
     let after_snapshot = { before_snapshot with queued_internal_events = values 2 } in
     let moderator =
-      A.Moderator_checkpoint.encode_with_queue after_snapshot ~queue:after_metadata
+      A.Moderator_checkpoint.update_with_queue
+        (SD.value before).moderator
+        ~snapshot:after_snapshot
+        ~queue:after_metadata
       |> protocol_ok
     in
     let after = { (SD.value before) with moderator = Some moderator } in
