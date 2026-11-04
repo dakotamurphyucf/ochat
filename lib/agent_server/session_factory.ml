@@ -2273,10 +2273,6 @@ let job_services
       ~initialization_jobs
       ~run_preparation
   =
-  let checkpoint () =
-    Option.value_map construction_checkpoint ~default:(Ok ()) ~f:(fun check -> check ())
-    |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
-  in
   let capacity_key () =
     let prompt =
       Option.value_map
@@ -2356,7 +2352,13 @@ let job_services
         job
         (Error ("synchronous model call failed: " ^ Exn.to_string exn))
   in
-  let services ~scope admission : Agent_session.Runtime_model_services.t =
+  let services ~construction_checkpoint ~scope admission
+    : Agent_session.Runtime_model_services.t
+    =
+    let checkpoint () =
+      Option.value_map construction_checkpoint ~default:(Ok ()) ~f:(fun check -> check ())
+      |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+    in
     let admit job =
       let open Result.Let_syntax in
       let%bind () = checkpoint () in
@@ -2506,10 +2508,13 @@ let job_services
       | (None | Some _), None | None, Some _ ->
         Agent_session.Invocation_capabilities.unavailable.model_jobs
     in
-    services ~scope admission
+    services ~construction_checkpoint ~scope admission
   in
   Agent_session.Runtime_model_services.
-    { initialization; for_execution = (fun admission -> services ~scope:None admission) }
+    { initialization
+    ; for_execution =
+        (fun admission -> services ~construction_checkpoint:None ~scope:None admission)
+    }
 ;;
 
 let flush_pending_jobs ?run_preparation actor jobs =
@@ -4045,7 +4050,14 @@ let legacy_construction
   =
   let module A = Agent_session.Session_actor in
   let module B = Agent_session.Runtime_builder in
-  let with_services actor scope (jobs : Agent_session.Runtime_model_services.t) ~commit f =
+  let with_services
+        ~construction_checkpoint
+        actor
+        scope
+        (jobs : Agent_session.Runtime_model_services.t)
+        ~commit
+        f
+    =
     let check_construction () =
       Option.value_map construction_checkpoint ~default:(Ok ()) ~f:(fun check -> check ())
     in
@@ -4140,7 +4152,8 @@ let legacy_construction
         ~scope:constructor
         ~manager
         ~callback
-        (fun ~scope ~commit -> with_services actor scope jobs ~commit f)
+        (fun ~scope ~commit ->
+           with_services ~construction_checkpoint actor scope jobs ~commit f)
     | None, _ | Some _, None ->
       Error
         (unavailable
@@ -4175,7 +4188,7 @@ let legacy_construction
         in
         claim ~callback (fun ~scope ~commit ->
           let jobs = installed_jobs.for_execution (A.callback_model_jobs actor ~scope) in
-          with_services actor scope jobs ~commit f))
+          with_services ~construction_checkpoint:None actor scope jobs ~commit f))
   in
   let history () =
     let open Result.Let_syntax in

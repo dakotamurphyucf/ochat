@@ -173,6 +173,14 @@ module Held_run = struct
       | Reserved | Constructing -> t.phase := Closed
       | Handed_off _ | Closed -> ()
     ;;
+
+    let handoff_acknowledged t =
+      if not (Int.equal t.domain (Stdlib.Domain.self () :> int))
+      then invalid_arg "held activation belongs to another Eio domain";
+      match !(t.phase) with
+      | Handed_off _ -> true
+      | Reserved | Constructing | Closed -> false
+    ;;
   end
 
   module Admission = struct
@@ -1239,6 +1247,15 @@ module Held_startup_request = struct
     | Begin_held_recurrence_activation :
         Source_binding.t * Held_run.t * Recurrence_activation.Checked.t
         -> Recurrence_activation.Continuation.t t
+    | Enable_turn_budget :
+        Recurrence_activation.Continuation.t * Chat_response.Runtime_semantics.policy
+        -> unit t
+    | Install_runtime :
+        Recurrence_activation.Continuation.t
+        * Operation_worker.t
+        * Inference_client.Execution.t
+        * Chat_response.Moderator_manager.t option
+        -> unit t
     | End_held_activation : Held_run.Activation.t -> unit t
     | Begin_held_initialization :
         Recurrence_activation.Continuation.t
@@ -4606,7 +4623,7 @@ let with_runtime_terminal t operation_id f =
     Exn.raise_with_original_backtrace exn backtrace
 ;;
 
-let set_runtime_worker t worker inference moderator_manager =
+let validate_runtime_worker t worker inference moderator_manager =
   let open Result.Let_syntax in
   let%bind () =
     match worker, inference with
@@ -4632,9 +4649,20 @@ let set_runtime_worker t worker inference moderator_manager =
       Constructor_job_handoff.prepare t.state ~manager:moderator_manager
       |> Result.map ~f:ignore
   in
+  Ok ()
+;;
+
+let install_runtime_worker t worker inference moderator_manager =
+  let open Result.Let_syntax in
   let%map () = replace_operation_worker t worker ~intended_manager:moderator_manager in
   t.inference_execution <- inference;
   t.moderator_manager <- moderator_manager
+;;
+
+let set_runtime_worker t worker inference moderator_manager =
+  let open Result.Let_syntax in
+  let%bind () = validate_runtime_worker t worker inference moderator_manager in
+  install_runtime_worker t worker inference moderator_manager
 ;;
 
 let change_moderator t moderator =
@@ -19971,7 +19999,7 @@ let detach t attachment_id =
          ~f:(fun _ -> ()))
 ;;
 
-let enable_automatic_turn_budget ?run_preparation t policy =
+let enable_automatic_turn_budget ?check_before_commit ?run_preparation t policy =
   let open Result.Let_syntax in
   let%bind () =
     match run_preparation with
@@ -19985,6 +20013,7 @@ let enable_automatic_turn_budget ?run_preparation t policy =
     when Chat_response.Runtime_semantics.equal_policy budget.policy policy -> Ok ()
   | _, None, false ->
     transition
+      ?check_before_commit
       ?run_preparation
       t
       ~delta:(Session_delta.Automatic_turn_budget_enabled policy)
@@ -20188,6 +20217,8 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Bind_run_source _
   | Admit_held_recurrence_run _
   | Held_startup (Begin_held_recurrence_activation _)
+  | Held_startup (Enable_turn_budget _)
+  | Held_startup (Install_runtime _)
   | Held_startup (Begin_held_initialization _)
   | Held_startup (Reserve_held_history_block _)
   | Complete_initialization _
@@ -21436,12 +21467,19 @@ let prepare_held_history_reservation t continuation count =
       (Run_state.find index target.run.id)
       ~error:(error Conflict "held Run absent")
   in
+  let caller = (Run_preparation.request target.preparation).caller in
   let%bind authorities =
-    Run_authorities.add_for_caller
-      t.run_authorities
-      ~run
-      ~scope:target.scope
-      ~caller:(Run_preparation.request target.preparation).caller
+    match Run_authorities.find t.run_authorities run.id with
+    | None ->
+      Run_authorities.add_for_caller t.run_authorities ~run ~scope:target.scope ~caller
+    | Some binding
+      when phys_equal (Run_authorities.scope binding) target.scope
+           && Run_admission_request.Caller.equal (Run_authorities.caller binding) caller
+      ->
+      (* Cold construction and later input reserve from the SAME held startup.
+         Preserve its physical binding; equal Run data cannot replace an owner. *)
+      Ok t.run_authorities
+    | Some _ -> Error (error Conflict "held history reservation lost its Run owner")
   in
   let%bind () =
     if
@@ -21902,6 +21940,65 @@ let begin_held_initialization_internal t continuation purpose expected =
     ~purpose
     t
     expected
+;;
+
+let held_runtime_installation_basis t continuation =
+  let activation = Recurrence_activation.Continuation.target continuation in
+  let open Result.Let_syntax in
+  let%bind () =
+    if Int.equal activation.domain (Stdlib.Domain.self () :> int)
+    then Ok ()
+    else Error (error Invalid_request "held runtime belongs to another Eio domain")
+  in
+  let%bind () =
+    if
+      Option.exists t.held_activation ~f:(phys_equal activation)
+      && Option.exists t.run_preparation ~f:(phys_equal activation.preparation)
+      && Option.is_none t.operation_worker
+      && Option.is_none t.state.active_operation
+      && (not t.idle_moderator_borrowed)
+      && not (moderator_is_borrowed t)
+    then Ok ()
+    else
+      Error
+        (error
+           Conflict
+           "held runtime install requires its exact idle owner and empty worker slot")
+  in
+  activation.owned_basis ()
+;;
+
+let enable_held_turn_budget_internal t continuation policy =
+  let activation = Recurrence_activation.Continuation.target continuation in
+  let open Result.Let_syntax in
+  let check_before_commit () =
+    let%bind () = check_held_effect continuation in
+    let%bind () = held_runtime_installation_basis t continuation in
+    Recurrence_activation.Continuation.check_basis continuation
+  in
+  let%bind () = held_runtime_installation_basis t continuation in
+  (* Even an equal-policy no-write result belongs to this exact live startup.
+     A changed policy repeats the joint fence at the actual writer boundary. *)
+  let%bind () = check_before_commit () in
+  enable_automatic_turn_budget
+    ~check_before_commit
+    ~run_preparation:activation.preparation
+    t
+    policy
+;;
+
+let install_held_runtime_internal t continuation worker inference moderator_manager =
+  let open Result.Let_syntax in
+  let%bind () = held_runtime_installation_basis t continuation in
+  (* The existing Manager snapshot validation may acquire its gate. Do it before
+     the final held policy/currentness fence, never after that joint check. *)
+  let%bind () =
+    validate_runtime_worker t (Some worker) (Some inference) moderator_manager
+  in
+  let%bind () = check_held_effect continuation in
+  let%bind () = held_runtime_installation_basis t continuation in
+  let%bind () = Recurrence_activation.Continuation.check_basis continuation in
+  install_runtime_worker t (Some worker) (Some inference) moderator_manager
 ;;
 
 let acquire_recurrence_activation_internal t ~actor ~authorize ~observation =
@@ -23185,6 +23282,10 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        | Submit_input (scope, input) -> submit_held_run_input_internal t scope input
        | Close_input scope -> close_held_input_internal t scope
        | End_held_activation activation -> end_held_activation_internal t activation
+       | Enable_turn_budget (continuation, policy) ->
+         enable_held_turn_budget_internal t continuation policy
+       | Install_runtime (continuation, worker, inference, manager) ->
+         install_held_runtime_internal t continuation worker inference manager
        | Begin_held_recurrence_activation (binding, held, checked) ->
          begin_held_recurrence_activation_internal t binding held checked
        | Begin_held_initialization (activation, purpose, expected) ->
@@ -24911,6 +25012,32 @@ let reserve_held_history_block t ~continuation ~count =
 
 let end_held_activation t ~activation =
   call t (Held_startup (End_held_activation activation))
+;;
+
+let install_held_runtime
+      ?automatic_turn_policy
+      ?moderator_manager
+      t
+      ~continuation
+      ~worker
+      ~inference
+  =
+  let open Result.Let_syntax in
+  let%bind () = held_runtime_installation_basis t continuation in
+  let%bind () = Recurrence_activation.Continuation.refresh continuation in
+  Eio.Cancel.protect (fun () ->
+    let%bind () =
+      match automatic_turn_policy with
+      | None -> Ok ()
+      | Some policy ->
+        let%bind () = call t (Held_startup (Enable_turn_budget (continuation, policy))) in
+        (* The factual policy ACK can rotate target/controller Store custody.
+           Refresh outside the mailbox before physical installation. *)
+        Recurrence_activation.Continuation.refresh continuation
+    in
+    call
+      t
+      (Held_startup (Install_runtime (continuation, worker, inference, moderator_manager))))
 ;;
 
 let submit_held_run_input t ~scope ~input =

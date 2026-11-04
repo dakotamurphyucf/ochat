@@ -1520,6 +1520,14 @@ module Held_run : sig
 
     val check_basis : t -> (unit, Agent_protocol.Error.t) result
     val close : t -> unit
+
+    (** Historical fact from this actual owner's immutable root-operation ACK
+        proof. Remains true after that Operation retires; neither checks live
+        authority nor permits execution, resource loading or replacement. The
+        runtime owner must separately retain its exact installed resources and
+        ordinary lease admission checks. Same issuing Eio domain, otherwise
+        raises [Invalid_argument]. *)
+    val handoff_acknowledged : t -> bool
   end
 
   module Admission : sig
@@ -3245,7 +3253,9 @@ val sweep_recurrences : t -> (unit, Agent_protocol.Error.t) result
 (** First owned startup write: final policy refresh has occurred outside the
     mailbox; the real writer repeats clock/original and joint pure bases. Own ACK
     advances the same preparation and installs its genuine Run authority before
-    constructor effects. No synthetic input/Operation is allocated. *)
+    constructor effects. Later reservations under this exact startup reuse its
+    physical scope and caller binding; a different retained owner is rejected.
+    No synthetic input/Operation is allocated. *)
 val reserve_held_history_block
   :  t
   -> continuation:Recurrence_activation.Continuation.t
@@ -3297,3 +3307,24 @@ val submit_held_run_input
   -> scope:Held_input_scope.t
   -> input:Runtime_input_preparation.Prepared_input.t
   -> (submission, Agent_protocol.Error.t) result
+
+(** Install the first physical worker/inference pair of the SAME held startup.
+    Repeats joint target/controller admission after mailbox entry and any Manager
+    validation. Requires the actual registered live continuation/preparation and
+    an empty worker slot; a loaded/replaced worker cannot be overwritten. Uses
+    the ordinary runtime validation and custody installation without replacing
+    the Run binding, admitting a Run, writing history or replaying startup.
+    An optional automatic-turn policy uses the ordinary budget recipe under
+    the same held owner's final writer fence before physical installation; an
+    equal existing policy is not reset. A policy ACK is followed by fresh Store
+    custody outside the mailbox. Successful installation preserves startup custody for the subsequent actual input handoff. Runtime resources
+    and cleanup remain owned by the calling Runtime_owner; this returns no lease.
+    Same Eio domain as the issuing startup. *)
+val install_held_runtime
+  :  ?automatic_turn_policy:Chat_response.Runtime_semantics.policy
+  -> ?moderator_manager:Chat_response.Moderator_manager.t
+  -> t
+  -> continuation:Recurrence_activation.Continuation.t
+  -> worker:Operation_worker.t
+  -> inference:Inference_client.Execution.t
+  -> (unit, Agent_protocol.Error.t) result

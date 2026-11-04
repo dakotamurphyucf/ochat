@@ -682,7 +682,7 @@ let implementation_sources =
   ; ( "lib/agent_session/legacy_callback_runtime.ml"
     , "558426b59a1832b4eb43a8e944a981a0ba635617e92df1eb98520c2b337e982e" )
   ; ( "lib/agent_session/runtime_builder.ml"
-    , "0ac6649524d5bbc18becc18822c0b133b8dd3b26da0593f3662169e1a9b181b5" )
+    , "00fe46e5cb6d3e5cd811bc8f7356aa62702f30520e2474ddcc6f0b93f80e7fce" )
   ; ( "lib/context_compaction/compactor.ml"
     , "7b11eae5ce4d929bf1ab4702111d03f70fe97cfe8543135c73782c2b92391ff0" )
   ; ( "lib/agent_session/session_transition.ml"
@@ -720,7 +720,7 @@ let implementation_sources =
   ; ( "bin/ochat_agent_stdio.ml"
     , "8d134cd11c7df2a60e6b4b77a5ff7f9ea0c28a8a2674a3dd9f573adaa7623902" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "3ecf3f9a277326ed4889392cef9ddfa006796fb4ceaf91d2d4473b62835545c2" )
+    , "5c185af5dd3614e97f5bf7ba91ff2418e13e0bb28d1f3d0f6d3be79af5f2a53e" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"
@@ -842,7 +842,7 @@ let implementation_sources =
   ; ( "lib/agent_server/command_handler.ml"
     , "9c0c8f4815a4ae12c2879e291b9b8aeead2c88bc51fa44c987c319f4143160fb" )
   ; ( "lib/agent_server/runtime_owner.ml"
-    , "cf601fb34ee2acb7fa2a80159b6e574b24dc4918b504a0b502dc824417a7874a" )
+    , "bde5080acd0b3f66ad43d74a82292f0501b36e086eb8143b0e49335dd3bb011b" )
   ; ( "lib/agent_session/managed_submission_tracking.ml"
     , "6c8804b2d0c2033631b965769af63c5240afeb6dabff72695c818dc1a68baed8" )
   ; ( "lib/agent_server/managed_output_cursor.ml"
@@ -966,7 +966,7 @@ let implementation_sources =
   ; ( "lib/agent_session/script_subscription_service.ml"
     , "54c775836b551733687e907ff46a2a7a0cc26bd46ff915cc6fd5f0cf5116f069" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "31390751271b6ebb89d56f3dedc149af4a1c048ceffc3d9ae1b215a18cae2b26" )
+    , "9d7a45010d2f38a550ff70a24fd8f0236a6d1f8edbf7d6143f209bf2c16db184" )
   ; ( "lib/agent_session/job_custody.ml"
     , "3f3a132b6fd32f11eba332ec3ae9f6ff4dbfb771dd542ab12cab5a1316e8f3b3" )
   ; ( "lib/agent_session/staged_jobs.ml"

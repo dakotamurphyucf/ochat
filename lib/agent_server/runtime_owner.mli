@@ -200,9 +200,13 @@ end
 
 (** Reserve a staged source lifetime without loading a runtime. Binding happens
     outside the owner mutex; stop/close/replacement irrevocably closes it before
-    cancellation or joins. Ordinary eager loading and competing stages reject
-    while this lease exists. [f] cannot retain Prepared or its borrowed runtime
-    lifetime after return. The caller still ends its original Run preparation.
+    cancellation or joins. Ordinary eager loading rejects until this exact
+    startup's acknowledged input handoff; its same physical runtime may then
+    serve normal resource leases while lexical cleanup finishes. Competing
+    source stages remain excluded. A successful completed retirement permits a new
+    cold stage once resources are unloaded; unfinished or failed retirement does
+    not. [f] cannot retain Prepared or its borrowed runtime lifetime after return.
+    The caller still ends its original Run preparation.
     Errors/cancellation release the existing lease and preserve original failures.
     Acquisition is not held Run admission or permission to start effects. *)
 val with_prepared_source
@@ -231,6 +235,46 @@ val with_held_recurrence_runtime
   -> (Agent_session.Runtime_builder.t
       -> Agent_session.Session_actor.Recurrence_activation.Continuation.t
       -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
+module Held_input_runtime : sig
+  (** The same actual prepared/held runtime under its scoped source lease. It is
+      not a new source, permission or runtime getter. Only User_submission is
+      supported here; authored lifecycle release is a separate owner. *)
+  type t
+
+  (** Run the actual selected parser, install a cold runtime only after parsing
+      joins, then attach the recorded input through the existing same-Run root
+      ACK. Returns the ORIGINAL Admission, not another admission or a completion
+      receipt. Parser effects are not rolled back. A reached writer cannot replay.
+      The callback receives the exact runtime and actor-issued input scope; its
+      returned DATA is checked and recorded by that scope before handoff. *)
+  val submit
+    :  t
+    -> prepare:
+         (runtime:Agent_session.Runtime_builder.t
+          -> scope:Agent_session.Session_actor.Held_input_scope.t
+          -> ( Agent_session.Runtime_input_preparation.Prepared_input.t
+               , Agent_protocol.Error.t )
+               result)
+    -> (Agent_protocol.Run_receipt.t, Agent_protocol.Error.t) result
+end
+
+(** The actual input/adoption consumer. Cold construction remains scoped until
+    its exact Actor installation, then this owner retains the resources before
+    the root writer can run. Loaded reuse preserves the same physical runtime
+    and does not initialize again. A successful root ACK transfers normal runtime
+    ownership; lexical cleanup cannot close it. After an installed failure, exact
+    retirement is joined by the outer prepared-source cleanup AFTER its own lease
+    releases. Cleanup never closes resources underneath an installed worker.
+    Errors/cancellation retain their primary outcome. No NoEffects claim follows
+    from a rejected root, because parsing may already have produced effects. *)
+val with_held_input_runtime
+  :  t
+  -> prepared:Prepared.t
+  -> held:Agent_session.Session_actor.Held_run.t
+  -> checked:Agent_session.Session_actor.Recurrence_activation.Checked.t
+  -> (Held_input_runtime.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
 (** Cancellable auxiliary inference lifetime without loading a runtime. A loaded

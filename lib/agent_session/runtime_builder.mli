@@ -357,6 +357,10 @@ type t =
         holding the owning runtime lease; this is not permission to invoke tools.
         Absent for unqualified construction. *)
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
+    (** First startup remains construction-fenced. After an actual host-backed
+        legacy startup ACK, repeated calls return that exact acknowledged DATA
+        without re-entering its retired construction owner. Extension startup
+        snapshots remain construction-fenced. *)
   ; enqueue_internal_event :
       ?prepare:prepare_enqueue
       -> Jsonaf.t
@@ -419,8 +423,10 @@ type legacy_callback_claim = Legacy_callback_runtime.claim
 (** Constructor and installed claims have separate exact lifetimes. [claim]
     requires the actual initialization owner. [installed_claim] requires the
     supplied operation or exact idle Queue_head and must never reuse constructor
-    services. [history] reads the actual Actor's current canonical history before
-    native-tool boundary moderation; the later exact callback claim still checks
+    services or its additional construction checkpoint. Installed Model services
+    use the supplied actual admission port; Tool and Model effects retain their
+    exact callback and execution checks. [history] reads the actual Actor's current
+    canonical history before native-tool boundary moderation; the later exact callback claim still checks
     current ownership. Host-backed legacy foreground and idle adapters use these
     services one acknowledged callback at a time. *)
 type legacy_construction =

@@ -591,6 +591,24 @@ readiness, the actual worker branch refreshes both owners and checks them before
 its first effect. Failure settles the real Operation through normal terminal
 handling; it cannot erase effects already completed while preparing the input.
 
+Runtime resources have a separate owner from the startup permission. A cold
+runtime transfers to the session owner only after the Actor acknowledges its
+installation; an already loaded runtime is reused without repeating
+initialization. The installation and ownership bookkeeping form one protected
+transfer, so cancellation cannot close resources underneath an installed worker.
+
+Input preparation finishes before a cold runtime is installed. A parsing failure
+closes its locally constructed resources. If installation succeeds but root
+handoff then fails, the installed runtime is retired through the normal worker
+and lease cleanup. Cleanup waits until the startup lease has been released,
+rather than waiting for that lease from inside it. A successful root handoff keeps the installed runtime alive after the
+startup scopes end. Completed input work remains part of the Run in either case.
+
+Installed callbacks use their actual callback, Job or Operation ownership, not
+an expired initialization scope. Reading an already acknowledged legacy startup
+snapshot does not rerun its initializer. Escaped initialization handles stay
+closed, and original authorization revocation still prevents later effects.
+
 Host rejections keep their protocol error code and retryability through legacy
 moderator callbacks. Revoked authorization therefore fails the foreground
 Operation as a non-retryable permission denial. The legacy string-based Manager

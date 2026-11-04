@@ -1046,85 +1046,96 @@ let create_moderator
       |> Result.map ~f:(fun snapshot -> Some (Moderator_checkpoint.encode snapshot))
     in
     let start () =
-      let%bind () = check_construction construction_checkpoint in
-      if Option.is_some (Manager.extension_definition manager)
-      then current_snapshot ()
-      else if !started
-      then (
-        match legacy_construction, !acknowledged_snapshot with
-        | Some _, Some snapshot -> Ok snapshot
-        | Some _, None ->
-          Error (failure "legacy startup lost its acknowledged checkpoint")
-        | None, _ -> current_snapshot ())
-      else (
-        let now_ms =
-          Eio.Time.now (Eio.Stdenv.clock env) *. 1_000. |> Float.iround_nearest_exn
-        in
-        let open Result.Let_syntax in
-        match legacy_construction, script_tools with
-        | Some host, Some script_tools ->
-          let%bind selected =
-            Lazy.force agent_runtime.Agent_runtime.capabilities
-            |> Result.map_error ~f:(fun error ->
-              failure error.Chat_response.Tool_capability.message)
+      match
+        ( Manager.extension_definition manager
+        , legacy_construction
+        , !started
+        , !acknowledged_snapshot )
+      with
+      | None, Some _, true, Some snapshot ->
+        (* This is the exact already-acknowledged constructor result, not another
+           startup effect under the retired construction owner. *)
+        Ok snapshot
+      | _ ->
+        let%bind () = check_construction construction_checkpoint in
+        if Option.is_some (Manager.extension_definition manager)
+        then current_snapshot ()
+        else if !started
+        then (
+          match legacy_construction, !acknowledged_snapshot with
+          | Some _, Some snapshot -> Ok snapshot
+          | Some _, None ->
+            Error (failure "legacy startup lost its acknowledged checkpoint")
+          | None, _ -> current_snapshot ())
+        else (
+          let now_ms =
+            Eio.Time.now (Eio.Stdenv.clock env) *. 1_000. |> Float.iround_nearest_exn
           in
-          let%bind () = check_construction construction_checkpoint in
-          let%map checkpoint =
-            run_legacy_constructor
-              host
-              ~bind_inference_identity
-              ~script_tools
-              ~selected
-              ~manager
-              ~executor
-              ~delegated
-              ~session_text
-              ~now_ms
-              ~history
-              ~tools
-              ~selection:
-                (Boundary
-                   (if Option.is_some snapshot then Session_resume else Session_start))
-          in
-          acknowledged_snapshot := Some checkpoint;
-          started := true;
-          checkpoint
-        | Some _, None ->
-          Error (failure "legacy construction requires actual native services")
-        | None, _ ->
-          let%bind outcome =
-            Manager.handle_event_entries
-              manager
-              ~session_id:session_text
-              ~now_ms
-              ~history
-              ~available_tools:tools
-              ~session_meta:`Null
-              ~event:
-                (if Option.is_some snapshot
-                 then Moderation.Event.Session_resume
-                 else Session_start)
-            |> Result.map_error ~f:failure
-          in
-          let%bind _ =
-            if
-              Option.is_some
-                (Chat_response.Runtime_semantics.should_end_session
-                   outcome.runtime_requests)
-            then Ok []
-            else
-              Manager.drain_internal_events_entries
+          let open Result.Let_syntax in
+          match legacy_construction, script_tools with
+          | Some host, Some script_tools ->
+            let%bind selected =
+              Lazy.force agent_runtime.Agent_runtime.capabilities
+              |> Result.map_error ~f:(fun error ->
+                failure error.Chat_response.Tool_capability.message)
+            in
+            let%bind () = check_construction construction_checkpoint in
+            let%map checkpoint =
+              run_legacy_constructor
+                host
+                ~bind_inference_identity
+                ~script_tools
+                ~selected
+                ~manager
+                ~executor
+                ~delegated
+                ~session_text
+                ~now_ms
+                ~history
+                ~tools
+                ~selection:
+                  (Boundary
+                     (if Option.is_some snapshot then Session_resume else Session_start))
+            in
+            acknowledged_snapshot := Some checkpoint;
+            started := true;
+            checkpoint
+          | Some _, None ->
+            Error (failure "legacy construction requires actual native services")
+          | None, _ ->
+            let%bind outcome =
+              Manager.handle_event_entries
                 manager
                 ~session_id:session_text
                 ~now_ms
                 ~history
                 ~available_tools:tools
                 ~session_meta:`Null
+                ~event:
+                  (if Option.is_some snapshot
+                   then Moderation.Event.Session_resume
+                   else Session_start)
               |> Result.map_error ~f:failure
-          in
-          let%map snapshot = current_snapshot () in
-          started := true;
-          snapshot)
+            in
+            let%bind _ =
+              if
+                Option.is_some
+                  (Chat_response.Runtime_semantics.should_end_session
+                     outcome.runtime_requests)
+              then Ok []
+              else
+                Manager.drain_internal_events_entries
+                  manager
+                  ~session_id:session_text
+                  ~now_ms
+                  ~history
+                  ~available_tools:tools
+                  ~session_meta:`Null
+                |> Result.map_error ~f:failure
+            in
+            let%map snapshot = current_snapshot () in
+            started := true;
+            snapshot)
     in
     Ok
       ( Some moderator_pair

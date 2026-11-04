@@ -15,6 +15,8 @@ type source_stage =
   ; mutable continuation :
       Agent_session.Session_actor.Recurrence_activation.Continuation.t option
   ; mutable closed : bool
+  ; mutable retire_installed : Agent_session.Runtime_builder.t option
+  ; mutable handoff_runtime : Agent_session.Runtime_builder.t option
   }
 
 let close_source_stage stage =
@@ -96,6 +98,23 @@ type t =
   ; mutable background_leases : background_lease list
   ; mutable retired_resources : Agent_session.Runtime_builder.t list
   }
+
+(* A root worker can request its actual resources before its submitting caller
+   resumes. Only the Actor's immutable same-activation ACK permits coexistence
+   with that old lexical stage; installation alone grants no such admission. *)
+let prepared_source_blocks_runtime t =
+  match t.prepared_source with
+  | None -> false
+  | Some stage ->
+    not
+      (match stage.continuation, stage.handoff_runtime, t.runtime with
+       | Some continuation, Some installed, Some current ->
+         phys_equal installed current
+         && Agent_session.Session_actor.Held_run.Activation.handoff_acknowledged
+              (Agent_session.Session_actor.Recurrence_activation.Continuation.target
+                 continuation)
+       | None, _, _ | _, None, _ | _, _, None -> false)
+;;
 
 let create_internal ~before_unload ~actor ~initial ~build ~build_deferred =
   { actor
@@ -258,7 +277,7 @@ let ensure_loaded_locked ?run_preparation ?original_actor t =
   in
   match t.closed, t.runtime with
   | true, _ -> Error (closed_error ())
-  | false, _ when Option.is_some t.prepared_source ->
+  | false, _ when prepared_source_blocks_runtime t ->
     Error
       (Agent_protocol.Error.create
          Conflict
@@ -414,7 +433,7 @@ let with_lease_internal ?(retire = ignore) t ~survives_stop ~admit f =
       with_owner_lock t ~protect:true (fun () ->
         let open Result.Let_syntax in
         let%bind () =
-          if Option.is_some t.prepared_source then Error (background_busy ()) else Ok ()
+          if prepared_source_blocks_runtime t then Error (background_busy ()) else Ok ()
         in
         let%map decision = admit () in
         match decision with
@@ -539,250 +558,6 @@ let with_background_runtime t f = with_runtime_lease t ~retain_resources:false f
 
 let with_prepared_run_runtime t ~preparation f =
   with_runtime_lease ~run_preparation:preparation t ~retain_resources:false f
-;;
-
-let with_prepared_source t ~preparation ~source f =
-  let reserved = ref None in
-  let retire () = Option.iter !reserved ~f:close_source_stage in
-  let cleanup () =
-    Eio.Cancel.protect (fun () ->
-      retire ();
-      with_owner_lock t ~protect:true (fun () ->
-        match t.prepared_source, !reserved with
-        | Some current, Some owned when phys_equal current owned ->
-          t.prepared_source <- None
-        | Some _, (Some _ | None) | None, (Some _ | None) -> ()))
-  in
-  Exn.protect ~finally:cleanup ~f:(fun () ->
-    with_lease
-      t
-      ~survives_stop:false
-      ~retire
-      ~admit:(fun () ->
-        match t.closed, t.unloading, t.foreground_retirement, t.prepared_source with
-        | true, _, _, _ -> Error (closed_error ())
-        | false, Some _, _, _ | false, None, Some _, _ | false, None, None, Some _ ->
-          Error (background_busy ())
-        | false, None, None, None when not (List.is_empty t.background_leases) ->
-          Error (background_busy ())
-        | false, None, None, None ->
-          let stage =
-            { domain = (Stdlib.Domain.self () :> int)
-            ; runtime = t.runtime
-            ; binding = None
-            ; continuation = None
-            ; closed = false
-            }
-          in
-          reserved := Some stage;
-          t.prepared_source <- Some stage;
-          Ok (stage, t.runtime))
-      (fun stage ->
-         let open Result.Let_syntax in
-         (* The mailbox call may yield. No owner mutex is held, and accepted
-           retirement closes this stage before cancelling the lease. *)
-         let%bind binding =
-           Eio.Cancel.protect (fun () ->
-             let result =
-               Agent_session.Session_actor.bind_run_source t.actor ~preparation ~source
-             in
-             Result.iter result ~f:(fun binding -> stage.binding <- Some binding);
-             result)
-         in
-         let prepared : Prepared.t =
-           { stage
-           ; binding
-           ; preparation
-           ; basis =
-               (fun () ->
-                 if
-                   t.closed
-                   || Option.is_some t.unloading
-                   || Option.is_some t.foreground_retirement
-                   || (not (Option.exists t.prepared_source ~f:(phys_equal stage)))
-                   || not (Option.equal phys_equal t.runtime stage.runtime)
-                 then
-                   Error
-                     (Agent_protocol.Error.create
-                        Conflict
-                        ~message:"prepared runtime owner was displaced"
-                        ~retryable:false
-                        ())
-                 else Ok ())
-           }
-         in
-         let%bind () = Prepared.check_basis prepared in
-         Eio.Fiber.check ();
-         f prepared))
-;;
-
-let with_held_recurrence_runtime t ~(prepared : Prepared.t) ~held ~checked f =
-  let open Result.Let_syntax in
-  let owner_basis () =
-    if
-      t.closed
-      || Option.is_some t.unloading
-      || Option.is_some t.foreground_retirement
-      || (not (Option.exists t.prepared_source ~f:(phys_equal prepared.stage)))
-      || not (Option.equal phys_equal t.runtime prepared.stage.runtime)
-    then
-      Error
-        (Agent_protocol.Error.create
-           Conflict
-           ~message:"prepared source belongs to another or displaced runtime owner"
-           ~retryable:false
-           ())
-    else prepared.basis ()
-  in
-  let%bind () = Prepared.check_basis prepared in
-  let%bind () = owner_basis () in
-  let%bind () =
-    match prepared.stage.runtime, t.build_deferred with
-    | None, None ->
-      Error
-        (Agent_protocol.Error.create
-           Invalid_state
-           ~message:"runtime owner has no verified-source deferred constructor"
-           ~retryable:false
-           ())
-    | Some _, (Some _ | None) | None, Some _ -> Ok ()
-  in
-  let continuation = ref None in
-  let constructed = ref None in
-  let consumed_basis active =
-    if
-      (not (Int.equal prepared.stage.domain (Stdlib.Domain.self () :> int)))
-      || prepared.stage.closed
-      || not (Option.exists prepared.stage.continuation ~f:(phys_equal active))
-    then
-      Error
-        (Agent_protocol.Error.create
-           Conflict
-           ~message:"consumed runtime source owner is closed or displaced"
-           ~retryable:false
-           ())
-    else owner_basis ()
-  in
-  let check_effect active =
-    let module Continuation =
-      Agent_session.Session_actor.Recurrence_activation.Continuation
-    in
-    let%bind () = consumed_basis active in
-    let%bind () = Continuation.refresh active in
-    let%bind () = Continuation.check_timing active in
-    let%bind () = Continuation.check_authority active in
-    let%bind () = consumed_basis active in
-    let%bind () =
-      Agent_session.Session_actor.Held_run.Activation.check_basis
-        (Continuation.target active)
-    in
-    Continuation.check_basis active
-  in
-  let cleanup () =
-    Eio.Cancel.protect (fun () ->
-      let ended =
-        match !continuation with
-        | None -> Ok (Ok ())
-        | Some active ->
-          let activation =
-            Agent_session.Session_actor.Recurrence_activation.Continuation.target active
-          in
-          Agent_session.Session_actor.Held_run.Activation.close activation;
-          (try
-             Ok (Agent_session.Session_actor.end_held_activation t.actor ~activation)
-           with
-           | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
-      in
-      (* This scope never installed its cold runtime in [t.runtime]. Loaded
-         resources still belong to the outer existing lease and are not closed. *)
-      let closed =
-        match !constructed with
-        | None -> Ok ()
-        | Some runtime ->
-          constructed := None;
-          (try
-             runtime.Agent_session.Runtime_builder.close ();
-             Ok ()
-           with
-           | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
-      in
-      match ended, closed with
-      | Error failure, _ -> Error failure
-      | Ok (Error error), _ -> Ok (Error error)
-      | Ok (Ok ()), Error failure -> Error failure
-      | Ok (Ok ()), Ok () -> Ok (Ok ()))
-  in
-  let result =
-    try
-      let result =
-        let%bind active =
-          (* Capture the issued owner before pending cancellation can unwind.
-             Construction and the caller's effects remain cancellable. *)
-          Eio.Cancel.protect (fun () ->
-            let result =
-              Agent_session.Session_actor.begin_held_recurrence_activation
-                t.actor
-                ~binding:prepared.binding
-                ~held
-                ~checked
-            in
-            Result.iter result ~f:(fun active ->
-              continuation := Some active;
-              prepared.stage.continuation <- Some active;
-              if prepared.stage.closed
-              then
-                Agent_session.Session_actor.Held_run.Activation.close
-                  (Agent_session.Session_actor.Recurrence_activation.Continuation.target
-                     active));
-            result)
-        in
-        Eio.Fiber.check ();
-        let%bind runtime =
-          match prepared.stage.runtime with
-          | Some runtime -> Ok runtime
-          | None ->
-            let%bind () = check_effect active in
-            (match t.build_deferred with
-             | None ->
-               Error
-                 (Agent_protocol.Error.create
-                    Invalid_state
-                    ~message:"runtime owner has no verified-source deferred constructor"
-                    ~retryable:false
-                    ())
-             | Some build ->
-               let result =
-                 build
-                   ~source:
-                     (Agent_session.Session_actor.Source_binding.source prepared.binding)
-                   ~preparation:prepared.preparation
-                   ~continuation:active
-               in
-               Result.iter result ~f:(fun runtime -> constructed := Some runtime);
-               result)
-        in
-        let%bind () =
-          match runtime.Agent_session.Runtime_builder.check_execution with
-          | None -> Ok ()
-          | Some check -> check ()
-        in
-        let%bind () = check_effect active in
-        f runtime active
-      in
-      (match result with
-       | Error _ -> ()
-       | Ok _ -> Eio.Fiber.check ());
-      Ok result
-    with
-    | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
-  in
-  let cleaned = cleanup () in
-  match result, cleaned with
-  | Error (exn, backtrace), _ -> Exn.raise_with_original_backtrace exn backtrace
-  | Ok (Error _ as failure), _ -> failure
-  | Ok result, Ok (Ok ()) -> result
-  | Ok (Ok _), Ok (Error error) -> Error error
-  | Ok (Ok _), Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let with_delegation_resources t f = with_runtime_lease t ~retain_resources:true f
@@ -983,6 +758,478 @@ let unload_and_wait t =
     match outcome with
     | Ok result -> result
     | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace)
+;;
+
+let with_prepared_source t ~preparation ~source f =
+  let completed_retirement =
+    let candidate =
+      with_owner_lock t ~protect:true (fun () ->
+        match t.closed, t.unloading, t.runtime, t.foreground_retirement with
+        | false, None, None, Some retirement
+          when Agent_session.Session_actor.Runtime_retirement.is_finished retirement ->
+          Some retirement
+        | (true | false), (Some _ | None), (Some _ | None), (Some _ | None) -> None)
+    in
+    (* Joining even an already-finished handle belongs outside the owner mutex.
+       Admission below still requires the exact same completed retirement. *)
+    Option.bind candidate ~f:(fun retirement ->
+      match Agent_session.Session_actor.Runtime_retirement.await retirement with
+      | Ok () -> Some retirement
+      | Error _ -> None)
+  in
+  let reserved = ref None in
+  let retire () = Option.iter !reserved ~f:close_source_stage in
+  let cleanup () =
+    Eio.Cancel.protect (fun () ->
+      retire ();
+      let clear_owned_stage () =
+        with_owner_lock t ~protect:true (fun () ->
+          match t.prepared_source, !reserved with
+          | Some current, Some owned when phys_equal current owned ->
+            t.prepared_source <- None
+          | Some _, (Some _ | None) | None, (Some _ | None) -> ())
+      in
+      Exn.protect ~finally:clear_owned_stage ~f:(fun () ->
+        let open Result.Let_syntax in
+        let%bind retire_runtime =
+          with_owner_lock t ~protect:true (fun () ->
+            match !reserved with
+            | None -> Ok false
+            | Some owned ->
+              (match owned.retire_installed with
+               | None -> Ok false
+               | Some installed ->
+                 (match t.prepared_source, t.runtime with
+                  | Some current, Some runtime
+                    when phys_equal current owned && phys_equal installed runtime ->
+                    Ok true
+                  | Some current, None when phys_equal current owned -> Ok false
+                  | Some _, (Some _ | None) | None, (Some _ | None) ->
+                    Error
+                      (Agent_protocol.Error.create
+                         Conflict
+                         ~message:"installed runtime retirement owner was displaced"
+                         ~retryable:false
+                         ()))))
+        in
+        (* The old stage stays registered across the join, excluding a foreign
+           reload after this lease has released but before retirement begins. *)
+        if retire_runtime then unload_and_wait t else Ok ()))
+  in
+  let result =
+    try
+      Ok
+        (with_lease
+           t
+           ~survives_stop:false
+           ~retire
+           ~admit:(fun () ->
+             (match
+                ( completed_retirement
+                , t.foreground_retirement
+                , t.closed
+                , t.unloading
+                , t.runtime )
+              with
+              | Some completed, Some current, false, None, None
+                when phys_equal completed current -> t.foreground_retirement <- None
+              | ( (Some _ | None)
+                , (Some _ | None)
+                , (true | false)
+                , (Some _ | None)
+                , (Some _ | None) ) -> ());
+             match t.closed, t.unloading, t.foreground_retirement, t.prepared_source with
+             | true, _, _, _ -> Error (closed_error ())
+             | false, Some _, _, _ | false, None, Some _, _ | false, None, None, Some _ ->
+               Error (background_busy ())
+             | false, None, None, None when not (List.is_empty t.background_leases) ->
+               Error (background_busy ())
+             | false, None, None, None ->
+               let stage =
+                 { domain = (Stdlib.Domain.self () :> int)
+                 ; runtime = t.runtime
+                 ; binding = None
+                 ; continuation = None
+                 ; closed = false
+                 ; retire_installed = None
+                 ; handoff_runtime = None
+                 }
+               in
+               reserved := Some stage;
+               t.prepared_source <- Some stage;
+               Ok (stage, t.runtime))
+           (fun stage ->
+              let open Result.Let_syntax in
+              (* The mailbox call may yield. No owner mutex is held, and accepted
+                 retirement closes this stage before cancelling the lease. *)
+              let%bind binding =
+                Eio.Cancel.protect (fun () ->
+                  let result =
+                    Agent_session.Session_actor.bind_run_source
+                      t.actor
+                      ~preparation
+                      ~source
+                  in
+                  Result.iter result ~f:(fun binding -> stage.binding <- Some binding);
+                  result)
+              in
+              let prepared : Prepared.t =
+                { stage
+                ; binding
+                ; preparation
+                ; basis =
+                    (fun () ->
+                      if
+                        t.closed
+                        || Option.is_some t.unloading
+                        || Option.is_some t.foreground_retirement
+                        || (not (Option.exists t.prepared_source ~f:(phys_equal stage)))
+                        || not (Option.equal phys_equal t.runtime stage.runtime)
+                      then
+                        Error
+                          (Agent_protocol.Error.create
+                             Conflict
+                             ~message:"prepared runtime owner was displaced"
+                             ~retryable:false
+                             ())
+                      else Ok ())
+                }
+              in
+              let%bind () = Prepared.check_basis prepared in
+              Eio.Fiber.check ();
+              f prepared))
+    with
+    | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+  in
+  let cleaned =
+    try Ok (cleanup ()) with
+    | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+  in
+  match result, cleaned with
+  | Error (exn, backtrace), _ -> Exn.raise_with_original_backtrace exn backtrace
+  | Ok (Error _ as failure), _ -> failure
+  | Ok result, Ok (Ok ()) -> result
+  | Ok (Ok _), Ok (Error error) -> Error error
+  | Ok (Ok _), Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+;;
+
+module Held_runtime_residency = struct
+  type t =
+    | Local of Agent_session.Runtime_builder.t
+    | Reused of Agent_session.Runtime_builder.t
+    | Installed of Agent_session.Runtime_builder.t
+    | Handed_off of Agent_session.Runtime_builder.t
+end
+
+let with_held_runtime t ~(prepared : Prepared.t) ~held ~checked f =
+  let open Result.Let_syntax in
+  let owner_basis () =
+    if
+      t.closed
+      || Option.is_some t.unloading
+      || Option.is_some t.foreground_retirement
+      || (not (Option.exists t.prepared_source ~f:(phys_equal prepared.stage)))
+      || not (Option.equal phys_equal t.runtime prepared.stage.runtime)
+    then
+      Error
+        (Agent_protocol.Error.create
+           Conflict
+           ~message:"prepared source belongs to another or displaced runtime owner"
+           ~retryable:false
+           ())
+    else prepared.basis ()
+  in
+  let%bind () = Prepared.check_basis prepared in
+  let%bind () = owner_basis () in
+  let%bind () =
+    match prepared.stage.runtime, t.build_deferred with
+    | None, None ->
+      Error
+        (Agent_protocol.Error.create
+           Invalid_state
+           ~message:"runtime owner has no verified-source deferred constructor"
+           ~retryable:false
+           ())
+    | Some _, (Some _ | None) | None, Some _ -> Ok ()
+  in
+  let continuation = ref None in
+  let residency : Held_runtime_residency.t option ref = ref None in
+  let consumed_basis active =
+    if
+      (not (Int.equal prepared.stage.domain (Stdlib.Domain.self () :> int)))
+      || prepared.stage.closed
+      || not (Option.exists prepared.stage.continuation ~f:(phys_equal active))
+    then
+      Error
+        (Agent_protocol.Error.create
+           Conflict
+           ~message:"consumed runtime source owner is closed or displaced"
+           ~retryable:false
+           ())
+    else owner_basis ()
+  in
+  let check_effect active =
+    let module Continuation =
+      Agent_session.Session_actor.Recurrence_activation.Continuation
+    in
+    let%bind () = consumed_basis active in
+    let%bind () = Continuation.refresh active in
+    let%bind () = Continuation.check_timing active in
+    let%bind () = Continuation.check_authority active in
+    let%bind () = consumed_basis active in
+    let%bind () =
+      Agent_session.Session_actor.Held_run.Activation.check_basis
+        (Continuation.target active)
+    in
+    Continuation.check_basis active
+  in
+  let cleanup () =
+    Eio.Cancel.protect (fun () ->
+      let ended =
+        match !continuation with
+        | None -> Ok (Ok ())
+        | Some active ->
+          let activation =
+            Agent_session.Session_actor.Recurrence_activation.Continuation.target active
+          in
+          Agent_session.Session_actor.Held_run.Activation.close activation;
+          (try
+             Ok (Agent_session.Session_actor.end_held_activation t.actor ~activation)
+           with
+           | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+      in
+      (* An installed worker owns a reference until ordinary retirement joins.
+         The outer prepared-source finalizer does that only after releasing its
+         own lease. Loaded resources are never retired by this speculative use. *)
+      let closed =
+        match !residency with
+        | None | Some (Reused _ | Handed_off _) -> Ok ()
+        | Some (Installed runtime) ->
+          let handed_off =
+            Option.exists !continuation ~f:(fun active ->
+              Agent_session.Session_actor.Held_run.Activation.handoff_acknowledged
+                (Agent_session.Session_actor.Recurrence_activation.Continuation.target
+                   active))
+          in
+          if handed_off
+          then (
+            (* Publication may fail after the actual root ACK. Its immutable
+               transfer still owns the runtime even without a returned reply. *)
+            residency := Some (Handed_off runtime);
+            Ok ())
+          else (
+            prepared.stage.retire_installed <- Some runtime;
+            Ok ())
+        | Some (Local runtime) ->
+          residency := None;
+          (try
+             runtime.Agent_session.Runtime_builder.close ();
+             Ok ()
+           with
+           | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+      in
+      match ended, closed with
+      | Error failure, _ -> Error failure
+      | Ok (Error error), _ -> Ok (Error error)
+      | Ok (Ok ()), Error failure -> Error failure
+      | Ok (Ok ()), Ok () -> Ok (Ok ()))
+  in
+  let result =
+    try
+      let result =
+        let%bind active =
+          (* Capture the issued owner before pending cancellation can unwind.
+             Construction and the caller's effects remain cancellable. *)
+          Eio.Cancel.protect (fun () ->
+            let result =
+              Agent_session.Session_actor.begin_held_recurrence_activation
+                t.actor
+                ~binding:prepared.binding
+                ~held
+                ~checked
+            in
+            Result.iter result ~f:(fun active ->
+              continuation := Some active;
+              prepared.stage.continuation <- Some active;
+              if prepared.stage.closed
+              then
+                Agent_session.Session_actor.Held_run.Activation.close
+                  (Agent_session.Session_actor.Recurrence_activation.Continuation.target
+                     active));
+            result)
+        in
+        Eio.Fiber.check ();
+        let%bind runtime =
+          match prepared.stage.runtime with
+          | Some runtime ->
+            residency := Some (Held_runtime_residency.Reused runtime);
+            Ok runtime
+          | None ->
+            let%bind () = check_effect active in
+            (match t.build_deferred with
+             | None ->
+               Error
+                 (Agent_protocol.Error.create
+                    Invalid_state
+                    ~message:"runtime owner has no verified-source deferred constructor"
+                    ~retryable:false
+                    ())
+             | Some build ->
+               let result =
+                 build
+                   ~source:
+                     (Agent_session.Session_actor.Source_binding.source prepared.binding)
+                   ~preparation:prepared.preparation
+                   ~continuation:active
+               in
+               Result.iter result ~f:(fun runtime ->
+                 residency := Some (Held_runtime_residency.Local runtime));
+               result)
+        in
+        let%bind () =
+          match runtime.Agent_session.Runtime_builder.check_execution with
+          | None -> Ok ()
+          | Some check -> check ()
+        in
+        let%bind () = check_effect active in
+        f runtime active residency
+      in
+      (match result with
+       | Error _ -> ()
+       | Ok _ -> Eio.Fiber.check ());
+      Ok result
+    with
+    | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+  in
+  let cleaned = cleanup () in
+  match result, cleaned with
+  | Error (exn, backtrace), _ -> Exn.raise_with_original_backtrace exn backtrace
+  | Ok (Error _ as failure), _ -> failure
+  | Ok result, Ok (Ok ()) -> result
+  | Ok (Ok _), Ok (Error error) -> Error error
+  | Ok (Ok _), Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let with_held_recurrence_runtime t ~prepared ~held ~checked f =
+  with_held_runtime t ~prepared ~held ~checked (fun runtime continuation _residency ->
+    f runtime continuation)
+;;
+
+module Held_input_runtime = struct
+  module Phase = struct
+    type t =
+      | Available
+      | Submitted
+      | Closed
+  end
+
+  type owner = t
+
+  type t =
+    { owner : owner
+    ; prepared : Prepared.t
+    ; runtime : Agent_session.Runtime_builder.t
+    ; continuation : Agent_session.Session_actor.Recurrence_activation.Continuation.t
+    ; residency : Held_runtime_residency.t option ref
+    ; admission : Agent_protocol.Run_receipt.t
+    ; mutable phase : Phase.t
+    }
+
+  let unavailable () =
+    Agent_protocol.Error.create
+      Conflict
+      ~message:"held input runtime is closed or already submitted"
+      ~retryable:false
+      ()
+  ;;
+
+  let submit t ~prepare =
+    let module A = Agent_session.Session_actor in
+    let open Result.Let_syntax in
+    let%bind () =
+      match t.phase with
+      | Available
+        when Int.equal t.prepared.stage.domain (Stdlib.Domain.self () :> int)
+             && (not t.prepared.stage.closed)
+             && Option.exists t.owner.prepared_source ~f:(phys_equal t.prepared.stage)
+             && Option.exists t.prepared.stage.continuation ~f:(phys_equal t.continuation)
+        ->
+        t.phase <- Submitted;
+        Ok ()
+      | Available | Submitted | Closed -> Error (unavailable ())
+    in
+    A.with_held_input
+      t.owner.actor
+      ~continuation:t.continuation
+      ~prepare:(fun ~scope _execution ->
+        Eio.Fiber.check ();
+        prepare ~runtime:t.runtime ~scope)
+      (fun ~scope ~input ->
+         let%bind () =
+           with_owner_lock t.owner ~protect:true (fun () ->
+             if
+               t.owner.closed
+               || Option.is_some t.owner.unloading
+               || Option.is_some t.owner.foreground_retirement
+               || t.prepared.stage.closed
+               || (not
+                     (Option.exists
+                        t.owner.prepared_source
+                        ~f:(phys_equal t.prepared.stage)))
+               || not (Option.equal phys_equal t.owner.runtime t.prepared.stage.runtime)
+             then Error (unavailable ())
+             else t.prepared.basis ())
+         in
+         let%bind () =
+           match !(t.residency) with
+           | Some (Reused runtime) when phys_equal runtime t.runtime -> Ok ()
+           | Some (Local runtime) when phys_equal runtime t.runtime ->
+             (* Capture the actual physical-installation ACK and retain resources
+                before pending cancellation or a root writer can observe them. *)
+             Eio.Cancel.protect (fun () ->
+               let%bind () =
+                 A.install_held_runtime
+                   ?automatic_turn_policy:runtime.automatic_turn_policy
+                   ?moderator_manager:runtime.moderator_manager
+                   t.owner.actor
+                   ~continuation:t.continuation
+                   ~worker:runtime.worker
+                   ~inference:(Agent_session.Runtime_builder.inference_execution runtime)
+               in
+               with_owner_lock t.owner ~protect:true (fun () ->
+                 t.owner.runtime <- Some runtime;
+                 t.prepared.stage.handoff_runtime <- Some runtime;
+                 t.residency := Some (Installed runtime));
+               Ok ())
+           | None | Some (Local _ | Reused _ | Installed _ | Handed_off _) ->
+             Error (unavailable ())
+         in
+         Eio.Fiber.check ();
+         (* The root ACK precedes this bookkeeping. Keep the exact original
+            Admission, rather than manufacturing a receipt from the submission. *)
+         Eio.Cancel.protect (fun () ->
+           let%map _submission = A.submit_held_run_input t.owner.actor ~scope ~input in
+           t.residency := Some (Handed_off t.runtime);
+           t.admission))
+  ;;
+end
+
+let with_held_input_runtime t ~prepared ~held ~checked f =
+  with_held_runtime t ~prepared ~held ~checked (fun runtime continuation residency ->
+    prepared.stage.handoff_runtime <- Some runtime;
+    let input_runtime : Held_input_runtime.t =
+      { owner = t
+      ; prepared
+      ; runtime
+      ; continuation
+      ; residency
+      ; admission = Agent_session.Session_actor.Held_run.admission held
+      ; phase = Available
+      }
+    in
+    Exn.protect
+      ~finally:(fun () -> input_runtime.phase <- Closed)
+      ~f:(fun () -> f input_runtime))
 ;;
 
 let with_unloaded t f =
