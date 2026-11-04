@@ -709,6 +709,7 @@ let state_jobs t entry =
     List.iter state.jobs ~f:(cancel_terminal_worker t ~actor:entry.actor);
     if
       Agent_protocol.Session.equal_desired_state state.lifecycle.desired Stopped
+      || Agent_session.Session_state.execution_migration_required state
       || (match state.runtime_initialization with
           | Pending _ -> true
           | Ready -> false)

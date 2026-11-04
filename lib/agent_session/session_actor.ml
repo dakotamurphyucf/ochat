@@ -4129,6 +4129,8 @@ let idle_actor_available t =
 ;;
 
 let runtime_ready t =
+  (not (Session_state.execution_migration_required t.state))
+  &&
   match
     t.state.runtime_initialization, Inference.Selection.view t.state.spec.inference_target
   with
@@ -10050,6 +10052,12 @@ let claim_job ?run_preparation t job_id generation =
   let%bind job = find_job t job_id in
   let%bind () = validate_job_generation t job generation in
   let%bind () =
+    if Session_state.execution_migration_required t.state
+    then
+      Error (error Migration_required "job execution requires explicit runtime migration")
+    else Ok ()
+  in
+  let%bind () =
     match
       List.exists t.job_scopes ~f:(fun scope ->
         Agent_protocol.Id.Job.equal scope.job.id job_id)
@@ -11284,6 +11292,15 @@ let claim_schedule t schedule_id generation =
   let open Result.Let_syntax in
   let%bind schedule = find_schedule t schedule_id in
   let%bind () = validate_schedule_generation t schedule generation in
+  let%bind () =
+    if Session_state.execution_migration_required t.state
+    then
+      Error
+        (error
+           Migration_required
+           "schedule execution requires explicit runtime migration")
+    else Ok ()
+  in
   match schedule.status with
   | Agent_protocol.Schedule.Scheduled ->
     let%bind due = schedule_is_due t schedule in

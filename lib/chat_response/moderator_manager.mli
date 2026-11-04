@@ -74,6 +74,10 @@ module Registry : sig
     -> (t * artifact option, string) result
 
   val script_id : artifact -> string
+
+  (** Canonical SHA-256 identity. Single programs hash exact retained source
+      bytes; Prepared programs retain their complete linked-program fingerprint.
+      Historical MD5 checkpoints require explicit host rebuild, never relabeling. *)
   val source_hash : artifact -> string
 end
 

@@ -247,6 +247,13 @@ val authoring_references
 
 val summary : t -> Agent_protocol.Session.t
 
+(** Existing typed execution block, not a source/permission or validity proof.
+    Observed [Failed Migration_required] prevents queued execution claims. Stop
+    preserves that cause while observed [Stopped], until explicit rebuild clears
+    it. Other observed states do not inherit an old failure's migration block;
+    ordinary failures retain their existing scheduling semantics. *)
+val execution_migration_required : t -> bool
+
 (** Presentation-only projection shared by actual native state and prelayout
     sizing. A generic workspace supplies only its typed visible instance ID;
     this grants no workspace/runtime authority and admits no native state. *)

@@ -155,6 +155,22 @@ type 'spec fields =
 
 type t = Spec.t fields [@@deriving sexp]
 
+let execution_migration_required (t : t) =
+  match t.lifecycle.observed with
+  | Failed failure -> Agent_protocol.Error.equal_code failure.code Migration_required
+  | Stopped ->
+    Option.exists t.failure ~f:(fun failure ->
+      Agent_protocol.Error.equal_code failure.code Migration_required)
+  | Queued_for_slot
+  | Starting
+  | Recovering
+  | Idle
+  | Running_turn _
+  | Compacting _
+  | Waiting_for_permission _
+  | Stopping -> false
+;;
+
 let current_schema_version = 25
 
 let upgrade_schema (t : t) =

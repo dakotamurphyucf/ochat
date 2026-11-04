@@ -193,10 +193,14 @@ let%expect_test "manager snapshots, restores, and drains internal events" =
     ((append_item))
     moderation-overlay-1 developer "policy"
     synthetic-1 assistant "queued"
-    ((script_id main) (script_source_hash 720bb598084b1f2609fb3ce5ac5d8787)
+    ((script_id main)
+     (script_source_hash
+      96c382dc7455c37f455bc282132255f5292420f1a0bbee1960d14342950b98e9)
      (queued_internal_events 0) (prepended_items 1) (appended_items 1)
      (replacements 0) (deleted_items 0))
-    ((script_id main) (script_source_hash 720bb598084b1f2609fb3ce5ac5d8787)
+    ((script_id main)
+     (script_source_hash
+      96c382dc7455c37f455bc282132255f5292420f1a0bbee1960d14342950b98e9)
      (queued_internal_events 0) (prepended_items 1) (appended_items 1)
      (replacements 0) (deleted_items 0))
     |}]
@@ -297,7 +301,7 @@ let%expect_test "manager rejects mismatched persisted script metadata" =
    | Ok _ -> print_endline "unexpected success"
    | Error msg -> print_endline msg);
   [%expect
-    {| Moderator snapshot source hash "other-hash" does not match prompt source hash "720bb598084b1f2609fb3ce5ac5d8787". |}]
+    {| Moderator snapshot source hash "other-hash" does not match prompt source hash "96c382dc7455c37f455bc282132255f5292420f1a0bbee1960d14342950b98e9". |}]
 ;;
 
 let%expect_test "manager restores queued internal events from persisted snapshots" =
