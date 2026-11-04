@@ -60,13 +60,20 @@ let validate t ~definition =
     match F.schedule definition, t.label with
     | Interval { rule; first_due }, Interval ->
       let slot = I.Occurrence.slot t.key in
-      let%bind expected =
-        R.Cursor.Interval.at_slot (R.Cursor.Interval.create ~first_due) ~rule ~slot
-        |> timing
-      in
-      if Time_ns.equal expected t.at
-      then Ok ()
-      else invalid "interval nominal time differs from its immutable phase"
+      (match R.Rule.Interval.mode rule with
+       | Fixed_delay when Int64.(slot > 0L) ->
+         (* A later delay has no definition-only UTC phase. Its enclosing
+            frontier binds the current timestamp to exact completion evidence;
+            retained historical nominal data is not a rearm proof. *)
+         Ok ()
+       | Fixed_rate | Fixed_delay ->
+         let%bind expected =
+           R.Cursor.Interval.at_slot (R.Cursor.Interval.create ~first_due) ~rule ~slot
+           |> timing
+         in
+         if Time_ns.equal expected t.at
+         then Ok ()
+         else invalid "interval nominal time differs from its immutable phase")
     | Calendar rule, Calendar label ->
       if
         R.Rule.Calendar.matches rule label.date
@@ -93,6 +100,24 @@ let create_interval definition ~slot =
       |> timing
     in
     Ok { key; definition_sha256 = F.digest definition; at; label = Interval }
+;;
+
+let of_interval_cursor definition cursor =
+  let open Result.Let_syntax in
+  let%bind key =
+    I.Occurrence.create
+      ~definition:(F.key definition)
+      ~slot:(R.Cursor.Interval.slot cursor)
+  in
+  let t =
+    { key
+    ; definition_sha256 = F.digest definition
+    ; at = R.Cursor.Interval.due_at cursor
+    ; label = Interval
+    }
+  in
+  let%map () = validate t ~definition in
+  t
 ;;
 
 let create_calendar definition ~slot ~(occurrence : R.Cursor.Calendar.Occurrence.t) =

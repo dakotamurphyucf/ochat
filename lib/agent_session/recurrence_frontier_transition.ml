@@ -8,15 +8,9 @@ module V = Recurrence_frontier_records
 module S = V.State
 module C = Recurrence_cursor
 
-let protected_rows (s : S.t) =
-  List.map s.protected_children ~f:(fun row ->
-    (* The complete reservation owns the original nominal; projection is used
-       only for partition/capacity checks, never for moving custody. *)
-    Recurrence_child_reservation.nominal row)
-;;
-
-let protected_count (s : S.t) = List.length s.protected_children
-let pending_count (s : S.t) = List.length s.ready + protected_count s
+let protected_rows (s : S.t) = S.claimed_nominals s
+let protected_count (s : S.t) = S.unresolved_count s
+let pending_count (s : S.t) = S.pending_count s
 
 let ready_capacity (s : S.t) definition =
   Int.max 0 (Recurrence_policy.max_pending (F.policy definition) - protected_count s)
@@ -333,8 +327,17 @@ let validate_dispositions (s : S.t) =
         I.Definition.equal (I.Occurrence.definition (key row)) mark.definition)
     in
     let protected =
-      List.filter (protected_rows s) ~f:(fun row ->
-        I.Definition.equal (I.Occurrence.definition (N.key row)) mark.definition)
+      List.filter
+        (protected_rows s
+         @ List.filter_map (S.execution_rows s) ~f:(fun execution ->
+           if Recurrence_execution.is_pending execution
+           then None
+           else
+             Some
+               (Recurrence_execution_intent.nominal
+                  (Recurrence_execution.intent execution))))
+        ~f:(fun row ->
+          I.Definition.equal (I.Occurrence.definition (N.key row)) mark.definition)
     in
     let intervals =
       List.map protected ~f:(fun row ->
@@ -376,6 +379,7 @@ let validate_current (s : S.t) ~definition:current ~cursor =
           I.Definition.equal (I.Occurrence.definition (key row)) mark.definition)
       in
       let%bind total = V.add mark.omitted mark.withdrawn in
+      let%bind total = V.add total mark.settled in
       let protected =
         List.count (protected_rows s) ~f:(fun row ->
           I.Definition.equal (I.Occurrence.definition (N.key row)) mark.definition)
@@ -415,11 +419,47 @@ let validate_current (s : S.t) ~definition:current ~cursor =
   let%bind () =
     match mark.through, F.schedule current with
     | None, _ | Some _, Calendar _ -> Ok ()
-    | Some slot, Interval _ ->
-      let%bind expected = N.create_interval current ~slot in
-      if Option.equal Time_ns.equal mark.last_at (Some (N.at expected))
+    | Some slot, Interval { rule; _ } ->
+      let%bind expected =
+        if
+          R.Rule.Interval.equal_mode (R.Rule.Interval.mode rule) Fixed_delay
+          && not (Int64.equal slot 0L)
+        then (
+          match
+            List.find
+              (s.ready @ candidates s)
+              ~f:(fun row -> Int64.equal (I.Occurrence.slot (key row)) slot)
+          with
+          | Some row -> Ok (at row)
+          | None ->
+            (match
+               List.find (S.execution_rows s) ~f:(fun execution ->
+                 let occurrence =
+                   Recurrence_execution_intent.occurrence
+                     (Recurrence_execution.intent execution)
+                 in
+                 I.Definition.equal (I.Occurrence.definition occurrence) (F.key current)
+                 && Int64.equal (I.Occurrence.slot occurrence) slot)
+             with
+             | Some execution ->
+               Ok
+                 (N.at
+                    (Recurrence_execution_intent.nominal
+                       (Recurrence_execution.intent execution)))
+             | None ->
+               (match s.delay_basis with
+                | Some basis
+                  when Int64.equal
+                         slot
+                         (I.Occurrence.slot (Recurrence_delay_basis.occurrence basis)) ->
+                  Ok (Recurrence_delay_basis.nominal_at basis)
+                | None | Some _ ->
+                  invalid "fixed-delay high-water lacks exact selected metadata")))
+        else Result.map (N.create_interval current ~slot) ~f:N.at
+      in
+      if Option.equal Time_ns.equal mark.last_at (Some expected)
       then Ok ()
-      else invalid "interval high-water time differs from immutable phase"
+      else invalid "interval high-water time differs from exact selected nominal"
   in
   let%bind () =
     if
@@ -445,12 +485,27 @@ let validate_current (s : S.t) ~definition:current ~cursor =
     match C.position cursor, F.schedule current with
     | Interval interval, Interval { rule; first_due } ->
       let%bind expected =
-        R.Cursor.Interval.at_slot
-          (R.Cursor.Interval.create ~first_due)
-          ~rule
-          ~slot:consumed
-        |> Result.map_error ~f:(fun e ->
-          P.Error.invalid_request (Sexp.to_string_hum (R.Timing_error.sexp_of_t e)))
+        if
+          R.Rule.Interval.equal_mode (R.Rule.Interval.mode rule) Fixed_delay
+          && not (Int64.equal consumed 0L)
+        then (
+          match s.delay_basis with
+          | Some basis
+            when Int64.(
+                   I.Occurrence.slot (Recurrence_delay_basis.occurrence basis)
+                   = consumed - 1L) ->
+            Result.map
+              (Recurrence_delay_basis.next_interval basis ~definition:current)
+              ~f:R.Cursor.Interval.due_at
+          | None | Some _ ->
+            invalid "fixed-delay successor lacks exact prior completion basis")
+        else
+          R.Cursor.Interval.at_slot
+            (R.Cursor.Interval.create ~first_due)
+            ~rule
+            ~slot:consumed
+          |> Result.map_error ~f:(fun e ->
+            P.Error.invalid_request (Sexp.to_string_hum (R.Timing_error.sexp_of_t e)))
       in
       if
         Int64.equal consumed (R.Cursor.Interval.slot interval)
@@ -472,12 +527,41 @@ let validate_current (s : S.t) ~definition:current ~cursor =
     | Awaiting_completion occurrence, Interval { rule; _ } ->
       if
         R.Rule.Interval.equal_mode (R.Rule.Interval.mode rule) Fixed_delay
-        && Int64.equal consumed 1L
-        && Int64.equal (I.Occurrence.slot occurrence) 0L
+        && Int64.(consumed > 0L)
+        && Int64.equal (I.Occurrence.slot occurrence) Int64.(consumed - 1L)
         && Option.is_none s.batch
         && Option.is_none s.lookahead
-      then Ok ()
-      else invalid "fixed-delay completion frontier is not initial selection"
+      then
+        if Int64.equal (I.Occurrence.slot occurrence) 0L
+        then Ok ()
+        else (
+          match s.delay_basis with
+          | Some basis
+            when I.Occurrence.equal occurrence (Recurrence_delay_basis.occurrence basis)
+            ->
+            if
+              Option.equal
+                Time_ns.equal
+                mark.last_at
+                (Some (Recurrence_delay_basis.nominal_at basis))
+            then Ok ()
+            else invalid "awaiting terminal nominal differs from exact basis"
+          | Some basis
+            when Int64.(
+                   I.Occurrence.slot (Recurrence_delay_basis.occurrence basis)
+                   = I.Occurrence.slot occurrence - 1L) ->
+            let%bind next =
+              Recurrence_delay_basis.next_interval basis ~definition:current
+            in
+            if
+              Option.equal
+                Time_ns.equal
+                mark.last_at
+                (Some (R.Cursor.Interval.due_at next))
+            then Ok ()
+            else invalid "awaiting nominal differs from prior completion deadline"
+          | None | Some _ -> invalid "later delay selection lacks its exact prior basis")
+      else invalid "fixed-delay completion frontier differs from exact selected slot"
     | Exhausted, Interval { rule; first_due } ->
       if Int64.equal consumed 0L || Option.is_some s.lookahead || Option.is_some s.batch
       then invalid "exhausted interval lacks consumed endpoint"
@@ -574,6 +658,128 @@ let validate_associations (s : S.t) ~definitions ~cursor =
       with
       | None -> invalid "protected creation lacks captured definition"
       | Some definition -> Recurrence_child_reservation.validate row ~definition)
+  in
+  let%bind () =
+    List.fold_result (S.execution_rows s) ~init:() ~f:(fun () execution ->
+      let intent = Recurrence_execution.intent execution in
+      let occurrence = Recurrence_execution_intent.occurrence intent in
+      let%bind definition =
+        Result.of_option
+          (List.find definitions ~f:(fun definition ->
+             I.Definition.equal (F.key definition) (I.Occurrence.definition occurrence)))
+          ~error:(P.Error.invalid_request "execution lacks exact captured definition")
+      in
+      let reservation =
+        List.find s.protected_children ~f:(fun row ->
+          I.Occurrence.equal occurrence (Recurrence_child_reservation.occurrence row))
+      in
+      let%bind () =
+        Recurrence_execution_intent.validate intent ~definition ~reservation
+      in
+      let%bind () =
+        match Recurrence_execution_intent.child intent with
+        | None ->
+          if Option.is_none reservation
+          then Ok ()
+          else invalid "existing-target execution acquired a child reservation"
+        | Some child ->
+          if
+            List.exists s.child_associations ~f:(Recurrence_child_association.equal child)
+          then Ok ()
+          else invalid "execution child differs from exact retained association"
+      in
+      let selected = s.ready @ candidates s @ Option.to_list s.lookahead in
+      if List.exists selected ~f:(fun row -> I.Occurrence.equal occurrence (key row))
+      then invalid "execution overlaps an unadmitted nominal"
+      else Ok ())
+  in
+  let%bind () =
+    List.fold_result definitions ~init:() ~f:(fun () definition ->
+      let%bind mark = find_mark s definition in
+      let retained =
+        List.count (S.execution_rows s) ~f:(fun execution ->
+          (not (Recurrence_execution.is_pending execution))
+          && I.Definition.equal
+               (I.Occurrence.definition
+                  (Recurrence_execution_intent.occurrence
+                     (Recurrence_execution.intent execution)))
+               (F.key definition))
+      in
+      if Int64.(of_int retained <= mark.settled)
+      then Ok ()
+      else invalid "retained terminal details exceed lifetime settled count")
+  in
+  let%bind () =
+    if
+      List.count (S.execution_rows s) ~f:(fun execution ->
+        not (Recurrence_execution.is_pending execution))
+      <= Recurrence_policy.max_history (F.policy current)
+    then Ok ()
+    else invalid "terminal execution detail exceeds captured history policy"
+  in
+  let%bind () =
+    match s.delay_basis with
+    | None -> Ok ()
+    | Some basis ->
+      let%bind () = Recurrence_delay_basis.validate basis ~definition:current in
+      let%bind mark = find_mark s current in
+      let%bind () =
+        if Int64.(mark.settled > 0L)
+        then Ok ()
+        else invalid "completion basis lacks lifetime settlement"
+      in
+      let key = Recurrence_delay_basis.occurrence basis in
+      let%bind () =
+        if
+          Option.exists mark.through ~f:(fun through ->
+            Int64.(I.Occurrence.slot key <= through))
+        then Ok ()
+        else invalid "fixed-delay basis lies above consumed high-water"
+      in
+      (match S.find_execution s key with
+       | None -> Ok ()
+       | Some execution ->
+         let attempt = Recurrence_execution.current_attempt execution in
+         if
+           Option.equal
+             Recurrence_run_origin.equal
+             (Recurrence_execution.Attempt.origin attempt)
+             (Some (Recurrence_delay_basis.origin basis))
+           && Option.equal
+                Recurrence_run_reference.equal
+                (Recurrence_execution.Attempt.terminal attempt)
+                (Some (Recurrence_delay_basis.terminal basis))
+           && Time_ns.equal
+                (Recurrence_nominal.at
+                   (Recurrence_execution_intent.nominal
+                      (Recurrence_execution.intent execution)))
+                (Recurrence_delay_basis.nominal_at basis)
+         then Ok ()
+         else invalid "fixed-delay basis differs from retained terminal execution")
+  in
+  let%bind () =
+    List.fold_result s.control_history ~init:() ~f:(fun () detail ->
+      match detail.kind with
+      | Retired_alarm | Retired_batch -> Ok ()
+      | Retired_delay_basis ->
+        let%bind basis = Recurrence_delay_basis.of_json detail.json in
+        let%bind definition =
+          Result.of_option
+            (List.find definitions ~f:(fun definition ->
+               I.Definition.equal
+                 (F.key definition)
+                 (I.Occurrence.definition (Recurrence_delay_basis.occurrence basis))))
+            ~error:
+              (P.Error.invalid_request "archived delay basis lacks retained definition")
+        in
+        let%bind () = Recurrence_delay_basis.validate basis ~definition in
+        let%bind mark = find_mark s definition in
+        if
+          Int64.(mark.settled > 0L)
+          && Option.exists mark.through ~f:(fun through ->
+            Int64.(I.Occurrence.slot (Recurrence_delay_basis.occurrence basis) <= through))
+        then Ok ()
+        else invalid "archived delay basis lacks consumed settlement")
   in
   validate_current s ~definition:current ~cursor
 ;;

@@ -1531,7 +1531,7 @@ let codec ~capture ~limits ~presence =
       ~kind:"session.state"
       ~version:current_version
       ~shape
-      ~supported_semantics:Queue_provenance_semantics.supported
+      ~supported_semantics:Session_storage_semantics.supported
       ~validate:(fun state -> X.document_result (S.validate state))
       ~decode:(fun json -> X.document_result (state_of_jsonaf ?capture ~limits json))
       ~encode:(fun state -> X.document_result (state_to_jsonaf state ~limits ~presence))
@@ -1553,23 +1553,13 @@ let previous_decode_evidence t =
   Option.bind t.original ~f:(fun original -> original.decode_evidence)
 ;;
 
-let require_queue_semantics document ~limits =
-  Queue_provenance_semantics.require
-    document
-    ~limits
-    ~required:(Queue_provenance_semantics.state_requires (D.Document.payload document))
-;;
-
-let check_queue_semantics document =
-  Queue_provenance_semantics.check
-    document
-    ~required:(Queue_provenance_semantics.state_requires (D.Document.payload document))
-;;
+let require_storage_semantics = Session_storage_semantics.require_state
+let check_storage_semantics = Session_storage_semantics.check_state
 
 let decode_with_evidence ?previous ~limits document =
   let open Result.Let_syntax in
   let%bind document = upgrade document ~limits in
-  let%bind () = check_queue_semantics document in
+  let%bind () = check_storage_semantics document in
   let%bind () = validate_raw_queue_capacity document in
   let capture = Decode_evidence.Capture.create ?previous ~limits () in
   let%bind carrier =
@@ -1630,13 +1620,44 @@ let validate_queue_update previous incoming =
   |> X.document_result
 ;;
 
+let validate_run_update previous incoming =
+  match previous, incoming with
+  | None, None -> Ok ()
+  | None, Some incoming ->
+    Run_state.validate_transition ~previous:Run_state.empty incoming |> X.document_result
+  | Some previous, Some incoming ->
+    Run_state.validate_transition ~previous incoming |> X.document_result
+  | Some _, None ->
+    Error
+      (D.Error.Invalid_field
+         { path = [ "run_state" ]; reason = "durable Run evidence cannot be discarded" })
+;;
+
+let validate_run_carrier (t : t) =
+  match t.original with
+  | None -> Ok ()
+  | Some original ->
+    let open Result.Let_syntax in
+    let%bind () = D.Document.validate original.template ~limits:original.limits in
+    let%bind previous =
+      match D.Json.field (D.Document.payload original.template) ~name:"run_state" with
+      | Absent | Null -> Ok None
+      | Value raw ->
+        Run_state.of_jsonaf raw |> X.document_result |> Result.map ~f:Option.some
+    in
+    validate_run_update previous (value t).run_state
+;;
+
 let decode_after previous ~limits document =
   let open Result.Let_syntax in
   let%bind incoming =
     decode_with_evidence ?previous:(previous_decode_evidence previous) ~limits document
   in
   let%bind () = validate_inference_origin_update (value previous) (value incoming) in
-  let%map () = validate_queue_update (value previous) (value incoming) in
+  let%bind () = validate_queue_update (value previous) (value incoming) in
+  let%map () =
+    validate_run_update (value previous).run_state (value incoming).run_state
+  in
   incoming
 ;;
 
@@ -1821,6 +1842,7 @@ let validate_accounts_carrier t ~limits =
 
 let encode t ~limits =
   let open Result.Let_syntax in
+  let%bind () = validate_run_carrier t in
   let%bind () = validate_queue_carrier t in
   let%bind () = validate_inference_origin_carrier t in
   let%bind () = validate_goal_carrier t in
@@ -1844,17 +1866,22 @@ let encode t ~limits =
       let%bind.Result document =
         D.Document.create ~limits ~kind:"session.state" ~version:current_version ~payload
       in
-      let%bind.Result document = require_queue_semantics document ~limits in
+      let%bind.Result document = require_storage_semantics document ~limits in
       let%bind.Result admitted = decode ~limits document in
       D.Domain_codec.encode (codec_for admitted ~limits) admitted.carrier
   in
-  let%bind document = require_queue_semantics document ~limits in
+  let%bind document = require_storage_semantics document ~limits in
   let%map () = validate_run_capacity (value t) document ~limits in
   document
 ;;
 
 let adopt previous ~limits incoming =
   let open Result.Let_syntax in
+  let%bind () = validate_run_carrier previous in
+  let%bind () = validate_run_carrier incoming in
+  let%bind () =
+    validate_run_update (value previous).run_state (value incoming).run_state
+  in
   let%bind () = validate_queue_carrier previous in
   let%bind () = validate_queue_carrier incoming in
   let%bind () = validate_queue_update (value previous) (value incoming) in
@@ -2203,7 +2230,7 @@ module Transaction = struct
         ~kind:"session.state"
         ~version:current_version
         ~shape
-        ~supported_semantics:Queue_provenance_semantics.supported
+        ~supported_semantics:Session_storage_semantics.supported
         ~decode:(fun json ->
           state_fields_of_jsonaf ?capture ~limits json |> X.document_result)
         ~encode:(fun state ->
@@ -2222,6 +2249,7 @@ module Transaction = struct
 
   let encode_prefix t ~limits =
     let open Result.Let_syntax in
+    let%bind () = validate_run_carrier t in
     let%bind () = validate_inference_origin_carrier t in
     let capture =
       Decode_evidence.Capture.create ?previous:(previous_decode_evidence t) ~limits ()
@@ -2265,14 +2293,14 @@ module Transaction = struct
              ~presence:Session_state_presence.authored)
           carrier
     in
-    let%bind document = require_queue_semantics document ~limits in
+    let%bind document = require_storage_semantics document ~limits in
     let%map () = validate_run_capacity (value { staged = t }) document ~limits in
     document
   ;;
 
   let decode_prefix ?previous ~limits document =
     let open Result.Let_syntax in
-    let%bind () = check_queue_semantics document in
+    let%bind () = check_storage_semantics document in
     let%bind () = validate_raw_queue_capacity document in
     let capture = Decode_evidence.Capture.create ?previous ~limits () in
     let%bind carrier =

@@ -138,6 +138,68 @@ let%expect_test
   assert (A.Recurrence_cursor.equal (E.cursor delay) (E.cursor missed));
   let _, _, changed = step missed ~phase:None now in
   assert (not changed);
+  (* A target completion can precede a newly opened controller's elapsed origin.
+     Literal elapsed subtraction is independent of phase/clock constructors;
+     wall rollback must not retime this live receipt-derived deadline. *)
+  let next =
+    R.Cursor.Interval.create ~first_due:(at_ms 0)
+    |> R.Cursor.Interval.after_completion ~rule ~completed_at:(at_ms 0)
+    |> timing
+  in
+  List.iter [ -2_000_000_000L; 0L; 500_000_000L ] ~f:(fun completion_elapsed_ns ->
+    let phase =
+      Phase.from_completion
+        (E.current delay)
+        ~cursor:next
+        ~completed_at:(at_ms 0)
+        ~completion_elapsed_ns
+      |> protocol_ok
+    in
+    List.iter [ 0; 999; 1000; 1600; 4000 ] ~f:(fun elapsed_ms ->
+      let elapsed_ns = Int64.(of_int elapsed_ms * 1_000_000L) in
+      let current =
+        Phase.Snapshot.create ~wall:(at_ms (-1000000)) ~elapsed_ns |> protocol_ok
+      in
+      let since_completion = Int64.(elapsed_ns - completion_elapsed_ns) in
+      if Int64.(since_completion < 0L)
+      then (
+        assert (Result.is_error (Phase.due_count phase ~snapshot:current));
+        assert (Result.is_error (Phase.lateness_ns phase ~snapshot:current)))
+      else (
+        let expected_late =
+          if Int64.(since_completion < 1_000_000_000L)
+          then None
+          else Some Int64.(since_completion - 1_000_000_000L)
+        in
+        [%test_eq: int64 option]
+          (Phase.lateness_ns phase ~snapshot:current |> protocol_ok)
+          expected_late;
+        [%test_eq: int64]
+          (Phase.due_count phase ~snapshot:current |> protocol_ok)
+          (if Option.is_some expected_late then 1L else 0L))));
+  let overflow =
+    Phase.from_completion
+      (E.current delay)
+      ~cursor:next
+      ~completed_at:(at_ms 0)
+      ~completion_elapsed_ns:Int64.min_value
+    |> protocol_ok
+  in
+  assert (Result.is_error (Phase.lateness_ns overflow ~snapshot:now));
+  assert (
+    Result.is_error
+      (Phase.from_completion
+         (E.current delay)
+         ~cursor:(R.Cursor.Interval.create ~first_due:(at_ms 2000))
+         ~completed_at:(at_ms 0)
+         ~completion_elapsed_ns:0L));
+  assert (
+    Result.is_error
+      (Phase.from_completion
+         (E.current initial)
+         ~cursor:next
+         ~completed_at:(at_ms 0)
+         ~completion_elapsed_ns:0L));
   print_endline
     "live elapsed phase; honest restart catch-up; missed initial delay never invents \
      completion";

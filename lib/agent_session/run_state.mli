@@ -30,6 +30,25 @@ val goal_link : t -> Agent_protocol.Id.Run.t -> Run_goal_link.t option
     survive terminal/source/reset/recovery and cannot be reassigned or removed. *)
 val bind_goal : t -> Run_goal_link.t -> (t, Agent_protocol.Error.t) result
 
+(** Immutable reciprocal origins follow the existing bounded Run/receipt
+    retention policy. Complete nested carriers and wrapper unknowns are retained.
+    These values are data, never current execution authority. *)
+val recurrence_origins : t -> Recurrence_run_origin.t list
+
+val recurrence_origin : t -> Agent_protocol.Id.Run.t -> Recurrence_run_origin.t option
+
+(** One pure admission candidate: a new revision-zero Admitted Run, its exact new
+    Admission receipt and origin. No independent late-attach writer is exposed.
+    Exact retained origins retry as no-ops; conflicting or reassigned evidence
+    rejects. Final transition and complete index/terminal capacity are validated
+    before return. The actor still authenticates the real prepared owner. *)
+val commit_recurrence_admission
+  :  t
+  -> run:Agent_protocol.Run.t
+  -> receipt:Agent_protocol.Run_receipt.t
+  -> origin:Recurrence_run_origin.t
+  -> (t, Agent_protocol.Error.t) result
+
 val job_deliveries : t -> Run_job_delivery.t list
 val find_job_delivery : t -> Run_job_delivery.Key.t -> Run_job_delivery.t option
 

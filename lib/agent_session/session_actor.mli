@@ -2404,6 +2404,132 @@ val check_recurrence_creation
   -> Recurrence_creation.t
   -> (Recurrence_creation.Checked.t, Agent_protocol.Error.t) result
 
+(** Record the exact selected occurrence and original attempt zero through the
+    actual controller transaction. Requires fresh Send_messages and current host
+    policy for the exact retained definition in both branches. [authorize] must
+    not yield. Only a new record additionally requires a running ready controller,
+    current automatic birth/source, enabled control, current selection grace and
+    the actual caller as attempt principal. Exact retained original data remains
+    available after control/source changes under fresh policy, without a new
+    transaction. The original principal/control revision remain audit facts.
+
+    Returns immutable request data only after ACK and fresh reauthorization;
+    neither target visibility/execution permission, retry proof nor activation
+    authority is issued. Failed or unknown ACK never replaces request identities.
+    No target runtime is loaded, source installed or Run admitted. *)
+val record_recurrence_execution
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:
+       (Session_state.t
+        -> Recurrence_definition.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> intent:Recurrence_execution_intent.t
+  -> attempt:Recurrence_execution_attempt.t
+  -> (Recurrence_execution.t, Agent_protocol.Error.t) result
+
+module Recurrence_run_observation : sig
+  (** Actual target-owner observation of retained immutable Run evidence. No
+      constructor or decoder; native/decoded origin/reference data cannot mint
+      this value. The owning Store and exact target remain attached privately,
+      together with validation of saved extended terminal references against the
+      actual retained payload and any process-local completion clock sample.
+      A present invalid live clock is distinct from recovery absence. *)
+  type t
+
+  val origin : t -> Recurrence_run_origin.t
+  val terminal : t -> Recurrence_run_reference.t option
+
+  (** Synchronous, nonyielding original-read-policy, actual owner/lifecycle and
+      exact retained evidence check. Returning through the observation RPC is a
+      scheduling boundary: invoke this after yielding preparation immediately
+      before a separate owned effect. It grants nothing across a later yield. *)
+  val check_current : t -> (unit, Agent_protocol.Error.t) result
+end
+
+module Recurrence_import : sig
+  module Timing : sig
+    type t =
+      | No_successor
+      | Live_phase
+      | Recovery_adoption
+      | Held of Agent_protocol.Error.t
+  end
+
+  (** Result DATA, not a target or activation capability. Held accompanies an
+      acknowledged evidence-plus-review-hold candidate; its diagnostic does not
+      claim the commit failed. Retained/unavailable-detail results never install
+      a phase or rearm. Fresh controller visibility governs returned data after
+      ACK, without requerying a target or reusing its stale precommit witness. *)
+  type t =
+    { settlement : Recurrence_settlement.t
+    ; timing : Timing.t
+    }
+end
+
+(** Observe the exact immutable attempt through this actual target's owned
+    Store/Handle and retained Run index. Requires genuine current
+    View_session_transcript and nonyielding current host read policy, repeated
+    after the Store observation and after the callback. The reader may differ
+    from the original request principal. No runtime is loaded or initialized;
+    stopped and old-source terminal evidence remains readable under current
+    visibility policy. No automatic/execution authority is granted.
+
+    A missing retained request returns None, never a no-effects/retry proof.
+    A receipt lacking its exact reciprocal origin or terminal evidence rejects.
+    Positive observations validate the actual Admission and complete terminal
+    payload/canonical digest; no copied result history is stored. *)
+val observe_recurrence_run
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> intent:Recurrence_execution_intent.t
+  -> attempt:Recurrence_execution_attempt.t
+  -> (Recurrence_run_observation.t option, Agent_protocol.Error.t) result
+
+(** Import an actual opaque target observation from the same owned Store into
+    this controller's exact retained occurrence attempt. Requires fresh original
+    Send_messages and current evidence visibility for the historical definition;
+    the caller may differ from the stored audit principal. Both policy callbacks
+    are trusted and must not yield. No runtime is loaded or initialized.
+
+    Saved extended terminal references are authenticated against the target's
+    actual Run/receipt, then retained as complete original JSON by the pure owner. Unchanged
+    results require current visibility but write no transaction, increment no
+    counter and install no phase. Detail_not_retained makes no prior completion
+    or matching-receipt claim. Already acknowledged facts need no later target
+    lookup to classify pending work or explicitly enable a saved basis.
+
+    A new automatic successor additionally requires the current running,
+    enabled, source/birth/lifecycle match and [automatic_policy]. This policy
+    authorizes rearm metadata only, never target execution. Receipt wall and
+    actual surviving monotonic timing prepare the phase before persistence.
+    Missing process timing preserves wall reconciliation; invalid live timing
+    commits one historical evidence-plus-review-hold candidate and returns Held
+    alongside acknowledged DATA. Fact contradictions reject before persistence.
+
+    All target/controller policy callbacks precede callback-free final checks
+    of both original proofs, retained facts and actual owner/Current bases.
+    Nonyielding policy callbacks may revoke another proof; callback ordering alone
+    does not secure this joint fence. These checks precede the existing persistence
+    owner. ACK installs state and the prepared phase before publication. Return
+    visibility refreshes only the controller; a self-target's precommit witness
+    is not reused after its own ACK. A postACK visibility error does not claim
+    rollback. No retry, Run admission or activation authority is issued. *)
+val import_recurrence_execution
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:
+       (Session_state.t
+        -> Recurrence_definition.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> automatic_policy:
+       (Session_state.t
+        -> Recurrence_definition.t
+        -> (bool, Agent_protocol.Error.t) result)
+  -> observation:Recurrence_run_observation.t
+  -> (Recurrence_import.t, Agent_protocol.Error.t) result
+
 module Recurrence_child_link : sig
   (** Actual owned-child observation. No constructor, decoder or session-ID
       lookup can mint this proof. It retains a synchronous currentness check;

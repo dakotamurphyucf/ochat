@@ -1,6 +1,7 @@
 (** Durable metadata control for one recurrence ID. Immutable definition revisions
     and a shape-validated cursor are distinct from control revision. The pure due planner owns unadmitted nominal rows/alarms in a separate frontier.
-    This owner creates no target execution evidence. *)
+    Pure imports retain associated target execution data; actual observation
+    authentication and activation remain with their effectful owners. *)
 type t
 
 module Pause : sig
@@ -57,6 +58,15 @@ val reserve_child
     definition/control/cursor. Actual child proof and ACK belong to the actor. *)
 val link_child : t -> Recurrence_child_association.t -> (t, Agent_protocol.Error.t) result
 
+(** Pure ordinal-zero record candidate. Exact replay preserves original audit
+    data; a new request requires the current enabled definition/control. The
+    publisher authenticates actual current authority and persistence separately. *)
+val record_execution
+  :  t
+  -> intent:Recurrence_execution_intent.t
+  -> attempt:Recurrence_execution_attempt.t
+  -> (t * Recurrence_execution.t, Agent_protocol.Error.t) result
+
 (** Apply one exact-basis opaque pure plan while Enabled. Cursor/frontier advance
     together; control revision and immutable definitions stay unchanged. This is
     not lifecycle/source authorization or a persistence/dispatch operation. *)
@@ -65,7 +75,11 @@ val apply_due : t -> Recurrence_due_plan.t -> (t, Agent_protocol.Error.t) result
 (** Pure metadata changes. These functions supply no original operator, source,
     lifecycle or execution authority; the actor validates those separately.
     At most eight immutable revisions are retained; edits reject saturation.
-    A retired ID is a permanent tombstone and cannot be edited or enabled. *)
+    A retired ID is a permanent tombstone and cannot be edited or enabled.
+    A genuine new enable from an ordinary pause can consume an exact definitive
+    delay basis once, keeping its receipt-derived deadline. Review-held completed
+    or interrupted waits require explicit definition recovery; duplicate enable
+    never rearms. *)
 val edit : t -> Recurrence_definition.t -> (t, Agent_protocol.Error.t) result
 
 val enable : t -> (t, Agent_protocol.Error.t) result
@@ -82,7 +96,8 @@ val retire_lifecycle : t -> (t option, Agent_protocol.Error.t) result
 (** Complete previous immutable revisions and unknowns cannot disappear or be
     replaced. Control changes advance the control revision once; exact-basis due plans
     advance the planning revision while leaving control unchanged. Decoded updates obey the
-    same fences; historical snapshot admission is separate. *)
+    same fences; historical snapshot admission is separate. Paused and retired
+    entries admit exact evidence-only settlement without resurrection. *)
 val validate_transition : t -> incoming:t -> (unit, Agent_protocol.Error.t) result
 
 val of_document : Document_schema.Document.t -> (t, Document_schema.Error.t) result
@@ -112,3 +127,18 @@ val pending_child_associations : t -> int
     decimal growth. Never decode it as an entry, install it, or treat it as
     retirement evidence. All compatible child unknowns remain present. *)
 val capacity_projection : t -> (Jsonaf.t, Document_schema.Error.t) result
+
+(** Independent row proof commits, added to other owners' reserved transitions. *)
+val pending_execution_steps : t -> int
+
+(** Pure atomic terminal/origin data import. Paused/retired controls always force
+    evidence-only behavior regardless of the supplied policy data. A new current
+    definitive delay completion stores a basis and either rearms or remains held;
+    original intent control revision is audit only. The actual publisher must
+    authenticate the target observation and all current policy separately. *)
+val import_execution
+  :  t
+  -> origin:Recurrence_run_origin.t
+  -> terminal:Recurrence_run_reference.t option
+  -> automatic:Recurrence_settlement.Automatic.t
+  -> (t * Recurrence_settlement.t, Agent_protocol.Error.t) result

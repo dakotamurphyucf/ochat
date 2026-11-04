@@ -38,7 +38,7 @@ let capture (state : Session_state.t) ~shape ~document ~limits =
           ~kind:(D.Document.kind document)
           ~version:(D.Document.version document)
           ~shape
-          ~supported_semantics:Queue_provenance_semantics.supported
+          ~supported_semantics:Session_storage_semantics.supported
           ~decode:(fun json -> Ok json)
           ~encode:(fun json -> Ok json)
       in

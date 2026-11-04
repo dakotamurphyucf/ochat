@@ -9,7 +9,9 @@ open! Core
     value is None, including adoption and unrelated writes. The optional delivery
     subscription binding has the same policy, keyed by its typed delivery ID.
     A newly admitted Some value introduces its known field; wire presence never
-    supplies authority. *)
+    supplies authority. Run updates also validate against the retained template
+    and prior carrier, so encode/adopt cannot attach a new reciprocal origin to
+    an already retained Run or discard immutable Run/receipt custody. *)
 type t
 
 (** Version of newly authored complete session.state documents. *)

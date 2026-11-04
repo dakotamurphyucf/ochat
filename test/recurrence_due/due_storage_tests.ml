@@ -115,6 +115,7 @@ let%expect_test
          current
          ~incoming:(H.initial (E.current selected) |> protocol_ok)
          ~definitions:(E.definitions selected)
+         ~previous_cursor:(E.cursor selected)
          ~cursor:(F.initial_cursor (E.current selected))));
   print_endline
     "2 MiB boundary keeps exact alarm/batch metadata; byte/field/node reserves cover \

@@ -238,15 +238,18 @@ let%expect_test
               armed := true;
               let replied, reply = Eio.Promise.create () in
               Eio.Fiber.fork ~sw:fixture.sw (fun () ->
-                Eio.Promise.resolve reply (reserve actor "cut" (N.key nominal)));
+                Eio.Promise.resolve
+                  reply
+                  (capture_owner_call (fun () -> reserve actor "cut" (N.key nominal))));
               Eio.Time.with_timeout_exn (Eio.Stdenv.clock fixture.env) 5. (fun () ->
                 Eio.Promise.await entered;
                 Eio.Cancel.cancel cancel Exit;
                 Eio.Promise.await exited;
-                match Eio.Promise.await replied with
-                | Error { code = Server_shutting_down; _ } -> ()
-                | Ok _ -> failwith "owner death returned a permit"
-                | Error error -> raise_s [%sexp (error : P.Error.t)]);
+                assert_owner_cancelled (Eio.Promise.await replied));
+              (match A.Session_actor.state actor with
+               | Error { code = Server_shutting_down; _ } -> ()
+               | Ok _ -> failwith "terminated owner returned state"
+               | Error error -> raise_s [%sexp (error : P.Error.t)]);
               let _, restored, _ = restored_journal fixture in
               let recovered = A.Session_persistence.Restored.state restored in
               let recovered_entry =

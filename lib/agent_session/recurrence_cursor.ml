@@ -155,6 +155,31 @@ let consume_initial_delay t ~rule =
     invalid "fixed-delay initial selection cannot rearm execution"
 ;;
 
+let consume_delay t ~rule =
+  match t.position with
+  | Interval cursor
+    when R.Rule.Interval.equal_mode (R.Rule.Interval.mode rule) Fixed_delay ->
+    let%map.Result occurrence =
+      I.Occurrence.create ~definition:t.definition ~slot:(R.Cursor.Interval.slot cursor)
+    in
+    { t with position = Awaiting_completion occurrence }
+  | Interval _ | Calendar _ | Awaiting_completion _ | Exhausted ->
+    invalid "fixed-delay consumption requires its current interval selection"
+;;
+
+let rearm_delay t ~occurrence ~next =
+  match t.position with
+  | Awaiting_completion expected
+    when I.Occurrence.equal expected occurrence
+         && (not (Int64.equal (I.Occurrence.slot occurrence) Int64.max_value))
+         && Int64.equal
+              (R.Cursor.Interval.slot next)
+              (Int64.succ (I.Occurrence.slot occurrence)) ->
+    Ok { t with position = Interval next }
+  | Interval _ | Calendar _ | Awaiting_completion _ | Exhausted ->
+    invalid "fixed-delay rearm differs from exact awaiting occurrence/successor slot"
+;;
+
 let of_json json ~rule =
   let open Result.Let_syntax in
   let%bind () =

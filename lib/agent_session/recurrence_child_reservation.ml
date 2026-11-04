@@ -193,7 +193,7 @@ let validate t ~definition =
   match Recurrence_target.view (F.target definition) with
   | Existing_session _ ->
     invalid "creation reservation requires captured fresh-child target"
-  | Fresh_child { artifact; definition = _; parent = _ } ->
+  | Fresh_child { artifact; definition = _; parent = _; mode = _ } ->
     let artifact = Agent_store.Captured_prompt_artifact.value artifact in
     if
       String.equal p.target_sha256 target_sha256
@@ -233,7 +233,7 @@ let create
   match Recurrence_target.view (F.target definition) with
   | Existing_session _ ->
     invalid "creation reservation requires captured fresh-child target"
-  | Fresh_child { artifact; definition = _; parent = _ } ->
+  | Fresh_child { artifact; definition = _; parent = _; mode = _ } ->
     let artifact = Agent_store.Captured_prompt_artifact.value artifact in
     let p =
       { nominal

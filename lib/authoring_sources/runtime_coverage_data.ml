@@ -671,7 +671,7 @@ let implementation_sources =
   ; ( "bin/ochat_agent_stdio.ml"
     , "8d134cd11c7df2a60e6b4b77a5ff7f9ea0c28a8a2674a3dd9f573adaa7623902" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "67d084d4927c00551917b94d2940b78bd2718743b267fca8eca2a42e3c3d9dcf" )
+    , "9cf2b179c0cce1eeb898d9a85b5b356b6e4f497bdf457463b22d42aa0d5f41e8" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"
@@ -917,7 +917,7 @@ let implementation_sources =
   ; ( "lib/agent_session/script_subscription_service.ml"
     , "54c775836b551733687e907ff46a2a7a0cc26bd46ff915cc6fd5f0cf5116f069" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "14ca4bb6d33f1decf6acf5d971b9c340d692dcb85c36f929fc9b0b4aa434ced1" )
+    , "737ff5c13c2a69ac8ea45d5bef313e8e3c81df247644f9a3344b77835bd8be38" )
   ; ( "lib/agent_session/staged_jobs.ml"
     , "7731a0fc9f021188e3856041fe493f3044556bc7a15364815c47299fe968603b" )
   ; ( "lib/agent_session/staged_notifications.ml"

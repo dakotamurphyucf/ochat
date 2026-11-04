@@ -21,11 +21,23 @@
   recurrence_child_reservation
   recurrence_child_association
   recurrence_child_origin
+  recurrence_execution_intent
+  recurrence_execution_attempt
+  recurrence_run_origin
+  recurrence_run_reference
+  recurrence_retry_resolution
+  recurrence_execution_capacity
+  recurrence_execution_record
+  recurrence_execution
+  recurrence_executions
+  recurrence_delay_basis
+  recurrence_settlement
   captured_recurrence_source
   recurrence_selection_grace
   recurrence_frontier_records
   recurrence_frontier_codec
   recurrence_frontier_transition
+  recurrence_frontier_settlement
   recurrence_frontier
   recurrence_due_plan
   recurrence_parent
@@ -42,6 +54,8 @@
   recurrence_command_transition
   recurrence_command_admission
   recurrence_creation_admission
+  recurrence_execution_admission
+  recurrence_settlement_admission
   recurrence_source
   recurrence_reconciliation
   recurrence_recovery
@@ -122,6 +136,7 @@
   configuration_capture
   configuration_policy
   queue_provenance_semantics
+  session_storage_semantics
   queue_producer
   queue_payload
   moderator_queue
@@ -134,6 +149,7 @@
   run_record_shapes
   run_goal_link
   run_goal_links
+  run_recurrence_origins
   goal_document
   goal_command
   goal_command_receipt
@@ -296,7 +312,7 @@
   goal_accounting_document
   goal_accounts
   inference_ledger)
- (private_modules actor_reply queue_payload recurrence_runtime recurrence_frontier_records recurrence_frontier_codec recurrence_frontier_transition agent_authority_scope goal_accounting_state goal_accounting_stored instruction_selection_capacity instruction_selection_record workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles
+ (private_modules actor_reply recurrence_execution_capacity recurrence_executions run_recurrence_origins queue_payload recurrence_runtime recurrence_execution_record recurrence_frontier_records recurrence_frontier_codec recurrence_frontier_transition recurrence_frontier_settlement agent_authority_scope goal_accounting_state goal_accounting_stored instruction_selection_capacity instruction_selection_record workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles
   prompt_project_baseline_record prompt_project_baseline_document native_tool_policy)
  (libraries ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript
   core

@@ -24,6 +24,7 @@ type t =
   ; receipts : P.Run_receipt.t Map.M(Receipt_key).t
   ; job_deliveries : Run_job_deliveries.t
   ; goal_links : Run_goal_links.t
+  ; recurrence_origins : Run_recurrence_origins.t
   }
 
 let empty =
@@ -33,6 +34,7 @@ let empty =
   ; receipts = Map.empty (module Receipt_key)
   ; job_deliveries = Run_job_deliveries.empty
   ; goal_links = Run_goal_links.empty
+  ; recurrence_origins = Run_recurrence_origins.empty
   }
 ;;
 
@@ -45,6 +47,10 @@ let equal_observation t other =
        Run_goal_link.equal
        (Run_goal_links.entries t.goal_links)
        (Run_goal_links.entries other.goal_links)
+  && List.equal
+       Recurrence_run_origin.equal
+       (Run_recurrence_origins.entries t.recurrence_origins)
+       (Run_recurrence_origins.entries other.recurrence_origins)
 ;;
 
 let installation t = t.installation
@@ -54,6 +60,8 @@ let receipts t = Map.data t.receipts
 let job_deliveries t = Run_job_deliveries.entries t.job_deliveries
 let goal_links t = Run_goal_links.entries t.goal_links
 let goal_link t id = Run_goal_links.find t.goal_links id
+let recurrence_origins t = Run_recurrence_origins.entries t.recurrence_origins
+let recurrence_origin t id = Run_recurrence_origins.find t.recurrence_origins id
 let find_job_delivery t key = Run_job_deliveries.find t.job_deliveries key
 
 let enqueued_job_frame t ~frame =
@@ -78,6 +86,21 @@ let validate_goal_links t =
     | _, _ ->
       Error
         (P.Error.invalid_request "goal association lacks its exact Workflow admission"))
+;;
+
+let validate_recurrence_origins t =
+  List.fold_result (recurrence_origins t) ~init:() ~f:(fun () origin ->
+    let admission = Recurrence_run_origin.admission origin in
+    match
+      ( find t (Recurrence_run_origin.run_id origin)
+      , Map.find t.receipts (receipt_key admission) )
+    with
+    | Some run, Some retained ->
+      Recurrence_run_origin.validate_run origin ~run ~admission:retained
+    | _, _ ->
+      Error
+        (P.Error.invalid_request
+           "recurrence origin lacks its exact retained Run admission"))
 ;;
 
 let receipt t ~principal_id ~key ~request_sha256 =
@@ -168,7 +191,8 @@ let to_jsonaf t =
      ; "receipts", X.list_json P.Run_receipt.to_json (receipts t)
      ]
      @ Run_job_deliveries.fields t.job_deliveries
-     @ Run_goal_links.fields t.goal_links)
+     @ Run_goal_links.fields t.goal_links
+     @ Run_recurrence_origins.fields t.recurrence_origins)
 ;;
 
 let reserved_bytes t =
@@ -253,11 +277,21 @@ let validate_encoded_capacity_with_reserve t ~additional_bytes json =
     in
     if remaining <= 0
     then Error (P.Error.invalid_request "Run lacks reserved terminal capacity")
-    else
-      P.Json_codec.validate_limits
-        ~max_bytes:remaining
-        ~max_depth:P.Run_limits.max_depth
-        json)
+    else (
+      let%bind limits =
+        Document_schema.Limits.create
+          ~max_bytes:remaining
+          ~max_depth:(Document_schema.Limits.max_depth limits)
+          ~max_fields:(Document_schema.Limits.max_fields limits)
+          ~max_nodes:(Document_schema.Limits.max_nodes limits)
+        |> Result.map_error ~f:(fun error ->
+          P.Error.invalid_request
+            (Sexp.to_string_hum (Document_schema.Error.sexp_of_t error)))
+      in
+      Document_schema.Json.validate ~limits json
+      |> Result.map_error ~f:(fun error ->
+        P.Error.invalid_request
+          (Sexp.to_string_hum (Document_schema.Error.sexp_of_t error)))))
 ;;
 
 let validate_encoded_capacity t json =
@@ -414,10 +448,9 @@ let replace_installation t ~installation ~retired_runs =
 let of_jsonaf json =
   let open Result.Let_syntax in
   let%bind () =
-    P.Json_codec.validate_limits
-      ~max_bytes:P.Run_limits.max_document_bytes
-      ~max_depth:P.Run_limits.max_depth
-      json
+    Document_schema.Json.validate ~limits:capacity_limits json
+    |> Result.map_error ~f:(fun error ->
+      P.Error.invalid_request (Sexp.to_string_hum (Document_schema.Error.sexp_of_t error)))
   in
   let%bind fields = J.fields json in
   let%bind installation =
@@ -458,9 +491,23 @@ let of_jsonaf json =
     Run_goal_links.of_field
       (List.Assoc.find (J.to_alist fields) ~equal:String.equal "goal_links")
   in
-  let t = { installation; runs; receipts; intents; job_deliveries; goal_links } in
+  let%bind recurrence_origins =
+    Run_recurrence_origins.of_field
+      (List.Assoc.find (J.to_alist fields) ~equal:String.equal "recurrence_origins")
+  in
+  let t =
+    { installation
+    ; runs
+    ; receipts
+    ; intents
+    ; job_deliveries
+    ; goal_links
+    ; recurrence_origins
+    }
+  in
   let%bind () = validate_encoded_capacity t json in
   let%bind () = validate_goal_links t in
+  let%bind () = validate_recurrence_origins t in
   let%bind () =
     Map.fold receipts ~init:(Ok ()) ~f:(fun ~key:_ ~data:receipt result ->
       let%bind () = result in
@@ -530,6 +577,7 @@ let shape =
     ; "receipts", X.array_shape_exn Run_record_shapes.receipt
     ; "job_deliveries", Run_job_deliveries.shape
     ; "goal_links", Run_goal_links.shape
+    ; "recurrence_origins", Document_schema.Shape.value
     ]
 ;;
 
@@ -537,6 +585,7 @@ let validate t ~session_id ~generation =
   let%bind.Result () = validate_document_size t in
   let%bind.Result () = validate_job_deliveries t in
   let%bind.Result () = validate_goal_links t in
+  let%bind.Result () = validate_recurrence_origins t in
   Map.fold t.runs ~init:(Ok ()) ~f:(fun ~key:_ ~data:run accumulated ->
     let%bind.Result () = accumulated in
     if not (P.Id.Session.equal (P.Session_ref.session_id run.session) session_id)
@@ -552,6 +601,33 @@ let validate t ~session_id ~generation =
 
 let validate_transition ~previous next =
   let open Result.Let_syntax in
+  let%bind () =
+    Run_recurrence_origins.validate_transition
+      ~previous:previous.recurrence_origins
+      next.recurrence_origins
+  in
+  let%bind () = validate_recurrence_origins next in
+  let%bind () =
+    List.fold_result (recurrence_origins next) ~init:() ~f:(fun () origin ->
+      let id = Recurrence_run_origin.run_id origin in
+      match recurrence_origin previous id with
+      | Some _ -> Ok ()
+      | None ->
+        let admission = Recurrence_run_origin.admission origin in
+        (match
+           ( find previous id
+           , find next id
+           , Map.find previous.receipts (receipt_key admission) )
+         with
+         | None, Some run, None
+           when Int64.equal run.revision 0L
+                && P.Run.Lifecycle.equal run.lifecycle Admitted -> Ok ()
+         | _, _, _ ->
+           Error
+             (P.Error.invalid_request
+                "new recurrence origin requires a new Run and Admission in the same \
+                 transition")))
+  in
   let%bind () =
     Run_goal_links.validate_transition ~previous:previous.goal_links next.goal_links
   in
@@ -642,6 +718,41 @@ let validate_transition ~previous next =
                 "source replacement did not interrupt former live run")))
   in
   ()
+;;
+
+let commit_recurrence_admission t ~(run : P.Run.t) ~receipt ~origin =
+  let open Result.Let_syntax in
+  let%bind () = Recurrence_run_origin.validate_run origin ~run ~admission:receipt in
+  match recurrence_origin t run.id with
+  | Some retained when Recurrence_run_origin.equal retained origin ->
+    (match find t run.id, Map.find t.receipts (receipt_key receipt) with
+     | Some actual_run, Some actual_receipt
+       when P.Run.equal actual_run run && P.Run_receipt.equal actual_receipt receipt ->
+       Ok t
+     | _, _ ->
+       Error
+         (P.Error.invalid_request
+            "duplicate recurrence admission differs from retained Run evidence"))
+  | Some _ -> Error (P.Error.invalid_request "Run recurrence origin is immutable")
+  | None ->
+    let%bind () =
+      if
+        Map.mem t.runs run.id
+        || Map.mem t.receipts (receipt_key receipt)
+        || not
+             (Int64.equal run.revision 0L && P.Run.Lifecycle.equal run.lifecycle Admitted)
+      then
+        Error (P.Error.invalid_request "recurrence admission requires a new admitted Run")
+      else Ok ()
+    in
+    let%bind next = commit t ~run ~receipt ~intent:None in
+    let%bind recurrence_origins =
+      Run_recurrence_origins.add t.recurrence_origins origin
+    in
+    let next = { next with recurrence_origins } in
+    let%bind () = validate_transition ~previous:t next in
+    let%map () = validate_document_size next in
+    next
 ;;
 
 let bind_goal t link =

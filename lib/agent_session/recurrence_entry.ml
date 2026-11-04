@@ -130,7 +130,15 @@ let pending_child_associations t =
   | Some frontier -> List.length (Recurrence_frontier.unlinked_children frontier.value)
 ;;
 
-let required_transition_steps t = steps (control t) + pending_child_associations t
+let pending_execution_steps t =
+  match (C.value t).frontier with
+  | None -> 0
+  | Some frontier -> Recurrence_frontier.pending_execution_steps frontier.value
+;;
+
+let required_transition_steps t =
+  steps (control t) + pending_child_associations t + pending_execution_steps t
+;;
 
 let limits =
   D.Limits.create
@@ -513,6 +521,136 @@ let control_frontier p ~definitions ~control =
     Result.map (Stored_frontier.create next) ~f:Option.some
 ;;
 
+let advance_control p control =
+  if equal_control p.control control
+  then Ok p.control_revision
+  else if Int64.equal p.control_revision Int64.max_value
+  then invalid "recurrence control frontier exhausted"
+  else Ok (Int64.succ p.control_revision)
+;;
+
+let settlement_projection p ~origin ~terminal ~automatic =
+  let open Result.Let_syntax in
+  let%bind old =
+    Result.of_option
+      p.frontier
+      ~error:(P.Error.invalid_request "historical recurrence lacks execution frontier")
+  in
+  let automatic =
+    match p.control with
+    | Enabled -> automatic
+    | Paused _ | Retired _ -> Recurrence_settlement.Automatic.Historical_only
+  in
+  let%bind plan =
+    Recurrence_frontier.import_execution
+      old.value
+      ~definitions:p.definitions
+      ~cursor:p.cursor
+      ~origin
+      ~terminal
+      ~automatic
+  in
+  let%bind frontier = Stored_frontier.create plan.frontier in
+  let control =
+    match p.control, plan.result with
+    | Enabled, Recurrence_settlement.Imported { next = Review_hold _; _ } ->
+      Paused Recovery_review
+    | Enabled, Imported { execution; next = Evidence_only } ->
+      let key =
+        Recurrence_execution_intent.occurrence (Recurrence_execution.intent execution)
+      in
+      let current = current_projection p in
+      let fixed_delay =
+        match F.schedule current with
+        | Calendar _ -> false
+        | Interval { rule; _ } ->
+          Recurrence_rules.Rule.Interval.equal_mode
+            (Recurrence_rules.Rule.Interval.mode rule)
+            Fixed_delay
+      in
+      if
+        fixed_delay
+        && (not (Recurrence_execution.is_pending execution))
+        && I.Definition.equal (I.Occurrence.definition key) (F.key current)
+      then Paused Recovery_review
+      else Enabled
+    | ( (Enabled | Paused _ | Retired _)
+      , (Imported _ | Retained_exact _ | Detail_not_retained _) ) -> p.control
+  in
+  let%map control_revision = advance_control p control in
+  ( { p with frontier = Some frontier; cursor = plan.cursor; control; control_revision }
+  , plan.result )
+;;
+
+let enable_projection p =
+  let open Result.Let_syntax in
+  match p.control with
+  | Retired _ -> invalid "retired recurrence cannot be enabled"
+  | Enabled -> Ok p
+  | Paused reason ->
+    if Int64.equal p.control_revision Int64.max_value
+    then invalid "recurrence control frontier exhausted"
+    else (
+      let%bind control, cursor, frontier =
+        match Recurrence_cursor.position p.cursor, p.frontier with
+        | Awaiting_completion expected, Some frontier ->
+          let exact_basis =
+            Option.exists
+              (Recurrence_frontier.delay_basis frontier.value)
+              ~f:(fun basis ->
+                I.Occurrence.equal expected (Recurrence_delay_basis.occurrence basis))
+          in
+          if exact_basis
+          then (
+            match reason with
+            | Source_review | Recovery_review ->
+              invalid
+                "review-held completed recurrence requires explicit definition recovery"
+            | Operator_pause | Controller_stop ->
+              let%bind plan =
+                Recurrence_frontier.resume_delay
+                  frontier.value
+                  ~definitions:p.definitions
+                  ~cursor:p.cursor
+              in
+              let%map frontier = Stored_frontier.create plan.frontier in
+              let control =
+                match plan.next with
+                | Review_hold _ -> Paused Recovery_review
+                | Successor _ -> Enabled
+                | Evidence_only -> assert false
+              in
+              control, plan.cursor, Some frontier)
+          else (
+            let pending =
+              match Recurrence_frontier.find_execution frontier.value expected with
+              | Some execution -> Recurrence_execution.is_pending execution
+              | None ->
+                List.exists
+                  (Recurrence_frontier.protected_children frontier.value)
+                  ~f:(fun row ->
+                    I.Occurrence.equal
+                      expected
+                      (Recurrence_child_reservation.occurrence row))
+            in
+            if pending
+            then Ok (Enabled, p.cursor, p.frontier)
+            else
+              invalid
+                "unarmed fixed-delay recurrence requires a new definition or explicit \
+                 recovery")
+        | (Interval _ | Calendar _ | Exhausted), _ | Awaiting_completion _, None ->
+          Ok (Enabled, p.cursor, p.frontier)
+      in
+      Ok
+        { p with
+          control
+        ; control_revision = Int64.succ p.control_revision
+        ; cursor
+        ; frontier
+        })
+;;
+
 let validate_transition previous ~incoming =
   let open Result.Let_syntax in
   let%bind () = validate_projection (C.value incoming) in
@@ -539,12 +677,78 @@ let validate_transition previous ~incoming =
     && Int64.equal p.control_revision n.control_revision
     && not unchanged
   in
+  let evidence =
+    match p.frontier, n.frontier with
+    | Some old, Some next ->
+      List.filter_map (Recurrence_frontier.executions next.value) ~f:(fun execution ->
+        let key =
+          Recurrence_execution_intent.occurrence (Recurrence_execution.intent execution)
+        in
+        match Recurrence_frontier.find_execution old.value key with
+        | None -> None
+        | Some previous ->
+          let old = Recurrence_execution.current_attempt previous in
+          let next = Recurrence_execution.current_attempt execution in
+          if
+            Option.equal
+              Recurrence_run_origin.equal
+              (Recurrence_execution.Attempt.origin old)
+              (Recurrence_execution.Attempt.origin next)
+            && Option.equal
+                 Recurrence_run_reference.equal
+                 (Recurrence_execution.Attempt.terminal old)
+                 (Recurrence_execution.Attempt.terminal next)
+          then None
+          else Some execution)
+    | None, _ | Some _, None -> []
+  in
   let%bind () =
     if unchanged
     then
       if Int64.equal p.control_revision n.control_revision
       then Ok ()
       else invalid "unchanged recurrence advanced control"
+    else if not (List.is_empty evidence)
+    then (
+      match evidence, added with
+      | [ execution ], [] ->
+        let attempt = Recurrence_execution.current_attempt execution in
+        let%bind origin =
+          Result.of_option
+            (Recurrence_execution.Attempt.origin attempt)
+            ~error:(P.Error.invalid_request "settlement entry lacks origin")
+        in
+        let terminal = Recurrence_execution.Attempt.terminal attempt in
+        let candidate automatic =
+          let%map expected, _ = settlement_projection p ~origin ~terminal ~automatic in
+          D.Json.equal (raw_json expected) (raw_json n)
+        in
+        (match candidate Historical_only with
+         | Ok true -> Ok ()
+         | Ok false | Error _ ->
+           (match p.control with
+            | Paused _ | Retired _ ->
+              invalid "held or retired settlement cannot rearm or alter control"
+            | Enabled ->
+              (match candidate Current_policy_allows with
+               | Ok true -> Ok ()
+               | Ok false | Error _ ->
+                 invalid "entry differs from exact atomic settlement")))
+      | [], _ | _ :: _ :: _, _ | [ _ ], _ :: _ ->
+        invalid "entry imports multiple facts or changes definitions")
+    else if
+      List.is_empty added
+      &&
+      match p.control, n.control with
+      | Paused (Operator_pause | Controller_stop), (Enabled | Paused Recovery_review) ->
+        true
+      | Paused (Source_review | Recovery_review), Enabled -> true
+      | (Enabled | Retired _ | Paused _), (Enabled | Paused _ | Retired _) -> false
+    then (
+      let%bind expected = enable_projection p in
+      if D.Json.equal (raw_json expected) (raw_json n)
+      then Ok ()
+      else invalid "enable differs from exact stored completion-basis candidate")
     else if due
     then (
       match p.frontier, n.frontier with
@@ -554,6 +758,7 @@ let validate_transition previous ~incoming =
             old.value
             ~incoming:next.value
             ~definitions:n.definitions
+            ~previous_cursor:p.cursor
             ~cursor:n.cursor
         in
         if
@@ -662,10 +867,15 @@ let edit t definition =
 ;;
 
 let enable t =
-  match control t with
-  | Retired _ -> invalid "retired recurrence cannot be enabled"
-  | Enabled | Paused _ ->
-    change t ~definitions:(definitions t) ~control:Enabled ~cursor:(cursor t)
+  let open Result.Let_syntax in
+  let%bind projection = enable_projection (C.value t) in
+  if D.Json.equal (raw_json projection) (raw_json (C.value t))
+  then Ok t
+  else (
+    let candidate = C.with_value t projection in
+    let%bind () = validate_transition t ~incoming:candidate in
+    let%map _ = to_document candidate |> protocol in
+    candidate)
 ;;
 
 let pause t ~reason =
@@ -749,6 +959,41 @@ let link_child t association =
       candidate))
 ;;
 
+let record_execution t ~intent ~attempt =
+  let open Result.Let_syntax in
+  let%bind old = frontier t in
+  let occurrence = Recurrence_execution_intent.occurrence intent in
+  let%bind definition =
+    Result.of_option
+      (List.find (definitions t) ~f:(fun definition ->
+         I.Definition.equal (F.key definition) (I.Occurrence.definition occurrence)))
+      ~error:(P.Error.invalid_request "execution definition is not retained")
+  in
+  let duplicate = Option.is_some (Recurrence_frontier.find_execution old occurrence) in
+  let%bind () =
+    if
+      duplicate
+      || (equal_control (control t) Enabled
+          && I.Definition.equal (F.key definition) (F.key (current t))
+          && Int64.equal
+               (Recurrence_execution_intent.control_revision intent)
+               (control_revision t))
+    then Ok ()
+    else invalid "new execution requires exact enabled definition/control"
+  in
+  let%bind next, row =
+    Recurrence_frontier.record_execution old ~definition ~intent ~attempt
+  in
+  if Int64.equal (Recurrence_frontier.revision old) (Recurrence_frontier.revision next)
+  then Ok (t, row)
+  else (
+    let%bind frontier = Stored_frontier.create next in
+    let candidate = C.with_value t { (C.value t) with frontier = Some frontier } in
+    let%bind () = validate_transition t ~incoming:candidate in
+    let%map _ = to_document candidate |> protocol in
+    candidate, row)
+;;
+
 let effective_control t ~current_revision ~archived =
   let birth = F.birth_lifecycle_revision (current t) in
   let comparison = P.Session_lifecycle.Revision.compare birth current_revision in
@@ -789,4 +1034,18 @@ let capacity_projection t =
     else D.Domain_codec.encode probe_codec (C.with_value t json)
   in
   D.Document.json document
+;;
+
+let import_execution t ~origin ~terminal ~automatic =
+  let open Result.Let_syntax in
+  let%bind projection, result =
+    settlement_projection (C.value t) ~origin ~terminal ~automatic
+  in
+  if D.Json.equal (raw_json projection) (raw_json (C.value t))
+  then Ok (t, result)
+  else (
+    let candidate = C.with_value t projection in
+    let%bind () = validate_transition t ~incoming:candidate in
+    let%map _ = to_document candidate |> protocol in
+    candidate, result)
 ;;

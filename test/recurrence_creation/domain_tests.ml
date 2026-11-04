@@ -135,6 +135,7 @@ let%expect_test
            frontier
            ~incoming:erased
            ~definitions:(E.definitions reserved)
+           ~previous_cursor:(E.cursor reserved)
            ~cursor:(E.cursor reserved)));
     let replacement =
       Reservation.create
@@ -163,6 +164,7 @@ let%expect_test
            frontier
            ~incoming
            ~definitions:(E.definitions reserved)
+           ~previous_cursor:(E.cursor reserved)
            ~cursor:(E.cursor reserved)));
     let capacity = H.capacity_projection frontier |> document_ok in
     let original_markers = D.Document.required_semantics document in

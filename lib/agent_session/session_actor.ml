@@ -45,6 +45,47 @@ module Recurrence_child_link = struct
   let check_current t = t.check_current ()
 end
 
+module Recurrence_run_observation = struct
+  type t =
+    { origin : Recurrence_run_origin.t
+    ; terminal : Recurrence_run_reference.t option
+    ; controller : Recurrence_controller.t
+    ; check_current : unit -> (unit, Agent_protocol.Error.t) result
+    ; check_basis : unit -> (unit, Agent_protocol.Error.t) result
+    ; validate_reference :
+        Recurrence_run_reference.t -> (unit, Agent_protocol.Error.t) result
+    ; completion : Recurrence_runtime.Completion.t option
+    }
+
+  let origin t = t.origin
+  let terminal t = t.terminal
+  let check_current t = t.check_current ()
+end
+
+module Recurrence_import = struct
+  module Timing = struct
+    type t =
+      | No_successor
+      | Live_phase
+      | Recovery_adoption
+      | Held of Agent_protocol.Error.t
+  end
+
+  type t =
+    { settlement : Recurrence_settlement.t
+    ; timing : Timing.t
+    }
+end
+
+module Recurrence_import_candidate = struct
+  type t =
+    { admission : Recurrence_settlement_admission.t
+    ; transition : Session_transition.t
+    ; phase : Recurrence_runtime.Completion_phase.t option
+    ; timing : Recurrence_import.Timing.t
+    }
+end
+
 module Runtime_retirement = struct
   type outcome =
     ((unit, Agent_protocol.Error.t) result, exn * Stdlib.Printexc.raw_backtrace) result
@@ -701,6 +742,30 @@ type _ request =
   | Check_recurrence_creation :
       Recurrence_creation.t
       -> Recurrence_creation.Checked.t request
+  | Record_recurrence_execution :
+      Operator_authorization.t
+      * (Session_state.t
+         -> Recurrence_definition.t
+         -> (unit, Agent_protocol.Error.t) result)
+      * Recurrence_execution_intent.t
+      * Recurrence_execution_attempt.t
+      -> Recurrence_execution.t request
+  | Observe_recurrence_run :
+      Operator_authorization.t
+      * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+      * Recurrence_execution_intent.t
+      * Recurrence_execution_attempt.t
+      -> Recurrence_run_observation.t option request
+  | Import_recurrence_execution :
+      Operator_authorization.t
+      * (Session_state.t
+         -> Recurrence_definition.t
+         -> (unit, Agent_protocol.Error.t) result)
+      * (Session_state.t
+         -> Recurrence_definition.t
+         -> (bool, Agent_protocol.Error.t) result)
+      * Recurrence_run_observation.t
+      -> Recurrence_import.t request
   | Verify_recurrence_child :
       Recurrence_child_reservation.t
       -> Recurrence_child_link.t request
@@ -1476,11 +1541,25 @@ let publish_committed_transition t (transition : Session_transition.t) =
   t.services.state_committed t.state transition.events
 ;;
 
-let install ?run_preparation ?commit_attempted t transition =
+let install ?run_preparation ?commit_attempted ?completion_sample t transition =
   let open Result.Let_syntax in
+  let%bind completion_plan =
+    match completion_sample with
+    | None -> Ok None
+    | Some sample ->
+      Recurrence_runtime.prepare_completions
+        t.recurrence_runtime
+        ~sample
+        ~previous:t.state
+        ~current:transition.Session_transition.state
+      |> Result.map ~f:Option.some
+  in
   Option.iter commit_attempted ~f:(fun attempted -> attempted := true);
   let%bind () = persist_transition t transition in
   install_committed_transition ?run_preparation t transition;
+  Option.iter
+    completion_plan
+    ~f:(Recurrence_runtime.install_completions t.recurrence_runtime);
   publish_committed_transition t transition;
   Ok ()
 ;;
@@ -1525,10 +1604,12 @@ let prepare_transition ?run_preparation t ~delta ~payloads =
   prepared
 ;;
 
-let transition ?run_preparation ?commit_attempted t ~delta ~payloads =
+let transition ?run_preparation ?commit_attempted ?completion_sample t ~delta ~payloads =
   let open Result.Let_syntax in
   let%bind transition = prepare_transition ?run_preparation t ~delta ~payloads in
-  let%map () = install ?run_preparation ?commit_attempted t transition in
+  let%map () =
+    install ?run_preparation ?commit_attempted ?completion_sample t transition
+  in
   Agent_protocol.Session.(Session_state.summary t.state)
 ;;
 
@@ -4647,10 +4728,25 @@ let run_actions_internal t (executing : Agent_protocol.Moderator_execution.t) =
        Some owner)
 ;;
 
+module Prepared_run_delta = struct
+  type t =
+    { deltas : Session_delta.t list
+    ; completion_sample : Recurrence_runtime.Completion.sample option
+    }
+
+  let empty = { deltas = []; completion_sample = None }
+end
+
+let completion_clock_pair t =
+  let wall = t.services.now () in
+  let monotonic = t.services.monotonic_now () in
+  wall, Recurrence_runtime.Completion.sample ~wall ~monotonic
+;;
+
 let prepared_run_delta t (borrow : queued_event_borrow) completed requests job_deltas =
   let open Result.Let_syntax in
   match borrow.run_actions with
-  | None -> Ok []
+  | None -> Ok Prepared_run_delta.empty
   | Some owner ->
     let scope = Run_action_service.scope owner in
     let%bind () = check_run_authority t scope in
@@ -4706,7 +4802,7 @@ let prepared_run_delta t (borrow : queued_event_borrow) completed requests job_d
       && List.is_empty owned_work
       && (not owns_callback)
       && not initial_single_turn
-    then Ok []
+    then Ok Prepared_run_delta.empty
     else (
       let%bind work_transition =
         prepare_transition
@@ -4715,6 +4811,7 @@ let prepared_run_delta t (borrow : queued_event_borrow) completed requests job_d
             (Session_delta.Batch (job_deltas @ [ Moderator_execution_changed completed ]))
           ~payloads:[]
       in
+      let now, completion_sample = completion_clock_pair t in
       let%bind prepared =
         Run_transition.prepare
           t.state
@@ -4723,7 +4820,7 @@ let prepared_run_delta t (borrow : queued_event_borrow) completed requests job_d
           ~work_state:work_transition.state
           ~owned_work
           ~action
-          ~now:(t.services.now ())
+          ~now
       in
       let%bind () =
         match action with
@@ -4753,7 +4850,10 @@ let prepared_run_delta t (borrow : queued_event_borrow) completed requests job_d
         | Some intent ->
           Goal_run_transition.prepare_request t.state ~scope ~prepared ~intent
       in
-      Run_transition.delta prepared :: goal_deltas)
+      Prepared_run_delta.
+        { deltas = Run_transition.delta prepared :: goal_deltas
+        ; completion_sample = Some completion_sample
+        })
 ;;
 
 let commit_queued_event t borrow snapshot requests decision notifications =
@@ -4827,7 +4927,7 @@ let commit_queued_event t borrow snapshot requests decision notifications =
   let%bind job_deltas, job_payloads =
     staged_work_changes t (Agent_protocol.Job.Moderator_event borrow.receipt.context.id)
   in
-  let%bind run_deltas = prepared_run_delta t borrow completed requests job_deltas in
+  let%bind run_change = prepared_run_delta t borrow completed requests job_deltas in
   let%bind _ =
     with_intent_agent_custody
       t
@@ -4836,6 +4936,7 @@ let commit_queued_event t borrow snapshot requests decision notifications =
       (event_agent_custody t borrow)
       (fun () ->
          transition
+           ?completion_sample:run_change.completion_sample
            t
            ~delta:
              (Session_delta.Batch
@@ -4845,7 +4946,7 @@ let commit_queued_event t borrow snapshot requests decision notifications =
                        (Some (Runtime_builder.encode_moderator_snapshot snapshot))
                    ]
                  @ job_deltas
-                 @ run_deltas))
+                 @ run_change.deltas))
            ~payloads:
              (job_payloads
               @ List.map notifications ~f:(fun message ->
@@ -4910,25 +5011,30 @@ let finish_queued_event t borrow interrupted =
             ; details = `Null
             }
       in
-      let%bind run_deltas =
+      let%bind run_change =
         match run_scope with
-        | None -> Ok []
+        | None -> Ok Prepared_run_delta.empty
         | Some scope ->
-          Run_transition.fail_callback
-            t.state
-            ~scope
-            ~executing:borrow.receipt
-            ~completed:terminal
-            ~now:(t.services.now ())
+          let now, completion_sample = completion_clock_pair t in
+          let%map deltas =
+            Run_transition.fail_callback
+              t.state
+              ~scope
+              ~executing:borrow.receipt
+              ~completed:terminal
+              ~now
+          in
+          Prepared_run_delta.{ deltas; completion_sample = Some completion_sample }
       in
       transition
+        ?completion_sample:run_change.completion_sample
         t
         ~delta:
           (Session_delta.Batch
              (children_deltas
               @ permission_deltas
               @ [ Session_delta.Moderator_execution_changed terminal ]
-              @ run_deltas))
+              @ run_change.deltas))
         ~payloads:permission_payloads
       |> Result.map ~f:ignore
   in
@@ -7857,12 +7963,9 @@ let worker_terminal t operation_id outcome compaction_custody =
       | Cancelled _ -> Cancelled
       | Failed _ -> Failed
     in
+    let now, completion_sample = completion_clock_pair t in
     let%bind run_deltas =
-      Run_transition.settle_operation
-        t.state
-        ~operation_id
-        ~outcome:run_outcome
-        ~now:(t.services.now ())
+      Run_transition.settle_operation t.state ~operation_id ~outcome:run_outcome ~now
     in
     let%bind delta, payloads = terminal_delta t operation outcome in
     let%bind follow_up = foreground_terminal_requests t operation_id outcome in
@@ -7870,6 +7973,7 @@ let worker_terminal t operation_id outcome compaction_custody =
     let permissions, jobs = operation_terminal_cleanup t operation outcome in
     let%bind _ =
       transition
+        ~completion_sample
         t
         ~delta:
           (Session_delta.Batch
@@ -12894,7 +12998,10 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Apply_recurrence_command _
   | Reserve_recurrence_child _
   | Check_recurrence_creation _
+  | Record_recurrence_execution _
   | Verify_recurrence_child _
+  | Observe_recurrence_run _
+  | Import_recurrence_execution _
   | Link_recurrence_child _
   | Read_recurrences _
   | Update_metadata _
@@ -12999,6 +13106,98 @@ let check_recurrence_creation_admission t prepared =
   Recurrence_creation_admission.check_current prepared t.state
 ;;
 
+let check_recurrence_execution_admission t prepared =
+  let open Result.Let_syntax in
+  let%bind () =
+    if
+      (not t.stopped)
+      && Option.is_none (Eio.Promise.peek t.finished)
+      && Option.is_none t.lifecycle_fence
+    then Ok ()
+    else Error (error Conflict "recurrence execution controller owner is unavailable")
+  in
+  let%bind () = Recurrence_execution_admission.check_current prepared t.state in
+  match Recurrence_execution_admission.decision prepared with
+  | Retained _ -> Ok ()
+  | New _ ->
+    let%bind () = require_runtime_admission t in
+    let%bind moderator_halted =
+      Runtime_builder.moderator_snapshot_is_halted t.state.moderator
+    in
+    let%bind () =
+      match
+        t.state.lifecycle.desired, t.state.runtime_initialization, t.state.failure
+      with
+      | Running, Ready, None when not (t.state.halted || moderator_halted) -> Ok ()
+      | (Running | Stopped), (Ready | Pending _), (Some _ | None) ->
+        Error (error Conflict "recurrence execution controller runtime is unavailable")
+    in
+    let%bind snapshot =
+      Recurrence_runtime.snapshot
+        t.recurrence_runtime
+        ~wall:(t.services.now ())
+        ~monotonic:(t.services.monotonic_now ())
+    in
+    let entry = Recurrence_execution_admission.entry prepared in
+    let%bind late =
+      Recurrence_runtime.selection_lateness
+        t.recurrence_runtime
+        ~entry
+        ~nominal:(Recurrence_execution_admission.nominal prepared)
+        ~snapshot
+    in
+    let%bind () =
+      match late with
+      | Some late
+        when Int64.(
+               late
+               <= Recurrence_policy.grace_ns
+                    (Recurrence_definition.policy (Recurrence_entry.current entry))) ->
+        Ok ()
+      | None | Some _ ->
+        Error (error Conflict "recurrence execution nominal is outside current grace")
+    in
+    let%bind () = require_runtime_admission t in
+    Recurrence_execution_admission.check_current prepared t.state
+;;
+
+let record_recurrence_execution_internal t ~actor ~authorize ~intent ~attempt =
+  let open Result.Let_syntax in
+  let%bind controller = require_recurrence_controller t in
+  let prepare () =
+    Recurrence_execution_admission.prepare
+      t.state
+      ~controller
+      ~actor
+      ~authorize
+      ~intent
+      ~attempt
+  in
+  let%bind prepared = prepare () in
+  let%bind () = check_recurrence_execution_admission t prepared in
+  match Recurrence_execution_admission.decision prepared with
+  | Retained row -> Ok row
+  | New { catalog; execution } ->
+    let%bind candidate =
+      prepare_transition
+        t
+        ~delta:(Session_delta.Recurrence_catalog_changed catalog)
+        ~payloads:[]
+    in
+    let%bind () = check_recurrence_execution_admission t prepared in
+    let%bind () = persist_transition t candidate in
+    install_committed_transition t candidate;
+    publish_committed_transition t candidate;
+    (* Our own canonical projection rotates the genuine Current. Refresh rather
+       than testing the precommit observation or claiming rollback after ACK. *)
+    let%bind refreshed = prepare () in
+    let%bind () = check_recurrence_execution_admission t refreshed in
+    (match Recurrence_execution_admission.decision refreshed with
+     | Retained row when Recurrence_execution.equal row execution -> Ok row
+     | Retained _ | New _ ->
+       Error (error Conflict "committed recurrence execution changed before return"))
+;;
+
 let check_lifecycle_fence t fence =
   if
     phys_equal t.lifecycle_owner fence.Lifecycle_fence.owner
@@ -13069,6 +13268,351 @@ let refresh_recurrence_creation t permit =
     }
   in
   Ok checked
+;;
+
+let observe_recurrence_run_internal t ~actor ~authorize ~intent ~attempt =
+  let open Result.Let_syntax in
+  let owner_current () =
+    if
+      (not t.stopped)
+      && Option.is_none (Eio.Promise.peek t.finished)
+      && Option.is_none t.lifecycle_fence
+    then Ok ()
+    else Error (error Conflict "recurrence target observation owner is unavailable")
+  in
+  let check_read () =
+    let%bind () = owner_current () in
+    Recurrence_command_admission.check_read actor ~authorize t.state
+  in
+  let%bind () = check_read () in
+  let%bind () = Recurrence_execution_attempt.validate attempt ~intent in
+  let%bind controller = require_recurrence_controller t in
+  let%bind () =
+    if
+      Agent_protocol.Session_ref.equal
+        (Recurrence_controller.session controller)
+        (Recurrence_execution_intent.target intent)
+    then Ok ()
+    else Error (error Conflict "recurrence observation targets another session")
+  in
+  let lookup () =
+    match t.state.run_state with
+    | None -> Ok None
+    | Some index ->
+      let%bind receipt =
+        Run_state.receipt
+          index
+          ~principal_id:(Recurrence_execution_attempt.principal_id attempt)
+          ~key:(Recurrence_execution_attempt.key attempt)
+          ~request_sha256:(Recurrence_execution_attempt.request_sha256 attempt)
+      in
+      (match receipt with
+       | None -> Ok None
+       | Some admission ->
+         let%bind origin =
+           Result.of_option
+             (Run_state.recurrence_origin index admission.run_id)
+             ~error:(error Conflict "retained Run lacks its exact recurrence origin")
+         in
+         let%bind run =
+           Result.of_option
+             (Run_state.find index admission.run_id)
+             ~error:(error Conflict "recurrence origin lost its retained Run")
+         in
+         let%bind () = Recurrence_run_origin.validate origin ~intent ~attempt in
+         let%bind () = Recurrence_run_origin.validate_run origin ~run ~admission in
+         let%map terminal =
+           match run.lifecycle with
+           | Admitted | Active | Waiting _ -> Ok None
+           | Terminal _ ->
+             let receipts =
+               List.filter (Run_state.receipts index) ~f:(fun receipt ->
+                 Agent_protocol.Run_receipt.Kind.equal receipt.kind Terminal
+                 && Agent_protocol.Id.Run.equal receipt.run_id run.id
+                 && Int64.equal receipt.run_revision run.revision)
+             in
+             (match receipts with
+              | [ receipt ] ->
+                Recurrence_run_reference.create ~origin ~run ~receipt
+                |> Result.map ~f:Option.some
+              | [] | _ :: _ :: _ ->
+                Error
+                  (error
+                     Conflict
+                     "recurrence terminal Run lacks one exact terminal receipt"))
+         in
+         Some (origin, run, admission, terminal))
+  in
+  let%bind evidence = lookup () in
+  let%bind current = Recurrence_controller.observe controller t.state in
+  let check_owner () =
+    let%bind () = owner_current () in
+    if Recurrence_controller.is_current current
+    then Ok ()
+    else Error (error Conflict "recurrence target lifecycle observation changed")
+  in
+  let check_basis () =
+    let%bind () =
+      if
+        Operator_authorization.is_current actor
+        && Agent_protocol.Principal.has_scope
+             (Operator_authorization.principal actor)
+             View_session_transcript
+      then Ok ()
+      else
+        Error
+          (error
+             Permission_denied
+             "recurrence original authority expired, was revoked or lacks scope")
+    in
+    let%bind () = check_owner () in
+    let%bind actual = lookup () in
+    let same =
+      match evidence, actual with
+      | None, None -> true
+      | ( Some (origin, run, admission, terminal)
+        , Some (next_origin, next_run, next_admission, next_terminal) ) ->
+        Recurrence_run_origin.equal origin next_origin
+        && Agent_protocol.Run.equal run next_run
+        && Agent_protocol.Run_receipt.equal admission next_admission
+        && Option.equal Recurrence_run_reference.equal terminal next_terminal
+      | None, Some _ | Some _, None -> false
+    in
+    if same
+    then check_owner ()
+    else Error (error Conflict "recurrence target retained evidence changed")
+  in
+  let check () =
+    let%bind () = check_read () in
+    check_basis ()
+  in
+  let%bind () = check () in
+  match evidence with
+  | None -> Ok None
+  | Some (observed_origin, observed_run, _, observed_terminal) ->
+    let validate_reference reference =
+      let%bind () = check () in
+      let%bind () =
+        match observed_terminal with
+        | None -> Error (error Conflict "recurrence observation has no terminal payload")
+        | Some terminal ->
+          Recurrence_run_reference.validate
+            reference
+            ~origin:observed_origin
+            ~run:observed_run
+            ~receipt:(Recurrence_run_reference.receipt terminal)
+      in
+      check ()
+    in
+    let%map completion =
+      match observed_terminal with
+      | None -> Ok None
+      | Some terminal ->
+        Recurrence_runtime.completion
+          t.recurrence_runtime
+          ~origin:observed_origin
+          ~terminal
+    in
+    let observation : Recurrence_run_observation.t =
+      { origin = observed_origin
+      ; terminal = observed_terminal
+      ; controller
+      ; check_current = check
+      ; check_basis
+      ; validate_reference
+      ; completion
+      }
+    in
+    Some observation
+;;
+
+let check_recurrence_import_owner t =
+  if
+    (not t.stopped)
+    && Option.is_none (Eio.Promise.peek t.finished)
+    && Option.is_none t.lifecycle_fence
+  then Ok ()
+  else Error (error Conflict "recurrence settlement controller owner is unavailable")
+;;
+
+let recurrence_import_evidence t (observation : Recurrence_run_observation.t) =
+  let open Result.Let_syntax in
+  let origin = observation.origin in
+  let occurrence = Recurrence_run_origin.occurrence origin in
+  let recurrence_id =
+    occurrence
+    |> Recurrence_identity.Occurrence.definition
+    |> Recurrence_identity.Definition.recurrence_id
+  in
+  let%bind retained =
+    match
+      Option.bind t.state.recurrence_catalog ~f:(fun catalog ->
+        Recurrence_catalog.find catalog recurrence_id)
+    with
+    | None -> Ok None
+    | Some entry ->
+      let%map frontier = Recurrence_entry.frontier entry in
+      Recurrence_frontier.find_execution frontier occurrence
+  in
+  match retained with
+  | None -> Ok (origin, observation.terminal)
+  | Some execution ->
+    let attempt = Recurrence_execution.current_attempt execution in
+    let%bind () =
+      Recurrence_run_origin.validate
+        origin
+        ~intent:(Recurrence_execution.intent execution)
+        ~attempt:(Recurrence_execution.Attempt.request attempt)
+    in
+    let%bind () =
+      match Recurrence_execution.Attempt.origin attempt with
+      | None -> Ok ()
+      | Some saved when Recurrence_run_origin.equal saved origin -> Ok ()
+      | Some _ ->
+        Error (error Conflict "observed recurrence origin differs from retained data")
+    in
+    (match Recurrence_execution.Attempt.terminal attempt with
+     | None -> Ok (origin, observation.terminal)
+     | Some saved ->
+       (* Authenticate annotations against the actual retained target payload,
+          then keep this complete original carrier for strict pure equality. *)
+       let%map () = observation.validate_reference saved in
+       origin, Some saved)
+;;
+
+let prepare_recurrence_import_candidate
+      t
+      (observation : Recurrence_run_observation.t)
+      admission
+  =
+  let open Result.Let_syntax in
+  let prepare admission =
+    prepare_transition
+      t
+      ~delta:
+        (Session_delta.Recurrence_catalog_changed
+           (Recurrence_settlement_admission.catalog admission))
+      ~payloads:[]
+  in
+  let%bind candidate = prepare admission in
+  match Recurrence_settlement_admission.settlement admission with
+  | Imported { next = Successor basis; _ } ->
+    let recurrence_id =
+      Recurrence_delay_basis.occurrence basis
+      |> Recurrence_identity.Occurrence.definition
+      |> Recurrence_identity.Definition.recurrence_id
+    in
+    let%bind entry =
+      Result.of_option
+        (Option.bind candidate.state.recurrence_catalog ~f:(fun catalog ->
+           Recurrence_catalog.find catalog recurrence_id))
+        ~error:(error Conflict "settlement successor entry is absent from candidate")
+    in
+    let wall = t.services.now () in
+    let monotonic = t.services.monotonic_now () in
+    let%bind phase =
+      Recurrence_runtime.prepare_completion_phase
+        t.recurrence_runtime
+        ~completion:observation.completion
+        ~basis
+        ~entry
+        ~state:candidate.state
+        ~wall
+        ~monotonic
+    in
+    (match phase with
+     | Prepared phase ->
+       let timing : Recurrence_import.Timing.t =
+         match Recurrence_runtime.Completion_phase.source phase with
+         | Live_completion -> Live_phase
+         | Recovery_adoption -> Recovery_adoption
+       in
+       Ok
+         Recurrence_import_candidate.
+           { admission; transition = candidate; phase = Some phase; timing }
+     | Timing_unavailable diagnostic ->
+       (* Rebuild from the original catalog, never commit the automatic
+          alternative first or classify contradictory facts as clock trouble. *)
+       let%bind admission = Recurrence_settlement_admission.hold admission in
+       let%map candidate = prepare admission in
+       Recurrence_import_candidate.
+         { admission; transition = candidate; phase = None; timing = Held diagnostic })
+  | Imported { next = Evidence_only | Review_hold _; _ } ->
+    Ok
+      Recurrence_import_candidate.
+        { admission; transition = candidate; phase = None; timing = No_successor }
+  | Retained_exact _ | Detail_not_retained _ ->
+    Error (error Conflict "unchanged recurrence import cannot prepare a transaction")
+;;
+
+let import_recurrence_execution_internal
+      t
+      ~actor
+      ~authorize
+      ~automatic_policy
+      ~(observation : Recurrence_run_observation.t)
+  =
+  let open Result.Let_syntax in
+  let%bind () = check_recurrence_import_owner t in
+  let%bind () =
+    Recurrence_command_admission.check_write actor ~authorize:(fun _ -> Ok ()) t.state
+  in
+  let%bind controller = require_recurrence_controller t in
+  let%bind () =
+    if Recurrence_controller.same_store controller observation.controller
+    then Ok ()
+    else Error (error Conflict "recurrence import requires the actual same Store")
+  in
+  let%bind () = observation.check_current () in
+  let%bind origin, terminal = recurrence_import_evidence t observation in
+  let%bind admission =
+    Recurrence_settlement_admission.prepare
+      t.state
+      ~controller
+      ~actor
+      ~authorize
+      ~automatic_policy
+      ~origin
+      ~terminal
+  in
+  let check_current admission =
+    let%bind () = check_recurrence_import_owner t in
+    let%bind () = observation.check_current () in
+    let%bind () = Recurrence_settlement_admission.check_current admission t.state in
+    (* Trusted nonyielding policies can still revoke either original proof.
+       After every policy callback, validate both owners without more callbacks. *)
+    let%bind () = observation.check_basis () in
+    let%bind () = Recurrence_settlement_admission.check_basis admission t.state in
+    check_recurrence_import_owner t
+  in
+  let%bind () = check_current admission in
+  match Recurrence_settlement_admission.settlement admission with
+  | (Retained_exact _ | Detail_not_retained _) as settlement ->
+    Ok Recurrence_import.{ settlement; timing = No_successor }
+  | Imported _ ->
+    let%bind candidate = prepare_recurrence_import_candidate t observation admission in
+    let%bind () = check_current candidate.admission in
+    let settlement = Recurrence_settlement_admission.settlement candidate.admission in
+    let%bind () = persist_transition t candidate.transition in
+    install_committed_transition t candidate.transition;
+    Option.iter
+      candidate.phase
+      ~f:(Recurrence_runtime.install_completion_phase t.recurrence_runtime);
+    publish_committed_transition t candidate.transition;
+    (* Own ACK rotates Current, including a self-target's target observation.
+       Refresh controller visibility only; acknowledged facts need no requery. *)
+    let%bind current = Recurrence_controller.observe controller t.state in
+    let%bind () =
+      Recurrence_command_admission.check_write
+        actor
+        ~authorize:(fun state ->
+          authorize state (Recurrence_settlement_admission.definition candidate.admission))
+        t.state
+    in
+    let%bind () = check_recurrence_import_owner t in
+    if Recurrence_controller.is_current current
+    then Ok Recurrence_import.{ settlement; timing = candidate.timing }
+    else Error (error Conflict "settlement controller visibility changed after ACK")
 ;;
 
 let observe_recurrence_child t reservation =
@@ -13823,6 +14367,17 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       in
       Ok permit
     | Check_recurrence_creation permit -> refresh_recurrence_creation t permit
+    | Record_recurrence_execution (actor, authorize, intent, attempt) ->
+      record_recurrence_execution_internal t ~actor ~authorize ~intent ~attempt
+    | Observe_recurrence_run (actor, authorize, intent, attempt) ->
+      observe_recurrence_run_internal t ~actor ~authorize ~intent ~attempt
+    | Import_recurrence_execution (actor, authorize, automatic_policy, observation) ->
+      import_recurrence_execution_internal
+        t
+        ~actor
+        ~authorize
+        ~automatic_policy
+        ~observation
     | Verify_recurrence_child reservation -> observe_recurrence_child t reservation
     | Link_recurrence_child (permit, child) ->
       let open Result.Let_syntax in
@@ -15690,6 +16245,20 @@ let reserve_recurrence_child t ~actor ~authorize ~occurrence ~expected_control_r
 
 let check_recurrence_creation t permit =
   recurrence_call t (Check_recurrence_creation permit)
+;;
+
+let record_recurrence_execution t ~actor ~authorize ~intent ~attempt =
+  recurrence_call t (Record_recurrence_execution (actor, authorize, intent, attempt))
+;;
+
+let observe_recurrence_run t ~actor ~authorize ~intent ~attempt =
+  recurrence_call t (Observe_recurrence_run (actor, authorize, intent, attempt))
+;;
+
+let import_recurrence_execution t ~actor ~authorize ~automatic_policy ~observation =
+  recurrence_call
+    t
+    (Import_recurrence_execution (actor, authorize, automatic_policy, observation))
 ;;
 
 let verify_recurrence_child t ~reservation =

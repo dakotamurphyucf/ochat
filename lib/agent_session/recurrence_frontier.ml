@@ -10,6 +10,7 @@ module V = Recurrence_frontier_records
 module S = V.State
 module Codec = Recurrence_frontier_codec
 module T = Recurrence_frontier_transition
+module J = Recurrence_frontier_settlement
 module Summary = V.Summary
 module Reason = V.Reason
 module Issue = V.Issue
@@ -36,7 +37,14 @@ let ready t = List.map (value t).ready ~f:V.Stored_nominal.value
 let protected_children t = (value t).protected_children
 let child_associations t = (value t).child_associations
 let unlinked_children t = S.unlinked_children (value t)
-let pending_count t = List.length (value t).ready + List.length (protected_children t)
+let pending_count t = S.pending_count (value t)
+let delay_basis t = (value t).delay_basis
+let executions t = S.execution_rows (value t)
+let find_execution t occurrence = S.find_execution (value t) occurrence
+
+let pending_execution_steps t =
+  Recurrence_executions.required_transition_steps (value t).executions
+;;
 
 let candidates t =
   Option.value_map (value t).batch ~default:[] ~f:(fun b ->
@@ -64,6 +72,10 @@ let validate t ~definitions ~cursor =
    all current history is conservative even when ordinary retention would prune. *)
 let withdrawal_probe (s : S.t) =
   let missing_associations = not (List.is_empty (S.unlinked_children s)) in
+  let independent_work =
+    missing_associations
+    || Recurrence_executions.required_transition_steps s.executions > 0
+  in
   let pending =
     s.ready @ Option.value_map s.batch ~default:[] ~f:(fun b -> b.candidates)
   in
@@ -104,6 +116,16 @@ let withdrawal_probe (s : S.t) =
                  ; original_json = None
                  }
            else None))
+    (* Definition adoption or replacement moves the complete immutable basis.
+       Retain the live copy in this accounting witness: its removal cannot fund
+       an independent row proof or archive wrapper. *)
+    @ Option.to_list
+        (Option.map s.delay_basis ~f:(fun basis ->
+           V.Control_detail.
+             { kind = Retired_delay_basis
+             ; json = Recurrence_delay_basis.to_json basis
+             ; original_json = None
+             }))
   in
   match Codec.encode s with
   | `Object fields ->
@@ -112,6 +134,13 @@ let withdrawal_probe (s : S.t) =
          let json =
            match name with
            | "revision" -> X.int64_json Int64.max_value
+           | "executions" ->
+             Option.value
+               (List.Assoc.find
+                  (Recurrence_executions.capacity_fields s.executions)
+                  "executions"
+                  ~equal:String.equal)
+               ~default:json
            | "ready" -> `Array []
            | "alarm" ->
              (* Linking can retain the current control container. Do not spend
@@ -119,14 +148,14 @@ let withdrawal_probe (s : S.t) =
                 Extended containers already move their complete raw value into
                 control_history, with additional wrapper growth. *)
              if
-               missing_associations
+               independent_work
                && Option.exists s.alarm ~f:(fun alarm ->
                  not (V.Stored_alarm.has_extensions alarm))
              then json
              else `Null
            | "batch" ->
              if
-               missing_associations
+               independent_work
                && Option.exists s.batch ~f:(fun batch ->
                  not (Codec.batch_has_extensions batch))
              then json
@@ -182,7 +211,10 @@ let probe_codec =
     ~version:1
     ~shape:Codec.shape
     ~supported_semantics:
-      [ "recurrence.child-reservation.v1"; "recurrence.child-association.v1" ]
+      [ "recurrence.child-reservation.v1"
+      ; "recurrence.child-association.v1"
+      ; "recurrence.execution.v1"
+      ]
     ~decode:(fun j -> Ok j)
     ~encode:(fun j -> Ok j)
   |> Result.map_error ~f:(fun e -> Sexp.to_string_hum (D.Error.sexp_of_t e))
@@ -200,6 +232,11 @@ let require_creation_semantics ?(capacity = false) t document =
       && not (capacity && not (List.is_empty (protected_children t)))
     then []
     else [ "recurrence.child-association.v1" ]
+  in
+  let required =
+    required
+    @
+    if S.requires_execution_semantics (value t) then [ "recurrence.execution.v1" ] else []
   in
   if
     List.for_all required ~f:(fun marker ->
@@ -281,6 +318,16 @@ let of_document document =
     else
       Error (D.Error.Required_semantics_unknown "missing recurrence.child-association.v1")
   in
+  let%bind () =
+    if
+      (not (S.requires_execution_semantics (value t)))
+      || List.mem
+           (D.Document.required_semantics document)
+           "recurrence.execution.v1"
+           ~equal:String.equal
+    then Ok ()
+    else Error (D.Error.Required_semantics_unknown "missing recurrence.execution.v1")
+  in
   let%map _ = to_document t in
   t
 ;;
@@ -293,7 +340,14 @@ let admit previous state =
 
 let bump (state : S.t) =
   let%bind.Result revision = V.add state.revision 1L in
-  if Int64.(revision > max_value - of_int (List.length (S.unlinked_children state)))
+  if
+    Int64.(
+      revision
+      > max_value
+        - of_int
+            Int.(
+              List.length (S.unlinked_children state)
+              + Recurrence_executions.required_transition_steps state.executions))
   then invalid "frontier lacks reserved control and child association revisions"
   else Ok { state with revision }
 ;;
@@ -379,6 +433,71 @@ let reserve_child
     t, row
 ;;
 
+let record_execution t ~definition ~intent ~attempt =
+  let open Result.Let_syntax in
+  let state = value t in
+  let occurrence = Recurrence_execution_intent.occurrence intent in
+  let reservation =
+    List.find state.protected_children ~f:(fun row ->
+      I.Occurrence.equal occurrence (Recurrence_child_reservation.occurrence row))
+  in
+  let%bind () = Recurrence_execution_intent.validate intent ~definition ~reservation in
+  match find_execution t occurrence with
+  | Some _ ->
+    let%map _, row = Recurrence_executions.record state.executions ~intent ~attempt in
+    t, row
+  | None ->
+    let%bind () =
+      match List.last state.marks with
+      | Some mark
+        when I.Definition.equal mark.definition (F.key definition)
+             && String.equal mark.definition_sha256 (F.digest definition) -> Ok ()
+      | None | Some _ -> invalid "new execution requires current captured definition"
+    in
+    let%bind () =
+      match Recurrence_execution_intent.child intent with
+      | None ->
+        if
+          List.exists state.ready ~f:(fun nominal ->
+            I.Occurrence.equal
+              occurrence
+              (Recurrence_nominal.key (V.Stored_nominal.value nominal))
+            && D.Json.equal
+                 (V.Stored_nominal.json nominal)
+                 (Recurrence_execution_intent.nominal_json intent))
+        then Ok ()
+        else invalid "execution requires exact complete prior Ready nominal"
+      | Some child ->
+        if
+          List.exists
+            state.child_associations
+            ~f:(Recurrence_child_association.equal child)
+          && Option.exists reservation ~f:(fun row ->
+            D.Json.equal
+              (Recurrence_child_reservation.nominal_json row)
+              (Recurrence_execution_intent.nominal_json intent))
+        then Ok ()
+        else invalid "execution requires exact protected and linked child"
+    in
+    let%bind executions, row =
+      Recurrence_executions.record state.executions ~intent ~attempt
+    in
+    let%bind state =
+      bump
+        { state with
+          executions
+        ; ready =
+            List.filter state.ready ~f:(fun nominal ->
+              not
+                (I.Occurrence.equal
+                   occurrence
+                   (Recurrence_nominal.key (V.Stored_nominal.value nominal))))
+        }
+    in
+    let%map t = admit t state in
+    t, row
+;;
+
 let withdraw t ~definition =
   let open Result.Let_syntax in
   let%bind state = T.withdraw (value t) ~definition ~preserve_lookahead:true in
@@ -412,7 +531,17 @@ let adopt_definition t ~previous ~definition =
     else Ok ()
   in
   let state =
-    { state with marks = state.marks @ [ V.Mark.initial definition ]; issue = None }
+    match state.delay_basis with
+    | None -> state
+    | Some basis ->
+      T.archive state previous Retired_delay_basis (Recurrence_delay_basis.to_json basis)
+  in
+  let state =
+    { state with
+      marks = state.marks @ [ V.Mark.initial definition ]
+    ; issue = None
+    ; delay_basis = None
+    }
   in
   let%bind state = bump state in
   let%bind () =
@@ -483,28 +612,47 @@ module Work = struct
     { t with state; expected_cursor = Some actual.next }
   ;;
 
-  let consume_initial_delay t ~nominal =
+  let consume_delay t ~nominal =
     let open Result.Let_syntax in
     let%bind rule =
       match F.schedule t.definition with
       | Calendar _ -> invalid "fixed delay has calendar source"
       | Interval { rule; _ } -> Ok rule
     in
-    let%bind expected_cursor =
-      Recurrence_cursor.consume_initial_delay t.original_cursor ~rule
+    let%bind expected_cursor = Recurrence_cursor.consume_delay t.original_cursor ~rule in
+    let%bind current =
+      match Recurrence_cursor.position t.original_cursor with
+      | Interval current -> Ok current
+      | Calendar _ | Awaiting_completion _ | Exhausted ->
+        invalid "delay selection requires interval position"
     in
+    let%bind expected = Recurrence_nominal.of_interval_cursor t.definition current in
+    let%bind () =
+      if Recurrence_nominal.equal expected nominal
+      then Ok ()
+      else invalid "delay nominal differs from exact current interval"
+    in
+    let slot = R.Cursor.Interval.slot current in
     let%bind nominal = V.Stored_nominal.create nominal in
     let%map state =
       T.consume_range
         t.state
         ~definition:t.definition
-        ~first_slot:0L
-        ~last_slot:0L
+        ~first_slot:slot
+        ~last_slot:slot
         ~last_at:(Recurrence_nominal.at (V.Stored_nominal.value nominal))
         ~selected:[ nominal ]
         ~omitted:[]
     in
     { t with state; expected_cursor = Some expected_cursor }
+  ;;
+
+  let consume_initial_delay t ~nominal =
+    match Recurrence_cursor.position t.original_cursor with
+    | Interval cursor when Int64.equal (R.Cursor.Interval.slot cursor) 0L ->
+      consume_delay t ~nominal
+    | Interval _ | Calendar _ | Awaiting_completion _ | Exhausted ->
+      invalid "initial delay selection requires slot zero"
   ;;
 
   let begin_calendar t ~cutoff =
@@ -600,8 +748,14 @@ module Work = struct
   ;;
 end
 
-let validate_transition previous ~incoming ~definitions ~cursor =
+let validate_transition previous ~incoming ~definitions ~previous_cursor ~cursor =
   let open Result.Let_syntax in
+  let%bind () =
+    validate
+      previous
+      ~definitions:(List.take definitions (List.length (value previous).marks))
+      ~cursor:previous_cursor
+  in
   let%bind () = validate incoming ~definitions ~cursor in
   let p = C.value previous
   and n = C.value incoming in
@@ -615,6 +769,79 @@ let validate_transition previous ~incoming ~definitions ~cursor =
     else Ok ()
   in
   let%bind () =
+    Recurrence_executions.validate_transition p.executions ~incoming:n.executions
+  in
+  let evidence =
+    List.filter_map (S.execution_rows n) ~f:(fun execution ->
+      let key =
+        Recurrence_execution_intent.occurrence (Recurrence_execution.intent execution)
+      in
+      match S.find_execution p key with
+      | None -> None
+      | Some previous ->
+        let old = Recurrence_execution.current_attempt previous in
+        let next = Recurrence_execution.current_attempt execution in
+        if
+          Option.equal
+            Recurrence_run_origin.equal
+            (Recurrence_execution.Attempt.origin old)
+            (Recurrence_execution.Attempt.origin next)
+          && Option.equal
+               Recurrence_run_reference.equal
+               (Recurrence_execution.Attempt.terminal old)
+               (Recurrence_execution.Attempt.terminal next)
+        then None
+        else Some execution)
+  in
+  let%bind () =
+    match evidence with
+    | [] ->
+      let%bind () =
+        List.fold_result p.marks ~init:() ~f:(fun () old ->
+          match
+            List.find n.marks ~f:(fun mark ->
+              I.Definition.equal mark.definition old.definition)
+          with
+          | Some mark when Int64.equal old.settled mark.settled -> Ok ()
+          | None | Some _ ->
+            invalid "lifetime settled count changed without one new terminal")
+      in
+      if
+        Option.equal Recurrence_delay_basis.equal p.delay_basis n.delay_basis
+        || (List.length n.marks = List.length p.marks + 1 && Option.is_none n.delay_basis)
+      then Ok ()
+      else invalid "completion basis changed without exact terminal import"
+    | [ execution ] ->
+      if List.length n.marks <> List.length p.marks
+      then invalid "execution import cannot also edit the definition"
+      else (
+        let attempt = Recurrence_execution.current_attempt execution in
+        let%bind origin =
+          Result.of_option
+            (Recurrence_execution.Attempt.origin attempt)
+            ~error:(P.Error.invalid_request "execution import requires exact Run origin")
+        in
+        let terminal = Recurrence_execution.Attempt.terminal attempt in
+        let candidate automatic =
+          let%bind plan =
+            J.import p ~definitions ~cursor:previous_cursor ~origin ~terminal ~automatic
+          in
+          let%map expected = bump plan.state in
+          D.Json.equal (Codec.encode expected) (Codec.encode n)
+          && Recurrence_cursor.equal plan.cursor cursor
+        in
+        match candidate Historical_only with
+        | Ok true -> Ok ()
+        | Error _ | Ok false ->
+          (match candidate Current_policy_allows with
+           | Ok true -> Ok ()
+           | Error _ | Ok false ->
+             invalid
+               "execution import differs from the complete atomic settlement candidate"))
+    | _ :: _ :: _ ->
+      invalid "one frontier transition cannot import multiple execution facts"
+  in
+  let%bind () =
     List.fold_result p.marks ~init:() ~f:(fun () (old : V.Mark.t) ->
       match
         List.find n.marks ~f:(fun next ->
@@ -626,13 +853,35 @@ let validate_transition previous ~incoming ~definitions ~cursor =
         let immutable_old =
           match List.last p.marks with
           | Some current when I.Definition.equal current.definition old.definition -> true
-          | None | Some _ -> V.Mark.equal old next
+          | None | Some _ -> V.Mark.equal { old with settled = next.settled } next
         in
         if
           immutable_old
           && String.equal old.definition_sha256 next.definition_sha256
           && monotonic Int64.compare old.through next.through
-          && monotonic Time_ns.compare old.last_at next.last_at
+          && (monotonic Time_ns.compare old.last_at next.last_at
+              ||
+              match Recurrence_cursor.position previous_cursor, p.delay_basis with
+              | Interval selected, Some basis ->
+                I.Definition.equal
+                  (Recurrence_cursor.definition previous_cursor)
+                  old.definition
+                && Option.equal
+                     Int64.equal
+                     next.through
+                     (Some (R.Cursor.Interval.slot selected))
+                && Option.equal
+                     Time_ns.equal
+                     next.last_at
+                     (Some (R.Cursor.Interval.due_at selected))
+                && List.exists definitions ~f:(fun definition ->
+                  I.Definition.equal (F.key definition) old.definition
+                  &&
+                  match Recurrence_delay_basis.next_interval basis ~definition with
+                  | Ok expected -> R.Cursor.Interval.equal expected selected
+                  | Error _ -> false)
+              | ( (Interval _ | Calendar _ | Awaiting_completion _ | Exhausted)
+                , (None | Some _) ) -> false)
           && monotonic Int64.compare old.last_alarm_sequence next.last_alarm_sequence
           && Int64.(old.omitted <= next.omitted && old.withdrawn <= next.withdrawn)
         then Ok ()
@@ -656,7 +905,17 @@ let validate_transition previous ~incoming ~definitions ~cursor =
            List.find n.protected_children ~f:(fun row ->
              I.Occurrence.equal key (Recurrence_child_reservation.occurrence row))
          with
-         | None -> Ok ()
+         | None ->
+           (match S.find_execution n key with
+            | None -> Ok ()
+            | Some execution ->
+              if
+                D.Json.equal
+                  (Recurrence_execution_intent.nominal_json
+                     (Recurrence_execution.intent execution))
+                  (V.Stored_nominal.json old)
+              then Ok ()
+              else invalid "execution nominal lost immutable original custody")
          | Some row ->
            if
              D.Json.equal
@@ -697,6 +956,14 @@ let validate_transition previous ~incoming ~definitions ~cursor =
             (Recurrence_child_reservation.occurrence row))
       with
       | Some row when Recurrence_child_reservation.equal old row -> Ok ()
+      | None
+        when Option.exists
+               (S.find_execution p (Recurrence_child_reservation.occurrence old))
+               ~f:(fun execution ->
+                 (not (Recurrence_execution.is_pending execution))
+                 && Option.is_none
+                      (S.find_execution n (Recurrence_child_reservation.occurrence old)))
+        -> Ok ()
       | None | Some _ -> invalid "protected creation evidence was erased or replaced")
   in
   let%bind () =
@@ -708,6 +975,14 @@ let validate_transition previous ~incoming ~definitions ~cursor =
             (Recurrence_child_association.occurrence row))
       with
       | Some row when Recurrence_child_association.equal old row -> Ok ()
+      | None
+        when Option.exists
+               (S.find_execution p (Recurrence_child_association.occurrence old))
+               ~f:(fun execution ->
+                 (not (Recurrence_execution.is_pending execution))
+                 && Option.is_none
+                      (S.find_execution n (Recurrence_child_association.occurrence old)))
+        -> Ok ()
       | None | Some _ -> invalid "immutable child association was erased or replaced")
   in
   let added_associations =
@@ -744,6 +1019,42 @@ let validate_transition previous ~incoming ~definitions ~cursor =
         Ok ()
       | Some _ -> invalid "retained disposition detail changed immutable bytes")
   in
+  let%bind () =
+    Recurrence_executions.validate_transition p.executions ~incoming:n.executions
+  in
+  let%bind () =
+    List.fold_result (S.execution_rows n) ~init:() ~f:(fun () execution ->
+      let intent = Recurrence_execution.intent execution in
+      let occurrence = Recurrence_execution_intent.occurrence intent in
+      match S.find_execution p occurrence with
+      | Some _ -> Ok ()
+      | None ->
+        let original = Recurrence_execution_intent.nominal_json intent in
+        (match Recurrence_execution_intent.child intent with
+         | None ->
+           if
+             List.exists p.ready ~f:(fun nominal ->
+               I.Occurrence.equal
+                 occurrence
+                 (Recurrence_nominal.key (V.Stored_nominal.value nominal))
+               && D.Json.equal original (V.Stored_nominal.json nominal))
+           then Ok ()
+           else invalid "new execution did not move exact previous Ready"
+         | Some child ->
+           if
+             List.exists
+               p.child_associations
+               ~f:(Recurrence_child_association.equal child)
+             && List.exists p.protected_children ~f:(fun reservation ->
+               I.Occurrence.equal
+                 occurrence
+                 (Recurrence_child_reservation.occurrence reservation)
+               && D.Json.equal
+                    original
+                    (Recurrence_child_reservation.nominal_json reservation))
+           then Ok ()
+           else invalid "new execution did not bind exact previous linked child"))
+  in
   (* The native candidate can still carry the envelope from before its first
      protected reservation or child link. Persistence, by contrast, has decoded
      the marker-bearing wire returned by [to_document]. Materialize the same
@@ -762,4 +1073,51 @@ let validate_transition previous ~incoming ~definitions ~cursor =
   if D.Json.equal (D.Document.json adopted) (D.Document.json incoming)
   then Ok ()
   else invalid "frontier update discarded compatible unknown fields"
+;;
+
+type settlement =
+  { frontier : t
+  ; cursor : Recurrence_cursor.t
+  ; result : Recurrence_settlement.t
+  }
+
+let import_execution t ~definitions ~cursor ~origin ~terminal ~automatic =
+  let open Result.Let_syntax in
+  let%bind () = validate t ~definitions ~cursor in
+  let%bind plan = J.import (value t) ~definitions ~cursor ~origin ~terminal ~automatic in
+  if D.Json.equal (Codec.encode (value t)) (Codec.encode plan.state)
+  then Ok { frontier = t; cursor; result = plan.result }
+  else (
+    let%bind state = bump plan.state in
+    let%bind frontier = admit t state in
+    let%map () =
+      validate_transition
+        t
+        ~incoming:frontier
+        ~definitions
+        ~previous_cursor:cursor
+        ~cursor:plan.cursor
+    in
+    { frontier; cursor = plan.cursor; result = plan.result })
+;;
+
+type resumption =
+  { frontier : t
+  ; cursor : Recurrence_cursor.t
+  ; next : Recurrence_settlement.Next.t
+  }
+
+let resume_delay t ~definitions ~cursor =
+  let open Result.Let_syntax in
+  let%bind () = validate t ~definitions ~cursor in
+  let%bind definition =
+    Result.of_option
+      (List.last definitions)
+      ~error:(P.Error.invalid_request "delay resume lacks current definition")
+  in
+  let%bind state, cursor, next = J.resume (value t) ~definition ~cursor in
+  let%bind state = bump state in
+  let%bind () = T.validate_associations state ~definitions ~cursor in
+  let%map frontier = admit t state in
+  { frontier; cursor; next }
 ;;

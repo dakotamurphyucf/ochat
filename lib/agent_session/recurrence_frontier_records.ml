@@ -15,6 +15,7 @@ module Summary = struct
     { consumed : int64
     ; omitted : int64
     ; withdrawn : int64
+    ; settled : int64
     }
   [@@deriving equal, sexp_of]
 end
@@ -55,6 +56,9 @@ module Issue = struct
     | Timing_exhausted
     | Capacity_saturated
     | Initial_delay_missed
+    | Delay_nominal_missed
+    | Execution_interrupted
+    | Delay_successor_exhausted
   [@@deriving equal, sexp_of]
 
   let to_string = function
@@ -63,6 +67,9 @@ module Issue = struct
     | Timing_exhausted -> "timing_exhausted"
     | Capacity_saturated -> "capacity_saturated"
     | Initial_delay_missed -> "initial_delay_missed"
+    | Delay_nominal_missed -> "delay_nominal_missed"
+    | Execution_interrupted -> "execution_interrupted"
+    | Delay_successor_exhausted -> "delay_successor_exhausted"
   ;;
 
   let of_json =
@@ -73,6 +80,9 @@ module Issue = struct
       ; "timing_exhausted", Timing_exhausted
       ; "capacity_saturated", Capacity_saturated
       ; "initial_delay_missed", Initial_delay_missed
+      ; "delay_nominal_missed", Delay_nominal_missed
+      ; "execution_interrupted", Execution_interrupted
+      ; "delay_successor_exhausted", Delay_successor_exhausted
       ]
   ;;
 end
@@ -149,6 +159,7 @@ module Control_detail = struct
   type kind =
     | Retired_alarm
     | Retired_batch
+    | Retired_delay_basis
   [@@deriving equal, sexp_of]
 
   type t =
@@ -166,6 +177,7 @@ module Mark = struct
     ; last_at : Time_ns.Alternate_sexp.t option
     ; omitted : int64
     ; withdrawn : int64
+    ; settled : int64
     ; last_alarm_sequence : int64 option
     }
   [@@deriving equal]
@@ -177,6 +189,7 @@ module Mark = struct
     ; last_at = None
     ; omitted = 0L
     ; withdrawn = 0L
+    ; settled = 0L
     ; last_alarm_sequence = None
     }
   ;;
@@ -239,6 +252,8 @@ module State = struct
     ; ready : Stored_nominal.t list
     ; protected_children : Recurrence_child_reservation.t list
     ; child_associations : Recurrence_child_association.t list
+    ; executions : Recurrence_executions.t
+    ; delay_basis : Recurrence_delay_basis.t option
     ; batch : Batch.t option
     ; lookahead : Stored_nominal.t option
     ; alarm : Stored_alarm.t option
@@ -253,6 +268,8 @@ module State = struct
     ; ready = []
     ; protected_children = []
     ; child_associations = []
+    ; executions = Recurrence_executions.empty
+    ; delay_basis = None
     ; batch = None
     ; lookahead = None
     ; alarm = None
@@ -271,16 +288,50 @@ module State = struct
              (Recurrence_child_reservation.occurrence reservation))))
   ;;
 
+  let execution_rows t = Recurrence_executions.rows t.executions
+  let find_execution t occurrence = Recurrence_executions.find t.executions occurrence
+
+  (* Lifetime settled totals represent terminal coordinates independently of
+     bounded detail. Only unresolved rows participate in the remaining partition;
+     a child reservation and its execution consume a single claim. *)
+  let claimed_nominals t =
+    List.filter (execution_rows t) ~f:Recurrence_execution.is_pending
+    |> fun pending ->
+    List.map pending ~f:(fun execution ->
+      Recurrence_execution.intent execution |> Recurrence_execution_intent.nominal)
+    @ List.filter_map t.protected_children ~f:(fun child ->
+      match find_execution t (Recurrence_child_reservation.occurrence child) with
+      | Some _ -> None
+      | None -> Some (Recurrence_child_reservation.nominal child))
+  ;;
+
+  let unresolved_count t =
+    List.count (execution_rows t) ~f:Recurrence_execution.is_pending
+    + List.count t.protected_children ~f:(fun child ->
+      Option.is_none (find_execution t (Recurrence_child_reservation.occurrence child)))
+  ;;
+
+  let pending_count t = List.length t.ready + unresolved_count t
+
+  let requires_execution_semantics t =
+    Recurrence_executions.requires_semantics t.executions
+    || List.exists t.marks ~f:(fun mark -> not (Int64.equal mark.settled 0L))
+    || Option.is_some t.delay_basis
+    || List.exists t.control_history ~f:(fun detail ->
+      Control_detail.equal_kind detail.kind Retired_delay_basis)
+  ;;
+
   let summary t =
     List.fold_result
       t.marks
-      ~init:Summary.{ consumed = 0L; omitted = 0L; withdrawn = 0L }
+      ~init:Summary.{ consumed = 0L; omitted = 0L; withdrawn = 0L; settled = 0L }
       ~f:(fun sum (mark : Mark.t) ->
         let open Result.Let_syntax in
         let%bind count = Mark.consumed mark in
         let%bind consumed = add sum.consumed count in
         let%bind omitted = add sum.omitted mark.omitted in
-        let%map withdrawn = add sum.withdrawn mark.withdrawn in
-        Summary.{ consumed; omitted; withdrawn })
+        let%bind withdrawn = add sum.withdrawn mark.withdrawn in
+        let%map settled = add sum.settled mark.settled in
+        Summary.{ consumed; omitted; withdrawn; settled })
   ;;
 end
