@@ -82,12 +82,14 @@ let shared_features =
   ; ( "lifecycle.stop"
     , "Graceful and cancel dispositions, joined cleanup and independent child lifetimes"
     , [ "lib/agent_session/session_actor.ml"
+      ; "lib/agent_session/actor_reply.ml"
       ; "lib/agent_session/background_execution.ml"
       ; "lib/agent_server/runtime_owner.ml"
       ; "lib/agent_server/delegation_lifecycle.ml"
       ]
     , "runtime.lifecycle"
-    , [ "test/agent_session/extension_stop_tests.ml"
+    , [ "test/agent_session/owner_termination_tests.ml"
+      ; "test/agent_session/extension_stop_tests.ml"
       ; "test/agent_session/delegation_lifecycle_tests.ml"
       ; "test/chatml_composition/background_shell_tests.ml"
       ] )
@@ -616,7 +618,9 @@ let moderator_features =
 ;;
 
 let implementation_sources =
-  [ ( "lib/agent_session/legacy_moderator_checkpoint.ml"
+  [ ( "lib/agent_session/actor_reply.ml"
+    , "00e0abeb3120d71ddd4fc0dc109b0d584da3ba8b771f6d0c02aad525df984fb4" )
+  ; ( "lib/agent_session/legacy_moderator_checkpoint.ml"
     , "e541ee7532b2a3e96d7c06c539cd1637c0ddaa1c55d7f1c51cec24b6d9c4f399" )
   ; ( "lib/agent_session/session_state.ml"
     , "4c3007f2766732f41925ebb62c26011d3174d46cf192c53bf0b25b72f49babe5" )
@@ -913,7 +917,7 @@ let implementation_sources =
   ; ( "lib/agent_session/script_subscription_service.ml"
     , "54c775836b551733687e907ff46a2a7a0cc26bd46ff915cc6fd5f0cf5116f069" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "873f2f328ada02d271249dc2b07ed094dd5de108cd91a61cab46494e8a03d631" )
+    , "14ca4bb6d33f1decf6acf5d971b9c340d692dcb85c36f929fc9b0b4aa434ced1" )
   ; ( "lib/agent_session/staged_jobs.ml"
     , "7731a0fc9f021188e3856041fe493f3044556bc7a15364815c47299fe968603b" )
   ; ( "lib/agent_session/staged_notifications.ml"
