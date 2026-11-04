@@ -892,3 +892,29 @@ target activation. Actual producer-to-importer live-phase
 qualification still requires genuine held admission, reciprocal controller
 acknowledgement, effect-deferred startup and central activation fences. Host
 target dispatch remains a separate required integration boundary.
+
+### Controller activation custody
+
+The controller actor owns a revocable process-local permit for an exact retained
+execution attempt and its acknowledged reciprocal target Run. Acquisition requires
+a genuine current same-Store observation of an `Admitted` Run, current guarded
+host policy, enabled current definition/source/control, automatic controller birth
+lifecycle and nominal grace. Stored creators and original request principals are
+audit data. This permit is not the target's held admission or startup authority.
+
+A checked view contains fresh actual Store lifecycle evidence. An unrelated
+controller ACK may stale that view; refreshing a still-live permit obtains new
+evidence. Pause, Stop, edit, source/lifecycle changes or terminal association
+close affected permits before the normalized controller candidate begins its
+write. Failed writes never revive them. Runtime retirement, lifecycle reservation
+and owner shutdown close custody before external effects. A successful runtime
+reconfiguration with an existing worker also closes pending permits; initial
+worker installation alone does not reopen or revoke prior closed custody.
+
+All policy callbacks precede final callback-free checks of both original proofs
+and exact evidence bases. The eventual target consumer must also retain its own
+genuine held owner and check after all yielding preparation, persistence, history
+reconciliation and scheduling, immediately before the actual first effect on the
+same Eio domain. Current source-level custody does not qualify that deferred
+startup/activation integration. Release neither cancels an already activated Run
+nor claims that an uncertain effect did not occur.

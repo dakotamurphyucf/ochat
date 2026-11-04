@@ -31,7 +31,7 @@ let publish fixture previous delta =
 
 (* Constructor facts, published through the real journal/Store. No callback,
    Run authority, process completion sample or provider is fabricated here. *)
-let publish_terminal fixture (previous : A.Session_state.t) name intent attempt =
+let publish_admitted fixture (previous : A.Session_state.t) name intent attempt =
   let run_id = P.Id.Run.of_string ("run_import_" ^ name) |> protocol_ok in
   let run lifecycle revision =
     P.Run.create
@@ -82,6 +82,13 @@ let publish_terminal fixture (previous : A.Session_state.t) name intent attempt 
     |> protocol_ok
   in
   let admitted = publish fixture previous (Run_state_changed index) in
+  admitted, index, origin, run, receipt
+;;
+
+let publish_terminal fixture previous name intent attempt =
+  let admitted, index, origin, run, receipt =
+    publish_admitted fixture previous name intent attempt
+  in
   let outcome = P.Run.Terminal.Completed None in
   let terminal_receipt =
     receipt
