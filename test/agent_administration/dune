@@ -1,7 +1,9 @@
 (library
- (name agent_administration_test)
- (modules agent_administration_test)
+ (name agent_administration_tests)
+ (modules agent_administration_test legacy_source_recovery_fixture legacy_source_recovery_tests)
  (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix
-  ochat.agent_server ochat.agent_client ochat.agent_session ochat.agent_protocol)
+  chatmd chatmd_shell_spec
+  ochat.agent_server ochat.agent_client ochat.agent_session ochat.agent_protocol
+  ochat.agent_store ochat.document_schema ochat.operator_authorization)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))

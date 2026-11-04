@@ -703,6 +703,23 @@ let check_source_for_execution t state = function
   | Generated_artifact _ -> Result.map (generated_parent t state) ~f:ignore
 ;;
 
+let legacy_checkpoint_activation_blocked (state : Agent_session.Session_state.t)
+  = function
+  | Generated_artifact _ -> Ok None
+  | Authored revision ->
+    Agent_session.Legacy_moderator_checkpoint.classify
+      revision
+      ~checkpoint:state.moderator
+      ~poll:Eio.Fiber.check
+    |> Result.map ~f:(function
+      | No_migration -> None
+      | Rebuild_required ->
+        Some
+          (unavailable
+             Migration_required
+             "historical moderator identity requires Stop and an explicit Pinned rebuild"))
+;;
+
 type parent_stop_recovery =
   { reference : Agent_store.Delegation_store.Reference.t
   ; epoch : int64
@@ -4922,6 +4939,12 @@ let build_runtime_for_actor ?run_preparation ?original_actor t handle actor =
   let%bind state = Agent_session.Session_actor.state actor in
   let%bind revision = restore_state_source t state in
   let%bind () = check_source_for_execution t state revision in
+  let%bind blocked = legacy_checkpoint_activation_blocked state revision in
+  let%bind () =
+    match blocked with
+    | None -> Ok ()
+    | Some failure -> Error failure
+  in
   let%bind profile = restore_state_profile t state in
   let%bind reservation =
     match run_preparation with
@@ -6622,6 +6645,10 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
     in
     let%bind parent_stop = parent_stop_recovery t ~policy:parent_policy state in
     let stopping = Option.exists parent_stop ~f:(fun parent -> parent.stop) in
+    let%bind revision = recovered_revision t state in
+    let%bind legacy_activation_blocked =
+      legacy_checkpoint_activation_blocked state revision
+    in
     let%bind inference_target =
       match
         ( Inference.Selection.view state.spec.inference_target
@@ -6654,13 +6681,14 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
       | Unresolved, Running, false, None -> Ok None
     in
     let activation_blocked =
-      match state.runtime_initialization with
-      | Pending _ ->
+      match legacy_activation_blocked, state.runtime_initialization with
+      | Some failure, _ -> Some failure
+      | None, Pending _ ->
         Some
           (unavailable
              Invalid_state
              "selected runtime initialization requires explicit activation")
-      | Ready ->
+      | None, Ready ->
         (match Inference.Selection.view state.spec.inference_target, inference_target with
          | Unresolved, None
            when Agent_protocol.Session.equal_desired_state state.lifecycle.desired Running
@@ -6671,7 +6699,6 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
                 "execution requires explicit inference migration")
          | Captured _, _ | Unresolved, _ -> None)
     in
-    let%bind revision = recovered_revision t state in
     let%bind () =
       match state.lifecycle.desired with
       | Stopped -> Ok ()

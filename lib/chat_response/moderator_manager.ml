@@ -37,7 +37,7 @@ module Registry = struct
     | Src { source_text; _ } -> source_text
   ;;
 
-  let source_hash (source_text : string) = Md5.digest_string source_text |> Md5.to_hex
+  let source_hash (source_text : string) = Chatmd_shell_spec.Source_ref.digest source_text
 
   let surface_key (surface : Builtin_surface.surface) =
     let names values ~f =

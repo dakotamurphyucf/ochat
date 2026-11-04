@@ -3472,7 +3472,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "bfeead5e6f60c7ed6d3a6a548e68d741d852532d9aca896f3f4bc9e42dda114e" ]
+                   [ "4c7d58124e7bec93b87079fcb9be2c17c6e13e61f12201f35011a6eba0e06f37" ]
                ; evidence =
                    [ "lib/agent_session/administration.ml"
                    ; "lib/agent_session/session_actor.ml"

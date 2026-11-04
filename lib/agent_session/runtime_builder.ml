@@ -256,6 +256,15 @@ let run_agent
     items
 ;;
 
+(* This port is consumed only by declared native Agent tools. Binding it for a
+   tool-free legacy revision would require custody for an unused capability.
+   Actual child declarations must still pass the strict captured binding. *)
+let requires_agent_source_runner elements =
+  List.exists elements ~f:(function
+    | Prompt.Chat_markdown.Tool (Agent _ | Persistent_agent _) -> true
+    | _ -> false)
+;;
+
 let create_agent_runtime
       ~invocation
       ~agent_source_runner
@@ -355,11 +364,11 @@ let create_authored_resources
       let elements = Prompt_revision.elements revision in
       let open Result.Let_syntax in
       let%bind agent_source_runner =
-        match agent_source, script_preparation with
-        | None, _ -> Ok None
-        | Some _, None ->
+        match requires_agent_source_runner elements, agent_source, script_preparation with
+        | false, _, _ | true, None, _ -> Ok None
+        | true, Some _, None ->
           Error (failure "installed child source requires explicit script policy")
-        | Some binding, Some policy ->
+        | true, Some binding, Some policy ->
           Captured_agent_runner.Source_binding.bind
             binding
             ~script_preparation:policy
