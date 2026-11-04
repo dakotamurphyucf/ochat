@@ -12,6 +12,14 @@ type t =
     is distinct from the entry body's content digest retained for custody. *)
 val source_revision : t -> single_file_revision:string -> string
 
+(** The same source identity before linkage/initialization. A genuinely restored
+    selected program contributes its complete prepared fingerprint; absence keeps
+    the actual single-file revision. This validates no custody or tool authority. *)
+val source_revision_of_prepared
+  :  Chatml_prepared_program.t option
+  -> single_file_revision:string
+  -> string
+
 (** Dispatch without introducing another execution scope, preserving result
     validation/commit and cancellation behavior of the existing adapters. *)
 val run_in_scope

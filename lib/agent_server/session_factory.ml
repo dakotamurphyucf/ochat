@@ -645,7 +645,7 @@ let parent_authority_fingerprint t (state : Agent_session.Session_state.t) =
   Agent_session.Delegation_authority.fingerprint ?moderator state
 ;;
 
-let generated_parent ?(check_stop_epoch = true) t (state : Agent_session.Session_state.t) =
+let generated_parent_record t (state : Agent_session.Session_state.t) =
   let open Result.Let_syntax in
   let missing_host () =
     Error
@@ -673,46 +673,50 @@ let generated_parent ?(check_stop_epoch = true) t (state : Agent_session.Session
     in
     (match Session_registry.find t.registry record.key.parent_session_id with
      | None -> missing_host ()
-     | Some parent ->
-       let%bind current = Agent_session.Session_actor.state parent.actor in
-       let%bind () =
-         Agent_session.Delegation_authority.check_invocation_owner record current
-       in
-       let%bind fingerprint = parent_authority_fingerprint t current in
-       let%bind () = authorize_independent t record in
-       (match
-          ( current.lifecycle.desired
-          , current.lifecycle.observed
-          , current.halted
-          , current.failure
-          , record.revocation
-          , record.admission.lifetime )
-        with
-        | ( Running
-          , (Idle | Running_turn _ | Waiting_for_permission _)
-          , false
-          , None
-          , None
-          , (Owned | Invocation_owned _) )
-          when String.equal fingerprint record.admission.authority_sha256
-               && ((not check_stop_epoch)
-                   || Int64.equal
-                        current.stop_epoch
-                        (Option.value
-                           state.parent_stop_epoch
-                           ~default:
-                             (Option.value record.admission.parent_stop_epoch ~default:0L))
-                  ) -> Ok (parent, record)
-        | _, _, _, _, None, Independent _
-          when String.equal fingerprint record.admission.authority_sha256 ->
-          Ok (parent, record)
-        | _ ->
-          Error
-            (unavailable
-               Permission_denied
-               "delegation.parent_authority: parent authority or lifetime does not \
-                permit execution")))
+     | Some parent -> Ok (parent, record))
   | _ -> missing_host ()
+;;
+
+let generated_parent ?(check_stop_epoch = true) t (state : Agent_session.Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind parent, record = generated_parent_record t state in
+  let%bind current = Agent_session.Session_actor.state parent.actor in
+  let%bind () =
+    Agent_session.Delegation_authority.check_invocation_owner record current
+  in
+  let%bind fingerprint = parent_authority_fingerprint t current in
+  let%bind () = authorize_independent t record in
+  match
+    ( current.lifecycle.desired
+    , current.lifecycle.observed
+    , current.halted
+    , current.failure
+    , record.revocation
+    , record.admission.lifetime )
+  with
+  | ( Running
+    , (Idle | Running_turn _ | Waiting_for_permission _)
+    , false
+    , None
+    , None
+    , (Owned | Invocation_owned _) )
+    when String.equal fingerprint record.admission.authority_sha256
+         && ((not check_stop_epoch)
+             || Int64.equal
+                  current.stop_epoch
+                  (Option.value
+                     state.parent_stop_epoch
+                     ~default:
+                       (Option.value record.admission.parent_stop_epoch ~default:0L))) ->
+    Ok (parent, record)
+  | _, _, _, _, None, Independent _
+    when String.equal fingerprint record.admission.authority_sha256 -> Ok (parent, record)
+  | _ ->
+    Error
+      (unavailable
+         Permission_denied
+         "delegation.parent_authority: parent authority or lifetime does not permit \
+          execution")
 ;;
 
 let check_source_for_execution t state = function
@@ -2696,7 +2700,7 @@ let source_attachment_error error =
   unavailable Invalid_state (Core.Error.to_string_hum error)
 ;;
 
-let restore_authored_code
+let restore_authored_child
       t
       ~artifacts
       ~source
@@ -2728,7 +2732,194 @@ let restore_authored_code
        ~manifest_sha256
        ~root_relative_path)
     ~checkpoint:Eio.Fiber.check
+;;
+
+let restore_authored_code t ~artifacts ~source record =
+  restore_authored_child t ~artifacts ~source record
   |> Result.map ~f:Agent_session.Prompt_child_source.revision
+;;
+
+let with_prepared_run_source t (entry : Session_registry.entry) ~preparation f =
+  let module A = Agent_session in
+  let module Source = A.Runtime_builder.Source in
+  let module Store = Agent_store.Session_store in
+  let open Result.Let_syntax in
+  let%bind handle =
+    Result.of_option
+      entry.store_handle
+      ~error:(unavailable Invalid_state "source staging requires an owned session store")
+  in
+  let%bind () =
+    if Store.owns_handle t.store handle
+    then Ok ()
+    else
+      Error (unavailable Permission_denied "source staging has a foreign session store")
+  in
+  let%bind _ =
+    Store.Handle.metadata_checked handle |> Result.map_error ~f:protocol_of_store
+  in
+  let%bind state = A.Session_actor.state entry.actor in
+  let%bind () =
+    if
+      Agent_protocol.Id.Session.equal
+        (Store.Handle.session_id handle)
+        state.identity.session_id
+    then Ok ()
+    else
+      Error
+        (unavailable Invalid_state "source staging session owner differs from its Handle")
+  in
+  let%bind retained = restore_state_source t state in
+  let invocation =
+    A.Runtime_script_preparation.Invocation.of_root state.spec.root_invocation
+  in
+  let with_source source f =
+    Runtime_owner.with_prepared_source entry.runtime ~preparation ~source f
+  in
+  let select revision =
+    Source.prepare
+      revision
+      ~script_preparation:t.script_preparation
+      ~invocation
+      ~env:t.env
+      ~checkpoint:Eio.Fiber.check
+  in
+  let diagnostics values =
+    unavailable
+      Prompt_unavailable
+      (List.map values ~f:(fun (value : A.Prompt_revision_builder.Diagnostic.t) ->
+         value.message)
+       |> String.concat ~sep:"\n")
+  in
+  match retained with
+  | Authored _ ->
+    let%bind definition_id =
+      Result.of_option
+        state.spec.prompt_definition_id
+        ~error:(unavailable Prompt_unavailable "session has no catalog prompt identity")
+    in
+    let%bind revision =
+      A.Prompt_catalog.restore_verified_revision
+        t.prompts
+        ~definition_id
+        ~revision_id:state.spec.prompt_revision_id
+      |> Result.map_error ~f:diagnostics
+    in
+    let%bind source = select revision in
+    with_source source f
+  | Captured_delegation retained ->
+    let%bind source =
+      Source.prepare_captured
+        retained
+        ~script_preparation:t.script_preparation
+        ~invocation
+        ~env:t.env
+        ~checkpoint:Eio.Fiber.check
+    in
+    with_source source f
+  | Generated_artifact { artifact; _ } ->
+    let%bind parent, record = generated_parent_record t state in
+    (* A source witness may select existing grants, never cause their creation.
+       This lease spans the target's prepared callback, including any held ACK. *)
+    Runtime_owner.with_loaded_runtime parent.runtime (fun runtime ->
+      let%bind current_parent, current_record = generated_parent t state in
+      let%bind () =
+        if
+          phys_equal parent.actor current_parent.actor
+          && Agent_store.Delegation_store.equal_record record current_record
+        then Ok ()
+        else
+          Error
+            (unavailable Conflict "delegation source owner changed before preparation")
+      in
+      let%bind native =
+        Result.of_option
+          runtime.A.Runtime_builder.native_runtime
+          ~error:
+            (unavailable Invalid_state "delegation parent has no loaded native bindings")
+      in
+      let%bind () =
+        if Lazy.is_val native.capabilities
+        then Ok ()
+        else
+          Error
+            (unavailable
+               Invalid_state
+               "delegation parent native bindings have not already been realized")
+      in
+      let%bind public =
+        Lazy.force native.capabilities
+        |> Result.map_error ~f:(fun error ->
+          unavailable Permission_denied error.Chat_response.Tool_capability.message)
+      in
+      let%bind artifacts =
+        Agent_store.Prompt_artifact_store.open_existing
+          ~env:t.env
+          ~root:
+            (Agent_store.Data_root.prompt_artifacts_path
+               (Agent_store.Session_store.data_root t.store))
+        |> Result.map_error ~f:protocol_of_store
+      in
+      let%bind source =
+        match record.admission.authored_tool with
+        | Some origin ->
+          let%bind resources =
+            Authored_resources.find t.authored_resources ~public ~name:origin.name
+          in
+          let%bind _ = Authored_resources.resolve t.authored_resources record ~public in
+          let%bind child =
+            restore_authored_child t ~artifacts ~source:resources.source record
+          in
+          Source.prepare_authored_child
+            child
+            ~record
+            ~script_preparation:t.script_preparation
+            ~invocation
+            ~env:t.env
+            ~checkpoint:Eio.Fiber.check
+        | None ->
+          let%bind definition =
+            A.Generated_definition.restore
+              ?limits:
+                (Option.map
+                   t.authoring_validation_host
+                   ~f:Chat_response.Authoring_validation.compilation_limits)
+              ?source_limits:
+                (Option.map
+                   t.authoring_validation_host
+                   ~f:Chat_response.Authoring_validation.bundle_limits)
+              ?catalog:
+                (Option.bind
+                   t.authoring_validation_host
+                   ~f:Chat_response.Authoring_validation.delegated_catalog)
+              ~env:t.env
+              ~artifact_store:artifacts
+              ~revision_id:artifact.revision_id
+              ~manifest_sha256:record.admission.manifest_sha256
+              ~current_capabilities:(fun () -> public)
+              ~pins:record.admission.capability_pins
+              ()
+            |> Result.map_error ~f:(fun diagnostics ->
+              unavailable
+                Prompt_unavailable
+                (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string
+                 |> String.concat ~sep:"\n"))
+          in
+          Source.prepare_generated definition ~invocation
+      in
+      with_source source (fun prepared ->
+        let%bind current_parent, current_record = generated_parent t state in
+        let%bind () =
+          if
+            phys_equal parent.actor current_parent.actor
+            && Agent_store.Delegation_store.equal_record record current_record
+          then Ok ()
+          else
+            Error
+              (unavailable Conflict "delegation source owner changed during preparation")
+        in
+        let%bind () = Runtime_owner.Prepared.check_basis prepared in
+        f prepared))
 ;;
 
 let restore_authored_selection t ~artifacts ~public record =

@@ -1,4 +1,5 @@
 open! Core
+module Source = Runtime_source_preparation
 module Agent_runtime = Chat_response.Agent_runtime
 module Config = Chat_response.Config
 module Converter = Chat_response.Converter

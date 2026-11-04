@@ -20,6 +20,7 @@ let with_daemon
       ?(qualify_chatml_extensions = false)
       ?(profile = permission_profile)
       ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
+      ?(prepare_sources = fun _ _ -> ())
       ~policy
       f
   =
@@ -54,6 +55,7 @@ let with_daemon
              {|let run ctx input =
   let unused = fun () -> Model.spawn("agent_prompt_v1", input) in
   Task.pure(`Complete(`String("ok")))|});
+         prepare_sources env root;
          Eio.Switch.run (fun sw ->
            let daemon =
              Daemon.start

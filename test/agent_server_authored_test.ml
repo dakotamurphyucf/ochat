@@ -84,6 +84,102 @@ let answer ~id =
   |> Stdlib.List.to_seq
 ;;
 
+(* Exercise the source boundary on the actual named native child, after ordinary
+   execution/reopen has established its genuine parent owner. *)
+let assert_authored_source env daemon id =
+  let entry = R.load (D.registry daemon) id |> protocol_ok in
+  let before = A.state entry.actor |> protocol_ok in
+  let store_ok = function
+    | Ok value -> value
+    | Error error -> raise_s [%sexp (error : Agent_store.Store_error.t)]
+  in
+  let frames () =
+    let handle = Option.value_exn entry.store_handle in
+    let journal =
+      Agent_store.Journal.open_existing
+        ~env
+        ~directory:(Agent_store.Session_store.Handle.journal_directory handle)
+        ~max_payload_length:16777216
+        ~max_segment_bytes:67108864L
+        ~max_segment_frames:4096
+      |> store_ok
+    in
+    let scan = Agent_store.Journal.scan journal |> store_ok in
+    List.map scan.entries ~f:(fun entry -> Agent_store.Frame.payload entry.frame)
+  in
+  let saved = frames () in
+  let request =
+    Agent_session.Run_admission_request.Headless.create
+      ~session_id:id
+      ~generation:before.identity.generation
+      ~expected_revision:before.counters.revision
+      ~mode:Single_turn
+      ~input:Authored_start
+      ~key:(P.Idempotency_key.of_string "authored-source-stage" |> protocol_ok)
+    |> protocol_ok
+  in
+  let preparation =
+    match
+      A.begin_headless_run_preparation
+        entry.actor
+        ~actor:(Operator_authorization.trusted_local (principal ()))
+        ~authorize:(fun _ -> Ok ())
+        ~request
+      |> protocol_ok
+    with
+    | Prepare preparation -> preparation
+    | Retained _ -> failwith "authored source unexpectedly retained a Run"
+  in
+  Exn.protect
+    ~finally:(fun () -> A.end_run_preparation entry.actor preparation |> protocol_ok)
+    ~f:(fun () ->
+      Agent_server.Session_factory.with_prepared_run_source
+        (D.factory daemon)
+        entry
+        ~preparation
+        (fun prepared ->
+           Agent_server.Runtime_owner.Prepared.check_basis prepared |> protocol_ok;
+           let selected =
+             A.Source_binding.source
+               (Agent_server.Runtime_owner.Prepared.binding prepared)
+           in
+           match Agent_session.Runtime_builder.Source.selection selected with
+           | Authored_child { source = child; reference } ->
+             let revision = Agent_session.Prompt_child_source.revision child in
+             assert (
+               Agent_store.Delegation_store.Reference.equal
+                 reference
+                 (Option.value_exn before.spec.delegation));
+             let parent =
+               R.find (D.registry daemon) reference.key.parent_session_id
+               |> Option.value_exn
+             in
+             assert (
+               Result.is_error
+                 (Agent_session.Runtime_builder.Source.validate_target
+                    selected
+                    (A.state parent.actor |> protocol_ok)));
+             assert (
+               P.Id.Prompt_revision.equal
+                 before.spec.prompt_revision_id
+                 (Agent_session.Prompt_revision.id revision));
+             assert (
+               String.is_substring
+                 (Agent_session.Prompt_revision.artifact revision).root_chatmd
+                 ~substring:"AUTHORED_SPECIALIST");
+             Ok ()
+           | Authored _ | Captured _ | Generated _ ->
+             failwith "authored child source was reclassified")
+      |> protocol_ok);
+  assert (
+    Jsonaf.exactly_equal
+      (state_document before |> store_ok |> Document_schema.Document.json)
+      (state_document (A.state entry.actor |> protocol_ok)
+       |> store_ok
+       |> Document_schema.Document.json));
+  [%test_eq: string list] saved (frames ())
+;;
+
 let%expect_test
     "authored native sessions retain private moderator state over Unix sockets and \
      daemon restart"
@@ -118,6 +214,7 @@ let%expect_test
         let queued = ref None in
         let child_calls = ref 0 in
         let calls = ref 0 in
+        let constructions = ref 0 in
         let child_preflight = ref (fun () -> ()) in
         let provider ~sw:_ ~inputs =
           Int.incr calls;
@@ -184,6 +281,17 @@ let%expect_test
           Eio.Switch.run (fun sw ->
             Failure_diagnostic.reset diagnostic;
             let before = !calls in
+            let policy =
+              inference_policy ~default_model:"fixture-model" ~post_stream:provider
+            in
+            let policy =
+              { policy with
+                runtime_inference_ports =
+                  (fun actor ->
+                    Int.incr constructions;
+                    policy.runtime_inference_ports actor)
+              }
+            in
             let daemon =
               run_phase "start daemon" (fun () ->
                 D.start
@@ -196,10 +304,7 @@ let%expect_test
                   ~options:
                     { D.default_options with
                       qualify_chatml_extensions = true
-                    ; inference_policy =
-                        Agent_server_test_support.inference_policy
-                          ~default_model:"fixture-model"
-                          ~post_stream:provider
+                    ; inference_policy = policy
                     }
                   ()
                 |> protocol_ok)
@@ -593,6 +698,12 @@ let%expect_test
           in
           assert (P.Id.Session.equal child continued);
           check_counter daemon child "count-3";
+          let before_calls = !calls in
+          let before_construction = !constructions in
+          run_phase "verify authored source after original edit and restart" (fun () ->
+            assert_authored_source env daemon child);
+          [%test_eq: int] before_calls !calls;
+          [%test_eq: int] before_construction !constructions;
           let continued =
             call sw daemon client caller ~session_id:grandchild "Inherited after restart."
           in

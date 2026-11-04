@@ -77,9 +77,8 @@ let check_new t state =
     else conflict "new recurrence execution source, lifecycle, control or caller changed"
 ;;
 
-let check_current t (state : Session_state.t) =
+let check_basis t (state : Session_state.t) =
   let open Result.Let_syntax in
-  let%bind () = check_original t.actor ~authorize:t.authorize state t.definition in
   let%bind () =
     if
       Recurrence_controller.is_current t.current
@@ -95,6 +94,12 @@ let check_current t (state : Session_state.t) =
     | Some _ | None -> conflict "recurrence execution exact retained basis changed"
   in
   check_new t state
+;;
+
+let check_current t state =
+  let open Result.Let_syntax in
+  let%bind () = check_original t.actor ~authorize:t.authorize state t.definition in
+  check_basis t state
 ;;
 
 let prepare (state : Session_state.t) ~controller ~actor ~authorize ~intent ~attempt =

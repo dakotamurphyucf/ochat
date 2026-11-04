@@ -1388,6 +1388,87 @@ val begin_headless_run_preparation
 
 val end_run_preparation : t -> Run_preparation.t -> (unit, Agent_protocol.Error.t) result
 
+module Source_binding : sig
+  (** Actor-issued captured source/preparation custody, not a runtime lease or
+      execution authority. No serialization or caller-supplied guard issuer.
+      Belongs to the issuing Eio domain; release is irreversible and idempotent. *)
+  type t
+
+  val source : t -> Runtime_source_preparation.t
+  val close : t -> unit
+
+  (** Repeats the original policy, then the callback-free basis. *)
+  val check_current : t -> (unit, Agent_protocol.Error.t) result
+
+  (** Non-yielding and callback-free: original proof presence, live
+      actor/preparation, exact retained source selection and current revision.
+      Original authentication currentness and policy run in [check_current];
+      this basis alone grants neither. *)
+  val check_basis : t -> (unit, Agent_protocol.Error.t) result
+end
+
+(** Bind one authentic static source selection to the exact live authenticated
+    preparation. Requires no active operation or moderator borrow and an Idle or
+    Stopped target. Checks the pinned definition/revision/invocation; installed-tree
+    verification remains the host source owner's responsibility. Ordinary ACKs,
+    lifecycle/runtime retirement, replacement and owner exit close the binding.
+    An exact owned preparation ACK can advance its basis. A closed binding cannot
+    be rebound. This neither constructs nor proves a Runtime_owner lease. *)
+val bind_run_source
+  :  t
+  -> preparation:Run_preparation.t
+  -> source:Runtime_source_preparation.t
+  -> (Source_binding.t, Agent_protocol.Error.t) result
+
+module Held_run : sig
+  (** Actual actor-issued continuous startup custody for an inert acknowledged
+      Run. Neutral with respect to recurrence/Goal ownership. No decoder, issuer
+      or scope constructor; a retained receipt never recreates this value.
+      Requires the separate genuine runtime-owner Prepared lifetime for eventual
+      activation. Closing its source binding preserves the acknowledged evidence
+      and last write disposition without rollback or no-effects permission. *)
+  type t
+
+  val admission : t -> Agent_protocol.Run_receipt.t
+
+  (** Callback-free exact live actor/source/preparation and still-Admitted
+      Run/receipt. Neither authenticates the original nor starts execution. *)
+  val check_basis : t -> (unit, Agent_protocol.Error.t) result
+
+  module Admission : sig
+    type held = t
+
+    (** Retained is exact confirmed DATA only, including a known ACK whose
+        continuous source owner closed during persistence. Rejected means no
+        admission write was attempted; it is not a no-effects proof. Uncertain
+        retains attempted-write uncertainty and forbids a replacement admission. *)
+    type t =
+      | Held of held
+      | Retained of Agent_protocol.Run_receipt.t
+      | Rejected of Agent_protocol.Error.t
+      | Uncertain of Agent_protocol.Error.t
+  end
+end
+
+(** Trusted host inert admission using the exact actor-issued source binding and
+    its original authenticated preparation. Its canonical request must match the
+    complete occurrence intent/attempt and exact actual server/session target.
+    New Run, Admission and reciprocal origin
+    commit atomically before returning live Held custody. No normal Run authority,
+    operation/history allocation, runtime load, initialization or worker launch.
+    Retained lookup verifies exact origin/attempt and returns DATA only; closed
+    or recovered custody must use existing observation/reconciliation, never
+    recreate Held. Own ACK advances only this exact preparation before publish.
+    Source binding alone is not installed-artifact or runtime-lease authority;
+    the host must supply those genuine owners before any eventual activation. *)
+val admit_held_recurrence_run
+  :  t
+  -> binding:Source_binding.t
+  -> intent:Recurrence_execution_intent.t
+  -> attempt:Recurrence_execution_attempt.t
+  -> session:Agent_protocol.Session_ref.t
+  -> (Held_run.Admission.t, Agent_protocol.Error.t) result
+
 (** Current host policy, target and writer are checked in one mailbox read before
     receipt lookup. [authorize] is host-owned and non-yielding. No runtime load,
     history allocation or authority reconstruction occurs on this path. *)
@@ -2725,6 +2806,26 @@ val record_recurrence_execution
   -> attempt:Recurrence_execution_attempt.t
   -> (Recurrence_execution.t, Agent_protocol.Error.t) result
 
+(** Self-target recording under the exact Selected source/preparation owner.
+    Before callbacks, requires this actual actor and full controller and target
+    Session_refs and the unchanged original attempt request/principal/CAS/key/digest. Current
+    controller policy/source/grace still apply. Only its exact acknowledged
+    record advances that preparation; duplicate DATA neither advances nor
+    reattaches custody. Fresh grace clocks precede final original-authorization
+    checks and callback-free custody bases. No target Run or execution authority
+    is issued. *)
+val record_prepared_recurrence_execution
+  :  t
+  -> binding:Source_binding.t
+  -> actor:Operator_authorization.t
+  -> authorize:
+       (Session_state.t
+        -> Recurrence_definition.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> intent:Recurrence_execution_intent.t
+  -> attempt:Recurrence_execution_attempt.t
+  -> (Recurrence_execution.t, Agent_protocol.Error.t) result
+
 module Recurrence_run_observation : sig
   (** Actual target-owner observation of retained immutable Run evidence. No
       constructor or decoder; native/decoded origin/reference data cannot mint
@@ -2758,16 +2859,32 @@ module Recurrence_activation : sig
         through the actor. A revoked cell is never refreshed or revived. *)
     type t
 
-    (** First reject closed/stale custody without invoking its stored policy.
-        Then run trusted nonyielding original controller and target-read policies,
-        followed by both callback-free current bases. No permission survives a yield. *)
+    (** Complete check: reject closed/stale custody, run all controller/target-read
+        policies, repeat both originals, sample fresh grace timing, then check both
+        pure bases. Callbacks are trusted nonyielding host code; exceptions
+        propagate. No permission survives a yield. *)
     val check_current : t -> (unit, Agent_protocol.Error.t) result
 
-    (** Callback-free final original proofs, exact owner/source/control/attempt,
-        actual target Admitted Run, Store Current and nominal-grace checks.
-        The target consumer must run ALL its policies before these final bases,
-        and repeat its own callback-free held-owner check after our policies.
-        Same Eio domain; no yield before its actual first-effect boundary. *)
+    (** Controller and target-read policies, retaining their original-proof checks.
+        First rejects closed/stale custody without invoking stored host code. *)
+    val check_policy : t -> (unit, Agent_protocol.Error.t) result
+
+    (** Both original authentication guards and immutable scopes, without host
+        policy. Executes trusted nonyielding host code after a pure preflight. *)
+    val check_authority : t -> (unit, Agent_protocol.Error.t) result
+
+    (** Sample supplied wall/monotonic clocks and validate fresh nominal grace.
+        Executes host callbacks after a pure preflight; this is not a durable
+        timing certificate or a substitute for policy/original authentication. *)
+    val check_timing : t -> (unit, Agent_protocol.Error.t) result
+
+    (** Callback-free exact owner/source/control/attempt, actual target Admitted
+        Run and Store Current. Invokes no original, policy or clock callback.
+        The target consumer must compose ALL host policies, ALL originals, fresh
+        timing, then BOTH pure target/controller bases immediately before the
+        first effect. Both genuine held ownership and this view are required;
+        this basis alone authenticates neither. Same Eio domain, with no yield
+        or callback after the final bases. *)
     val check_basis : t -> (unit, Agent_protocol.Error.t) result
   end
 end
@@ -2878,6 +2995,29 @@ val observe_recurrence_run
     rollback. No retry, Run admission or activation authority is issued. *)
 val import_recurrence_execution
   :  t
+  -> actor:Operator_authorization.t
+  -> authorize:
+       (Session_state.t
+        -> Recurrence_definition.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> automatic_policy:
+       (Session_state.t
+        -> Recurrence_definition.t
+        -> (bool, Agent_protocol.Error.t) result)
+  -> observation:Recurrence_run_observation.t
+  -> (Recurrence_import.t, Agent_protocol.Error.t) result
+
+(** A continuously owned self-target Held may import ONLY its exact nonterminal
+    Admitted origin/Admission association through the same Store. Both actual
+    target/controller proofs and current policies remain required. The single
+    association ACK advances only that Held's original preparation before
+    publication, leaving request/CAS/key/digest unchanged. Retained DATA writes
+    nothing and cannot recreate or reattach Held custody. PostACK visibility
+    refreshes only the controller, never the stale self-target observation.
+    No activation, startup, terminal settlement or no-effects proof is issued. *)
+val import_held_recurrence_execution
+  :  t
+  -> held:Held_run.t
   -> actor:Operator_authorization.t
   -> authorize:
        (Session_state.t

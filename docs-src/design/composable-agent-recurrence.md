@@ -911,10 +911,125 @@ and owner shutdown close custody before external effects. A successful runtime
 reconfiguration with an existing worker also closes pending permits; initial
 worker installation alone does not reopen or revoke prior closed custody.
 
-All policy callbacks precede final callback-free checks of both original proofs
-and exact evidence bases. The eventual target consumer must also retain its own
-genuine held owner and check after all yielding preparation, persistence, history
-reconciliation and scheduling, immediately before the actual first effect on the
-same Eio domain. Current source-level custody does not qualify that deferred
-startup/activation integration. Release neither cancels an already activated Run
-nor claims that an uncertain effect did not occur.
+The checked view exposes separate policy, original-authentication, fresh timing
+and pure basis checks. Original guards and supplied clocks execute trusted host
+code, even when they do not yield. The complete check first rejects stale or
+closed custody, runs both controller and target-read policies, repeats both
+originals, samples fresh wall/monotonic time for nominal grace, then checks both
+pure owner/evidence bases. Those final bases invoke no policy, original guard or
+clock. A callback closing custody cannot escape that final check.
+
+The eventual target consumer must retain its own genuine held owner and compose
+all policies, all original guards, fresh timing, and both pure target/controller
+bases after yielding preparation, persistence, history reconciliation and
+scheduling. No callback or yield may intervene between the final bases and the
+actual first effect on the same Eio domain. The basis alone grants neither
+authentication nor held ownership. Current source-level custody does not qualify
+that deferred startup/activation integration. Release neither cancels an already
+activated Run nor claims that an uncertain effect did not occur.
+
+### Source selection before deferred activation
+
+`Runtime_builder.Source` retains an explicit `Authored` revision or `Generated`
+definition, rather than manufacturing an ordinary revision for generated code.
+Authored selection uses the existing bounded parser/program restoration owner. Its
+explicit `Legacy`, `Extension` and `No_moderator` outcomes separate source identity
+from versioned invocation capability. A legacy script's genuine identity does not
+become a versioned observer or handler receipt. Single-file source identity and
+complete linked-program identity use the same recipe as the live Registry.
+
+This immutable selection performs no Manager construction, Agent-content
+conversion, history allocation, native shell initialization or MCP connection.
+It grants no execution authority. Native resource discovery and compilation
+requiring a newly discovered tool ABI still belong to the real activation path
+after the held Run and reciprocal controller acknowledgements. Generated
+definitions can statically restore and compile against their actual already
+loaded parent's inherited bindings; the source retains that genuine generated
+owner and its compiled programs. The existing Registry binds their exact identity
+without constructing or initializing a Manager. A source selection alone cannot
+authorize an inert admission or bypass the target's physical runtime lifetime.
+The held admission and first-effect owner integration
+remains a separate qualification boundary.
+
+`Session_factory.with_prepared_run_source` verifies the actual target's complete
+retained publication and materialized inventory before binding or any held Run
+write. Authored cache hits use the Catalog's own artifact store and exact retained
+manifest digest; cached revision identity alone is insufficient. Captured
+recurrence children retain their exact private admission and captured replay.
+The source witness distinguishes ordinary authored, captured recurrence,
+authored-tool child and generated families. Each child carries its actual
+retained child association; sharing the parent's artifact does not make the
+parent a valid target. The child's absent catalog identity does not erase the
+original artifact's defining metadata or relax ordinary source matching.
+Authored-tool children resolve their genuine defining policy and source through
+the loaded parent's existing resource index. Generated children restore their
+exact recorded artifact and inherited capability pins through the existing
+generated owner. Neither branch consults original files or repairs stored bytes.
+
+The Factory acquires the actual no-load parent lease before parent policy lookup
+and retains it through the prepared callback when inherited bindings are needed.
+Only already-realized inherited bindings are selected. A cold parent or unrealized
+bindings fail without creating tools, connecting MCP or running an initializer.
+Ordinary eager loading remains available through its existing authorized path;
+source staging does not invoke it covertly.
+The prepared callback still owns current command/delegation checks, reciprocal
+acknowledgement and final effect admission. It cannot retain the borrowed resource
+lifetime after returning, and artifact verification grants no execution permission.
+
+The actor can bind that source to its exact authenticated Run preparation.
+`Session_actor.Source_binding` owns only this source/preparation custody; it does
+not establish a runtime lease. `Runtime_owner.with_prepared_source` separately
+reserves the actual owner without loading a runtime, and lends a `Prepared`
+lifetime with the actor-issued binding. Competing leases and eager loading are
+excluded while it is reserved. Original authentication, pinned selection, actor
+basis and runtime resource identity remain independently checked.
+
+An ordinary validated persistence attempt closes bound preparation before its
+write yields; an explicitly owned preparation acknowledgement may advance its
+same basis. Accepted lifecycle/runtime retirement and replacement close custody
+before cancellation or cleanup joins. Closing either lifetime never reopens it
+or proves rollback.
+
+The actor's inert admission path uses that exact source binding and original
+headless preparation. It validates the complete occurrence intent/attempt and
+commits the revision-zero `Admitted` Run, canonical Admission receipt and
+reciprocal origin together. The source-installation candidate precedes that
+combined commit; origin cannot attach later to an ordinary admission. Ordinary
+Run admission retains its existing initialized-checkpoint and operation rules.
+The inert path requires scripted orchestration, including an actual legacy
+source identity; a no-moderator selection cannot admit a Run.
+
+This acknowledgement allocates no input Operation or history, invokes no source
+initializer or native setup, and installs no normal Run authority. Only the
+continuously live actor-issued `Held_run` owns the admitted startup; activation
+also requires the separate genuine `Runtime_owner.Prepared` lifetime and verified
+retained artifact. An exact receipt retry returns data, never recreated held
+custody. Closure preserves the last write disposition and durable evidence.
+Prewrite rejection, attempted-write uncertainty and confirmed admission remain
+distinct, including when custody closes during persistence or publication raises.
+
+For a controller targeting its own session, the exact prepared-record operation
+keeps the original target request, CAS, key and digest while its controller record
+ACK advances only the actual owned preparation. The held association import then
+requires the same live `Admitted` Run, canonical Admission and immutable origin.
+Its reciprocal controller ACK advances that same preparation before publication.
+Retained data neither advances nor reattaches custody; unrelated ordinary writes
+still close it. Neither operation accepts a different actor or server-qualified
+target. The controller must already own its legitimate installed source and
+checkpoint; these operations create no cold checkpoint.
+
+Both owned paths finish their controller policies after the central source-binding
+policy callback. Fresh selection grace, where required, precedes the final
+original proofs and callback-free controller and source/held bases immediately
+before the sole writer attempt. Own ACK rotates the actual Store witness, so returned
+data refreshes controller visibility without reusing the stale self-target read.
+The pure custody basis alone remains neither authentication nor runtime authority.
+
+The deferred host, actual reciprocal activation barrier and no-effects retry
+issuer remain separate qualification boundaries. Factory must verify the full
+retained artifact, installed tree and selected program/content custody before
+binding or held admission; equal revision IDs alone do not establish that proof.
+Activation must consume the same genuine `Prepared` and `Held_run` owners through
+a one-shot phase, without widening staged quiescence or accepting an arbitrary
+runtime replacement. This inert admission seam starts no deferred effects and
+issues no no-effects proof.

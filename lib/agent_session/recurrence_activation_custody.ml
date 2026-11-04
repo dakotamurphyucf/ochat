@@ -147,25 +147,28 @@ let check_policy t state =
     state
 ;;
 
+let check_authority t =
+  if not t.live
+  then conflict "activation custody is closed or belongs to another owner"
+  else if
+    Operator_authorization.is_current t.actor
+    && P.Principal.has_scope (Operator_authorization.principal t.actor) Send_messages
+  then Ok ()
+  else
+    Error
+      (P.Error.create
+         Permission_denied
+         ~message:"activation original authority is unavailable"
+         ~retryable:false
+         ())
+;;
+
 let check_basis t ~owner state =
   let open Result.Let_syntax in
   let%bind () =
     if belongs_to t ~owner && t.live
     then Ok ()
     else conflict "activation custody is closed or belongs to another owner"
-  in
-  let%bind () =
-    if
-      Operator_authorization.is_current t.actor
-      && P.Principal.has_scope (Operator_authorization.principal t.actor) Send_messages
-    then Ok ()
-    else
-      Error
-        (P.Error.create
-           Permission_denied
-           ~message:"activation original authority is unavailable"
-           ~retryable:false
-           ())
   in
   semantic_basis t state
 ;;
@@ -190,6 +193,7 @@ let create ~owner ~state ~actor ~authorize ~origin =
     Recurrence_run_origin.validate origin ~intent:t.intent ~attempt:t.attempt
   in
   let%bind () = check_policy t state in
+  let%bind () = check_authority t in
   let%map () = check_basis t ~owner state in
   t
 ;;

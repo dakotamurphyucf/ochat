@@ -54,13 +54,9 @@ type t =
   ; reject : bool ref
   }
 
-let with_store f =
+let with_store ?prepare_initial f =
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
-      let manager, _, _ = handoff_definition ~declare_tool:false env in
-      let snapshot =
-        Chat_response.Moderator_manager.identity_snapshot manager |> Result.ok_or_failwith
-      in
       let initial =
         actor_state ~workspace_instance ~liveness:Detached ~start_immediately:true
       in
@@ -76,8 +72,18 @@ let with_store f =
                      (P.Timestamp.to_time_ns timestamp)
                      (Time_ns.Span.of_int_sec 86_400))
             }
-        ; moderator = Some (A.Moderator_checkpoint.encode snapshot)
         }
+      in
+      let initial =
+        match prepare_initial with
+        | Some prepare -> prepare env initial
+        | None ->
+          let manager, _, _ = handoff_definition ~declare_tool:false env in
+          let snapshot =
+            Chat_response.Moderator_manager.identity_snapshot manager
+            |> Result.ok_or_failwith
+          in
+          { initial with moderator = Some (A.Moderator_checkpoint.encode snapshot) }
       in
       let root =
         Filename.concat workspace_instance.canonical_root.native_path "runtime-store"
@@ -175,6 +181,9 @@ let create_actor
       ?(index_projection = index_entry)
       ?(before_observe = ignore)
       ?(published = fun _ -> ())
+      ?(published_events = fun _ -> ())
+      ?(clock_read = fun () -> ())
+      ?(before_commit = fun () -> ())
       ()
   =
   let persistence : A.Session_actor.persistence =
@@ -189,7 +198,9 @@ let create_actor
                  ~message:"definite no-write runtime fixture"
                  ~retryable:true
                  ())
-          else A.Session_persistence.commit t.durable ~command_audit ~previous transition)
+          else (
+            before_commit ();
+            A.Session_persistence.commit t.durable ~command_audit ~previous transition))
     }
   in
   let actor =
@@ -202,9 +213,13 @@ let create_actor
       ~persistence
       ~operation_worker:None
       ~services:
-        { now = (fun () -> !(t.wall))
+        { now =
+            (fun () ->
+              clock_read ();
+              !(t.wall))
         ; monotonic_now =
             (fun () ->
+              clock_read ();
               Mtime.add_span
                 Mtime.min_stamp
                 (Mtime.Span.of_uint64_ns Int64.(of_int !(t.elapsed_ms) * 1_000_000L))
@@ -212,13 +227,14 @@ let create_actor
         ; create_attachment_id = P.Id.Attachment.create
         ; create_reclaim_token = (fun () -> "runtime-reclaim")
         ; state_committed =
-            (fun state _ ->
+            (fun state events ->
               S.write_metadata
                 ~entry:(index_projection state)
                 t.store
                 t.handle
                 (metadata state)
               |> store_ok;
+              published_events events;
               published state)
         ; job_results = None
         ; subscription_limits = A.Staged_subscriptions.default_limits
