@@ -290,7 +290,15 @@ end
 val reconcile_inference_recovery : t -> (unit, Agent_protocol.Error.t) Result.t
 
 module Initialization_scope : sig
-  (** Process-local capability issued only to a trusted Pending constructor.
+  module Purpose : sig
+    type t =
+      | Pending_initialization
+      | Runtime_construction
+    [@@deriving equal, sexp_of]
+  end
+
+  (** Process-local capability issued only to a trusted Pending initializer or
+      authenticated Ready resource construction.
       Bound to one actor, stable source/complete Selection and generation; it is
       never reconstructed from durable Pending state or exposed by RPC. *)
   type t
@@ -658,6 +666,35 @@ val commit_extensions
   -> Extension_change.t list
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
+module Callback_scope : sig
+  (** Exact actor-issued legacy borrow and installed Manager callback. No public
+      constructor or decoder; saved source/origin facts grant no authority. *)
+  type t
+
+  val executing : t -> Agent_protocol.Moderator_execution.t
+  val source : t -> Agent_protocol.Run_source.t
+  val origin : t -> Agent_protocol.Inference_origin.t option
+end
+
+(** A callback holds its actual actor borrow through checkpoint commit and
+    cleanup. Commit persists the outcome and full prospective queue atomically.
+    Failure retains honest failed/interrupted evidence; effects are not replayed. *)
+type legacy_callback_handler =
+  scope:Callback_scope.t
+  -> commit:
+       (snapshot:Session.Moderator_state.Identity_snapshot.t
+        -> requests:Agent_protocol.Invocation.follow_up
+        -> (unit, Agent_protocol.Error.t) result)
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Exact installed Manager callback admission. True means checkpoint committed
+    and cleanup completed; false means physical actor unavailable. Expired,
+    foreign or mismatching callbacks reject rather than granting a legacy fallback. *)
+type legacy_callback_claim =
+  callback:Chat_response.Moderator_manager.Callback.t
+  -> legacy_callback_handler
+  -> (bool, Agent_protocol.Error.t) result
+
 (** Host-owned invocation service for one already claimed background job attempt.
     The callback receives the actor's actual job record and an expiring executor.
     Only one scope may own a job at a time. Roots require Script origin and that
@@ -685,11 +722,15 @@ type job_execution =
   ; execute : Native_tool_invocation.executor
   ; moderator_execute : Native_tool_invocation.moderator_executor
   ; claim_event : event:Chat_response.Moderation.Event.t -> Moderator_event.claim
+  ; claim_legacy_callback : legacy_callback_claim
   }
 
 (** Retain job-attempt ownership across native calls and moderator events. Event
     claims use the actor's moderator gate and persist job identity with the
-    checkpoint receipt. Returned services expire at callback completion. *)
+    checkpoint receipt. [claim_legacy_callback] admits only actual Boundary
+    selections from the installed Manager under this exact job attempt. Missing
+    historical custody remains unavailable. Returned services expire at callback
+    completion; none reconstruct original authentication from a Job ID. *)
 val with_job_execution
   :  t
   -> job_id:Agent_protocol.Id.Job.t
@@ -738,9 +779,13 @@ val set_operation_worker
     The constructor and legacy worker-only setter retain no inferred execution.
     No callback reenters the runtime owner's mutex during compaction. When an
     original [actor] is supplied, check it at actual worker installation after
-    any queued constructor checkpoints; legacy omission remains unbound. *)
+    any queued constructor checkpoints; legacy omission remains unbound.
+    [moderator_manager] retains the exact installed compiled resource for callback
+    ownership checks. It requires a runtime worker and is cleared by worker-only
+    replacement, removal or retirement. It never grants source authority by itself. *)
 val set_runtime_worker
   :  ?actor:Operator_authorization.t
+  -> ?moderator_manager:Chat_response.Moderator_manager.t
   -> t
   -> worker:Operation_worker.t option
   -> inference:Inference_client.Execution.t option
@@ -837,19 +882,25 @@ val commit_reconciled_administration
   -> Session_state.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
-(** Issue one exclusive constructor scope against the actual Pending basis.
+(** Issue one exclusive constructor scope against its exact lifecycle/source
+    basis. Default purpose is Pending_initialization. Runtime_construction requires
+    actual Ready and current original custody or a genuine Run preparation; this
+    legacy no-proof entry cannot issue it. Complete/fail initialization reject
+    Runtime_construction without changing Ready; end retires either purpose.
     Requires a captured target. Actor-owned jobs/schedules, tracking counters,
     reservations and acknowledged shell grants may advance without replacing the
     basis. Accepted authorized Stop permanently revokes even a stopped no-op. *)
 val begin_initialization
-  :  t
+  :  ?purpose:Initialization_scope.Purpose.t
+  -> t
   -> expected:Session_state.t
   -> (Initialization_scope.t, Agent_protocol.Error.t) result
 
 (** Actual authenticated initialization admission. The scope still supplies
     lifecycle/job ownership; the retained original actor grants no source read. *)
 val begin_initialization_authenticated
-  :  t
+  :  ?purpose:Initialization_scope.Purpose.t
+  -> t
   -> actor:Operator_authorization.t
   -> expected:Session_state.t
   -> (Initialization_scope.t, Agent_protocol.Error.t) result
@@ -865,7 +916,8 @@ val initialization_agent_actor
 (** Same existing constructor scope, explicitly bound to this run preparation.
     Scoped commits recheck current custody and acknowledge only their own changes. *)
 val begin_run_initialization
-  :  t
+  :  ?purpose:Initialization_scope.Purpose.t
+  -> t
   -> preparation:Run_preparation.t
   -> expected:Session_state.t
   -> (Initialization_scope.t, Agent_protocol.Error.t) result
@@ -876,6 +928,18 @@ val begin_run_initialization
 val end_initialization
   :  t
   -> scope:Initialization_scope.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Negative cleanup for this actor-issued constructor's exact resource.
+    Valid after end_initialization. Removes only its acknowledged selected queue/
+    Schedule loans still bound to this physical Manager/full source. Missing rows
+    are idempotent; a foreign actor or contradictory Manager rejects. No durable
+    fact is deleted and no original authority is required or renewed. The host
+    composes this with the resource's original close, which must always run. *)
+val retire_initialization_resource
+  :  t
+  -> scope:Initialization_scope.t
+  -> moderator_manager:Chat_response.Moderator_manager.t
   -> (unit, Agent_protocol.Error.t) result
 
 (** Admit a fresh queued Model_call under the active constructor capability.
@@ -928,17 +992,38 @@ val complete_initialization_model_job
   -> Runtime_builder.model_job_outcome
   -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
 
-(** Trusted completion retains the scope's stable basis and requires it active.
+(** Trusted Pending completion retains the scope's stable basis and requires it
+    active. Runtime_construction rejects without changing Ready.
     Only initialized history/count/reservations, moderator and shell reviewer
     checkpoints are overlaid. Actual jobs/bindings/schedules, tracking commits
-    and shell grants remain authoritative. Marks Ready without a second archive. *)
+    and shell grants remain authoritative. The optional actual runtime Manager
+    binds only this owner's acknowledged constructor Jobs; missing completed
+    no-delivery rows remain unavailable. Permission objects are not renewed.
+    Failed ACK retains prior bindings; ACK installs handoff before publication.
+    Marks Ready without a second archive. *)
 val complete_initialization
-  :  t
+  :  ?moderator_manager:Chat_response.Moderator_manager.t
+  -> t
   -> scope:Initialization_scope.t
   -> candidate:Session_state.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
-(** Record failed activation under the active scope's stable basis. Retains
+(** Checkpoint only this actual Ready construction and hand off its acknowledged
+    constructor Jobs to the intended runtime resource. Uses the same original
+    Admission and optional Run preparation; no permission is renewed. Missing
+    completed no-delivery rows remain unavailable. Failed ACK preserves the
+    prior basis and bindings; ACK installs them before reconciliation/publication.
+    Exact unchanged checkpoints with no binding change perform no write.
+    Pending scopes must use [complete_initialization]. *)
+val checkpoint_runtime_construction
+  :  ?moderator_manager:Chat_response.Moderator_manager.t
+  -> t
+  -> scope:Initialization_scope.t
+  -> Jsonaf.t option
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
+(** Record failed Pending activation under the active scope's stable basis.
+    Runtime_construction rejects without changing Ready. Retains
     Pending and actual durable effects/configuration; no rollback is claimed. *)
 val fail_initialization
   :  t
@@ -1197,9 +1282,13 @@ val interrupt_run_constructor_job
   -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
 
 (** Captured runtime's moderator install in the preparation's acknowledged
-    constructor transaction. Matching checkpoints produce no durable advance. *)
+    constructor transaction. The exact runtime Manager can bind only that owner's
+    acknowledged constructor Job subset without renewing its permission. Matching
+    checkpoints and unchanged bindings produce no durable advance; omitted Manager
+    never grants a physical resource. Failed ACK preserves subset and bindings. *)
 val checkpoint_run_moderator
-  :  t
+  :  ?moderator_manager:Chat_response.Moderator_manager.t
+  -> t
   -> preparation:Run_preparation.t
   -> Jsonaf.t option
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
@@ -1714,11 +1803,18 @@ val enqueue_run_job_delivery
   -> after:Jsonaf.t
   -> (unit, Agent_protocol.Error.t) result
 
-(** Optional expected values perform checkpoint and complete job-record comparison
-    in the same mailbox transaction as delivery. Scheduler ingress supplies both. *)
+(** Optional expected values perform checkpoint and complete Job-record comparison
+    in the same mailbox transaction as delivery. Actual legacy Manager delivery
+    requires both, compares known snapshots independently from the full retained
+    queue, and appends exactly the existing completion payload. Current/Expired
+    terminal custody transfers before Delivered retires its parent; missing
+    historical custody stays unavailable. The queue loan installs only after ACK,
+    before publication. Named Run source conflicts reject rather than downgrade.
+    Generic and qualified v1 checkpoint comparison remains byte-strict. *)
 val deliver_job
   :  ?expected:Session.Moderator_state.Identity_snapshot.t
   -> ?expected_job:Agent_protocol.Job.t
+  -> ?moderator_manager:Chat_response.Moderator_manager.t
   -> t
   -> job_id:Agent_protocol.Id.Job.t
   -> generation:int
@@ -1829,10 +1925,17 @@ val retry_schedule
   -> (Agent_protocol.Schedule.t, Agent_protocol.Error.t) result
 
 (** Optional expected values compare the old checkpoint and captured schedule
-    before saving delivery plus the new moderator checkpoint atomically. *)
+    before saving delivery plus the new moderator checkpoint atomically. Legacy
+    positive creator evidence or existing queue metadata requires the actual
+    installed Manager resource, exact expected record/checkpoint and one raw
+    append. Only genuinely historical absence retains the data-only route.
+    Completed delivery persists truthful facts even if original custody expired;
+    the corresponding Expired queue loan rejects later execution. No custody is
+    restored from missing inventory. Owned v1 Timer-frame validation is unchanged. *)
 val complete_schedule
   :  ?expected:Session.Moderator_state.Identity_snapshot.t
   -> ?expected_schedule:Agent_protocol.Schedule.t
+  -> ?moderator_manager:Chat_response.Moderator_manager.t
   -> t
   -> schedule_id:Agent_protocol.Id.Schedule.t
   -> generation:int
@@ -1985,6 +2088,96 @@ val with_moderator_checkpoint
   :  t
   -> (unit -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
+
+(** Direct non-yielding currentness check. Retains the exact physical borrow,
+    Manager callback epoch and source installation. Unavailable captures grant
+    no original proof. Call again after any awaited authorization and at final
+    submission; this check itself does not grant effect authority. *)
+val check_callback_current
+  :  t
+  -> Callback_scope.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Borrow the original proof only from this exact admission. A fresh legacy
+    admission without an original object returns None; historical unavailable
+    custody rejects. An expired original object rejects rather than becoming None.
+    Returned proofs also expire with this callback/Manager/source. Queue custody
+    transfer is supplied by producer integration, never the unrelated drainer. *)
+val callback_agent_actor
+  :  t
+  -> scope:Callback_scope.t
+  -> (Operator_authorization.t option, Agent_protocol.Error.t) result
+
+(** Immediate legacy Schedule services bound to this exact callback. Constructing
+    the record grants no authority: each call rechecks the actual Manager/source,
+    physical borrow and original admission at actor persistence. Unavailable or
+    expired custody rejects; genuine admitted None retains legacy behavior.
+    after_ms preserves nonnegative checked wall-clock delay and raw JSON payload,
+    and atomically records creator evidence plus an independent live loan before
+    publication. Failed ACK discards the speculative loan; owner exit retires it.
+    cancel preserves cancellation of any retained Scheduled ID, including a
+    historical target without provenance or custody. This is not a delivery or
+    provider port. The Manager binding owns Snapshot/value conversion and must
+    not fall back to constructor services when this scope is unavailable. *)
+val callback_schedule_services
+  :  t
+  -> scope:Callback_scope.t
+  -> Runtime_builder.schedule_services
+
+(** Admit a genuine Boundary or Queue_head selection from the exact installed
+    Manager. Boundaries use the real active operation, or the one acknowledged
+    startup/resume continuation on an idle actor. Internal events require an exact
+    Queue_head; callers cannot select a relaxed mode or supply proof constructors.
+    Claim ACK installs the callback loan before publication. Failed/uncertain save
+    discards speculative custody; post-ACK errors do not replay the callback.
+    A committed fresh emitted suffix receives independent loans from this exact
+    admitted callback. Historical or recovered rows remain unavailable; the
+    drainer never supplies missing custody. Emitted loans install before publish
+    and remain acknowledged if publication later fails. *)
+val with_legacy_callback
+  :  t
+  -> operation_id:Agent_protocol.Id.Operation.t option
+  -> legacy_callback_claim
+
+(** Claim this actual constructor's one Session_start or Session_resume from
+    its exact active Manager callback. The same Pending/Ready scope, immutable
+    control basis and original admission fence every effect. Claim/source/metadata
+    and receipt commit together; old queue rows remain unavailable. A rejected
+    claim ACK leaves the one-shot phase unchanged; executed failure is not replayed.
+    True means checkpoint and cleanup completed; this owner never claims a raw
+    Queue_head or lends permission from stored metadata. Actual host routing is a
+    separate consumer of this CPS interface. *)
+val with_initialization_callback
+  :  t
+  -> scope:Initialization_scope.t
+  -> manager:Chat_response.Moderator_manager.t
+  -> legacy_callback_claim
+
+(** Claim the exact legacy Queue_head selected by the installed opaque Manager.
+    True means the callback committed its checkpoint and cleanup completed; false
+    means the actual physical actor was unavailable. Empty queues do not invoke
+    this wrapper. The existing claim/failed/interrupted no-replay cleanup owns
+    the whole CPS lifetime. First capture atomically installs only source facts,
+    structural queue metadata and the real claim receipt, without creating a Run
+    or inferred Unbound origin. Generic/v1 handoffs retain strict envelopes.
+    Fresh emitted suffixes name their actual completed Event and retain its
+    original nullable attribution. Only the process-local acknowledged row loan
+    can lend continuation custody; stored captures alone cannot. Legacy queue
+    rows never match payload-shaped Run wakes or borrow Run action services;
+    unavailable custody rejects turn and compaction requests rather than
+    downgrading to legacy authority.
+    End-session and truthful failure/cleanup remain available. *)
+val with_legacy_queued_callback
+  :  t
+  -> callback:Chat_response.Moderator_manager.Callback.t
+  -> operation_id:Agent_protocol.Id.Operation.t option
+  -> (scope:Callback_scope.t
+      -> commit:
+           (snapshot:Session.Moderator_state.Identity_snapshot.t
+            -> requests:Agent_protocol.Invocation.follow_up
+            -> (unit, Agent_protocol.Error.t) result)
+      -> (unit, Agent_protocol.Error.t) result)
+  -> (bool, Agent_protocol.Error.t) result
 
 (** Explicitly retire a retained failed/interrupted queue head at its original
     checkpoint. Available while quiescent running-idle or stopped, without an

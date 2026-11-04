@@ -76,6 +76,44 @@ val advance
 (** Idempotent release on all normal/error/cancellation/uncertain-write exits. *)
 val close : t -> unit
 
+module Constructor_jobs : sig
+  type preparation := t
+  type t
+
+  (** Prepare bookkeeping for one genuine fresh constructor Job. Issuance needs
+      the Actor's existing private owner secret and current preparation; a caller
+      holding only the returned preparation cannot select arbitrary Job IDs.
+      Retained IDs plus this fresh admission bound the subset without a new quota.
+      This is not execution authority or a persistent registry. *)
+  val prepare_add
+    :  preparation
+    -> owner:Owner.t
+    -> state:Session_state.t
+    -> job:Agent_protocol.Job.t
+    -> (t, Agent_protocol.Error.t) result
+
+  (** Capture the exact acknowledged retained subset and prepare its consumption
+      at that owner's actual checkpoint ACK. Missing/removed facts are not
+      reconstructed. Failed writes leave the prior subset unchanged. *)
+  val prepare_handoff
+    :  preparation
+    -> owner:Owner.t
+    -> state:Session_state.t
+    -> (Agent_protocol.Id.Job.t list * t, Agent_protocol.Error.t) result
+
+  (** Repeat exact revision/selection and original preparation checks immediately
+      before persistence, after any yielded host policy work. *)
+  val check_before_commit
+    :  t
+    -> owner:Owner.t
+    -> state:Session_state.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Nonyielding install only after the exact Job/checkpoint ACK and preparation
+      revision advance. Never reopens a closed preparation or renews permission. *)
+  val acknowledge : t -> unit
+end
+
 module Decision : sig
   type preparation = t
 

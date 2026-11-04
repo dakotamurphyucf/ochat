@@ -67,6 +67,26 @@ val claim_foreground
        , Agent_protocol.Error.t )
        result
 
+(** Data validation for an opaque Manager-selected legacy head. The actual actor
+    must first verify that callback belongs to its currently installed Manager
+    and retain the callback epoch/physical borrow. Generic claims above remain
+    strict extensibility-v1 envelope entry points.
+
+    Retain the exact original metadata head as receipt codec5. Source-only
+    bootstrap assigns unavailable structural origin to historical values; no
+    source/ordinal/origin comes from a caller proof. This pure capture still
+    grants no live continuation or permission. Commit the actual source index
+    and metadata atomically with this fresh Running receipt. *)
+val claim_legacy
+  :  callback:Chat_response.Moderator_manager.Callback.t
+  -> operation_id:Agent_protocol.Id.Operation.t option
+  -> state:Session_state.t
+  -> id:Agent_protocol.Id.Moderator_execution.t
+  -> now:Agent_protocol.Timestamp.t
+  -> ( Agent_protocol.Moderator_execution.t * Session.Snapshot.t
+       , Agent_protocol.Error.t )
+       result
+
 (** Validate unchanged source and preservation of the old queue tail. The trusted
     engine supplies the prospective snapshot and runtime requests; the actor must
     atomically save both this receipt and that checkpoint while retaining its borrow. *)

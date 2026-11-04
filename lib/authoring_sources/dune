@@ -205,12 +205,18 @@
     lib/agent_session/script_subscription_service.ml %{dep:../agent_session/script_subscription_service.ml}
     lib/agent_session/session_actor.ml %{dep:../agent_session/session_actor.ml}
     lib/agent_session/actor_reply.ml %{dep:../agent_session/actor_reply.ml}
+    lib/agent_session/execution_custody.ml %{dep:../agent_session/execution_custody.ml}
+    lib/agent_session/legacy_queue_custody.ml %{dep:../agent_session/legacy_queue_custody.ml}
+    lib/agent_session/legacy_queue_checkpoint.ml %{dep:../agent_session/legacy_queue_checkpoint.ml}
+    lib/agent_session/legacy_schedule_custody.ml %{dep:../agent_session/legacy_schedule_custody.ml}
+    lib/agent_session/moderator_source_installation.ml %{dep:../agent_session/moderator_source_installation.ml}
     lib/agent_session/session_state.ml %{dep:../agent_session/session_state.ml}
     lib/agent_session/legacy_moderator_checkpoint.ml %{dep:../agent_session/legacy_moderator_checkpoint.ml}
     lib/agent_session/administration.ml %{dep:../agent_session/administration.ml}
     lib/agent_server/command_handler.ml %{dep:../agent_server/command_handler.ml}
     lib/agent_server/runtime_owner.ml %{dep:../agent_server/runtime_owner.ml}
     lib/agent_session/staged_jobs.ml %{dep:../agent_session/staged_jobs.ml}
+    lib/agent_session/job_custody.ml %{dep:../agent_session/job_custody.ml}
     lib/agent_session/staged_notifications.ml %{dep:../agent_session/staged_notifications.ml}
     lib/agent_session/staged_subscriptions.ml %{dep:../agent_session/staged_subscriptions.ml}
     lib/chat_response/background_delivery.ml %{dep:../chat_response/background_delivery.ml}

@@ -353,3 +353,19 @@ let validate_update ~previous incoming =
   | None, None -> Ok ()
   | Some _, (None | Some _) | None, Some _ -> validate_nonempty_update ~previous incoming
 ;;
+
+let reuse_unchanged_snapshot ~previous ~incoming =
+  let open Result.Let_syntax in
+  let%bind () = validate_encoded_capacity previous in
+  let%bind () = validate_encoded_capacity incoming in
+  let%bind old_snapshot = decode previous in
+  let%map new_snapshot = decode incoming in
+  match previous, incoming, old_snapshot, new_snapshot with
+  | Some _, Some incoming_json, Some previous_snapshot, Some incoming_snapshot
+    when Jsonaf.exactly_equal incoming_json (encode incoming_snapshot)
+         && Sexp.equal
+              (Session.Moderator_state.Identity_snapshot.sexp_of_t previous_snapshot)
+              (Session.Moderator_state.Identity_snapshot.sexp_of_t incoming_snapshot) ->
+    previous
+  | _ -> incoming
+;;

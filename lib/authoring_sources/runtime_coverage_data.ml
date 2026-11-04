@@ -24,6 +24,7 @@ let shared_features =
     , "ACK-owned lifecycle and completion handoffs, explicit compactor guidance \
        reservation and actual writer-profile Clear admission"
     , [ "lib/agent_session/session_actor.ml"
+      ; "lib/agent_session/execution_custody.ml"
       ; "lib/agent_server/session_factory.ml"
       ; "lib/context_compaction/compactor.ml"
       ; "lib/agent_session/instruction_clear_capacity.ml"
@@ -425,6 +426,7 @@ let shared_features =
       ; "lib/agent_session/script_job_request.ml"
       ; "lib/agent_session/script_job_service.ml"
       ; "lib/agent_session/staged_jobs.ml"
+      ; "lib/agent_session/job_custody.ml"
       ; "lib/agent_server/developer_script_job_service.ml"
       ; "lib/agent_server/developer_host.ml"
       ; "lib/agent_server/developer_background_job_runner.ml"
@@ -519,9 +521,15 @@ let moderator_features =
       ; "lib/chat_response/moderator_invocation.ml"
       ; "lib/agent_session/moderator_tool_dispatch.ml"
       ; "lib/agent_session/session_actor.ml"
+      ; "lib/agent_session/execution_custody.ml"
+      ; "lib/agent_session/legacy_queue_custody.ml"
+      ; "lib/agent_session/legacy_queue_checkpoint.ml"
+      ; "lib/agent_session/legacy_schedule_custody.ml"
+      ; "lib/agent_session/moderator_source_installation.ml"
       ]
     , "runtime.invocations.moderator"
-    , [ "test/chatml_composition/moderator_pending_tests.ml"
+    , [ "test/agent_session/event_delivery_tests.ml"
+      ; "test/chatml_composition/moderator_pending_tests.ml"
       ; "test/agent_server_restart_test.ml"
       ; "test/chatml_script_routing/routing_tests.ml"
       ] )
@@ -620,6 +628,16 @@ let moderator_features =
 let implementation_sources =
   [ ( "lib/agent_session/actor_reply.ml"
     , "00e0abeb3120d71ddd4fc0dc109b0d584da3ba8b771f6d0c02aad525df984fb4" )
+  ; ( "lib/agent_session/execution_custody.ml"
+    , "8d64b47d0385c80013963ffdf886519fe04c3058d543a79b6d9934f4573d5133" )
+  ; ( "lib/agent_session/legacy_queue_custody.ml"
+    , "f1d7d4892f9ee3e237d6bdc924c231f1664fa176d63158377644f4ab5fd3c48f" )
+  ; ( "lib/agent_session/legacy_queue_checkpoint.ml"
+    , "1dd6ea7f4bb9cd85ec569493a6f53c92484c680890da475eff0ea592d5da2922" )
+  ; ( "lib/agent_session/legacy_schedule_custody.ml"
+    , "f9c7f73ae0f24cc5c3cb3097813a7a76fd77d7c9eb87f80a1a8fa64d5d6a148f" )
+  ; ( "lib/agent_session/moderator_source_installation.ml"
+    , "1e1595ffe97a6e23fd8456e5e891c256fb606d1b2c0b68940e9a2ac465d9483d" )
   ; ( "lib/agent_session/legacy_moderator_checkpoint.ml"
     , "e541ee7532b2a3e96d7c06c539cd1637c0ddaa1c55d7f1c51cec24b6d9c4f399" )
   ; ( "lib/agent_session/session_state.ml"
@@ -671,7 +689,7 @@ let implementation_sources =
   ; ( "bin/ochat_agent_stdio.ml"
     , "8d134cd11c7df2a60e6b4b77a5ff7f9ea0c28a8a2674a3dd9f573adaa7623902" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "9cf2b179c0cce1eeb898d9a85b5b356b6e4f497bdf457463b22d42aa0d5f41e8" )
+    , "df27c6331b3e89c9fa143bee6405961b0408ae6bc7c8314c84fd0d35d5165132" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"
@@ -793,7 +811,7 @@ let implementation_sources =
   ; ( "lib/agent_server/command_handler.ml"
     , "9c0c8f4815a4ae12c2879e291b9b8aeead2c88bc51fa44c987c319f4143160fb" )
   ; ( "lib/agent_server/runtime_owner.ml"
-    , "e3d3404738d78c53123538f0d52ad4c8f962010a9b1357325aa3d746561668bc" )
+    , "60066f119ecb153031f71c01a85b46133a1e098d2b611c187884676258453d5f" )
   ; ( "lib/agent_session/managed_submission_tracking.ml"
     , "6c8804b2d0c2033631b965769af63c5240afeb6dabff72695c818dc1a68baed8" )
   ; ( "lib/agent_server/managed_output_cursor.ml"
@@ -917,9 +935,11 @@ let implementation_sources =
   ; ( "lib/agent_session/script_subscription_service.ml"
     , "54c775836b551733687e907ff46a2a7a0cc26bd46ff915cc6fd5f0cf5116f069" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "c3e61ea399d5c6e8b19df98932420287789772a71743f884f6d862be053b7380" )
+    , "48aa97ae48bb9f9e852ad2a064037d5ad14f621c17e1045d04671e7f54589339" )
+  ; ( "lib/agent_session/job_custody.ml"
+    , "3f3a132b6fd32f11eba332ec3ae9f6ff4dbfb771dd542ab12cab5a1316e8f3b3" )
   ; ( "lib/agent_session/staged_jobs.ml"
-    , "7731a0fc9f021188e3856041fe493f3044556bc7a15364815c47299fe968603b" )
+    , "5acc00996e4588a634811ede92cfc32187877bf1c938aaa8e3bf8bdd163c5833" )
   ; ( "lib/agent_session/staged_notifications.ml"
     , "8cd8537e4aa24fe231cab7d2b454e67fbf0cde3a4a20d392206f32cf1f8db14a" )
   ; ( "lib/agent_session/staged_subscriptions.ml"
@@ -935,7 +955,7 @@ let implementation_sources =
   ; ( "lib/chat_response/moderator_invocation.ml"
     , "445f7e4a6597b27d3af34905fee56441bcf82285fd52eb8d9f0c400379b28deb" )
   ; ( "lib/chat_response/moderator_manager.ml"
-    , "fd6bdfedf5358761caf9108deff8a2b0d4f3735543a3ae7cf24b102972a6e1d0" )
+    , "14697607ad18367fb45fd5bba32a30d86e1e313d8dfa112166fb17b96d14a619" )
   ; ( "lib/chat_response/notification_operations.ml"
     , "1e67db1e69921f11f0c28798e340e7e23dc5436eb492bb79a12a0125b0f69e29" )
   ; ( "lib/chat_response/runtime_semantics.ml"

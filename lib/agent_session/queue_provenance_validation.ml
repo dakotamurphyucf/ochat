@@ -78,15 +78,12 @@ let validate_schedule t (schedule : P.Schedule.t) =
               (Job _ | Invocation _ | Subscription _ | Delivery _ | Moderator_execution _)
             -> false))
     in
+    let%bind () = validate_origin t source origin in
+    (* Causal attribution creates no retained work. Any actual Schedule owner
+       remains authoritative and must agree with the original Run. *)
     (match origin, owners with
-     | None, _ -> Ok ()
-     | Some Unbound, [] -> Ok ()
-     | Some (Run id), [ owner ]
-       when P.Id.Run.equal id owner.id
-            && P.Id.Session.equal
-                 schedule.session_id
-                 (P.Session_ref.session_id owner.session)
-            && P.Run_source.equal source owner.source -> Ok ()
+     | None, _ | Some Unbound, [] | Some (Run _), [] -> Ok ()
+     | Some (Run id), [ owner ] when P.Id.Run.equal id owner.id -> Ok ()
      | Some _, _ ->
        invalid "Schedule original inference provenance contradicts retained Run custody")
 ;;

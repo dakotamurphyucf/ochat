@@ -141,6 +141,14 @@
   queue_producer
   queue_payload
   moderator_queue
+  legacy_queue_checkpoint
+  legacy_job_delivery
+  execution_custody
+  job_custody
+  constructor_job_handoff
+  constructor_callback_checkpoint
+  legacy_queue_custody
+  legacy_schedule_custody
   queue_provenance_validation
   moderator_checkpoint
   legacy_moderator_checkpoint
@@ -173,6 +181,7 @@
   goal_command_transition
   goal_command_admission
   goal_catalog_source
+  moderator_source_installation
   goal_run_evidence
   goal_episode_admission
   goal_run_transition
@@ -313,7 +322,7 @@
   goal_accounting_document
   goal_accounts
   inference_ledger)
- (private_modules recurrence_activation_custody actor_reply recurrence_execution_capacity recurrence_executions run_recurrence_origins queue_payload recurrence_runtime recurrence_execution_record recurrence_frontier_records recurrence_frontier_codec recurrence_frontier_transition recurrence_frontier_settlement agent_authority_scope goal_accounting_state goal_accounting_stored instruction_selection_capacity instruction_selection_record workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles
+ (private_modules recurrence_activation_custody actor_reply recurrence_execution_capacity recurrence_executions run_recurrence_origins queue_payload recurrence_runtime recurrence_execution_record recurrence_frontier_records recurrence_frontier_codec recurrence_frontier_transition recurrence_frontier_settlement agent_authority_scope goal_accounting_state goal_accounting_stored instruction_selection_capacity instruction_selection_record workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles legacy_queue_checkpoint legacy_job_delivery execution_custody job_custody constructor_job_handoff constructor_callback_checkpoint legacy_queue_custody legacy_schedule_custody
   prompt_project_baseline_record prompt_project_baseline_document native_tool_policy)
  (libraries ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript
   core

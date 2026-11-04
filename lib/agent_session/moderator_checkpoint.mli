@@ -72,3 +72,14 @@ val validate_encoded_capacity : Jsonaf.t option -> (unit, Agent_protocol.Error.t
 (** Existing receipt checkpoint digest over the complete known identity snapshot.
     This is a data comparison, not proof of an installed runtime or authority. *)
 val digest : Session.Moderator_state.Identity_snapshot.t -> string
+
+(** Constructor/runtime owners may reuse the ORIGINAL full checkpoint when the
+    incoming value is exactly the bare known-snapshot encoding and both validated
+    known snapshots agree. Explicit metadata, unknown incoming data and any known
+    change are returned unchanged for ordinary strict transition validation.
+    This preserves raw extension custody; it neither merges nor authorizes an
+    install, and generic checkpoint mutations must keep their existing policy. *)
+val reuse_unchanged_snapshot
+  :  previous:Jsonaf.t option
+  -> incoming:Jsonaf.t option
+  -> (Jsonaf.t option, Agent_protocol.Error.t) result

@@ -6,13 +6,14 @@ type capacity =
   ; abort : unit -> unit
   }
 
-type entry =
+type 'payload entry =
   { mutable job : P.Job.t
   ; capacity : capacity
+  ; payload : 'payload
   ; mutable selected : bool
   }
 
-type t = entry list ref
+type 'payload t = 'payload entry list ref
 
 let create () = ref []
 let is_empty t = List.is_empty !t
@@ -24,14 +25,14 @@ let owned entry expected =
 
 let invalid message = Error (P.Error.invalid_request message)
 
-let stage t ~job ~capacity =
+let stage t ~job ~payload ~capacity =
   match job.P.Job.launch with
   | None -> invalid "staged job requires an owning launch"
   | Some _ ->
     (match List.exists !t ~f:(fun entry -> P.Id.Job.equal entry.job.id job.id) with
      | true -> invalid "job is already staged"
      | false ->
-       t := { job; capacity; selected = false } :: !t;
+       t := { job; capacity; payload; selected = false } :: !t;
        Ok ())
 ;;
 
@@ -65,14 +66,29 @@ let selected t ~owner =
   |> List.rev
 ;;
 
+let selected_payloads t ~owner =
+  List.filter_map !t ~f:(fun entry ->
+    if owned entry owner && entry.selected then Some (entry.job, entry.payload) else None)
+  |> List.rev
+;;
+
 let retire t ~matches ~commit =
   let retiring, remaining = List.partition_tf !t ~f:matches in
   t := remaining;
   Eio.Cancel.protect (fun () ->
+    let first_failure = ref None in
     List.iter (List.rev retiring) ~f:(fun entry ->
-      match commit && entry.selected, entry.job.status with
-      | true, Queued -> entry.capacity.publish ()
-      | _ -> entry.capacity.abort ()))
+      try
+        match commit && entry.selected, entry.job.status with
+        | true, Queued -> entry.capacity.publish ()
+        | _ -> entry.capacity.abort ()
+      with
+      | exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        if Option.is_none !first_failure then first_failure := Some (exn, backtrace));
+    match !first_failure with
+    | None -> ()
+    | Some (exn, backtrace) -> Stdlib.Printexc.raise_with_backtrace exn backtrace)
 ;;
 
 let commit t ~owner = retire t ~matches:(fun entry -> owned entry owner) ~commit:true
