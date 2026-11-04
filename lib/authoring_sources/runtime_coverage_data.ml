@@ -917,7 +917,7 @@ let implementation_sources =
   ; ( "lib/agent_session/script_subscription_service.ml"
     , "54c775836b551733687e907ff46a2a7a0cc26bd46ff915cc6fd5f0cf5116f069" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "d4885a822c49f9dfad8ff53d928b79cb01dd5155f411bb748464f98e6e8d26e6" )
+    , "53e9df31b1b2f984f83e467150972e6fe716ca335e7532bf26fe28ad75454ba8" )
   ; ( "lib/agent_session/staged_jobs.ml"
     , "7731a0fc9f021188e3856041fe493f3044556bc7a15364815c47299fe968603b" )
   ; ( "lib/agent_session/staged_notifications.ml"

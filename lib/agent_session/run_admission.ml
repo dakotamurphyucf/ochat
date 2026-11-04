@@ -36,6 +36,18 @@ module Scope = struct
   let startup_pending t = t.startup_pending ()
 end
 
+module Held_plan = struct
+  type t =
+    { run : P.Run.t
+    ; receipt : P.Run_receipt.t
+    ; source_index : Run_state.t
+    }
+
+  let run t = t.run
+  let receipt t = t.receipt
+  let source_index t = t.source_index
+end
+
 type t =
   { run : P.Run.t
   ; receipt : P.Run_receipt.t
@@ -53,18 +65,18 @@ let observer_equal left right =
   && String.equal left.source_sha256 right.source_sha256
 ;;
 
-let current_installation state scope =
+let current_installation state selected =
   let open Result.Let_syntax in
   let index = Option.value state.Session_state.run_state ~default:Run_state.empty in
   let installed = Run_state.installation index in
   match installed.source with
   | Some observer ->
-    if observer_equal observer (Scope.observer scope)
+    if observer_equal observer selected
     then Ok index
     else conflict "compiled run source differs from current installation"
   | None ->
     let%bind installation =
-      Run_source_installation.apply installed ~change:(Replace (Scope.observer scope))
+      Run_source_installation.apply installed ~change:(Replace selected)
     in
     Run_state.replace_installation index ~installation ~retired_runs:[]
 ;;
@@ -102,6 +114,86 @@ let owned_operation state request operation =
          | Cancelled
          | Interrupted _ ) ) ->
        invalid "run input operation does not match actual starting user turn")
+;;
+
+let current_source (state : Session_state.t) index request =
+  let open Result.Let_syntax in
+  let%bind source =
+    Run_source_installation.captured
+      (Run_state.installation index)
+      ~generation:state.identity.generation
+  in
+  let%map () =
+    match request.Run_admission_request.mode with
+    | Single_turn -> Ok ()
+    | Workflow ->
+      if
+        List.exists (Run_state.runs index) ~f:(fun (run : P.Run.t) ->
+          P.Run_source.equal run.source source
+          && P.Run.Mode.equal run.mode Workflow
+          &&
+          match run.lifecycle with
+          | Admitted | Active | Waiting _ -> true
+          | Terminal _ -> false)
+      then conflict "current source already owns an unfinished workflow run"
+      else Ok ()
+  in
+  source
+;;
+
+(* Fact construction is shared by ordinary and inert admission. Authorization,
+   runtime callbacks and final persistence custody remain with their owners. *)
+let prepare_facts
+      (state : Session_state.t)
+      ~index
+      ~source
+      ~(request : Run_admission_request.t)
+      ~session
+      ~run_id
+      ~principal_id
+      ~owned_work
+      ~request_sha256
+      ~now
+  =
+  let open Result.Let_syntax in
+  let%bind run =
+    P.Run.create
+      ~id:run_id
+      ~session
+      ~principal_id
+      ~source
+      ~mode:request.mode
+      ~lifecycle:Admitted
+      ~revision:0L
+      ~owned_work
+      ~relinquished_work:[]
+      ~terminal_work:[]
+      ~created_at:now
+      ~updated_at:now
+  in
+  let%map receipt =
+    if Int64.equal state.counters.revision Int64.max_value
+    then
+      Error
+        (P.Error.create
+           Resource_limit
+           ~message:"session revision exhausted"
+           ~retryable:false
+           ())
+    else
+      P.Run_receipt.create
+        ~run_id
+        ~principal_id:run.principal_id
+        ~source
+        ~key:request.key
+        ~request_sha256
+        ~kind:Admission
+        ~run_revision:0L
+        ~session_revision:Int64.(state.counters.revision + 1L)
+        ~committed_at:now
+  in
+  let facts : Held_plan.t = { run; receipt; source_index = index } in
+  facts
 ;;
 
 let prepare_checked
@@ -143,64 +235,24 @@ let prepare_checked
        | Stopped, Stopped, None when Scope.startup_pending scope -> Ok ()
        | _ -> conflict "authored run start requires an actual pending startup")
   in
-  let%bind index = current_installation state scope in
-  let%bind source =
-    Run_source_installation.captured
-      (Run_state.installation index)
-      ~generation:state.identity.generation
-  in
-  let%bind () =
-    match request.mode with
-    | Single_turn -> Ok ()
-    | Workflow ->
-      if
-        List.exists (Run_state.runs index) ~f:(fun (run : P.Run.t) ->
-          P.Run_source.equal run.source source
-          && P.Run.Mode.equal run.mode Workflow
-          &&
-          match run.lifecycle with
-          | Admitted | Active | Waiting _ -> true
-          | Terminal _ -> false)
-      then conflict "current source already owns an unfinished workflow run"
-      else Ok ()
-  in
+  let%bind index = current_installation state (Scope.observer scope) in
+  let%bind source = current_source state index request in
   let%bind owned_work = owned_operation state request operation in
-  let%bind run =
-    P.Run.create
-      ~id:run_id
-      ~session
-      ~principal_id:(Scope.principal_id scope)
+  let%bind facts =
+    prepare_facts
+      state
+      ~index
       ~source
-      ~mode:request.mode
-      ~lifecycle:Admitted
-      ~revision:0L
+      ~request
+      ~session
+      ~run_id
+      ~principal_id:(Scope.principal_id scope)
       ~owned_work
-      ~relinquished_work:[]
-      ~terminal_work:[]
-      ~created_at:now
-      ~updated_at:now
+      ~request_sha256
+      ~now
   in
-  let%bind receipt =
-    if Int64.equal state.counters.revision Int64.max_value
-    then
-      Error
-        (P.Error.create
-           Resource_limit
-           ~message:"session revision exhausted"
-           ~retryable:false
-           ())
-    else
-      P.Run_receipt.create
-        ~run_id
-        ~principal_id:run.principal_id
-        ~source
-        ~key:request.key
-        ~request_sha256
-        ~kind:Admission
-        ~run_revision:0L
-        ~session_revision:Int64.(state.counters.revision + 1L)
-        ~committed_at:now
-  in
+  let run = Held_plan.run facts in
+  let receipt = Held_plan.receipt facts in
   let%map index = Run_state.commit index ~run ~receipt ~intent:None in
   { run; receipt; index }
 ;;
@@ -267,6 +319,74 @@ let prepare_from_preparation
     ~session
     ~run_id
     ~operation
+    ~request_sha256:(Run_preparation.request_sha256 preparation)
+    ~now
+;;
+
+let prepare_held_from_preparation
+      (state : Session_state.t)
+      ~preparation
+      ~owner
+      ~source
+      ~session
+      ~run_id
+      ~now
+  =
+  let open Result.Let_syntax in
+  let%bind () = Run_preparation.check_basis preparation ~owner ~state in
+  let%bind () =
+    match Run_preparation.original_actor preparation with
+    | Some _ -> Ok ()
+    | None ->
+      Error
+        (P.Error.create
+           Permission_denied
+           ~message:"held admission requires original authentication"
+           ~retryable:false
+           ())
+  in
+  let request = Run_preparation.request preparation in
+  let%bind () =
+    if
+      P.Id.Session.equal request.session_id state.identity.session_id
+      && P.Id.Session.equal (P.Session_ref.session_id session) state.identity.session_id
+      && Int.equal request.generation state.identity.generation
+    then Ok ()
+    else conflict "held admission session or generation changed"
+  in
+  let%bind () =
+    match
+      ( state.lifecycle.desired
+      , state.lifecycle.observed
+      , state.active_operation
+      , request.input )
+    with
+    | Stopped, Stopped, None, _ | _, Idle, None, User_submission _ -> Ok ()
+    | _ ->
+      conflict "held admission requires a quiescent target and unstarted authored input"
+  in
+  let%bind observer =
+    match Runtime_source_preparation.moderator source with
+    | Legacy observer | Extension observer -> Ok observer
+    | No_moderator ->
+      Error
+        (P.Error.create
+           Invalid_state
+           ~message:"held Run admission requires scripted orchestration"
+           ~retryable:false
+           ())
+  in
+  let%bind index = current_installation state observer in
+  let%bind source = current_source state index request in
+  prepare_facts
+    state
+    ~index
+    ~source
+    ~request
+    ~session
+    ~run_id
+    ~principal_id:(Run_preparation.principal_id preparation)
+    ~owned_work:[]
     ~request_sha256:(Run_preparation.request_sha256 preparation)
     ~now
 ;;

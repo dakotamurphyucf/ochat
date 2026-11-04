@@ -958,5 +958,27 @@ An ordinary validated persistence attempt closes bound preparation before its
 write yields; an explicitly owned preparation acknowledgement may advance its
 same basis. Accepted lifecycle/runtime retirement and replacement close custody
 before cancellation or cleanup joins. Closing either lifetime never reopens it
-or proves rollback. These ownership seams still do not admit a held Run, issue a
-no-effects retry proof or start deferred effects.
+or proves rollback.
+
+The actor's inert admission path uses that exact source binding and original
+headless preparation. It validates the complete occurrence intent/attempt and
+commits the revision-zero `Admitted` Run, canonical Admission receipt and
+reciprocal origin together. The source-installation candidate precedes that
+combined commit; origin cannot attach later to an ordinary admission. Ordinary
+Run admission retains its existing initialized-checkpoint and operation rules.
+The inert path requires scripted orchestration, including an actual legacy
+source identity; a no-moderator selection cannot admit a Run.
+
+This acknowledgement allocates no input Operation or history, invokes no source
+initializer or native setup, and installs no normal Run authority. Only the
+continuously live actor-issued `Held_run` owns the admitted startup; activation
+also requires the separate genuine `Runtime_owner.Prepared` lifetime and verified
+retained artifact. An exact receipt retry returns data, never recreated held
+custody. Closure preserves the last write disposition and durable evidence.
+Prewrite rejection, attempted-write uncertainty and confirmed admission remain
+distinct, including when custody closes during persistence or publication raises.
+
+The deferred host, self-target controller acknowledgement advancement, actual
+reciprocal activation barrier and no-effects retry issuer remain separate
+qualification boundaries. This inert admission seam starts no deferred effects
+and issues no no-effects proof.

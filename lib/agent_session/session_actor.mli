@@ -1290,6 +1290,55 @@ val bind_run_source
   -> source:Runtime_source_preparation.t
   -> (Source_binding.t, Agent_protocol.Error.t) result
 
+module Held_run : sig
+  (** Actual actor-issued continuous startup custody for an inert acknowledged
+      Run. Neutral with respect to recurrence/Goal ownership. No decoder, issuer
+      or scope constructor; a retained receipt never recreates this value.
+      Requires the separate genuine runtime-owner Prepared lifetime for eventual
+      activation. Closing its source binding preserves the acknowledged evidence
+      and last write disposition without rollback or no-effects permission. *)
+  type t
+
+  val admission : t -> Agent_protocol.Run_receipt.t
+
+  (** Callback-free exact live actor/source/preparation and still-Admitted
+      Run/receipt. Neither authenticates the original nor starts execution. *)
+  val check_basis : t -> (unit, Agent_protocol.Error.t) result
+
+  module Admission : sig
+    type held = t
+
+    (** Retained is exact confirmed DATA only, including a known ACK whose
+        continuous source owner closed during persistence. Rejected means no
+        admission write was attempted; it is not a no-effects proof. Uncertain
+        retains attempted-write uncertainty and forbids a replacement admission. *)
+    type t =
+      | Held of held
+      | Retained of Agent_protocol.Run_receipt.t
+      | Rejected of Agent_protocol.Error.t
+      | Uncertain of Agent_protocol.Error.t
+  end
+end
+
+(** Trusted host inert admission using the exact actor-issued source binding and
+    its original authenticated preparation. Its canonical request must match the
+    complete occurrence intent/attempt and exact actual server/session target.
+    New Run, Admission and reciprocal origin
+    commit atomically before returning live Held custody. No normal Run authority,
+    operation/history allocation, runtime load, initialization or worker launch.
+    Retained lookup verifies exact origin/attempt and returns DATA only; closed
+    or recovered custody must use existing observation/reconciliation, never
+    recreate Held. Own ACK advances only this exact preparation before publish.
+    Source binding alone is not installed-artifact or runtime-lease authority;
+    the host must supply those genuine owners before any eventual activation. *)
+val admit_held_recurrence_run
+  :  t
+  -> binding:Source_binding.t
+  -> intent:Recurrence_execution_intent.t
+  -> attempt:Recurrence_execution_attempt.t
+  -> session:Agent_protocol.Session_ref.t
+  -> (Held_run.Admission.t, Agent_protocol.Error.t) result
+
 (** Current host policy, target and writer are checked in one mailbox read before
     receipt lookup. [authorize] is host-owned and non-yielding. No runtime load,
     history allocation or authority reconstruction occurs on this path. *)

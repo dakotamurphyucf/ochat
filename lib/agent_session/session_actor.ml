@@ -24,11 +24,20 @@ module Recurrence_activation = struct
 end
 
 module Source_binding = struct
+  type disposition =
+    | Selected
+    | Admission_pending of bool ref
+    | Admitted of Agent_protocol.Run_receipt.t
+
+  type phase =
+    | Open of disposition
+    | Closed of disposition
+
   type t =
     { source : Runtime_source_preparation.t
     ; preparation : Run_preparation.t
     ; domain : int
-    ; mutable closed : bool
+    ; mutable phase : phase
     ; current : unit -> (unit, Agent_protocol.Error.t) result
     ; basis : unit -> (unit, Agent_protocol.Error.t) result
     }
@@ -38,7 +47,9 @@ module Source_binding = struct
 
   let close t =
     if not (on_domain t) then invalid_arg "source binding belongs to another Eio domain";
-    t.closed <- true
+    match t.phase with
+    | Open disposition -> t.phase <- Closed disposition
+    | Closed _ -> ()
   ;;
 
   let check_basis t =
@@ -47,7 +58,10 @@ module Source_binding = struct
       Error
         (Agent_protocol.Error.invalid_request
            "source binding belongs to another Eio domain")
-    else if t.closed
+    else if
+      match t.phase with
+      | Closed _ -> true
+      | Open _ -> false
     then
       Error
         (Agent_protocol.Error.create
@@ -64,6 +78,26 @@ module Source_binding = struct
     let%bind () = t.current () in
     check_basis t
   ;;
+end
+
+module Held_run = struct
+  type t =
+    { admission : Agent_protocol.Run_receipt.t
+    ; basis : unit -> (unit, Agent_protocol.Error.t) result
+    }
+
+  let admission t = t.admission
+  let check_basis t = t.basis ()
+
+  module Admission = struct
+    type held = t
+
+    type t =
+      | Held of held
+      | Retained of Agent_protocol.Run_receipt.t
+      | Rejected of Agent_protocol.Error.t
+      | Uncertain of Agent_protocol.Error.t
+  end
 end
 
 module Recurrence_planning_read = struct
@@ -825,6 +859,12 @@ type _ request =
       * Recurrence_execution_intent.t
       * Recurrence_execution_attempt.t
       -> Recurrence_run_observation.t option request
+  | Admit_held_recurrence_run :
+      Source_binding.t
+      * Recurrence_execution_intent.t
+      * Recurrence_execution_attempt.t
+      * Agent_protocol.Session_ref.t
+      -> Held_run.Admission.t request
   | Import_recurrence_execution :
       Operator_authorization.t
       * (Session_state.t
@@ -9469,7 +9509,7 @@ let bind_run_source_internal t ~preparation ~source =
       { source
       ; preparation
       ; domain = (Stdlib.Domain.self () :> int)
-      ; closed = false
+      ; phase = Open Selected
       ; current = (fun () -> check_run_preparation t preparation)
       ; basis =
           (fun () ->
@@ -9481,6 +9521,211 @@ let bind_run_source_internal t ~preparation ~source =
     in
     t.run_source_binding <- Some binding;
     Ok binding
+;;
+
+let held_run t binding run admission =
+  let basis () =
+    let open Result.Let_syntax in
+    let%bind () = Source_binding.check_basis binding in
+    let%bind () =
+      match binding.Source_binding.phase with
+      | Open (Admitted saved) when Agent_protocol.Run_receipt.equal saved admission ->
+        Ok ()
+      | Open (Selected | Admission_pending _ | Admitted _) | Closed _ ->
+        Error (error Conflict "held Run source owner is not continuously admitted")
+    in
+    let%bind index =
+      Result.of_option
+        t.state.run_state
+        ~error:(error Conflict "held Run index is unavailable")
+    in
+    let%bind current_source =
+      Run_source_installation.captured
+        (Run_state.installation index)
+        ~generation:t.state.identity.generation
+    in
+    let%bind actual =
+      Run_state.receipt
+        index
+        ~principal_id:admission.Agent_protocol.Run_receipt.principal_id
+        ~key:admission.key
+        ~request_sha256:admission.request_sha256
+    in
+    if
+      Agent_protocol.Run_source.equal current_source run.Agent_protocol.Run.source
+      && Option.exists (Run_state.find index run.id) ~f:(Agent_protocol.Run.equal run)
+      && Option.exists actual ~f:(Agent_protocol.Run_receipt.equal admission)
+    then Ok ()
+    else Error (error Conflict "held Run or exact Admission evidence changed")
+  in
+  let held : Held_run.t = { admission; basis } in
+  held
+;;
+
+let admit_held_recurrence_run_internal t ~binding ~intent ~attempt ~session =
+  let open Result.Let_syntax in
+  (* Capture before any original/policy or supplied clock callback. *)
+  let previous = t.state in
+  let preparation = binding.Source_binding.preparation in
+  let check_basis () =
+    let%bind () =
+      match t.run_source_binding with
+      | Some current when phys_equal current binding -> Ok ()
+      | Some _ | None ->
+        Error (error Conflict "held admission source belongs to another owner")
+    in
+    let%bind () = Source_binding.check_basis binding in
+    if Int64.equal previous.counters.revision t.state.counters.revision
+    then Ok ()
+    else Error (error Conflict "held admission basis changed during preparation")
+  in
+  let%bind () = check_basis () in
+  let%bind controller = require_recurrence_controller t in
+  let actual_session = Recurrence_controller.session controller in
+  let%bind () =
+    if
+      Agent_protocol.Session_ref.equal actual_session session
+      && Agent_protocol.Session_ref.equal
+           actual_session
+           (Recurrence_execution_intent.target intent)
+    then Ok ()
+    else Error (error Conflict "held recurrence admission targets another session")
+  in
+  let%bind request = Recurrence_execution_attempt.request attempt ~intent in
+  let request = Run_admission_request.of_headless request in
+  let actual = Run_preparation.request preparation in
+  let%bind () =
+    if
+      Run_admission_request.Caller.equal actual.caller Headless_command
+      && Agent_protocol.Id.Principal.equal
+           (Run_preparation.principal_id preparation)
+           (Recurrence_execution_attempt.principal_id attempt)
+      && Agent_protocol.Id.Session.equal actual.session_id request.session_id
+      && Int.equal actual.generation request.generation
+      && Int64.equal actual.expected_revision request.expected_revision
+      && Agent_protocol.Run.Mode.equal actual.mode request.mode
+      && Agent_protocol.Idempotency_key.equal actual.key request.key
+      && Jsonaf.exactly_equal
+           (Agent_protocol.Run_start.Input.to_json actual.input)
+           (Agent_protocol.Run_start.Input.to_json request.input)
+      && String.equal
+           (Run_preparation.request_sha256 preparation)
+           (Recurrence_execution_attempt.request_sha256 attempt)
+    then Ok ()
+    else
+      Error
+        (error Conflict "held admission requires the exact original occurrence request")
+  in
+  let%bind () = Source_binding.check_current binding in
+  let%bind () = check_basis () in
+  let index = Option.value previous.run_state ~default:Run_state.empty in
+  let%bind retained =
+    Run_state.receipt
+      index
+      ~principal_id:(Run_preparation.principal_id preparation)
+      ~key:actual.key
+      ~request_sha256:(Run_preparation.request_sha256 preparation)
+  in
+  match retained with
+  | Some admission ->
+    let%bind origin =
+      Result.of_option
+        (Run_state.recurrence_origin index admission.run_id)
+        ~error:
+          (error Conflict "retained held admission lacks its exact recurrence origin")
+    in
+    let%bind run =
+      Result.of_option
+        (Run_state.find index admission.run_id)
+        ~error:(error Conflict "retained held admission lost its Run")
+    in
+    let%bind () = Recurrence_run_origin.validate origin ~intent ~attempt in
+    let%bind () = Recurrence_run_origin.validate_run origin ~run ~admission in
+    let%bind () = Source_binding.check_current binding in
+    let%map () = check_basis () in
+    Held_run.Admission.Retained admission
+  | None ->
+    let%bind () =
+      match binding.phase with
+      | Open Selected -> Ok ()
+      | Open (Admission_pending _ | Admitted _) | Closed _ ->
+        Error (error Conflict "source owner already attempted a held admission")
+    in
+    let attempted = ref false in
+    let returned = ref false in
+    Exn.protect
+      ~finally:(fun () -> if not !returned then Source_binding.close binding)
+      ~f:(fun () ->
+        let prepare () =
+          let now = t.services.now () in
+          let%bind () = check_basis () in
+          let%bind facts =
+            Run_admission.prepare_held_from_preparation
+              previous
+              ~preparation
+              ~owner:t.run_preparation_owner
+              ~source:binding.source
+              ~session
+              ~run_id:(Agent_protocol.Id.Run.create ())
+              ~now
+          in
+          let run = Run_admission.Held_plan.run facts in
+          let admission = Run_admission.Held_plan.receipt facts in
+          let%bind origin =
+            Recurrence_run_origin.create ~intent ~attempt ~run ~admission
+          in
+          let%bind index =
+            Run_state.commit_recurrence_admission
+              (Run_admission.Held_plan.source_index facts)
+              ~run
+              ~receipt:admission
+              ~origin
+          in
+          let%bind transition =
+            prepare_transition
+              ~run_preparation:preparation
+              t
+              ~delta:(Session_delta.Run_state_changed index)
+              ~payloads:[]
+          in
+          let held = held_run t binding run admission in
+          let%bind () = Source_binding.check_current binding in
+          let%map () = check_basis () in
+          transition, held
+        in
+        match prepare () with
+        | Error failure -> Ok (Held_run.Admission.Rejected failure)
+        | Ok (transition, held) ->
+          (* The same actual attempt marker is set by the sole persistence seam
+             AFTER its final preflight, immediately before the writer call.
+             Closing preserves this reference until the outcome is known. *)
+          binding.phase <- Open (Admission_pending attempted);
+          (match
+             persist_transition
+               ~run_preparation:preparation
+               ~commit_attempted:attempted
+               t
+               transition
+           with
+           | Error failure ->
+             Ok
+               (if !attempted
+                then Held_run.Admission.Uncertain failure
+                else Held_run.Admission.Rejected failure)
+           | Ok () ->
+             install_committed_transition ~run_preparation:preparation t transition;
+             let disposition = Source_binding.Admitted (Held_run.admission held) in
+             binding.phase
+             <- (match binding.phase with
+                 | Open _ -> Open disposition
+                 | Closed _ -> Closed disposition);
+             (* No normal Run_authorities entry is installed. This durable Run
+                stays inert; the future one-shot activation owner publishes it. *)
+             publish_committed_transition t transition;
+             returned := true;
+             if Result.is_ok (Held_run.check_basis held)
+             then Ok (Held_run.Admission.Held held)
+             else Ok (Held_run.Admission.Retained (Held_run.admission held))))
 ;;
 
 let admit_run
@@ -13181,6 +13426,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Begin_run_preparation _
   | Begin_headless_run_preparation _
   | Bind_run_source _
+  | Admit_held_recurrence_run _
   | Complete_initialization _
   | Start _
   | Start_initial_delegated _
@@ -15176,6 +15422,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         ~request_sha256
     | Bind_run_source (preparation, source) ->
       bind_run_source_internal t ~preparation ~source
+    | Admit_held_recurrence_run (binding, intent, attempt, session) ->
+      admit_held_recurrence_run_internal t ~binding ~intent ~attempt ~session
     | Close_run_preparation preparation ->
       if not (Run_preparation.belongs_to preparation ~owner:t.run_preparation_owner)
       then Error (error Conflict "run preparation belongs to another actor")
@@ -16694,4 +16942,8 @@ let sweep_recurrences t =
     match previous with
     | Error _ -> previous
     | Ok () -> outcome)
+;;
+
+let admit_held_recurrence_run t ~binding ~intent ~attempt ~session =
+  recurrence_call t (Admit_held_recurrence_run (binding, intent, attempt, session))
 ;;
