@@ -59,8 +59,11 @@ val ensure_loaded : t -> (unit, Agent_protocol.Error.t) result
 
 (** Current original actor is passed to a supporting initializer only. Existing
     runtime ownership/policy still controls loading; this supplies no source,
-    execution or instruction permission. Legacy constructors reject proof-bearing cold construction rather than
-    silently dropping its proof; an already loaded runtime needs no reconstruction. *)
+    execution or instruction permission. The authenticated Factory builder retains
+    this actor through cold legacy ChatML construction and its [Session_resume]
+    callback. Host builders made without the authenticated constructor reject a
+    supplied actor on cold load rather than silently discarding it. An already
+    loaded runtime is checked without replaying its constructor. *)
 val ensure_loaded_authenticated
   :  t
   -> actor:Operator_authorization.t

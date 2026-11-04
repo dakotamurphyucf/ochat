@@ -360,6 +360,7 @@ let%test_unit "sealed and uncertain catalog admission rejects before the capture
 
 let%test_unit "legacy Factory startup owns native calls and saves its emitted suffix" =
   let module P = Agent_protocol in
+  let module Owner = Agent_server.Runtime_owner in
   let module Checkpoint = Agent_session.Moderator_checkpoint in
   let module Queue = Agent_session.Moderator_queue in
   let prompt_text =
@@ -377,6 +378,13 @@ let on_event = fun ctx state event -> match event with
         Task.bind(Schedule.after_ms(60000, `String("constructor timer")), fun timer ->
           Task.bind(Ui.notify("constructor notification"), fun ignored ->
             Task.pure(state + 1)))))
+| `Session_resume ->
+  Task.bind(Tool.call("read_file", `Object([{key = "root"; value = `String("data")}; {key = "file"; value = `String("resume.txt")}])), fun result ->
+    match result with
+    | `Error(code) -> Task.fail(code)
+    | `Ok(value) ->
+      Task.bind(Runtime.emit(`String("resume suffix")), fun ignored ->
+        Task.pure(state + 1)))
 | _ -> Task.pure(state)
 </script>|}
   in
@@ -392,6 +400,10 @@ let on_event = fun ctx state event -> match event with
         ~create:(`Exclusive 0o600)
         Eio.Path.(env#fs / root / "startup.txt")
         "actual startup native result";
+      Eio.Path.save
+        ~create:(`Exclusive 0o600)
+        Eio.Path.(env#fs / root / "resume.txt")
+        "actual cold resume native result";
       let entry =
         Factory.create_session
           (Daemon.factory daemon)
@@ -408,164 +420,318 @@ let on_event = fun ctx state event -> match event with
           closed := true)
       in
       Fun.protect ~finally:close (fun () ->
-        let state = Actor.state entry.actor |> protocol_ok in
-        assert (
-          Option.is_none
-            (Agent_server.Session_registry.find
-               (Daemon.registry daemon)
-               state.identity.session_id));
-        assert (
-          Agent_session.Session_state.Runtime_initialization.equal
-            state.runtime_initialization
-            Ready);
-        [%test_eq: P.Session.desired_state] state.lifecycle.desired Stopped;
-        assert (Option.is_none state.active_operation);
-        assert (Option.is_none state.failure);
-        let receipt =
-          match state.moderator_executions with
-          | [ receipt ] -> receipt
-          | receipts ->
-            raise_s
-              [%sexp
-                "expected one constructor receipt"
-              , (receipts : P.Moderator_execution.t list)]
-        in
-        assert (P.Moderator_execution.equal_phase receipt.context.phase Session_start);
-        let events =
-          match
-            Agent_session.Durable_event_log.replay
-              entry.durable_events
-              ~after_sequence:0L
-              ~through_sequence:state.counters.event_sequence
-          with
-          | Available events -> events
-          | Snapshot_required -> failwith "constructor events exceeded the replay window"
-        in
-        let notifications =
-          List.filter_map events ~f:(fun event ->
+        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. (fun () ->
+          let state = Actor.state entry.actor |> protocol_ok in
+          assert (
+            Option.is_none
+              (Agent_server.Session_registry.find
+                 (Daemon.registry daemon)
+                 state.identity.session_id));
+          assert (
+            Agent_session.Session_state.Runtime_initialization.equal
+              state.runtime_initialization
+              Ready);
+          [%test_eq: P.Session.desired_state] state.lifecycle.desired Stopped;
+          assert (Option.is_none state.active_operation);
+          assert (Option.is_none state.failure);
+          let receipt =
+            match state.moderator_executions with
+            | [ receipt ] -> receipt
+            | receipts ->
+              raise_s
+                [%sexp
+                  "expected one constructor receipt"
+                , (receipts : P.Moderator_execution.t list)]
+          in
+          assert (P.Moderator_execution.equal_phase receipt.context.phase Session_start);
+          let events =
             match
-              P.Event.Durable.Payload.of_json ~kind:event.kind event.payload
-              |> protocol_ok
+              Agent_session.Durable_event_log.replay
+                entry.durable_events
+                ~after_sequence:0L
+                ~through_sequence:state.counters.event_sequence
             with
-            | Moderator_notification payload -> Some payload
-            | _ -> None)
-        in
-        assert (
-          List.equal
+            | Available events -> events
+            | Snapshot_required ->
+              failwith "constructor events exceeded the replay window"
+          in
+          let notifications =
+            List.filter_map events ~f:(fun event ->
+              match
+                P.Event.Durable.Payload.of_json ~kind:event.kind event.payload
+                |> protocol_ok
+              with
+              | Moderator_notification payload -> Some payload
+              | _ -> None)
+          in
+          assert (
+            List.equal
+              Jsonaf.exactly_equal
+              notifications
+              [ `Object
+                  [ "message", `String "constructor notification"
+                  ; ( "moderator_execution_id"
+                    , P.Id.Moderator_execution.to_json receipt.context.id )
+                  ]
+              ]);
+          (match receipt.status with
+           | Completed _ -> ()
+           | Running | Failed _ | Interrupted _ ->
+             raise_s
+               [%sexp "constructor did not complete", (receipt : P.Moderator_execution.t)]);
+          let invocation = List.hd_exn state.invocations in
+          [%test_eq: int] (List.length state.invocations) 1;
+          [%test_eq: P.Id.Moderator_execution.t option]
+            invocation.parent_event
+            (Some receipt.context.id);
+          let observation = Option.value_exn invocation.observation in
+          assert (P.Invocation.equal_observer observation.observer receipt.context.source);
+          (match invocation.status with
+           | Resolved (Complete result) ->
+             assert (
+               String.is_substring
+                 (Jsonaf.to_string result)
+                 ~substring:"actual startup native result")
+           | Admitted | Dispatching | Published _
+           | Resolved (Pending _ | Fail _ | Cancelled _) ->
+             raise_s [%sexp "unexpected native outcome", (invocation : P.Invocation.t)]);
+          let snapshot =
+            Checkpoint.decode state.moderator |> protocol_ok |> Option.value_exn
+          in
+          assert (
             Jsonaf.exactly_equal
-            notifications
-            [ `Object
-                [ "message", `String "constructor notification"
-                ; ( "moderator_execution_id"
-                  , P.Id.Moderator_execution.to_json receipt.context.id )
-                ]
-            ]);
-        (match receipt.status with
-         | Completed _ -> ()
-         | Running | Failed _ | Interrupted _ ->
-           raise_s
-             [%sexp "constructor did not complete", (receipt : P.Moderator_execution.t)]);
-        let invocation = List.hd_exn state.invocations in
-        [%test_eq: int] (List.length state.invocations) 1;
-        [%test_eq: P.Id.Moderator_execution.t option]
-          invocation.parent_event
-          (Some receipt.context.id);
-        let observation = Option.value_exn invocation.observation in
-        assert (P.Invocation.equal_observer observation.observer receipt.context.source);
-        (match invocation.status with
-         | Resolved (Complete result) ->
-           assert (
-             String.is_substring
-               (Jsonaf.to_string result)
-               ~substring:"actual startup native result")
-         | Admitted | Dispatching | Published _
-         | Resolved (Pending _ | Fail _ | Cancelled _) ->
-           raise_s [%sexp "unexpected native outcome", (invocation : P.Invocation.t)]);
-        let snapshot =
-          Checkpoint.decode state.moderator |> protocol_ok |> Option.value_exn
-        in
-        assert (
-          Jsonaf.exactly_equal
-            (Session.Snapshot.to_jsonaf snapshot.current_state)
-            (Session.Snapshot.to_jsonaf (Int 1)));
-        assert (
-          List.equal
-            (fun left right ->
-               Jsonaf.exactly_equal
-                 (Session.Snapshot.to_jsonaf left)
-                 (Session.Snapshot.to_jsonaf right))
-            snapshot.queued_internal_events
-            [ Variant ("String", [ String "constructor suffix" ]) ]);
-        let queue = Checkpoint.queue state.moderator |> protocol_ok |> Option.value_exn in
-        [%test_eq: int64] (Queue.head_ordinal queue) 0L;
-        [%test_eq: int64] (Queue.next_ordinal queue) 1L;
-        let occurrence = List.hd_exn (Queue.entries queue) in
-        assert (
-          Option.equal
-            Agent_session.Queue_producer.equal
-            (Queue.Entry.producer occurrence)
-            (Some (Event receipt.context.id)));
-        assert (
-          Option.equal
-            P.Inference_origin.equal
-            (Queue.Entry.origin occurrence)
-            (Some Unbound));
-        assert (
-          P.Invocation.equal_observer (Queue.source queue).observer receipt.context.source);
-        let timer = List.hd_exn state.schedules in
-        [%test_eq: int] (List.length state.schedules) 1;
-        (match timer.status with
-         | Scheduled -> ()
-         | Delivering | Delivered | Cancelled | Failed _ ->
-           raise_s [%sexp "unexpected constructor timer status", (timer : P.Schedule.t)]);
-        let provenance = Option.value_exn timer.inference_provenance in
-        assert (
-          P.Run_source.equal
-            (P.Schedule_provenance.source provenance)
-            (Queue.source queue));
-        assert (
-          Option.equal
-            P.Inference_origin.equal
-            (P.Schedule_provenance.origin provenance)
-            (Queue.Entry.origin occurrence));
-        [%test_eq: int] !model_calls 0;
-        let snapshot_directory =
-          entry.store_handle
-          |> Option.value_exn
-          |> Agent_store.Session_store.Handle.snapshot_directory
-        in
-        (* Direct Factory admission leaves registration and owner closure to the
+              (Session.Snapshot.to_jsonaf snapshot.current_state)
+              (Session.Snapshot.to_jsonaf (Int 1)));
+          assert (
+            List.equal
+              (fun left right ->
+                 Jsonaf.exactly_equal
+                   (Session.Snapshot.to_jsonaf left)
+                   (Session.Snapshot.to_jsonaf right))
+              snapshot.queued_internal_events
+              [ Variant ("String", [ String "constructor suffix" ]) ]);
+          let queue =
+            Checkpoint.queue state.moderator |> protocol_ok |> Option.value_exn
+          in
+          [%test_eq: int64] (Queue.head_ordinal queue) 0L;
+          [%test_eq: int64] (Queue.next_ordinal queue) 1L;
+          let occurrence = List.hd_exn (Queue.entries queue) in
+          assert (
+            Option.equal
+              Agent_session.Queue_producer.equal
+              (Queue.Entry.producer occurrence)
+              (Some (Event receipt.context.id)));
+          assert (
+            Option.equal
+              P.Inference_origin.equal
+              (Queue.Entry.origin occurrence)
+              (Some Unbound));
+          assert (
+            P.Invocation.equal_observer
+              (Queue.source queue).observer
+              receipt.context.source);
+          let timer = List.hd_exn state.schedules in
+          [%test_eq: int] (List.length state.schedules) 1;
+          (match timer.status with
+           | Scheduled -> ()
+           | Delivering | Delivered | Cancelled | Failed _ ->
+             raise_s [%sexp "unexpected constructor timer status", (timer : P.Schedule.t)]);
+          let provenance = Option.value_exn timer.inference_provenance in
+          assert (
+            P.Run_source.equal
+              (P.Schedule_provenance.source provenance)
+              (Queue.source queue));
+          assert (
+            Option.equal
+              P.Inference_origin.equal
+              (P.Schedule_provenance.origin provenance)
+              (Queue.Entry.origin occurrence));
+          [%test_eq: int] !model_calls 0;
+          assert (not (Owner.is_loaded entry.runtime));
+          let resume_live = Atomic.make true in
+          let resume_original =
+            Operator_authorization.guarded
+              ~principal:(principal ())
+              ~is_current:(fun () -> Atomic.get resume_live)
+          in
+          Owner.ensure_loaded_authenticated entry.runtime ~actor:resume_original
+          |> protocol_ok;
+          assert (Owner.is_loaded entry.runtime);
+          let resumed = Actor.state entry.actor |> protocol_ok in
+          [%test_eq: P.Session.desired_state] resumed.lifecycle.desired Stopped;
+          assert (
+            Agent_session.Session_state.Runtime_initialization.equal
+              resumed.runtime_initialization
+              Ready);
+          assert (Option.is_none resumed.failure);
+          let resume_receipt =
+            match
+              List.filter resumed.moderator_executions ~f:(fun candidate ->
+                not
+                  (P.Id.Moderator_execution.equal candidate.context.id receipt.context.id))
+            with
+            | [ receipt ] -> receipt
+            | receipts ->
+              raise_s
+                [%sexp
+                  "expected one cold Resume receipt"
+                , (receipts : P.Moderator_execution.t list)]
+          in
+          [%test_eq: int] (List.length resumed.moderator_executions) 2;
+          assert (
+            List.exists
+              resumed.moderator_executions
+              ~f:(P.Moderator_execution.equal receipt));
+          assert (
+            P.Moderator_execution.equal_phase resume_receipt.context.phase Session_resume);
+          assert (
+            P.Invocation.equal_observer
+              resume_receipt.context.source
+              receipt.context.source);
+          assert (Option.is_none resume_receipt.context.operation_id);
+          assert (Option.is_none resumed.active_operation);
+          (match resume_receipt.status with
+           | Completed _ -> ()
+           | Running | Failed _ | Interrupted _ ->
+             raise_s
+               [%sexp
+                 "cold Resume did not complete"
+               , (resume_receipt : P.Moderator_execution.t)]);
+          let resumed_native =
+            match
+              List.filter resumed.invocations ~f:(fun candidate ->
+                not (P.Id.Invocation.equal candidate.context.id invocation.context.id))
+            with
+            | [ invocation ] -> invocation
+            | invocations ->
+              raise_s
+                [%sexp
+                  "expected one cold Resume native call"
+                , (invocations : P.Invocation.t list)]
+          in
+          assert (List.exists resumed.invocations ~f:(P.Invocation.equal invocation));
+          [%test_eq: P.Id.Moderator_execution.t option]
+            resumed_native.parent_event
+            (Some resume_receipt.context.id);
+          (match resumed_native.status with
+           | Resolved (Complete result) ->
+             assert (
+               String.is_substring
+                 (Jsonaf.to_string result)
+                 ~substring:"actual cold resume native result")
+           | Admitted | Dispatching | Published _
+           | Resolved (Pending _ | Fail _ | Cancelled _) ->
+             raise_s
+               [%sexp
+                 "unexpected cold Resume native outcome"
+               , (resumed_native : P.Invocation.t)]);
+          let resumed_snapshot =
+            Checkpoint.decode resumed.moderator |> protocol_ok |> Option.value_exn
+          in
+          assert (
+            Jsonaf.exactly_equal
+              (Session.Snapshot.to_jsonaf resumed_snapshot.current_state)
+              (Session.Snapshot.to_jsonaf (Int 2)));
+          assert (
+            List.equal
+              (fun left right ->
+                 Jsonaf.exactly_equal
+                   (Session.Snapshot.to_jsonaf left)
+                   (Session.Snapshot.to_jsonaf right))
+              resumed_snapshot.queued_internal_events
+              [ Variant ("String", [ String "constructor suffix" ])
+              ; Variant ("String", [ String "resume suffix" ])
+              ]);
+          let resumed_queue =
+            Checkpoint.queue resumed.moderator |> protocol_ok |> Option.value_exn
+          in
+          assert (P.Run_source.equal (Queue.source queue) (Queue.source resumed_queue));
+          [%test_eq: int64] (Queue.head_ordinal resumed_queue) (Queue.head_ordinal queue);
+          [%test_eq: int64] (Queue.next_ordinal resumed_queue) 2L;
+          let raw_entries checkpoint =
+            let raw = Option.value_exn checkpoint in
+            let queue = Jsonaf.member "queue_provenance" raw |> Option.value_exn in
+            match Jsonaf.member "entries" queue with
+            | Some (`Array entries) -> entries
+            | _ -> failwith "expected actual raw queue entries"
+          in
+          assert (
+            Jsonaf.exactly_equal
+              (List.hd_exn (raw_entries state.moderator))
+              (List.hd_exn (raw_entries resumed.moderator)));
+          (match Queue.entries resumed_queue with
+           | [ old; fresh ] ->
+             assert (Queue.Entry.equal old occurrence);
+             [%test_eq: int64] (Queue.Entry.ordinal fresh) 1L;
+             assert (
+               Option.equal
+                 Agent_session.Queue_producer.equal
+                 (Queue.Entry.producer fresh)
+                 (Some (Event resume_receipt.context.id)));
+             assert (
+               Option.equal
+                 P.Inference_origin.equal
+                 (Queue.Entry.origin fresh)
+                 (Some Unbound))
+           | _ -> failwith "cold Resume changed the queued prefix");
+          assert (
+            List.equal
+              (fun left right ->
+                 Jsonaf.exactly_equal (P.Schedule.to_json left) (P.Schedule.to_json right))
+              state.schedules
+              resumed.schedules);
+          assert (Operator_authorization.is_current resume_original);
+          Owner.ensure_loaded_authenticated entry.runtime ~actor:resume_original
+          |> protocol_ok;
+          let repeated = Actor.state entry.actor |> protocol_ok in
+          (match
+             Agent_session.Session_state_document.equal_values
+               resumed
+               ~limits:Document_schema.Limits.default
+               repeated
+           with
+           | Ok true -> ()
+           | Ok false -> failwith "already loaded runtime replayed cold construction"
+           | Error error -> raise_s [%sexp (error : Document_schema.Error.t)]);
+          let state = repeated in
+          [%test_eq: int] !model_calls 0;
+          let snapshot_directory =
+            entry.store_handle
+            |> Option.value_exn
+            |> Agent_store.Session_store.Handle.snapshot_directory
+          in
+          (* Direct Factory admission leaves registration and owner closure to the
          caller. Close this exact entry to join its runtime and install the latest
          journal-backed checkpoint before inspecting CURRENT. *)
-        close ();
-        let installed =
-          match
-            Agent_store.Snapshot.load_current
-              ~env
-              ~directory:snapshot_directory
-              ~max_payload_length:(64 * 1024 * 1024)
-          with
-          | Ok installed -> Option.value_exn installed
-          | Error error -> raise_s [%sexp (error : Agent_store.Store_error.t)]
-        in
-        let saved =
-          match
-            Agent_session.Session_state_document.decode
-              ~limits:Document_schema.Limits.default
-              installed.snapshot.payload
-          with
-          | Ok saved -> Agent_session.Session_state_document.value saved
-          | Error error -> raise_s [%sexp (error : Document_schema.Error.t)]
-        in
-        assert (Option.equal Jsonaf.exactly_equal saved.moderator state.moderator);
-        assert (List.equal P.Invocation.equal saved.invocations state.invocations);
-        assert (
-          List.equal
-            (fun left right ->
-               Jsonaf.exactly_equal (P.Schedule.to_json left) (P.Schedule.to_json right))
-            saved.schedules
-            state.schedules);
-        [%test_eq: int] !model_calls 0)))
+          close ();
+          let installed =
+            match
+              Agent_store.Snapshot.load_current
+                ~env
+                ~directory:snapshot_directory
+                ~max_payload_length:(64 * 1024 * 1024)
+            with
+            | Ok installed -> Option.value_exn installed
+            | Error error -> raise_s [%sexp (error : Agent_store.Store_error.t)]
+          in
+          let saved =
+            match
+              Agent_session.Session_state_document.decode
+                ~limits:Document_schema.Limits.default
+                installed.snapshot.payload
+            with
+            | Ok saved -> Agent_session.Session_state_document.value saved
+            | Error error -> raise_s [%sexp (error : Document_schema.Error.t)]
+          in
+          assert (Option.equal Jsonaf.exactly_equal saved.moderator state.moderator);
+          assert (List.equal P.Invocation.equal saved.invocations state.invocations);
+          assert (
+            List.equal
+              (fun left right ->
+                 Jsonaf.exactly_equal (P.Schedule.to_json left) (P.Schedule.to_json right))
+              saved.schedules
+              state.schedules);
+          [%test_eq: int] !model_calls 0))))
 ;;
 
 let%test_unit
@@ -1088,4 +1254,217 @@ let on_event ctx state event = match event with
                       (P.Schedule.to_json right))
                  saved.schedules
                  final.schedules)))))
+;;
+
+let%test_unit "legacy Factory initialization owns dedicated Model call and spawn" =
+  let module P = Agent_protocol in
+  let module Checkpoint = Agent_session.Moderator_checkpoint in
+  let module Res = Openai.Responses in
+  let prompt_text =
+    {|<developer>Offline dedicated constructor Model fixture.</developer>
+<tool name="recipe_source" agent="init-recipe.chatmd" local/>
+<script id="owner" language="chatml" kind="moderator">
+let initial_state = 0
+let payload input = `Object([
+  {key = "prompt"; value = `String("init-recipe.chatmd")},
+  {key = "input"; value = `String(input)},
+  {key = "is_local"; value = `Bool(true)}
+])
+let on_event ctx state event = match event with
+| `Session_start ->
+  let* called = Model.call("agent_prompt_v1", payload("525_INIT_CALL")) in
+  (match called with
+  | `Ok(value) ->
+    let* spawned = Model.spawn("agent_prompt_v1", payload("525_INIT_SPAWN")) in
+    Task.pure(state + 1)
+  | `Refused(message) -> Task.fail(message)
+  | `Error(message) -> Task.fail(message))
+| _ -> Task.pure(state)
+</script>|}
+  in
+  List.iter [ false; true ] ~f:(fun qualify_chatml_extensions ->
+    let original_live = Atomic.make true in
+    let original =
+      Operator_authorization.guarded ~principal:(principal ()) ~is_current:(fun () ->
+        Atomic.get original_live)
+    in
+    let provider_calls = ref 0 in
+    let policy =
+      inference_policy ~default_model:"fixture-model" ~post_stream:(fun ~sw:_ ~inputs ->
+        assert (Operator_authorization.is_current original);
+        let transcript =
+          `Array (List.map inputs ~f:Res.Item.jsonaf_of_t) |> Jsonaf.to_string
+        in
+        assert (String.is_substring transcript ~substring:"525_INIT_RECIPE");
+        assert (String.is_substring transcript ~substring:"525_INIT_CALL");
+        assert (not (String.is_substring transcript ~substring:"525_INIT_SPAWN"));
+        incr provider_calls;
+        let message : Res.Output_message.t =
+          { role = Assistant
+          ; id = "525-init-answer"
+          ; status = "completed"
+          ; content =
+              [ { annotations = []; text = "525-init-call-result"; _type = "output_text" }
+              ]
+          ; phase = None
+          ; _type = "message"
+          }
+        in
+        let item = Res.Response_stream.Item.Output_message message in
+        [ Res.Response_stream.Output_item_added
+            { item; output_index = 0; type_ = "response.output_item.added" }
+        ; Output_text_delta
+            { item_id = message.id
+            ; output_index = 0
+            ; content_index = 0
+            ; delta = "525-init-call-result"
+            ; type_ = "response.output_text.delta"
+            }
+        ; Output_item_done { item; output_index = 0; type_ = "response.output_item.done" }
+        ]
+        |> Stdlib.List.to_seq)
+    in
+    with_daemon
+      ~prompt_text
+      ~sources:
+        [ ( "init-recipe.chatmd"
+          , "<developer>525_INIT_RECIPE. Return the fixture result.</developer>" )
+        ]
+      ~qualify_chatml_extensions
+      ~policy
+      (fun env _ _root daemon ->
+         Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. (fun () ->
+           let entry =
+             Factory.create_session_authenticated
+               (Daemon.factory daemon)
+               ~command_audit:None
+               ~actor:original
+               (create_request ())
+             |> protocol_ok
+           in
+           let closed = ref false in
+           let close () =
+             if not !closed
+             then (
+               entry.close ();
+               closed := true)
+           in
+           Fun.protect
+             ~finally:(fun () -> Eio.Cancel.protect close)
+             (fun () ->
+                let state = Actor.state entry.actor |> protocol_ok in
+                assert (
+                  Agent_session.Session_state.Runtime_initialization.equal
+                    state.runtime_initialization
+                    Ready);
+                [%test_eq: P.Session.desired_state] state.lifecycle.desired Stopped;
+                assert (Option.is_none state.active_operation);
+                assert (Option.is_none state.failure);
+                let receipt =
+                  match state.moderator_executions with
+                  | [ receipt ] -> receipt
+                  | receipts ->
+                    raise_s
+                      [%sexp
+                        "expected dedicated constructor receipt"
+                      , (receipts : P.Moderator_execution.t list)]
+                in
+                assert (
+                  P.Moderator_execution.equal_phase receipt.context.phase Session_start);
+                assert (Option.is_none receipt.context.operation_id);
+                (match receipt.status with
+                 | Completed _ -> ()
+                 | Running | Failed _ | Interrupted _ ->
+                   raise_s [%sexp (receipt : P.Moderator_execution.t)]);
+                let snapshot =
+                  Checkpoint.decode state.moderator |> protocol_ok |> Option.value_exn
+                in
+                assert (
+                  Jsonaf.exactly_equal
+                    (Session.Snapshot.to_jsonaf snapshot.current_state)
+                    (Session.Snapshot.to_jsonaf (Int 1)));
+                let find_job input =
+                  match
+                    List.filter state.jobs ~f:(fun job ->
+                      Option.equal
+                        Jsonaf.exactly_equal
+                        (Jsonaf.member "payload" job.P.Job.payload
+                         |> Option.bind ~f:(Jsonaf.member "input"))
+                        (Some (`String input)))
+                  with
+                  | [ job ] -> job
+                  | jobs ->
+                    raise_s
+                      [%sexp
+                        "unexpected dedicated constructor jobs", (jobs : P.Job.t list)]
+                in
+                [%test_eq: int] (List.length state.jobs) 2;
+                let called = find_job "525_INIT_CALL" in
+                let spawned = find_job "525_INIT_SPAWN" in
+                assert (not (P.Id.Job.equal called.id spawned.id));
+                List.iter [ called; spawned ] ~f:(fun job ->
+                  assert (P.Job.equal_kind job.kind Model_call);
+                  assert (
+                    Option.equal
+                      P.Inference_origin.equal
+                      job.inference_origin
+                      (Some Unbound)));
+                [%test_eq: int] called.attempt 1;
+                (match called.status, called.delivery with
+                 | Succeeded, Not_required -> ()
+                 | _ ->
+                   raise_s
+                     [%sexp "dedicated Init call did not finish", (called : P.Job.t)]);
+                assert (
+                  Option.equal
+                    Jsonaf.exactly_equal
+                    (Jsonaf.member "final_text" (Option.value_exn called.result))
+                    (Some (`String "525-init-call-result")));
+                [%test_eq: int] spawned.attempt 0;
+                (match spawned.status, spawned.delivery with
+                 | Queued, Pending -> ()
+                 | _ ->
+                   raise_s
+                     [%sexp "dedicated Init spawn was not queued", (spawned : P.Job.t)]);
+                assert (Option.is_none spawned.result);
+                assert (Option.is_none spawned.started_at);
+                assert (Operator_authorization.is_current original);
+                [%test_eq: int] !provider_calls 1;
+                let directory =
+                  Option.value_exn entry.store_handle
+                  |> Agent_store.Session_store.Handle.snapshot_directory
+                in
+                close ();
+                let installed =
+                  match
+                    Agent_store.Snapshot.load_current
+                      ~env
+                      ~directory
+                      ~max_payload_length:(64 * 1024 * 1024)
+                  with
+                  | Ok value -> Option.value_exn value
+                  | Error error -> raise_s [%sexp (error : Agent_store.Store_error.t)]
+                in
+                let saved =
+                  match
+                    Agent_session.Session_state_document.decode
+                      ~limits:Document_schema.Limits.default
+                      installed.snapshot.payload
+                  with
+                  | Ok value -> Agent_session.Session_state_document.value value
+                  | Error error -> raise_s [%sexp (error : Document_schema.Error.t)]
+                in
+                assert (Option.equal Jsonaf.exactly_equal saved.moderator state.moderator);
+                assert (
+                  List.equal
+                    P.Moderator_execution.equal
+                    saved.moderator_executions
+                    state.moderator_executions);
+                assert (
+                  List.equal
+                    (fun left right ->
+                       Jsonaf.exactly_equal (P.Job.to_json left) (P.Job.to_json right))
+                    saved.jobs
+                    state.jobs);
+                [%test_eq: int] !provider_calls 1))))
 ;;

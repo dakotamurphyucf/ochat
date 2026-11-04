@@ -387,6 +387,15 @@ definition. A genuine constructor can run while initially Stopped, but its callb
 still checks the actual halt/failure flags, original admission and exact scope.
 Interactive approval retains its existing running-owner requirement.
 
+Cold loading a Ready session invokes `Session_resume` with the explicitly supplied
+current actor through the same constructor adapter. It preserves the old queue
+prefix and source installation; any emitted suffix belongs to the new Resume
+Event. Existing queued data does not acquire fresh authority from that load.
+Ensuring an already loaded runtime does not replay Resume or append its effects.
+Host builders without the authenticated construction port reject a supplied actor
+on cold load rather than discarding it; this limitation does not apply to the
+Factory's legacy ChatML constructor.
+
 A successful callback records its exact full checkpoint as acknowledged data before
 publication. Reading it after commit neither re-encodes Manager state nor reuses
 closed effect authority. Repeated startup calls return that same checkpoint. Owned
@@ -437,9 +446,9 @@ Standalone embeddings without the explicit host adapter retain their existing
 aggregate compatibility path. Legacy source identity does not become a v1 native
 observation capability; that separate delivery path remains unchanged.
 
-These source contracts do not by themselves qualify actual host Tool/Model
-execution, cold Ready resume, or genuine constructor Model.call/Model.spawn through
-the existing dedicated initialization services.
+Constructor `Model.call` and `Model.spawn` use the dedicated initialization
+services. The ordinary installed callback port does not accept constructor
+custody and must not substitute for that path.
 
 Deferred native observations retain a separate process-local admission component
 within the existing bounded continuation inventory. The completed native result
