@@ -18,6 +18,7 @@ let with_daemon
       ?(schemas = false)
       ?(sources = [])
       ?(qualify_chatml_extensions = false)
+      ?(profile = permission_profile)
       ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
       ~policy
       f
@@ -59,7 +60,7 @@ let with_daemon
                ~sw
                ~env
                ~config:
-                 (let config = config root root prompt in
+                 (let config = config ~profile root root prompt in
                   { config with
                     prompts =
                       List.map config.prompts ~f:(fun entry ->
@@ -1467,4 +1468,298 @@ let on_event ctx state event = match event with
                     saved.jobs
                     state.jobs);
                 [%test_eq: int] !provider_calls 1))))
+;;
+
+let%test_unit "cold Ready Running legacy constructor settles actual session approval" =
+  let module P = Agent_protocol in
+  let module Owner = Agent_server.Runtime_owner in
+  let module Checkpoint = Agent_session.Moderator_checkpoint in
+  let profile =
+    { permission_profile with tool_default = Ask; approval_fallback = Deny }
+  in
+  let prompt_text =
+    {|<developer>Offline interactive constructor fixture.</developer>
+<tool name="read_file"><read id="data" path="${workspace}"/></tool>
+<script id="owner" language="chatml" kind="moderator">
+let initial_state = 0
+let on_event ctx state event = match event with
+| `Session_start -> Task.pure(state)
+| `Session_resume ->
+  let* result = Tool.call("read_file", `Object([
+    {key = "root"; value = `String("data")},
+    {key = "file"; value = `String("approved-resume.txt")}
+  ])) in
+  (match result with
+  | `Ok(value) -> Task.pure(state + 1)
+  | `Error(message) -> Task.fail(message))
+| _ -> Task.pure(state)
+</script>|}
+  in
+  let provider_calls = ref 0 in
+  let policy =
+    inference_policy ~default_model:"fixture-model" ~post_stream:(fun ~sw:_ ~inputs:_ ->
+      incr provider_calls;
+      failwith "native approval must not dispatch a provider")
+  in
+  with_daemon ~prompt_text ~profile ~policy (fun env _ root daemon ->
+    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. (fun () ->
+      Eio.Path.save
+        ~create:(`Exclusive 0o600)
+        Eio.Path.(env#fs / root / "approved-resume.txt")
+        "actual approved cold native result";
+      let initial_live = Atomic.make true in
+      let original live =
+        Operator_authorization.guarded ~principal:(principal ()) ~is_current:(fun () ->
+          Atomic.get live)
+      in
+      let initial_original = original initial_live in
+      let entry =
+        Factory.create_session_authenticated
+          (Daemon.factory daemon)
+          ~command_audit:None
+          ~actor:initial_original
+          (create_request ~start_immediately:true ())
+        |> protocol_ok
+      in
+      let closed = ref false in
+      let close () =
+        if not !closed
+        then (
+          entry.close ();
+          closed := true)
+      in
+      let protect_body f =
+        match f () with
+        | value ->
+          Eio.Cancel.protect close;
+          value
+        | exception primary ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          eprintf
+            "primary Ready/Running constructor failure: %s\n"
+            (Exn.to_string primary);
+          (try Eio.Cancel.protect close with
+           | cleanup ->
+             eprintf
+               "secondary Ready/Running constructor cleanup failure: %s\n"
+               (Exn.to_string cleanup));
+          Exn.raise_with_original_backtrace primary backtrace
+      in
+      protect_body (fun () ->
+        let rec await_idle () =
+          let state = Actor.state entry.actor |> protocol_ok in
+          match state.lifecycle.observed, state.active_operation, state.failure with
+          | Idle, None, None -> state
+          | _, _, Some error -> raise_s [%sexp (error : P.Error.t)]
+          | _ ->
+            Eio.Time.sleep (Eio.Stdenv.clock env) 0.001;
+            await_idle ()
+        in
+        let initial = await_idle () in
+        assert (
+          Agent_session.Session_state.Runtime_initialization.equal
+            initial.runtime_initialization
+            Ready);
+        [%test_eq: P.Session.desired_state] initial.lifecycle.desired Running;
+        assert (List.is_empty initial.permissions);
+        assert (List.is_empty initial.invocations);
+        let writer, _ =
+          Actor.attach entry.actor ~mode:Read_write ~subscribe:false |> protocol_ok
+        in
+        Owner.unload entry.runtime |> protocol_ok;
+        assert (not (Owner.is_loaded entry.runtime));
+        Atomic.set initial_live false;
+        let resume_live = Atomic.make true in
+        let resume_original = original resume_live in
+        Eio.Switch.run (fun sw ->
+          let loading =
+            Eio.Fiber.fork_promise ~sw (fun () ->
+              Owner.ensure_loaded_authenticated entry.runtime ~actor:resume_original)
+          in
+          let rec await_permission () =
+            let state = Actor.state entry.actor |> protocol_ok in
+            match
+              List.filter state.permissions ~f:(fun permission ->
+                P.Permission.equal_state permission.state Pending)
+            with
+            | [ permission ] -> state, permission
+            | [] ->
+              (match Eio.Promise.peek loading with
+               | Some _ ->
+                 Eio.Promise.await_exn loading |> protocol_ok;
+                 failwith "cold constructor returned without its actual Ask"
+               | None ->
+                 Eio.Time.sleep (Eio.Stdenv.clock env) 0.001;
+                 await_permission ())
+            | permissions ->
+              raise_s
+                [%sexp
+                  "unexpected constructor permissions"
+                , (permissions : P.Permission.t list)]
+          in
+          let waiting, permission = await_permission () in
+          (match waiting.lifecycle.observed with
+           | Waiting_for_permission id -> assert (P.Id.Permission.equal id permission.id)
+           | observed ->
+             raise_s
+               [%sexp
+                 "constructor is not waiting for approval"
+               , (observed : P.Session.observed_state)]);
+          assert (Option.is_none waiting.active_operation);
+          assert (Operator_authorization.is_current resume_original);
+          assert (not (Operator_authorization.is_current initial_original));
+          let invocation_id =
+            match permission.owner with
+            | Invocation id -> id
+            | Operation _ -> failwith "constructor Ask fabricated a foreground operation"
+          in
+          let native =
+            List.find_exn waiting.invocations ~f:(fun invocation ->
+              P.Id.Invocation.equal invocation.context.id invocation_id)
+          in
+          [%test_eq: string] native.context.tool_name "read_file";
+          let event_id = Option.value_exn native.parent_event in
+          let resume =
+            List.find_exn waiting.moderator_executions ~f:(fun receipt ->
+              P.Id.Moderator_execution.equal receipt.context.id event_id)
+          in
+          assert (P.Moderator_execution.equal_phase resume.context.phase Session_resume);
+          (match resume.status with
+           | Running -> ()
+           | Completed _ | Failed _ | Interrupted _ ->
+             raise_s [%sexp (resume : P.Moderator_execution.t)]);
+          let approved =
+            Actor.respond_permission
+              entry.actor
+              ~attachment_id:writer.id
+              ~principal_id:(Some (principal ()).id)
+              ~permission_id:permission.id
+              ~permission_generation:permission.generation
+              ~choice:Approve_session
+              ~reason:None
+            |> function
+            | Ok approved -> approved
+            | Error error ->
+              raise_s
+                [%sexp "actual constructor approval response failed", (error : P.Error.t)]
+          in
+          assert (P.Permission.equal_state approved.state Approved);
+          (match approved.resolution with
+           | Some { choice = Approve_session; principal_id = Some id; _ } ->
+             assert (P.Id.Principal.equal id (principal ()).id)
+           | resolution -> raise_s [%sexp (resolution : P.Permission.resolution option)]);
+          (match Eio.Promise.await_exn loading with
+           | Ok () -> ()
+           | Error error ->
+             raise_s
+               [%sexp "actual approved cold construction failed", (error : P.Error.t)]);
+          assert (Owner.is_loaded entry.runtime);
+          let final = await_idle () in
+          [%test_eq: P.Session.desired_state] final.lifecycle.desired Running;
+          assert (
+            Agent_session.Session_state.Runtime_initialization.equal
+              final.runtime_initialization
+              Ready);
+          let completed =
+            List.find_exn final.moderator_executions ~f:(fun receipt ->
+              P.Id.Moderator_execution.equal receipt.context.id event_id)
+          in
+          (match completed.status with
+           | Completed _ -> ()
+           | Running | Failed _ | Interrupted _ ->
+             raise_s [%sexp (completed : P.Moderator_execution.t)]);
+          let native =
+            List.find_exn final.invocations ~f:(fun invocation ->
+              P.Id.Invocation.equal invocation.context.id invocation_id)
+          in
+          (match native.status with
+           | Resolved (Complete result) ->
+             assert (
+               String.is_substring
+                 (Jsonaf.to_string result)
+                 ~substring:"actual approved cold native result")
+           | Admitted | Dispatching | Published _
+           | Resolved (Pending _ | Fail _ | Cancelled _) ->
+             raise_s [%sexp (native : P.Invocation.t)]);
+          let snapshot =
+            Checkpoint.decode final.moderator |> protocol_ok |> Option.value_exn
+          in
+          assert (
+            Jsonaf.exactly_equal
+              (Session.Snapshot.to_jsonaf snapshot.current_state)
+              (Session.Snapshot.to_jsonaf (Int 1)));
+          let grant =
+            match final.grants with
+            | [ grant ] -> grant
+            | grants -> raise_s [%sexp (grants : P.Grant.t list)]
+          in
+          [%test_eq: P.Grant.scope] grant.scope Exact_session;
+          [%test_eq: P.Grant.state] grant.state Active;
+          assert (P.Id.Principal.equal grant.principal_id (principal ()).id);
+          [%test_eq: string] grant.tool_name permission.tool_name;
+          [%test_eq: string]
+            grant.identity_digest
+            (Option.value_exn permission.runtime_identity);
+          let events =
+            match
+              Agent_session.Durable_event_log.replay
+                entry.durable_events
+                ~after_sequence:initial.counters.event_sequence
+                ~through_sequence:final.counters.event_sequence
+            with
+            | Available events -> events
+            | Snapshot_required ->
+              failwith "interactive constructor events exceeded replay window"
+          in
+          let requests, resolutions =
+            List.fold events ~init:([], []) ~f:(fun (requests, resolutions) event ->
+              match
+                P.Event.Durable.Payload.of_json ~kind:event.kind event.payload
+                |> protocol_ok
+              with
+              | Permission_requested value
+                when P.Id.Permission.equal value.id permission.id ->
+                value :: requests, resolutions
+              | Permission_resolved value
+                when P.Id.Permission.equal value.id permission.id ->
+                requests, value :: resolutions
+              | _ -> requests, resolutions)
+          in
+          [%test_eq: int] (List.length requests) 1;
+          [%test_eq: int] (List.length resolutions) 1;
+          assert (
+            Jsonaf.exactly_equal
+              (P.Permission.to_json (List.hd_exn requests))
+              (P.Permission.to_json permission));
+          assert (
+            Jsonaf.exactly_equal
+              (P.Permission.to_json (List.hd_exn resolutions))
+              (P.Permission.to_json approved));
+          (match
+             Actor.respond_permission
+               entry.actor
+               ~attachment_id:writer.id
+               ~principal_id:(Some (principal ()).id)
+               ~permission_id:permission.id
+               ~permission_generation:permission.generation
+               ~choice:Approve_session
+               ~reason:None
+           with
+           | Error { code = Already_resolved; _ } -> ()
+           | Error error -> raise_s [%sexp (error : P.Error.t)]
+           | Ok _ -> failwith "constructor permission resolved twice");
+          Owner.ensure_loaded_authenticated entry.runtime ~actor:resume_original
+          |> protocol_ok;
+          let repeated = Actor.state entry.actor |> protocol_ok in
+          (match
+             Agent_session.Session_state_document.equal_values
+               final
+               ~limits:Document_schema.Limits.default
+               repeated
+           with
+           | Ok true -> ()
+           | Ok false -> failwith "loaded constructor repeated approval or Resume"
+           | Error error -> raise_s [%sexp (error : Document_schema.Error.t)]);
+          assert (Operator_authorization.is_current resume_original);
+          [%test_eq: int] !provider_calls 0))))
 ;;

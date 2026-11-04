@@ -330,11 +330,27 @@ module Initialization_scope = struct
   end
 
   module Acknowledged = struct
+    module Permission_basis = struct
+      type t =
+        { permissions : Agent_protocol.Permission.t list
+        ; grants : Agent_protocol.Grant.t list
+        ; lifecycle : Session_state.Lifecycle.t
+        }
+
+      let capture (state : Session_state.t) =
+        { permissions = state.permissions
+        ; grants = state.grants
+        ; lifecycle = state.lifecycle
+        }
+      ;;
+    end
+
     type t =
       { moderator : Jsonaf.t option
       ; run_state : Run_state.t option
       ; moderator_executions : Agent_protocol.Moderator_execution.t list
       ; invocations : Agent_protocol.Invocation.t list
+      ; permission_basis : Permission_basis.t
       }
 
     let capture (state : Session_state.t) =
@@ -342,6 +358,7 @@ module Initialization_scope = struct
       ; run_state = state.run_state
       ; moderator_executions = state.moderator_executions
       ; invocations = state.invocations
+      ; permission_basis = Permission_basis.capture state
       }
     ;;
 
@@ -351,6 +368,9 @@ module Initialization_scope = struct
       ; run_state = t.run_state
       ; moderator_executions = t.moderator_executions
       ; invocations = t.invocations
+      ; permissions = t.permission_basis.permissions
+      ; grants = t.permission_basis.grants
+      ; lifecycle = t.permission_basis.lifecycle
       }
     ;;
   end
@@ -441,7 +461,14 @@ module Initialization_scope = struct
       ; incoming : Acknowledged.t
       }
 
-    let prepare ?callback ?resource ?jobs scope (state : Session_state.t) =
+    let prepare
+          ?callback
+          ?resource
+          ?jobs
+          ?permission_checkpoint
+          scope
+          (state : Session_state.t)
+      =
       { scope
       ; previous = scope.acknowledged
       ; previous_callback = scope.callback
@@ -453,7 +480,19 @@ module Initialization_scope = struct
            | Some _ -> resource
            | None -> scope.resource)
       ; jobs = Option.value jobs ~default:scope.jobs
-      ; incoming = Acknowledged.capture state
+      ; incoming =
+          (* An ordinary constructor ACK must not absorb unrelated permissions,
+             grants or lifecycle changes. Only a selected validated DATA plan
+             advances this subprojection. *)
+          { (Acknowledged.capture state) with
+            permission_basis =
+              Option.value_map
+                permission_checkpoint
+                ~default:scope.acknowledged.permission_basis
+                ~f:(fun checkpoint ->
+                  Acknowledged.Permission_basis.capture
+                    (Constructor_permission_checkpoint.apply checkpoint scope.expected))
+          }
       }
     ;;
 
@@ -2395,6 +2434,7 @@ let prepare_completion_plan t (transition : Session_transition.t) completion_sam
 let install
       ?queued_claim_acknowledgement
       ?authored_run_acknowledgement
+      ?initialization_acknowledgement
       ?check_before_commit
       ?admission_hold
       ?retire_legacy_custody
@@ -2416,6 +2456,7 @@ let install
   install_committed_transition
     ?queued_claim_acknowledgement
     ?authored_run_acknowledgement
+    ?initialization_acknowledgement
     ?admission_hold
     ?retire_legacy_custody
     ?run_preparation
@@ -5842,6 +5883,8 @@ let check_constructor_invocation_basis t (scope : Initialization_scope.t) =
 ;;
 
 let prepare_constructor_invocation_ack
+      ?(permissions = [])
+      ?permission_lifecycle
       t
       borrow
       ~before
@@ -5860,8 +5903,24 @@ let prepare_constructor_invocation_ack
         ~before
         ~after
     in
+    let%bind permission_checkpoint =
+      if List.is_empty permissions
+      then Ok None
+      else
+        Constructor_permission_checkpoint.prepare
+          ~previous:t.state
+          ~incoming:prepared.state
+          ~invocation_id:after.context.id
+          ~permissions
+          ~grant:None
+          ~lifecycle:(Option.value permission_lifecycle ~default:t.state.lifecycle)
+        |> Result.map ~f:Option.some
+    in
     let acknowledgement =
-      Initialization_scope.Acknowledgement.prepare scope prepared.state
+      Initialization_scope.Acknowledgement.prepare
+        ?permission_checkpoint
+        scope
+        prepared.state
     in
     let%map () =
       validate_initialization_projection
@@ -12467,6 +12526,137 @@ let permission_owner_active t (permission : Agent_protocol.Permission.t) =
      | _ -> Error (error Conflict "permission requires a live invocation owner"))
 ;;
 
+module Constructor_permission_owner = struct
+  module Write = struct
+    type t =
+      | Admission
+      | Negative_resolution
+  end
+
+  type t =
+    { execution : invocation_execution
+    ; borrow : queued_event_borrow
+    ; scope : Initialization_scope.t
+    }
+end
+
+let check_constructor_permission_owner t (owner : Constructor_permission_owner.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_constructor_invocation_basis t owner.scope in
+  if
+    List.exists t.invocation_executions ~f:(phys_equal owner.execution)
+    && owner.execution.accepts_children
+    && Atomic.get owner.execution.authority_live
+    && Option.exists
+         (constructor_scope_of_borrow t owner.borrow)
+         ~f:(phys_equal owner.scope)
+    && List.exists t.state.invocations ~f:(fun retained ->
+      Agent_protocol.Invocation.equal retained owner.execution.dispatched)
+  then Ok ()
+  else
+    Error (error Conflict "constructor permission no longer owns its native invocation")
+;;
+
+let constructor_permission_owner t (permission : Agent_protocol.Permission.t) =
+  let open Result.Let_syntax in
+  match permission.owner with
+  | Operation _ -> Ok None
+  | Invocation id ->
+    (match
+       List.find t.invocation_executions ~f:(fun execution ->
+         Agent_protocol.Id.Invocation.equal execution.dispatched.context.id id)
+     with
+     | Some ({ owner = Event_moderator borrow; _ } as execution) ->
+       (match constructor_scope_of_borrow t borrow with
+        | None -> Ok None
+        | Some scope ->
+          let owner : Constructor_permission_owner.t = { execution; borrow; scope } in
+          let%map () = check_constructor_permission_owner t owner in
+          Some owner)
+     | Some { owner = Foreground _ | Invocation_moderator _ | Background_job _; _ } | None
+       -> Ok None)
+;;
+
+(* The selected owner is captured before clocks/IDs are sampled. Only this
+   validated DATA plan can advance the permission projection. The normal writer
+   and its final currentness fence remain the sole persistence path. *)
+let commit_permission_transition
+      t
+      owner
+      ~(write : Constructor_permission_owner.Write.t)
+      ~revision
+      ~permissions
+      ~grant
+      ~lifecycle
+      ~delta
+      ~payloads
+  =
+  let open Result.Let_syntax in
+  match owner with
+  | None -> transition t ~delta ~payloads |> Result.map ~f:(fun _ -> ())
+  | Some (owner : Constructor_permission_owner.t) ->
+    let run_preparation = owner.scope.run_preparation in
+    let%bind () = check_constructor_permission_owner t owner in
+    let%bind prepared =
+      match write with
+      | Admission -> prepare_transition ?run_preparation t ~delta ~payloads
+      | Negative_resolution ->
+        (* A factual denial must unblock its exact waiter even when the original
+           proof expired. Keep physical/source/Run-preparation basis checks, not
+           fresh-effect authorization. Install advances the SAME preparation. *)
+        let%bind () =
+          if
+            Option.is_none grant
+            && List.for_all permissions ~f:(fun permission ->
+              Option.exists
+                permission.Agent_protocol.Permission.resolution
+                ~f:(fun resolution ->
+                  Agent_protocol.Permission.equal_choice resolution.choice Deny))
+          then Ok ()
+          else Error (error Conflict "negative permission ACK contains approval facts")
+        in
+        prepare_transition t ~delta ~payloads
+    in
+    let%bind permission_checkpoint =
+      Constructor_permission_checkpoint.prepare
+        ~previous:t.state
+        ~incoming:prepared.state
+        ~invocation_id:owner.execution.dispatched.context.id
+        ~permissions
+        ~grant
+        ~lifecycle
+    in
+    let acknowledgement =
+      Initialization_scope.Acknowledgement.prepare
+        ~permission_checkpoint
+        owner.scope
+        prepared.state
+    in
+    let%bind () =
+      validate_initialization_projection
+        (Initialization_scope.Acknowledgement.expected acknowledgement)
+        prepared.state
+    in
+    let check_before_commit () =
+      let%bind () =
+        match write with
+        | Admission -> validate_initialization_scope_current t owner.scope
+        | Negative_resolution -> Ok ()
+      in
+      let%bind () = check_constructor_permission_owner t owner in
+      let%bind () = Initialization_scope.Acknowledgement.check_basis acknowledgement in
+      if Int64.equal revision t.state.counters.revision
+      then Ok ()
+      else Error (error Conflict "constructor permission basis changed before commit")
+    in
+    install
+      ~initialization_acknowledgement:acknowledgement
+      ~check_before_commit
+      ?run_preparation
+      t
+      prepared
+;;
+
 let resolve_permission
       t
       (permission : Agent_protocol.Permission.t)
@@ -12475,6 +12665,9 @@ let resolve_permission
       ~reason
       ~resume_observed
   =
+  let open Result.Let_syntax in
+  let revision = t.state.counters.revision in
+  let%bind owner = constructor_permission_owner t permission in
   let resolution =
     Agent_protocol.Permission.
       { choice; principal_id; resolved_at = t.services.now (); reason }
@@ -12501,8 +12694,17 @@ let resolve_permission
       }
   in
   let%bind _ =
-    transition
+    commit_permission_transition
       t
+      owner
+      ~write:
+        (match choice with
+         | Agent_protocol.Permission.Deny -> Negative_resolution
+         | Approve_once | Approve_session | Approve_prefix | Durable_exact -> Admission)
+      ~revision
+      ~permissions:[ permission ]
+      ~grant
+      ~lifecycle
       ~delta:
         (Session_delta.Batch
            ([ Session_delta.Permission_changed permission
@@ -12546,6 +12748,8 @@ let schedule_permission_expiry t permission timeout_seconds fallback =
 
 let open_permission t (permission : Agent_protocol.Permission.t) timeout_seconds fallback =
   let open Result.Let_syntax in
+  let revision = t.state.counters.revision in
+  let%bind owner = constructor_permission_owner t permission in
   let%bind () = permission_owner_active t permission in
   if
     Agent_protocol.Id.Session.compare permission.session_id t.state.identity.session_id
@@ -12582,8 +12786,14 @@ let open_permission t (permission : Agent_protocol.Permission.t) timeout_seconds
     in
     let open Result.Let_syntax in
     let%bind _ =
-      transition
+      commit_permission_transition
         t
+        owner
+        ~write:Admission
+        ~revision
+        ~permissions:[ permission ]
+        ~grant:None
+        ~lifecycle
         ~delta:
           (Session_delta.Batch
              [ Permission_changed permission; Lifecycle_changed lifecycle ])
@@ -14855,6 +15065,11 @@ let finish_invocation t execution outcome requests commit_starts authoring_refer
            | None -> Ok None
            | Some borrow ->
              prepare_constructor_invocation_ack
+               ~permissions
+               ?permission_lifecycle:
+                 (List.find_map permission_deltas ~f:(function
+                    | Session_delta.Lifecycle_changed lifecycle -> Some lifecycle
+                    | _ -> None))
                t
                borrow
                ~before:(Some execution.dispatched)

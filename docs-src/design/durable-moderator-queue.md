@@ -458,3 +458,25 @@ drains the observation. The handler follow-up component has an independent lifet
 Historical absence and known expiry remain explicit negative facts: they can settle
 truthful outcomes but cannot authorize a new Model call, Turn, or Compact. Stop,
 source retirement, owner shutdown, and recovery never reconstruct these loans.
+
+A constructor's native permission wait retains the actual dispatched Invocation,
+its Event borrow, callback and initialization scope. Opening or resolving that
+selected permission advances the existing initialization acknowledgement only
+when the exact permission rows, optional new grant and waiter-derived lifecycle
+are accepted in the same durable transition. The acknowledgement is installed
+before registering or fulfilling the waiter. Ordinary constructor checkpoints do
+not absorb unrelated permissions, grants or lifecycle changes; those changes
+still invalidate the constructor basis. The same selected-data validation covers
+native-result cancellation of its pending permissions. Failed writes advance
+neither the acknowledgement nor the waiter, and approval data never renews the
+original authentication or revives a retired constructor. Existing Run preparation
+ownership advances through the selected successful ACK; unavailable or expired
+owners keep the existing failure/retirement behavior.
+
+Selected denial and timeout resolution are factual settlement, not new effect
+admission. They retain exact physical constructor and Run-preparation basis
+checks while allowing an expired original to remain expired; successful ACK
+advances only that same preparation's owned revision. Opening and approval keep
+their currentness checks. Native-result cleanup likewise retains its existing
+settlement-only checks, so a negative outcome can unblock its waiter without
+renewing authentication or reviving a closed scope.
