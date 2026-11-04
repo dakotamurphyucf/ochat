@@ -783,21 +783,42 @@ let inherit_resources ~(parent : resources) ~definition =
     { resources with source_lease = Prompt_source_lease.borrow parent.source_lease })
 ;;
 
-let initial_items ~ctx ~elements ~manifest_authorizer ~approval_provider ~response_dir =
-  Converter.to_items
-    ~ctx
-    ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
-      Chat_response.Driver.run_agent
-        ~history_compaction:false
-        ?prompt_dir
-        ?session_id
-        ~response_dir
-        ~shell_manifest_authorizer:manifest_authorizer
-        ~shell_approval_provider:approval_provider
-        ~ctx
-        prompt
-        items)
-    elements
+exception Construction_rejected of Agent_protocol.Error.t
+
+let check_construction = function
+  | None -> Ok ()
+  | Some check -> check ()
+;;
+
+let initial_items
+      ~construction_checkpoint
+      ~ctx
+      ~elements
+      ~manifest_authorizer
+      ~approval_provider
+      ~response_dir
+  =
+  try
+    Ok
+      (Converter.to_items
+         ~ctx
+         ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
+           (match check_construction construction_checkpoint with
+            | Ok () -> ()
+            | Error failure -> raise (Construction_rejected failure));
+           Chat_response.Driver.run_agent
+             ~history_compaction:false
+             ?prompt_dir
+             ?session_id
+             ~response_dir
+             ~shell_manifest_authorizer:manifest_authorizer
+             ~shell_approval_provider:approval_provider
+             ~ctx
+             prompt
+             items)
+         elements)
+  with
+  | Construction_rejected failure -> Error failure
 ;;
 
 let allocate_initial ~namespace ~next_sequence items =
@@ -921,6 +942,7 @@ let run_legacy_constructor
 ;;
 
 let create_moderator
+      ~construction_checkpoint
       ~definition
       ~delegated
       ~runtime_policy
@@ -983,6 +1005,7 @@ let create_moderator
       ; on_schedule_cancel = schedule_services.cancel
       }
     in
+    let%bind () = check_construction construction_checkpoint in
     let%bind manager =
       Manager.create_entries
         ~env
@@ -1019,6 +1042,7 @@ let create_moderator
       |> Result.map ~f:(fun snapshot -> Some (Moderator_checkpoint.encode snapshot))
     in
     let start () =
+      let%bind () = check_construction construction_checkpoint in
       if Option.is_some (Manager.extension_definition manager)
       then current_snapshot ()
       else if !started
@@ -1040,6 +1064,7 @@ let create_moderator
             |> Result.map_error ~f:(fun error ->
               failure error.Chat_response.Tool_capability.message)
           in
+          let%bind () = check_construction construction_checkpoint in
           let%map checkpoint =
             run_legacy_constructor
               host
@@ -1418,6 +1443,7 @@ let guarded_services authority (services : extension_services) =
 ;;
 
 let build_with_services
+      ~construction_checkpoint
       ~startup
       ~agent_source
       ~native_registrations
@@ -1449,6 +1475,7 @@ let build_with_services
       ~legacy_construction
   =
   let open Result.Let_syntax in
+  let%bind () = check_construction construction_checkpoint in
   let inference_session = Inference_runtime.Session.create ~sw in
   let root_binding = Chat_response.Root_binding.create inference_session in
   let%bind inference_context =
@@ -1603,6 +1630,7 @@ let build_with_services
     |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
   in
   let response_dir = response_dir storage_paths in
+  let%bind () = check_construction construction_checkpoint in
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 response_dir;
   let cache = cache storage_paths in
   let ctx =
@@ -1675,6 +1703,7 @@ let build_with_services
       in
       resources.native, resources.definition, resources.managed, resources.authoring
   in
+  let%bind () = check_construction construction_checkpoint in
   let%bind authoring =
     match source with
     | Authored _ | Authored_child _ -> Ok authoring
@@ -1787,10 +1816,20 @@ let build_with_services
     match existing_history with
     | Some history -> Ok (history, next_history_sequence)
     | None ->
-      initial_items ~ctx ~elements ~manifest_authorizer ~approval_provider ~response_dir
-      |> allocate_initial
-           ~namespace:history_namespace
-           ~next_sequence:next_history_sequence
+      let%bind () = check_construction construction_checkpoint in
+      let%bind items =
+        initial_items
+          ~construction_checkpoint
+          ~ctx
+          ~elements
+          ~manifest_authorizer
+          ~approval_provider
+          ~response_dir
+      in
+      allocate_initial
+        ~namespace:history_namespace
+        ~next_sequence:next_history_sequence
+        items
   in
   let reserved_history_through = initial_end + moderator_reservation_size in
   let%bind restored_moderator_snapshot =
@@ -1829,6 +1868,7 @@ let build_with_services
   in
   let%bind moderator, start_moderator_once, model_recipes =
     create_moderator
+      ~construction_checkpoint
       ~definition
       ~delegated
       ~runtime_policy:
@@ -2447,6 +2487,7 @@ let build_with_services
 ;;
 
 let build
+      ~construction_checkpoint
       ~startup
       ~legacy_construction
       ~agent_source
@@ -2465,6 +2506,7 @@ let build
       ~revision
   =
   build_with_services
+    ~construction_checkpoint
     ~legacy_construction
     ~startup
     ~agent_source
@@ -2484,6 +2526,7 @@ let build
 ;;
 
 let build_with_extensions
+      ~construction_checkpoint
       ~startup
       ~legacy_construction
       ~agent_source
@@ -2504,6 +2547,7 @@ let build_with_extensions
       ~revision
   =
   build_with_services
+    ~construction_checkpoint
     ~legacy_construction
     ~startup
     ~agent_source
@@ -2523,6 +2567,7 @@ let build_with_extensions
 ;;
 
 let build_generated
+      ~construction_checkpoint
       ~services
       ~definition
       ~artifact_store
@@ -2531,6 +2576,7 @@ let build_generated
       ~authority
   =
   build_with_services
+    ~construction_checkpoint
     ~legacy_construction:None
     ~startup:None
     ~agent_source:None
@@ -2541,8 +2587,17 @@ let build_generated
     ~extension_services:(Some services)
 ;;
 
-let build_authored_child ~services ~revision ~prepared ~code ~authority ~history =
+let build_authored_child
+      ~construction_checkpoint
+      ~services
+      ~revision
+      ~prepared
+      ~code
+      ~authority
+      ~history
+  =
   build_with_services
+    ~construction_checkpoint
     ~legacy_construction:None
     ~startup:None
     ~agent_source:None

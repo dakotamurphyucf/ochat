@@ -13,8 +13,16 @@
     Operation when present; Job completion consumes a Finish without inventing an
     Operation. The caller persists this index with the actual work terminal fact
     in one transaction and supplies the matching live completion clock sample. *)
+
+(** [startup_run], when supplied by the actual actor, is the exact retained Run
+    selected by its live held startup/Init owner. It defers quiescent terminal
+    completion while real input/startup handoff remains pending. This optional
+    pure DATA is not execution authority and must never be decoded as a live
+    hold. Ordinary settlement without that owner remains unchanged. *)
+
 val prepare
-  :  Run_state.t
+  :  ?startup_run:Agent_protocol.Run.t
+  -> Run_state.t
   -> state:Session_state.t
   -> previous:Agent_protocol.Run.t
   -> owned_work:Agent_protocol.Run_work.t list

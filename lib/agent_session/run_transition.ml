@@ -69,6 +69,7 @@ type preparation =
   | Running_work
 
 let prepare_internal
+      ?startup_run
       mode
       (state : Session_state.t)
       ~scope
@@ -178,7 +179,10 @@ let prepare_internal
     match action with
     | None ->
       let%bind lifecycle =
-        if initial_single_turn && Set.is_empty owned
+        if
+          initial_single_turn
+          && Set.is_empty owned
+          && not (Option.exists startup_run ~f:(P.Run.equal previous))
         then (
           match completed with
           | Some completed
@@ -263,12 +267,16 @@ let prepare_internal
       let remaining = Set.diff owned (Set.of_list (module P.Run_work) relinquish) in
       let unsettled = Set.diff remaining evidence in
       let%bind lifecycle =
-        if Set.is_empty unsettled
+        if
+          Set.is_empty unsettled
+          && not (Option.exists startup_run ~f:(P.Run.equal previous))
         then Ok (P.Run.Lifecycle.Terminal terminal)
         else (
           match
             executing.context.phase, executing.context.operation_id, Set.to_list unsettled
           with
+          | _, _, [] when Option.exists startup_run ~f:(P.Run.equal previous) ->
+            Ok P.Run.Lifecycle.Active
           | Turn_end, Some operation_id, [ work ] ->
             (match work.P.Run_work.key with
              | Operation id when P.Id.Operation.equal id operation_id ->
@@ -345,8 +353,9 @@ let prepare_internal
   { run; delta = Session_delta.Run_state_changed index }
 ;;
 
-let prepare state ~scope ~executing ~work_state ~owned_work ~action ~now =
+let prepare ?startup_run state ~scope ~executing ~work_state ~owned_work ~action ~now =
   prepare_internal
+    ?startup_run
     (Checkpoint action)
     state
     ~scope
@@ -360,7 +369,7 @@ let add_owned_work state ~scope ~executing ~work_state ~owned_work ~now =
   prepare_internal Running_work state ~scope ~executing ~work_state ~owned_work ~now
 ;;
 
-let settle_operation (state : Session_state.t) ~operation_id ~outcome ~now =
+let settle_operation ?startup_run (state : Session_state.t) ~operation_id ~outcome ~now =
   let open Result.Let_syntax in
   match state.run_state with
   | None -> Ok []
@@ -388,6 +397,7 @@ let settle_operation (state : Session_state.t) ~operation_id ~outcome ~now =
                 ~revision:(Int64.succ previous.revision)
             in
             Run_work_settlement.prepare
+              ?startup_run
               index
               ~state
               ~previous

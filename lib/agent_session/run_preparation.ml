@@ -144,6 +144,32 @@ let check t ~owner ~state =
   t.authorize state
 ;;
 
+module Authorization = struct
+  type t =
+    { actor : Operator_authorization.t
+    ; authorize : Session_state.t -> (unit, P.Error.t) result
+    }
+
+  let actor t = t.actor
+  let check t state = t.authorize state
+end
+
+let capture_authorization t ~owner ~state =
+  let open Result.Let_syntax in
+  let%bind () = check t ~owner ~state in
+  let%map actor =
+    Result.of_option
+      t.original_actor
+      ~error:
+        (P.Error.create
+           Permission_denied
+           ~message:"held activation requires its original authentication"
+           ~retryable:false
+           ())
+  in
+  ({ actor; authorize = t.authorize } : Authorization.t)
+;;
+
 let advance t ~owner ~(previous : Session_state.t) ~(current : Session_state.t) =
   let result =
     let open Result.Let_syntax in

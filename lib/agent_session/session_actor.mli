@@ -1435,6 +1435,18 @@ module Held_run : sig
       Run/receipt. Neither authenticates the original nor starts execution. *)
   val check_basis : t -> (unit, Agent_protocol.Error.t) result
 
+  module Activation : sig
+    (** One-shot continuation of this exact actor-issued held owner. The old
+        quiescent Held/source checks cease to work after consumption. Own ACKs
+        retain the same preparation and immutable admission; unrelated writes,
+        Stop, replacement and closure revoke startup. No receipt/ID constructor.
+        This is not a reconstructed Run authority or an execution result. *)
+    type t
+
+    val check_basis : t -> (unit, Agent_protocol.Error.t) result
+    val close : t -> unit
+  end
+
   module Admission : sig
     type held = t
 
@@ -2887,7 +2899,55 @@ module Recurrence_activation : sig
         or callback after the final bases. *)
     val check_basis : t -> (unit, Agent_protocol.Error.t) result
   end
+
+  module Continuation : sig
+    (** Consumes one exact Checked/held-target link. Controller custody remains
+        live; only this actual target activation may acknowledge its own progress.
+        Refresh uses the genuine Store/Handle after yields, including self-target
+        ACKs. The old Checked is not weakened or reused as a fresh view. *)
+    type t
+
+    val target : t -> Held_run.Activation.t
+
+    (** Policy and genuine lifecycle observation refresh; may perform Store I/O.
+        Call outside actor mailboxes and runtime-owner mutexes. *)
+    val refresh : t -> (unit, Agent_protocol.Error.t) result
+
+    (** Trusted nonyielding policy callbacks only, with pure preflight/final
+        ownership. No Store I/O or mailbox call. Repeat at the actual fresh
+        writer boundary before clock/original/final pure checks. *)
+    val check_policy : t -> (unit, Agent_protocol.Error.t) result
+
+    (** Trusted clock/grace callbacks, then original authentication guards must
+        precede both final pure bases. Neither check grants a lasting permission. *)
+    val check_timing : t -> (unit, Agent_protocol.Error.t) result
+
+    val check_authority : t -> (unit, Agent_protocol.Error.t) result
+    val check_basis : t -> (unit, Agent_protocol.Error.t) result
+  end
 end
+
+(** Consume only the exact linked Admitted target and current Checked view.
+    No native resources, history/content conversion, initializer or worker runs.
+    The host separately retains the actual Runtime_owner.Prepared lease; after
+    this yielding mailbox call it refreshes the continuation and repeats the
+    final joint first-effect fence. *)
+val begin_held_recurrence_activation
+  :  t
+  -> binding:Source_binding.t
+  -> held:Held_run.t
+  -> checked:Recurrence_activation.Checked.t
+  -> (Recurrence_activation.Continuation.t, Agent_protocol.Error.t) result
+
+(** Exact owned constructor entry for a consumed held activation. It reuses the
+    existing Initialization scope and ACK rules; arbitrary live Runs or original
+    proofs cannot bypass the ordinary unresolved-Run exclusion. *)
+val begin_held_initialization
+  :  t
+  -> continuation:Recurrence_activation.Continuation.t
+  -> purpose:Initialization_scope.Purpose.t
+  -> expected:Session_state.t
+  -> (Initialization_scope.t, Agent_protocol.Error.t) result
 
 (** Acquire only after actual target admission AND reciprocal controller ACK.
     Requires current Send_messages and trusted nonyielding execution-selection
@@ -3103,3 +3163,23 @@ val set_recurrence_planning_host
     Cancellation joins preparation cleanup; stale cleanup cannot release a new
     token. Called by the existing sole daemon scheduler, never a new timer. *)
 val sweep_recurrences : t -> (unit, Agent_protocol.Error.t) result
+
+(** First owned startup write: final policy refresh has occurred outside the
+    mailbox; the real writer repeats clock/original and joint pure bases. Own ACK
+    advances the same preparation and installs its genuine Run authority before
+    constructor effects. No synthetic input/Operation is allocated. *)
+val reserve_held_history_block
+  :  t
+  -> continuation:Recurrence_activation.Continuation.t
+  -> count:int
+  -> (History_id_source.reservation, Agent_protocol.Error.t) result
+
+(** Retire this actual scoped startup if it did not hand off. Selected factual
+    Run interruption preserves completed child winners and marks unresolved
+    custody Unconfirmed in its one canonical terminal ACK. No reauthorization,
+    initializer replay, effect rollback or no-effects claim. Idempotent after
+    successful cleanup; foreign physical owners reject. *)
+val end_held_activation
+  :  t
+  -> activation:Held_run.Activation.t
+  -> (unit, Agent_protocol.Error.t) result

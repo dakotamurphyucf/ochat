@@ -28,6 +28,7 @@ let awaits (state : Session_state.t) job =
 ;;
 
 let prepare
+      ?startup_run
       (state : Session_state.t)
       ~(running : P.Job.t)
       ~(terminal : P.Job.t)
@@ -131,6 +132,7 @@ let prepare
             in
             let%bind index =
               Run_work_settlement.prepare
+                ?startup_run
                 index
                 ~state
                 ~previous
@@ -159,7 +161,7 @@ let prepare
     if !changed then [ Session_delta.Run_state_changed index ] else []
 ;;
 
-let cancel_queued (state : Session_state.t) ~job ~now =
+let cancel_queued ?startup_run (state : Session_state.t) ~job ~now =
   let open Result.Let_syntax in
   let%bind () =
     if
@@ -237,6 +239,7 @@ let cancel_queued (state : Session_state.t) ~job ~now =
             else if P.Job.equal_kind job.kind Model_call
             then
               Run_work_settlement.prepare
+                ?startup_run
                 index
                 ~state
                 ~previous:run

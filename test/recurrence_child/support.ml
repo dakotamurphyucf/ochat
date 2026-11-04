@@ -402,6 +402,7 @@ let assert_ordinary_execution_blocked env sw connection daemon child_id =
 ;;
 
 let with_daemon
+      ?policy
       ?(on_runtime_construction = fun () -> ())
       env
       root
@@ -411,11 +412,14 @@ let with_daemon
   =
   Eio.Switch.run (fun sw ->
     let policy =
-      T.inference_policy
-        ~default_model:"fixture-model"
-        ~post_stream:(fun ~sw:_ ~inputs:_ ->
-          Int.incr provider_calls;
-          failwith "captured child activated provider")
+      match policy with
+      | Some policy -> policy
+      | None ->
+        T.inference_policy
+          ~default_model:"fixture-model"
+          ~post_stream:(fun ~sw:_ ~inputs:_ ->
+            Int.incr provider_calls;
+            failwith "captured child activated provider")
     in
     let policy =
       { policy with

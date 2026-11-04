@@ -12,18 +12,24 @@ type source_stage =
   { domain : int
   ; runtime : Agent_session.Runtime_builder.t option
   ; mutable binding : Agent_session.Session_actor.Source_binding.t option
+  ; mutable continuation :
+      Agent_session.Session_actor.Recurrence_activation.Continuation.t option
   ; mutable closed : bool
   }
 
 let close_source_stage stage =
   stage.closed <- true;
-  Option.iter stage.binding ~f:Agent_session.Session_actor.Source_binding.close
+  Option.iter stage.binding ~f:Agent_session.Session_actor.Source_binding.close;
+  Option.iter stage.continuation ~f:(fun continuation ->
+    Agent_session.Session_actor.Held_run.Activation.close
+      (Agent_session.Session_actor.Recurrence_activation.Continuation.target continuation))
 ;;
 
 module Prepared = struct
   type t =
     { stage : source_stage
     ; binding : Agent_session.Session_actor.Source_binding.t
+    ; preparation : Agent_session.Run_preparation.t
     ; basis : unit -> (unit, Agent_protocol.Error.t) result
     }
 
@@ -35,12 +41,12 @@ module Prepared = struct
       Error
         (Agent_protocol.Error.invalid_request
            "prepared source belongs to another Eio domain")
-    else if t.stage.closed
+    else if t.stage.closed || Option.is_some t.stage.continuation
     then
       Error
         (Agent_protocol.Error.create
            Conflict
-           ~message:"prepared source lifetime is closed"
+           ~message:"prepared source lifetime is closed or consumed"
            ~retryable:false
            ())
     else
@@ -57,6 +63,12 @@ type unload_outcome =
 
 exception Cleanup_failed of Agent_protocol.Error.t
 
+type deferred_builder =
+  source:Agent_session.Runtime_builder.Source.t
+  -> preparation:Agent_session.Run_preparation.t
+  -> continuation:Agent_session.Session_actor.Recurrence_activation.Continuation.t
+  -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result
+
 type builder =
   | Ordinary of (unit -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
   | For_runs of
@@ -70,6 +82,7 @@ type builder =
 type t =
   { actor : Agent_session.Session_actor.t
   ; build : builder
+  ; build_deferred : deferred_builder option
   ; before_unload : (closing:bool -> (unit, Agent_protocol.Error.t) result) option
   ; mutex : Eio.Mutex.t
   ; moderator_work_mutex : Eio.Mutex.t
@@ -84,9 +97,10 @@ type t =
   ; mutable retired_resources : Agent_session.Runtime_builder.t list
   }
 
-let create_internal ~before_unload ~actor ~initial ~build =
+let create_internal ~before_unload ~actor ~initial ~build ~build_deferred =
   { actor
   ; build
+  ; build_deferred
   ; before_unload
   ; mutex = Eio.Mutex.create ()
   ; moderator_work_mutex = Eio.Mutex.create ()
@@ -107,10 +121,16 @@ let create_with_unload ~before_unload ~actor ~initial ~build =
     ~actor
     ~initial
     ~build:(Ordinary build)
+    ~build_deferred:None
 ;;
 
 let create ~actor ~initial ~build =
-  create_internal ~before_unload:None ~actor ~initial ~build:(Ordinary build)
+  create_internal
+    ~before_unload:None
+    ~actor
+    ~initial
+    ~build:(Ordinary build)
+    ~build_deferred:None
 ;;
 
 let create_with_run_unload ~before_unload ~actor ~initial ~build =
@@ -119,6 +139,7 @@ let create_with_run_unload ~before_unload ~actor ~initial ~build =
     ~actor
     ~initial
     ~build:(For_runs build)
+    ~build_deferred:None
 ;;
 
 let create_with_authenticated_run_unload ~before_unload ~actor ~initial ~build =
@@ -127,6 +148,16 @@ let create_with_authenticated_run_unload ~before_unload ~actor ~initial ~build =
     ~actor
     ~initial
     ~build:(For_authenticated_runs build)
+    ~build_deferred:None
+;;
+
+let create_with_deferred_run_unload ~before_unload ~actor ~initial ~build ~build_deferred =
+  create_internal
+    ~before_unload:(Some before_unload)
+    ~actor
+    ~initial
+    ~build:(For_authenticated_runs build)
+    ~build_deferred:(Some build_deferred)
 ;;
 
 let is_loaded t = Eio.Mutex.use_ro t.mutex (fun () -> Option.is_some t.runtime)
@@ -355,7 +386,13 @@ let foreground_retirement_finished t =
     | Error error -> raise (Cleanup_failed error))
 ;;
 
-let with_lease ?(retire = ignore) t ~survives_stop ~admit f =
+module Lease_admission = struct
+  type ('value, 'result) t =
+    | No_work of 'result
+    | Borrow of 'value * Agent_session.Runtime_builder.t option
+end
+
+let with_lease_internal ?(retire = ignore) t ~survives_stop ~admit f =
   Eio.Cancel.sub (fun context ->
     let active = Atomic.make true in
     let finished, finish = Eio.Promise.create () in
@@ -379,16 +416,25 @@ let with_lease ?(retire = ignore) t ~survives_stop ~admit f =
         let%bind () =
           if Option.is_some t.prepared_source then Error (background_busy ()) else Ok ()
         in
-        let%map value, resources = admit () in
-        lease.resources <- resources;
-        t.background_leases <- lease :: t.background_leases;
-        value)
+        let%map decision = admit () in
+        match decision with
+        | Lease_admission.No_work _ -> decision
+        | Borrow (_, resources) ->
+          lease.resources <- resources;
+          t.background_leases <- lease :: t.background_leases;
+          decision)
     in
     match admitted with
     | Error _ as failure ->
       Atomic.set active false;
       failure
-    | Ok runtime ->
+    | Ok (Lease_admission.No_work result) ->
+      (* No work acquired ownership or exposed the cancellation callback. Keep
+         caller cancellation observable without publishing a background lease. *)
+      Atomic.set active false;
+      Eio.Fiber.check ();
+      Ok result
+    | Ok (Borrow (runtime, _)) ->
       let cleanup () =
         (* Cleanup must survive cancellation while waiting for another owner. *)
         Eio.Cancel.protect (fun () ->
@@ -436,6 +482,17 @@ let with_lease ?(retire = ignore) t ~survives_stop ~admit f =
        | Ok result, Ok () -> result
        | Ok (Ok _), Error (exn, backtrace) ->
          Exn.raise_with_original_backtrace exn backtrace))
+;;
+
+let with_lease ?retire t ~survives_stop ~admit f =
+  with_lease_internal
+    ?retire
+    t
+    ~survives_stop
+    ~admit:(fun () ->
+      Result.map (admit ()) ~f:(fun (value, resources) ->
+        Lease_admission.Borrow (value, resources)))
+    f
 ;;
 
 let with_runtime_lease ?run_preparation t ~retain_resources f =
@@ -513,6 +570,7 @@ let with_prepared_source t ~preparation ~source f =
             { domain = (Stdlib.Domain.self () :> int)
             ; runtime = t.runtime
             ; binding = None
+            ; continuation = None
             ; closed = false
             }
           in
@@ -534,6 +592,7 @@ let with_prepared_source t ~preparation ~source f =
          let prepared : Prepared.t =
            { stage
            ; binding
+           ; preparation
            ; basis =
                (fun () ->
                  if
@@ -555,6 +614,175 @@ let with_prepared_source t ~preparation ~source f =
          let%bind () = Prepared.check_basis prepared in
          Eio.Fiber.check ();
          f prepared))
+;;
+
+let with_held_recurrence_runtime t ~(prepared : Prepared.t) ~held ~checked f =
+  let open Result.Let_syntax in
+  let owner_basis () =
+    if
+      t.closed
+      || Option.is_some t.unloading
+      || Option.is_some t.foreground_retirement
+      || (not (Option.exists t.prepared_source ~f:(phys_equal prepared.stage)))
+      || not (Option.equal phys_equal t.runtime prepared.stage.runtime)
+    then
+      Error
+        (Agent_protocol.Error.create
+           Conflict
+           ~message:"prepared source belongs to another or displaced runtime owner"
+           ~retryable:false
+           ())
+    else prepared.basis ()
+  in
+  let%bind () = Prepared.check_basis prepared in
+  let%bind () = owner_basis () in
+  let%bind () =
+    match prepared.stage.runtime, t.build_deferred with
+    | None, None ->
+      Error
+        (Agent_protocol.Error.create
+           Invalid_state
+           ~message:"runtime owner has no verified-source deferred constructor"
+           ~retryable:false
+           ())
+    | Some _, (Some _ | None) | None, Some _ -> Ok ()
+  in
+  let continuation = ref None in
+  let constructed = ref None in
+  let consumed_basis active =
+    if
+      (not (Int.equal prepared.stage.domain (Stdlib.Domain.self () :> int)))
+      || prepared.stage.closed
+      || not (Option.exists prepared.stage.continuation ~f:(phys_equal active))
+    then
+      Error
+        (Agent_protocol.Error.create
+           Conflict
+           ~message:"consumed runtime source owner is closed or displaced"
+           ~retryable:false
+           ())
+    else owner_basis ()
+  in
+  let check_effect active =
+    let module Continuation =
+      Agent_session.Session_actor.Recurrence_activation.Continuation
+    in
+    let%bind () = consumed_basis active in
+    let%bind () = Continuation.refresh active in
+    let%bind () = Continuation.check_timing active in
+    let%bind () = Continuation.check_authority active in
+    let%bind () = consumed_basis active in
+    let%bind () =
+      Agent_session.Session_actor.Held_run.Activation.check_basis
+        (Continuation.target active)
+    in
+    Continuation.check_basis active
+  in
+  let cleanup () =
+    Eio.Cancel.protect (fun () ->
+      let ended =
+        match !continuation with
+        | None -> Ok (Ok ())
+        | Some active ->
+          let activation =
+            Agent_session.Session_actor.Recurrence_activation.Continuation.target active
+          in
+          Agent_session.Session_actor.Held_run.Activation.close activation;
+          (try
+             Ok (Agent_session.Session_actor.end_held_activation t.actor ~activation)
+           with
+           | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+      in
+      (* This scope never installed its cold runtime in [t.runtime]. Loaded
+         resources still belong to the outer existing lease and are not closed. *)
+      let closed =
+        match !constructed with
+        | None -> Ok ()
+        | Some runtime ->
+          constructed := None;
+          (try
+             runtime.Agent_session.Runtime_builder.close ();
+             Ok ()
+           with
+           | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+      in
+      match ended, closed with
+      | Error failure, _ -> Error failure
+      | Ok (Error error), _ -> Ok (Error error)
+      | Ok (Ok ()), Error failure -> Error failure
+      | Ok (Ok ()), Ok () -> Ok (Ok ()))
+  in
+  let result =
+    try
+      let result =
+        let%bind active =
+          (* Capture the issued owner before pending cancellation can unwind.
+             Construction and the caller's effects remain cancellable. *)
+          Eio.Cancel.protect (fun () ->
+            let result =
+              Agent_session.Session_actor.begin_held_recurrence_activation
+                t.actor
+                ~binding:prepared.binding
+                ~held
+                ~checked
+            in
+            Result.iter result ~f:(fun active ->
+              continuation := Some active;
+              prepared.stage.continuation <- Some active;
+              if prepared.stage.closed
+              then
+                Agent_session.Session_actor.Held_run.Activation.close
+                  (Agent_session.Session_actor.Recurrence_activation.Continuation.target
+                     active));
+            result)
+        in
+        Eio.Fiber.check ();
+        let%bind runtime =
+          match prepared.stage.runtime with
+          | Some runtime -> Ok runtime
+          | None ->
+            let%bind () = check_effect active in
+            (match t.build_deferred with
+             | None ->
+               Error
+                 (Agent_protocol.Error.create
+                    Invalid_state
+                    ~message:"runtime owner has no verified-source deferred constructor"
+                    ~retryable:false
+                    ())
+             | Some build ->
+               let result =
+                 build
+                   ~source:
+                     (Agent_session.Session_actor.Source_binding.source prepared.binding)
+                   ~preparation:prepared.preparation
+                   ~continuation:active
+               in
+               Result.iter result ~f:(fun runtime -> constructed := Some runtime);
+               result)
+        in
+        let%bind () =
+          match runtime.Agent_session.Runtime_builder.check_execution with
+          | None -> Ok ()
+          | Some check -> check ()
+        in
+        let%bind () = check_effect active in
+        f runtime active
+      in
+      (match result with
+       | Error _ -> ()
+       | Ok _ -> Eio.Fiber.check ());
+      Ok result
+    with
+    | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+  in
+  let cleaned = cleanup () in
+  match result, cleaned with
+  | Error (exn, backtrace), _ -> Exn.raise_with_original_backtrace exn backtrace
+  | Ok (Error _ as failure), _ -> failure
+  | Ok result, Ok (Ok ()) -> result
+  | Ok (Ok _), Ok (Error error) -> Error error
+  | Ok (Ok _), Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let with_delegation_resources t f = with_runtime_lease t ~retain_resources:true f
@@ -1369,17 +1597,17 @@ let snapshot_has_pending_events t =
 ;;
 
 let drain_idle_moderator_leased t =
-  with_lease
+  with_lease_internal
     t
     ~survives_stop:false
     ~admit:(fun () ->
       let open Result.Let_syntax in
       let%bind pending = snapshot_has_pending_events t in
       match pending with
-      | false -> Ok (None, None)
+      | false -> Ok (Lease_admission.No_work false)
       | true ->
         let%map () = ensure_loaded_locked t in
-        t.runtime, None)
+        Lease_admission.Borrow (t.runtime, None))
     (function
       | None -> Ok false
       | Some runtime ->

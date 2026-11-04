@@ -4,6 +4,7 @@ module P = Agent_protocol
 let conflict message = P.Error.create Conflict ~message ~retryable:false ()
 
 let prepare
+      ?startup_run
       index
       ~(state : Session_state.t)
       ~(previous : P.Run.t)
@@ -38,7 +39,12 @@ let prepare
       | Finish { terminal; _ } -> Some terminal
       | Continue | Wait _ -> None)
   in
-  let settled = List.length terminal_work = List.length owned_work in
+  let startup_pending =
+    Option.exists startup_run ~f:(fun run -> P.Run.equal run previous)
+  in
+  let settled =
+    (not startup_pending) && List.length terminal_work = List.length owned_work
+  in
   let outcome =
     List.fold
       terminal_work

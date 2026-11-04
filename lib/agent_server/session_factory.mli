@@ -174,7 +174,11 @@ val developer_catalog : t -> Developer_catalog.t
     Prepared or borrowed resource custody after return. The caller ends its actual
     Run preparation and still owns current command/delegation authorization,
     reciprocal ACK and final effect admission. Verification grants none of those.
-    Cancellation and unexpected checkpoint failures propagate unchanged. *)
+    Cancellation and unexpected checkpoint failures propagate unchanged. The real owner also carries its deferred builder: only a consumed exact Held
+    continuation can enter cold construction. It reuses this selected source and
+    parent lease and repeats the joint fence after yielded preparation, before
+    native/Agent/Manager/startup effects. Loaded reuse never initializes again.
+    Scoped construction is not an input/Operation handoff receipt. *)
 val with_prepared_run_source
   :  t
   -> Session_registry.entry

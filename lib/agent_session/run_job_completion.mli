@@ -17,8 +17,16 @@ val owns : Session_state.t -> Agent_protocol.Job.t -> bool
     canonical receipt; Waiting remains live until its actual queued callback is
     claimed. Both Async_tool stored completions and Model raw terminal results
     are validated through Job.terminal_result, without rewriting the Job schema. *)
+
+(** [startup_run], when supplied by the actual actor, is the exact retained Run
+    selected by its live held startup/Init owner. It defers quiescent terminal
+    completion while real input/startup handoff remains pending. This optional
+    pure DATA is not execution authority and must never be decoded as a live
+    hold. Ordinary settlement without that owner remains unchanged. *)
+
 val prepare
-  :  Session_state.t
+  :  ?startup_run:Agent_protocol.Run.t
+  -> Session_state.t
   -> running:Agent_protocol.Job.t
   -> terminal:Agent_protocol.Job.t
   -> successor:Agent_protocol.Job.t
@@ -38,7 +46,8 @@ val prepare
     cancelled Job with this candidate and supplies the genuine completion sample
     if the Model branch creates a terminal receipt. *)
 val cancel_queued
-  :  Session_state.t
+  :  ?startup_run:Agent_protocol.Run.t
+  -> Session_state.t
   -> job:Agent_protocol.Job.t
   -> now:Agent_protocol.Timestamp.t
   -> (Session_delta.t list, Agent_protocol.Error.t) result

@@ -2264,6 +2264,7 @@ let model_job_inference t entry job =
 ;;
 
 let job_services
+      ?construction_checkpoint
       t
       (state : Agent_session.Session_state.t)
       actor_ref
@@ -2272,6 +2273,10 @@ let job_services
       ~initialization_jobs
       ~run_preparation
   =
+  let checkpoint () =
+    Option.value_map construction_checkpoint ~default:(Ok ()) ~f:(fun check -> check ())
+    |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+  in
   let capacity_key () =
     let prompt =
       Option.value_map
@@ -2353,6 +2358,8 @@ let job_services
   in
   let services ~scope admission : Agent_session.Runtime_model_services.t =
     let admit job =
+      let open Result.Let_syntax in
+      let%bind () = checkpoint () in
       Agent_session.Model_job_admission.admit admission job
       |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
     in
@@ -2387,6 +2394,7 @@ let job_services
                let%bind job =
                  Eio.Cancel.protect (fun () ->
                    let%bind job = admit job in
+                   let%bind () = checkpoint () in
                    (match scope with
                     | Some scope ->
                       Agent_session.Session_actor.claim_initialization_model_job
@@ -2417,6 +2425,7 @@ let job_services
                  (* Preparation can reject or be cancelled after the durable Job
                     claim. Keep it inside the same terminal-outcome owner as
                     execution so it cannot strand a Run-owned child. *)
+                 let%bind () = checkpoint () in
                  let%bind inference =
                    prepare_model_job_inference
                      ~run_preparation
@@ -2426,27 +2435,46 @@ let job_services
                      job
                    |> Result.map_error ~f:(fun error -> error.message)
                  in
+                 let%bind () = checkpoint () in
                  let execute_owned allocate_inference =
                    execute
                      ~inference_context:inference.context
                      ~allocate_inference
                      ~before_inference_attempt:(fun _attempt ->
-                       match scope with
-                       | None -> ()
-                       | Some scope ->
-                         (match
-                            Agent_session.Session_actor
-                            .initialization_model_job_is_current
-                              actor
-                              ~scope
-                              ~job_id:job.id
-                              ~generation:job.generation
-                              ~attempt:job.attempt
-                          with
-                          | Ok true -> ()
-                          | Ok false | Error _ ->
-                            raise Chat_response.Ctx.Inference_admission_rejected))
-                     ~capture_recipe_target:inference.capture_recipe_target
+                       (match checkpoint () with
+                        | Ok () -> ()
+                        | Error _ -> raise Chat_response.Ctx.Inference_admission_rejected);
+                       (match scope with
+                        | None -> ()
+                        | Some scope ->
+                          (match
+                             Agent_session.Session_actor
+                             .initialization_model_job_is_current
+                               actor
+                               ~scope
+                               ~job_id:job.id
+                               ~generation:job.generation
+                               ~attempt:job.attempt
+                           with
+                           | Ok true -> ()
+                           | Ok false | Error _ ->
+                             raise Chat_response.Ctx.Inference_admission_rejected));
+                       match checkpoint () with
+                       | Ok () -> ()
+                       | Error _ -> raise Chat_response.Ctx.Inference_admission_rejected)
+                     ~capture_recipe_target:(fun target ->
+                       let open Result.Let_syntax in
+                       let check_construction () =
+                         Option.value_map
+                           construction_checkpoint
+                           ~default:(Ok ())
+                           ~f:(fun check -> check ())
+                       in
+                       let%bind () = check_construction () in
+                       let%bind () = inference.capture_recipe_target target in
+                       (* The actual capture ACK rotates target Store custody.
+                          Refresh outside the mailbox before graph allocation. *)
+                       check_construction ())
                  in
                  match scope with
                  | Some scope ->
@@ -3097,6 +3125,7 @@ let prepare_authored_job_source
 ;;
 
 let prepare_authored_code
+      ?construction_checkpoint
       t
       ~prepared
       ~revision
@@ -3147,7 +3176,12 @@ let prepare_authored_code
     let exception Admission_rejected of Agent_protocol.Error.t in
     let check_authority () =
       Eio.Fiber.check ();
-      match authorize () with
+      let admitted =
+        let%bind () = authorize () in
+        Option.value_map construction_checkpoint ~default:(Ok ()) ~f:(fun check ->
+          check ())
+      in
+      match admitted with
       | Ok () -> Eio.Fiber.check ()
       | Error error -> raise (Admission_rejected error)
     in
@@ -3260,6 +3294,7 @@ let prepare_authored_code
 ;;
 
 let prepare_authored_graph
+      ?construction_checkpoint
       t
       ~startup
       ~sw
@@ -3297,6 +3332,10 @@ let prepare_authored_graph
         ~checkpoint:Eio.Fiber.check
         ~f:(fun _ source -> Ok source))
     ~build:(fun ~source ~native_registrations ->
+      let%bind () =
+        Option.value_map construction_checkpoint ~default:(Ok ()) ~f:(fun check ->
+          check ())
+      in
       Agent_session.Runtime_builder.prepare_authored_resources_from_source
         source
         ~agent_source
@@ -3342,7 +3381,7 @@ let prepare_authored_graph
         |> Result.map_error ~f:source_attachment_error))
 ;;
 
-let independent_resource_host t =
+let independent_resource_host ?construction_checkpoint t =
   let module R = Independent_resources in
   let module B = Agent_session.Runtime_builder in
   let module G = Agent_session.Generated_definition in
@@ -3425,6 +3464,7 @@ let independent_resource_host t =
               let source_lease = original_source_lease t ~sw ~revision in
               let%bind prepared, native_registrations =
                 prepare_authored_graph
+                  ?construction_checkpoint
                   t
                   ~startup
                   ~sw
@@ -3445,6 +3485,10 @@ let independent_resource_host t =
               in
               let%bind inference_context = resolve_state_inference_context t state in
               let%bind agent_source = source_binding t ~source_lease in
+              let%bind () =
+                Option.value_map construction_checkpoint ~default:(Ok ()) ~f:(fun check ->
+                  check ())
+              in
               let%bind resources =
                 B.prepare_resources
                   ~agent_source
@@ -3937,6 +3981,7 @@ let delegated_tool_preparation
 ;;
 
 let legacy_construction
+      ?construction_checkpoint
       t
       profile
       actor_ref
@@ -3949,7 +3994,15 @@ let legacy_construction
   let module A = Agent_session.Session_actor in
   let module B = Agent_session.Runtime_builder in
   let with_services actor scope (jobs : Agent_session.Runtime_model_services.t) ~commit f =
-    let check_current () = A.check_callback_current actor scope in
+    let check_construction () =
+      Option.value_map construction_checkpoint ~default:(Ok ()) ~f:(fun check -> check ())
+    in
+    let check_current () =
+      let open Result.Let_syntax in
+      let%bind () = A.check_callback_current actor scope in
+      let%bind () = check_construction () in
+      A.check_callback_current actor scope
+    in
     let check_service () =
       check_current ()
       |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
@@ -3990,7 +4043,17 @@ let legacy_construction
     let services : B.legacy_callback_services =
       { jobs
       ; schedules = A.callback_schedule_services actor ~scope
-      ; execute = A.callback_tool_executor actor ~scope
+      ; execute =
+          (fun ~invocation execute ->
+            let open Result.Let_syntax in
+            let%bind () = check_construction () in
+            A.callback_tool_executor
+              actor
+              ~scope
+              ~invocation
+              (fun ~dispatched ~capabilities ->
+                 let%bind () = check_construction () in
+                 execute ~dispatched ~capabilities))
       ; executing = A.Callback_scope.executing scope
       ; check_current
       ; is_halted
@@ -4000,12 +4063,17 @@ let legacy_construction
     f ~services ~commit
   in
   let claim ~manager ~callback f =
+    let open Result.Let_syntax in
+    let%bind () =
+      Option.value_map construction_checkpoint ~default:(Ok ()) ~f:(fun check -> check ())
+    in
     match !actor_ref, !initialization_scope with
     | Some actor, Some constructor ->
       (* Capture this exact Init owner. Returning/closing it cannot retarget these
          services to a later constructor or the ordinary raw Job writer. *)
       let jobs =
         (job_services
+           ?construction_checkpoint
            t
            state
            actor_ref
@@ -4075,6 +4143,8 @@ let legacy_construction
 ;;
 
 let prepare_runtime_at_paths
+      ?prepared_source
+      ?construction_checkpoint
       t
       paths
       storage_paths
@@ -4111,6 +4181,7 @@ let prepare_runtime_at_paths
   let legacy_construction =
     Some
       (legacy_construction
+         ?construction_checkpoint
          t
          profile
          actor_ref
@@ -4159,6 +4230,7 @@ let prepare_runtime_at_paths
              ~run_preparation)
         ~job_services:
           (job_services
+             ?construction_checkpoint
              t
              state
              actor_ref
@@ -4167,8 +4239,17 @@ let prepare_runtime_at_paths
              ~initialization_jobs
              ~run_preparation)
     in
+    let selected_source =
+      match source, prepared_source with
+      | Captured_delegation captured, Some selected ->
+        (match Agent_session.Runtime_builder.Source.selection selected with
+         | Captured actual when phys_equal actual captured ->
+           Authored (Agent_session.Captured_recurrence_source.revision actual)
+         | Authored _ | Captured _ | Authored_child _ | Generated _ -> source)
+      | (Authored _ | Generated_artifact _ | Captured_delegation _), _ -> source
+    in
     let%map runtime =
-      match source with
+      match selected_source with
       | Captured_delegation _ ->
         Error
           (unavailable
@@ -4193,6 +4274,7 @@ let prepare_runtime_at_paths
                   construct
                     sw
                     (Agent_session.Runtime_builder.build
+                       ~construction_checkpoint
                        ~legacy_construction
                        ~agent_source
                        ~startup:(Some startup)
@@ -4215,6 +4297,7 @@ let prepare_runtime_at_paths
                   in
                   let%bind prepared, native_registrations =
                     prepare_authored_graph
+                      ?construction_checkpoint
                       t
                       ~startup
                       ~sw
@@ -4235,6 +4318,7 @@ let prepare_runtime_at_paths
                     construct
                       sw
                       (B.build_with_extensions
+                         ~construction_checkpoint
                          ~legacy_construction
                          ~agent_source
                          ~startup:(Some startup)
@@ -4354,40 +4438,55 @@ let prepare_runtime_at_paths
                 Authored_resources.resolve t.authored_resources record ~public:current
               in
               let%map revision =
-                restore_authored_code
-                  t
-                  ~artifacts:artifact_store
-                  ~source:prepared.source
-                  record
+                match
+                  Option.map
+                    prepared_source
+                    ~f:Agent_session.Runtime_builder.Source.selection
+                with
+                | Some (Authored_child selected) ->
+                  Ok (Agent_session.Prompt_child_source.revision selected.source)
+                | Some (Authored _ | Captured _ | Generated _) | None ->
+                  restore_authored_code
+                    t
+                    ~artifacts:artifact_store
+                    ~source:prepared.source
+                    record
               in
               `Authored (prepared, revision), selected
             | None ->
               let%map definition =
-                Agent_session.Generated_definition.restore
-                  ?limits:
-                    (Option.map
-                       t.authoring_validation_host
-                       ~f:Chat_response.Authoring_validation.compilation_limits)
-                  ?source_limits:
-                    (Option.map
-                       t.authoring_validation_host
-                       ~f:Chat_response.Authoring_validation.bundle_limits)
-                  ?catalog:
-                    (Option.bind
-                       t.authoring_validation_host
-                       ~f:Chat_response.Authoring_validation.delegated_catalog)
-                  ~env:t.env
-                  ~artifact_store
-                  ~revision_id:artifact.revision_id
-                  ~manifest_sha256:record.admission.manifest_sha256
-                  ~current_capabilities:(fun () -> current)
-                  ~pins:record.admission.capability_pins
-                  ()
-                |> Result.map_error ~f:(fun diagnostics ->
-                  unavailable
-                    Prompt_unavailable
-                    (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string
-                     |> String.concat ~sep:"\n"))
+                match
+                  Option.map
+                    prepared_source
+                    ~f:Agent_session.Runtime_builder.Source.selection
+                with
+                | Some (Generated definition) -> Ok definition
+                | Some (Authored _ | Captured _ | Authored_child _) | None ->
+                  Agent_session.Generated_definition.restore
+                    ?limits:
+                      (Option.map
+                         t.authoring_validation_host
+                         ~f:Chat_response.Authoring_validation.compilation_limits)
+                    ?source_limits:
+                      (Option.map
+                         t.authoring_validation_host
+                         ~f:Chat_response.Authoring_validation.bundle_limits)
+                    ?catalog:
+                      (Option.bind
+                         t.authoring_validation_host
+                         ~f:Chat_response.Authoring_validation.delegated_catalog)
+                    ~env:t.env
+                    ~artifact_store
+                    ~revision_id:artifact.revision_id
+                    ~manifest_sha256:record.admission.manifest_sha256
+                    ~current_capabilities:(fun () -> current)
+                    ~pins:record.admission.capability_pins
+                    ()
+                  |> Result.map_error ~f:(fun diagnostics ->
+                    unavailable
+                      Prompt_unavailable
+                      (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string
+                       |> String.concat ~sep:"\n"))
               in
               ( `Generated definition
               , Chat_response.Generated_admission.capabilities
@@ -4463,6 +4562,7 @@ let prepare_runtime_at_paths
             | `Generated definition ->
               Ok
                 (Agent_session.Runtime_builder.build_generated
+                   ~construction_checkpoint
                    ~services
                    ~definition
                    ~artifact_store
@@ -4480,6 +4580,7 @@ let prepare_runtime_at_paths
               in
               let%map code =
                 prepare_authored_code
+                  ?construction_checkpoint
                   t
                   ~prepared
                   ~revision
@@ -4508,6 +4609,7 @@ let prepare_runtime_at_paths
                 ~next_history_sequence
                 ~existing_history:_ ->
                 Agent_session.Runtime_builder.build_authored_child
+                  ~construction_checkpoint
                   ~services
                   ~revision
                   ~prepared
@@ -4589,7 +4691,7 @@ let prepare_runtime_at_paths
            let with_resources f =
              Independent_resources.with_chain
                ~max_depth:t.limits.delegation_max_depth
-               ~host:(independent_resource_host t)
+               ~host:(independent_resource_host ?construction_checkpoint t)
                ~reference
                ~f:(fun resources ->
                  let%bind parent =
@@ -4650,6 +4752,8 @@ let prepare_runtime_at_paths
 ;;
 
 let prepare_runtime
+      ?prepared_source
+      ?construction_checkpoint
       t
       handle
       revision
@@ -4668,6 +4772,8 @@ let prepare_runtime
   let open Result.Let_syntax in
   let%bind paths = runtime_paths t handle revision state in
   prepare_runtime_at_paths
+    ?prepared_source
+    ?construction_checkpoint
     t
     paths
     paths
@@ -5353,12 +5459,71 @@ let close_unregistered_runtime t handle runtime writer actor capacity =
   Agent_store.Commit_writer.close writer
 ;;
 
-let build_runtime_for_actor ?run_preparation ?original_actor t handle actor =
+let refresh_held_construction continuation =
+  let module A = Agent_session.Session_actor in
+  let module C = A.Recurrence_activation.Continuation in
   let open Result.Let_syntax in
+  let%bind () = C.refresh continuation in
+  let%bind () = C.check_policy continuation in
+  let%bind () = C.check_timing continuation in
+  let%bind () = C.check_authority continuation in
+  let%bind () = A.Held_run.Activation.check_basis (C.target continuation) in
+  C.check_basis continuation
+;;
+
+let selected_runtime_source t source =
+  let module S = Agent_session.Runtime_builder.Source in
+  let open Result.Let_syntax in
+  match S.selection source with
+  | Authored revision -> Ok (Authored revision)
+  | Captured source -> Ok (Captured_delegation source)
+  | Authored_child selected ->
+    let revision = Agent_session.Prompt_child_source.revision selected.source in
+    Ok
+      (Generated_artifact
+         { artifact = Agent_session.Prompt_revision.artifact revision
+         ; materialized_tree = Agent_session.Prompt_revision.materialized_tree revision
+         })
+  | Generated definition ->
+    let artifact = Agent_session.Generated_definition.artifact definition in
+    let%map artifacts =
+      Agent_store.Prompt_artifact_store.open_existing
+        ~env:t.env
+        ~root:
+          (Agent_store.Data_root.prompt_artifacts_path
+             (Agent_store.Session_store.data_root t.store))
+      |> Result.map_error ~f:protocol_of_store
+    in
+    Generated_artifact
+      { artifact
+      ; materialized_tree =
+          Agent_store.Prompt_artifact_store.materialized_tree
+            artifacts
+            artifact.revision_id
+      }
+;;
+
+let build_runtime_for_actor ?run_preparation ?original_actor ?deferred t handle actor =
+  let open Result.Let_syntax in
+  let check_deferred () =
+    Option.value_map deferred ~default:(Ok ()) ~f:(fun (_, continuation) ->
+      refresh_held_construction continuation)
+  in
+  let%bind () = check_deferred () in
   let%bind () = Agent_session.Session_actor.check_runtime_admission actor in
   let%bind state = Agent_session.Session_actor.state actor in
-  let%bind revision = restore_state_source t state in
-  let%bind () = check_source_for_execution t state revision in
+  let%bind revision =
+    match deferred with
+    | None -> restore_state_source t state
+    | Some (source, _) ->
+      let%bind () = Agent_session.Runtime_builder.Source.validate_target source state in
+      selected_runtime_source t source
+  in
+  let%bind () =
+    match deferred with
+    | None -> check_source_for_execution t state revision
+    | Some _ -> check_deferred ()
+  in
   let%bind blocked = legacy_checkpoint_activation_blocked state revision in
   let%bind () =
     match blocked with
@@ -5366,13 +5531,19 @@ let build_runtime_for_actor ?run_preparation ?original_actor t handle actor =
     | Some failure -> Error failure
   in
   let%bind profile = restore_state_profile t state in
+  let%bind () = check_deferred () in
   let%bind reservation =
-    match run_preparation with
-    | None ->
+    match deferred, run_preparation with
+    | Some (_, continuation), _ ->
+      Agent_session.Session_actor.reserve_held_history_block
+        actor
+        ~continuation
+        ~count:t.limits.moderator_reservation_size
+    | None, None ->
       Agent_session.Session_actor.reserve_history_block
         actor
         ~count:t.limits.moderator_reservation_size
-    | Some preparation ->
+    | None, Some preparation ->
       Agent_session.Session_actor.reserve_run_history_block
         actor
         ~preparation
@@ -5383,7 +5554,9 @@ let build_runtime_for_actor ?run_preparation ?original_actor t handle actor =
     then Error (unavailable Invalid_state "history sequence space is exhausted")
     else Ok (Int64.to_int_exn reservation.first_sequence)
   in
+  let%bind () = check_deferred () in
   let%bind expected = Agent_session.Session_actor.state actor in
+  let%bind () = check_deferred () in
   let pending =
     match expected.runtime_initialization with
     | Ready -> None
@@ -5410,28 +5583,37 @@ let build_runtime_for_actor ?run_preparation ?original_actor t handle actor =
           | Admitted | Active | Waiting _ -> true
           | Terminal _ -> false))
     in
-    match pending, original_actor, run_preparation with
-    | None, None, None -> Ok None
-    | None, _, _ when unresolved_run -> Ok None
-    | _ ->
-      (match run_preparation with
-       | None ->
-         (match original_actor with
+    match deferred with
+    | Some (_, continuation) ->
+      Agent_session.Session_actor.begin_held_initialization
+        actor
+        ~continuation
+        ~purpose
+        ~expected
+      |> Result.map ~f:Option.some
+    | None ->
+      (match pending, original_actor, run_preparation with
+       | None, None, None -> Ok None
+       | None, _, _ when unresolved_run -> Ok None
+       | _ ->
+         (match run_preparation with
           | None ->
-            Agent_session.Session_actor.begin_initialization ~purpose actor ~expected
-          | Some original_actor ->
-            Agent_session.Session_actor.begin_initialization_authenticated
+            (match original_actor with
+             | None ->
+               Agent_session.Session_actor.begin_initialization ~purpose actor ~expected
+             | Some original_actor ->
+               Agent_session.Session_actor.begin_initialization_authenticated
+                 ~purpose
+                 actor
+                 ~actor:original_actor
+                 ~expected)
+          | Some preparation ->
+            Agent_session.Session_actor.begin_run_initialization
               ~purpose
               actor
-              ~actor:original_actor
+              ~preparation
               ~expected)
-       | Some preparation ->
-         Agent_session.Session_actor.begin_run_initialization
-           ~purpose
-           actor
-           ~preparation
-           ~expected)
-      |> Result.map ~f:Option.some
+         |> Result.map ~f:Option.some)
   in
   let initialization_scope = ref scope in
   let constructor_preparation = ref run_preparation in
@@ -5440,8 +5622,11 @@ let build_runtime_for_actor ?run_preparation ?original_actor t handle actor =
   let schedules = ref [] in
   let jobs = ref [] in
   let initialize () =
+    let%bind () = check_deferred () in
     let%bind runtime, shell =
       prepare_runtime
+        ?prepared_source:(Option.map deferred ~f:fst)
+        ?construction_checkpoint:(Option.map deferred ~f:(fun _ -> check_deferred))
         t
         handle
         revision
@@ -5486,7 +5671,9 @@ let build_runtime_for_actor ?run_preparation ?original_actor t handle actor =
       | None, _ | Some _, None -> runtime
     in
     let finish () =
+      let%bind () = check_deferred () in
       let%bind moderator = runtime.start_moderator () in
+      let%bind () = check_deferred () in
       let%bind () = flush_pending_schedules ?run_preparation actor !schedules in
       let%bind () = flush_pending_jobs ?run_preparation actor !jobs in
       let%bind () =
@@ -5899,12 +6086,19 @@ let create_loaded_entry
     failure
   | Ok () ->
     let runtime =
-      Runtime_owner.create_with_authenticated_run_unload
+      Runtime_owner.create_with_deferred_run_unload
         ~before_unload:(retire_owned_children t actor)
         ~actor
         ~initial:(Some runtime)
         ~build:(fun ~original_actor run_preparation ->
           build_runtime_for_actor ?run_preparation ?original_actor t handle actor)
+        ~build_deferred:(fun ~source ~preparation ~continuation ->
+          build_runtime_for_actor
+            ~run_preparation:preparation
+            ~deferred:(source, continuation)
+            t
+            handle
+            actor)
     in
     runtime_owner := Some runtime;
     let finish () =
@@ -6080,12 +6274,19 @@ let create_unloaded_entry
       Agent_session.Session_actor.set_configuration_policy actor (configuration_policy t)
     in
     let runtime =
-      Runtime_owner.create_with_authenticated_run_unload
+      Runtime_owner.create_with_deferred_run_unload
         ~before_unload:(retire_owned_children t actor)
         ~actor
         ~initial:None
         ~build:(fun ~original_actor run_preparation ->
           build_runtime_for_actor ?run_preparation ?original_actor t handle actor)
+        ~build_deferred:(fun ~source ~preparation ~continuation ->
+          build_runtime_for_actor
+            ~run_preparation:preparation
+            ~deferred:(source, continuation)
+            t
+            handle
+            actor)
     in
     runtime_owner := Some runtime;
     Session_recovery_owner.adopt_runtime_exn owner runtime;

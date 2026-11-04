@@ -444,12 +444,19 @@ val moderator_snapshot_observer
   :  Jsonaf.t option
   -> (Agent_protocol.Invocation.observer option, Agent_protocol.Error.t) result
 
-(** [build ... ~paths ~storage_paths ...] constructs a runtime with public path
+(** [construction_checkpoint] is supplied only by the actual scoped held
+    constructor, after concrete actor issuance. It repeats the owning target and
+    controller fence before native acquisition, after yielded native setup and
+    before initial content, Manager top-level and startup. It grants no custody
+    and cannot replace host admission. None preserves ordinary construction.
+
+    [build ... ~paths ~storage_paths ...] constructs a runtime with public path
     substitutions from [paths] and private cache/response IO from [storage_paths].
     Supply the same paths outside detached administrative preparation. Initializer
     effects on external tools/files are not rolled back by session transactions. *)
 val build
-  :  startup:Chat_response.Startup_compilation.t option
+  :  construction_checkpoint:(unit -> (unit, Agent_protocol.Error.t) result) option
+  -> startup:Chat_response.Startup_compilation.t option
   -> legacy_construction:legacy_construction option
   -> agent_source:Captured_agent_runner.Source_binding.t option
   -> root_invocation:
@@ -496,7 +503,8 @@ val build
     delivery remain under implementation. Public feature negotiation is unchanged;
     ordinary hosts continue using [build]. *)
 val build_with_extensions
-  :  startup:Chat_response.Startup_compilation.t option
+  :  construction_checkpoint:(unit -> (unit, Agent_protocol.Error.t) result) option
+  -> startup:Chat_response.Startup_compilation.t option
   -> legacy_construction:legacy_construction option
   -> agent_source:Captured_agent_runner.Source_binding.t option
   -> root_invocation:
@@ -555,7 +563,8 @@ type inherited_managed =
     restrictions as well as the child's own policy. A live parent registry alone
     is not proof of delegability. General model-visible exposure remains gated. *)
 val build_generated
-  :  services:extension_services
+  :  construction_checkpoint:(unit -> (unit, Agent_protocol.Error.t) result) option
+  -> services:extension_services
   -> definition:Generated_definition.t
   -> artifact_store:Agent_store.Prompt_artifact_store.t
   -> parent_runtime:Chat_response.Agent_runtime.t
@@ -611,7 +620,8 @@ val build_generated
     background work use the same guards as generated children. This does not
     create/publish a durable session or install root authored-tool registrations. *)
 val build_authored_child
-  :  services:extension_services
+  :  construction_checkpoint:(unit -> (unit, Agent_protocol.Error.t) result) option
+  -> services:extension_services
   -> revision:Prompt_revision.t
   -> prepared:authored_resources
   -> code:Authored_code_preparation.t option

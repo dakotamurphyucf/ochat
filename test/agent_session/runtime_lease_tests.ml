@@ -188,6 +188,109 @@ let runtime ?script_tools ?check_execution ?activity ~close () : Builder.t =
   }
 ;;
 
+let%expect_test "a no-work idle drain does not exclude a queued source stage" =
+  let module A = Agent_session.Session_actor in
+  with_source_stage_actor (fun fixture ->
+    let builds = ref 0 in
+    let owner =
+      Owner.create ~actor:fixture.actor ~initial:None ~build:(fun () ->
+        Int.incr builds;
+        failwith "no-work drain or source stage loaded a runtime")
+    in
+    let preparation = source_stage_preparation fixture "stage-after-no-work" in
+    let capture f =
+      match f () with
+      | value -> Ok value
+      | exception exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+    in
+    let result =
+      capture (fun () ->
+        let before = A.state fixture.actor |> protocol_ok in
+        let saved = Agent_session.Memory_backend.state fixture.backend in
+        let entered_stage = ref 0 in
+        Eio.Switch.run (fun sw ->
+          let blocked, blocked_u = Eio.Promise.create () in
+          let release, release_u = Eio.Promise.create () in
+          let release_checkpoint () =
+            if Option.is_none (Eio.Promise.peek release)
+            then Eio.Promise.resolve release_u ()
+          in
+          Exn.protect ~finally:release_checkpoint ~f:(fun () ->
+            let checkpoint =
+              Eio.Fiber.fork_promise ~sw (fun () ->
+                A.checkpoint fixture.actor ~persist:(fun _ ->
+                  Eio.Promise.resolve blocked_u ();
+                  Eio.Promise.await release;
+                  Ok ()))
+            in
+            Eio.Promise.await blocked;
+            let draining, draining_u = Eio.Promise.create () in
+            let drain =
+              Eio.Fiber.fork_promise ~sw (fun () ->
+                Eio.Promise.resolve draining_u ();
+                Owner.drain_idle_moderator owner)
+            in
+            Eio.Promise.await draining;
+            (* An uncontended Eio mutex acquisition does not switch fibers.
+               The drain now owns the owner mutex and its State request waits
+               behind the serialized checkpoint. The next caller queues on that
+               mutex before the checkpoint is released. Unlock hands ownership
+               to that waiter before the drain can reacquire it for cleanup. *)
+            let staging, staging_u = Eio.Promise.create () in
+            let stage =
+              Eio.Fiber.fork_promise ~sw (fun () ->
+                Eio.Promise.resolve staging_u ();
+                Owner.with_prepared_source
+                  owner
+                  ~preparation
+                  ~source:fixture.source
+                  (fun prepared ->
+                     let open Result.Let_syntax in
+                     let%bind () = Owner.Prepared.check_basis prepared in
+                     let%map () =
+                       A.Source_binding.check_basis (Owner.Prepared.binding prepared)
+                     in
+                     Int.incr entered_stage;
+                     true))
+            in
+            Eio.Promise.await staging;
+            assert (Option.is_none (Eio.Promise.peek drain));
+            assert (Option.is_none (Eio.Promise.peek stage));
+            release_checkpoint ();
+            Eio.Promise.await_exn checkpoint |> protocol_ok;
+            let did_work = Eio.Promise.await_exn drain |> protocol_ok in
+            let staged = Eio.Promise.await_exn stage |> protocol_ok in
+            assert (not did_work);
+            assert staged));
+        [%test_eq: int] 1 !entered_stage;
+        [%test_eq: int] 0 !builds;
+        assert (not (Owner.is_loaded owner));
+        [%test_eq: Sexp.t]
+          (Agent_session.Session_state.sexp_of_t before)
+          (Agent_session.Session_state.sexp_of_t (A.state fixture.actor |> protocol_ok));
+        [%test_eq: Sexp.t]
+          (Agent_session.Session_state.sexp_of_t saved)
+          (Agent_session.Session_state.sexp_of_t
+             (Agent_session.Memory_backend.state fixture.backend)))
+    in
+    let cleanup =
+      capture (fun () ->
+        Eio.Cancel.protect (fun () ->
+          Exn.protect
+            ~finally:(fun () -> Owner.close_and_wait owner)
+            ~f:(fun () -> A.end_run_preparation fixture.actor preparation |> protocol_ok)))
+    in
+    (match result, cleanup with
+     | Error (exn, backtrace), _ | Ok (), Error (exn, backtrace) ->
+       Exn.raise_with_original_backtrace exn backtrace
+     | Ok (), Ok () -> ());
+    print_endline
+      "no-work drain and queued source stage both finish; one staged owner; zero builds \
+       or writes");
+  [%expect
+    {| no-work drain and queued source stage both finish; one staged owner; zero builds or writes |}]
+;;
+
 let%expect_test
     "source stages retain exact actor custody without loading or calling policy from \
      basis"

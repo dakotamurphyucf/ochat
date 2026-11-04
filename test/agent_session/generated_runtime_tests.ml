@@ -491,6 +491,7 @@ let%expect_test
                 ()
             in
             B.build_generated
+              ~construction_checkpoint:None
               ~services
               ~definition
               ~artifact_store

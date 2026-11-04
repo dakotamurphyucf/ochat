@@ -531,3 +531,31 @@ The existing queued Async_tool policy is preserved: an exact Wait retires with
 truthful cancellation evidence, while non-waiting queued cancellation retains
 its Run lifecycle. Actual completed Async_tool attempts use the shared aggregate
 settlement described above.
+
+
+Held recurrence startup uses the actual selected source, preparation, Run and
+admission under one consumed runtime-source lease. Its controller continuation
+is bound to that exact target owner; another valid occurrence cannot supply the
+barrier. Genuine Store observations refresh outside the Actor mailbox and runtime
+mutex. Fresh writers repeat nonyielding policies, clock/grace, original proofs
+and both pure owner checks at their actual commit boundary. Negative result and
+retirement ACKs preserve their existing factual-settlement rules.
+
+An exact held initialization can admit its own Model children without inventing
+an Event work item or borrowing a drainer. Their immutable terminal evidence is
+saved normally, while this process-local startup owner defers quiescent Run
+completion until actual startup/input handoff. A closed owner grants no new
+effects. If its factual retirement write fails, its exact negative disposition
+remains until retirement ACK or a retained terminal winner; recovery uses the
+existing interruption path and never reconstructs live startup permission.
+
+The scoped constructor consumer builds a local cold runtime or reuses the exact
+loaded runtime without replaying initialization. Its scope always retires pending
+startup on exit and closes only resources it constructed. This lower scoped
+consumer does not itself acknowledge an input, launch a worker, prove NoEffects
+or return a successful activation handoff.
+
+Idle polling that finds no pending work does not publish an execution lease.
+The decision happens under the same runtime-owner mutex used to select, load and
+lease real work. This lets queued source preparation proceed after an empty
+poll, while actual background work continues to exclude incompatible startup.

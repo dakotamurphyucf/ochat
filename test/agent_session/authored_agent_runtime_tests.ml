@@ -392,6 +392,7 @@ let on_event ctx state event = match event with
                 ()
             in
             B.build_authored_child
+              ~construction_checkpoint:None
               ~services
               ~revision
               ~prepared

@@ -196,3 +196,15 @@ let prepare_callback state ~(run : P.Run.t) ~executing ~work_state ~children ~no
   in
   prepare_attributed_callback state ~run ~retained_owner ~work_state ~children ~now
 ;;
+
+let prepare_initialization state ~run ~work_state ~children ~now =
+  (* Live startup ownership is authenticated by the actor, not this pure DATA
+     helper. No Event occurrence or parent-work obligation is invented. *)
+  prepare_attributed_callback
+    state
+    ~run
+    ~retained_owner:(fun _ -> true)
+    ~work_state
+    ~children
+    ~now
+;;

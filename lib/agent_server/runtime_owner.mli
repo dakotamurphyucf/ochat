@@ -42,6 +42,17 @@ val create_with_run_unload
 
 val is_loaded : t -> bool
 
+(** Existing Factory constructor for a source that has already passed actual
+    retained-artifact verification. The neutral activation is issued by the
+    exact target actor; no raw IDs, caller guard or alternate executor replace it.
+    Called only inside the consumed Prepared lifetime, after the first-effect
+    fence, and must preserve selected source/parent resource ownership. *)
+type deferred_builder =
+  source:Agent_session.Runtime_builder.Source.t
+  -> preparation:Agent_session.Run_preparation.t
+  -> continuation:Agent_session.Session_actor.Recurrence_activation.Continuation.t
+  -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result
+
 (** Actual factory constructor retaining an explicitly supplied original actor
     through initialization. The proof option is supplied only by authenticated
     loading or genuine Run preparation, never by the stored session creator. *)
@@ -53,6 +64,20 @@ val create_with_authenticated_run_unload
        (original_actor:Operator_authorization.t option
         -> Agent_session.Run_preparation.t option
         -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
+  -> t
+
+(** The actual verified-source Factory supplies this additional cold constructor.
+    Ordinary loading retains the existing authenticated builder. Deferred loading
+    is available only through the exact consumed prepared/held lifetime below. *)
+val create_with_deferred_run_unload
+  :  before_unload:(closing:bool -> (unit, Agent_protocol.Error.t) result)
+  -> actor:Agent_session.Session_actor.t
+  -> initial:Agent_session.Runtime_builder.t option
+  -> build:
+       (original_actor:Operator_authorization.t option
+        -> Agent_session.Run_preparation.t option
+        -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
+  -> build_deferred:deferred_builder
   -> t
 
 val ensure_loaded : t -> (unit, Agent_protocol.Error.t) result
@@ -168,7 +193,8 @@ module Prepared : sig
   val binding : t -> Agent_session.Session_actor.Source_binding.t
 
   (** Non-yielding callback-free check in the creating Eio domain. Checks the
-      exact owner/stage/runtime resource and actor source binding. *)
+      exact owner/stage/runtime resource and actor source binding. A consumed
+      startup phase never passes this old staged check. *)
   val check_basis : t -> (unit, Agent_protocol.Error.t) result
 end
 
@@ -184,6 +210,27 @@ val with_prepared_source
   -> preparation:Agent_session.Run_preparation.t
   -> source:Agent_session.Runtime_builder.Source.t
   -> (Prepared.t -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
+(** Consume this exact Prepared/Held/Checked link into an actual scoped
+    constructor or loaded-runtime reuse. The old staged owner is not widened.
+    This may construct native resources/content and execute startup after the
+    joint effect fence. Loaded reuse does not reinitialize. [f] runs outside the
+    owner mutex and cannot retain the runtime/startup owner after return.
+    This API is not a successful input/worker handoff or an activation receipt;
+    actual handoff is separate and must occur before execution can escape. Error,
+    cancellation or missing handoff factually interrupts the exact startup Run
+    and closes only locally constructed resources. An already loaded runtime is
+    retained. Primary errors/exceptions survive cleanup; cleanup failure after
+    successful work is reported. No replay or no-effects claim is made. *)
+val with_held_recurrence_runtime
+  :  t
+  -> prepared:Prepared.t
+  -> held:Agent_session.Session_actor.Held_run.t
+  -> checked:Agent_session.Session_actor.Recurrence_activation.Checked.t
+  -> (Agent_session.Runtime_builder.t
+      -> Agent_session.Session_actor.Recurrence_activation.Continuation.t
+      -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
 (** Cancellable auxiliary inference lifetime without loading a runtime. A loaded
@@ -351,8 +398,11 @@ val deliver_schedule
     completed event also requests another probe for newly created observations.
     Pending deferred user submissions also trigger a probe after an idle callback
     releases its borrow, even without a notification or moderator turn request.
-    Draining retains a cancellable lease rather than the owner mutex across
-    moderator work. Cancellation confined to
+    A poll finding no pending work under the owner mutex publishes no execution
+    lease, so it cannot exclude a queued source-stage acquisition. Real work is
+    selected, loaded and leased under the same mutex; draining then retains that
+    cancellable lease rather than the owner mutex across moderator work.
+    Cancellation confined to
     the owned event returns Interrupted, keeping the shared scheduler alive;
     cancellation of the caller still propagates. Later polling and administration
     remain usable. Runtime installation and each callback's ownership transfer

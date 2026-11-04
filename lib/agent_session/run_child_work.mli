@@ -44,3 +44,16 @@ val prepare_callback
   -> children:Agent_protocol.Job.t list
   -> now:Agent_protocol.Timestamp.t
   -> (Session_delta.t, Agent_protocol.Error.t) result
+
+(** New selected Jobs from the exact actor-registered held Init/startup owner.
+    The actor supplies the actual live Run after physical Init/activation/source
+    validation. Checks the same complete retained index, installed source,
+    generation and exact new Job origins as other child joins; creates neither
+    an Event nor a parent-work placeholder. Pure DATA, never an Init issuer. *)
+val prepare_initialization
+  :  Session_state.t
+  -> run:Agent_protocol.Run.t
+  -> work_state:Session_state.t
+  -> children:Agent_protocol.Job.t list
+  -> now:Agent_protocol.Timestamp.t
+  -> (Session_delta.t, Agent_protocol.Error.t) result

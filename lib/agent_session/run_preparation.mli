@@ -82,6 +82,22 @@ val check_current
   -> state:Session_state.t
   -> (unit, Agent_protocol.Error.t) result
 
+module Authorization : sig
+  (** Actual authenticated policy captured under the issuing private owner.
+      Independent of the preparation's revision tracker after legitimate handoff;
+      the original and host policy remain mandatory for new execution. *)
+  type t
+
+  val actor : t -> Operator_authorization.t
+  val check : t -> Session_state.t -> (unit, Agent_protocol.Error.t) result
+end
+
+val capture_authorization
+  :  t
+  -> owner:Owner.t
+  -> state:Session_state.t
+  -> (Authorization.t, Agent_protocol.Error.t) result
+
 (** Called only after a durable commit carrying this exact preparation. Advances
     one acknowledged revision; a different or skipped basis invalidates custody.
     Ordinary commits close the actor's live preparation instead. *)

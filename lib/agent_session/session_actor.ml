@@ -1,28 +1,6 @@
 open! Core
 module Activation_custody = Recurrence_activation_custody
 
-module Recurrence_activation = struct
-  type t = Activation_custody.t
-
-  let origin = Activation_custody.origin
-
-  module Checked = struct
-    type t =
-      { check_current : unit -> (unit, Agent_protocol.Error.t) result
-      ; check_policy : unit -> (unit, Agent_protocol.Error.t) result
-      ; check_authority : unit -> (unit, Agent_protocol.Error.t) result
-      ; check_timing : unit -> (unit, Agent_protocol.Error.t) result
-      ; check_basis : unit -> (unit, Agent_protocol.Error.t) result
-      }
-
-    let check_current t = t.check_current ()
-    let check_policy t = t.check_policy ()
-    let check_authority t = t.check_authority ()
-    let check_timing t = t.check_timing ()
-    let check_basis t = t.check_basis ()
-  end
-end
-
 module Source_binding = struct
   type disposition =
     | Selected
@@ -91,6 +69,55 @@ module Held_run = struct
   let admission t = t.admission
   let check_basis t = t.basis ()
 
+  module Activation = struct
+    type phase =
+      | Reserved
+      | Constructing
+      | Handed_off
+      | Closed
+
+    type t =
+      { domain : int
+      ; preparation : Run_preparation.t
+      ; source : Runtime_source_preparation.t
+      ; run : Agent_protocol.Run.t
+      ; admission : Agent_protocol.Run_receipt.t
+      ; scope : Run_admission.Scope.t
+      ; phase : phase ref
+      ; owned_basis : unit -> (unit, Agent_protocol.Error.t) result
+      ; basis : unit -> (unit, Agent_protocol.Error.t) result
+      ; policy : unit -> (unit, Agent_protocol.Error.t) result
+      ; check_policy : unit -> (unit, Agent_protocol.Error.t) result
+      ; authority : unit -> (unit, Agent_protocol.Error.t) result
+      }
+
+    let check_basis t =
+      if not (Int.equal t.domain (Stdlib.Domain.self () :> int))
+      then
+        Error
+          (Agent_protocol.Error.invalid_request
+             "held activation belongs to another Eio domain")
+      else (
+        match !(t.phase) with
+        | Reserved | Constructing -> t.basis ()
+        | Handed_off | Closed ->
+          Error
+            (Agent_protocol.Error.create
+               Conflict
+               ~message:"held startup owner is closed"
+               ~retryable:false
+               ()))
+    ;;
+
+    let close t =
+      if not (Int.equal t.domain (Stdlib.Domain.self () :> int))
+      then invalid_arg "held activation belongs to another Eio domain";
+      match !(t.phase) with
+      | Reserved | Constructing -> t.phase := Closed
+      | Handed_off | Closed -> ()
+    ;;
+  end
+
   module Admission = struct
     type held = t
 
@@ -99,6 +126,61 @@ module Held_run = struct
       | Retained of Agent_protocol.Run_receipt.t
       | Rejected of Agent_protocol.Error.t
       | Uncertain of Agent_protocol.Error.t
+  end
+end
+
+module Recurrence_activation = struct
+  type t = Activation_custody.t
+
+  let origin = Activation_custody.origin
+
+  module Continuation = struct
+    type t =
+      { target : Held_run.Activation.t
+      ; refresh : unit -> (unit, Agent_protocol.Error.t) result
+      ; policy : unit -> (unit, Agent_protocol.Error.t) result
+      ; timing : unit -> (unit, Agent_protocol.Error.t) result
+      ; authority : unit -> (unit, Agent_protocol.Error.t) result
+      ; basis : unit -> (unit, Agent_protocol.Error.t) result
+      }
+
+    let target t = t.target
+    let refresh t = t.refresh ()
+    let check_policy t = t.policy ()
+    let check_timing t = t.timing ()
+    let check_authority t = t.authority ()
+    let check_basis t = t.basis ()
+  end
+
+  module Checked = struct
+    type t =
+      { check_current : unit -> (unit, Agent_protocol.Error.t) result
+      ; check_policy : unit -> (unit, Agent_protocol.Error.t) result
+      ; check_authority : unit -> (unit, Agent_protocol.Error.t) result
+      ; check_timing : unit -> (unit, Agent_protocol.Error.t) result
+      ; check_basis : unit -> (unit, Agent_protocol.Error.t) result
+      ; origin : Recurrence_run_origin.t
+      ; target_controller : Recurrence_controller.t
+      ; continue : Held_run.Activation.t -> Continuation.t
+      ; consumed : bool ref
+      }
+
+    let check_current t = t.check_current ()
+    let check_policy t = t.check_policy ()
+    let check_authority t = t.check_authority ()
+    let check_timing t = t.check_timing ()
+
+    let check_basis t =
+      if !(t.consumed)
+      then
+        Error
+          (Agent_protocol.Error.create
+             Conflict
+             ~message:"activation view was consumed by its held target"
+             ~retryable:false
+             ())
+      else t.check_basis ()
+    ;;
   end
 end
 
@@ -527,6 +609,7 @@ module Initialization_scope = struct
     ; mutable callback : Callback.t
     ; mutable resource : Resource.t option
     ; run_preparation : Run_preparation.t option
+    ; held_continuation : Recurrence_activation.Continuation.t option
     ; agent_admission : agent_admission
     }
 
@@ -981,6 +1064,22 @@ module Lifecycle_fence = struct
     }
 end
 
+module Held_startup_request = struct
+  type _ t =
+    | Begin_held_recurrence_activation :
+        Source_binding.t * Held_run.t * Recurrence_activation.Checked.t
+        -> Recurrence_activation.Continuation.t t
+    | End_held_activation : Held_run.Activation.t -> unit t
+    | Begin_held_initialization :
+        Recurrence_activation.Continuation.t
+        * Initialization_scope.Purpose.t
+        * Session_state.t
+        -> Initialization_scope.t t
+    | Reserve_held_history_block :
+        Recurrence_activation.Continuation.t * int
+        -> History_id_source.reservation t
+end
+
 type _ request =
   | Open_inference_owner : Transcript.Source_id.t -> Inference_owner.t request
   | Admit_inference :
@@ -1424,6 +1523,7 @@ type _ request =
       * Recurrence_execution_intent.t
       * Recurrence_execution_attempt.t
       -> Recurrence_run_observation.t option request
+  | Held_startup : 'a Held_startup_request.t -> 'a request
   | Admit_held_recurrence_run :
       Source_binding.t
       * Recurrence_execution_intent.t
@@ -1925,6 +2025,7 @@ type t =
   ; run_preparation_owner : Run_preparation.Owner.t
   ; mutable run_preparation : Run_preparation.t option
   ; mutable run_source_binding : Source_binding.t option
+  ; mutable held_activation : Held_run.Activation.t option
   ; mutable foreground_moderator :
       (Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.observer) option
   ; mutable invocation_executions : invocation_execution list
@@ -2300,7 +2401,52 @@ let model_job_port t execution =
     Eio.Cancel.protect (fun () -> call t (Admit_model_job (execution, job))))
 ;;
 
+let check_held_effect continuation =
+  let open Result.Let_syntax in
+  let target = Recurrence_activation.Continuation.target continuation in
+  let%bind () = Recurrence_activation.Continuation.check_basis continuation in
+  let%bind () = Recurrence_activation.Continuation.check_policy continuation in
+  let%bind () = Recurrence_activation.Continuation.check_timing continuation in
+  let%bind () = Recurrence_activation.Continuation.check_authority continuation in
+  let%bind () = Held_run.Activation.check_basis target in
+  Recurrence_activation.Continuation.check_basis continuation
+;;
+
+(* Selected only by actual fresh-effect writers. Factual result/permission-denial
+   ACKs carrying the same preparation deliberately do not call this selector. *)
+let held_startup_effect t preparation =
+  Option.bind t.initialization_scope ~f:(fun scope ->
+    Option.bind scope.Initialization_scope.held_continuation ~f:(fun continuation ->
+      let activation = Recurrence_activation.Continuation.target continuation in
+      if Option.exists preparation ~f:(phys_equal activation.preparation)
+      then
+        Some
+          (fun () ->
+            let open Result.Let_syntax in
+            let%bind () = check_held_effect continuation in
+            if
+              Option.exists t.initialization_scope ~f:(phys_equal scope)
+              && Option.exists t.held_activation ~f:(phys_equal activation)
+            then
+              Run_preparation.check_basis
+                activation.preparation
+                ~owner:t.run_preparation_owner
+                ~state:t.state
+            else Error (error Conflict "held Init effect owner changed"))
+      else None))
+;;
+
 let close_run_preparation t =
+  Option.iter t.held_activation ~f:Held_run.Activation.close;
+  (* Closed startup disposition survives a failed factual retirement ACK. It
+     cannot authorize effects; the exact retained Run is still pending retirement. *)
+  t.held_activation
+  <- Option.filter t.held_activation ~f:(fun activation ->
+       Option.exists t.state.run_state ~f:(fun index ->
+         Option.exists (Run_state.find index activation.run.id) ~f:(fun run ->
+           match run.Agent_protocol.Run.lifecycle with
+           | Admitted | Active | Waiting _ -> true
+           | Terminal _ -> false)));
   Option.iter t.run_source_binding ~f:Source_binding.close;
   t.run_source_binding <- None;
   Option.iter t.run_preparation ~f:Run_preparation.close;
@@ -2308,7 +2454,111 @@ let close_run_preparation t =
 ;;
 
 let close_bound_run_preparation t =
-  if Option.is_some t.run_source_binding then close_run_preparation t
+  if Option.is_some t.run_source_binding || Option.is_some t.held_activation
+  then close_run_preparation t
+;;
+
+let pending_held_startup_run t =
+  Option.bind t.held_activation ~f:(fun activation ->
+    let retained () =
+      let open Result.Let_syntax in
+      let%bind () =
+        Runtime_source_preparation.validate_target activation.source t.state
+      in
+      let%bind index =
+        Result.of_option
+          t.state.run_state
+          ~error:(error Conflict "held startup Run index is absent")
+      in
+      let%bind run =
+        Result.of_option
+          (Run_state.find index activation.run.id)
+          ~error:(error Conflict "held startup Run is absent")
+      in
+      let%bind origin =
+        Result.of_option
+          (Run_state.recurrence_origin index run.id)
+          ~error:(error Conflict "held startup origin is absent")
+      in
+      let%bind admission =
+        Run_state.receipt
+          index
+          ~principal_id:activation.admission.principal_id
+          ~key:activation.admission.key
+          ~request_sha256:activation.admission.request_sha256
+      in
+      let%bind () =
+        if
+          Option.exists
+            admission
+            ~f:(Agent_protocol.Run_receipt.equal activation.admission)
+        then
+          Recurrence_run_origin.validate_run origin ~run ~admission:activation.admission
+        else Error (error Conflict "held startup Admission changed")
+      in
+      match run.lifecycle with
+      | Admitted | Active | Waiting _ -> Ok run
+      | Terminal _ -> Error (error Conflict "held startup already terminated")
+    in
+    match !(activation.Held_run.Activation.phase) with
+    | Closed ->
+      (* Negative custody only: a failed retirement write must not turn a later
+         child ACK into successful completion of input that never started. *)
+      Result.ok (retained ())
+    | Handed_off -> None
+    | Reserved | Constructing ->
+      let exact_scope =
+        match t.initialization_scope with
+        | None -> true
+        | Some scope ->
+          Option.exists
+            scope.Initialization_scope.held_continuation
+            ~f:(fun continuation ->
+              phys_equal
+                activation
+                (Recurrence_activation.Continuation.target continuation))
+      in
+      if exact_scope && Result.is_ok (activation.owned_basis ())
+      then Result.ok (retained ())
+      else None)
+;;
+
+let initialization_held_run t (scope : Initialization_scope.t) =
+  match
+    ( Option.map scope.held_continuation ~f:Recurrence_activation.Continuation.target
+    , t.initialization_scope )
+  with
+  | Some activation, Some current
+    when phys_equal scope current
+         && Option.exists t.held_activation ~f:(phys_equal activation)
+         && Option.exists scope.run_preparation ~f:(phys_equal activation.preparation) ->
+    (match !(activation.phase) with
+     | Reserved | Constructing -> pending_held_startup_run t
+     | Handed_off | Closed -> None)
+  | (Some _ | None), (Some _ | None) -> None
+;;
+
+let held_initialization_of_execution t = function
+  | Inference_initialization scope | Inference_initialization_job (scope, _) ->
+    Option.map (initialization_held_run t scope) ~f:(fun run -> scope, run)
+  | Inference_event borrow ->
+    Option.bind t.legacy_callback_scope ~f:(fun callback ->
+      if phys_equal callback.borrow borrow
+      then
+        Option.bind callback.constructor_scope ~f:(fun scope ->
+          Option.map (initialization_held_run t scope) ~f:(fun run -> scope, run))
+      else None)
+  | Inference_invocation execution ->
+    (match execution.owner with
+     | Event_moderator borrow ->
+       Option.bind t.legacy_callback_scope ~f:(fun callback ->
+         if phys_equal callback.borrow borrow
+         then
+           Option.bind callback.constructor_scope ~f:(fun scope ->
+             Option.map (initialization_held_run t scope) ~f:(fun run -> scope, run))
+         else None)
+     | Foreground _ | Background_job _ | Invocation_moderator _ -> None)
+  | Inference_operation _ | Inference_moderator _ | Inference_job _ -> None
 ;;
 
 let check_run_preparation t preparation =
@@ -2970,7 +3220,7 @@ let reconcile_recurrences_internal t =
 
 let inference_error _ = error Invalid_state "inference tracking admission failed"
 
-let commit_inference_ledger ?run_preparation ?admission t ledger =
+let commit_inference_ledger ?run_preparation ?admission ?check_before_commit t ledger =
   let open Result.Let_syntax in
   let%bind () =
     match run_preparation with
@@ -3000,6 +3250,7 @@ let commit_inference_ledger ?run_preparation ?admission t ledger =
       else []
     in
     transition
+      ?check_before_commit
       ?run_preparation
       t
       ~delta:(Session_delta.Batch (Inference_ledger_changed ledger :: accounting_delta))
@@ -4929,7 +5180,7 @@ let validate_initialization_owner t (scope : Initialization_scope.t) =
   else Error (error Conflict "initialization scope belongs to another actor")
 ;;
 
-let validate_initialization_scope_current t scope =
+let validate_initialization_scope_basis t scope =
   let open Result.Let_syntax in
   let%bind () = validate_initialization_owner t scope in
   let%bind () =
@@ -4941,17 +5192,36 @@ let validate_initialization_scope_current t scope =
     Initialization_scope.Acknowledged.apply scope.acknowledged scope.expected
   in
   let%bind () = validate_initialization_basis ~scope t ~purpose:scope.purpose expected in
-  match scope.Initialization_scope.run_preparation with
-  | None -> Ok ()
-  | Some preparation ->
-    (match t.run_preparation with
-     | Some active when phys_equal active preparation ->
-       Run_preparation.check_current
-         preparation
-         ~owner:t.run_preparation_owner
-         ~state:t.state
-     | Some _ | None ->
-       Error (error Conflict "initializer Run preparation is no longer active"))
+  Option.value_map scope.run_preparation ~default:(Ok ()) ~f:(fun preparation ->
+    if Option.exists t.run_preparation ~f:(phys_equal preparation)
+    then
+      Run_preparation.check_basis
+        preparation
+        ~owner:t.run_preparation_owner
+        ~state:t.state
+    else Error (error Conflict "initializer Run preparation is no longer active"))
+;;
+
+let validate_initialization_scope_current t scope =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_scope_basis t scope in
+  let check_held_owner () =
+    Option.value_map
+      scope.Initialization_scope.held_continuation
+      ~default:(Ok ())
+      ~f:(fun continuation ->
+        (Recurrence_activation.Continuation.target continuation).owned_basis ())
+  in
+  let%bind () = check_held_owner () in
+  let%bind () =
+    Option.value_map scope.run_preparation ~default:(Ok ()) ~f:(fun preparation ->
+      Run_preparation.check_current
+        preparation
+        ~owner:t.run_preparation_owner
+        ~state:t.state)
+  in
+  let%bind () = check_held_owner () in
+  validate_initialization_scope_basis t scope
 ;;
 
 let validate_initialization_scope t scope =
@@ -4963,6 +5233,7 @@ let validate_initialization_scope t scope =
 ;;
 
 let begin_initialization
+      ?held_continuation
       ?run_preparation
       ?original_actor
       ?(purpose = Initialization_scope.Purpose.Pending_initialization)
@@ -5005,6 +5276,7 @@ let begin_initialization
         ; callback = Callback.Unclaimed
         ; resource = None
         ; run_preparation
+        ; held_continuation
         ; agent_admission =
             create_agent_admission (Option.map original_actor ~f:create_agent_custody)
         }
@@ -5251,7 +5523,7 @@ let complete_initialization t scope (candidate : Session_state.t) moderator_mana
           prepare_constructor_resource_handoff t scope prepared.state moderator_manager
         in
         let%bind () = Initialization_scope.Acknowledgement.check_basis acknowledgement in
-        let%bind () = persist_transition t prepared in
+        let%bind () = persist_transition ?run_preparation t prepared in
         install_committed_transition
           ?run_preparation
           ?job_custody
@@ -5339,7 +5611,7 @@ let checkpoint_runtime_construction t scope moderator moderator_manager =
           let%bind _ =
             prepare_constructor_resource_handoff t scope prepared.state moderator_manager
           in
-          let%bind () = persist_transition t prepared in
+          let%bind () = persist_transition ?run_preparation t prepared in
           install_committed_transition
             ?run_preparation
             ?job_custody
@@ -5584,22 +5856,38 @@ let operation_invocation_origin t operation_id invocation =
 ;;
 
 let event_inference_origin t (receipt : Agent_protocol.Moderator_execution.t) =
-  match receipt.context.job with
-  | Some _ ->
-    Invocation_inference_provenance.of_event
-      ~runs:t.state.run_state
-      ~jobs:t.state.jobs
-      receipt
+  let held =
+    Option.bind t.legacy_callback_scope ~f:(fun callback ->
+      if
+        Option.exists t.queued_event_borrow ~f:(phys_equal callback.borrow)
+        && Agent_protocol.Moderator_execution.equal callback.borrow.receipt receipt
+      then
+        Option.bind callback.constructor_scope ~f:(fun scope ->
+          Option.map (initialization_held_run t scope) ~f:(fun run ->
+            callback.origin, run))
+      else None)
+  in
+  match held with
+  | Some (Some (Run id), run) when Agent_protocol.Id.Run.equal id run.id ->
+    Ok (Some (Agent_protocol.Inference_origin.Run id))
+  | Some _ -> Error (error Conflict "held constructor origin disagrees with its Run")
   | None ->
-    let open Result.Let_syntax in
-    let%bind selected = Run_event_scope.select t.state ~executing:receipt in
-    (match selected with
-     | Some run -> Ok (Some (Agent_protocol.Inference_origin.Run run.id))
-     | None ->
+    (match receipt.context.job with
+     | Some _ ->
        Invocation_inference_provenance.of_event
          ~runs:t.state.run_state
          ~jobs:t.state.jobs
-         receipt)
+         receipt
+     | None ->
+       let open Result.Let_syntax in
+       let%bind selected = Run_event_scope.select t.state ~executing:receipt in
+       (match selected with
+        | Some run -> Ok (Some (Agent_protocol.Inference_origin.Run run.id))
+        | None ->
+          Invocation_inference_provenance.of_event
+            ~runs:t.state.run_state
+            ~jobs:t.state.jobs
+            receipt))
 ;;
 
 let event_invocation_origin t receipt invocation =
@@ -6894,10 +7182,13 @@ let claim_initialization_callback
       ~now:(t.services.now ())
   in
   let%bind origin =
-    Invocation_inference_provenance.of_event
-      ~runs:checkpoint_state.run_state
-      ~jobs:checkpoint_state.jobs
-      receipt
+    match initialization_held_run t constructor with
+    | Some run -> Ok (Some (Agent_protocol.Inference_origin.Run run.id))
+    | None ->
+      Invocation_inference_provenance.of_event
+        ~runs:checkpoint_state.run_state
+        ~jobs:checkpoint_state.jobs
+        receipt
   in
   let%bind admission = transfer_agent_admission constructor.agent_admission in
   let acknowledged = ref false in
@@ -6980,7 +7271,13 @@ let claim_initialization_callback
           then Ok ()
           else Error (error Conflict "constructor callback basis changed before commit")
         in
-        let%bind () = persist_transition t prepared in
+        let%bind () =
+          persist_transition
+            ?run_preparation:constructor.run_preparation
+            ?check_before_commit:(held_startup_effect t constructor.run_preparation)
+            t
+            prepared
+        in
         install_committed_transition
           ?run_preparation:constructor.run_preparation
           ~initialization_acknowledgement:acknowledgement
@@ -7635,7 +7932,13 @@ let claim_event_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
         then Ok ()
         else Error (error Conflict "Invocation ACK basis changed before commit")
       in
-      let%bind () = persist_transition t prepared in
+      let%bind () =
+        persist_transition
+          ?run_preparation
+          ?check_before_commit:(held_startup_effect t run_preparation)
+          t
+          prepared
+      in
       install_committed_transition
         ?run_preparation
         ?initialization_acknowledgement
@@ -7782,6 +8085,7 @@ let prepared_run_delta t (borrow : queued_event_borrow) completed requests job_d
       let now, completion_sample = completion_clock_pair t in
       let%bind prepared =
         Run_transition.prepare
+          ?startup_run:(pending_held_startup_run t)
           t.state
           ~scope
           ~executing:borrow.receipt
@@ -11091,7 +11395,12 @@ let worker_terminal t operation_id outcome compaction_custody =
     in
     let now, completion_sample = completion_clock_pair t in
     let%bind run_deltas =
-      Run_transition.settle_operation t.state ~operation_id ~outcome:run_outcome ~now
+      Run_transition.settle_operation
+        ?startup_run:(pending_held_startup_run t)
+        t.state
+        ~operation_id
+        ~outcome:run_outcome
+        ~now
     in
     let%bind delta, payloads = terminal_delta t operation outcome in
     let%bind follow_up = foreground_terminal_requests t operation_id outcome in
@@ -13727,6 +14036,7 @@ let capture_model_job_source ?run_preparation t job_id generation target limits 
   let%bind _, binding = find_model_job_target t job_id generation in
   let%bind captured = Model_job_target.capture_source binding ~target ~limits in
   transition
+    ?check_before_commit:(held_startup_effect t run_preparation)
     ?run_preparation
     t
     ~delta:(Session_delta.Model_job_target_captured captured)
@@ -13734,7 +14044,16 @@ let capture_model_job_source ?run_preparation t job_id generation target limits 
   |> Result.map ~f:ignore
 ;;
 
-let capture_recipe_target ?run_preparation t job_id generation attempt target limits =
+let capture_recipe_target
+      ?run_preparation
+      ?check_before_commit
+      t
+      job_id
+      generation
+      attempt
+      target
+      limits
+  =
   let open Result.Let_syntax in
   let%bind job, binding = find_model_job_target t job_id generation in
   let%bind () =
@@ -13752,6 +14071,7 @@ let capture_recipe_target ?run_preparation t job_id generation attempt target li
   in
   let%bind captured = Model_job_target.capture_recipe binding ~target ~limits in
   transition
+    ?check_before_commit
     ?run_preparation
     t
     ~delta:(Session_delta.Model_job_recipe_target_captured captured)
@@ -13803,6 +14123,7 @@ let validate_job_generation t (job : Agent_protocol.Job.t) generation =
 ;;
 
 let update_jobs
+      ?check_before_commit
       ?initialization_scope
       ?completion_sample
       ?run_preparation
@@ -13879,7 +14200,14 @@ let update_jobs
   let%map session =
     match initialization_scope with
     | None ->
-      transition ?run_preparation ?job_custody ?completion_sample t ~delta ~payloads
+      transition
+        ?check_before_commit
+        ?run_preparation
+        ?job_custody
+        ?completion_sample
+        t
+        ~delta
+        ~payloads
     | Some scope ->
       (* Only actual owned initialization Model completion supplies this scope.
          Its immutable control projection remains strict; acknowledging a result
@@ -13912,7 +14240,7 @@ let update_jobs
                 ~state:t.state)
           in
           let%bind () = check_basis () in
-          let%bind prepared = prepare_transition ?run_preparation t ~delta ~payloads in
+          let%bind prepared = prepare_transition t ~delta ~payloads in
           let acknowledgement =
             Initialization_scope.Acknowledgement.prepare scope prepared.state
           in
@@ -13942,8 +14270,8 @@ let update_jobs
   session
 ;;
 
-let update_job ?run_preparation ?job_custody t job =
-  update_jobs ?run_preparation ?job_custody t [ job ]
+let update_job ?run_preparation ?job_custody ?check_before_commit t job =
+  update_jobs ?run_preparation ?job_custody ?check_before_commit t [ job ]
 ;;
 
 let validate_new_job t (job : Agent_protocol.Job.t) =
@@ -14030,7 +14358,7 @@ let retire_unauthorized_run_job t (job : Agent_protocol.Job.t) =
       true)
 ;;
 
-let claim_job ?run_preparation t job_id generation =
+let claim_job ?run_preparation ?check_before_commit t job_id generation =
   let open Result.Let_syntax in
   let%bind job = find_job t job_id in
   let%bind () = validate_job_generation t job generation in
@@ -14076,7 +14404,7 @@ let claim_job ?run_preparation t job_id generation =
       let%bind job_custody =
         Job_custody.prepare_claim t.job_agent_custody ~previous ~claimed:job
       in
-      let%map _ = update_job ?run_preparation ~job_custody t job in
+      let%map _ = update_job ?check_before_commit ?run_preparation ~job_custody t job in
       Some job)
   | Queued -> Ok None
   | Running
@@ -14417,6 +14745,7 @@ let complete_job
   in
   let%bind run_deltas =
     Run_job_completion.prepare
+      ?startup_run:(pending_held_startup_run t)
       t.state
       ~running:previous
       ~terminal
@@ -14588,7 +14917,12 @@ let claim_initialization_model_job t scope job_id generation =
   in
   let%bind () = check_initialization_agent_actor scope in
   let%bind claimed =
-    claim_job ?run_preparation:scope.run_preparation t job_id generation
+    claim_job
+      ?run_preparation:scope.run_preparation
+      ?check_before_commit:(held_startup_effect t scope.run_preparation)
+      t
+      job_id
+      generation
   in
   Result.of_option
     claimed
@@ -14598,7 +14932,7 @@ let claim_initialization_model_job t scope job_id generation =
 let initialization_model_job_is_owned t scope job_id generation attempt =
   let open Result.Let_syntax in
   let%bind () = validate_initialization_owner t scope in
-  match validate_initialization_scope t scope with
+  match validate_initialization_scope_basis t scope with
   | Error _ -> Ok false
   | Ok () ->
     Ok
@@ -14623,7 +14957,9 @@ let initialization_model_job_is_owned t scope job_id generation attempt =
 let initialization_model_job_is_current t scope job_id generation attempt =
   let open Result.Let_syntax in
   let%map owned = initialization_model_job_is_owned t scope job_id generation attempt in
-  owned && Result.is_ok (check_initialization_agent_actor scope)
+  owned
+  && Result.is_ok (validate_initialization_scope t scope)
+  && Result.is_ok (check_initialization_agent_actor scope)
 ;;
 
 let validate_initialization_model_job t scope job_id generation attempt =
@@ -14902,13 +15238,13 @@ let execution_basis t (origins : execution_origin_lookup) execution =
                Permission_denied
                "initializer no longer owns this current model attempt")
       in
-      basis ?preparation:scope.run_preparation None
+      basis ?preparation:scope.run_preparation (initialization_held_run t scope)
     | Inference_initialization scope ->
       let%bind () = validate_initialization_scope_current t scope in
       let%bind () = check_initialization_agent_actor scope in
       (* A future controller episode requires a genuine reservation. Existing
          initializer identity is retained; source or auth alone cannot invent it. *)
-      basis ?preparation:scope.run_preparation None
+      basis ?preparation:scope.run_preparation (initialization_held_run t scope)
   in
   let%map () =
     match result.run with
@@ -15280,75 +15616,88 @@ let staged_child_run_delta t execution ~basis ~classification ~parent_work job_d
       Session_delta.capture_new_model_jobs t.state (Session_delta.Batch job_deltas)
     in
     let%bind work_state = Session_delta.apply t.state work_delta in
-    let%bind parent =
-      match parent_work with
-      | Some parent -> Ok (Parent_work parent)
-      | None -> child_parent t execution
-    in
-    (match parent with
-     | Parent_work parent ->
+    (match held_initialization_of_execution t execution with
+     | Some (_, selected) when Agent_protocol.Run.equal selected run ->
        let%map delta =
-         Run_child_work.prepare
+         Run_child_work.prepare_initialization
            t.state
            ~run
-           ~parent
-           ~work_state
-           ~children
-           ~now:(t.services.now ())
-       in
-       [ delta ], fun () -> Ok ()
-     | Parent_observation borrow ->
-       let%map delta =
-         Run_child_work.prepare_observation
-           t.state
-           ~run
-           ~observing:borrow.invocation
            ~work_state
            ~children:jobs
            ~now:(t.services.now ())
        in
        [ delta ], fun () -> Ok ()
-     | Parent_event borrow ->
-       (match t.legacy_callback_scope with
-        | Some scope when phys_equal scope.borrow borrow ->
-          let%bind _ = callback_agent_actor t ~scope in
+     | Some _ -> Error (error Conflict "held Init selected a different actual Run")
+     | None ->
+       let%bind parent =
+         match parent_work with
+         | Some parent -> Ok (Parent_work parent)
+         | None -> child_parent t execution
+       in
+       (match parent with
+        | Parent_work parent ->
           let%map delta =
-            Run_child_work.prepare_callback
+            Run_child_work.prepare
               t.state
               ~run
-              ~executing:borrow.receipt
+              ~parent
+              ~work_state
+              ~children
+              ~now:(t.services.now ())
+          in
+          [ delta ], fun () -> Ok ()
+        | Parent_observation borrow ->
+          let%map delta =
+            Run_child_work.prepare_observation
+              t.state
+              ~run
+              ~observing:borrow.invocation
               ~work_state
               ~children:jobs
               ~now:(t.services.now ())
           in
           [ delta ], fun () -> Ok ()
-        | None | Some _ ->
-          let%bind owner =
-            run_actions_internal t borrow.receipt
-            |> Result.bind ~f:(fun owner ->
-              Result.of_option
-                owner
-                ~error:(error Invalid_state "Run event owner is absent"))
-          in
-          let scope = Run_action_service.scope owner in
-          let%bind prepared =
-            Run_transition.add_owned_work
-              t.state
-              ~scope
-              ~executing:borrow.receipt
-              ~work_state
-              ~owned_work:children
-              ~now:(t.services.now ())
-          in
-          let%map advance =
-            Run_scope.Host.prepare_advance
-              scope
-              ~previous:run
-              ~next:(Run_transition.run prepared)
-              ~execution_id:borrow.receipt.context.id
-          in
-          ( [ Run_transition.delta prepared ]
-          , fun () -> Run_scope.Host.acknowledge_advance advance )))
+        | Parent_event borrow ->
+          (match t.legacy_callback_scope with
+           | Some scope when phys_equal scope.borrow borrow ->
+             let%bind _ = callback_agent_actor t ~scope in
+             let%map delta =
+               Run_child_work.prepare_callback
+                 t.state
+                 ~run
+                 ~executing:borrow.receipt
+                 ~work_state
+                 ~children:jobs
+                 ~now:(t.services.now ())
+             in
+             [ delta ], fun () -> Ok ()
+           | None | Some _ ->
+             let%bind owner =
+               run_actions_internal t borrow.receipt
+               |> Result.bind ~f:(fun owner ->
+                 Result.of_option
+                   owner
+                   ~error:(error Invalid_state "Run event owner is absent"))
+             in
+             let scope = Run_action_service.scope owner in
+             let%bind prepared =
+               Run_transition.add_owned_work
+                 t.state
+                 ~scope
+                 ~executing:borrow.receipt
+                 ~work_state
+                 ~owned_work:children
+                 ~now:(t.services.now ())
+             in
+             let%map advance =
+               Run_scope.Host.prepare_advance
+                 scope
+                 ~previous:run
+                 ~next:(Run_transition.run prepared)
+                 ~execution_id:borrow.receipt.context.id
+             in
+             ( [ Run_transition.delta prepared ]
+             , fun () -> Run_scope.Host.acknowledge_advance advance ))))
 ;;
 
 let prepare_selected_child_run t execution job_deltas =
@@ -15454,7 +15803,8 @@ let admit_model_job t execution candidate =
     match execution with
     | Inference_initialization _ | Inference_initialization_job _ ->
       if
-        Option.exists t.state.run_state ~f:(fun index ->
+        Option.is_none (held_initialization_of_execution t execution)
+        && Option.exists t.state.run_state ~f:(fun index ->
           List.exists (Run_state.runs index) ~f:(fun run ->
             match run.Agent_protocol.Run.lifecycle with
             | Admitted | Active | Waiting _ -> true
@@ -15566,7 +15916,13 @@ let admit_model_job t execution candidate =
           then Ok ()
           else Error (error Conflict "model admission basis changed before persistence")
         in
-        let%bind () = persist_transition t prepared in
+        let%bind () =
+          persist_transition
+            ?run_preparation:preparation
+            ?check_before_commit:(held_startup_effect t preparation)
+            t
+            prepared
+        in
         install_committed_transition
           ?run_preparation:preparation
           ~job_custody
@@ -16047,6 +16403,21 @@ let commit_moderator_invocation t borrow (resolved : Agent_protocol.Invocation.t
 
 let check_inference_allocation t (current : inference_currentness) owner handle =
   let open Result.Let_syntax in
+  let held_basis =
+    Option.bind t.initialization_scope ~f:(fun scope ->
+      Option.bind scope.Initialization_scope.held_continuation ~f:(fun continuation ->
+        let activation = Recurrence_activation.Continuation.target continuation in
+        if Option.exists current.basis.preparation ~f:(phys_equal activation.preparation)
+        then
+          Some
+            (fun () ->
+              if
+                Option.exists t.initialization_scope ~f:(phys_equal scope)
+                && Option.exists t.held_activation ~f:(phys_equal activation)
+              then Recurrence_activation.Continuation.check_basis continuation
+              else Error (error Conflict "held inference owner changed during checks"))
+        else None))
+  in
   let%bind registration = inference_registration t owner handle in
   (* Final checks run after every composed refresh. Sample only an actual
      registered Goal deadline, before original/physical/policy checks. Sampling
@@ -16074,6 +16445,12 @@ let check_inference_allocation t (current : inference_currentness) owner handle 
     then Ok ()
     else Error (error Permission_denied "goal inference policy changed")
   in
+  let%bind () =
+    Option.value_map
+      (held_startup_effect t current.basis.preparation)
+      ~default:(Ok ())
+      ~f:(fun check -> check ())
+  in
   let%bind () = current.check_current () in
   let actual = Option.map current.basis.attribution ~f:Goal_work_attribution.goal_id in
   let%bind () =
@@ -16085,10 +16462,15 @@ let check_inference_allocation t (current : inference_currentness) owner handle 
     then Ok ()
     else Error (error Permission_denied "inference Goal origin changed")
   in
-  match deadline_sample with
-  | Some (deadline, now) when Agent_protocol.Timestamp.compare now deadline >= 0 ->
-    Error (error Permission_denied "goal deadline reached before submission")
-  | None | Some _ -> Ok ()
+  let%bind () =
+    match deadline_sample with
+    | Some (deadline, now) when Agent_protocol.Timestamp.compare now deadline >= 0 ->
+      Error (error Permission_denied "goal deadline reached before submission")
+    | None | Some _ -> Ok ()
+  in
+  (* Original checks above may run trusted callbacks. Recheck the exact captured
+     startup owner last, without policy, clock, Store access or reselection. *)
+  Option.value_map held_basis ~default:(Ok ()) ~f:(fun check -> check ())
 ;;
 
 let allocate_inference t execution owner relation configuration =
@@ -16170,7 +16552,12 @@ let allocate_inference t execution owner relation configuration =
       | Held _ -> assert false
     in
     let%bind () =
-      commit_inference_ledger ?run_preparation:basis.preparation ?admission t ledger
+      commit_inference_ledger
+        ?run_preparation:basis.preparation
+        ?admission
+        ?check_before_commit:(held_startup_effect t basis.preparation)
+        t
+        ledger
     in
     Graph_owner.register
       owner
@@ -16205,6 +16592,8 @@ let capture_initialization_recipe_target t scope job_id generation attempt targe
   let open Result.Let_syntax in
   let%bind () = validate_initialization_model_job t scope job_id generation attempt in
   capture_recipe_target
+    ?check_before_commit:
+      (held_startup_effect t scope.Initialization_scope.run_preparation)
     ?run_preparation:scope.Initialization_scope.run_preparation
     t
     job_id
@@ -17045,9 +17434,14 @@ let cancel_job_internal t job_id =
       | Queued
         when owned
              && (Agent_protocol.Job.equal_kind running.kind Async_tool || model_owned) ->
-        Run_job_completion.cancel_queued t.state ~job:running ~now
+        Run_job_completion.cancel_queued
+          ?startup_run:(pending_held_startup_run t)
+          t.state
+          ~job:running
+          ~now
       | (Running | Waiting_permission _ | Waiting_completion _) when model_owned ->
         Run_job_completion.prepare
+          ?startup_run:(pending_held_startup_run t)
           t.state
           ~running
           ~terminal:job
@@ -17134,6 +17528,7 @@ let interrupt_job ?run_preparation t job_id generation attempt reason =
       if model_owned
       then
         Run_job_completion.prepare
+          ?startup_run:(pending_held_startup_run t)
           t.state
           ~running
           ~terminal:job
@@ -19004,6 +19399,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Seal_inference_owner _
   | Finish_inference_owner _
   | Close_run_preparation _
+  | Held_startup (End_held_activation _)
   | Release_recurrence_due _
   | Run_start_receipt _
   | Complete_run_constructor_model_job _
@@ -19167,6 +19563,9 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Begin_headless_run_preparation _
   | Bind_run_source _
   | Admit_held_recurrence_run _
+  | Held_startup (Begin_held_recurrence_activation _)
+  | Held_startup (Begin_held_initialization _)
+  | Held_startup (Reserve_held_history_block _)
   | Complete_initialization _
   | Checkpoint_runtime_construction _
   | Start _
@@ -19979,6 +20378,7 @@ let check_recurrence_activation_internal
       (observation : Recurrence_run_observation.t)
   =
   let open Result.Let_syntax in
+  let consumed = ref false in
   let%bind controller = require_recurrence_controller t in
   let owner () =
     let%bind () = check_recurrence_import_owner t in
@@ -20004,6 +20404,9 @@ let check_recurrence_activation_internal
   let%bind () = observation.check_current () in
   let%bind current = Recurrence_controller.observe controller t.state in
   let check_basis () =
+    let%bind () =
+      if !consumed then Error (error Conflict "activation view was consumed") else Ok ()
+    in
     let%bind () = owner () in
     let%bind () =
       Activation_custody.check_basis custody ~owner:t.recurrence_activation_owner t.state
@@ -20034,8 +20437,7 @@ let check_recurrence_activation_internal
     let%bind () = observation.check_authority () in
     check_basis ()
   in
-  let check_timing () =
-    let%bind () = check_basis () in
+  let sample_timing () =
     let%bind entry = Activation_custody.entry custody t.state in
     (* These supplied readers are host callbacks. Sample them before the final
        pure bases, never from a purported callback-free first-effect fence. *)
@@ -20062,6 +20464,11 @@ let check_recurrence_activation_internal
       | None | Some _ ->
         Error (error Conflict "activation nominal is outside current grace")
     in
+    Ok ()
+  in
+  let check_timing () =
+    let%bind () = check_basis () in
+    let%bind () = sample_timing () in
     check_basis ()
   in
   let check_current () =
@@ -20073,10 +20480,416 @@ let check_recurrence_activation_internal
     check_basis ()
   in
   let%map () = check_current () in
-  let checked : Recurrence_activation.Checked.t =
-    { check_current; check_policy; check_authority; check_timing; check_basis }
+  let continue (target : Held_run.Activation.t) =
+    let refreshed = ref None in
+    let owned () =
+      let%bind () =
+        if Int.equal target.domain (Stdlib.Domain.self () :> int)
+        then Ok ()
+        else
+          Error (error Invalid_request "held continuation belongs to another Eio domain")
+      in
+      let%bind () = owner () in
+      let%bind () =
+        Activation_custody.check_basis
+          custody
+          ~owner:t.recurrence_activation_owner
+          t.state
+      in
+      target.owned_basis ()
+    in
+    let basis () =
+      let%bind () = owned () in
+      let%bind () = Held_run.Activation.check_basis target in
+      match !refreshed with
+      | Some current
+        when Recurrence_controller.is_current current
+             && Recurrence_controller.automatic current
+             && Agent_protocol.Session_lifecycle.Revision.equal
+                  (Recurrence_controller.revision current)
+                  (Recurrence_definition.birth_lifecycle_revision
+                     (Activation_custody.definition custody)) -> Ok ()
+      | Some _ | None ->
+        Error
+          (error Conflict "owned activation needs a fresh controller Store observation")
+    in
+    let policy () =
+      let%bind () = basis () in
+      let%bind () = Activation_custody.check_policy custody t.state in
+      let%bind () = observation.check_policy () in
+      let%bind () = target.check_policy () in
+      basis ()
+    in
+    let refresh () =
+      (* Unlike the old Checked view this preflight does not require a stale
+         Current to be fresh before acquiring its genuine replacement. *)
+      let%bind () = owned () in
+      let%bind () = Activation_custody.check_policy custody t.state in
+      let%bind () = observation.check_policy () in
+      let%bind () = target.policy () in
+      let%bind current = Recurrence_controller.observe controller t.state in
+      refreshed := Some current;
+      policy ()
+    in
+    let timing () =
+      let%bind () = basis () in
+      let%bind () = sample_timing () in
+      basis ()
+    in
+    let authority () =
+      let%bind () = basis () in
+      let%bind () = Activation_custody.check_authority custody in
+      let%bind () = observation.check_authority () in
+      let%bind () = target.authority () in
+      basis ()
+    in
+    ({ target; refresh; policy; timing; authority; basis }
+     : Recurrence_activation.Continuation.t)
   in
-  checked
+  ({ check_current
+   ; check_policy
+   ; check_authority
+   ; check_timing
+   ; check_basis
+   ; origin = observation.origin
+   ; target_controller = observation.controller
+   ; continue
+   ; consumed
+   }
+   : Recurrence_activation.Checked.t)
+;;
+
+let begin_held_recurrence_activation_internal t binding (held : Held_run.t) checked =
+  let open Result.Let_syntax in
+  let%bind () =
+    if phys_equal binding held.binding
+    then Ok ()
+    else Error (error Conflict "held activation belongs to another prepared source")
+  in
+  let%bind () = Held_run.check_basis held in
+  let%bind () = Recurrence_activation.Checked.check_basis checked in
+  let%bind controller = require_recurrence_controller t in
+  let%bind index =
+    Result.of_option
+      t.state.run_state
+      ~error:(error Conflict "held activation lost its Run index")
+  in
+  let%bind origin =
+    Result.of_option
+      (Run_state.recurrence_origin index held.run.id)
+      ~error:(error Conflict "held activation lost its reciprocal origin")
+  in
+  let%bind () =
+    if
+      Recurrence_controller.same_store
+        controller
+        checked.Recurrence_activation.Checked.target_controller
+      && Recurrence_run_origin.equal origin checked.origin
+      && Agent_protocol.Run_receipt.equal
+           held.admission
+           (Recurrence_run_origin.admission checked.origin)
+    then Ok ()
+    else Error (error Conflict "activation view belongs to another held Run or Store")
+  in
+  let preparation = held.binding.Source_binding.preparation in
+  let%bind authorization =
+    Run_preparation.capture_authorization
+      preparation
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+  in
+  let phase = ref Held_run.Activation.Reserved in
+  let owned = ref None in
+  let startup_pending () =
+    (match !phase with
+     | Reserved | Constructing -> true
+     | Handed_off | Closed -> false)
+    && Option.exists t.held_activation ~f:(fun active ->
+      Option.exists !owned ~f:(phys_equal active))
+  in
+  let observer = held.run.Agent_protocol.Run.source.observer in
+  let%bind scope =
+    Run_admission.Scope.create_authenticated
+      ~actor:(Run_preparation.Authorization.actor authorization)
+      ~observer
+      ~startup_pending
+      ~authorize:(fun state ->
+        match !phase with
+        | Held_run.Activation.Reserved | Constructing | Handed_off ->
+          Run_preparation.Authorization.check authorization state
+        | Closed -> Error (error Conflict "held startup authority was retired"))
+  in
+  let fresh = ref None in
+  let rec activation : Held_run.Activation.t =
+    { domain = held.binding.domain
+    ; preparation
+    ; source = held.binding.source
+    ; run = held.run
+    ; admission = held.admission
+    ; scope
+    ; phase
+    ; owned_basis =
+        (fun () ->
+          let%bind () = require_runtime_admission t in
+          let%bind () =
+            if
+              Option.exists t.held_activation ~f:(phys_equal activation)
+              && Option.exists t.run_preparation ~f:(phys_equal preparation)
+              &&
+              match !phase with
+              | Reserved | Constructing -> true
+              | Handed_off | Closed -> false
+            then Ok ()
+            else Error (error Conflict "held activation owner was retired")
+          in
+          let%bind () =
+            Run_preparation.check_basis
+              preparation
+              ~owner:t.run_preparation_owner
+              ~state:t.state
+          in
+          let%bind () =
+            Runtime_source_preparation.validate_target activation.source t.state
+          in
+          let%bind index =
+            Result.of_option
+              t.state.run_state
+              ~error:(error Conflict "held startup Run index is absent")
+          in
+          let%bind run =
+            Result.of_option
+              (Run_state.find index held.run.id)
+              ~error:(error Conflict "held startup Run is absent")
+          in
+          let%bind admission =
+            Run_state.receipt
+              index
+              ~principal_id:held.admission.principal_id
+              ~key:held.admission.key
+              ~request_sha256:held.admission.request_sha256
+          in
+          let%bind () =
+            if
+              Option.exists admission ~f:(Agent_protocol.Run_receipt.equal held.admission)
+            then Recurrence_run_origin.validate_run origin ~run ~admission:held.admission
+            else Error (error Conflict "held startup Admission changed")
+          in
+          match run.lifecycle with
+          | Admitted | Active -> Ok ()
+          | Waiting _ | Terminal _ ->
+            Error (error Conflict "held startup is no longer exclusively starting"))
+    ; basis =
+        (fun () ->
+          let%bind () = activation.owned_basis () in
+          match !fresh with
+          | Some current when Recurrence_controller.is_current current -> Ok ()
+          | Some _ | None ->
+            Error (error Conflict "held startup requires fresh target Store custody"))
+    ; check_policy =
+        (fun () ->
+          let%bind () = activation.owned_basis () in
+          let%bind () = Run_admission.Scope.authorize scope t.state in
+          activation.owned_basis ())
+    ; policy =
+        (fun () ->
+          let%bind () = activation.owned_basis () in
+          let%bind () = Run_admission.Scope.authorize scope t.state in
+          let%bind current = Recurrence_controller.observe controller t.state in
+          fresh := Some current;
+          activation.basis ())
+    ; authority =
+        (fun () ->
+          let%bind () = activation.owned_basis () in
+          let%bind () =
+            Run_preparation.check_current
+              preparation
+              ~owner:t.run_preparation_owner
+              ~state:t.state
+          in
+          activation.owned_basis ())
+    }
+  in
+  owned := Some activation;
+  (* No ownership mutation until all callbacks and both original guards finish.
+     The new phase has not yet installed any normal Run authority. *)
+  let%bind () = Source_binding.check_current held.binding in
+  let%bind () = Recurrence_activation.Checked.check_policy checked in
+  let%bind () = Recurrence_activation.Checked.check_timing checked in
+  let%bind () = check_source_original t held.binding in
+  let%bind () = Recurrence_activation.Checked.check_authority checked in
+  let%bind () = Held_run.check_basis held in
+  let%bind () = Recurrence_activation.Checked.check_basis checked in
+  let continuation = checked.continue activation in
+  Source_binding.close held.binding;
+  t.run_source_binding <- None;
+  t.held_activation <- Some activation;
+  checked.consumed := true;
+  Ok continuation
+;;
+
+let reserve_held_history_block_internal t continuation count =
+  let open Result.Let_syntax in
+  let target = Recurrence_activation.Continuation.target continuation in
+  let%bind () = target.Held_run.Activation.owned_basis () in
+  let%bind () =
+    if Option.exists t.held_activation ~f:(phys_equal target)
+    then Ok ()
+    else Error (error Conflict "held reservation belongs to another actor")
+  in
+  let%bind () = check_held_effect continuation in
+  let%bind index =
+    Result.of_option t.state.run_state ~error:(error Conflict "held index absent")
+  in
+  let%bind run =
+    Result.of_option
+      (Run_state.find index target.run.id)
+      ~error:(error Conflict "held Run absent")
+  in
+  let%bind authorities =
+    Run_authorities.add_for_caller
+      t.run_authorities
+      ~run
+      ~scope:target.scope
+      ~caller:(Run_preparation.request target.preparation).caller
+  in
+  let%bind () =
+    if
+      count > 0
+      && Int64.(t.state.conversation.next_history_sequence <= max_value - of_int count)
+    then Ok ()
+    else Error (error Invalid_request "invalid held history reservation")
+  in
+  let first_sequence = t.state.conversation.next_history_sequence in
+  let reserved_through = Int64.(first_sequence + of_int count) in
+  let%bind candidate =
+    prepare_transition
+      ~run_preparation:target.preparation
+      t
+      ~delta:(Session_delta.History_block_reserved reserved_through)
+      ~payloads:[]
+  in
+  let%bind () =
+    persist_transition
+      ~run_preparation:target.preparation
+      ~check_before_commit:(fun () ->
+        let%map () = check_held_effect continuation in
+        target.phase := Constructing)
+      t
+      candidate
+  in
+  install_committed_transition ~run_preparation:target.preparation t candidate;
+  t.run_authorities <- authorities;
+  publish_committed_transition t candidate;
+  Ok History_id_source.{ first_sequence; reserved_through }
+;;
+
+let end_held_activation_internal t (activation : Held_run.Activation.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    if Run_preparation.belongs_to activation.preparation ~owner:t.run_preparation_owner
+    then Ok ()
+    else Error (error Conflict "held cleanup belongs to another actor")
+  in
+  match t.held_activation with
+  | None -> Ok ()
+  | Some other when not (phys_equal activation other) ->
+    Error (error Conflict "another held startup owner replaced this cleanup")
+  | Some _ ->
+    Held_run.Activation.close activation;
+    let previous = t.state in
+    let%bind () =
+      match previous.run_state with
+      | None -> Error (error Conflict "held cleanup lost its Run index")
+      | Some index ->
+        let%bind run =
+          Result.of_option
+            (Run_state.find index activation.run.id)
+            ~error:(error Conflict "held cleanup Run is absent")
+        in
+        let%bind () =
+          match run.Agent_protocol.Run.lifecycle with
+          | Terminal _ -> Ok ()
+          | Admitted | Active | Waiting _ ->
+            if Int64.(previous.counters.revision < max_value)
+            then Ok ()
+            else Error (error Conflict "held cleanup revision is exhausted")
+        in
+        let now, sample = completion_clock_pair t in
+        let session_revision =
+          match run.lifecycle with
+          | Terminal _ -> previous.counters.revision
+          | Admitted | Active | Waiting _ -> Int64.succ previous.counters.revision
+        in
+        let%bind next =
+          Run_retirement.interrupt_run
+            index
+            ~run_id:activation.run.id
+            ~session_revision
+            ~now
+        in
+        if Run_state.equal index next
+        then Ok ()
+        else (
+          let run_preparation =
+            match
+              Run_preparation.check_basis
+                activation.preparation
+                ~owner:t.run_preparation_owner
+                ~state:t.state
+            with
+            | Ok () -> Some activation.preparation
+            | Error _ -> None
+          in
+          (* Factual loss of startup custody, not fresh execution authorization.
+             Keep the same actual preparation only for its own ACK advancement. *)
+          let%bind candidate =
+            prepare_transition
+              t
+              ~delta:(Session_delta.Run_state_changed next)
+              ~payloads:[]
+          in
+          let%bind completion = prepare_completion_plan t candidate (Some sample) in
+          let%bind () =
+            persist_transition
+              ?run_preparation
+              ~check_before_commit:(fun () ->
+                if
+                  Option.exists t.held_activation ~f:(phys_equal activation)
+                  && Int64.equal previous.counters.revision t.state.counters.revision
+                then Ok ()
+                else Error (error Conflict "held cleanup basis changed"))
+              t
+              candidate
+          in
+          install_committed_transition ?run_preparation t candidate;
+          Option.iter
+            completion
+            ~f:(Recurrence_runtime.install_completions t.recurrence_runtime);
+          publish_committed_transition t candidate;
+          Ok ())
+    in
+    t.held_activation <- None;
+    Ok ()
+;;
+
+let begin_held_initialization_internal t continuation purpose expected =
+  let activation = Recurrence_activation.Continuation.target continuation in
+  let open Result.Let_syntax in
+  let%bind () = activation.Held_run.Activation.owned_basis () in
+  let%bind () =
+    if Option.exists t.held_activation ~f:(phys_equal activation)
+    then Ok ()
+    else Error (error Conflict "held initializer belongs to another actor")
+  in
+  let%bind () = check_run_preparation t activation.preparation in
+  begin_initialization
+    ~held_continuation:continuation
+    ~run_preparation:activation.preparation
+    ~original_actor:
+      (Option.value_exn (Run_admission.Scope.original_actor activation.scope))
+    ~purpose
+    t
+    expected
 ;;
 
 let acquire_recurrence_activation_internal t ~actor ~authorize ~observation =
@@ -21353,6 +22166,15 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         ~request_sha256
     | Bind_run_source (preparation, source) ->
       bind_run_source_internal t ~preparation ~source
+    | Held_startup request ->
+      (match request with
+       | End_held_activation activation -> end_held_activation_internal t activation
+       | Begin_held_recurrence_activation (binding, held, checked) ->
+         begin_held_recurrence_activation_internal t binding held checked
+       | Begin_held_initialization (activation, purpose, expected) ->
+         begin_held_initialization_internal t activation purpose expected
+       | Reserve_held_history_block (continuation, count) ->
+         reserve_held_history_block_internal t continuation count)
     | Admit_held_recurrence_run (binding, intent, attempt, session) ->
       admit_held_recurrence_run_internal t ~binding ~intent ~attempt ~session
     | Close_run_preparation preparation ->
@@ -21767,6 +22589,7 @@ let create_with_owner_lease_duration
     ; run_preparation_owner = Run_preparation.Owner.create ()
     ; run_preparation = None
     ; run_source_binding = None
+    ; held_activation = None
     ; foreground_moderator = None
     ; invocation_executions = []
     ; inference_owner_identity = ref ()
@@ -22497,7 +23320,30 @@ let initialization_model_admission t ~scope =
 ;;
 
 let initialization_model_allocation t ~scope ~job =
-  inference_port t (Inference_initialization_job (scope, job))
+  let allocate = inference_port t (Inference_initialization_job (scope, job)) in
+  fun ~graph ~relation ~configuration ->
+    let open Result.Let_syntax in
+    let%map allocation = allocate ~graph ~relation ~configuration in
+    match scope.Initialization_scope.held_continuation with
+    | None -> allocation
+    | Some continuation ->
+      let require = function
+        | Ok () -> ()
+        | Error error -> raise (Inference_allocation.Rejected error)
+      in
+      (* Constructing this guard cannot abandon an acknowledged allocation.
+         Graph tracking registers the same handle before submission refreshes. *)
+      let refresh =
+        Inference_runtime.Submission_guard.create ~refresh:(fun () ->
+          Recurrence_activation.Continuation.refresh continuation |> require;
+          fun () -> Recurrence_activation.Continuation.check_basis continuation |> require)
+      in
+      Inference_allocation.Host.create
+        ~handle:(Inference_allocation.handle allocation)
+        ~submission_guard:
+          (Inference_runtime.Submission_guard.compose
+             refresh
+             (Inference_allocation.submission_guard allocation))
 ;;
 
 let add_initialization_model_job t ~scope job =
@@ -22996,4 +23842,22 @@ let import_held_recurrence_execution
     t
     (Import_held_recurrence_execution
        (held, actor, authorize, automatic_policy, observation))
+;;
+
+let begin_held_recurrence_activation t ~binding ~held ~checked =
+  recurrence_call
+    t
+    (Held_startup (Begin_held_recurrence_activation (binding, held, checked)))
+;;
+
+let begin_held_initialization t ~continuation ~purpose ~expected =
+  call t (Held_startup (Begin_held_initialization (continuation, purpose, expected)))
+;;
+
+let reserve_held_history_block t ~continuation ~count =
+  call t (Held_startup (Reserve_held_history_block (continuation, count)))
+;;
+
+let end_held_activation t ~activation =
+  call t (Held_startup (End_held_activation activation))
 ;;
