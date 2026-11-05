@@ -424,7 +424,27 @@ module Goal_runtime_phase = struct
     | Closed
 end
 
-module Goal_continuation = struct
+(* The one existing-Run source/runtime owner. Public request families are views
+   over this same preparation and custody, never parallel constructor state. *)
+module Existing_goal_preparation = struct
+  module Cause = struct
+    type t = Resume_command of Run_preparation.Goal_continuation.t
+
+    let custody = function
+      | Resume_command request -> Run_preparation.Goal_continuation.custody request
+    ;;
+
+    let resume_request = function
+      | Resume_command request ->
+        (match Run_preparation.Goal_continuation.cause request with
+         | Resume request -> Ok request
+         | Wake _ ->
+           Error
+             (Agent_protocol.Error.invalid_request
+                "Goal wake is not an explicit resume command"))
+    ;;
+  end
+
   module Source_phase = struct
     type t =
       | Open
@@ -432,7 +452,7 @@ module Goal_continuation = struct
   end
 
   type preparation =
-    { request : Run_preparation.Goal_continuation.t
+    { cause : Cause.t
     ; binding : Run_authorities.binding
     ; run : Agent_protocol.Run.t
     ; admission : Agent_protocol.Run_receipt.t
@@ -494,7 +514,7 @@ module Goal_continuation = struct
     | Completed of Agent_protocol.Id.Moderator_execution.t
     | Joined
 
-  let custody preparation = Run_preparation.Goal_continuation.custody preparation.request
+  let custody preparation = Cause.custody preparation.cause
 
   let known_receipt preparation =
     match preparation.phase with
@@ -603,10 +623,14 @@ module Goal_continuation = struct
   end
 end
 
+(* Keep the explicit Resume API as an exact view of the same physical owner.
+   Its command receipt remains specific to the actual Resume cause. *)
+module Goal_continuation = Existing_goal_preparation
+
 module Preparation_owner = struct
   type t =
     | Initial of Run_preparation.t
-    | Existing_goal of Goal_continuation.Preparation.t
+    | Existing_goal of Existing_goal_preparation.Preparation.t
 
   let initial = function
     | Initial preparation -> Some preparation
@@ -634,7 +658,7 @@ end
 module Runtime_construction = struct
   type t =
     | Initial of Admitted_activation.Continuation.t
-    | Existing_goal of Goal_continuation.t
+    | Existing_goal of Existing_goal_preparation.t
 
   let of_admitted continuation = Initial continuation
   let of_goal continuation = Existing_goal continuation
@@ -26067,7 +26091,7 @@ let begin_goal_resume_preparation_internal t ~actor ~authorize ~session ~request
            ~link:(Goal_resume_admission.link plan)
        in
        let rec preparation : Goal_continuation.Preparation.t =
-         { request = custody
+         { cause = Resume_command custody
          ; binding
          ; run
          ; admission = Goal_resume_admission.admission plan
@@ -26175,12 +26199,7 @@ let commit_goal_resume_internal t ~(binding : Goal_continuation.Source_binding.t
   let preparation = binding.preparation in
   let attempted = ref false in
   let returned = ref false in
-  let request =
-    match Run_preparation.Goal_continuation.cause preparation.request with
-    | Resume request -> Ok request
-    | Wake _ ->
-      Error (error Invalid_request "Goal wake is not an explicit resume command")
-  in
+  let request = Existing_goal_preparation.Cause.resume_request preparation.cause in
   Exn.protect
     ~finally:(fun () -> if not !returned then Goal_continuation.close preparation)
     ~f:(fun () ->
