@@ -1571,7 +1571,9 @@ module Held_startup_request = struct
 end
 
 type _ request =
-  | Open_inference_owner : Transcript.Source_id.t -> Inference_owner.t request
+  | Open_inference_owner :
+      Run_preparation.t option * Transcript.Source_id.t
+      -> Inference_owner.t request
   | Admit_inference :
       Run_preparation.t option
       * Inference_owner.t
@@ -1874,7 +1876,7 @@ type _ request =
       * Inference_client.Execution.t option
       * Chat_response.Moderator_manager.t option
       -> unit request
-  | Check_runtime_admission : unit request
+  | Check_runtime_admission : Admitted_activation.Continuation.t option -> unit request
   | Retire_runtime_worker : bool -> Runtime_retirement.t request
   | Set_compaction_inference : Compaction_inference.t option -> unit request
   | Enable_automatic_turn_budget :
@@ -2510,6 +2512,7 @@ type t =
   ; mutable job_agent_custody : Job_custody.t
   ; mutable run_authorities : Run_authorities.t
   ; runtime_source_owner : Runtime_source_owner.Identity.t option
+  ; ordinary_execution_admission : unit -> (unit, Agent_protocol.Error.t) result
   ; runtime_source_domain : int
   ; run_preparation_owner : Run_preparation.Owner.t
   ; mutable run_preparation : Run_preparation.t option
@@ -4714,6 +4717,14 @@ let validate_inference_owner t (owner : Inference_owner.t) =
   else Ok ()
 ;;
 
+let require_selected_execution t = t.ordinary_execution_admission ()
+
+let require_selected_or_held_execution t preparation =
+  match held_startup_effect t preparation with
+  | Some check -> check ()
+  | None -> require_selected_execution t
+;;
+
 let open_inference_owner t source =
   if
     List.exists t.inference_owners ~f:(fun owner ->
@@ -6001,6 +6012,7 @@ let queue_start_internal t =
 ;;
 
 let activate_queued_start t =
+  let%bind.Result () = require_selected_execution t in
   if not (runtime_admission_open t)
   then Error (error Conflict "session runtime is retiring")
   else if
@@ -6862,6 +6874,11 @@ let begin_initialization
       (expected : Session_state.t)
   =
   let open Result.Let_syntax in
+  let%bind () =
+    match held_continuation with
+    | Some _ -> Ok ()
+    | None -> require_selected_execution t
+  in
   exclude_effect_deferred t Ordinary_execution;
   let%bind () = validate_initialization_basis t ~purpose expected in
   let%bind () =
@@ -7386,11 +7403,12 @@ let adopt_deferred t =
   let entries = Pending_plan.adopted_entries (Pending_transition.plan prepared) in
   if List.is_empty entries
   then Ok (Session_state.summary t.state)
-  else
+  else (
+    let%bind () = require_selected_execution t in
     transition
       t
       ~delta:(Pending_transition.delta prepared)
-      ~payloads:[ Agent_protocol.Event.Durable.Payload.History_appended entries ]
+      ~payloads:[ Agent_protocol.Event.Durable.Payload.History_appended entries ])
 ;;
 
 let reserve_history_block ?run_preparation t count =
@@ -7850,6 +7868,7 @@ let with_selected_job_custody t owner f =
 
 let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
   let open Result.Let_syntax in
+  let%bind () = require_selected_execution t in
   let%bind _ = running_operation t operation_id in
   let%bind () =
     Extension_invariants.owner
@@ -8255,6 +8274,7 @@ let check_constructor_invocation_ack t borrow acknowledgement =
 
 let claim_moderator_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
   let open Result.Let_syntax in
+  let%bind () = require_selected_execution t in
   let%bind () =
     match invocation.parent_event with
     | None -> Ok ()
@@ -8385,6 +8405,7 @@ let claim_queued_event
   match available with
   | false -> Ok None
   | true ->
+    let%bind () = require_selected_execution t in
     let%bind receipt, event =
       (match operation_id with
        | None -> Queued_moderator_event.claim
@@ -8659,6 +8680,7 @@ let claim_ordinary_event t id operation_id snapshot event =
   match available with
   | false -> Ok None
   | true ->
+    let%bind () = require_selected_execution t in
     let%bind receipt, event =
       Queued_moderator_event.claim_ordinary
         ~state:t.state
@@ -8743,6 +8765,7 @@ let claim_delegated_event t id delegation snapshot event =
       match claimed with
       | Replayed receipt -> Ok (Delegated_replay receipt)
       | Claimed (receipt, event) ->
+        let%bind () = require_selected_execution t in
         let%bind _ =
           transition
             t
@@ -9345,6 +9368,7 @@ let claim_legacy_head t manager callback operation_id =
 
 let claim_legacy_callback t callback parent =
   let open Result.Let_syntax in
+  let%bind () = require_selected_execution t in
   let%bind manager =
     match t.moderator_manager with
     | Some manager
@@ -10367,6 +10391,7 @@ let validate_installed_observer t observer =
 
 let claim_moderator_observation t operation_id invocation_id =
   let open Result.Let_syntax in
+  let%bind () = require_selected_execution t in
   let%bind () = observation_owner_available t operation_id in
   let%bind moderator_halted =
     Runtime_builder.moderator_snapshot_is_halted t.state.moderator
@@ -10533,6 +10558,7 @@ let claim_next_moderator_observation t operation_id observer =
   match selected with
   | None -> Ok None
   | Some invocation ->
+    let%bind () = require_selected_execution t in
     claim_moderator_observation t operation_id invocation.context.id
     |> Result.map ~f:Option.some
 ;;
@@ -13047,6 +13073,7 @@ let manage_moderator_follow_up t operation_id observer =
 
 let admit_moderator_turn t operation_id =
   let open Result.Let_syntax in
+  let%bind () = require_selected_execution t in
   let%bind operation = running_operation t operation_id in
   let%bind observer = managed_moderator t operation_id in
   let%bind halted = Runtime_builder.moderator_snapshot_is_halted t.state.moderator in
@@ -13068,6 +13095,7 @@ let admit_moderator_turn t operation_id =
 
 let admit_notification_turn t operation_id =
   let open Result.Let_syntax in
+  let%bind () = require_selected_execution t in
   let%bind _ = running_operation t operation_id in
   let%bind () =
     match t.state.lifecycle.desired, t.state.halted, moderator_is_borrowed t with
@@ -13579,6 +13607,19 @@ let with_invocation t operation_id ~invocation f =
 
 let with_job_scope t ~job_id ~generation ~attempt ~deadline f =
   let open Result.Let_syntax in
+  let selected =
+    List.find_map t.state.jobs ~f:(fun job ->
+      if
+        Agent_protocol.Id.Job.equal job.id job_id
+        && Int.equal job.generation generation
+        && Int.equal job.attempt attempt
+      then held_authored_job t job
+      else None)
+  in
+  (* The preceding actual Job claim ACK invalidates target Store custody. Refresh
+     its same live startup outside the mailbox; Claim_job_scope independently
+     reselects the real owner and repeats all occurrence/effect guards. *)
+  let%bind () = Option.value_map selected ~default:(Ok ()) ~f:(refresh_held_authored t) in
   let%bind scope =
     Eio.Cancel.protect (fun () ->
       call t (Claim_job_scope (job_id, generation, attempt, deadline)))
@@ -14727,6 +14768,7 @@ let submit_authorized_message
       t
       entry
   =
+  let%bind.Result () = require_selected_execution t in
   if not (runtime_admission_open t)
   then Error (error Conflict "session runtime is retiring")
   else if t.state.halted
@@ -15738,6 +15780,7 @@ let admit_run
      | Action | Terminal ->
        Error (error Conflict "run start key belongs to another action"))
   | None ->
+    let%bind () = require_selected_execution t in
     let%bind () =
       match request.input with
       | User_submission _ -> Ok ()
@@ -15878,6 +15921,7 @@ let submit_managed_message t reference key request_sha256 generation max_receipt
      | true -> Ok receipt
      | false -> Error (error Conflict "managed send key was used for a different request"))
   | None ->
+    let%bind () = require_selected_execution t in
     let%bind () =
       match
         ( Int.equal generation t.state.identity.generation
@@ -17015,6 +17059,7 @@ let claim_job ?run_preparation ?check_before_commit t job_id generation =
     in
     match job.status with
     | Agent_protocol.Job.Queued when job_is_due t job ->
+      let%bind () = require_selected_or_held_execution t run_preparation in
       let%bind retired = retire_unauthorized_run_job t job in
       if retired
       then Ok None
@@ -17167,6 +17212,9 @@ let validate_job_attempt (job : Agent_protocol.Job.t) attempt =
 let claim_job_scope t job_id generation attempt deadline =
   let open Result.Let_syntax in
   let%bind job = find_job t job_id in
+  let%bind () =
+    require_selected_or_held_execution t (held_authored_job_preparation t job)
+  in
   let%bind () = validate_job_generation t job generation in
   let%bind () = validate_job_attempt job attempt in
   let%bind () =
@@ -20517,6 +20565,7 @@ let claim_schedule t schedule_id generation =
     (match due with
      | false -> Ok None
      | true ->
+       let%bind () = require_selected_execution t in
        let schedule = { schedule with status = Delivering } in
        let%map _ = update_schedule t schedule in
        Some schedule)
@@ -21105,12 +21154,13 @@ let callback_schedule_cancel t scope schedule_id =
 let claim_idle_moderator t =
   if not (idle_moderator_eligible t)
   then Ok None
-  else
+  else (
+    let%bind.Result () = require_selected_execution t in
     History_codec.all_of_protocol t.state.conversation.canonical_history
     |> Result.map ~f:(fun history ->
       exclude_effect_deferred t Ordinary_execution;
       t.idle_moderator_borrowed <- true;
-      Some history)
+      Some history))
 ;;
 
 let notification_payload message =
@@ -21134,6 +21184,7 @@ let start_idle_turn_unchecked
       ~adopt_deferred
   =
   let open Result.Let_syntax in
+  let%bind () = require_selected_execution t in
   let%bind () = require_runtime_admission t in
   let%bind () = reconcile_foreground_invocations t in
   let operation = create_turn_operation t reason in
@@ -21217,7 +21268,9 @@ let commit_history_transition t ~delta ~payloads ~admission =
   let%bind agent_custody =
     match admission with
     | None -> Ok None
-    | Some admission -> admission_agent_custody t admission
+    | Some admission ->
+      let%bind () = require_selected_execution t in
+      admission_agent_custody t admission
   in
   let%bind prepared = prepare_transition t ~delta ~payloads in
   Eio.Cancel.protect (fun () ->
@@ -22441,7 +22494,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Commit_configuration_update _
   | Begin_configuration_capture _
   | Mark_configuration_capture _
-  | Check_runtime_admission
+  | Check_runtime_admission _
   | Begin_lifecycle _
   | Enable_automatic_turn_budget _
   | Enable_run_constructor_turn_budget _
@@ -25881,9 +25934,18 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       finish_configuration_capture t capture success
     | Snapshot -> Ok (current_snapshot t)
     | Observe -> Ok (t.state, current_snapshot t)
-    | Set_operation_worker worker -> set_operation_worker t worker
+    | Set_operation_worker worker ->
+      let%bind.Result () =
+        Option.value_map worker ~default:(Ok ()) ~f:(fun _ ->
+          require_selected_execution t)
+      in
+      set_operation_worker t worker
     | Set_runtime_worker (original_actor, worker, inference, moderator_manager) ->
       let open Result.Let_syntax in
+      let%bind () =
+        Option.value_map worker ~default:(Ok ()) ~f:(fun _ ->
+          require_selected_execution t)
+      in
       let%bind () =
         match original_actor with
         | None -> Ok ()
@@ -25892,7 +25954,12 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
           Error (error Permission_denied "runtime installation authentication expired")
       in
       set_runtime_worker t worker inference moderator_manager
-    | Check_runtime_admission -> require_runtime_admission t
+    | Check_runtime_admission continuation ->
+      let open Result.Let_syntax in
+      let%bind () = require_runtime_admission t in
+      (match continuation with
+       | None -> require_selected_execution t
+       | Some continuation -> held_runtime_installation_basis t continuation)
     | Retire_runtime_worker closing -> retire_runtime_worker t ~closing
     | Set_compaction_inference port ->
       t.compaction_inference <- port;
@@ -26787,6 +26854,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Submit_managed_message (reference, key, fingerprint, generation, maximum, entry) ->
       submit_managed_message t reference key fingerprint generation maximum entry
     | Compact (original_actor, attachment_id, expected_revision) ->
+      let%bind.Result () = require_selected_execution t in
       compact_internal t original_actor attachment_id expected_revision
     | Delete_history (attachment_id, revision, history_id) ->
       delete_history_internal t attachment_id revision history_id
@@ -26979,9 +27047,18 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        | None, None, [], [], None, None, None, false, true, ([], []) ->
          Result.map (inspect t.state) ~f:Option.some
        | _ -> Ok None)
-    | Open_inference_owner source -> open_inference_owner t source
+    | Open_inference_owner (preparation, source) ->
+      let%bind.Result () =
+        match preparation with
+        | None -> require_selected_execution t
+        | Some preparation ->
+          let%bind.Result () = check_run_preparation t preparation in
+          require_selected_or_held_execution t (Some preparation)
+      in
+      open_inference_owner t source
     | Admit_inference
         (run_preparation, owner, relation, operation_id, invocation_id, configuration) ->
+      let%bind.Result () = require_selected_or_held_execution t run_preparation in
       admit_inference
         ?run_preparation
         t
@@ -27081,6 +27158,7 @@ let rec run t =
 
 let create_internal
       ~runtime_source_owner
+      ~ordinary_execution_admission
       ~schedule_permission_timeouts
       ~sw
       ~clock
@@ -27156,6 +27234,7 @@ let create_internal
     ; job_agent_custody = Job_custody.empty
     ; run_authorities = Run_authorities.empty
     ; runtime_source_owner
+    ; ordinary_execution_admission
     ; runtime_source_domain = (Stdlib.Domain.self () :> int)
     ; run_preparation_owner = Run_preparation.Owner.create ()
     ; run_preparation = None
@@ -27221,6 +27300,7 @@ let create_with_owner_lease_duration
   =
   create_internal
     ~runtime_source_owner:None
+    ~ordinary_execution_admission:(fun () -> Ok ())
     ~schedule_permission_timeouts
     ~sw
     ~clock
@@ -27237,6 +27317,7 @@ let create_with_owner_lease_duration
 
 let create_with_runtime_source_owner
       ~runtime_source_owner
+      ~ordinary_execution_admission
       ~schedule_permission_timeouts
       ~sw
       ~clock
@@ -27252,6 +27333,7 @@ let create_with_runtime_source_owner
   =
   create_internal
     ~runtime_source_owner:(Some runtime_source_owner)
+    ~ordinary_execution_admission
     ~schedule_permission_timeouts
     ~sw
     ~clock
@@ -27370,7 +27452,11 @@ let commit_reconciled_administration
     (Commit_reconciled_administration (attachment_id, expected, kind, candidate))
 ;;
 
-let open_inference_owner t ~source = call t (Open_inference_owner source)
+let open_inference_owner t ~source = call t (Open_inference_owner (None, source))
+
+let open_prepared_inference_owner t ~preparation ~source =
+  call t (Open_inference_owner (Some preparation, source))
+;;
 
 let admit_inference t ~owner ~relation ~operation_id ~invocation_id ~configuration =
   call
@@ -28408,7 +28494,11 @@ let begin_lifecycle t ~attachment_id ~expected_generation ~expected_revision =
 let lifecycle_state t fence = call t ~priority:Priority (Lifecycle_state fence)
 let retire_lifecycle t fence = call t ~priority:Priority (Retire_lifecycle fence)
 let abort_lifecycle t fence = call t ~priority:Priority (Abort_lifecycle fence)
-let check_runtime_admission t = call t ~priority:Priority Check_runtime_admission
+let check_runtime_admission t = call t ~priority:Priority (Check_runtime_admission None)
+
+let check_held_runtime_admission t ~continuation =
+  call t ~priority:Priority (Check_runtime_admission (Some continuation))
+;;
 
 let goal_command t ~actor ~authorize ~session ~request =
   call t (Apply_goal_command (actor, authorize, session, request))

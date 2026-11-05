@@ -716,13 +716,40 @@ lifetime. The entire configuration is bounded to 64 KiB, 256 controllers,
 IDs are rejected on construction and decoding; there are no wildcard grants.
 
 [`Recurrence_execution_host`](../../lib/agent_server/recurrence_execution_host.mli)
-belongs to the actual daemon or embedded composition. It issues current proofs
-only for entries already registered with that composition's Factory. Selecting
-a target does not load or initialize it. On-demand configuration therefore does
-not select all configured sessions. Operator-only mode creates no execution
-host. Closing the host revokes its original proofs before worker teardown; it
-does not alter another host's proofs. Configuration changes use the existing
-server restart boundary.
+belongs to the actual daemon or embedded composition. A controller must be
+registered and selected for execution in that composition. Listing a controller
+or target in configuration does not select it. Operator-only mode creates no
+execution host. Closing the host revokes its original proofs before worker
+teardown; it does not alter another host's proofs. Configuration changes use the
+existing server restart boundary.
+
+For an existing target that is not selected, the host can acquire its metadata
+through the Factory. This opens its actual session owner for validation, reads
+and control without constructing the runtime, running `Session_resume`, migrating
+its inference configuration or starting queued work. Acquisition can persist
+necessary recovery changes; it is not a promise of zero storage writes. Normal
+provenance, lifecycle, profile, workspace and capacity checks still apply. If
+capacity is unavailable, acquisition returns an error rather than queuing an
+ordinary session start.
+
+The acquired target stays in the existing registry. Repeated acquisition reuses
+the same Actor, Handle and runtime owner, including retry evidence retained after
+a fully joined source failure. A source preview returns the selected source and
+current revision only after releasing its temporary source and parent loans. It
+runs no initializer or provider request and grants no execution permission; the
+later Run service must select and validate the source again.
+
+Fresh background execution remains excluded until the target is explicitly
+selected or its actual authorized Run handoff is acknowledged. Reads, attachment,
+control, factual job completion and shutdown remain available. A durable receipt,
+configuration entry or uncertain admission alone cannot select execution. An
+acquired target also cannot act as a recurrence controller until selected. This
+keeps on-demand hosts from starting every session mentioned in configuration.
+
+When explicit trusted-host selection rebuilds a runtime, it carries the caller's
+current authentication into initialization. A legacy `Session_resume` callback
+uses that actual initialization owner; a saved creator ID or a recovered receipt
+cannot supply the missing authority.
 
 The selected controller proof has message and transcript scopes, adding session
 creation only for an explicit captured-child grant. Target proofs have message

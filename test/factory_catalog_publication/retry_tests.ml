@@ -9,6 +9,25 @@ module Source_path = struct
     | Resume_after_verification_failure
 end
 
+(* Checkpoint/rotation markers are storage bookkeeping, not another session
+   transaction. Keep every decoded transaction and reject unknown markers. *)
+let transaction_payloads env entry =
+  Existing.journal_entries env entry
+  |> List.filter_map ~f:(fun entry ->
+    let frame = entry.Agent_store.Journal.frame in
+    let payload = Agent_store.Frame.payload frame in
+    match Agent_store.Frame.flags frame with
+    | 0 ->
+      Agent_store.Transaction.decode payload |> Existing.store_ok |> ignore;
+      Some payload
+    | 1 ->
+      assert (
+        String.equal payload "checkpoint boundary"
+        || String.equal payload "segment sealed");
+      None
+    | flags -> raise_s [%sexp "unexpected journal frame flags", (flags : int)])
+;;
+
 let run_activation (source_path : Source_path.t) =
   let entered, entered_u = Eio.Promise.create () in
   let release, release_u = Eio.Promise.create () in
@@ -126,6 +145,7 @@ let run_activation (source_path : Source_path.t) =
                  Result.is_error (Actor.No_effects_observation.check_current observation));
                let before = state entry in
                let frames = Existing.frames env entry in
+               let transactions = transaction_payloads env entry in
                let pending =
                  Actor.admit_held_recurrence_run
                    entry.actor
@@ -153,9 +173,13 @@ let run_activation (source_path : Source_path.t) =
                [%test_eq: int64]
                  (Int64.succ before.counters.revision)
                  (state entry).counters.revision;
+               let after_transactions = transaction_payloads env entry in
                [%test_eq: int]
-                 (List.length frames + 1)
-                 (List.length (Existing.frames env entry));
+                 (List.length transactions + 1)
+                 (List.length after_transactions);
+               [%test_eq: string list]
+                 transactions
+                 (List.take after_transactions (List.length transactions));
                assert (Intent.equal occurrence.intent (Execution.intent rotated));
                (match Execution.attempts rotated with
                 | [ previous; current ] ->

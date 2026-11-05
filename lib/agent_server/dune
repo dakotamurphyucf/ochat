@@ -102,6 +102,7 @@
   result_retention
   session_recovery_owner
   session_registry
+  recovery_work
   session_lifecycle_receipts
   session_lifecycle_service
   session_catalog_policy

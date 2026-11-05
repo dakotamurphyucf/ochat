@@ -1,6 +1,10 @@
 open! Core
 module Catalogs = Session_factory_catalogs
 
+type recovery_purpose =
+  | Ordinary_recovery
+  | Metadata_target_recovery
+
 type generated_lifetime =
   | Owned
   | Independent
@@ -2830,11 +2834,12 @@ let restore_authored_code t ~artifacts ~source record =
   |> Result.map ~f:Agent_session.Prompt_child_source.revision
 ;;
 
-let with_selected_run_source
+let with_selected_source
       t
       (entry : Session_registry.entry)
       ~with_parent
       ~with_source
+      ~check_selected
       f
   =
   let module A = Agent_session in
@@ -2992,8 +2997,18 @@ let with_selected_run_source
             Error
               (unavailable Conflict "delegation source owner changed during preparation")
         in
-        let%bind () = Runtime_owner.Prepared.check_basis prepared in
+        let%bind () = check_selected prepared in
         f prepared))
+;;
+
+let with_selected_run_source t entry ~with_parent ~with_source f =
+  with_selected_source
+    t
+    entry
+    ~with_parent
+    ~with_source
+    ~check_selected:Runtime_owner.Prepared.check_basis
+    f
 ;;
 
 let with_prepared_run_source t entry ~preparation f =
@@ -5830,7 +5845,12 @@ let build_runtime_for_actor ?run_preparation ?original_actor ?deferred t handle 
       refresh_held_construction continuation)
   in
   let%bind () = check_deferred () in
-  let%bind () = Agent_session.Session_actor.check_runtime_admission actor in
+  let%bind () =
+    match deferred with
+    | None -> Agent_session.Session_actor.check_runtime_admission actor
+    | Some (_, continuation) ->
+      Agent_session.Session_actor.check_held_runtime_admission actor ~continuation
+  in
   let%bind state = Agent_session.Session_actor.state actor in
   let%bind revision =
     match deferred with
@@ -6359,6 +6379,7 @@ let create_loaded_entry
     Agent_session.Session_actor.create_with_runtime_source_owner
       ~runtime_source_owner:
         (Agent_session.Runtime_source_owner.identity t.runtime_source_owner)
+      ~ordinary_execution_admission:(fun () -> Ok ())
       ~schedule_permission_timeouts:false
       ~sw:t.sw
       ~clock:(Eio.Stdenv.clock t.env)
@@ -6532,6 +6553,7 @@ let close_recovered_entry t owner handle journal persistence actor =
 
 let create_unloaded_entry
       ?recovery_owner
+      ?(recovery_purpose = Ordinary_recovery)
       t
       handle
       journal
@@ -6570,10 +6592,29 @@ let create_unloaded_entry
         runtime_owner
         ~creating_principal:state.identity.creating_principal
     in
+    let actual_actor = ref None in
+    let ordinary_execution_admission () =
+      match recovery_purpose with
+      | Ordinary_recovery -> Ok ()
+      | Metadata_target_recovery ->
+        (match
+           ( !actual_actor
+           , !runtime_owner
+           , Session_registry.find t.registry state.identity.session_id )
+         with
+         | Some actor, Some runtime, Some actual
+           when phys_equal actor actual.actor
+                && phys_equal runtime actual.runtime
+                && Session_registry.execution_selected t.registry actual -> Ok ()
+         | _ ->
+           Error
+             (unavailable Conflict "target has not been selected for ordinary execution"))
+    in
     let actor =
       Agent_session.Session_actor.create_with_runtime_source_owner
         ~runtime_source_owner:
           (Agent_session.Runtime_source_owner.identity t.runtime_source_owner)
+        ~ordinary_execution_admission
         ~schedule_permission_timeouts:false
         ~sw:t.sw
         ~clock:(Eio.Stdenv.clock t.env)
@@ -6587,6 +6628,7 @@ let create_unloaded_entry
         ~operation_worker:None
         ~services
     in
+    actual_actor := Some actor;
     Session_recovery_owner.adopt_actor_exn owner actor;
     let%bind () = install_recurrence_controller t handle actor in
     let%bind () = Agent_session.Session_actor.reconcile_run_recovery actor in
@@ -7572,6 +7614,27 @@ let prepare_recovery_capacity t state =
      | Queue_required _ | Rejected _ -> Ok (Queued_for_slot, Some capacity))
 ;;
 
+let prepare_metadata_target_capacity t ~owner (state : Agent_session.Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind capacity = capacity_for_state t state in
+  match state.lifecycle.desired, capacity with
+  | Stopped, _ ->
+    Option.iter capacity ~f:(Session_recovery_owner.adopt_capacity_exn owner);
+    Ok (Agent_protocol.Session.Stopped, capacity)
+  | Running, None -> Ok (Agent_protocol.Session.Idle, None)
+  | Running, Some capacity ->
+    (match Session_capacity.try_acquire capacity ~queue_if_limited:false with
+     | Acquired | Already_acquired ->
+       Session_recovery_owner.adopt_capacity_exn owner capacity;
+       (* Release only construction credit; this owner retains its actual
+          session/workspace acquisition. No runtime or Start ticket is created. *)
+       Session_capacity.runtime_ready capacity;
+       Ok (Agent_protocol.Session.Idle, Some capacity)
+     | Rejected failure -> Error failure
+     | Queue_required _ ->
+       Error (unavailable Resource_limit "recurrence target capacity is unavailable"))
+;;
+
 let commit_moderator_snapshot t persistence state moderator =
   let open Result.Let_syntax in
   let%bind transition =
@@ -7609,7 +7672,13 @@ let persist_recovered_state t handle journal persistence state =
   persist_metadata t handle state |> Result.map_error ~f:protocol_of_store
 ;;
 
-let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t handle =
+let recover_open_handle
+      ?original_actor
+      ?(prepare_parent_policy = fun () -> Ok Loaded_only)
+      ?(purpose = Ordinary_recovery)
+      t
+      handle
+  =
   let open Result.Let_syntax in
   let%bind owner =
     Session_recovery_owner.create
@@ -7673,7 +7742,10 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
         , stopping
         , t.inference_policy.migrate_inference_target )
       with
-      | Unresolved, Running, false, Some migrate ->
+      | Unresolved, Running, false, Some migrate
+        when match purpose with
+             | Ordinary_recovery -> true
+             | Metadata_target_recovery -> false ->
         let%bind target =
           migrate state.spec
           |> Result.map_error ~f:(fun error ->
@@ -7692,29 +7764,32 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
               (Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error)))
         in
         Some target
+      | Unresolved, Running, false, Some _
       | Captured _, _, _, _
       | Unresolved, Stopped, _, _
       | Unresolved, Running, true, _
       | Unresolved, Running, false, None -> Ok None
     in
+    let migration_blocked () =
+      match Inference.Selection.view state.spec.inference_target, inference_target with
+      | Unresolved, None
+        when Agent_protocol.Session.equal_desired_state state.lifecycle.desired Running ->
+        Some
+          (unavailable
+             Migration_required
+             "execution requires explicit inference migration")
+      | Captured _, _ | Unresolved, _ -> None
+    in
     let activation_blocked =
-      match legacy_activation_blocked, state.runtime_initialization with
-      | Some failure, _ -> Some failure
-      | None, Pending _ ->
+      match legacy_activation_blocked, purpose, state.runtime_initialization with
+      | Some failure, _, _ -> Some failure
+      | None, Ordinary_recovery, Pending _ ->
         Some
           (unavailable
              Invalid_state
              "selected runtime initialization requires explicit activation")
-      | None, Ready ->
-        (match Inference.Selection.view state.spec.inference_target, inference_target with
-         | Unresolved, None
-           when Agent_protocol.Session.equal_desired_state state.lifecycle.desired Running
-           ->
-           Some
-             (unavailable
-                Migration_required
-                "execution requires explicit inference migration")
-         | Captured _, _ | Unresolved, _ -> None)
+      | None, Ordinary_recovery, Ready
+      | None, Metadata_target_recovery, (Pending _ | Ready) -> migration_blocked ()
     in
     let dormant_capture =
       match revision with
@@ -7728,7 +7803,10 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
     let%bind () =
       match state.lifecycle.desired with
       | Stopped -> Ok ()
-      | Running when not stopping -> check_source_for_execution t state revision
+      | Running when not stopping ->
+        (match purpose with
+         | Ordinary_recovery -> check_source_for_execution t state revision
+         | Metadata_target_recovery -> Ok ())
       | Running -> Ok ()
     in
     let%bind profile = recovered_profile t state in
@@ -7755,13 +7833,19 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
       | true, false, Some _ -> Ok (Agent_protocol.Session.Stopped, None)
       | false, false, Some failure -> Ok (Agent_protocol.Session.Failed failure, None)
       | (true | false), true, _ | (true | false), false, None ->
-        prepare_recovery_capacity
-          t
-          (if stopping
-           then { state with lifecycle = { desired = Stopped; observed = Stopped } }
-           else state)
+        let state =
+          if stopping
+          then { state with lifecycle = { desired = Stopped; observed = Stopped } }
+          else state
+        in
+        (match purpose with
+         | Ordinary_recovery -> prepare_recovery_capacity t state
+         | Metadata_target_recovery -> prepare_metadata_target_capacity t ~owner state)
     in
-    Option.iter capacity ~f:(Session_recovery_owner.adopt_capacity_exn owner);
+    (match purpose with
+     | Ordinary_recovery ->
+       Option.iter capacity ~f:(Session_recovery_owner.adopt_capacity_exn owner)
+     | Metadata_target_recovery -> ());
     let%bind writer =
       create_recovery_writer t journal recovery state.identity.session_id
     in
@@ -7831,6 +7915,7 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
          let%bind entry =
            create_unloaded_entry
              ~recovery_owner:owner
+             ~recovery_purpose:purpose
              t
              handle
              journal
@@ -7855,18 +7940,25 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
              in
              Runtime_owner.unload_and_wait entry.runtime
            | None | Some { stop = false; _ } ->
-             (match state.lifecycle.observed, activation_blocked with
-              | Stopped, _ | _, Some _ -> Ok ()
-              | ( ( Queued_for_slot
-                  | Starting
-                  | Recovering
-                  | Idle
-                  | Running_turn _
-                  | Compacting _
-                  | Waiting_for_permission _
-                  | Stopping
-                  | Failed _ )
-                , None ) -> Runtime_owner.ensure_loaded entry.runtime)
+             (match purpose with
+              | Metadata_target_recovery -> Ok ()
+              | Ordinary_recovery ->
+                (match state.lifecycle.observed, activation_blocked with
+                 | Stopped, _ | _, Some _ -> Ok ()
+                 | ( ( Queued_for_slot
+                     | Starting
+                     | Recovering
+                     | Idle
+                     | Running_turn _
+                     | Compacting _
+                     | Waiting_for_permission _
+                     | Stopping
+                     | Failed _ )
+                   , None ) ->
+                   (match original_actor with
+                    | None -> Runtime_owner.ensure_loaded entry.runtime
+                    | Some actor ->
+                      Runtime_owner.ensure_loaded_authenticated entry.runtime ~actor)))
          in
          let%map () = restored () in
          entry))
@@ -8070,8 +8162,9 @@ let check_registered_entry t (entry : Session_registry.entry) ~session =
          "recurrence entry is not this Factory's current registered owner")
 ;;
 
-let recover_owned_session t handle =
+let recover_owned_session t handle ~actor =
   recover_open_handle
+    ~original_actor:actor
     ~prepare_parent_policy:(fun () ->
       Recovery_parent.create
         ~store:t.store
@@ -8737,6 +8830,8 @@ let resume_selected_initial_starts t =
       in
       match Session_registry.find t.registry record.key.parent_session_id with
       | None -> Ok false
+      | Some parent when not (Session_registry.execution_selected t.registry parent) ->
+        Ok false
       | Some parent ->
         let%bind state = A.state parent.actor in
         (match state.spec.delegation with
@@ -8753,7 +8848,7 @@ let resume_selected_initial_starts t =
       if selected then resume_generated_initial_start t entry else Ok ()
   in
   with_generated_creation_lock ~protect:false t (fun () ->
-    List.iter (Session_registry.entries t.registry) ~f:(fun entry ->
+    List.iter (Session_registry.execution_entries t.registry) ~f:(fun entry ->
       ignore (resume entry : (unit, Agent_protocol.Error.t) Result.t)))
 ;;
 
@@ -11547,4 +11642,232 @@ let seed_session t ~principal ~request ~command_audit ~checkpoint =
 
 let reconcile_seed_creations t ~limits ~checkpoint =
   Session_seed_recovery.reconcile (seed_recovery t) ~limits ~checkpoint
+;;
+
+let check_execution_selected_entry t entry ~session =
+  let open Result.Let_syntax in
+  let%bind () = check_registered_entry t entry ~session in
+  if Session_registry.execution_selected t.registry entry
+  then Ok ()
+  else Error (unavailable Conflict "recurrence entry is not selected for execution")
+;;
+
+let check_recurrence_original actor =
+  let principal = Operator_authorization.principal actor in
+  if
+    Operator_authorization.is_current actor
+    && Agent_protocol.Principal.has_scope principal Send_messages
+    && Agent_protocol.Principal.has_scope principal View_session_transcript
+  then Ok ()
+  else
+    Error (unavailable Permission_denied "recurrence target original authority expired")
+;;
+
+let check_recurrence_target_state ~session ~actor ~authorize state =
+  let open Result.Let_syntax in
+  let%bind () = check_recurrence_original actor in
+  let%bind () =
+    if
+      Agent_protocol.Id.Session.equal
+        (Agent_protocol.Session_ref.session_id session)
+        state.Agent_session.Session_state.identity.session_id
+    then Ok ()
+    else Error (unavailable Conflict "recurrence target state belongs to another session")
+  in
+  let%bind () = authorize state in
+  check_recurrence_original actor
+;;
+
+let qualify_metadata_target t entry =
+  let module S = Agent_store.Session_store in
+  let open Result.Let_syntax in
+  let qualify () =
+    let%bind () =
+      Recovery_work.jobs
+        entry
+        ~max_count:t.limits.job_result_recovery_max_count
+        ~max_total_bytes:t.limits.job_result_recovery_max_bytes
+    in
+    let%bind () = Recovery_work.schedules entry ~startup_time:(now t) in
+    let%bind handle =
+      Result.of_option
+        entry.Session_registry.store_handle
+        ~error:(unavailable Internal_error "recovered target has no owned Handle")
+    in
+    let%bind indexed =
+      Agent_store.Session_index.find_checked
+        (S.session_index t.store)
+        (S.Handle.session_id handle)
+      |> Result.map_error ~f:protocol_of_store
+      |> Result.bind ~f:(fun value ->
+        Result.of_option value ~error:(unavailable Session_not_found "target disappeared"))
+    in
+    let%map current =
+      S.current_lifecycle t.store handle ~current_entry:indexed
+      |> Result.map_error ~f:protocol_of_store
+    in
+    entry, current
+  in
+  match qualify () with
+  | Ok _ as success -> success
+  | Error error as failure ->
+    Session_registry.rollback_recovered
+      t.registry
+      ~primary:(Session_registry.Cleanup_failure.rejected error)
+      [ entry ];
+    failure
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    Session_registry.rollback_recovered
+      t.registry
+      ~primary:(Session_registry.Cleanup_failure.raised exn backtrace)
+      [ entry ];
+    Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let acquire_recurrence_target t ~session ~actor ~authorize =
+  let module P = Agent_protocol in
+  let module S = Agent_store.Session_store in
+  let module R = Session_registry in
+  let open Result.Let_syntax in
+  let%bind () = check_recurrence_original actor in
+  let%bind () =
+    if P.Id.Server.equal (P.Session_ref.server_id session) (S.server_id t.store)
+    then Ok ()
+    else Error (unavailable Invalid_request "recurrence target belongs to another host")
+  in
+  let check_state = check_recurrence_target_state ~session ~actor ~authorize in
+  let check_loaded entry =
+    let%bind () = check_registered_entry t entry ~session in
+    let%bind state = Agent_session.Session_actor.state entry.R.actor in
+    let%bind () = check_state state in
+    let%map () = check_registered_entry t entry ~session in
+    entry
+  in
+  let%bind entry =
+    match R.find t.registry (P.Session_ref.session_id session) with
+    | Some entry -> check_loaded entry
+    | None ->
+      R.with_lifecycle t.registry (P.Session_ref.session_id session) (fun reservation ->
+        match R.Lifecycle_reservation.target reservation with
+        | Absent -> Error (unavailable Session_not_found "recurrence target is absent")
+        | Loaded entry ->
+          let%bind state = Agent_session.Session_actor.state entry.actor in
+          let%map () = check_state state in
+          entry
+        | Indexed indexed ->
+          let%bind handle =
+            S.open_session
+              t.store
+              ~sw:t.sw
+              ~actor_lock_nonce:(P.Id.Transaction.create () |> P.Id.Transaction.to_string)
+              indexed.session.id
+            |> Result.map_error ~f:protocol_of_store
+          in
+          let recovered = ref None in
+          R.acquire_indexed_target
+            t.registry
+            reservation
+            ~store:t.store
+            ~handle
+            ~authorize:(fun _summary ->
+              let%bind state =
+                match !recovered with
+                | None -> read_owned_session t handle
+                | Some entry -> Agent_session.Session_actor.state entry.R.actor
+              in
+              check_state state)
+            ~recover:(fun () ->
+              let%bind entry =
+                recover_open_handle
+                  ~purpose:Metadata_target_recovery
+                  ~prepare_parent_policy:(fun () ->
+                    Recovery_parent.create
+                      ~store:t.store
+                      ~registry:t.registry
+                      ~max_depth:t.limits.delegation_max_depth
+                      ~read_owned:(read_owned_session t)
+                      ~authorize_independent:(authorize_independent t)
+                    |> Result.map ~f:(fun retained -> Retained_unselected retained))
+                  t
+                  handle
+              in
+              let%map entry, current = qualify_metadata_target t entry in
+              recovered := Some entry;
+              entry, current))
+  in
+  check_loaded entry
+;;
+
+module Recurrence_source_preview = struct
+  type t =
+    { source : Agent_protocol.Run_source.t
+    ; expected_revision : int64
+    }
+
+  let source t = t.source
+  let expected_revision t = t.expected_revision
+end
+
+let preview_recurrence_source t entry ~actor ~authorize =
+  let module A = Agent_session in
+  let module S = A.Runtime_builder.Source in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let%bind handle =
+    Result.of_option
+      entry.Session_registry.store_handle
+      ~error:(unavailable Invalid_state "recurrence source requires an owned Handle")
+  in
+  let session =
+    P.Session_ref.create
+      ~server_id:(Agent_store.Session_store.server_id t.store)
+      ~session_id:(Agent_store.Session_store.Handle.session_id handle)
+  in
+  let check state =
+    let%bind () = check_registered_entry t entry ~session in
+    check_recurrence_target_state ~session ~actor ~authorize state
+  in
+  let%bind before = A.Session_actor.state entry.actor in
+  let%bind () = check before in
+  let%bind selected =
+    with_selected_source
+      t
+      entry
+      ~with_parent:(fun owner f ->
+        Runtime_owner.with_loaded_source_capabilities_reported
+          owner
+          ~source_owner:t.runtime_source_owner
+          f
+        |> Runtime_owner.Scope_outcome.resume)
+      ~with_source:(fun source f -> f source)
+      ~check_selected:(fun source -> S.validate_target source before)
+      (fun source ->
+         let%map () = S.validate_target source before in
+         source)
+  in
+  (* All source/parent resource scopes have joined before any proposal escapes. *)
+  let%bind after = A.Session_actor.state entry.actor in
+  let%bind () = check after in
+  let%bind () = S.validate_target selected after in
+  let%bind () =
+    if
+      Int64.equal before.counters.revision after.counters.revision
+      && Int.equal before.identity.generation after.identity.generation
+    then Ok ()
+    else Error (unavailable Conflict "recurrence target changed during source preview")
+  in
+  let%bind observer =
+    match S.moderator selected with
+    | Legacy observer | Extension observer -> Ok observer
+    | No_moderator ->
+      Error (unavailable Invalid_state "recurrence source has no moderator")
+  in
+  let%bind index = A.Run_admission.prepare_source_index after ~observer in
+  let%map source =
+    A.Run_source_installation.captured
+      (A.Run_state.installation index)
+      ~generation:after.identity.generation
+  in
+  { Recurrence_source_preview.source; expected_revision = after.counters.revision }
 ;;

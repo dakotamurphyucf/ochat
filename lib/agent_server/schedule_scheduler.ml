@@ -19,45 +19,7 @@ let is_overdue schedule timestamp =
   <= 0
 ;;
 
-let rec reconcile_schedule entry startup_time (schedule : Agent_protocol.Schedule.t) =
-  match schedule.status with
-  | Agent_protocol.Schedule.Delivering ->
-    (match
-       Agent_session.Session_actor.retry_schedule
-         entry.Session_registry.actor
-         ~schedule_id:schedule.id
-         ~generation:schedule.generation
-     with
-     | Ok schedule -> reconcile_schedule entry startup_time schedule
-     | Error error -> Error error)
-  | Scheduled when is_overdue schedule startup_time ->
-    (match schedule.misfire with
-     | Deliver_once_immediately -> Ok ()
-     | Skip_if_expired ->
-       Agent_session.Session_actor.skip_schedule
-         entry.Session_registry.actor
-         ~schedule_id:schedule.id
-         ~generation:schedule.generation
-       |> Result.map ~f:(fun (_ : Agent_protocol.Schedule.t) -> ())
-     | Fail ->
-       Agent_session.Session_actor.fail_schedule
-         entry.actor
-         ~schedule_id:schedule.id
-         ~generation:schedule.generation
-         (failure "schedule expired while the daemon was unavailable")
-       |> Result.map ~f:(fun (_ : Agent_protocol.Schedule.t) -> ()))
-  | Scheduled | Delivered | Cancelled | Failed _ -> Ok ()
-;;
-
-let reconcile_entry entry ~startup_time =
-  let open Result.Let_syntax in
-  let%bind _ =
-    Agent_session.Session_actor.expire_subscriptions entry.Session_registry.actor
-  in
-  let%bind state = Agent_session.Session_actor.state entry.actor in
-  List.fold_result state.schedules ~init:() ~f:(fun () schedule ->
-    reconcile_schedule entry startup_time schedule)
-;;
+let reconcile_entry = Recovery_work.schedules
 
 let reconcile_recovered ~registry ~startup_time =
   Session_registry.entries registry
@@ -196,8 +158,10 @@ let process t sw registry =
     ignore
       (Agent_session.Session_actor.expire_subscriptions entry.Session_registry.actor
        : (int, Agent_protocol.Error.t) result);
-    dispatch_recurrences t sw entry;
-    dispatch_entry t sw entry)
+    if Session_registry.execution_selected registry entry
+    then (
+      dispatch_recurrences t sw entry;
+      dispatch_entry t sw entry))
 ;;
 
 let rec run t sw clock registry =

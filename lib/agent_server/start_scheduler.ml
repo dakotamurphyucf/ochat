@@ -45,7 +45,8 @@ let seed_entry queue entry =
 ;;
 
 let seed_recovered ~registry ~queue =
-  Result.all_unit (List.map (Session_registry.entries registry) ~f:(seed_entry queue))
+  Result.all_unit
+    (List.map (Session_registry.execution_entries registry) ~f:(seed_entry queue))
 ;;
 
 let activate_actor entry capacity newly_acquired =
@@ -100,7 +101,10 @@ let activate_entry entry =
 let process_ticket registry ticket =
   match Session_registry.find registry ticket.Agent_session.Start_queue.session_id with
   | None -> Drop
-  | Some entry -> activate_entry entry
+  | Some entry ->
+    if Session_registry.execution_selected registry entry
+    then activate_entry entry
+    else Drop
 ;;
 
 let blocked_entry entry blockers =

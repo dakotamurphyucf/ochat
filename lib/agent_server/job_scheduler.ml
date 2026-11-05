@@ -181,38 +181,7 @@ end
 
 exception Job_cancelled
 
-let interrupted_reason = "daemon restarted while the job was running"
-
-let reconcile_job entry (job : Agent_protocol.Job.t) =
-  match job.status with
-  | Agent_protocol.Job.Running ->
-    Agent_session.Session_actor.interrupt_job
-      entry.Session_registry.actor
-      ~job_id:job.id
-      ~generation:job.generation
-      ~attempt:job.attempt
-      ~reason:interrupted_reason
-    |> Result.map ~f:(fun (_ : Agent_protocol.Job.t) -> ())
-  | Queued
-  | Waiting_permission _
-  | Waiting_completion _
-  | Succeeded
-  | Failed _
-  | Cancelled
-  | Interrupted _ -> Ok ()
-;;
-
-let reconcile_entry entry ~max_count ~max_total_bytes =
-  let open Result.Let_syntax in
-  let%bind () =
-    Agent_session.Session_actor.recover_background_results
-      entry.Session_registry.actor
-      ~max_count
-      ~max_total_bytes
-  in
-  let%bind state = Agent_session.Session_actor.state entry.actor in
-  List.fold_result state.jobs ~init:() ~f:(fun () job -> reconcile_job entry job)
-;;
+let reconcile_entry = Recovery_work.jobs
 
 let reconcile_recovered ~registry ~max_count ~max_total_bytes =
   Session_registry.entries registry
@@ -761,6 +730,10 @@ let process t sw registry =
              ~attempt:job.attempt
            : (Agent_protocol.Job.t, Agent_protocol.Error.t) result)
       | _ -> ()));
+  let states =
+    List.filter states ~f:(fun (entry, _, _) ->
+      Session_registry.execution_selected registry entry)
+  in
   List.iter states ~f:(fun (entry, _, jobs) -> dispatch_delivery t sw entry jobs);
   let conversation_groups =
     List.filter_map states ~f:(fun (entry, owner, jobs) ->

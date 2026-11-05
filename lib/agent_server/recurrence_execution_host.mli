@@ -105,7 +105,7 @@ module Execution : sig
 end
 
 module Target : sig
-  (** Actual selected target and target-family grant, before source preview or
+  (** Actual acquired target and target-family grant, before source preview or
       Intent construction. Holds one original target proof and the same actual
       controller/entry/child association used by the eventual Execution. No
       constructor, decoder, resource owner or permission registry. *)
@@ -164,3 +164,18 @@ val captured_target
     work before Actor/Store teardown; this policy owner has no private work to
     pretend to join. An unrelated host/context is not modified. *)
 val close : t -> unit
+
+(** Acquire only this actual selected Controller's exact configured local edge
+    through the real Factory metadata owner. Configuration alone never selects a
+    controller. The configured original principal/absolute expiry and real target
+    provenance/capacity/policy remain required across recovery. No runtime warms. *)
+val acquire_existing_target
+  :  Controller.t
+  -> session:Agent_protocol.Session_ref.t
+  -> (Target.t, Agent_protocol.Error.t) result
+
+(** The same Target original/policy through the actual Factory's joined immutable
+    source preview; no Intent, runtime or executable authority is manufactured. *)
+val preview_target_source
+  :  Target.t
+  -> (Session_factory.Recurrence_source_preview.t, Agent_protocol.Error.t) result
