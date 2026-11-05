@@ -5781,7 +5781,7 @@ let close_unregistered_runtime t handle runtime writer actor capacity =
 
 let refresh_held_construction continuation =
   let module A = Agent_session.Session_actor in
-  let module C = A.Recurrence_activation.Continuation in
+  let module C = A.Admitted_activation.Continuation in
   let open Result.Let_syntax in
   let%bind () = C.refresh continuation in
   let%bind () = C.check_policy continuation in
@@ -8040,6 +8040,35 @@ let read_session t index_entry =
 ;;
 
 let owns_handle t handle = Agent_store.Session_store.owns_handle t.store handle
+
+let check_registered_entry t (entry : Session_registry.entry) ~session =
+  let module S = Agent_store.Session_store in
+  let module P = Agent_protocol in
+  let valid =
+    match entry.store_handle with
+    | None -> false
+    | Some handle ->
+      let id = S.Handle.session_id handle in
+      P.Session_ref.equal
+        session
+        (P.Session_ref.create ~server_id:(S.server_id t.store) ~session_id:id)
+      && S.owns_handle t.store handle
+      && (not (Session_registry.is_closing t.registry))
+      && (not (Session_registry.lifecycle_reserved t.registry id))
+      && Runtime_owner.belongs_to_actor entry.runtime entry.actor
+      && Option.exists (Session_registry.find t.registry id) ~f:(fun actual ->
+        phys_equal actual.actor entry.actor
+        && phys_equal actual.runtime entry.runtime
+        && Option.exists actual.store_handle ~f:(phys_equal handle))
+  in
+  if valid
+  then Ok ()
+  else
+    Error
+      (unavailable
+         Conflict
+         "recurrence entry is not this Factory's current registered owner")
+;;
 
 let recover_owned_session t handle =
   recover_open_handle

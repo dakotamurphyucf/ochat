@@ -92,7 +92,7 @@ val belongs_to_actor : t -> Agent_session.Session_actor.t -> bool
 type deferred_builder =
   source:Agent_session.Runtime_builder.Source.t
   -> preparation:Agent_session.Run_preparation.t
-  -> continuation:Agent_session.Session_actor.Recurrence_activation.Continuation.t
+  -> continuation:Agent_session.Session_actor.Admitted_activation.Continuation.t
   -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result
 
 (** Actual factory constructor retaining an explicitly supplied original actor
@@ -405,13 +405,25 @@ val resume_recurrence_retry_source_reported
     and closes only locally constructed resources. An already loaded runtime is
     retained. Primary errors/exceptions survive cleanup; cleanup failure after
     successful work is reported. No replay or no-effects claim is made. *)
+val with_held_runtime
+  :  t
+  -> prepared:Prepared.t
+  -> held:Agent_session.Session_actor.Held_run.t
+  -> checked:Agent_session.Session_actor.Admitted_activation.Checked.t
+  -> (Agent_session.Runtime_builder.t
+      -> Agent_session.Session_actor.Admitted_activation.Continuation.t
+      -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
+(** Recurrence compatibility entry. Projects the SAME checked association into
+    [with_held_runtime]; scoped lifetime, cleanup and error laws are identical. *)
 val with_held_recurrence_runtime
   :  t
   -> prepared:Prepared.t
   -> held:Agent_session.Session_actor.Held_run.t
   -> checked:Agent_session.Session_actor.Recurrence_activation.Checked.t
   -> (Agent_session.Runtime_builder.t
-      -> Agent_session.Session_actor.Recurrence_activation.Continuation.t
+      -> Agent_session.Session_actor.Admitted_activation.Continuation.t
       -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
@@ -451,7 +463,7 @@ val with_held_input_runtime
   :  t
   -> prepared:Prepared.t
   -> held:Agent_session.Session_actor.Held_run.t
-  -> checked:Agent_session.Session_actor.Recurrence_activation.Checked.t
+  -> checked:Agent_session.Session_actor.Admitted_activation.Checked.t
   -> (Held_input_runtime.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
@@ -466,7 +478,7 @@ val start_held_authored_runtime
   :  t
   -> prepared:Prepared.t
   -> held:Agent_session.Session_actor.Held_run.t
-  -> checked:Agent_session.Session_actor.Recurrence_activation.Checked.t
+  -> checked:Agent_session.Session_actor.Admitted_activation.Checked.t
   -> (Agent_protocol.Run_receipt.t, Agent_protocol.Error.t) result
 
 (** Cancellable auxiliary inference lifetime without loading a runtime. A loaded

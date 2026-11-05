@@ -13,7 +13,7 @@ type source_stage =
   ; runtime : Agent_session.Runtime_builder.t option
   ; mutable binding : Agent_session.Session_actor.Source_binding.t option
   ; mutable continuation :
-      Agent_session.Session_actor.Recurrence_activation.Continuation.t option
+      Agent_session.Session_actor.Admitted_activation.Continuation.t option
   ; mutable closed : bool
   ; mutable retire_installed : Agent_session.Runtime_builder.t option
   ; mutable handoff_runtime : Agent_session.Runtime_builder.t option
@@ -24,7 +24,7 @@ let close_source_stage stage =
   Option.iter stage.binding ~f:Agent_session.Session_actor.Source_binding.close;
   Option.iter stage.continuation ~f:(fun continuation ->
     Agent_session.Session_actor.Held_run.Activation.close
-      (Agent_session.Session_actor.Recurrence_activation.Continuation.target continuation))
+      (Agent_session.Session_actor.Admitted_activation.Continuation.target continuation))
 ;;
 
 module Prepared = struct
@@ -133,7 +133,7 @@ end
 type deferred_builder =
   source:Agent_session.Runtime_builder.Source.t
   -> preparation:Agent_session.Run_preparation.t
-  -> continuation:Agent_session.Session_actor.Recurrence_activation.Continuation.t
+  -> continuation:Agent_session.Session_actor.Admitted_activation.Continuation.t
   -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result
 
 type builder =
@@ -196,7 +196,7 @@ let prepared_source_blocks_runtime ?execution_access t =
        | Some continuation, Some installed, Some current ->
          phys_equal installed current
          && Agent_session.Session_actor.Held_run.Activation.handoff_acknowledged
-              (Agent_session.Session_actor.Recurrence_activation.Continuation.target
+              (Agent_session.Session_actor.Admitted_activation.Continuation.target
                  continuation)
        | None, _, _ | _, None, _ | _, _, None -> false)
 ;;
@@ -1385,7 +1385,7 @@ module Held_runtime_residency = struct
     | Handed_off of Agent_session.Runtime_builder.t
 end
 
-let with_held_runtime t ~(prepared : Prepared.t) ~held ~checked f =
+let with_held_runtime_internal t ~(prepared : Prepared.t) ~held ~checked f =
   let open Result.Let_syntax in
   let owner_basis () =
     if
@@ -1433,8 +1433,7 @@ let with_held_runtime t ~(prepared : Prepared.t) ~held ~checked f =
     else owner_basis ()
   in
   let check_effect active =
-    let module Continuation =
-      Agent_session.Session_actor.Recurrence_activation.Continuation
+    let module Continuation = Agent_session.Session_actor.Admitted_activation.Continuation
     in
     let%bind () = consumed_basis active in
     let%bind () = Continuation.refresh active in
@@ -1454,7 +1453,7 @@ let with_held_runtime t ~(prepared : Prepared.t) ~held ~checked f =
         | None -> Ok (Ok ())
         | Some active ->
           let activation =
-            Agent_session.Session_actor.Recurrence_activation.Continuation.target active
+            Agent_session.Session_actor.Admitted_activation.Continuation.target active
           in
           Agent_session.Session_actor.Held_run.Activation.close activation;
           (try
@@ -1472,7 +1471,7 @@ let with_held_runtime t ~(prepared : Prepared.t) ~held ~checked f =
           let handed_off =
             Option.exists !continuation ~f:(fun active ->
               Agent_session.Session_actor.Held_run.Activation.handoff_acknowledged
-                (Agent_session.Session_actor.Recurrence_activation.Continuation.target
+                (Agent_session.Session_actor.Admitted_activation.Continuation.target
                    active))
           in
           if handed_off
@@ -1506,7 +1505,7 @@ let with_held_runtime t ~(prepared : Prepared.t) ~held ~checked f =
              Construction and the caller's effects remain cancellable. *)
           Eio.Cancel.protect (fun () ->
             let result =
-              Agent_session.Session_actor.begin_held_recurrence_activation
+              Agent_session.Session_actor.begin_held_activation
                 t.actor
                 ~binding:prepared.binding
                 ~held
@@ -1518,7 +1517,7 @@ let with_held_runtime t ~(prepared : Prepared.t) ~held ~checked f =
               if prepared.stage.closed
               then
                 Agent_session.Session_actor.Held_run.Activation.close
-                  (Agent_session.Session_actor.Recurrence_activation.Continuation.target
+                  (Agent_session.Session_actor.Admitted_activation.Continuation.target
                      active));
             result)
         in
@@ -1574,9 +1573,22 @@ let with_held_runtime t ~(prepared : Prepared.t) ~held ~checked f =
   | Ok (Ok _), Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
+let with_held_runtime t ~prepared ~held ~checked f =
+  with_held_runtime_internal
+    t
+    ~prepared
+    ~held
+    ~checked
+    (fun runtime continuation _residency -> f runtime continuation)
+;;
+
 let with_held_recurrence_runtime t ~prepared ~held ~checked f =
-  with_held_runtime t ~prepared ~held ~checked (fun runtime continuation _residency ->
-    f runtime continuation)
+  with_held_runtime
+    t
+    ~prepared
+    ~held
+    ~checked:(Agent_session.Session_actor.Recurrence_activation.Checked.admitted checked)
+    f
 ;;
 
 let install_held_runtime t ~(prepared : Prepared.t) ~runtime ~continuation ~residency =
@@ -1640,7 +1652,7 @@ module Held_input_runtime = struct
     { owner : owner
     ; prepared : Prepared.t
     ; runtime : Agent_session.Runtime_builder.t
-    ; continuation : Agent_session.Session_actor.Recurrence_activation.Continuation.t
+    ; continuation : Agent_session.Session_actor.Admitted_activation.Continuation.t
     ; residency : Held_runtime_residency.t option ref
     ; admission : Agent_protocol.Run_receipt.t
     ; mutable phase : Phase.t
@@ -1695,39 +1707,52 @@ module Held_input_runtime = struct
 end
 
 let with_held_input_runtime t ~prepared ~held ~checked f =
-  with_held_runtime t ~prepared ~held ~checked (fun runtime continuation residency ->
-    prepared.stage.handoff_runtime <- Some runtime;
-    let input_runtime : Held_input_runtime.t =
-      { owner = t
-      ; prepared
-      ; runtime
-      ; continuation
-      ; residency
-      ; admission = Agent_session.Session_actor.Held_run.admission held
-      ; phase = Available
-      }
-    in
-    Exn.protect
-      ~finally:(fun () -> input_runtime.phase <- Closed)
-      ~f:(fun () -> f input_runtime))
+  with_held_runtime_internal
+    t
+    ~prepared
+    ~held
+    ~checked
+    (fun runtime continuation residency ->
+       prepared.stage.handoff_runtime <- Some runtime;
+       let input_runtime : Held_input_runtime.t =
+         { owner = t
+         ; prepared
+         ; runtime
+         ; continuation
+         ; residency
+         ; admission = Agent_session.Session_actor.Held_run.admission held
+         ; phase = Available
+         }
+       in
+       Exn.protect
+         ~finally:(fun () -> input_runtime.phase <- Closed)
+         ~f:(fun () -> f input_runtime))
 ;;
 
 let start_held_authored_runtime t ~prepared ~held ~checked =
-  with_held_runtime t ~prepared ~held ~checked (fun runtime continuation residency ->
-    let open Result.Let_syntax in
-    let%bind startup = Agent_session.Runtime_builder.authored_start runtime in
-    prepared.stage.handoff_runtime <- Some runtime;
-    let%bind () = install_held_runtime t ~prepared ~runtime ~continuation ~residency in
-    Eio.Fiber.check ();
-    (* The Actor joins the actual lifecycle callback and releases the aggregate.
+  with_held_runtime_internal
+    t
+    ~prepared
+    ~held
+    ~checked
+    (fun runtime continuation residency ->
+       let open Result.Let_syntax in
+       let%bind startup = Agent_session.Runtime_builder.authored_start runtime in
+       prepared.stage.handoff_runtime <- Some runtime;
+       let%bind () = install_held_runtime t ~prepared ~runtime ~continuation ~residency in
+       Eio.Fiber.check ();
+       (* The Actor joins the actual lifecycle callback and releases the aggregate.
        Do not shield that work from cancellation. Its immutable ACK also lets
        ordinary scoped cleanup reconcile a lost post-commit reply. *)
-    let result =
-      Agent_session.Session_actor.start_held_authored_run t.actor ~continuation ~startup
-    in
-    Result.iter result ~f:(fun _ ->
-      residency := Some (Held_runtime_residency.Handed_off runtime));
-    result)
+       let result =
+         Agent_session.Session_actor.start_held_authored_run
+           t.actor
+           ~continuation
+           ~startup
+       in
+       Result.iter result ~f:(fun _ ->
+         residency := Some (Held_runtime_residency.Handed_off runtime));
+       result)
 ;;
 
 let with_unloaded t f =

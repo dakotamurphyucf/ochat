@@ -703,3 +703,37 @@ a replacement request or revive the old observation. A failed or uncertain
 controller write does not release target admission. After recovery, an exact
 retained rotation can be reported as data, but that data does not restore a lost
 preparation or execution permission. No automatic retry loop is implied.
+
+
+`Recurrence_run_service` composes these existing owners into one explicit host
+operation. It validates the controller and target against the Factory's current
+registry and Store, records the occurrence attempt, admits its held Run, imports
+the reciprocal evidence, and acquires activation before invoking the existing
+input or authored-start runtime. A controller targeting itself uses the owned
+acknowledgement paths; a distinct target uses ordinary controller imports.
+The service does not select due occurrences or automatically retry them.
+
+Its response separates admission from activation. A known admission receipt stays
+available if activation or subsequent reconciliation fails. Unknown admission is
+reported as uncertain; it is never converted into permission to retry. Domain
+errors pass through the complete Factory cleanup before the service classifies
+them. Cancellation and unexpected exceptions retain their original behavior.
+An activation acknowledgement means the startup or input handoff succeeded, not
+that a workflow has finished.
+
+Retained lookup happens before runtime reservation, so an active workflow can
+return its existing receipt. Activation replay still requires the original
+attempt principal and current command and transcript-read permissions. Explicit
+reconciliation retains its separate read-authority rules. Neither path replays
+the runtime. Their results preserve the actual import's settlement and
+timing disposition, including review holds and details no longer retained.
+Terminal reconciliation uses the host's current automatic policy and the existing
+source, lifecycle and timing checks; it does not silently replace that policy
+with historical-only settlement.
+
+The runtime consumer accepts an opaque admitted activation view. Projecting a
+recurrence activation into that view retains the same owner and consumption cell;
+it cannot create a second activation. Concrete recurrence checks retain the
+original Store, Run admission and reciprocal origin through startup and transfer
+to the worker. Only the acknowledged transfer publishes that worker's ownership.
+This shared consumer does not itself issue Goal or recurrence authority.

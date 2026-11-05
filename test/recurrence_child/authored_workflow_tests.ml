@@ -349,7 +349,12 @@ let on_event ctx state event = Task.pure(state)
                                           child.runtime
                                           ~prepared
                                           ~held
-                                          ~checked
+                                          ~checked:
+                                            (Agent_session.Session_actor
+                                             .Recurrence_activation
+                                             .Checked
+                                             .admitted
+                                               checked)
                                         |> startup_result child
                                       in
                                       assert (P.Run_receipt.equal returned admission);

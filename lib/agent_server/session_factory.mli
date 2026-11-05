@@ -646,6 +646,19 @@ val recover_owned_session
 (** Pure same-host actual Handle ownership check before reconstruction transfer. *)
 val owns_handle : t -> Agent_store.Session_store.Handle.t -> bool
 
+(** Pure negative association check against this Factory's actual registry,
+    Actor/Owner pairing and owned Handle. [session] is expected-reference DATA,
+    compared with the actual Store server and Handle session. Rejects closing,
+    lifecycle-reserved, foreign or displaced owners without loading a runtime.
+    Stopped/recovered entries remain valid for factual reconciliation. This grants
+    no permission: actual source CPS still requires its private Factory key, and
+    all final authority checks remain in the existing Actor/Runtime_owner ports. *)
+val check_registered_entry
+  :  t
+  -> Session_registry.entry
+  -> session:Agent_protocol.Session_ref.t
+  -> (unit, Agent_protocol.Error.t) result
+
 (** Rebuild missing-index projections through immutable owned reads without
     actors/providers. Retain the eager-recovery marker for actual Execute recovery. *)
 val rebuild_index_projections : t -> (unit, Agent_protocol.Error.t) Result.t

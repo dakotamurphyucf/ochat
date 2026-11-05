@@ -862,7 +862,11 @@ let run (cut : Cut.t) =
                                       target.runtime
                                       ~prepared
                                       ~held
-                                      ~checked
+                                      ~checked:
+                                        (Agent_session.Session_actor.Recurrence_activation
+                                         .Checked
+                                         .admitted
+                                           checked)
                                       (fun input_runtime ->
                                          input_runtime_used := Some input_runtime;
                                          Owner.Held_input_runtime.submit

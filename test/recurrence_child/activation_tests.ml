@@ -333,7 +333,7 @@ let cold_target
 (* Parent is real Running/Ready/Idle after authenticated client create/start,
    with its actual planner installed via Support.with_planner. Source files and
    recipe file were written before Daemon.start. f stays within all live leases. *)
-let with_cold_held
+let with_cold_occurrence
       ?(mode = P.Run.Mode.Single_turn)
       ?(check_prewarm = false)
       ?(catalog_target = false)
@@ -419,102 +419,135 @@ let with_cold_held
       ~key:(P.Idempotency_key.of_string "520-cold-activation" |> protocol_ok)
     |> protocol_ok
   in
-  let preparation =
-    match
-      Actor.begin_headless_run_preparation
-        child.actor
-        ~actor:original
-        ~authorize
-        ~request:(Attempt.request attempt ~intent |> protocol_ok)
-      |> protocol_ok
-    with
-    | Prepare preparation -> preparation
-    | Retained _ -> failwith "cold fixture reused an old Run"
-  in
-  protect_cleanup
-    ~finally:(fun () -> Actor.end_run_preparation child.actor preparation |> protocol_ok)
-    (fun () ->
-       Factory.with_prepared_run_source
-         (Daemon.factory daemon)
-         child
-         ~preparation
-         (fun prepared ->
-            no_effects ();
-            let binding = Owner.Prepared.binding prepared in
-            let selected = Actor.Source_binding.source binding in
-            (match A.Runtime_builder.Source.selection selected with
-             | Captured _ -> ()
-             | Authored _ | Authored_child _ | Generated _ ->
-               failwith "cold fixture lost actual captured-child source custody");
-            (match A.Runtime_builder.Source.moderator selected with
-             | Legacy observer | Extension observer ->
-               assert (P.Invocation.equal_observer observer proposed_source.observer)
-             | No_moderator -> failwith "cold fixture has no actual moderator");
-            Actor.record_recurrence_execution
-              parent.actor
-              ~actor:proof
-              ~authorize:(fun current _ -> authorize current)
-              ~intent
-              ~attempt
-            |> protocol_ok
-            |> ignore;
-            no_effects ();
-            let held =
-              match
-                Actor.admit_held_recurrence_run
-                  child.actor
-                  ~binding
-                  ~intent
-                  ~attempt
-                  ~session:target_session
-                |> protocol_ok
-              with
-              | Held held -> held
-              | Retained _ -> failwith "cold fixture lacks live held owner"
-              | Rejected error | Uncertain error -> raise_s [%sexp (error : P.Error.t)]
-            in
-            no_effects ();
-            let observe () =
-              Actor.observe_recurrence_run
-                child.actor
-                ~actor:proof
-                ~authorize
-                ~intent
-                ~attempt
-              |> protocol_ok
-              |> Option.value_exn
-            in
-            Actor.import_recurrence_execution
-              parent.actor
-              ~actor:proof
-              ~authorize:(fun current _ -> authorize current)
-              ~automatic_policy:(fun _ _ -> Ok true)
-              ~observation:(observe ())
-            |> protocol_ok
-            |> ignore;
-            no_effects ();
-            let observation = observe () in
-            let permit =
-              Actor.acquire_recurrence_activation
-                parent.actor
-                ~actor:proof
-                ~authorize:(fun current _ -> authorize current)
-                ~observation
-              |> protocol_ok
-            in
-            protect_cleanup
-              ~finally:(fun () ->
-                Actor.release_recurrence_activation parent.actor permit |> protocol_ok)
-              (fun () ->
-                 let checked =
-                   Actor.check_recurrence_activation parent.actor permit ~observation
-                   |> protocol_ok
+  f ~child ~intent ~attempt ~assert_dormant_effects:no_effects
+;;
+
+let with_cold_held
+      ?(mode = P.Run.Mode.Single_turn)
+      ?(check_prewarm = false)
+      ?(catalog_target = false)
+      ?(before_prepare = fun _ -> ())
+      env
+      daemon
+      parent
+      ~root_file
+      ~counters
+      ~original
+      f
+  =
+  with_cold_occurrence
+    ~mode
+    ~check_prewarm
+    ~catalog_target
+    ~before_prepare
+    env
+    daemon
+    parent
+    ~root_file
+    ~counters
+    ~original
+    (fun ~child ~intent ~attempt ~assert_dormant_effects:no_effects ->
+       let proposed_source = Intent.source intent in
+       let target_session = Intent.target intent in
+       let preparation =
+         match
+           Actor.begin_headless_run_preparation
+             child.actor
+             ~actor:original
+             ~authorize
+             ~request:(Attempt.request attempt ~intent |> protocol_ok)
+           |> protocol_ok
+         with
+         | Prepare preparation -> preparation
+         | Retained _ -> failwith "cold fixture reused an old Run"
+       in
+       protect_cleanup
+         ~finally:(fun () ->
+           Actor.end_run_preparation child.actor preparation |> protocol_ok)
+         (fun () ->
+            Factory.with_prepared_run_source
+              (Daemon.factory daemon)
+              child
+              ~preparation
+              (fun prepared ->
+                 no_effects ();
+                 let binding = Owner.Prepared.binding prepared in
+                 let selected = Actor.Source_binding.source binding in
+                 (match A.Runtime_builder.Source.selection selected with
+                  | Captured _ -> ()
+                  | Authored _ | Authored_child _ | Generated _ ->
+                    failwith "cold fixture lost actual captured-child source custody");
+                 (match A.Runtime_builder.Source.moderator selected with
+                  | Legacy observer | Extension observer ->
+                    assert (P.Invocation.equal_observer observer proposed_source.observer)
+                  | No_moderator -> failwith "cold fixture has no actual moderator");
+                 Actor.record_recurrence_execution
+                   parent.actor
+                   ~actor:proof
+                   ~authorize:(fun current _ -> authorize current)
+                   ~intent
+                   ~attempt
+                 |> protocol_ok
+                 |> ignore;
+                 no_effects ();
+                 let held =
+                   match
+                     Actor.admit_held_recurrence_run
+                       child.actor
+                       ~binding
+                       ~intent
+                       ~attempt
+                       ~session:target_session
+                     |> protocol_ok
+                   with
+                   | Held held -> held
+                   | Retained _ -> failwith "cold fixture lacks live held owner"
+                   | Rejected error | Uncertain error ->
+                     raise_s [%sexp (error : P.Error.t)]
                  in
                  no_effects ();
-                 Held.check_basis held |> protocol_ok;
-                 Owner.Prepared.check_basis prepared |> protocol_ok;
-                 f child prepared held checked intent attempt))
-       |> protocol_ok)
+                 let observe () =
+                   Actor.observe_recurrence_run
+                     child.actor
+                     ~actor:proof
+                     ~authorize
+                     ~intent
+                     ~attempt
+                   |> protocol_ok
+                   |> Option.value_exn
+                 in
+                 Actor.import_recurrence_execution
+                   parent.actor
+                   ~actor:proof
+                   ~authorize:(fun current _ -> authorize current)
+                   ~automatic_policy:(fun _ _ -> Ok true)
+                   ~observation:(observe ())
+                 |> protocol_ok
+                 |> ignore;
+                 no_effects ();
+                 let observation = observe () in
+                 let permit =
+                   Actor.acquire_recurrence_activation
+                     parent.actor
+                     ~actor:proof
+                     ~authorize:(fun current _ -> authorize current)
+                     ~observation
+                   |> protocol_ok
+                 in
+                 protect_cleanup
+                   ~finally:(fun () ->
+                     Actor.release_recurrence_activation parent.actor permit
+                     |> protocol_ok)
+                   (fun () ->
+                      let checked =
+                        Actor.check_recurrence_activation parent.actor permit ~observation
+                        |> protocol_ok
+                      in
+                      no_effects ();
+                      Held.check_basis held |> protocol_ok;
+                      Owner.Prepared.check_basis prepared |> protocol_ok;
+                      f child prepared held checked intent attempt))
+            |> protocol_ok))
 ;;
 
 let%test_unit
@@ -1511,7 +1544,8 @@ let on_event ctx state event = Task.pure(state)
                                                    child.runtime
                                                    ~prepared
                                                    ~held
-                                                   ~checked))
+                                                   ~checked:
+                                                     (Activation.Checked.admitted checked)))
                                            in
                                            protect_cleanup
                                              ~finally:release_provider
@@ -1702,7 +1736,8 @@ let on_event ctx state event = Task.pure(state)
                                               child.runtime
                                               ~prepared
                                               ~held
-                                              ~checked
+                                              ~checked:
+                                                (Activation.Checked.admitted checked)
                                           with
                                           | Error error ->
                                             assert (P.Error.equal_code error.code Conflict)

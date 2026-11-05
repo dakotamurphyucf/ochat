@@ -185,12 +185,16 @@ let run (cut : Cut.t) =
                               Activation_tests.refresh actor permit observation
                               |> protocol_ok
                             in
+                            let admitted = Activation.Checked.admitted checked in
+                            let duplicate = Activation.Checked.admitted checked in
+                            Actor.Admitted_activation.Checked.check_basis admitted
+                            |> protocol_ok;
                             let continuation =
-                              Actor.begin_held_recurrence_activation
+                              Actor.begin_held_activation
                                 actor
                                 ~binding
                                 ~held
-                                ~checked
+                                ~checked:admitted
                               |> protocol_ok
                             in
                             protect_cleanup
@@ -201,6 +205,24 @@ let run (cut : Cut.t) =
                                     (Activation.Continuation.target continuation)
                                 |> protocol_ok)
                               (fun () ->
+                                 (* Both public views retain the same consumed
+                                    owner. A second projection cannot open a
+                                    second activation or poison the first one. *)
+                                 assert (
+                                   Result.is_error
+                                     (Activation.Checked.check_basis checked));
+                                 assert (
+                                   Result.is_error
+                                     (Actor.Admitted_activation.Checked.check_basis
+                                        duplicate));
+                                 assert (
+                                   Result.is_error
+                                     (Actor.begin_held_activation
+                                        actor
+                                        ~binding
+                                        ~held
+                                        ~checked:duplicate));
+                                 [%test_eq: int] 0 !prefix;
                                  Activation.Continuation.refresh continuation
                                  |> protocol_ok;
                                  Actor.with_held_input

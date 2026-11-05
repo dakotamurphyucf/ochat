@@ -427,7 +427,8 @@ let consume
          target.runtime
          ~prepared
          ~held
-         ~checked
+         ~checked:
+           (Agent_session.Session_actor.Recurrence_activation.Checked.admitted checked)
          (fun runtime ->
             Owner.Held_input_runtime.submit runtime ~prepare:(fun ~runtime ~scope ->
               assert (phys_equal expected_runtime runtime);

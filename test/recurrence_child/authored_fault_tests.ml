@@ -305,7 +305,11 @@ let on_event ctx state event = Task.pure(state)
                                    child.runtime
                                    ~prepared
                                    ~held
-                                   ~checked
+                                   ~checked:
+                                     (Agent_session.Session_actor.Recurrence_activation
+                                      .Checked
+                                      .admitted
+                                        checked)
                                with
                                | Error failure ->
                                  [%test_eq: P.Error.code] Persistence_error failure.code
@@ -364,7 +368,11 @@ let on_event ctx state event = Task.pure(state)
                                    child.runtime
                                    ~prepared
                                    ~held
-                                   ~checked
+                                   ~checked:
+                                     (Agent_session.Session_actor.Recurrence_activation
+                                      .Checked
+                                      .admitted
+                                        checked)
                                with
                                | Error failure ->
                                  [%test_eq: P.Error.code] Conflict failure.code

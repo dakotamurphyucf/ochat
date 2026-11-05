@@ -138,10 +138,29 @@ module Deferred_owner = struct
   ;;
 end
 
+(* Only concrete Actor-owned association issuers construct this link. It retains
+   the actual Store and immutable admitted association; public DATA cannot issue
+   or replace it. Checks are pure and never invoke supplied host callbacks. *)
+module Activation_association = struct
+  type t =
+    { check_target :
+        store:Recurrence_controller.t
+        -> state:Session_state.t
+        -> run:Agent_protocol.Run.t
+        -> admission:Agent_protocol.Run_receipt.t
+        -> (unit, Agent_protocol.Error.t) result
+    }
+
+  let check_target t ~store ~state ~run ~admission =
+    t.check_target ~store ~state ~run ~admission
+  ;;
+end
+
 module Activation_controller = struct
   module Operation = struct
     type t =
-      { install : unit -> unit
+      { association : Activation_association.t
+      ; install : unit -> unit
       ; close : unit -> unit
       ; refresh : unit -> (unit, Agent_protocol.Error.t) result
       ; policy : unit -> (unit, Agent_protocol.Error.t) result
@@ -161,7 +180,6 @@ module Held_operation = struct
       ; scope : Run_admission.Scope.t
       ; run : Agent_protocol.Run.t
       ; admission : Agent_protocol.Run_receipt.t
-      ; origin : Recurrence_run_origin.t
       ; source : Runtime_source_preparation.t
       ; operation : Agent_protocol.Operation.t
       ; worker : Operation_worker.t
@@ -231,6 +249,7 @@ module Held_run = struct
       ; run : Agent_protocol.Run.t
       ; admission : Agent_protocol.Run_receipt.t
       ; scope : Run_admission.Scope.t
+      ; association : Activation_association.t
       ; phase : phase ref
       ; input_attempt : Input_attempt.t ref
       ; owned_basis : unit -> (unit, Agent_protocol.Error.t) result
@@ -286,11 +305,7 @@ module Held_run = struct
   end
 end
 
-module Recurrence_activation = struct
-  type t = Activation_custody.t
-
-  let origin = Activation_custody.origin
-
+module Admitted_activation = struct
   module Continuation = struct
     type t =
       { target : Held_run.Activation.t
@@ -317,8 +332,7 @@ module Recurrence_activation = struct
       ; check_authority : unit -> (unit, Agent_protocol.Error.t) result
       ; check_timing : unit -> (unit, Agent_protocol.Error.t) result
       ; check_basis : unit -> (unit, Agent_protocol.Error.t) result
-      ; origin : Recurrence_run_origin.t
-      ; target_controller : Recurrence_controller.t
+      ; association : Activation_association.t
       ; continue : Held_run.Activation.t -> Continuation.t
       ; consumed : bool ref
       }
@@ -342,6 +356,25 @@ module Recurrence_activation = struct
   end
 end
 
+module Recurrence_activation = struct
+  type t = Activation_custody.t
+
+  let origin = Activation_custody.origin
+
+  module Checked = struct
+    type t = Admitted_activation.Checked.t
+
+    let check_current = Admitted_activation.Checked.check_current
+    let check_policy = Admitted_activation.Checked.check_policy
+    let check_authority = Admitted_activation.Checked.check_authority
+    let check_timing = Admitted_activation.Checked.check_timing
+    let check_basis = Admitted_activation.Checked.check_basis
+    let admitted t = t
+  end
+
+  module Continuation = Admitted_activation.Continuation
+end
+
 (* This owner is issued by the real authored lifecycle ACK, never by a source
    tag or a callback receipt. The same scope is retained by its actual Event. *)
 module Held_authored_start = struct
@@ -360,7 +393,7 @@ module Held_authored_start = struct
   type t =
     { domain : int
     ; issuing_actor : unit ref
-    ; continuation : Recurrence_activation.Continuation.t
+    ; continuation : Admitted_activation.Continuation.t
     ; startup : Runtime_builder.Authored_start.t
     ; binding : Run_authorities.binding
     ; mutable jobs : Agent_protocol.Job.t list
@@ -396,7 +429,7 @@ module Held_input_scope = struct
   type t =
     { domain : int
     ; issuing_actor : unit ref
-    ; continuation : Recurrence_activation.Continuation.t
+    ; continuation : Admitted_activation.Continuation.t
     ; request : Run_admission_request.t
     ; id : History_entry.Id.t
     ; mutable phase : phase
@@ -881,7 +914,7 @@ module Initialization_scope = struct
     ; mutable callback : Callback.t
     ; mutable resource : Resource.t option
     ; run_preparation : Run_preparation.t option
-    ; held_continuation : Recurrence_activation.Continuation.t option
+    ; held_continuation : Admitted_activation.Continuation.t option
     ; agent_admission : agent_admission
     }
 
@@ -1413,7 +1446,7 @@ module Held_startup_request = struct
     | Effect_deferred : 'a Effect_deferred_request.t -> 'a t
     | Input_graph : 'a Input_graph_request.t -> 'a t
     | Begin_authored :
-        Recurrence_activation.Continuation.t
+        Admitted_activation.Continuation.t
         * Runtime_builder.Authored_start.t
         * Session.Moderator_state.Identity_snapshot.t option
         -> Held_authored_start.t t
@@ -1426,9 +1459,9 @@ module Held_startup_request = struct
         -> queued_event_borrow option t
     | Finish_authored : Held_authored_start.t -> Agent_protocol.Run_receipt.t t
     | Authored_resource :
-        Recurrence_activation.Continuation.t * Agent_protocol.Job.launch_owner
+        Admitted_activation.Continuation.t * Agent_protocol.Job.launch_owner
         -> Held_authored_resource.t t
-    | Begin_input : Recurrence_activation.Continuation.t -> Held_input_scope.t t
+    | Begin_input : Admitted_activation.Continuation.t -> Held_input_scope.t t
     | Submit_input :
         Held_input_scope.t * Runtime_input_preparation.Prepared_input.t
         -> submission t
@@ -1436,26 +1469,26 @@ module Held_startup_request = struct
         Held_input_scope.t * Runtime_input_preparation.Prepared_input.t
         -> unit t
     | Close_input : Held_input_scope.t -> unit t
-    | Begin_held_recurrence_activation :
-        Source_binding.t * Held_run.t * Recurrence_activation.Checked.t
-        -> Recurrence_activation.Continuation.t t
+    | Begin_held_activation :
+        Source_binding.t * Held_run.t * Admitted_activation.Checked.t
+        -> Admitted_activation.Continuation.t t
     | Enable_turn_budget :
-        Recurrence_activation.Continuation.t * Chat_response.Runtime_semantics.policy
+        Admitted_activation.Continuation.t * Chat_response.Runtime_semantics.policy
         -> unit t
     | Install_runtime :
-        Recurrence_activation.Continuation.t
+        Admitted_activation.Continuation.t
         * Operation_worker.t
         * Inference_client.Execution.t
         * Chat_response.Moderator_manager.t option
         -> unit t
     | End_held_activation : Held_run.Activation.t -> unit t
     | Begin_held_initialization :
-        Recurrence_activation.Continuation.t
+        Admitted_activation.Continuation.t
         * Initialization_scope.Purpose.t
         * Session_state.t
         -> Initialization_scope.t t
     | Reserve_held_history_block :
-        Recurrence_activation.Continuation.t * int
+        Admitted_activation.Continuation.t * int
         -> History_id_source.reservation t
 end
 
@@ -2812,18 +2845,18 @@ let sync_extension_clock t =
 
 let check_held_effect continuation =
   let open Result.Let_syntax in
-  let target = Recurrence_activation.Continuation.target continuation in
-  let%bind () = Recurrence_activation.Continuation.check_basis continuation in
-  let%bind () = Recurrence_activation.Continuation.check_policy continuation in
-  let%bind () = Recurrence_activation.Continuation.check_timing continuation in
-  let%bind () = Recurrence_activation.Continuation.check_authority continuation in
+  let target = Admitted_activation.Continuation.target continuation in
+  let%bind () = Admitted_activation.Continuation.check_basis continuation in
+  let%bind () = Admitted_activation.Continuation.check_policy continuation in
+  let%bind () = Admitted_activation.Continuation.check_timing continuation in
+  let%bind () = Admitted_activation.Continuation.check_authority continuation in
   let%bind () = Held_run.Activation.check_basis target in
-  Recurrence_activation.Continuation.check_basis continuation
+  Admitted_activation.Continuation.check_basis continuation
 ;;
 
 let held_authored_basis t (scope : Held_authored_start.t) =
   let open Result.Let_syntax in
-  let activation = Recurrence_activation.Continuation.target scope.continuation in
+  let activation = Admitted_activation.Continuation.target scope.continuation in
   let%bind () =
     if
       Int.equal scope.domain (Stdlib.Domain.self () :> int)
@@ -2857,7 +2890,7 @@ let held_authored_run t scope =
   let open Result.Let_syntax in
   let%bind () = held_authored_basis t scope in
   let activation =
-    Recurrence_activation.Continuation.target scope.Held_authored_start.continuation
+    Admitted_activation.Continuation.target scope.Held_authored_start.continuation
   in
   Option.bind t.state.run_state ~f:(fun index -> Run_state.find index activation.run.id)
   |> Result.of_option ~error:(error Conflict "held authored Run is absent")
@@ -2897,7 +2930,7 @@ let held_authored_event_basis t (borrow : queued_event_borrow) scope =
 
 let held_authored_factual_preparation t (scope : Held_authored_start.t) =
   let preparation =
-    (Recurrence_activation.Continuation.target scope.continuation).preparation
+    (Admitted_activation.Continuation.target scope.continuation).preparation
   in
   if
     phys_equal scope.issuing_actor t.inference_owner_identity
@@ -2981,7 +3014,7 @@ let held_authored_handoff_acknowledged (scope : Held_authored_start.t) =
   then false
   else (
     match
-      scope.phase, !((Recurrence_activation.Continuation.target scope.continuation).phase)
+      scope.phase, !((Admitted_activation.Continuation.target scope.continuation).phase)
     with
     | Released, Handed_off (Authored_start proof) ->
       phys_equal proof.binding scope.binding
@@ -2995,7 +3028,7 @@ let refresh_held_authored t scope =
   else (
     let%bind () = held_authored_basis t scope in
     let%bind () =
-      Recurrence_activation.Continuation.refresh scope.Held_authored_start.continuation
+      Admitted_activation.Continuation.refresh scope.Held_authored_start.continuation
     in
     let%bind () = check_held_effect scope.continuation in
     held_authored_basis t scope)
@@ -3055,7 +3088,7 @@ let inference_port t execution ~graph ~relation ~configuration =
           if not (held_authored_handoff_acknowledged scope)
           then (
             held_authored_basis t scope |> require;
-            Recurrence_activation.Continuation.check_basis scope.continuation |> require))
+            Admitted_activation.Continuation.check_basis scope.continuation |> require))
     in
     Inference_allocation.Host.create
       ~handle:(Inference_allocation.handle allocation)
@@ -3076,7 +3109,7 @@ let model_job_port t execution =
 let held_startup_effect t preparation =
   let authored =
     Option.bind t.held_authored_start ~f:(fun scope ->
-      let activation = Recurrence_activation.Continuation.target scope.continuation in
+      let activation = Admitted_activation.Continuation.target scope.continuation in
       if Option.exists preparation ~f:(phys_equal activation.preparation)
       then
         Some
@@ -3092,7 +3125,7 @@ let held_startup_effect t preparation =
   | None ->
     Option.bind t.initialization_scope ~f:(fun scope ->
       Option.bind scope.Initialization_scope.held_continuation ~f:(fun continuation ->
-        let activation = Recurrence_activation.Continuation.target continuation in
+        let activation = Admitted_activation.Continuation.target continuation in
         if Option.exists preparation ~f:(phys_equal activation.preparation)
         then
           Some
@@ -3195,9 +3228,7 @@ let pending_held_startup_run t =
           Option.exists
             scope.Initialization_scope.held_continuation
             ~f:(fun continuation ->
-              phys_equal
-                activation
-                (Recurrence_activation.Continuation.target continuation))
+              phys_equal activation (Admitted_activation.Continuation.target continuation))
       in
       if exact_scope && Result.is_ok (activation.owned_basis ())
       then Result.ok (retained ())
@@ -3206,7 +3237,7 @@ let pending_held_startup_run t =
 
 let initialization_held_run t (scope : Initialization_scope.t) =
   match
-    ( Option.map scope.held_continuation ~f:Recurrence_activation.Continuation.target
+    ( Option.map scope.held_continuation ~f:Admitted_activation.Continuation.target
     , t.initialization_scope )
   with
   | Some activation, Some current
@@ -3560,7 +3591,7 @@ module Held_authored_acknowledgement = struct
     Option.iter t.pending ~f:(fun pending -> actor.lifecycle_agent_custody <- pending);
     actor.held_authored_start <- Some t.scope;
     t.scope.phase <- Starting;
-    (Recurrence_activation.Continuation.target t.scope.continuation).phase := Constructing
+    (Admitted_activation.Continuation.target t.scope.continuation).phase := Constructing
   ;;
 
   let discard t =
@@ -3700,6 +3731,7 @@ module Held_operation_acknowledgement = struct
     match t.input_scope.phase, t.held.phase with
     | Parsed_ready input, Staged
       when Runtime_input_preparation.Prepared_input.equal input t.input
+           && phys_equal t.held.proof.controller.association t.activation.association
            && Option.exists actor.operation_worker ~f:(phys_equal t.held.proof.worker)
            && Run_authorities.is_current
                 actor.run_authorities
@@ -4307,7 +4339,7 @@ let inference_error _ = error Invalid_state "inference tracking admission failed
 
 let input_scope_basis t (scope : Held_input_scope.t) =
   let open Result.Let_syntax in
-  let activation = Recurrence_activation.Continuation.target scope.continuation in
+  let activation = Admitted_activation.Continuation.target scope.continuation in
   let%bind () =
     if
       phys_equal scope.issuing_actor t.inference_owner_identity
@@ -4535,7 +4567,7 @@ let commit_inference_ledger
       let revision = t.state.counters.revision in
       let%bind candidate = prepare_transition t ~delta ~payloads in
       let preparation =
-        (Recurrence_activation.Continuation.target continuation).preparation
+        (Admitted_activation.Continuation.target continuation).preparation
       in
       let run_preparation =
         if
@@ -6702,7 +6734,7 @@ let validate_initialization_scope_current t scope =
       scope.Initialization_scope.held_continuation
       ~default:(Ok ())
       ~f:(fun continuation ->
-        (Recurrence_activation.Continuation.target continuation).owned_basis ())
+        (Admitted_activation.Continuation.target continuation).owned_basis ())
   in
   let%bind () = check_held_owner () in
   let%bind () =
@@ -8469,7 +8501,7 @@ let claim_held_authored_event t (scope : Held_authored_start.t) id snapshot even
         ; cancel_requested = false
         }
       in
-      let activation = Recurrence_activation.Continuation.target scope.continuation in
+      let activation = Admitted_activation.Continuation.target scope.continuation in
       let%bind prepared =
         prepare_transition
           ~run_preparation:activation.preparation
@@ -14184,13 +14216,18 @@ let held_operation_basis t (held : Held_operation.t) =
       ~request_sha256:proof.admission.request_sha256
   in
   let%bind () =
-    if
-      Option.exists admission ~f:(Agent_protocol.Run_receipt.equal proof.admission)
-      && Option.exists
-           (Run_state.recurrence_origin index run.id)
-           ~f:(Recurrence_run_origin.equal proof.origin)
-    then Recurrence_run_origin.validate_run proof.origin ~run ~admission:proof.admission
-    else Error (error Conflict "held root Admission or reciprocal origin changed")
+    if Option.exists admission ~f:(Agent_protocol.Run_receipt.equal proof.admission)
+    then Ok ()
+    else Error (error Conflict "held root Admission changed")
+  in
+  let%bind store = require_recurrence_controller t in
+  let%bind () =
+    Activation_association.check_target
+      proof.controller.association
+      ~store
+      ~state:t.state
+      ~run
+      ~admission:proof.admission
   in
   let%bind work =
     Agent_protocol.Run_work.create
@@ -17728,7 +17765,7 @@ let execution_basis t (origins : execution_origin_lookup) execution =
       let%bind () = Held_input_scope.parsing scope in
       let%bind () = input_scope_basis t scope in
       let%bind () = check_held_effect scope.continuation in
-      let activation = Recurrence_activation.Continuation.target scope.continuation in
+      let activation = Admitted_activation.Continuation.target scope.continuation in
       let%bind run =
         Option.bind t.state.run_state ~f:(fun index ->
           Run_state.find index activation.run.id)
@@ -18952,20 +18989,20 @@ let check_inference_allocation t (current : inference_currentness) owner handle 
   let authored_basis =
     Option.bind t.held_authored_start ~f:(fun scope ->
       let preparation =
-        (Recurrence_activation.Continuation.target scope.continuation).preparation
+        (Admitted_activation.Continuation.target scope.continuation).preparation
       in
       if Option.exists current.basis.preparation ~f:(phys_equal preparation)
       then
         Some
           (fun () ->
             let%bind () = held_authored_basis t scope in
-            Recurrence_activation.Continuation.check_basis scope.continuation)
+            Admitted_activation.Continuation.check_basis scope.continuation)
       else None)
   in
   let held_basis =
     Option.bind t.initialization_scope ~f:(fun scope ->
       Option.bind scope.Initialization_scope.held_continuation ~f:(fun continuation ->
-        let activation = Recurrence_activation.Continuation.target continuation in
+        let activation = Admitted_activation.Continuation.target continuation in
         if Option.exists current.basis.preparation ~f:(phys_equal activation.preparation)
         then
           Some
@@ -18973,7 +19010,7 @@ let check_inference_allocation t (current : inference_currentness) owner handle 
               if
                 Option.exists t.initialization_scope ~f:(phys_equal scope)
                 && Option.exists t.held_activation ~f:(phys_equal activation)
-              then Recurrence_activation.Continuation.check_basis continuation
+              then Admitted_activation.Continuation.check_basis continuation
               else Error (error Conflict "held inference owner changed during checks"))
         else None))
   in
@@ -18984,13 +19021,13 @@ let check_inference_allocation t (current : inference_currentness) owner handle 
           current.basis.preparation
           ~f:
             (phys_equal
-               (Recurrence_activation.Continuation.target scope.continuation).preparation)
+               (Admitted_activation.Continuation.target scope.continuation).preparation)
       then
         Some
           (fun () ->
             let%bind () = input_graph_basis t scope owner in
             let%bind () = Held_input_scope.parsing scope in
-            Recurrence_activation.Continuation.check_basis scope.continuation)
+            Admitted_activation.Continuation.check_basis scope.continuation)
       else None)
     |> Option.join
   in
@@ -22235,7 +22272,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Begin_headless_run_preparation _
   | Bind_run_source _
   | Admit_held_recurrence_run _
-  | Held_startup (Begin_held_recurrence_activation _)
+  | Held_startup (Begin_held_activation _)
   | Held_startup (Enable_turn_budget _)
   | Held_startup (Install_runtime _)
   | Held_startup (Begin_held_initialization _)
@@ -23287,6 +23324,40 @@ let check_recurrence_activation_internal
   let%bind () = Activation_custody.check_policy custody t.state in
   let%bind () = observation.check_current () in
   let%bind current = Recurrence_controller.observe controller t.state in
+  let association : Activation_association.t =
+    { check_target =
+        (fun ~store ~state ~run ~admission ->
+          let%bind () =
+            if
+              Recurrence_controller.same_store store observation.controller
+              && Agent_protocol.Run_receipt.equal
+                   admission
+                   (Recurrence_run_origin.admission observation.origin)
+            then Ok ()
+            else
+              Error
+                (error Conflict "activation view belongs to another held Run or Store")
+          in
+          let%bind index =
+            Result.of_option
+              state.Session_state.run_state
+              ~error:(error Conflict "held activation lost its Run index")
+          in
+          let%bind origin =
+            Result.of_option
+              (Run_state.recurrence_origin index run.Agent_protocol.Run.id)
+              ~error:(error Conflict "held activation lost its reciprocal origin")
+          in
+          let%bind () =
+            if Recurrence_run_origin.equal origin observation.origin
+            then Ok ()
+            else
+              Error
+                (error Conflict "activation view belongs to another held Run or Store")
+          in
+          Recurrence_run_origin.validate_run origin ~run ~admission)
+    }
+  in
   let check_basis () =
     let%bind () =
       if !consumed then Error (error Conflict "activation view was consumed") else Ok ()
@@ -23482,7 +23553,8 @@ let check_recurrence_activation_internal
         let%bind () = observation.check_authority () in
         basis ()
       in
-      ({ install = (fun () -> Activation_custody.Transfer.install transfer)
+      ({ association
+       ; install = (fun () -> Activation_custody.Transfer.install transfer)
        ; close = (fun () -> Activation_custody.Operation.close operation)
        ; refresh
        ; policy
@@ -23494,22 +23566,21 @@ let check_recurrence_activation_internal
     in
     let controller : Activation_controller.t = { transfer } in
     ({ target; controller; refresh; policy; timing; authority; basis }
-     : Recurrence_activation.Continuation.t)
+     : Admitted_activation.Continuation.t)
   in
   ({ check_current
    ; check_policy
    ; check_authority
    ; check_timing
    ; check_basis
-   ; origin = observation.origin
-   ; target_controller = observation.controller
+   ; association
    ; continue
    ; consumed
    }
    : Recurrence_activation.Checked.t)
 ;;
 
-let begin_held_recurrence_activation_internal t binding (held : Held_run.t) checked =
+let begin_held_activation_internal t binding (held : Held_run.t) checked =
   let open Result.Let_syntax in
   let%bind () =
     if phys_equal binding held.binding
@@ -23517,29 +23588,16 @@ let begin_held_recurrence_activation_internal t binding (held : Held_run.t) chec
     else Error (error Conflict "held activation belongs to another prepared source")
   in
   let%bind () = Held_run.check_basis held in
-  let%bind () = Recurrence_activation.Checked.check_basis checked in
+  let%bind () = Admitted_activation.Checked.check_basis checked in
   let%bind controller = require_recurrence_controller t in
-  let%bind index =
-    Result.of_option
-      t.state.run_state
-      ~error:(error Conflict "held activation lost its Run index")
-  in
-  let%bind origin =
-    Result.of_option
-      (Run_state.recurrence_origin index held.run.id)
-      ~error:(error Conflict "held activation lost its reciprocal origin")
-  in
+  let association = checked.Admitted_activation.Checked.association in
   let%bind () =
-    if
-      Recurrence_controller.same_store
-        controller
-        checked.Recurrence_activation.Checked.target_controller
-      && Recurrence_run_origin.equal origin checked.origin
-      && Agent_protocol.Run_receipt.equal
-           held.admission
-           (Recurrence_run_origin.admission checked.origin)
-    then Ok ()
-    else Error (error Conflict "activation view belongs to another held Run or Store")
+    Activation_association.check_target
+      association
+      ~store:controller
+      ~state:t.state
+      ~run:held.run
+      ~admission:held.admission
   in
   let preparation = held.binding.Source_binding.preparation in
   let%bind authorization =
@@ -23577,6 +23635,7 @@ let begin_held_recurrence_activation_internal t binding (held : Held_run.t) chec
     ; run = held.run
     ; admission = held.admission
     ; scope
+    ; association
     ; phase
     ; input_attempt = ref Input_attempt.Available
     ; owned_basis =
@@ -23622,7 +23681,13 @@ let begin_held_recurrence_activation_internal t binding (held : Held_run.t) chec
           let%bind () =
             if
               Option.exists admission ~f:(Agent_protocol.Run_receipt.equal held.admission)
-            then Recurrence_run_origin.validate_run origin ~run ~admission:held.admission
+            then
+              Activation_association.check_target
+                association
+                ~store:controller
+                ~state:t.state
+                ~run
+                ~admission:held.admission
             else Error (error Conflict "held startup Admission changed")
           in
           match run.lifecycle with
@@ -23630,7 +23695,7 @@ let begin_held_recurrence_activation_internal t binding (held : Held_run.t) chec
           | Waiting _
             when Option.exists t.held_authored_start ~f:(fun scope ->
                    phys_equal
-                     (Recurrence_activation.Continuation.target scope.continuation)
+                     (Admitted_activation.Continuation.target scope.continuation)
                      activation
                    &&
                    match scope.phase with
@@ -23673,12 +23738,12 @@ let begin_held_recurrence_activation_internal t binding (held : Held_run.t) chec
   (* No ownership mutation until all callbacks and both original guards finish.
      The new phase has not yet installed any normal Run authority. *)
   let%bind () = Source_binding.check_current held.binding in
-  let%bind () = Recurrence_activation.Checked.check_policy checked in
-  let%bind () = Recurrence_activation.Checked.check_timing checked in
+  let%bind () = Admitted_activation.Checked.check_policy checked in
+  let%bind () = Admitted_activation.Checked.check_timing checked in
   let%bind () = check_source_original t held.binding in
-  let%bind () = Recurrence_activation.Checked.check_authority checked in
+  let%bind () = Admitted_activation.Checked.check_authority checked in
   let%bind () = Held_run.check_basis held in
-  let%bind () = Recurrence_activation.Checked.check_basis checked in
+  let%bind () = Admitted_activation.Checked.check_basis checked in
   let continuation = checked.continue activation in
   Source_binding.close held.binding;
   t.run_source_binding <- None;
@@ -23701,7 +23766,7 @@ let select_held_run_authority t (activation : Held_run.Activation.t) run =
 
 let validate_held_authored_runtime t continuation startup snapshot =
   let open Result.Let_syntax in
-  let activation = Recurrence_activation.Continuation.target continuation in
+  let activation = Admitted_activation.Continuation.target continuation in
   let%bind () = activation.Held_run.Activation.owned_basis () in
   let%bind () =
     if
@@ -23750,7 +23815,7 @@ let validate_held_authored_runtime t continuation startup snapshot =
 
 let begin_held_authored_internal t continuation startup snapshot =
   let open Result.Let_syntax in
-  let activation = Recurrence_activation.Continuation.target continuation in
+  let activation = Admitted_activation.Continuation.target continuation in
   let request = Run_preparation.request activation.preparation in
   let%bind () =
     match request.input, !(activation.input_attempt), t.held_authored_start with
@@ -23880,7 +23945,7 @@ let ready_held_authored_internal t (scope : Held_authored_start.t) =
     | Starting, Running, Starting -> Ok ()
     | _ -> Error (error Conflict "held authored lifecycle is not starting")
   in
-  let activation = Recurrence_activation.Continuation.target scope.continuation in
+  let activation = Admitted_activation.Continuation.target scope.continuation in
   let%bind candidate =
     prepare_transition
       ~run_preparation:activation.preparation
@@ -23914,7 +23979,7 @@ let ready_held_authored_internal t (scope : Held_authored_start.t) =
 let finish_held_authored_internal t (scope : Held_authored_start.t) =
   let open Result.Let_syntax in
   let%bind run = held_authored_run t scope in
-  let activation = Recurrence_activation.Continuation.target scope.continuation in
+  let activation = Admitted_activation.Continuation.target scope.continuation in
   let%bind () =
     if
       Option.is_some t.queued_event_borrow
@@ -24006,7 +24071,7 @@ let finish_held_authored_internal t (scope : Held_authored_start.t) =
 
 let prepare_held_history_reservation t continuation count =
   let open Result.Let_syntax in
-  let target = Recurrence_activation.Continuation.target continuation in
+  let target = Admitted_activation.Continuation.target continuation in
   let%bind () = target.Held_run.Activation.owned_basis () in
   let%bind () =
     if Option.exists t.held_activation ~f:(phys_equal target)
@@ -24169,7 +24234,7 @@ let reserve_held_history_block_internal t continuation count =
 
 let begin_held_input_internal t continuation =
   let open Result.Let_syntax in
-  let activation = Recurrence_activation.Continuation.target continuation in
+  let activation = Admitted_activation.Continuation.target continuation in
   let request = Run_preparation.request activation.preparation in
   let%bind () =
     match request.input with
@@ -24293,7 +24358,7 @@ let close_held_input_internal t (scope : Held_input_scope.t) =
 
 let submit_held_run_input_internal t (scope : Held_input_scope.t) input =
   let open Result.Let_syntax in
-  let activation = Recurrence_activation.Continuation.target scope.continuation in
+  let activation = Admitted_activation.Continuation.target scope.continuation in
   let%bind () = input_scope_basis t scope in
   let%bind () =
     match scope.phase with
@@ -24339,13 +24404,14 @@ let submit_held_run_input_internal t (scope : Held_input_scope.t) input =
     then Ok ()
     else Error (error Conflict "held root Run binding was replaced")
   in
-  let%bind origin =
-    Result.of_option
-      (Run_state.recurrence_origin index run.id)
-      ~error:(error Conflict "held root lost its reciprocal origin")
-  in
+  let%bind store = require_recurrence_controller t in
   let%bind () =
-    Recurrence_run_origin.validate_run origin ~run ~admission:activation.admission
+    Activation_association.check_target
+      activation.association
+      ~store
+      ~state:t.state
+      ~run
+      ~admission:activation.admission
   in
   let%bind original =
     Result.of_option
@@ -24398,12 +24464,16 @@ let submit_held_run_input_internal t (scope : Held_input_scope.t) input =
            ])
   in
   let%bind controller = scope.continuation.controller.transfer () in
+  let%bind () =
+    if phys_equal controller.association activation.association
+    then Ok ()
+    else Error (error Conflict "held root transferred another admitted association")
+  in
   let proof : Held_operation.Proof.t =
     { preparation = activation.preparation
     ; scope = activation.scope
     ; run
     ; admission = activation.admission
-    ; origin
     ; source = activation.source
     ; operation
     ; worker
@@ -24444,7 +24514,7 @@ let submit_held_run_input_internal t (scope : Held_input_scope.t) input =
                 Held_operation_acknowledgement.check acknowledgement ~actor:t ~candidate
               in
               let%bind () = input_scope_basis t scope in
-              Recurrence_activation.Continuation.check_basis scope.continuation)
+              Admitted_activation.Continuation.check_basis scope.continuation)
             t
             candidate
         in
@@ -24479,7 +24549,7 @@ let end_held_activation_internal t (activation : Held_run.Activation.t) =
     match t.held_authored_start with
     | Some scope
       when phys_equal
-             (Recurrence_activation.Continuation.target scope.continuation)
+             (Admitted_activation.Continuation.target scope.continuation)
              activation ->
       scope.phase <- Closed;
       t.held_authored_start <- None
@@ -24579,7 +24649,7 @@ let end_held_activation_internal t (activation : Held_run.Activation.t) =
 ;;
 
 let begin_held_initialization_internal t continuation purpose expected =
-  let activation = Recurrence_activation.Continuation.target continuation in
+  let activation = Admitted_activation.Continuation.target continuation in
   let open Result.Let_syntax in
   let%bind () = activation.Held_run.Activation.owned_basis () in
   let%bind () =
@@ -24599,7 +24669,7 @@ let begin_held_initialization_internal t continuation purpose expected =
 ;;
 
 let held_runtime_installation_basis t continuation =
-  let activation = Recurrence_activation.Continuation.target continuation in
+  let activation = Admitted_activation.Continuation.target continuation in
   let open Result.Let_syntax in
   let%bind () =
     if Int.equal activation.domain (Stdlib.Domain.self () :> int)
@@ -24625,12 +24695,12 @@ let held_runtime_installation_basis t continuation =
 ;;
 
 let enable_held_turn_budget_internal t continuation policy =
-  let activation = Recurrence_activation.Continuation.target continuation in
+  let activation = Admitted_activation.Continuation.target continuation in
   let open Result.Let_syntax in
   let check_before_commit () =
     let%bind () = check_held_effect continuation in
     let%bind () = held_runtime_installation_basis t continuation in
-    Recurrence_activation.Continuation.check_basis continuation
+    Admitted_activation.Continuation.check_basis continuation
   in
   let%bind () = held_runtime_installation_basis t continuation in
   (* Even an equal-policy no-write result belongs to this exact live startup.
@@ -24653,7 +24723,7 @@ let install_held_runtime_internal t continuation worker inference moderator_mana
   in
   let%bind () = check_held_effect continuation in
   let%bind () = held_runtime_installation_basis t continuation in
-  let%bind () = Recurrence_activation.Continuation.check_basis continuation in
+  let%bind () = Admitted_activation.Continuation.check_basis continuation in
   install_runtime_worker t (Some worker) (Some inference) moderator_manager
 ;;
 
@@ -24786,8 +24856,8 @@ let exclude_ordinary_deferred_ingress : type a. t -> a request -> unit =
   | Start_initialization_model_job _
   | Claim_initialization_model_job _
   | Capture_initialization_recipe_target _ -> exclude_effect_deferred t Ordinary_execution
-  | Held_startup (Begin_held_recurrence_activation _ | Begin_input _ | Begin_authored _)
-    -> exclude_effect_deferred t Activation_consumed
+  | Held_startup (Begin_held_activation _ | Begin_input _ | Begin_authored _) ->
+    exclude_effect_deferred t Activation_consumed
   | _ -> ()
 ;;
 
@@ -25978,8 +26048,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
          enable_held_turn_budget_internal t continuation policy
        | Install_runtime (continuation, worker, inference, manager) ->
          install_held_runtime_internal t continuation worker inference manager
-       | Begin_held_recurrence_activation (binding, held, checked) ->
-         begin_held_recurrence_activation_internal t binding held checked
+       | Begin_held_activation (binding, held, checked) ->
+         begin_held_activation_internal t binding held checked
        | Begin_held_initialization (activation, purpose, expected) ->
          begin_held_initialization_internal t activation purpose expected
        | Reserve_held_history_block (continuation, count) ->
@@ -27314,8 +27384,8 @@ let initialization_model_allocation t ~scope ~job =
          Graph tracking registers the same handle before submission refreshes. *)
       let refresh =
         Inference_runtime.Submission_guard.create ~refresh:(fun () ->
-          Recurrence_activation.Continuation.refresh continuation |> require;
-          fun () -> Recurrence_activation.Continuation.check_basis continuation |> require)
+          Admitted_activation.Continuation.refresh continuation |> require;
+          fun () -> Admitted_activation.Continuation.check_basis continuation |> require)
       in
       Inference_allocation.Host.create
         ~handle:(Inference_allocation.handle allocation)
@@ -27846,10 +27916,16 @@ let import_held_recurrence_execution
        (held, actor, authorize, automatic_policy, observation))
 ;;
 
+let begin_held_activation t ~binding ~held ~checked =
+  recurrence_call t (Held_startup (Begin_held_activation (binding, held, checked)))
+;;
+
 let begin_held_recurrence_activation t ~binding ~held ~checked =
-  recurrence_call
+  begin_held_activation
     t
-    (Held_startup (Begin_held_recurrence_activation (binding, held, checked)))
+    ~binding
+    ~held
+    ~checked:(Recurrence_activation.Checked.admitted checked)
 ;;
 
 let begin_held_initialization t ~continuation ~purpose ~expected =
@@ -27874,7 +27950,7 @@ let install_held_runtime
   =
   let open Result.Let_syntax in
   let%bind () = held_runtime_installation_basis t continuation in
-  let%bind () = Recurrence_activation.Continuation.refresh continuation in
+  let%bind () = Admitted_activation.Continuation.refresh continuation in
   Eio.Cancel.protect (fun () ->
     let%bind () =
       match automatic_turn_policy with
@@ -27883,7 +27959,7 @@ let install_held_runtime
         let%bind () = call t (Held_startup (Enable_turn_budget (continuation, policy))) in
         (* The factual policy ACK can rotate target/controller Store custody.
            Refresh outside the mailbox before physical installation. *)
-        Recurrence_activation.Continuation.refresh continuation
+        Admitted_activation.Continuation.refresh continuation
     in
     call
       t
@@ -27907,18 +27983,18 @@ let submit_held_run_input t ~scope ~input =
       Error
         (error Conflict "held root input has already been submitted or is unavailable")
   in
-  let%bind () = Recurrence_activation.Continuation.refresh scope.continuation in
+  let%bind () = Admitted_activation.Continuation.refresh scope.continuation in
   Eio.Cancel.protect (fun () -> call t (Held_startup (Submit_input (scope, input))))
 ;;
 
 let held_authored_resource t ~continuation ~owner =
-  let%bind.Result () = Recurrence_activation.Continuation.refresh continuation in
+  let%bind.Result () = Admitted_activation.Continuation.refresh continuation in
   call t (Held_startup (Authored_resource (continuation, owner)))
 ;;
 
 let start_held_authored_run t ~continuation ~startup =
   let open Result.Let_syntax in
-  let%bind () = Recurrence_activation.Continuation.refresh continuation in
+  let%bind () = Admitted_activation.Continuation.refresh continuation in
   let%bind snapshot =
     match Runtime_builder.Authored_start.manager startup with
     | None -> Ok None
@@ -27927,7 +28003,7 @@ let start_held_authored_run t ~continuation ~startup =
       |> Result.map_error ~f:(error Invalid_state)
       |> Result.map ~f:Option.some
   in
-  let%bind () = Recurrence_activation.Continuation.refresh continuation in
+  let%bind () = Admitted_activation.Continuation.refresh continuation in
   let%bind scope =
     Eio.Cancel.protect (fun () ->
       call t (Held_startup (Begin_authored (continuation, startup, snapshot))))
@@ -27965,11 +28041,11 @@ let with_held_input t ~continuation ~prepare f =
     let%bind () = Held_input_scope.parsing scope in
     let%bind () = check_held_effect continuation in
     let%bind () = input_scope_basis t scope in
-    Recurrence_activation.Continuation.check_basis continuation
+    Admitted_activation.Continuation.check_basis continuation
   in
   let refresh () =
     let%bind () = Held_input_scope.parsing scope in
-    let%bind () = Recurrence_activation.Continuation.refresh continuation in
+    let%bind () = Admitted_activation.Continuation.refresh continuation in
     let%map () = final_check () in
     final_check
   in

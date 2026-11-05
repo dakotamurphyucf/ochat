@@ -122,6 +122,7 @@
   search_source
   search_service
   run_start_service
+  recurrence_run_service
   pagination
   inference_query_budget
   managed_output_cursor

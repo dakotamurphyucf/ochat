@@ -335,7 +335,12 @@ let on_event ctx state event = Task.pure(state)
                                            child.runtime
                                            ~prepared
                                            ~held
-                                           ~checked))
+                                           ~checked:
+                                             (Agent_session.Session_actor
+                                              .Recurrence_activation
+                                              .Checked
+                                              .admitted
+                                                checked)))
                                   with
                                   | Eio.Cancel.Cancelled _ -> `Cancelled)
                               in

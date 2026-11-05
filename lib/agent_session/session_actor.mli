@@ -3135,6 +3135,53 @@ module Recurrence_run_observation : sig
   val check_current : t -> (unit, Agent_protocol.Error.t) result
 end
 
+module Admitted_activation : sig
+  module Checked : sig
+    (** Actor-issued association for one actual admitted Run and its original
+        Admission. No constructor, decoder or caller-supplied validator. A view
+        retains its concrete issuer's live custody and one consumption cell. *)
+    type t
+
+    (** Complete current policy, timing, original and final pure-basis check.
+        Trusted callbacks are nonyielding; exceptions propagate. A successful
+        check grants no permission across a yield. *)
+    val check_current : t -> (unit, Agent_protocol.Error.t) result
+
+    val check_policy : t -> (unit, Agent_protocol.Error.t) result
+    val check_timing : t -> (unit, Agent_protocol.Error.t) result
+    val check_authority : t -> (unit, Agent_protocol.Error.t) result
+
+    (** Callback-free actual association/owner/Run/source and Store basis.
+        Stale or consumed custody rejects before any stored host callback. *)
+    val check_basis : t -> (unit, Agent_protocol.Error.t) result
+  end
+
+  module Continuation : sig
+    (** One exact consumed Checked/Held link. The actual admitted association
+        remains live through construction and acknowledged handoff; no returned
+        DATA, source identifier or historical receipt reconstructs this owner. *)
+    type t
+
+    val target : t -> Held_run.Activation.t
+
+    (** Refresh actual Store/Handle observations and concrete issuer policy.
+        May perform Store I/O. Call outside Actor mailboxes and Owner mutexes. *)
+    val refresh : t -> (unit, Agent_protocol.Error.t) result
+
+    (** Trusted nonyielding policy callbacks with pure preflight/final bases.
+        Repeat at the fresh effect boundary, then timing, originals and both
+        final pure bases without another yield or supplied callback. *)
+    val check_policy : t -> (unit, Agent_protocol.Error.t) result
+
+    (** The actual association issuer's fresh timing obligations; not a lasting
+        timing certificate. Original guards and final pure bases follow. *)
+    val check_timing : t -> (unit, Agent_protocol.Error.t) result
+
+    val check_authority : t -> (unit, Agent_protocol.Error.t) result
+    val check_basis : t -> (unit, Agent_protocol.Error.t) result
+  end
+end
+
 module Recurrence_activation : sig
   (** Revocable process-local controller custody for one exact acknowledged
       occurrence/attempt/Run. No constructor or decoder. The actual target's
@@ -3176,6 +3223,10 @@ module Recurrence_activation : sig
         this basis alone authenticates neither. Same Eio domain, with no yield
         or callback after the final bases. *)
     val check_basis : t -> (unit, Agent_protocol.Error.t) result
+
+    (** The SAME checked owner and consumption cell, without refresh or issuance.
+        Consuming this view also consumes the recurrence Checked. *)
+    val admitted : t -> Admitted_activation.Checked.t
   end
 
   module Continuation : sig
@@ -3183,7 +3234,7 @@ module Recurrence_activation : sig
         live; only this actual target activation may acknowledge its own progress.
         Refresh uses the genuine Store/Handle after yields, including self-target
         ACKs. The old Checked is not weakened or reused as a fresh view. *)
-    type t
+    type t = Admitted_activation.Continuation.t
 
     val target : t -> Held_run.Activation.t
 
@@ -3205,6 +3256,17 @@ module Recurrence_activation : sig
   end
 end
 
+(** Consume the exact Prepared binding/Held/actual admitted association once.
+    No constructor, initializer, history or worker runs here. The host retains
+    its real Prepared lease and, after this yielding RPC, refreshes and repeats
+    all policies, fresh timing, originals and final joint pure bases. *)
+val begin_held_activation
+  :  t
+  -> binding:Source_binding.t
+  -> held:Held_run.t
+  -> checked:Admitted_activation.Checked.t
+  -> (Admitted_activation.Continuation.t, Agent_protocol.Error.t) result
+
 (** Consume only the exact linked Admitted target and current Checked view.
     No native resources, history/content conversion, initializer or worker runs.
     The host separately retains the actual Runtime_owner.Prepared lease; after
@@ -3222,7 +3284,7 @@ val begin_held_recurrence_activation
     proofs cannot bypass the ordinary unresolved-Run exclusion. *)
 val begin_held_initialization
   :  t
-  -> continuation:Recurrence_activation.Continuation.t
+  -> continuation:Admitted_activation.Continuation.t
   -> purpose:Initialization_scope.Purpose.t
   -> expected:Session_state.t
   -> (Initialization_scope.t, Agent_protocol.Error.t) result
@@ -3464,7 +3526,7 @@ end
 
 val held_authored_resource
   :  t
-  -> continuation:Recurrence_activation.Continuation.t
+  -> continuation:Admitted_activation.Continuation.t
   -> owner:Agent_protocol.Job.launch_owner
   -> (Held_authored_resource.t, Agent_protocol.Error.t) result
 
@@ -3479,7 +3541,7 @@ val held_authored_resource
     not reauthorize expired effects or imply rollback. *)
 val start_held_authored_run
   :  t
-  -> continuation:Recurrence_activation.Continuation.t
+  -> continuation:Admitted_activation.Continuation.t
   -> startup:Runtime_builder.Authored_start.t
   -> (Agent_protocol.Run_receipt.t, Agent_protocol.Error.t) result
 
@@ -3491,7 +3553,7 @@ val start_held_authored_run
     No synthetic input/Operation is allocated. *)
 val reserve_held_history_block
   :  t
-  -> continuation:Recurrence_activation.Continuation.t
+  -> continuation:Admitted_activation.Continuation.t
   -> count:int
   -> (History_id_source.reservation, Agent_protocol.Error.t) result
 
@@ -3515,7 +3577,7 @@ val end_held_activation
     recovery evidence and never imply no effects. No Operation is created here. *)
 val with_held_input
   :  t
-  -> continuation:Recurrence_activation.Continuation.t
+  -> continuation:Admitted_activation.Continuation.t
   -> prepare:
        (scope:Held_input_scope.t
         -> Runtime_input_preparation.Execution.t
@@ -3557,7 +3619,7 @@ val install_held_runtime
   :  ?automatic_turn_policy:Chat_response.Runtime_semantics.policy
   -> ?moderator_manager:Chat_response.Moderator_manager.t
   -> t
-  -> continuation:Recurrence_activation.Continuation.t
+  -> continuation:Admitted_activation.Continuation.t
   -> worker:Operation_worker.t
   -> inference:Inference_client.Execution.t
   -> (unit, Agent_protocol.Error.t) result
