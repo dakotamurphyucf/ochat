@@ -977,3 +977,14 @@ val drain_idle_moderator
   :  t
   -> Session_registry.entry
   -> (bool, Agent_protocol.Error.t) result
+
+(** Finite post-callback native Resume uses the same actual registered target,
+    hidden Factory source owner, exclusive source stage, selected source and
+    joined cleanup as operator Resume. The opaque selection is not a claim:
+    only Actor Begin after that reservation may consume its same live loan. *)
+val with_native_goal_resume_source_reported
+  :  t
+  -> Session_registry.entry
+  -> selection:Agent_session.Session_actor.Goal_native_resume.Selection.t
+  -> (Runtime_owner.Prepared_goal_continuation.t -> ('a, Agent_protocol.Error.t) result)
+  -> ('a Goal_resume_source.t, Agent_protocol.Error.t) result

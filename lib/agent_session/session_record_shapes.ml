@@ -300,6 +300,7 @@ let invocation =
     ; "completion_contract", n completion_contract
     ; "authoring_reference", n authoring_reference
     ; "inference_origin", inference_origin
+    ; "native_goal_resume", v
     ]
 ;;
 

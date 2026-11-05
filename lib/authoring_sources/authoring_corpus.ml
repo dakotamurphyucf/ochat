@@ -3472,12 +3472,15 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "4c7d58124e7bec93b87079fcb9be2c17c6e13e61f12201f35011a6eba0e06f37" ]
+                   [ "2ddd89a69fb931200596a52794c0b0661883ff3a4bf4ddf0a695d59885bc689d" ]
                ; evidence =
                    [ "lib/agent_session/administration.ml"
                    ; "lib/agent_session/session_actor.ml"
                    ; "lib/agent_server/command_handler.ml"
                    ; "lib/agent_server/runtime_owner.ml"
+                   ; "lib/agent_session/runtime_builder.ml"
+                   ; "lib/agent_session/legacy_callback_runtime.ml"
+                   ; "test/factory_catalog_publication/legacy_resume_recovery_tests.ml"
                    ; "lib/agent_session/managed_submission_tracking.ml"
                    ; "lib/agent_server/managed_output_cursor.ml"
                    ; "test/chatml_composition/notification_administration_tests.ml"

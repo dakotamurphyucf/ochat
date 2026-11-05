@@ -428,8 +428,11 @@ type t =
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
     (** First startup remains construction-fenced. After an actual host-backed
         legacy startup ACK, repeated calls return that exact acknowledged DATA
-        without re-entering its retired construction owner. Extension startup
-        snapshots remain construction-fenced. *)
+        without re-entering its retired construction owner. A Ready legacy
+        restoration without Init returns its identity snapshot only; its actual
+        Session_resume ACK belongs to installed moderator_activation, joined
+        before any foreground callback. This snapshot is not a startup/resume
+        receipt. Extension startup snapshots remain construction-fenced. *)
   ; enqueue_internal_event :
       ?prepare:prepare_enqueue
       -> Jsonaf.t
@@ -504,9 +507,20 @@ type legacy_callback_services = Legacy_callback_runtime.Services.t =
 
 type legacy_callback_claim = Legacy_callback_runtime.claim
 
+(** Lifecycle selection DATA, never callback authority. [Constructor] requires
+    the actual Init callback owner. [Installed_resume] is only for an initialized
+    legacy checkpoint restored without an Init owner; its Session_resume waits
+    for the exact runtime worker/Manager installation and the ordinary installed
+    callback claim. Missing original custody stays unavailable. *)
+module Legacy_startup : sig
+  type t =
+    | Constructor
+    | Installed_resume
+end
+
 (** Constructor and installed claims have separate exact lifetimes. [claim]
     requires the actual initialization owner. [installed_claim] requires the
-    supplied operation or exact idle Queue_head and must never reuse constructor
+    supplied operation or eligible idle boundary/Queue_head and must never reuse constructor
     services or its additional construction checkpoint. Installed Model services
     use the supplied actual admission port; Tool and Model effects retain their
     exact callback and execution checks. [history] reads the actual Actor's current
@@ -514,7 +528,8 @@ type legacy_callback_claim = Legacy_callback_runtime.claim
     current ownership. Host-backed legacy foreground and idle adapters use these
     services one acknowledged callback at a time. *)
 type legacy_construction =
-  { claim : legacy_callback_claim
+  { startup : Legacy_startup.t
+  ; claim : legacy_callback_claim
   ; installed_claim :
       operation_id:Agent_protocol.Id.Operation.t option -> legacy_callback_claim
   ; history : unit -> (History_entry.t list, Agent_protocol.Error.t) result

@@ -37,7 +37,7 @@ let delta_requires payload =
   | Value _ | Absent | Null -> false
 ;;
 
-let check document ~required =
+let check document ~name ~required =
   if
     (not required)
     || List.mem (D.Document.required_semantics document) name ~equal:String.equal
@@ -45,7 +45,7 @@ let check document ~required =
   else Error (D.Error.Required_semantics_unknown ("missing " ^ name))
 ;;
 
-let require document ~required ~limits =
+let require document ~name ~required ~limits =
   if
     (not required)
     || List.mem (D.Document.required_semantics document) name ~equal:String.equal
@@ -66,12 +66,57 @@ let require document ~required ~limits =
     | _ -> assert false)
 ;;
 
+let native_invocation_requires invocation =
+  match D.Json.field invocation ~name:"native_goal_resume" with
+  | Absent -> false
+  | Null | Value _ -> true
+;;
+
+let native_state_requires payload =
+  match D.Json.field payload ~name:"invocations" with
+  | Value (`Array invocations) -> List.exists invocations ~f:native_invocation_requires
+  | Absent | Null | Value _ -> false
+;;
+
+let native_delta_requires payload =
+  match D.Json.field payload ~name:"changes" with
+  | Value (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match D.Json.field change ~name:"kind" with
+      | Value (`String ("invocation_changed" | "invocation_reconciled")) ->
+        (match D.Json.field change ~name:"value" with
+         | Value value -> native_invocation_requires value
+         | _ -> false)
+      | Value (`String "created") ->
+        (match D.Json.field change ~name:"state" with
+         | Value state ->
+           (match D.Json.field state ~name:"payload" with
+            | Value state -> native_state_requires state
+            | _ -> false)
+         | _ -> false)
+      | _ -> false)
+  | Absent | Null | Value _ -> false
+;;
+
+let native_name = Agent_protocol.Goal_native_resume_intent.persistence_semantics
+
 let require_state document ~limits =
   let open Result.Let_syntax in
   let%bind document =
     Q.require document ~limits ~required:(Q.state_requires (D.Document.payload document))
   in
-  require document ~limits ~required:(state_requires (D.Document.payload document))
+  let%bind document =
+    require
+      document
+      ~name
+      ~limits
+      ~required:(state_requires (D.Document.payload document))
+  in
+  require
+    document
+    ~name:native_name
+    ~limits
+    ~required:(native_state_requires (D.Document.payload document))
 ;;
 
 let check_state document =
@@ -79,7 +124,13 @@ let check_state document =
   let%bind () =
     Q.check document ~required:(Q.state_requires (D.Document.payload document))
   in
-  check document ~required:(state_requires (D.Document.payload document))
+  let%bind () =
+    check document ~name ~required:(state_requires (D.Document.payload document))
+  in
+  check
+    document
+    ~name:native_name
+    ~required:(native_state_requires (D.Document.payload document))
 ;;
 
 let require_delta document ~limits =
@@ -87,7 +138,18 @@ let require_delta document ~limits =
   let%bind document =
     Q.require document ~limits ~required:(Q.delta_requires (D.Document.payload document))
   in
-  require document ~limits ~required:(delta_requires (D.Document.payload document))
+  let%bind document =
+    require
+      document
+      ~name
+      ~limits
+      ~required:(delta_requires (D.Document.payload document))
+  in
+  require
+    document
+    ~name:native_name
+    ~limits
+    ~required:(native_delta_requires (D.Document.payload document))
 ;;
 
 let check_delta document =
@@ -95,5 +157,11 @@ let check_delta document =
   let%bind () =
     Q.check document ~required:(Q.delta_requires (D.Document.payload document))
   in
-  check document ~required:(delta_requires (D.Document.payload document))
+  let%bind () =
+    check document ~name ~required:(delta_requires (D.Document.payload document))
+  in
+  check
+    document
+    ~name:native_name
+    ~required:(native_delta_requires (D.Document.payload document))
 ;;

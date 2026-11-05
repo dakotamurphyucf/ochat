@@ -4440,3 +4440,112 @@ val reconcile_goal_wake_authority
   :  t
   -> request:Goal_execution_runtime.Wake_request.t
   -> (unit, Agent_protocol.Error.t) result
+
+(** Native Goal mutation staging. The exact selected native borrow is checked in
+    Actor. Callback invocations stage only into their actual lexical transaction;
+    they cannot fall back to an immediate writer when the route is absent. The
+    returned [unit] is speculative: only the native result and selected parent
+    checkpoint ACK can make it durable. No Run permission is returned. *)
+val stage_native_goal_edit
+  :  t
+  -> admission:Goal_native_admission.t
+  -> authorize:
+       (Operator_authorization.t
+        -> Session_state.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> edit:Agent_protocol.Goal_edit.t
+  -> (unit, Agent_protocol.Error.t) result
+
+val stage_native_goal_resume
+  :  t
+  -> admission:Goal_native_admission.t
+  -> authorize:
+       (Operator_authorization.t
+        -> Session_state.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> request:Goal_resume_request.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** The projection includes selected earlier local metadata edits only. It does
+    not replace actual source/Run/custody checks or issue execution authority. *)
+val native_goal_state
+  :  t
+  -> admission:Goal_native_admission.t
+  -> authorize:
+       (Operator_authorization.t
+        -> Session_state.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> (Session_state.t, Agent_protocol.Error.t) result
+
+module Goal_native_resume : sig
+  module Detail : sig
+    type t =
+      | Actor_handoff of Goal_resume_result.Continuation.t
+      | Unavailable
+  end
+
+  module Status : sig
+    type t =
+      | Staged of Agent_protocol.Goal_native_resume_intent.t
+      | Accepted of Agent_protocol.Goal_native_resume_intent.t
+      | Interrupted_before_dispatch of Agent_protocol.Goal_native_resume_intent.t
+      | Dispatching of Agent_protocol.Goal_native_resume_intent.t
+      | Unknown of Agent_protocol.Goal_native_resume_intent.t
+      | Discarded of Agent_protocol.Goal_native_resume_intent.t
+      | Rejected of Agent_protocol.Goal_native_resume_intent.t
+      | Acknowledged of
+          { intent : Agent_protocol.Goal_native_resume_intent.t
+          ; receipt : Goal_command_receipt.t
+          ; detail : Detail.t
+          ; failure : Agent_protocol.Error.t option
+          }
+  end
+
+  module Selection : sig
+    (** Physical scheduling reference to the actual Invocation's accepted command
+        loan. No decoder or ID constructor; this is not a source reservation or
+        execution claim. The Owner must reserve its real stage before Begin. *)
+    type t
+
+    val request : t -> Goal_resume_request.t
+    val session : t -> Agent_protocol.Session_ref.t
+    val invocation_id : t -> Agent_protocol.Id.Invocation.t
+  end
+end
+
+val select_native_goal_resume
+  :  t
+  -> (Goal_native_resume.Selection.t option, Agent_protocol.Error.t) result
+
+val begin_native_goal_resume_preparation
+  :  t
+  -> selection:Goal_native_resume.Selection.t
+  -> (Goal_continuation.Resume_issuance.t, Agent_protocol.Error.t) result
+
+val observe_native_goal_dispatch
+  :  t
+  -> selection:Goal_native_resume.Selection.t
+  -> failure:Agent_protocol.Error.t option
+  -> (unit, Agent_protocol.Error.t) result
+
+val native_goal_resume_receipt
+  :  t
+  -> selection:Goal_native_resume.Selection.t
+  -> (Goal_command_receipt.t option, Agent_protocol.Error.t) result
+
+(** Current authenticated native reader may inspect historical command facts.
+    A receipt is checked against its stored original principal/request and actual
+    immutable episode/admission link; it need not be the current Goal episode.
+    Accepted/Claimed are durable facts; positive Actor_handoff comes only from the
+    same preparation's actual acknowledged phase, never caller success DATA.
+    Joined host detail is not certified here. Negative host detail is process-local.
+    Recovery never restores custody from this projection. *)
+val native_goal_resume_status
+  :  t
+  -> admission:Goal_native_admission.t
+  -> authorize:
+       (Operator_authorization.t
+        -> Session_state.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> invocation_id:Agent_protocol.Id.Invocation.t
+  -> (Goal_native_resume.Status.t, Agent_protocol.Error.t) result

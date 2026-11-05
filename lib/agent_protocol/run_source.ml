@@ -2,7 +2,7 @@ open! Core
 module J = Json_codec
 
 type t =
-  { observer : Invocation.observer
+  { observer : Moderator_observer.t
   ; generation : int
   ; installation_epoch : int64
   }

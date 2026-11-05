@@ -1627,8 +1627,32 @@ module Goal_resume_source = struct
   end
 end
 
-let with_goal_resume_source_reported t ~source_owner ~actor ~authorize ~session ~request f
-  =
+module Goal_resume_issuer = struct
+  type t =
+    | Operator of
+        { actor : Operator_authorization.t
+        ; authorize :
+            Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result
+        ; session : Agent_protocol.Session_ref.t
+        ; request : Agent_session.Goal_resume_request.t
+        }
+    | Native of Agent_session.Session_actor.Goal_native_resume.Selection.t
+
+  let issue t actor =
+    match t with
+    | Operator { actor = original; authorize; session; request } ->
+      Agent_session.Session_actor.begin_goal_resume_preparation
+        actor
+        ~actor:original
+        ~authorize
+        ~session
+        ~request
+    | Native selection ->
+      Agent_session.Session_actor.begin_native_goal_resume_preparation actor ~selection
+  ;;
+end
+
+let with_goal_resume_issued_source_reported t ~source_owner ~issuer f =
   let module Actor = Agent_session.Session_actor in
   let preparation = ref None in
   let outcome =
@@ -1642,14 +1666,7 @@ let with_goal_resume_source_reported t ~source_owner ~actor ~authorize ~session 
         let open Result.Let_syntax in
         let%bind decision =
           Eio.Cancel.protect (fun () ->
-            let result =
-              Actor.begin_goal_resume_preparation
-                t.actor
-                ~actor
-                ~authorize
-                ~session
-                ~request
-            in
+            let result = Goal_resume_issuer.issue issuer t.actor in
             Result.iter result ~f:(function
               | Actor.Goal_continuation.Resume_issuance.Prepare issued ->
                 preparation := Some issued
@@ -1670,6 +1687,23 @@ let with_goal_resume_source_reported t ~source_owner ~actor ~authorize ~session 
           Result.map (f source) ~f:(fun value -> Goal_resume_source.Decision.Fresh value))
   in
   { Goal_resume_source.Report.preparation = !preparation; outcome }
+;;
+
+let with_goal_resume_source_reported t ~source_owner ~actor ~authorize ~session ~request f
+  =
+  with_goal_resume_issued_source_reported
+    t
+    ~source_owner
+    ~issuer:(Goal_resume_issuer.Operator { actor; authorize; session; request })
+    f
+;;
+
+let with_native_goal_resume_source_reported t ~source_owner ~selection f =
+  with_goal_resume_issued_source_reported
+    t
+    ~source_owner
+    ~issuer:(Goal_resume_issuer.Native selection)
+    f
 ;;
 
 module Goal_execution_source = struct

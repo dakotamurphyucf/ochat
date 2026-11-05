@@ -226,6 +226,10 @@ module Admission : sig
     -> binding:Chat_response.Tool_capability.binding
     -> (unit, Agent_protocol.Error.t) result
 
+  (** Routing identity only; retaining it never extends the native callback.
+      The actual Actor compares this with its physically registered callback. *)
+  val callback_scope : t -> Chat_response.Goal_native_scope.t option
+
   val invocation : t -> Agent_protocol.Invocation.t
 
   (** Exact checked503 borrow captured from this dispatched invocation. None is

@@ -68,6 +68,10 @@
   job_artifact
   job_result_reference
   invocation
+  moderator_observer
+  goal_edit
+  goal_resume_request
+  goal_native_resume_intent
   host_invocation
   completion_contract
   completion_projection

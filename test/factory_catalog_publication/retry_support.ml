@@ -86,7 +86,9 @@ type counters =
   }
 
 let with_recoverable_fixture
+      ?test_root
       ?(timeout = 30.)
+      ?(prompt_text = Source.prompt_text)
       ?(wrap_env = Fn.id)
       ?(max_root_agents = 1)
       ?(post_stream = fun _ -> completed_response "539 retry complete")
@@ -110,7 +112,8 @@ let with_recoverable_fixture
     }
   in
   Creation_tests.with_daemon
-    ~prompt_text:Source.prompt_text
+    ?test_root
+    ~prompt_text
     ~qualify_chatml_extensions:true
     ~wrap_env
     ~max_root_agents
@@ -121,9 +124,10 @@ let with_recoverable_fixture
            f env sw root daemon policy entry runtime revision counters)))
 ;;
 
-let with_fixture ?timeout ?wrap_env ?max_root_agents ?post_stream f =
+let with_fixture ?timeout ?prompt_text ?wrap_env ?max_root_agents ?post_stream f =
   with_recoverable_fixture
     ?timeout
+    ?prompt_text
     ?wrap_env
     ?max_root_agents
     ?post_stream

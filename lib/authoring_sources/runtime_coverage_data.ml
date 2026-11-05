@@ -698,7 +698,7 @@ let implementation_sources =
   ; ( "lib/agent_session/legacy_callback_runtime.ml"
     , "558426b59a1832b4eb43a8e944a981a0ba635617e92df1eb98520c2b337e982e" )
   ; ( "lib/agent_session/runtime_builder.ml"
-    , "0fec32fbef60654f76947834245aaf0bd2fcf5027b1e2b37df06111972dbee6f" )
+    , "2bc142447fc35809900da1c5dd4dececcc604cdb33a38e28b193eb52ea38b865" )
   ; ( "lib/context_compaction/compactor.ml"
     , "7b11eae5ce4d929bf1ab4702111d03f70fe97cfe8543135c73782c2b92391ff0" )
   ; ( "lib/agent_session/session_transition.ml"
@@ -736,7 +736,7 @@ let implementation_sources =
   ; ( "bin/ochat_agent_stdio.ml"
     , "8d134cd11c7df2a60e6b4b77a5ff7f9ea0c28a8a2674a3dd9f573adaa7623902" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "f88a2f916a6a2782042b8a8a0070976adb8532cf1ea23e0e87749542a1761aa4" )
+    , "41cffafed674a81135477850f50d61aea69dd47318b01ef216d73094cef98a25" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"
@@ -858,7 +858,7 @@ let implementation_sources =
   ; ( "lib/agent_server/command_handler.ml"
     , "9c0c8f4815a4ae12c2879e291b9b8aeead2c88bc51fa44c987c319f4143160fb" )
   ; ( "lib/agent_server/runtime_owner.ml"
-    , "a1e599e33020026a9c64891d0c773de09224987a63ab48af24b418703e6833ff" )
+    , "f304f257b7137309990690f9c8625a046b0164a4902a4245bd2773fd4b64c156" )
   ; ( "lib/agent_session/managed_submission_tracking.ml"
     , "6c8804b2d0c2033631b965769af63c5240afeb6dabff72695c818dc1a68baed8" )
   ; ( "lib/agent_server/managed_output_cursor.ml"
@@ -914,7 +914,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_host.ml"
     , "45be3610abdb3090ee3f0929b5317dc978af1020ae4cffdca2268b66fb395bf1" )
   ; ( "lib/agent_server/schedule_scheduler.ml"
-    , "b04d74f70914331da86703d9ab62595b73f2fd095b1e9416bccd76e0a3f8d61d" )
+    , "f245bfe362c0a55d3d93057059b5576668ee103f9891a5230094abef915fe30a" )
   ; ( "lib/agent_session/background_execution.ml"
     , "33996f6b8a1165fc7e992c5c019a2db478b67b1fe6ddb3fed34fa8b731454254" )
   ; ( "lib/agent_session/captured_agent_runner.ml"
@@ -984,7 +984,7 @@ let implementation_sources =
   ; ( "lib/agent_session/notification_wake_selection.ml"
     , "001872ff3729d6a4a7cd861cd6ec4ebbf75296637bd5c5cdaf3ede82c6f9b6ba" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "22f24be2378af6a5950ea3c32f18ca87ba83e25868a35abbef8605f1ec7c43a2" )
+    , "e488dc19737fe6ab60a7d0a98e99ccba96e8e5d3cfcc97a07d5e64b66ea2db04" )
   ; ( "lib/agent_session/job_custody.ml"
     , "6a3b5951629d8440ebfcaf9f72aa625cf522087e8996bb73cec82ce16abfa120" )
   ; ( "lib/agent_session/staged_jobs.ml"
@@ -1004,7 +1004,7 @@ let implementation_sources =
   ; ( "lib/chat_response/moderator_invocation.ml"
     , "445f7e4a6597b27d3af34905fee56441bcf82285fd52eb8d9f0c400379b28deb" )
   ; ( "lib/chat_response/moderator_manager.ml"
-    , "d303444ce708c366136a1f0d1d26c9ffb960b00f90c3160b32aaba2441811fb9" )
+    , "32e5b6887f92014bde071736a057015a6d2a5c63cbcd55b191703f173b32b053" )
   ; ( "lib/chat_response/notification_operations.ml"
     , "1e67db1e69921f11f0c28798e340e7e23dc5436eb492bb79a12a0125b0f69e29" )
   ; ( "lib/chat_response/runtime_semantics.ml"
@@ -1073,16 +1073,16 @@ let topic_contracts =
     , "d12925247f47d7caef5cf2abe69229efe2625413de4beb44e2f20783a17c890a" )
   ; ( "one_off_v1"
     , "runtime.lifecycle"
-    , "72164c5c3adfc5b77901d5dd10903c952ffdc32a1bba4e50f7a689b01a48cb69" )
+    , "0f2c5e4bcb162946cdb56925993d98ac6c84db68f671eff0f50fdcf36c57886d" )
   ; ( "tool_v1"
     , "runtime.lifecycle"
-    , "12c40c04cb8f0dbf7b54c44e0194109f2852bf277764440ac8819143df9a4773" )
+    , "e5e01825f4f97a7ea3d1b84653152cab175dc9d73a0eb94f912381aa51bed3c0" )
   ; ( "moderator_v1"
     , "runtime.lifecycle"
-    , "9cbc54b85c8bf9c8bc0bac6f9a7b0df2e6698eab0002802967cc8f7e05c6bdee" )
+    , "eef8f18e1d16a1a705b57da7af0c227f21871c7ebdad182380c1bfdb0b8b7e08" )
   ; ( "delegated_moderator_v1"
     , "runtime.lifecycle"
-    , "6a8c4afc635969a4a6de9e497120cc65bb35b24bec10063d4a514e50461b9088" )
+    , "12904fc71bf889d9a115eeaa43ddc345ad003556c4573698e068b3b412fc0ea3" )
   ; ( "one_off_v1"
     , "runtime.execution"
     , "2d8acea7732297ef2dc50ffd7eebd90ee3ddc01d3c1835b677a93b50f90b6d87" )

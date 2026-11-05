@@ -33,6 +33,8 @@
   moderation
   run_operations
   moderator_manager
+  goal_native_scope
+  goal_native_operations
   moderator_program
   moderator_invocation
   execution_gate

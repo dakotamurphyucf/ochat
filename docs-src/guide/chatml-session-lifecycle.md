@@ -31,6 +31,17 @@ effects; failure does not undo external work. After recovery, a `Pending` runtim
 requires explicit activation. Loading it neither proves initialization succeeded
 nor automatically repeats its initializer.
 
+A `Ready` legacy moderator restored without a live initializer first installs its
+retained identity checkpoint and actual runtime. Its `Session_resume` callback
+then runs under the installed lifecycle borrow, once for that runtime; a
+foreground operation joins it before its own callbacks or provider request.
+The checkpoint alone is not a resume acknowledgement. Recovery does not restore
+the old original caller or its native-tool authority: a callback may inspect and
+update its retained state, but permission-bearing effects still need an actual
+current caller. A later authenticated foreground operation uses its own admitted
+caller. A failed or interrupted resume is retained and is not replayed merely by
+polling that same runtime.
+
 ## Stop, start and restart
 
 A stop acknowledgement means the stop was admitted. Cleanup may still be in

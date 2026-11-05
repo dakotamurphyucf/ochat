@@ -279,7 +279,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_claim_deadline.ml"
     , "04bb3b5eae209fbc7af9b938e65d9896f9838421dbc48ea823ac802fd0803f63" )
   ; ( "lib/agent_protocol/invocation.ml"
-    , "d96de30866cc716a5f8f34315e4ae2585bbfd8e7cf765b77d2b2042836872223" )
+    , "3ffaf76aef781866e2517970053c7b008013111b3460bdb028ee628cd4890e2c" )
   ; ( "lib/agent_server/developer_background_job_runner.ml"
     , "9450ea610c424f91480b70ca733226137fa0b18325f07bf789da3e582e8d1876" )
   ; ( "lib/agent_server/developer_managed_tool_executor.ml"
@@ -303,7 +303,7 @@ let implementation_sources =
   ; ( "lib/agent_server/recurrence_authored_source.ml"
     , "e8f4b287579ae891c1d8197671c335e4e07afb02105ac206a44025701111bf3b" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "f88a2f916a6a2782042b8a8a0070976adb8532cf1ea23e0e87749542a1761aa4" )
+    , "41cffafed674a81135477850f50d61aea69dd47318b01ef216d73094cef98a25" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
@@ -339,7 +339,7 @@ let implementation_sources =
   ; ( "lib/agent_session/managed_wait_tool.ml"
     , "2482da27415b0f542bbf5e2fa61bf97de70fb047790cb6ee5100ced465b43708" )
   ; ( "lib/agent_session/native_tool_invocation.ml"
-    , "a620bd629e1a582d80f612ac95debd8fbed317681256b07d449154bebe5e4148" )
+    , "42896f00bad159ec1aed603563127b9ef933fd9da2b3cdeb8539b47c1402f56d" )
   ; ( "lib/agent_session/native_tool_policy.ml"
     , "0d125cf75d5f61aa20a9452c979a70ebb43677e2458c9e9f1c9c2c5ad2c26938" )
   ; ( "lib/agent_session/one_off_execution.ml"
@@ -371,7 +371,7 @@ let implementation_sources =
   ; ( "lib/agent_session/prompt_catalog.ml"
     , "a6b86884830197ff69113d8989280ef72bd33b61ccfa10d2e1b91bffbfc82505" )
   ; ( "lib/agent_session/runtime_builder.ml"
-    , "0fec32fbef60654f76947834245aaf0bd2fcf5027b1e2b37df06111972dbee6f" )
+    , "2bc142447fc35809900da1c5dd4dececcc604cdb33a38e28b193eb52ea38b865" )
   ; ( "lib/agent_session/authored_source_preparation.ml"
     , "d8eea801d69ffa262cfc1d0a9bee45123ce8d4b08f74c25c67df450cd247600c" )
   ; ( "lib/agent_store/prompt_source_receipt.ml"

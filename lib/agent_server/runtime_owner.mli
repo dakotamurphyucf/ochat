@@ -974,3 +974,13 @@ val run_goal_wake_runtime
   -> ( Agent_session.Session_actor.Goal_execution_runtime.Wake_result.t
        , Agent_protocol.Error.t )
        result
+
+(** Same exclusive source stage, reserved before consuming the actual accepted
+    native command selection. Uses that command's captured original loan/policy;
+    no DTO, actor lookup or second preparation is constructed by this wrapper. *)
+val with_native_goal_resume_source_reported
+  :  t
+  -> source_owner:Agent_session.Runtime_source_owner.t
+  -> selection:Agent_session.Session_actor.Goal_native_resume.Selection.t
+  -> (Goal_resume_source.t -> ('a, Agent_protocol.Error.t) result)
+  -> 'a Goal_resume_source.Report.t

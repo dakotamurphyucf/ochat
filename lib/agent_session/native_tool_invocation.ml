@@ -50,6 +50,7 @@ type borrowed =
   ; child_origin : I.origin
   ; coordination_context : Chat_response.Execution_gate.context
   ; execution_context : Chatml_execution.context
+  ; goal_context : Chat_response.Goal_native_scope.collection option
   ; runtime_context : Chat_response.Runtime_request_scope.t option
   ; moderation_context : Native_tool_moderation.t option
   ; authoring_reference_context : Authoring_reference_scope.t option
@@ -66,6 +67,7 @@ type owned_borrowed =
   ; child_origin : I.origin
   ; coordination_context : Chat_response.Execution_gate.context
   ; execution_context : Chatml_execution.context
+  ; goal_context : Chat_response.Goal_native_scope.collection option
   ; runtime_context : Chat_response.Runtime_request_scope.t option
   }
 
@@ -78,6 +80,7 @@ type selected_borrowed =
   ; ceiling : C.t option
   ; effect_entry : (C.binding -> (unit, Agent_protocol.Error.t) result) option
   ; execution_context : Chatml_execution.context
+  ; goal_context : Chat_response.Goal_native_scope.collection option
   ; runtime_context : Chat_response.Runtime_request_scope.t option
   ; selected_ancestor : selected_borrowed option
   }
@@ -324,6 +327,10 @@ module Admission = struct
       Error
         (Agent_protocol.Error.invalid_request
            "native admission expired or effect differs")
+  ;;
+
+  let callback_scope t =
+    Option.map t.borrowed.goal_context ~f:Chat_response.Goal_native_scope.owner
   ;;
 
   let invocation t = t.borrowed.invocation
@@ -579,6 +586,7 @@ let with_owned_scope
       ?ceiling
       ?(child_origin = I.Script)
       ?execution_context
+      ?goal_context
       ?runtime_context
       ~issuer
       ~parent_claim
@@ -592,6 +600,9 @@ let with_owned_scope
     Option.value_or_thunk
       runtime_context
       ~default:Chat_response.Runtime_request_scope.capture
+  in
+  let goal_context =
+    Option.value_or_thunk goal_context ~default:Chat_response.Goal_native_scope.capture
   in
   let scope =
     { invocation
@@ -603,20 +614,23 @@ let with_owned_scope
     ; child_origin
     ; coordination_context = Chat_response.Execution_gate.capture_context ()
     ; execution_context
+    ; goal_context
     ; runtime_context
     }
   in
   Exn.protect
     ~finally:(fun () -> Atomic.set scope.active false)
     ~f:(fun () ->
-      Chat_response.Runtime_request_scope.with_context runtime_context (fun () ->
-        Eio.Fiber.with_binding owned_scope_key scope f))
+      Chat_response.Goal_native_scope.with_context goal_context (fun () ->
+        Chat_response.Runtime_request_scope.with_context runtime_context (fun () ->
+          Eio.Fiber.with_binding owned_scope_key scope f)))
 ;;
 
 let with_selected_scope
       ?ceiling
       ?effect_entry
       ?execution_context
+      ?goal_context
       ?runtime_context
       ~issuer
       ~parent_claim
@@ -631,6 +645,9 @@ let with_selected_scope
       runtime_context
       ~default:Chat_response.Runtime_request_scope.capture
   in
+  let goal_context =
+    Option.value_or_thunk goal_context ~default:Chat_response.Goal_native_scope.capture
+  in
   let selected_ancestor = Eio.Fiber.get selected_scope_key in
   let scope =
     { invocation
@@ -641,6 +658,7 @@ let with_selected_scope
     ; ceiling
     ; effect_entry
     ; execution_context
+    ; goal_context
     ; runtime_context
     ; selected_ancestor
     }
@@ -648,8 +666,9 @@ let with_selected_scope
   Exn.protect
     ~finally:(fun () -> Atomic.set scope.active false)
     ~f:(fun () ->
-      Chat_response.Runtime_request_scope.with_context runtime_context (fun () ->
-        Eio.Fiber.with_binding selected_scope_key scope f))
+      Chat_response.Goal_native_scope.with_context goal_context (fun () ->
+        Chat_response.Runtime_request_scope.with_context runtime_context (fun () ->
+          Eio.Fiber.with_binding selected_scope_key scope f)))
 ;;
 
 let select_tools (scope : borrowed) ~names =
@@ -701,6 +720,7 @@ let with_scope
       ?(capabilities = Invocation_capabilities.unavailable)
       ?(child_origin = I.Script)
       ?execution_context
+      ?goal_context
       ?runtime_context
       ?moderation_context
       ~execute
@@ -742,30 +762,35 @@ let with_scope
       runtime_context
       ~default:Chat_response.Runtime_request_scope.capture
   in
+  let goal_context =
+    Option.value_or_thunk goal_context ~default:Chat_response.Goal_native_scope.capture
+  in
   let moderation_context =
     Option.value_or_thunk moderation_context ~default:Native_tool_moderation.capture
   in
   Exn.protect
     ~finally:(fun () -> Atomic.set active false)
     ~f:(fun () ->
-      Chat_response.Runtime_request_scope.with_context runtime_context (fun () ->
-        Native_tool_moderation.with_context moderation_context (fun () ->
-          Eio.Fiber.with_binding
-            scope_key
-            { invocation
-            ; active
-            ; execute
-            ; moderator_execute
-            ; ceiling
-            ; child_origin
-            ; coordination_context = Chat_response.Execution_gate.capture_context ()
-            ; execution_context
-            ; runtime_context
-            ; moderation_context
-            ; authoring_reference_context
-            ; capabilities
-            }
-            f)))
+      Chat_response.Goal_native_scope.with_context goal_context (fun () ->
+        Chat_response.Runtime_request_scope.with_context runtime_context (fun () ->
+          Native_tool_moderation.with_context moderation_context (fun () ->
+            Eio.Fiber.with_binding
+              scope_key
+              { invocation
+              ; active
+              ; execute
+              ; moderator_execute
+              ; ceiling
+              ; child_origin
+              ; coordination_context = Chat_response.Execution_gate.capture_context ()
+              ; execution_context
+              ; goal_context
+              ; runtime_context
+              ; moderation_context
+              ; authoring_reference_context
+              ; capabilities
+              }
+              f))))
 ;;
 
 let check_active (scope : borrowed) =
@@ -821,6 +846,7 @@ let execute_borrowed (scope : borrowed) ~invocation f =
         ~capabilities
         ?moderator_execute:scope.moderator_execute
         ~execution_context:scope.execution_context
+        ~goal_context:scope.goal_context
         ~runtime_context:scope.runtime_context
         ~moderation_context:scope.moderation_context
         ~execute:scope.execute
@@ -861,6 +887,7 @@ let execute_owned_borrowed (scope : owned_borrowed) ~invocation f =
            ~ceiling:selected
            ~child_origin:scope.child_origin
            ~execution_context:scope.execution_context
+           ~goal_context:scope.goal_context
            ~runtime_context:scope.runtime_context
            ~issuer:scope.issuer
            ~parent_claim:active
@@ -893,6 +920,7 @@ let execute_moderator_borrowed (scope : borrowed) ~invocation f =
         ~capabilities
         ?moderator_execute:scope.moderator_execute
         ~execution_context:scope.execution_context
+        ~goal_context:scope.goal_context
         ~runtime_context:scope.runtime_context
         ~moderation_context:scope.moderation_context
         ~execute:scope.execute
@@ -932,6 +960,7 @@ let with_managed_scope execution f =
     ~child_origin
     ?moderator_execute:scope.moderator_execute
     ~execution_context:scope.execution_context
+    ~goal_context:scope.goal_context
     ~runtime_context:scope.runtime_context
     ~moderation_context:scope.moderation_context
     ~execute:scope.execute
@@ -977,6 +1006,7 @@ let with_owned_managed_scope execution f =
     ~parent_claim:scope.parent_claim
     ~child_origin:I.Script
     ~execution_context:scope.execution_context
+    ~goal_context:scope.goal_context
     ~runtime_context:scope.runtime_context
     scope.invocation
     (fun () -> Result.bind (borrow_owned ()) ~f)
@@ -1020,6 +1050,7 @@ let with_selected_managed_scope execution f =
     ~issuer:scope.issuer
     ~parent_claim:scope.parent_claim
     ~execution_context:scope.execution_context
+    ~goal_context:scope.goal_context
     ~runtime_context:scope.runtime_context
     scope.invocation
     (fun () -> Result.bind (borrow_selected ()) ~f)
@@ -1104,6 +1135,7 @@ let with_owned_selected_capabilities selected f =
       ~parent_claim:scope.parent_claim
       ~child_origin:scope.child_origin
       ~execution_context:scope.execution_context
+      ~goal_context:scope.goal_context
       ~runtime_context:scope.runtime_context
       scope.invocation
       f
@@ -1135,6 +1167,7 @@ let with_developer_selected_capabilities selected f =
       ~issuer:scope.issuer
       ~parent_claim:scope.parent_claim
       ~execution_context:scope.execution_context
+      ~goal_context:scope.goal_context
       ~runtime_context:scope.runtime_context
       scope.invocation
       f

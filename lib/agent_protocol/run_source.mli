@@ -2,14 +2,14 @@
     Epoch is monotone within a session and changes on replacement/removal/reset.
     A matching runtime restore does not grant or extend source authority. *)
 type t = private
-  { observer : Invocation.observer
+  { observer : Moderator_observer.t
   ; generation : int
   ; installation_epoch : int64
   }
 [@@deriving equal, sexp]
 
 val create
-  :  observer:Invocation.observer
+  :  observer:Moderator_observer.t
   -> generation:int
   -> installation_epoch:int64
   -> (t, Error.t) result

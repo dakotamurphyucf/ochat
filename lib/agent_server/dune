@@ -129,6 +129,7 @@
   run_start_service
   recurrence_run_service
   goal_run_service
+  goal_native_resume_dispatcher
   pagination
   inference_query_budget
   managed_output_cursor

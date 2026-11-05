@@ -105,7 +105,7 @@ type routing =
 [@@deriving equal, sexp]
 
 (** Stable source identity, independent of process-local tool capability IDs. *)
-type observer =
+type observer = Moderator_observer.t =
   { script_id : string
   ; source_sha256 : string
   }
@@ -175,6 +175,7 @@ type t = private
     (** Host-produced receipt bound to the successful disclosed output. Its
         existence alone does not mean documentation reached provider history. *)
   ; inference_origin : Inference_origin.t option [@sexp.option]
+  ; native_goal_resume : Goal_native_resume_intent.t option [@sexp.option]
     (** Immutable original attribution, outside the authored context ABI. Missing
         historical evidence is unavailable; terminal Runs stay named. This field
         grants no live ownership or execution permission. *)
@@ -302,3 +303,8 @@ module Storage : sig
   val to_json : t -> Jsonaf.t
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
+
+(** Native action DATA follows the actual successful resolution transition.
+    Updating its phase validates immutable request/principal and monotone status;
+    the Actor must independently authenticate owner, writer and physical custody. *)
+val record_native_goal_resume : t -> Goal_native_resume_intent.t -> (t, Error.t) result

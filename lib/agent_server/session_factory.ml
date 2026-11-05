@@ -4675,8 +4675,14 @@ let legacy_construction
       let%bind current = A.state actor in
       Agent_session.History_codec.all_of_protocol current.conversation.canonical_history
   in
+  let startup =
+    match state.runtime_initialization, !initialization_scope with
+    | Ready, None -> B.Legacy_startup.Installed_resume
+    | Ready, Some _ | Pending _, (Some _ | None) -> Constructor
+  in
   B.
-    { claim
+    { startup
+    ; claim
     ; installed_claim
     ; history
     ; script_tools = native_script_tools t profile actor_ref ~state
@@ -12874,13 +12880,22 @@ module Goal_resume_source = struct
   let result t = resume_existing_goal_source t.outcome t.cleanup
 end
 
-let with_goal_resume_source_reported
+module Goal_resume_issuer = struct
+  type t =
+    | Operator of
+        { actor : Operator_authorization.t
+        ; authorize :
+            Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result
+        ; request : Agent_session.Goal_resume_request.t
+        }
+    | Native of Agent_session.Session_actor.Goal_native_resume.Selection.t
+end
+
+let with_goal_resume_issued_source_reported
       t
       (entry : Session_registry.entry)
-      ~actor
-      ~authorize
+      ~issuer
       ~session
-      ~request
       f
   =
   let module Actor = Agent_session.Session_actor in
@@ -12895,21 +12910,30 @@ let with_goal_resume_source_reported
   in
   let parent_cleanup = ref Deferred_parent_cleanup.Not_acquired in
   let report =
-    Runtime_owner.with_goal_resume_source_reported
-      entry.runtime
-      ~source_owner:t.runtime_source_owner
-      ~actor
-      ~authorize
-      ~session
-      ~request
-      (fun stage ->
-         select_existing_goal_source
-           t
-           entry
-           ~parent_cleanup
-           ~prepare:(fun source -> Source.prepare stage ~source)
-           ~check_selected:Runtime_owner.Prepared_goal_continuation.check_basis
-           f)
+    let with_source =
+      match issuer with
+      | Goal_resume_issuer.Operator { actor; authorize; request } ->
+        Runtime_owner.with_goal_resume_source_reported
+          entry.runtime
+          ~source_owner:t.runtime_source_owner
+          ~actor
+          ~authorize
+          ~session
+          ~request
+      | Native selection ->
+        Runtime_owner.with_native_goal_resume_source_reported
+          entry.runtime
+          ~source_owner:t.runtime_source_owner
+          ~selection
+    in
+    with_source (fun stage ->
+      select_existing_goal_source
+        t
+        entry
+        ~parent_cleanup
+        ~prepare:(fun source -> Source.prepare stage ~source)
+        ~check_selected:Runtime_owner.Prepared_goal_continuation.check_basis
+        f)
   in
   let outcome = Source.Report.outcome report in
   let cleanup =
@@ -12929,6 +12953,27 @@ let with_goal_resume_source_reported
        | Returned (Ok (Fresh _) | Error _) | Raised _ -> None)
   in
   Ok { Goal_resume_source.outcome; receipt; cleanup }
+;;
+
+let with_goal_resume_source_reported t entry ~actor ~authorize ~session ~request f =
+  with_goal_resume_issued_source_reported
+    t
+    entry
+    ~session
+    ~issuer:(Goal_resume_issuer.Operator { actor; authorize; request })
+    f
+;;
+
+let with_native_goal_resume_source_reported t entry ~selection f =
+  let session =
+    Agent_session.Session_actor.Goal_native_resume.Selection.session selection
+  in
+  with_goal_resume_issued_source_reported
+    t
+    entry
+    ~session
+    ~issuer:(Goal_resume_issuer.Native selection)
+    f
 ;;
 
 let with_goal_execution_source t (entry : Session_registry.entry) ~with_stage f =

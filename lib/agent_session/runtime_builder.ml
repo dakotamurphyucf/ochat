@@ -284,8 +284,15 @@ type legacy_callback_services = Legacy_callback_runtime.Services.t =
 
 type legacy_callback_claim = Legacy_callback_runtime.claim
 
+module Legacy_startup = struct
+  type t =
+    | Constructor
+    | Installed_resume
+end
+
 type legacy_construction =
-  { claim : legacy_callback_claim
+  { startup : Legacy_startup.t
+  ; claim : legacy_callback_claim
   ; installed_claim :
       operation_id:Agent_protocol.Id.Operation.t option -> legacy_callback_claim
   ; history : unit -> (History_entry.t list, Agent_protocol.Error.t) result
@@ -1067,6 +1074,63 @@ let run_legacy_constructor
   | None -> Error (failure "legacy constructor did not acknowledge its checkpoint")
 ;;
 
+module Installed_legacy_resume = struct
+  type state =
+    | Ready
+    | Completed
+    | Failed of Agent_protocol.Error.t
+
+  type t =
+    { state : state Atomic.t
+    ; gate : Chat_response.Execution_gate.t
+    ; run :
+        operation_id:Agent_protocol.Id.Operation.t option
+        -> (Legacy_callback_runtime.t option, Agent_protocol.Error.t) result
+    ; acknowledge : Jsonaf.t option -> unit
+    }
+
+  let create ~run ~acknowledge =
+    { state = Atomic.make Ready
+    ; gate = Chat_response.Execution_gate.create ()
+    ; run
+    ; acknowledge
+    }
+  ;;
+
+  let pending t =
+    match Atomic.get t.state with
+    | Ready -> true
+    | Completed | Failed _ -> false
+  ;;
+
+  let run t ~operation_id =
+    match
+      Chat_response.Execution_gate.with_access t.gate (fun () ->
+        match Atomic.get t.state with
+        | Completed -> Ok false
+        | Failed error -> Error error
+        | Ready ->
+          (match t.run ~operation_id with
+           | Ok None -> Ok false
+           | Ok (Some outcome) ->
+             t.acknowledge outcome.checkpoint;
+             Atomic.set t.state Completed;
+             Ok true
+           | Error error ->
+             Atomic.set t.state (Failed error);
+             Error error
+           | exception exn ->
+             let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+             Atomic.set
+               t.state
+               (Failed (failure "installed legacy resume was interrupted"));
+             Exn.raise_with_original_backtrace exn backtrace))
+    with
+    | Ok result -> result
+    | Error error -> Error (failure (Chat_response.Execution_gate.error_message error))
+  ;;
+end
+
 let create_moderator
       ~construction_checkpoint
       ~definition
@@ -1113,9 +1177,10 @@ let create_moderator
       , (fun () -> Ok None)
       , (fun _ -> String.Map.empty)
       , (fun () -> Error (failure "runtime has no host-backed legacy startup ACK"))
-      , fun () ->
+      , (fun () ->
           Error
-            (Runtime_resume.unavailable "runtime has no host-backed legacy resume ACK") )
+            (Runtime_resume.unavailable "runtime has no host-backed legacy resume ACK"))
+      , None )
   | Some artifact ->
     let executor =
       model_executor ~sw ~ctx ~manifest_authorizer ~approval_provider ~response_dir
@@ -1168,6 +1233,13 @@ let create_moderator
         }
     in
     let moderator_pair = moderator, executor in
+    let%bind installed_resume =
+      match Manager.extension_definition manager, legacy_construction, snapshot with
+      | None, Some { startup = Installed_resume; _ }, None ->
+        Error (failure "installed legacy resume requires an initialized checkpoint")
+      | None, Some { startup = Installed_resume; _ }, Some _ -> Ok true
+      | None, (Some { startup = Constructor; _ } | None), _ | Some _, _, _ -> Ok false
+    in
     let started = ref false in
     let acknowledged_snapshot = ref None in
     let current_snapshot () =
@@ -1197,6 +1269,8 @@ let create_moderator
           | Some _, None ->
             Error (failure "legacy startup lost its acknowledged checkpoint")
           | None, _ -> current_snapshot ())
+        else if installed_resume
+        then current_snapshot ()
         else (
           let now_ms =
             Eio.Time.now (Eio.Stdenv.clock env) *. 1_000. |> Float.iround_nearest_exn
@@ -1307,7 +1381,14 @@ let create_moderator
               ~bind_inference_identity
               (job_services.for_execution admission))
       , check_legacy_acknowledged
-      , check_legacy_resume_acknowledged )
+      , check_legacy_resume_acknowledged
+      , if installed_resume
+        then
+          Some
+            (fun checkpoint ->
+              acknowledged_snapshot := Some checkpoint;
+              started := true)
+        else None )
 ;;
 
 let encode_moderator_snapshot = Moderator_checkpoint.encode
@@ -2184,7 +2265,8 @@ let build_with_services
       , start_moderator_once
       , model_recipes
       , check_legacy_acknowledged
-      , check_legacy_resume_acknowledged )
+      , check_legacy_resume_acknowledged
+      , installed_legacy_resume )
     =
     create_moderator
       ~construction_checkpoint
@@ -2244,7 +2326,7 @@ let build_with_services
                  ~now)
         | _ -> tools_service)
   in
-  let%bind legacy_callbacks =
+  let%bind legacy_callback_run =
     match legacy_construction, moderator, base_script_tools with
     | Some host, Some (moderator, executor), Some script_tools
       when Option.is_none (Manager.extension_definition moderator.manager) ->
@@ -2254,28 +2336,38 @@ let build_with_services
           failure error.Chat_response.Tool_capability.message)
       in
       Some
-        (fun ~operation_id ->
-          Legacy_callback_runtime.Installed.create
-            moderator.manager
-            ~run:(fun ~selection ~history ~available_tools ~now_ms ->
-              Legacy_callback_runtime.run
-                moderator.manager
-                ~claim:(host.installed_claim ~operation_id)
-                ~model_recipes:
-                  (legacy_model_recipes
-                     ~delegated
-                     executor
-                     ~session_text:(Agent_protocol.Id.Session.to_string session_id)
-                     ~bind_inference_identity)
-                ~script_tools
-                ~selected
-                ~selection
-                ~session_id:(Agent_protocol.Id.Session.to_string session_id)
-                ~history
-                ~available_tools
-                ~session_meta:`Null
-                ~now_ms))
+        ( moderator.manager
+        , fun ~operation_id ~unavailable ~selection ~history ~available_tools ~now_ms ->
+            Legacy_callback_runtime.run
+              moderator.manager
+              ~claim:(fun ~manager ~callback f ->
+                let result = host.installed_claim ~operation_id ~manager ~callback f in
+                (match result, unavailable with
+                 | Ok false, Some unavailable -> unavailable := true
+                 | Ok (true | false), None | Ok true, Some _ | Error _, _ -> ());
+                result)
+              ~model_recipes:
+                (legacy_model_recipes
+                   ~delegated
+                   executor
+                   ~session_text:(Agent_protocol.Id.Session.to_string session_id)
+                   ~bind_inference_identity)
+              ~script_tools
+              ~selected
+              ~selection
+              ~session_id:(Agent_protocol.Id.Session.to_string session_id)
+              ~history
+              ~available_tools
+              ~session_meta:`Null
+              ~now_ms )
     | _ -> Ok None
+  in
+  let legacy_callbacks =
+    Option.map legacy_callback_run ~f:(fun (manager, run) ->
+      fun ~operation_id ->
+      Legacy_callback_runtime.Installed.create
+        manager
+        ~run:(run ~operation_id ~unavailable:None))
   in
   let now_ms () =
     Agent_protocol.Timestamp.to_time_ns (now ())
@@ -2339,11 +2431,55 @@ let build_with_services
         }
     | _ -> None
   in
+  let%bind moderator_activation, legacy_foreground_resume =
+    match installed_legacy_resume, legacy_callback_run, legacy_construction with
+    | None, _, _ -> Ok (moderator_activation, None)
+    | Some acknowledge, Some (_, run), Some host ->
+      let activate ~operation_id =
+        let%bind history = host.history () in
+        let unavailable = ref false in
+        let result =
+          run
+            ~operation_id
+            ~unavailable:(Some unavailable)
+            ~selection:(Boundary Session_resume)
+            ~history
+            ~available_tools:tools
+            ~now_ms:(now_ms ())
+        in
+        (* Only the actual host's Ok false means no callback entered. Preserve
+           all genuine admission, handler, writer and cleanup errors. *)
+        match !unavailable, result with
+        | true, Error _ -> Ok None
+        | (true | false), (Ok _ as result) | false, (Error _ as result) -> result
+      in
+      let resume = Installed_legacy_resume.create ~run:activate ~acknowledge in
+      let activation =
+        { pending = (fun () -> Installed_legacy_resume.pending resume)
+        ; startup_pending = (fun () -> false)
+        ; run = (fun () -> Installed_legacy_resume.run resume ~operation_id:None)
+        }
+      in
+      Ok
+        ( Some activation
+        , Some
+            (fun ~operation_id ->
+              let%bind _ = Installed_legacy_resume.run resume ~operation_id in
+              if Installed_legacy_resume.pending resume
+              then Error (failure "foreground requires its installed legacy resume ACK")
+              else Ok ()) )
+    | Some _, (None | Some _), None | Some _, None, Some _ ->
+      Error (failure "installed legacy resume lost its callback host")
+  in
   let moderator_events =
     match lifecycle, moderator, legacy_callbacks with
     | _, _, Some callbacks ->
       Some
         (fun ~input ~capabilities ->
+          let%bind () =
+            Option.value_map legacy_foreground_resume ~default:(Ok ()) ~f:(fun resume ->
+              resume ~operation_id:(Some input.Operation_worker.Input.operation.id))
+          in
           Legacy_callback_runtime.Installed.foreground_handlers
             (callbacks ~operation_id:(Some input.Operation_worker.Input.operation.id))
             ~capabilities)

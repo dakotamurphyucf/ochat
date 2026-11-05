@@ -192,8 +192,52 @@ let start_episode service ~entry ~actor ~session ~request =
 
 module Resume_result = Actor.Goal_resume_result
 
-let resume_episode service ~entry ~actor ~session ~request =
+let resume_from_source (entry : Session_registry.entry) ~check_entry ~with_source =
   let module Source = Factory.Goal_resume_source in
+  let open Result.Let_syntax in
+  let uncertain = ref false in
+  let%bind report =
+    with_source (fun prepared ->
+      let%bind () = check_entry () in
+      let%bind decision =
+        Actor.admit_goal_resume
+          entry.actor
+          ~binding:(Runtime_owner.Prepared_goal_continuation.binding prepared)
+      in
+      let finish = function
+        | (Resume_result.Resumed _ | Retained _) as result -> Ok result
+        | Resume_failed { receipt = _; error } | Rejected error -> Error error
+        | Uncertain error ->
+          uncertain := true;
+          Error error
+      in
+      match decision with
+      | Retained receipt -> Ok (Resume_result.Retained receipt)
+      | Waiting { receipt; wake } ->
+        Ok (Resume_result.Resumed { receipt; continuation = Waiting wake })
+      | Rejected error -> Error error
+      | Uncertain error ->
+        uncertain := true;
+        Error error
+      | Resume_failed { receipt = _; error } -> Error error
+      | Ready continuation ->
+        Runtime_owner.resume_goal_episode entry.runtime ~prepared ~continuation
+        |> Result.bind ~f:finish)
+  in
+  match Source.result report with
+  | Ok (Retained receipt) -> Ok (Resume_result.Retained receipt)
+  | Ok (Fresh result) -> Ok result
+  | Error error ->
+    (match Source.receipt report with
+     | Some receipt -> Ok (Resume_result.Resume_failed { receipt; error })
+     | None ->
+       Ok
+         (if !uncertain
+          then Resume_result.Uncertain error
+          else Resume_result.Rejected error))
+;;
+
+let resume_episode service ~entry ~actor ~session ~request =
   let open Result.Let_syntax in
   let check_entry () = Factory.check_registered_entry service.factory entry ~session in
   let authorize state =
@@ -213,51 +257,35 @@ let resume_episode service ~entry ~actor ~session ~request =
   match retained with
   | Some receipt -> Ok (Resume_result.Retained receipt)
   | None ->
-    let uncertain = ref false in
-    let%bind report =
-      Factory.with_goal_resume_source_reported
-        service.factory
-        entry
-        ~actor
-        ~authorize
-        ~session
-        ~request
-        (fun prepared ->
-           let%bind () = check_entry () in
-           let%bind decision =
-             Actor.admit_goal_resume
-               entry.actor
-               ~binding:(Runtime_owner.Prepared_goal_continuation.binding prepared)
-           in
-           let finish = function
-             | (Resume_result.Resumed _ | Retained _) as result -> Ok result
-             | Resume_failed { receipt = _; error } | Rejected error -> Error error
-             | Uncertain error ->
-               uncertain := true;
-               Error error
-           in
-           match decision with
-           | Retained receipt -> Ok (Resume_result.Retained receipt)
-           | Waiting { receipt; wake } ->
-             Ok (Resume_result.Resumed { receipt; continuation = Waiting wake })
-           | Rejected error -> Error error
-           | Uncertain error ->
-             uncertain := true;
-             Error error
-           | Resume_failed { receipt = _; error } -> Error error
-           | Ready continuation ->
-             Runtime_owner.resume_goal_episode entry.runtime ~prepared ~continuation
-             |> Result.bind ~f:finish)
-    in
-    (match Source.result report with
-     | Ok (Retained receipt) -> Ok (Resume_result.Retained receipt)
-     | Ok (Fresh result) -> Ok result
-     | Error error ->
-       (match Source.receipt report with
-        | Some receipt -> Ok (Resume_result.Resume_failed { receipt; error })
-        | None ->
-          Ok
-            (if !uncertain
-             then Resume_result.Uncertain error
-             else Resume_result.Rejected error)))
+    resume_from_source
+      entry
+      ~check_entry
+      ~with_source:
+        (Factory.with_goal_resume_source_reported
+           service.factory
+           entry
+           ~actor
+           ~authorize
+           ~session
+           ~request)
+;;
+
+let resume_native_episode factory ~entry ~selection =
+  let open Result.Let_syntax in
+  let session = Actor.Goal_native_resume.Selection.session selection in
+  let check_entry () = Factory.check_registered_entry factory entry ~session in
+  let%bind () = check_entry () in
+  (* Retained command facts do not acquire a runtime/source lease, including
+     while an already started continuation still owns the loaded runtime. *)
+  let%bind receipt =
+    Actor.native_goal_resume_receipt entry.Session_registry.actor ~selection
+  in
+  match receipt with
+  | Some receipt -> Ok (Resume_result.Retained receipt)
+  | None ->
+    resume_from_source
+      entry
+      ~check_entry
+      ~with_source:
+        (Factory.with_native_goal_resume_source_reported factory entry ~selection)
 ;;

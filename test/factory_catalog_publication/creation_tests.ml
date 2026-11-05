@@ -40,6 +40,7 @@ let with_max_root_agents (config : Agent_server.Config.t) ~max_root_agents =
 ;;
 
 let with_daemon
+      ?test_root
       ?(startup_mode = Daemon.Execute)
       ?(prompt_text = "<developer>Pinned source during creation.</developer>")
       ?(schemas = false)
@@ -56,10 +57,12 @@ let with_daemon
   =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
-    let root = temporary_root env in
+    let root = Option.value_or_thunk test_root ~default:(fun () -> temporary_root env) in
     let path = Eio.Path.(env#fs / root) in
     protect_cleanup
-      ~finally:(fun () -> Eio.Path.rmtree path)
+    (* A supplied root is borrowed from the crash-test parent, which joins the
+         child before deleting it. Only this fixture's own root is ours to remove. *)
+      ~finally:(fun () -> if Option.is_none test_root then Eio.Path.rmtree path)
       (fun () ->
          let prompt = Filename.concat root "parent.chatmd" in
          Eio.Path.save ~create:(`Exclusive 0o600) Eio.Path.(env#fs / prompt) prompt_text;

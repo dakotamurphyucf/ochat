@@ -214,3 +214,49 @@ execution owners must repeat their occurrence, original-permission and final
 admission checks. Wiring suspension through all wake consumers and configurable
 Goal helpers remains integration work. These components add no second Workflow
 scheduler and do not complete end-to-end goal automation by themselves.
+
+## Native command custody
+
+A selected native Goal adapter can stage objective/progress edits and a bounded
+same-episode Resume intent in its actual callback transaction. The lexical native
+receipt is speculative until the parent checkpoint acknowledges it. Parent
+rollback, a caught-and-rolled-back Tool.call, failed native completion and invalid
+multiple-Resume selection retire the speculative loans. A durable Accepted
+Invocation records the original request; it does not say that the Goal command
+has executed.
+
+The Resume intent freezes generation, full source, Goal/catalog/Run revisions,
+principal, key and request digest. The host must not refresh those fields to make
+a stale command pass. Callback commit can itself change an owned Goal Run's
+revision, so a Resume staged by that same Goal's callback may truthfully become
+stale. An unrelated ordinary callback can target a passive Goal without that
+self-change. Resume uses the existing episode, Run binding and accounting owner;
+it neither creates a replacement episode nor enables metadata as a substitute
+for authenticated continuation.
+
+The existing schedule host selects an accepted command only after the callback,
+Operation and runtime loans have joined. Its finite dispatcher reserves the same
+exclusive source stage and checks transferred command custody, current host
+policy, the original Run authority and exact source before admission. Native
+admission itself is borrowed and expires with the callback; retaining that token
+is not a post-callback authorizer. A successful dispatch returns an acknowledged
+Started, Waiting or Settled fact without waiting for arbitrary Workflow
+completion. There is no detached dispatcher or additional command queue.
+
+Dispatch requires the configured execution-enabled schedule host. Client
+detachment does not stop that host. An absent or disabled host can leave an
+Accepted command pending; it must not be represented as Started. Host shutdown
+retires the process-local command loan. Reopening preserves durable Invocation
+and Goal receipts as historical DATA but never reconstructs the loan or replays
+an accepted request. A fresh authenticated status reader distinguishes
+Interrupted_before_dispatch, Dispatching/Unknown and an actual Goal command ACK.
+Only the same actual preparation can supply a live handoff detail; after restart
+that detail may be Unavailable even when the durable Goal receipt is known.
+
+Known Goal ACK and attempted/uncertain writer outcomes prevent a later negative
+host detail from being persisted as a definitely pre-admission Rejected command.
+No status projection writes a post-Started Invocation revision that could
+invalidate the first execution prefix. Status IDs and decoded receipts grant no
+execution permission. New Invocation children require the understood native
+Resume semantics marker in both session snapshots and delta documents;
+historical absence retains its previous wire representation.

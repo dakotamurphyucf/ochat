@@ -12,6 +12,7 @@ type t =
   ; idle : Eio.Condition.t
   ; recurrence_dispatcher : Recurrence_dispatcher.t option
   ; factory : Session_factory.t
+  ; goal_native_resume_dispatcher : Goal_native_resume_dispatcher.t
   }
 
 let failure message = Agent_protocol.Error.create Interrupted ~message ~retryable:false ()
@@ -122,7 +123,17 @@ let process_entry t entry =
   | Ok (observed, schedules) ->
     List.iter schedules ~f:(fun schedule ->
       if not (Atomic.get t.closed) then claim t entry observed schedule);
-    if not (Atomic.get t.closed) then drain_idle_moderator t.factory entry
+    if not (Atomic.get t.closed)
+    then (
+      drain_idle_moderator t.factory entry;
+      (* Both source/Owner brackets have joined before this finite handoff. *)
+      if not (Atomic.get t.closed)
+      then
+        ignore
+          (Goal_native_resume_dispatcher.process_entry
+             t.goal_native_resume_dispatcher
+             entry
+           : (unit, Agent_protocol.Error.t) result))
 ;;
 
 let dispatch_entry t sw entry =
@@ -217,6 +228,7 @@ let start_controlled ?recurrence_dispatcher ~factory ~enabled ~sw ~clock ~regist
     ; idle = Eio.Condition.create ()
     ; recurrence_dispatcher
     ; factory
+    ; goal_native_resume_dispatcher = Goal_native_resume_dispatcher.create ~factory
     }
   in
   if enabled then Eio.Fiber.fork ~sw (fun () -> run t sw clock registry);
@@ -229,6 +241,7 @@ let start ~factory ~sw ~clock ~registry =
 
 let close t =
   Atomic.set t.closed true;
+  Goal_native_resume_dispatcher.close t.goal_native_resume_dispatcher;
   Option.iter t.recurrence_dispatcher ~f:Recurrence_dispatcher.close;
   List.iter t.sweeps ~f:(fun sweep ->
     Option.iter sweep.cancel ~f:(fun cancel -> Eio.Cancel.cancel cancel Exit))

@@ -104,3 +104,14 @@ val resume_episode
   -> session:Agent_protocol.Session_ref.t
   -> request:Agent_session.Goal_resume_request.t
   -> (Resume_result.t, Agent_protocol.Error.t) result
+
+(** Finite native command consumer. The opaque selected Invocation owns its
+    original host policy and same Admission loan. This function reserves the
+    existing real source bracket before actual claim, and returns after joined
+    handoff/cleanup rather than workflow completion. No actor reconstructed from
+    principal data or callback borrow is accepted. *)
+val resume_native_episode
+  :  Session_factory.t
+  -> entry:Session_registry.entry
+  -> selection:Agent_session.Session_actor.Goal_native_resume.Selection.t
+  -> (Resume_result.t, Agent_protocol.Error.t) result

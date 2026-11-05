@@ -91,7 +91,7 @@ type routing =
   }
 [@@deriving equal, sexp]
 
-type observer =
+type observer = Moderator_observer.t =
   { script_id : string
   ; source_sha256 : string
   }
@@ -144,6 +144,7 @@ type t =
   ; completion_contract : Completion_contract.t option [@sexp.option]
   ; authoring_reference : Authoring_reference.t option [@sexp.option]
   ; inference_origin : Inference_origin.t option [@sexp.option]
+  ; native_goal_resume : Goal_native_resume_intent.t option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
@@ -269,6 +270,25 @@ let validate_handler_intent (intent : handler_intent) =
 let validate t =
   let open Result.Let_syntax in
   let%bind () = validate_context t.context in
+  let%bind () =
+    match t.native_goal_resume with
+    | None -> Ok ()
+    | Some intent ->
+      let request = Goal_native_resume_intent.request intent in
+      if
+        String.equal t.context.tool_name "goal_resume"
+        && Id.Session.equal t.context.session_id (Goal_resume_request.session_id request)
+        && Int.equal t.context.generation (Goal_resume_request.generation request)
+        &&
+        match t.status with
+        | Resolved (Complete _) | Published (Complete _) -> true
+        | _ -> false
+      then
+        Goal_native_resume_intent.of_json (Goal_native_resume_intent.to_json intent)
+        |> Result.map ~f:ignore
+      else
+        invalid "native Goal resume intent differs from its successful actual invocation"
+  in
   let%bind () =
     Option.value_map t.inference_origin ~default:(Ok ()) ~f:Inference_origin.validate
   in
@@ -484,6 +504,21 @@ let validate t =
   | Resolved outcome | Published outcome -> validate_outcome outcome
 ;;
 
+let record_native_goal_resume t intent =
+  let open Result.Let_syntax in
+  let%bind () =
+    match t.native_goal_resume with
+    | None ->
+      (match Goal_native_resume_intent.phase intent with
+       | Staged -> Ok ()
+       | _ -> invalid "new native Goal action must be staged")
+    | Some previous -> Goal_native_resume_intent.validate_update previous ~incoming:intent
+  in
+  let next = { t with native_goal_resume = Some intent } in
+  let%map () = validate next in
+  next
+;;
+
 let create ?routing ?observer ?completion_contract ?parent_event context =
   let t =
     { context
@@ -495,6 +530,7 @@ let create ?routing ?observer ?completion_contract ?parent_event context =
     ; completion_contract
     ; authoring_reference = None
     ; inference_origin = None
+    ; native_goal_resume = None
     ; publication_discarded = None
     ; observation =
         Option.map observer ~f:(fun observer ->
@@ -851,6 +887,25 @@ let validate_handler_transition previous next =
 
 let validate_transition ~previous next =
   let open Result.Let_syntax in
+  let%bind () =
+    match previous, next.native_goal_resume with
+    | None, None -> Ok ()
+    | None, Some _ ->
+      invalid "new invocation cannot begin with native Goal action evidence"
+    | Some previous, None when Option.is_some previous.native_goal_resume ->
+      invalid "native Goal action evidence cannot be removed"
+    | Some _, None -> Ok ()
+    | Some previous, Some incoming ->
+      (match previous.native_goal_resume with
+       | Some before -> Goal_native_resume_intent.validate_update before ~incoming
+       | None ->
+         (match
+            previous.status, next.status, Goal_native_resume_intent.phase incoming
+          with
+          | Dispatching, Resolved (Complete _), (Staged | Accepted _) -> Ok ()
+          | _ ->
+            invalid "native Goal action requires its actual successful result transition"))
+  in
   let%bind () = validate next in
   match previous with
   | None ->
@@ -930,11 +985,16 @@ let validate_transition ~previous next =
                           equal_handler_intent
                           previous.handler_intent
                           next.handler_intent))
+                 || (not
+                       (Option.equal
+                          equal_observation
+                          previous.observation
+                          next.observation))
                  || not
                       (Option.equal
-                         equal_observation
-                         previous.observation
-                         next.observation)) -> Ok ()
+                         Goal_native_resume_intent.equal
+                         previous.native_goal_resume
+                         next.native_goal_resume)) -> Ok ()
       | Admitted, Dispatching | Admitted, Resolved (Cancelled _) | Dispatching, Resolved _
         -> Ok ()
       | (Resolved old, Published current | Published old, Published current)
@@ -1381,7 +1441,9 @@ let to_json t =
   `Object
     ([ ( "schema_version"
        , `Number
-           (if Option.is_some t.inference_origin
+           (if Option.is_some t.native_goal_resume
+            then "14"
+            else if Option.is_some t.inference_origin
             then "13"
             else if Option.is_some t.authoring_reference
             then "12"
@@ -1426,7 +1488,11 @@ let to_json t =
      @ optional "handler_intent" t.handler_intent handler_intent_to_json
      @ optional "completion_contract" t.completion_contract Completion_contract.to_json
      @ optional "authoring_reference" t.authoring_reference Authoring_reference.to_json
-     @ optional "inference_origin" t.inference_origin Inference_origin.to_json)
+     @ optional "inference_origin" t.inference_origin Inference_origin.to_json
+     @ optional
+         "native_goal_resume"
+         t.native_goal_resume
+         Goal_native_resume_intent.to_json)
 ;;
 
 let of_json json =
@@ -1441,7 +1507,7 @@ let of_json json =
   in
   let%bind () =
     match version with
-    | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 -> Ok ()
+    | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 -> Ok ()
     | _ -> failure Incompatible_protocol "unsupported invocation schema version"
   in
   let%bind () =
@@ -1456,7 +1522,8 @@ let of_json json =
        @ (if version >= 10 then [ "handler_intent" ] else [])
        @ (if version >= 11 then [ "completion_contract" ] else [])
        @ (if version >= 12 then [ "authoring_reference" ] else [])
-       @ if version >= 13 then [ "inference_origin" ] else [])
+       @ (if version >= 13 then [ "inference_origin" ] else [])
+       @ if version >= 14 then [ "native_goal_resume" ] else [])
   in
   let%bind context = Json_codec.required_as fields "context" (context_of_json ~version) in
   let%bind () =
@@ -1499,7 +1566,7 @@ let of_json json =
   in
   let%bind completion_contract =
     match version with
-    | 12 | 13 ->
+    | 12 | 13 | 14 ->
       Json_codec.optional_as fields "completion_contract" Completion_contract.of_json
     | 11 ->
       Json_codec.required_as fields "completion_contract" Completion_contract.of_json
@@ -1508,7 +1575,7 @@ let of_json json =
   in
   let%bind authoring_reference =
     match version with
-    | 13 ->
+    | 13 | 14 ->
       Json_codec.optional_as fields "authoring_reference" Authoring_reference.of_json
     | 12 ->
       Json_codec.required_as fields "authoring_reference" Authoring_reference.of_json
@@ -1516,9 +1583,18 @@ let of_json json =
     | _ -> Ok None
   in
   let%bind inference_origin =
-    if version >= 13
+    if version = 13
     then
       Json_codec.required_as fields "inference_origin" Inference_origin.of_json
+      |> Result.map ~f:Option.some
+    else if version >= 14
+    then Json_codec.optional_as fields "inference_origin" Inference_origin.of_json
+    else Ok None
+  in
+  let%bind native_goal_resume =
+    if version >= 14
+    then
+      Json_codec.required_as fields "native_goal_resume" Goal_native_resume_intent.of_json
       |> Result.map ~f:Option.some
     else Ok None
   in
@@ -1534,11 +1610,12 @@ let of_json json =
     ; completion_contract
     ; authoring_reference
     ; inference_origin
+    ; native_goal_resume
     }
   in
   let%bind t =
     match version with
-    | 10 | 11 | 12 | 13 ->
+    | 10 | 11 | 12 | 13 | 14 ->
       Json_codec.optional_as fields "parent_event" Id.Moderator_execution.of_json
       |> Result.map ~f:(fun parent_event -> { t with parent_event })
     | 9 ->
@@ -1560,19 +1637,23 @@ module Storage = struct
 
   let to_json (t : t) =
     `Object
-      [ "id", Id.Invocation.to_json t.context.id
-      ; "context", context_to_json t.context
-      ; "status", status_to_json t.status
-      ; "output_entry_id", option History.Id.to_json t.output_entry_id
-      ; "routing", option routing_to_json t.routing
-      ; "publication_discarded", option (fun s -> `String s) t.publication_discarded
-      ; "observation", option observation_to_json t.observation
-      ; "parent_event", option Id.Moderator_execution.to_json t.parent_event
-      ; "handler_intent", option handler_intent_to_json t.handler_intent
-      ; "completion_contract", option Completion_contract.to_json t.completion_contract
-      ; "authoring_reference", option Authoring_reference.to_json t.authoring_reference
-      ; "inference_origin", option Inference_origin.to_json t.inference_origin
-      ]
+      ([ "id", Id.Invocation.to_json t.context.id
+       ; "context", context_to_json t.context
+       ; "status", status_to_json t.status
+       ; "output_entry_id", option History.Id.to_json t.output_entry_id
+       ; "routing", option routing_to_json t.routing
+       ; "publication_discarded", option (fun s -> `String s) t.publication_discarded
+       ; "observation", option observation_to_json t.observation
+       ; "parent_event", option Id.Moderator_execution.to_json t.parent_event
+       ; "handler_intent", option handler_intent_to_json t.handler_intent
+       ; "completion_contract", option Completion_contract.to_json t.completion_contract
+       ; "authoring_reference", option Authoring_reference.to_json t.authoring_reference
+       ; "inference_origin", option Inference_origin.to_json t.inference_origin
+       ]
+       @ optional
+           "native_goal_resume"
+           t.native_goal_resume
+           Goal_native_resume_intent.to_json)
   ;;
 
   let of_json json =
@@ -1609,6 +1690,9 @@ module Storage = struct
       Json_codec.optional_as fields "inference_origin" (nullable Inference_origin.of_json)
       |> Result.map ~f:Option.join
     in
+    let%bind native_goal_resume =
+      Json_codec.optional_as fields "native_goal_resume" Goal_native_resume_intent.of_json
+    in
     let t =
       { context
       ; status
@@ -1621,6 +1705,7 @@ module Storage = struct
       ; completion_contract
       ; authoring_reference
       ; inference_origin
+      ; native_goal_resume
       }
     in
     let%map () = validate t in

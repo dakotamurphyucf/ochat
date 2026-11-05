@@ -593,6 +593,9 @@ module Existing_goal_preparation = struct
     ; registered_authority : unit -> (unit, Agent_protocol.Error.t) result
     ; mutable runtime_phase : runtime_scope Goal_runtime_phase.t
     ; mutable observed : Recurrence_controller.observation option
+    ; mutable native_command_loan : Execution_custody.Admission.t option
+    ; mutable resume_handoff : Goal_resume_result.Continuation.t option
+    ; resume_commit_attempted : bool ref
     }
 
   and phase =
@@ -1250,12 +1253,59 @@ type agent_intent_key =
   | Invocation_intent of Agent_protocol.Id.Invocation.t
 [@@deriving equal]
 
+type native_goal_custody =
+  { entry : Goal_native_actions.Entry.t
+  ; mutable dispatch_finished : bool
+  ; mutable failure : Agent_protocol.Error.t option
+  ; mutable preparation : Goal_continuation.Preparation.t option
+  }
+
+module Goal_native_resume = struct
+  module Detail = struct
+    type t =
+      | Actor_handoff of Goal_resume_result.Continuation.t
+      | Unavailable
+  end
+
+  module Status = struct
+    type t =
+      | Staged of Agent_protocol.Goal_native_resume_intent.t
+      | Accepted of Agent_protocol.Goal_native_resume_intent.t
+      | Interrupted_before_dispatch of Agent_protocol.Goal_native_resume_intent.t
+      | Dispatching of Agent_protocol.Goal_native_resume_intent.t
+      | Unknown of Agent_protocol.Goal_native_resume_intent.t
+      | Discarded of Agent_protocol.Goal_native_resume_intent.t
+      | Rejected of Agent_protocol.Goal_native_resume_intent.t
+      | Acknowledged of
+          { intent : Agent_protocol.Goal_native_resume_intent.t
+          ; receipt : Goal_command_receipt.t
+          ; detail : Detail.t
+          ; failure : Agent_protocol.Error.t option
+          }
+  end
+
+  module Selection = struct
+    type t =
+      { issuing_actor : unit ref
+      ; invocation_id : Agent_protocol.Id.Invocation.t
+      ; intent : Agent_protocol.Goal_native_resume_intent.t
+      ; session : Agent_protocol.Session_ref.t
+      ; native : native_goal_custody
+      }
+
+    let request t = Agent_protocol.Goal_native_resume_intent.request t.intent
+    let session t = t.session
+    let invocation_id t = t.invocation_id
+  end
+end
+
 type agent_intent_custody =
   { key : agent_intent_key
   ; generation : int
   ; source : Agent_protocol.Invocation.observer option
   ; custody : agent_custody option
   ; observation : Observation_continuation.t option
+  ; native_goal : native_goal_custody option
   }
 
 module Follow_up_authority = struct
@@ -1746,6 +1796,7 @@ type moderator_borrow =
   ; mutable committed : bool
   ; mutable accepts_children : bool
   ; mutable callback_finished : bool
+  ; native_goals : Goal_native_actions.t
   ; authority_live : bool Atomic.t
   ; mutable cancel : (unit -> unit) option
   ; mutable cancel_requested : bool
@@ -1775,6 +1826,7 @@ type queued_event_borrow =
   ; event : Session.Snapshot.t
   ; retirement_reason : string option
   ; mutable callback_active : bool
+  ; native_goals : Goal_native_actions.t
   ; authority_live : bool Atomic.t
   ; mutable run_actions : Run_action_service.t option
   ; mutable committed : bool
@@ -2005,6 +2057,7 @@ type delegated_event_claim =
 
 type invocation_execution =
   { owner : invocation_owner
+  ; mutable native_goal : (Goal_native_actions.Entry.t * int option) option
   ; dispatched : Agent_protocol.Invocation.t
   ; mutable accepts_children : bool
   ; authority_live : bool Atomic.t
@@ -2399,7 +2452,63 @@ module Held_startup_request = struct
     | End_held_activation : Held_run.Activation.t -> unit t
 end
 
+(* Routing references only the actual existing callback owner. The actions table
+   issues the integer receipts; neither a lexical scope nor caller data does. *)
+module Native_goal_owner = struct
+  type t =
+    | Event of queued_event_borrow
+    | Moderator of moderator_borrow
+
+  let actions = function
+    | Event borrow -> borrow.native_goals
+    | Moderator borrow -> borrow.native_goals
+  ;;
+end
+
+module Native_goal_request = struct
+  type authorize =
+    Operator_authorization.t -> Session_state.t -> (unit, Agent_protocol.Error.t) result
+
+  type _ t =
+    | Resume_receipt : Goal_native_resume.Selection.t -> Goal_command_receipt.t option t
+    | Resume_status :
+        Goal_native_admission.t * authorize * Agent_protocol.Id.Invocation.t
+        -> Goal_native_resume.Status.t t
+    | Select_resume : Goal_native_resume.Selection.t option t
+    | Begin_resume :
+        Goal_native_resume.Selection.t
+        -> Goal_continuation.Resume_issuance.t t
+    | Observe_dispatch :
+        Goal_native_resume.Selection.t * Agent_protocol.Error.t option
+        -> unit t
+    | Stage_edit :
+        Goal_native_admission.t * authorize * Agent_protocol.Goal_edit.t
+        -> int option t
+    | Stage_resume :
+        Goal_native_admission.t * authorize * Goal_resume_request.t
+        -> int option t
+    | Read : Goal_native_admission.t * authorize -> Session_state.t t
+    | Close_scope : Native_goal_owner.t -> unit t
+    | Install_scope : Native_goal_owner.t * Chat_response.Goal_native_scope.t -> unit t
+    | Deliverable : Native_goal_owner.t * int -> bool t
+    | Accept : Native_goal_owner.t * int -> unit t
+    | Rollback : Native_goal_owner.t * int -> unit t
+    | Prepare : Native_goal_owner.t * int list -> unit t
+end
+
+module Recurrence_read_request = struct
+  type authorize = Session_state.t -> (unit, Agent_protocol.Error.t) result
+
+  type _ t =
+    | Definitions : Operator_authorization.t * authorize -> Recurrence_view.t list t
+    | Query :
+        Operator_authorization.t * authorize * Recurrence_query.request
+        -> Recurrence_query.t t
+    | Planning : Operator_authorization.t * authorize -> Recurrence_planning_read.t t
+end
+
 type _ request =
+  | Native_goal : 'a Native_goal_request.t -> 'a request
   | Open_inference_owner :
       Run_preparation.t option * Transcript.Source_id.t
       -> Inference_owner.t request
@@ -2887,19 +2996,7 @@ type _ request =
   | Link_recurrence_child :
       Recurrence_creation.t * Recurrence_child_link.t
       -> Recurrence_child_association.t request
-  | Read_recurrences :
-      Operator_authorization.t
-      * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
-      -> Recurrence_view.t list request
-  | Query_recurrences :
-      Operator_authorization.t
-      * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
-      * Recurrence_query.request
-      -> Recurrence_query.t request
-  | Read_recurrence_planning :
-      Operator_authorization.t
-      * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
-      -> Recurrence_planning_read.t request
+  | Recurrence_read : 'a Recurrence_read_request.t -> 'a request
   | Apply_goal_command :
       Operator_authorization.t
       * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
@@ -3464,7 +3561,9 @@ let retire_instruction_continuations t =
   t.lifecycle_agent_custody <- Unadmitted;
   List.iter t.intent_agent_custody ~f:(fun entry ->
     Option.iter entry.custody ~f:retire_agent_custody;
-    Option.iter entry.observation ~f:Observation_continuation.retire);
+    Option.iter entry.observation ~f:Observation_continuation.retire;
+    Option.iter entry.native_goal ~f:(fun native ->
+      Goal_native_actions.Entry.discard native.entry));
   t.intent_agent_custody <- []
 ;;
 
@@ -3515,13 +3614,33 @@ let retain_instruction_continuations t =
              Observation_continuation.retire observation;
              None))
        in
+       let native_goal =
+         Option.bind entry.native_goal ~f:(fun native ->
+           let retained =
+             (not t.stopped)
+             && agent_source_current t entry.generation entry.source
+             && Option.exists invocation ~f:(fun invocation ->
+               Option.exists
+                 invocation.Agent_protocol.Invocation.native_goal_resume
+                 ~f:(fun intent ->
+                   match Agent_protocol.Goal_native_resume_intent.phase intent with
+                   | Accepted _ | Dispatch_claimed _ -> true
+                   | Staged | Discarded _ | Rejected _ -> false))
+           in
+           if retained
+           then Some native
+           else (
+             Goal_native_actions.Entry.discard native.entry;
+             None))
+       in
        if not follow_up then Option.iter entry.custody ~f:retire_agent_custody;
-       if follow_up || Option.is_some observation
+       if follow_up || Option.is_some observation || Option.is_some native_goal
        then
          Some
            { entry with
              custody = (if follow_up then entry.custody else None)
            ; observation
+           ; native_goal
            }
        else None)
 ;;
@@ -5221,7 +5340,11 @@ module Goal_runtime_operation_acknowledgement = struct
     t.held.phase <- Pending_first_effect;
     actor.operation_agent_custody <- Some t.owner;
     t.scope.continuation.binding.preparation.runtime_phase
-    <- Handed_off (t.scope, t.handoff)
+    <- Handed_off (t.scope, t.handoff);
+    match t.handoff with
+    | Goal_runtime_handoff.Resume handoff ->
+      t.scope.continuation.binding.preparation.resume_handoff <- Some handoff
+    | Existing_execution _ -> ()
   ;;
 end
 
@@ -9764,7 +9887,12 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
       ~payloads:[]
   in
   let execution =
-    { owner; dispatched; accepts_children = true; authority_live = Atomic.make true }
+    { owner
+    ; native_goal = None
+    ; dispatched
+    ; accepts_children = true
+    ; authority_live = Atomic.make true
+    }
   in
   t.invocation_executions <- execution :: t.invocation_executions;
   Ok execution
@@ -9810,6 +9938,7 @@ let with_intent_agent_custody ?observation t key ~pending custody f =
       ; generation = t.state.identity.generation
       ; source
       ; custody = staged
+      ; native_goal = Option.bind existing ~f:(fun previous -> previous.native_goal)
       ; observation =
           Option.first_some
             observation
@@ -10167,6 +10296,7 @@ let claim_moderator_invocation t operation_id (invocation : Agent_protocol.Invoc
       ; committed = false
       ; accepts_children = true
       ; callback_finished = false
+      ; native_goals = Goal_native_actions.create ()
       ; authority_live = Atomic.make true
       ; cancel = None
       ; cancel_requested = false
@@ -10288,6 +10418,7 @@ let claim_queued_event
       ; retirement_reason
       ; run_actions = None
       ; callback_active = true
+      ; native_goals = Goal_native_actions.create ()
       ; authority_live = Atomic.make true
       ; committed = false
       ; stop_retirement = None
@@ -10505,6 +10636,7 @@ let claim_held_authored_event t (scope : Held_authored_start.t) id snapshot even
         ; retirement_reason = None
         ; run_actions = Some (Run_action_service.create ~scope:run_scope)
         ; callback_active = true
+        ; native_goals = Goal_native_actions.create ()
         ; authority_live = Atomic.make true
         ; committed = false
         ; stop_retirement = None
@@ -10606,6 +10738,7 @@ let claim_ordinary_event t id operation_id snapshot event =
           ; retirement_reason = None
           ; run_actions = None
           ; callback_active = true
+          ; native_goals = Goal_native_actions.create ()
           ; authority_live = Atomic.make true
           ; committed = false
           ; stop_retirement = None
@@ -10676,6 +10809,7 @@ let claim_delegated_event t id delegation snapshot event =
           ; retirement_reason = None
           ; run_actions = None
           ; callback_active = true
+          ; native_goals = Goal_native_actions.create ()
           ; authority_live = Atomic.make true
           ; committed = false
           ; stop_retirement = None
@@ -10720,6 +10854,7 @@ let claim_job_event t scope id snapshot event =
     ; retirement_reason = None
     ; run_actions = None
     ; callback_active = true
+    ; native_goals = Goal_native_actions.create ()
     ; authority_live = Atomic.make true
     ; committed = false
     ; stop_retirement = None
@@ -10917,6 +11052,7 @@ let claim_initialization_callback
         ; retirement_reason = None
         ; run_actions = None
         ; callback_active = true
+        ; native_goals = Goal_native_actions.create ()
         ; authority_live = Atomic.make true
         ; committed = false
         ; stop_retirement = None
@@ -11084,6 +11220,7 @@ let claim_legacy_boundary t manager callback parent event =
             ; event = captured_event
             ; retirement_reason = None
             ; callback_active = true
+            ; native_goals = Goal_native_actions.create ()
             ; authority_live = Atomic.make true
             ; run_actions = None
             ; committed = false
@@ -11225,6 +11362,7 @@ let claim_legacy_head t manager callback operation_id =
           ; retirement_reason = None
           ; run_actions = None
           ; callback_active = true
+          ; native_goals = Goal_native_actions.create ()
           ; authority_live = Atomic.make true
           ; committed = false
           ; stop_retirement = None
@@ -11320,6 +11458,7 @@ let claim_queued_retirement t id snapshot reason =
       ; retirement_reason = Some reason
       ; run_actions = None
       ; callback_active = true
+      ; native_goals = Goal_native_actions.create ()
       ; authority_live = Atomic.make true
       ; committed = false
       ; stop_retirement = None
@@ -11614,6 +11753,7 @@ let claim_event_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
   in
   let execution =
     { owner = Event_moderator borrow
+    ; native_goal = None
     ; dispatched
     ; accepts_children = true
     ; authority_live = Atomic.make true
@@ -11731,7 +11871,140 @@ let lifecycle_selection (borrow : queued_event_borrow) run =
        | Turn_end -> None))
 ;;
 
-let prepared_run_delta t (borrow : queued_event_borrow) completed requests job_deltas =
+module Native_goal_plan = struct
+  type t =
+    { actions : Goal_native_actions.t option
+    ; plan : Goal_native_actions.Plan.t option
+    ; source : Agent_protocol.Invocation.observer option
+    ; entries : Goal_native_actions.Entry.t list
+    ; accepted : (Agent_protocol.Invocation.t * Goal_native_actions.Entry.t) list
+    }
+
+  let deltas t =
+    Option.value_map t.plan ~default:[] ~f:Goal_native_actions.Plan.deltas
+    @ List.map t.accepted ~f:(fun (invocation, _) ->
+      Session_delta.Invocation_changed invocation)
+  ;;
+end
+
+let prepare_native_goal_plan t ?actions ?completed entries =
+  let open Result.Let_syntax in
+  if List.is_empty entries
+  then
+    Ok
+      Native_goal_plan.
+        { actions; plan = None; source = None; entries = []; accepted = [] }
+  else (
+    let%bind source = Runtime_builder.moderator_snapshot_observer t.state.moderator in
+    let%bind controller = require_recurrence_controller t in
+    let%bind plan =
+      Goal_native_actions.Plan.prepare
+        entries
+        ~state:t.state
+        ~session:(Recurrence_controller.session controller)
+        ~now:(t.services.now ())
+    in
+    let%map accepted =
+      List.fold_result
+        (Goal_native_actions.Plan.resumes plan)
+        ~init:[]
+        ~f:(fun accepted_entries entry ->
+          let%bind invocation =
+            Option.first_some
+              (Option.filter completed ~f:(fun invocation ->
+                 Agent_protocol.Id.Invocation.equal
+                   invocation.Agent_protocol.Invocation.context.id
+                   (Goal_native_actions.Entry.invocation_id entry)))
+              (List.find t.state.invocations ~f:(fun invocation ->
+                 Agent_protocol.Id.Invocation.equal
+                   invocation.context.id
+                   (Goal_native_actions.Entry.invocation_id entry)))
+            |> Result.of_option
+                 ~error:
+                   (error Conflict "native Goal result is absent from its actual owner")
+          in
+          let%bind intent =
+            match Goal_native_actions.Entry.value entry with
+            | Resume intent -> Ok intent
+            | Edit _ ->
+              Error (error Internal_error "native Resume selection changed kind")
+          in
+          let%bind () =
+            match invocation.native_goal_resume with
+            | Some actual
+              when Agent_protocol.Goal_native_resume_intent.equal intent actual -> Ok ()
+            | _ -> Error (error Conflict "native Resume staged identity changed")
+          in
+          let%bind accepted =
+            Agent_protocol.Goal_native_resume_intent.accept
+              intent
+              ~now:(t.services.now ())
+          in
+          let%map invocation =
+            Agent_protocol.Invocation.record_native_goal_resume invocation accepted
+          in
+          (invocation, entry) :: accepted_entries)
+    in
+    Native_goal_plan.
+      { actions; plan = Some plan; source; entries; accepted = List.rev accepted })
+;;
+
+let prepare_callback_native_goals t actions =
+  let open Result.Let_syntax in
+  let%bind entries = Goal_native_actions.for_commit actions in
+  prepare_native_goal_plan t ~actions entries
+;;
+
+let check_native_goal_plan t (plan : Native_goal_plan.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    Option.value_map plan.plan ~default:(Ok ()) ~f:(fun plan ->
+      Goal_native_actions.Plan.check plan t.state)
+  in
+  match plan.actions with
+  | None -> Ok ()
+  | Some actions ->
+    let%bind actual = Goal_native_actions.for_commit actions in
+    if List.equal phys_equal actual plan.entries
+    then Ok ()
+    else Error (error Conflict "native Goal callback selection changed")
+;;
+
+let install_native_goal_plan t (plan : Native_goal_plan.t) =
+  List.iter plan.entries ~f:(fun entry ->
+    match Goal_native_actions.Entry.value entry with
+    | Edit _ -> Goal_native_actions.Entry.discard entry
+    | Resume _ -> Goal_native_actions.Entry.retain entry);
+  List.iter plan.accepted ~f:(fun (invocation, entry) ->
+    let key = Invocation_intent invocation.Agent_protocol.Invocation.context.id in
+    let existing =
+      List.find t.intent_agent_custody ~f:(fun slot ->
+        equal_agent_intent_key slot.key key)
+    in
+    let slot =
+      { key
+      ; generation = invocation.context.generation
+      ; source = plan.source
+      ; custody = Option.bind existing ~f:(fun slot -> slot.custody)
+      ; observation = Option.bind existing ~f:(fun slot -> slot.observation)
+      ; native_goal =
+          Some { entry; dispatch_finished = false; failure = None; preparation = None }
+      }
+    in
+    t.intent_agent_custody
+    <- slot
+       :: List.filter t.intent_agent_custody ~f:(fun slot ->
+         not (equal_agent_intent_key slot.key key)))
+;;
+
+let prepared_run_delta
+      ?goal_state
+      t
+      (borrow : queued_event_borrow)
+      completed
+      requests
+      job_deltas
+  =
   let open Result.Let_syntax in
   match borrow.run_actions with
   | None -> Ok Prepared_run_delta.empty
@@ -11838,7 +12111,11 @@ let prepared_run_delta t (borrow : queued_event_borrow) completed requests job_d
         match goal_finish with
         | None -> Ok []
         | Some intent ->
-          Goal_run_transition.prepare_request t.state ~scope ~prepared ~intent
+          Goal_run_transition.prepare_request
+            (Option.value goal_state ~default:t.state)
+            ~scope
+            ~prepared
+            ~intent
       in
       Prepared_run_delta.
         { deltas = Run_transition.delta prepared :: goal_deltas
@@ -11973,7 +12250,20 @@ let commit_queued_event t borrow snapshot requests decision notifications =
   in
   let owner = Agent_protocol.Job.Moderator_event borrow.receipt.context.id in
   let%bind job_deltas, job_payloads = staged_work_changes t owner in
-  let%bind run_change = prepared_run_delta t borrow completed requests job_deltas in
+  let%bind native_goals = prepare_callback_native_goals t borrow.native_goals in
+  let%bind run_change =
+    prepared_run_delta
+      ~goal_state:
+        (Option.value_map
+           native_goals.plan
+           ~default:t.state
+           ~f:Goal_native_actions.Plan.state)
+      t
+      borrow
+      completed
+      requests
+      job_deltas
+  in
   let%bind staged =
     match legacy_scope, queue_plan with
     | Some scope, Some plan ->
@@ -12020,6 +12310,7 @@ let commit_queued_event t borrow snapshot requests decision notifications =
                 @ [ Session_delta.Moderator_execution_changed completed
                   ; Moderator_changed (Some encoded_snapshot)
                   ]
+                @ Native_goal_plan.deltas native_goals
                 @ job_deltas
                 @ run_change.deltas)
            in
@@ -12119,21 +12410,28 @@ let commit_queued_event t borrow snapshot requests decision notifications =
                  ~default:(Ok ())
                  ~f:Initialization_scope.Acknowledgement.check_basis
              in
+             let%bind () = check_native_goal_plan t native_goals in
              let%bind () =
                persist_transition
                  ?run_preparation
-                 ?check_before_commit:
-                   (Option.map borrow.lifecycle_owner ~f:(fun owner ->
-                      fun () ->
-                      let%bind () = lifecycle_event_effect t borrow owner in
-                      Option.value_map
-                        goal_runtime_acknowledgement
-                        ~default:(Ok ())
-                        ~f:(fun ack ->
-                          Goal_runtime_acknowledgement.check
-                            ack
-                            ~actor:t
-                            ~candidate:prepared)))
+                 ~check_before_commit:(fun () ->
+                   let%bind () =
+                     Option.value_map
+                       borrow.lifecycle_owner
+                       ~default:(Ok ())
+                       ~f:(fun owner -> lifecycle_event_effect t borrow owner)
+                   in
+                   let%bind () =
+                     Option.value_map
+                       goal_runtime_acknowledgement
+                       ~default:(Ok ())
+                       ~f:(fun ack ->
+                         Goal_runtime_acknowledgement.check
+                           ack
+                           ~actor:t
+                           ~candidate:prepared)
+                   in
+                   check_native_goal_plan t native_goals)
                  t
                  prepared
              in
@@ -12162,6 +12460,7 @@ let commit_queued_event t borrow snapshot requests decision notifications =
                scope.Callback_scope.committed_checkpoint <- Some prepared.state.moderator);
              acknowledged := true;
              acknowledge ();
+             install_native_goal_plan t native_goals;
              publish_committed_transition t prepared;
              Ok ())))
 ;;
@@ -12433,14 +12732,16 @@ let claim_moderator_observation t operation_id invocation_id =
       in
       let%bind () = persist_transition t prepared in
       install_committed_transition t prepared;
-      (* Only this component is consumed. The same result's handler follow-up
-         custody, if any, has an independent lifetime. *)
+      (* Only the observation component is consumed. The same result's handler
+         follow-up and accepted native Goal command have independent lifetimes. *)
       t.intent_agent_custody
       <- List.filter_map t.intent_agent_custody ~f:(fun current ->
            if equal_agent_intent_key current.key key
            then (
              Option.iter current.observation ~f:Observation_continuation.retire;
-             if Observation_follow_up.pending invocation
+             if
+               Observation_follow_up.pending invocation
+               || Option.is_some current.native_goal
              then Some { current with observation = None }
              else None)
            else Some current);
@@ -12453,6 +12754,7 @@ let claim_moderator_observation t operation_id invocation_id =
         ; committed = false
         ; accepts_children = Option.is_some operation_id
         ; callback_finished = false
+        ; native_goals = Goal_native_actions.create ()
         ; authority_live = Atomic.make true
         ; cancel = None
         ; cancel_requested = false
@@ -12542,6 +12844,7 @@ let claim_job_moderator t scope invocation =
     ; committed = false
     ; accepts_children = true
     ; callback_finished = false
+    ; native_goals = Goal_native_actions.create ()
     ; authority_live = Atomic.make true
     ; cancel = None
     ; cancel_requested = false
@@ -13477,6 +13780,7 @@ let claim_idle_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
   in
   let execution =
     { owner = Invocation_moderator borrow
+    ; native_goal = None
     ; dispatched
     ; accepts_children = true
     ; authority_live = Atomic.make true
@@ -15667,6 +15971,43 @@ let with_job_scope t ~job_id ~generation ~attempt ~deadline f =
     Stdlib.Printexc.raise_with_backtrace exn backtrace
 ;;
 
+let with_native_goal_scope t owner f =
+  let open Result.Let_syntax in
+  let route request =
+    Result.map_error (call t (Native_goal request)) ~f:(fun error -> error.message)
+  in
+  let scope =
+    Chat_response.Goal_native_scope.create
+      { deliverable = (fun receipt -> route (Deliverable (owner, receipt)))
+      ; accept = (fun receipt -> route (Accept (owner, receipt)))
+      ; rollback =
+          (fun receipt ->
+            ignore (route (Rollback (owner, receipt)) : (unit, string) result))
+      ; prepare = (fun receipts -> route (Prepare (owner, receipts)))
+      }
+  in
+  let%bind () = call t (Native_goal (Install_scope (owner, scope))) in
+  let close () =
+    (* Atomic lexical revocation happens before the yielding factual mailbox
+       cleanup; the receipt table itself remains single-Actor owned. *)
+    Chat_response.Goal_native_scope.close scope;
+    Eio.Cancel.protect (fun () -> call t (Native_goal (Close_scope owner)))
+  in
+  match Chat_response.Goal_native_scope.with_scope scope f with
+  | Error _ as failure ->
+    (try ignore (close () : (unit, Agent_protocol.Error.t) result) with
+     | _ -> ());
+    failure
+  | Ok value ->
+    let%map () = close () in
+    value
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    (try ignore (close () : (unit, Agent_protocol.Error.t) result) with
+     | _ -> ());
+    Stdlib.Printexc.raise_with_backtrace exn backtrace
+;;
+
 let run_moderator_callback t borrow f =
   let open Result.Let_syntax in
   let commit ~resolved ~snapshot =
@@ -15710,7 +16051,7 @@ let run_moderator_callback t borrow f =
         in
         f ~dispatched:borrow.invocation ~capabilities ~commit)
   in
-  match run () with
+  match with_native_goal_scope t (Native_goal_owner.Moderator borrow) run with
   | result ->
     let failure =
       match result with
@@ -15824,7 +16165,7 @@ let run_queued_event_borrow t borrow f =
                   (Commit_queued_event
                      (borrow, snapshot, requests, decision, notifications))))))
   in
-  match execute () with
+  match with_native_goal_scope t (Native_goal_owner.Event borrow) execute with
   | Error failure ->
     finish_after_failure false;
     Error failure
@@ -19524,6 +19865,7 @@ let claim_job_invocation t scope (invocation : Agent_protocol.Invocation.t) =
   in
   let execution =
     { owner = Background_job scope
+    ; native_goal = None
     ; dispatched
     ; accepts_children = true
     ; authority_live = Atomic.make true
@@ -21197,6 +21539,243 @@ let stage_background_job_internal t (job : Agent_protocol.Job.t) capacity =
     failure
 ;;
 
+let native_goal_execution t admission effect_kind =
+  let open Result.Let_syntax in
+  let%bind () = Goal_native_admission.check_now admission t.state ~effect_kind in
+  let invocation = Goal_native_admission.invocation admission in
+  let%bind execution =
+    List.find t.invocation_executions ~f:(fun execution ->
+      Agent_protocol.Invocation.equal execution.dispatched invocation)
+    |> Result.of_option
+         ~error:(error Permission_denied "native Goal invocation is not executing")
+  in
+  let%bind () =
+    if execution.accepts_children && Atomic.get execution.authority_live
+    then Ok ()
+    else Error (error Conflict "native Goal execution has closed")
+  in
+  let%bind current = authorized_native_child_basis t (Inference_invocation execution) in
+  let%bind () = current.check_current () in
+  let%bind actions =
+    match execution.owner with
+    | Event_moderator borrow ->
+      let%bind () = validate_queued_event_borrow t borrow in
+      if
+        Goal_native_actions.matches_scope
+          borrow.native_goals
+          (Goal_native_admission.callback_scope admission)
+      then Ok (Some borrow.native_goals)
+      else
+        Error
+          (error
+             Permission_denied
+             "native Goal callback route does not match its actual event")
+    | Invocation_moderator borrow ->
+      let%bind () = validate_moderator_borrow t borrow in
+      if
+        Goal_native_actions.matches_scope
+          borrow.native_goals
+          (Goal_native_admission.callback_scope admission)
+      then Ok (Some borrow.native_goals)
+      else
+        Error
+          (error
+             Permission_denied
+             "native Goal callback route does not match its actual borrow")
+    | Foreground _ | Background_job _ ->
+      (match Goal_native_admission.callback_scope admission with
+       | None -> Ok None
+       | Some _ ->
+         Error (error Permission_denied "native Goal route escaped its callback"))
+  in
+  Ok (execution, actions, current)
+;;
+
+let native_goal_projection t actions =
+  let open Result.Let_syntax in
+  match actions with
+  | None -> Ok t.state
+  | Some actions ->
+    let%bind entries = Goal_native_actions.recorded actions in
+    let%bind controller = require_recurrence_controller t in
+    let%map plan =
+      Goal_native_actions.Plan.prepare
+        entries
+        ~state:t.state
+        ~session:(Recurrence_controller.session controller)
+        ~now:(t.services.now ())
+    in
+    Goal_native_actions.Plan.state plan
+;;
+
+let stage_native_goal t admission authorize ~effect_kind make =
+  let open Result.Let_syntax in
+  let%bind execution, actions, current = native_goal_execution t admission effect_kind in
+  let%bind () =
+    if Option.is_none execution.native_goal
+    then Ok ()
+    else Error (error Conflict "native Invocation already staged a Goal action")
+  in
+  let%bind state = native_goal_projection t actions in
+  let%bind parent = execution_agent_admission t execution in
+  let%bind parent =
+    Result.of_option
+      parent
+      ~error:(error Permission_denied "native Goal action has no admitted original")
+  in
+  let%bind custody =
+    Result.of_option
+      (Execution_custody.Admission.custody parent)
+      ~error:(error Permission_denied "native Goal action has no authenticated original")
+  in
+  let%bind actor = Execution_custody.actor custody in
+  let%bind () =
+    if
+      Agent_protocol.Id.Principal.equal
+        (Operator_authorization.principal actor).id
+        (Operator_authorization.principal (Goal_native_admission.actor admission)).id
+    then Goal_command_admission.check_write actor ~authorize:(authorize actor) t.state
+    else
+      Error (error Permission_denied "native Goal original differs from actual execution")
+  in
+  let%bind controller = require_recurrence_controller t in
+  let%bind value = make state actor (Recurrence_controller.session controller) in
+  let%bind () = Goal_native_admission.check_now admission t.state ~effect_kind in
+  let%bind () = current.check_current () in
+  let%bind loan = Execution_custody.Admission.transfer parent in
+  let entry =
+    Goal_native_actions.Entry.create
+      ~invocation_id:execution.dispatched.context.id
+      ~value
+      ~admission:loan
+      ~authorize
+  in
+  let installed = ref false in
+  Exn.protect
+    ~finally:(fun () -> if not !installed then Goal_native_actions.Entry.discard entry)
+    ~f:(fun () ->
+      let%bind ticket =
+        match actions with
+        | None -> Ok None
+        | Some actions ->
+          Result.map (Goal_native_actions.stage actions entry) ~f:Option.some
+      in
+      execution.native_goal <- Some (entry, ticket);
+      installed := true;
+      Ok ticket)
+;;
+
+let stage_native_goal_edit t admission authorize edit =
+  let effect_kind, mutation =
+    match Agent_protocol.Goal_edit.mutation edit with
+    | Revise_objective objective ->
+      ( Goal_native_admission.Effect.Objective
+      , Goal_command.Mutation.Revise_objective
+          (Agent_protocol.Goal_edit.goal_id edit, objective) )
+    | Record_progress progress ->
+      ( Goal_native_admission.Effect.Progress
+      , Goal_command.Mutation.Record_progress
+          (Agent_protocol.Goal_edit.goal_id edit, progress) )
+  in
+  stage_native_goal t admission authorize ~effect_kind (fun state actor session ->
+    let open Result.Let_syntax in
+    let%bind request =
+      Goal_command.create
+        ~session_id:t.state.identity.session_id
+        ~generation:(Agent_protocol.Goal_edit.generation edit)
+        ~source:(Some (Agent_protocol.Goal_edit.source edit))
+        ~expected_catalog_revision:
+          (Agent_protocol.Goal_edit.expected_catalog_revision edit)
+        ~expected_goal_revision:
+          (Some (Agent_protocol.Goal_edit.expected_goal_revision edit))
+        ~key:(Agent_protocol.Goal_edit.key edit)
+        ~mutation
+    in
+    let%map _ =
+      Goal_command_admission.prepare
+        state
+        ~actor
+        ~authorize:(authorize actor)
+        ~session
+        ~request
+        ~now:(t.services.now ())
+    in
+    Goal_native_actions.Value.Edit request)
+;;
+
+let stage_native_goal_resume t admission authorize request =
+  stage_native_goal t admission authorize ~effect_kind:Resume (fun state actor session ->
+    let open Result.Let_syntax in
+    let%bind _ =
+      Goal_resume_admission.prepare
+        state
+        ~request
+        ~principal_id:(Operator_authorization.principal actor).id
+        ~session
+        ~now:(t.services.now ())
+    in
+    let%bind intent =
+      Agent_protocol.Goal_native_resume_intent.create
+        ~request
+        ~principal_id:(Operator_authorization.principal actor).id
+    in
+    let%bind goal =
+      Option.bind state.Session_state.goal_catalog ~f:(fun catalog ->
+        Goal_catalog.find catalog (Goal_resume_request.goal_id request))
+      |> Result.of_option
+           ~error:(error Invalid_request "native Goal Resume target is absent")
+    in
+    let%map () =
+      match Agent_protocol.Goal.state goal with
+      | Open (Held Operator_pause) ->
+        Error
+          (error Permission_denied "native Goal Resume cannot clear an operator pause")
+      | Open (Enabled | Held _) | Closed _ -> Ok ()
+    in
+    Goal_native_actions.Value.Resume intent)
+;;
+
+let prepare_native_goal_completion t execution outcome resolved =
+  let open Result.Let_syntax in
+  match execution.native_goal with
+  | None ->
+    let%map plan = prepare_native_goal_plan t [] in
+    resolved, plan
+  | Some (entry, ticket) ->
+    (match outcome with
+     | Agent_protocol.Invocation.Complete _ ->
+       let%bind () = Goal_native_actions.Entry.check entry t.state in
+       Goal_native_actions.Entry.completed entry;
+       let%bind resolved =
+         match Goal_native_actions.Entry.value entry with
+         | Edit _ -> Ok resolved
+         | Resume intent ->
+           Agent_protocol.Invocation.record_native_goal_resume resolved intent
+       in
+       (match ticket with
+        | Some _ ->
+          (* Native result ACK remains Staged. Only the exact selected parent
+             checkpoint may accept this same entry and loan. *)
+          let%map plan = prepare_native_goal_plan t [] in
+          resolved, plan
+        | None ->
+          let%bind () = Goal_native_actions.Entry.select_completed entry in
+          let%map plan = prepare_native_goal_plan t ~completed:resolved [ entry ] in
+          let resolved =
+            List.find_map plan.accepted ~f:(fun (accepted, _) ->
+              if
+                Agent_protocol.Id.Invocation.equal accepted.context.id resolved.context.id
+              then Some accepted
+              else None)
+            |> Option.value ~default:resolved
+          in
+          resolved, plan)
+     | Fail _ | Pending _ | Cancelled _ ->
+       Goal_native_actions.Entry.discard entry;
+       let%map plan = prepare_native_goal_plan t [] in
+       resolved, plan)
+;;
+
 let finish_invocation t execution outcome requests commit_starts authoring_reference =
   let open Result.Let_syntax in
   let revision = t.state.counters.revision in
@@ -21292,6 +21871,9 @@ let finish_invocation t execution outcome requests commit_starts authoring_refer
       Agent_protocol.Invocation.record_handler_intent resolved ~requests
     | None, _ | Some _, Cancelled _ -> Ok resolved
   in
+  let%bind resolved, native_goals =
+    prepare_native_goal_completion t execution outcome resolved
+  in
   let permissions, permission_deltas, permission_payloads =
     cleanup_invocation_permissions t [ execution.dispatched.context.id ]
   in
@@ -21322,6 +21904,10 @@ let finish_invocation t execution outcome requests commit_starts authoring_refer
              ~delta:
                (Session_delta.Batch
                   ((Session_delta.Invocation_changed resolved :: permission_deltas)
+                   @ Option.value_map
+                       native_goals.plan
+                       ~default:[]
+                       ~f:Goal_native_actions.Plan.deltas
                    @ job_deltas
                    @ run_deltas))
              ~payloads:(permission_payloads @ job_payloads)
@@ -21378,10 +21964,15 @@ let finish_invocation t execution outcome requests commit_starts authoring_refer
            let%bind () =
              persist_transition
                ?run_preparation
-               ?check_before_commit:
-                 (Option.map goal_runtime_acknowledgement ~f:(fun ack ->
-                    fun () ->
-                    Goal_runtime_acknowledgement.check ack ~actor:t ~candidate:prepared))
+               ~check_before_commit:(fun () ->
+                 let%bind () =
+                   Option.value_map
+                     goal_runtime_acknowledgement
+                     ~default:(Ok ())
+                     ~f:(fun ack ->
+                       Goal_runtime_acknowledgement.check ack ~actor:t ~candidate:prepared)
+                 in
+                 check_native_goal_plan t native_goals)
                t
                prepared
            in
@@ -21393,6 +21984,7 @@ let finish_invocation t execution outcome requests commit_starts authoring_refer
              t
              prepared;
            acknowledge ();
+           install_native_goal_plan t native_goals;
            let%bind () = acknowledge_run () in
            Option.iter
              (held_authored_of_execution t (Inference_invocation execution))
@@ -21481,6 +22073,7 @@ let commit_moderator_invocation t borrow (resolved : Agent_protocol.Invocation.t
   (match borrow.kind, resolved.status with
    | Invocation, Resolved (Cancelled _) -> abort_staged_work t ~owner
    | _ -> ());
+  let%bind native_goals = prepare_callback_native_goals t borrow.native_goals in
   let%bind job_deltas, job_payloads = staged_work_changes t owner in
   let%bind run_deltas, check_run, acknowledge_run =
     prepare_selected_child_run t (Inference_moderator borrow) job_deltas
@@ -21521,6 +22114,7 @@ let commit_moderator_invocation t borrow (resolved : Agent_protocol.Invocation.t
                    ; Moderator_changed
                        (Some (Runtime_builder.encode_moderator_snapshot snapshot))
                    ]
+                   @ Native_goal_plan.deltas native_goals
                    @ job_deltas
                    @ run_deltas))
              ~payloads:job_payloads
@@ -21528,10 +22122,16 @@ let commit_moderator_invocation t borrow (resolved : Agent_protocol.Invocation.t
          Eio.Cancel.protect (fun () ->
            let%bind () = check_jobs () in
            let%bind () = check_run () in
-           let%bind () = persist_transition t prepared in
+           let%bind () =
+             persist_transition
+               ~check_before_commit:(fun () -> check_native_goal_plan t native_goals)
+               t
+               prepared
+           in
            install_committed_transition ~job_custody t prepared;
            borrow.committed <- true;
            acknowledge ();
+           install_native_goal_plan t native_goals;
            let%bind () = acknowledge_run () in
            publish_committed_transition t prepared;
            Ok ()))
@@ -23878,12 +24478,17 @@ let goal_resume_operation_controller t (scope : Goal_continuation.runtime_scope)
     current := Some observed;
     basis ()
   in
+  let command_loan = preparation.native_command_loan in
+  preparation.native_command_loan <- None;
   Ok
     Activation_controller.Operation.
       { association
       ; install =
           (fun () -> if Goal_operation_phase.equal !phase Staged then phase := Installed)
-      ; close = (fun () -> phase := Closed)
+      ; close =
+          (fun () ->
+            phase := Closed;
+            Option.iter command_loan ~f:Execution_custody.Admission.retire)
       ; refresh
       ; policy =
           (fun () ->
@@ -25242,6 +25847,20 @@ let enable_automatic_turn_budget ?check_before_commit ?run_preparation t policy 
 ;;
 
 let lifecycle_request_allowed : type a. a request -> bool = function
+  | Native_goal (Close_scope _ | Rollback _) -> true
+  | Native_goal
+      ( Resume_receipt _
+      | Resume_status _
+      | Select_resume
+      | Begin_resume _
+      | Observe_dispatch _
+      | Stage_edit _
+      | Stage_resume _
+      | Read _
+      | Install_scope _
+      | Deliverable _
+      | Accept _
+      | Prepare _ ) -> false
   | Set_operation_worker None
   | Set_runtime_worker (_, None, _, _)
   | Set_compaction_inference None -> true
@@ -25510,8 +26129,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Recurrence_due_ids
   | Begin_recurrence_due _
   | Finish_recurrence_due _
-  | Read_recurrence_planning _
-  | Query_recurrences _
+  | Recurrence_read (Definitions _ | Query _ | Planning _)
   | Apply_recurrence_command _
   | Reserve_recurrence_child _
   | Check_recurrence_creation _
@@ -25525,7 +26143,6 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Import_recurrence_execution _
   | Import_held_recurrence_execution _
   | Link_recurrence_child _
-  | Read_recurrences _
   | Update_metadata _
   | Stop _
   | Stop_managed _
@@ -27665,6 +28282,9 @@ let make_existing_goal_preparation
     ; registered_authority = (fun () -> goal_registered_authority t preparation)
     ; runtime_phase = Unclaimed
     ; observed = None
+    ; native_command_loan = None
+    ; resume_handoff = None
+    ; resume_commit_attempted = ref false
     }
   in
   preparation
@@ -27759,6 +28379,384 @@ let begin_goal_resume_preparation_internal t ~actor ~authorize ~session ~request
        in
        t.run_preparation <- Some (Existing_goal preparation);
        Ok (Goal_continuation.Resume_issuance.Prepare preparation))
+;;
+
+let native_goal_selection_slot t (selection : Goal_native_resume.Selection.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    if phys_equal selection.issuing_actor t.inference_owner_identity
+    then Ok ()
+    else Error (error Permission_denied "native Goal selection belongs to another Actor")
+  in
+  let%bind slot =
+    List.find t.intent_agent_custody ~f:(fun slot ->
+      equal_agent_intent_key slot.key (Invocation_intent selection.invocation_id)
+      && Option.exists slot.native_goal ~f:(phys_equal selection.native))
+    |> Result.of_option
+         ~error:
+           (error Permission_denied "native Goal intent no longer owns its live loan")
+  in
+  let%bind invocation =
+    List.find t.state.invocations ~f:(fun invocation ->
+      Agent_protocol.Id.Invocation.equal invocation.context.id selection.invocation_id)
+    |> Result.of_option
+         ~error:(error Conflict "native Goal invocation is no longer retained")
+  in
+  let%bind actual =
+    Result.of_option
+      invocation.native_goal_resume
+      ~error:(error Conflict "native Goal invocation has no accepted command")
+  in
+  let%bind () =
+    if Agent_protocol.Goal_native_resume_intent.equal actual selection.intent
+    then Ok ()
+    else Error (error Conflict "native Goal selection has advanced")
+  in
+  let%bind () = Goal_native_actions.Entry.check selection.native.entry t.state in
+  Ok (slot, invocation)
+;;
+
+let native_goal_resume_receipt_internal t selection =
+  let open Result.Let_syntax in
+  let%bind _ = native_goal_selection_slot t selection in
+  let%bind actor = Goal_native_actions.Entry.actor selection.native.entry in
+  goal_resume_receipt_internal
+    t
+    ~actor
+    ~authorize:(Goal_native_actions.Entry.authorize selection.native.entry actor)
+    ~session:selection.session
+    ~request:(Goal_native_resume.Selection.request selection)
+;;
+
+let validate_native_goal_receipt t intent (receipt : Goal_command_receipt.t) =
+  let open Result.Let_syntax in
+  let request = Agent_protocol.Goal_native_resume_intent.request intent in
+  let%bind digest = Goal_resume_request.digest request in
+  let%bind () =
+    if
+      Agent_protocol.Id.Principal.equal
+        receipt.principal_id
+        (Agent_protocol.Goal_native_resume_intent.principal_id intent)
+      && Agent_protocol.Idempotency_key.equal
+           receipt.key
+           (Goal_resume_request.key request)
+      && String.equal receipt.request_sha256 digest
+      && Agent_protocol.Id.Goal.equal
+           receipt.goal_id
+           (Goal_resume_request.goal_id request)
+      && Option.equal
+           Agent_protocol.Run_source.equal
+           receipt.source
+           (Some (Goal_resume_request.source request))
+      && Int64.(Goal_resume_request.expected_goal_revision request < max_value)
+      && Int64.(Goal_resume_request.expected_catalog_revision request < max_value)
+      && Int64.equal
+           receipt.goal_revision
+           Int64.(Goal_resume_request.expected_goal_revision request + 1L)
+      && Int64.equal
+           receipt.catalog_revision
+           Int64.(Goal_resume_request.expected_catalog_revision request + 1L)
+    then Ok ()
+    else
+      Error (error Conflict "native Goal receipt immutable command association changed")
+  in
+  let%bind index =
+    Result.of_option
+      t.state.run_state
+      ~error:(error Conflict "native Goal receipt has no retained Run index")
+  in
+  let%bind run =
+    Result.of_option
+      (Run_state.find index (Goal_resume_request.run_id request))
+      ~error:(error Conflict "native Goal receipt's actual Run is not retained")
+  in
+  let%bind link =
+    Result.of_option
+      (Run_state.goal_link index run.id)
+      ~error:(error Conflict "native Goal receipt's immutable episode link is absent")
+  in
+  let episode = Run_goal_link.episode link in
+  let admission = Agent_protocol.Goal_episode.admission episode in
+  if
+    Agent_protocol.Id.Goal.equal (Run_goal_link.goal_id link) receipt.goal_id
+    && Agent_protocol.Goal_episode.matches_run episode run
+    && Agent_protocol.Run_source.equal run.source (Goal_resume_request.source request)
+    && List.exists
+         (Run_state.receipts index)
+         ~f:(Agent_protocol.Run_receipt.equal admission)
+  then Goal_run_evidence.validate ~catalog:t.state.goal_catalog ~runs:t.state.run_state
+  else
+    Error
+      (error
+         Conflict
+         "native Goal receipt lost its actual historical admission association")
+;;
+
+let native_goal_resume_status_internal t admission authorize invocation_id =
+  let open Result.Let_syntax in
+  let%bind () = Goal_native_admission.check_now admission t.state ~effect_kind:Get in
+  let actor = Goal_native_admission.actor admission in
+  let%bind _ = Goal_command_admission.read t.state ~actor ~authorize:(authorize actor) in
+  let%bind invocation =
+    List.find t.state.invocations ~f:(fun invocation ->
+      Agent_protocol.Id.Invocation.equal invocation.context.id invocation_id)
+    |> Result.of_option
+         ~error:(error Invalid_request "native Goal invocation is not retained")
+  in
+  let%bind intent =
+    Result.of_option
+      invocation.native_goal_resume
+      ~error:(error Invalid_request "Invocation has no native Goal Resume command")
+  in
+  let request = Agent_protocol.Goal_native_resume_intent.request intent in
+  let%bind receipt =
+    Goal_resume_admission.find_receipt
+      t.state
+      ~request
+      ~principal_id:(Agent_protocol.Goal_native_resume_intent.principal_id intent)
+  in
+  let native =
+    List.find_map t.intent_agent_custody ~f:(fun slot ->
+      if equal_agent_intent_key slot.key (Invocation_intent invocation_id)
+      then slot.native_goal
+      else None)
+  in
+  let live =
+    Option.exists native ~f:(fun native ->
+      Result.is_ok (Goal_native_actions.Entry.actor native.entry)
+      || Option.exists native.preparation ~f:(fun preparation ->
+        Option.exists preparation.native_command_loan ~f:(fun loan ->
+          match Execution_custody.Admission.status loan with
+          | Current -> true
+          | Closed | Authority_expired -> false)))
+  in
+  let%bind status =
+    match receipt with
+    | Some receipt ->
+      let%map () = validate_native_goal_receipt t intent receipt in
+      let detail =
+        Option.bind native ~f:(fun native ->
+          Option.bind native.preparation ~f:(fun preparation ->
+            match Goal_continuation.Preparation.receipt preparation with
+            | Some actual when Goal_command_receipt.equal actual receipt ->
+              preparation.resume_handoff
+            | _ -> None))
+        |> Option.value_map
+             ~default:Goal_native_resume.Detail.Unavailable
+             ~f:(fun handoff -> Goal_native_resume.Detail.Actor_handoff handoff)
+      in
+      let failure = Option.bind native ~f:(fun native -> native.failure) in
+      Goal_native_resume.Status.Acknowledged { intent; receipt; detail; failure }
+    | None ->
+      Ok
+        (match Agent_protocol.Goal_native_resume_intent.phase intent with
+         | Staged -> Goal_native_resume.Status.Staged intent
+         | Accepted _ when live -> Accepted intent
+         | Accepted _ -> Interrupted_before_dispatch intent
+         | Dispatch_claimed _ when live -> Dispatching intent
+         | Dispatch_claimed _ -> Unknown intent
+         | Discarded _ -> Discarded intent
+         | Rejected _ -> Rejected intent)
+  in
+  let%bind _ = Goal_command_admission.read t.state ~actor ~authorize:(authorize actor) in
+  let%map () = Goal_native_admission.check_now admission t.state ~effect_kind:Get in
+  status
+;;
+
+let select_native_goal_resume_internal t =
+  let open Result.Let_syntax in
+  (* Selection is scheduling DATA tied to a physical live slot, not a claim. The
+     existing Owner source reservation must be acquired before Begin consumes it. *)
+  match
+    t.state.active_operation, t.run_preparation, t.moderator_borrow, t.queued_event_borrow
+  with
+  | Some _, _, _, _ | _, Some _, _, _ | _, _, Some _, _ | _, _, _, Some _ -> Ok None
+  | None, None, None, None ->
+    let%bind controller = require_recurrence_controller t in
+    let rec choose = function
+      | [] -> Ok None
+      | slot :: rest ->
+        (match slot.key, slot.native_goal with
+         | Invocation_intent id, Some native when not native.dispatch_finished ->
+           let intent =
+             List.find_map t.state.invocations ~f:(fun invocation ->
+               if Agent_protocol.Id.Invocation.equal invocation.context.id id
+               then invocation.native_goal_resume
+               else None)
+           in
+           (match intent with
+            | Some intent ->
+              (match Agent_protocol.Goal_native_resume_intent.phase intent with
+               | Accepted _ ->
+                 let selection : Goal_native_resume.Selection.t =
+                   { issuing_actor = t.inference_owner_identity
+                   ; invocation_id = id
+                   ; intent
+                   ; session = Recurrence_controller.session controller
+                   ; native
+                   }
+                 in
+                 (match native_goal_selection_slot t selection with
+                  | Ok _ -> Ok (Some selection)
+                  | Error _ ->
+                    Goal_native_actions.Entry.discard native.entry;
+                    choose rest)
+               | Staged | Dispatch_claimed _ | Discarded _ | Rejected _ -> choose rest)
+            | None -> choose rest)
+         | _ -> choose rest)
+    in
+    choose t.intent_agent_custody
+;;
+
+let begin_native_goal_resume_preparation_internal t selection =
+  let open Result.Let_syntax in
+  let%bind _, invocation = native_goal_selection_slot t selection in
+  let%bind () = goal_resume_quiescent t in
+  let%bind () =
+    if Option.is_none t.run_preparation
+    then Ok ()
+    else Error (error Conflict "another source preparation is active")
+  in
+  let%bind actor = Goal_native_actions.Entry.actor selection.native.entry in
+  let authorize = Goal_native_actions.Entry.authorize selection.native.entry actor in
+  let request = Goal_native_resume.Selection.request selection in
+  (* Do not silently rebase immutable CAS. The claim is a separate durable fact;
+     a stale command can then be reported as rejected without replaying it. *)
+  let%bind claimed =
+    Agent_protocol.Goal_native_resume_intent.claim
+      selection.intent
+      ~now:(t.services.now ())
+  in
+  let%bind invocation =
+    Agent_protocol.Invocation.record_native_goal_resume invocation claimed
+  in
+  let%bind candidate =
+    prepare_transition t ~delta:(Invocation_changed invocation) ~payloads:[]
+  in
+  let attempted = ref false in
+  let handed_off = ref false in
+  Exn.protect
+    ~finally:(fun () ->
+      if not !handed_off then Goal_native_actions.Entry.discard selection.native.entry)
+    ~f:(fun () ->
+      let%bind () =
+        persist_transition
+          ~commit_attempted:attempted
+          ~check_before_commit:(fun () ->
+            let%map _ = native_goal_selection_slot t selection in
+            ())
+          t
+          candidate
+      in
+      install_committed_transition t candidate;
+      publish_committed_transition t candidate;
+      let%bind loan = Goal_native_actions.Entry.take_admission selection.native.entry in
+      let transferred = ref false in
+      Exn.protect
+        ~finally:(fun () ->
+          if not !transferred then Execution_custody.Admission.retire loan)
+        ~f:(fun () ->
+          let%map issuance =
+            begin_goal_resume_preparation_internal
+              t
+              ~actor
+              ~authorize
+              ~session:selection.session
+              ~request
+          in
+          (match issuance with
+           | Retained _ -> ()
+           | Prepare preparation ->
+             preparation.native_command_loan <- Some loan;
+             selection.native.preparation <- Some preparation;
+             transferred := true;
+             handed_off := true);
+          issuance))
+;;
+
+let observe_native_goal_dispatch_internal t selection failure =
+  let open Result.Let_syntax in
+  let%bind () =
+    if
+      phys_equal
+        selection.Goal_native_resume.Selection.issuing_actor
+        t.inference_owner_identity
+      && List.exists t.intent_agent_custody ~f:(fun slot ->
+        Option.exists slot.native_goal ~f:(phys_equal selection.native))
+    then Ok ()
+    else Error (error Conflict "native Goal dispatch detail has no live intent owner")
+  in
+  let invocation =
+    List.find t.state.invocations ~f:(fun invocation ->
+      Agent_protocol.Id.Invocation.equal invocation.context.id selection.invocation_id)
+  in
+  let phase =
+    Option.bind invocation ~f:(fun invocation -> invocation.native_goal_resume)
+    |> Option.map ~f:Agent_protocol.Goal_native_resume_intent.phase
+  in
+  let pending_busy =
+    match phase, failure with
+    | Some (Accepted _), Some { Agent_protocol.Error.code = Conflict; _ } ->
+      Result.is_ok (Goal_native_actions.Entry.actor selection.native.entry)
+    | _ -> false
+  in
+  if pending_busy
+  then Ok ()
+  else (
+    (* No generic post-Started writer: the actual Goal command receipt and
+       current Run remain the durable outcome. Only pre-admission rejection of
+       a known claim gets an immutable bounded negative intent leaf. *)
+    selection.native.dispatch_finished <- true;
+    selection.native.failure <- failure;
+    let rejection =
+      match invocation, failure with
+      | Some invocation, Some error ->
+        (match invocation.native_goal_resume with
+         | Some intent ->
+           (match Agent_protocol.Goal_native_resume_intent.phase intent with
+            | Dispatch_claimed _ ->
+              let preparation_unattempted =
+                Option.value_map
+                  selection.native.preparation
+                  ~default:true
+                  ~f:(fun preparation ->
+                    Option.is_none (Goal_continuation.Preparation.receipt preparation)
+                    && not !(preparation.resume_commit_attempted))
+              in
+              (* Host failure is not pre-admission rejection. Keep actual ACK or
+                 uncertain-writer facts even after source cleanup closed custody;
+                 no generic outcome write may invalidate a handed-off prefix. *)
+              if preparation_unattempted
+              then (
+                match
+                  Goal_resume_admission.find_receipt
+                    t.state
+                    ~request:(Agent_protocol.Goal_native_resume_intent.request intent)
+                    ~principal_id:
+                      (Agent_protocol.Goal_native_resume_intent.principal_id intent)
+                with
+                | Ok None -> Some (invocation, intent, error)
+                | Ok (Some _) | Error _ -> None)
+              else None
+            | Staged | Accepted _ | Discarded _ | Rejected _ -> None)
+         | None -> None)
+      | _ -> None
+    in
+    Exn.protect
+      ~finally:(fun () -> Goal_native_actions.Entry.discard selection.native.entry)
+      ~f:(fun () ->
+        match rejection with
+        | None -> Ok ()
+        | Some (invocation, intent, failure) ->
+          let%bind rejected =
+            Agent_protocol.Goal_native_resume_intent.reject intent failure
+          in
+          let%bind invocation =
+            Agent_protocol.Invocation.record_native_goal_resume invocation rejected
+          in
+          Result.map
+            (transition t ~delta:(Invocation_changed invocation) ~payloads:[])
+            ~f:ignore))
 ;;
 
 module Goal_execution_issuance = struct
@@ -28024,7 +29022,7 @@ end
 let commit_goal_resume_internal t ~(binding : Goal_continuation.Source_binding.t) =
   let open Result.Let_syntax in
   let preparation = binding.preparation in
-  let attempted = ref false in
+  let attempted = preparation.resume_commit_attempted in
   let returned = ref false in
   let request = Existing_goal_preparation.Cause.resume_request preparation.cause in
   Exn.protect
@@ -28145,6 +29143,8 @@ let commit_goal_resume_internal t ~(binding : Goal_continuation.Source_binding.t
               (match (Goal_resume_admission.run plan).lifecycle with
                | Waiting wake ->
                  preparation.phase <- Waiting (receipt, wake);
+                 preparation.resume_handoff
+                 <- Some (Goal_resume_result.Continuation.Waiting wake);
                  Ok (Goal_continuation.Admission.Waiting { receipt; wake })
                | Admitted | Active ->
                  Ok
@@ -28195,6 +29195,8 @@ let end_goal_continuation_preparation_internal
          ~owner:t.run_preparation_owner
   then (
     Goal_continuation.close preparation;
+    Option.iter preparation.native_command_loan ~f:Execution_custody.Admission.retire;
+    preparation.native_command_loan <- None;
     (match t.run_preparation with
      | Some (Existing_goal current) when phys_equal current preparation ->
        t.run_preparation <- None
@@ -30322,6 +31324,7 @@ let claim_goal_resume_event t scope id snapshot event =
         ; event
         ; retirement_reason = None
         ; callback_active = true
+        ; native_goals = Goal_native_actions.create ()
         ; authority_live = Atomic.make true
         ; run_actions = Some (Run_action_service.create ~scope:run_scope)
         ; committed = false
@@ -30498,6 +31501,9 @@ let finalize_goal_runtime_settlement t scope index run =
       completions
       ~f:(Recurrence_runtime.install_completions t.recurrence_runtime);
     preparation.runtime_phase <- Handed_off (scope, handoff);
+    (match handoff with
+     | Goal_runtime_handoff.Resume handoff -> preparation.resume_handoff <- Some handoff
+     | Existing_execution _ -> ());
     publish_committed_transition t candidate;
     Ok (Some settlement)
 ;;
@@ -30555,12 +31561,14 @@ let continue_goal_episode_internal t continuation =
          let%map settlement = goal_resume_settlement index preparation run in
          let result = Goal_resume_result.Continuation.Settled settlement in
          preparation.runtime_phase <- Handed_off (scope, Resume result);
+         preparation.resume_handoff <- Some result;
          Goal_resume_result.Resumed
            { receipt = Goal_continuation.receipt continuation; continuation = result }
        | Waiting wake ->
          let%map () = check_runtime_construction_effect (Existing_goal continuation) in
          let result = Goal_resume_result.Continuation.Waiting wake in
          preparation.runtime_phase <- Handed_off (scope, Resume result);
+         preparation.resume_handoff <- Some result;
          Goal_resume_result.Resumed
            { receipt = Goal_continuation.receipt continuation; continuation = result }
        | Admitted | Active ->
@@ -31344,6 +32352,99 @@ let exclude_ordinary_deferred_ingress : type a. t -> a request -> unit =
   | _ -> ()
 ;;
 
+let check_native_goal_owner t = function
+  | Native_goal_owner.Event borrow -> validate_queued_event_borrow t borrow
+  | Moderator borrow -> validate_moderator_borrow t borrow
+;;
+
+let native_goal_request
+  : type a. t -> a Native_goal_request.t -> (a, Agent_protocol.Error.t) result
+  =
+  fun t request ->
+  let open Result.Let_syntax in
+  let check owner = check_native_goal_owner t owner in
+  match request with
+  | Resume_receipt selection -> native_goal_resume_receipt_internal t selection
+  | Resume_status (admission, authorize, invocation) ->
+    native_goal_resume_status_internal t admission authorize invocation
+  | Select_resume -> select_native_goal_resume_internal t
+  | Begin_resume selection -> begin_native_goal_resume_preparation_internal t selection
+  | Observe_dispatch (selection, outcome) ->
+    observe_native_goal_dispatch_internal t selection outcome
+  | Stage_edit (admission, authorize, edit) ->
+    stage_native_goal_edit t admission authorize edit
+  | Stage_resume (admission, authorize, request) ->
+    stage_native_goal_resume t admission authorize request
+  | Read (admission, authorize) ->
+    let%bind _, actions, current = native_goal_execution t admission Get in
+    let%bind state = native_goal_projection t actions in
+    let actor = Goal_native_admission.actor admission in
+    let%bind _ = Goal_command_admission.read state ~actor ~authorize:(authorize actor) in
+    let%bind () = current.check_current () in
+    let%map () = Goal_native_admission.check_now admission t.state ~effect_kind:Get in
+    state
+  | Close_scope owner ->
+    Goal_native_actions.close (Native_goal_owner.actions owner);
+    Ok ()
+  | Install_scope (owner, scope) ->
+    let%bind () = check owner in
+    Goal_native_actions.install_scope (Native_goal_owner.actions owner) scope
+  | Deliverable (owner, receipt) ->
+    let%bind () = check owner in
+    Goal_native_actions.deliverable (Native_goal_owner.actions owner) receipt
+  | Accept (owner, receipt) ->
+    let%bind () = check owner in
+    Goal_native_actions.accept (Native_goal_owner.actions owner) receipt
+  | Prepare (owner, receipts) ->
+    let%bind () = check owner in
+    Goal_native_actions.prepare (Native_goal_owner.actions owner) receipts
+  | Rollback (owner, receipt) ->
+    (* Factual rollback may retire an issued loan after callback revocation. It
+       never selects a replacement owner or grants fresh permission. *)
+    Goal_native_actions.rollback (Native_goal_owner.actions owner) receipt;
+    Ok ()
+;;
+
+let deliver_native_goal_receipt = function
+  | None -> Ok ()
+  | Some receipt ->
+    Chat_response.Goal_native_scope.emit receipt |> Result.map_error ~f:(error Conflict)
+;;
+
+let stage_native_goal_edit t ~admission ~authorize ~edit =
+  Result.bind
+    (call t (Native_goal (Stage_edit (admission, authorize, edit))))
+    ~f:deliver_native_goal_receipt
+;;
+
+let stage_native_goal_resume t ~admission ~authorize ~request =
+  Result.bind
+    (call t (Native_goal (Stage_resume (admission, authorize, request))))
+    ~f:deliver_native_goal_receipt
+;;
+
+let native_goal_state t ~admission ~authorize =
+  call t (Native_goal (Read (admission, authorize)))
+;;
+
+let select_native_goal_resume t = call t (Native_goal Select_resume)
+
+let begin_native_goal_resume_preparation t ~selection =
+  call t (Native_goal (Begin_resume selection))
+;;
+
+let observe_native_goal_dispatch t ~selection ~failure =
+  call t (Native_goal (Observe_dispatch (selection, failure)))
+;;
+
+let native_goal_resume_receipt t ~selection =
+  call t (Native_goal (Resume_receipt selection))
+;;
+
+let native_goal_resume_status t ~admission ~authorize ~invocation_id =
+  call t (Native_goal (Resume_status (admission, authorize, invocation_id)))
+;;
+
 let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   fun t request ->
   if Option.is_some t.lifecycle_fence && not (lifecycle_request_allowed request)
@@ -31351,6 +32452,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   else (
     exclude_ordinary_deferred_ingress t request;
     match request with
+    | Native_goal request -> native_goal_request t request
     | Begin_lifecycle (attachment_id, generation, revision) ->
       begin_lifecycle t attachment_id generation revision
     | Lifecycle_state fence ->
@@ -31454,7 +32556,19 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         | false -> Error (error Conflict "invocation callback no longer owns its result")
       in
       with_staged_transaction t (Invocation execution.dispatched.context.id) (fun () ->
-        finish_invocation t execution outcome requests commit_starts authoring_reference)
+        match
+          finish_invocation t execution outcome requests commit_starts authoring_reference
+        with
+        | Ok _ as result -> result
+        | Error _ as failure ->
+          Option.iter execution.native_goal ~f:(fun (entry, _) ->
+            Goal_native_actions.Entry.discard_speculative entry);
+          failure
+        | exception exn ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          Option.iter execution.native_goal ~f:(fun (entry, _) ->
+            Goal_native_actions.Entry.discard_speculative entry);
+          Stdlib.Printexc.raise_with_backtrace exn backtrace)
     | Claim_moderator_invocation (operation_id, invocation) ->
       claim_moderator_invocation t operation_id invocation
     | Claim_moderator_observation (operation_id, invocation_id) ->
@@ -32134,11 +33248,11 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
           Ok ())
       in
       Ok association
-    | Read_recurrences (actor, authorize) ->
+    | Recurrence_read (Definitions (actor, authorize)) ->
       let open Result.Let_syntax in
       let%bind controller = require_recurrence_controller t in
       Recurrence_command_admission.read t.state ~controller ~actor ~authorize
-    | Query_recurrences (actor, authorize, request) ->
+    | Recurrence_read (Query (actor, authorize, request)) ->
       let open Result.Let_syntax in
       let%bind () = Recurrence_command_admission.check_read actor ~authorize t.state in
       let%bind controller = require_recurrence_controller t in
@@ -32146,7 +33260,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         Recurrence_runtime.status t.recurrence_runtime ~state:t.state ~controller
       in
       Recurrence_query.read t.state ~controller ~actor ~authorize ~planning ~request
-    | Read_recurrence_planning (actor, authorize) ->
+    | Recurrence_read (Planning (actor, authorize)) ->
       let open Result.Let_syntax in
       let%bind () = Recurrence_command_admission.check_read actor ~authorize t.state in
       let%bind controller = require_recurrence_controller t in
@@ -34529,14 +35643,16 @@ let recurrence_command t ~actor ~authorize ~request =
   call t (Apply_recurrence_command (actor, authorize, request))
 ;;
 
-let read_recurrences t ~actor ~authorize = call t (Read_recurrences (actor, authorize))
+let read_recurrences t ~actor ~authorize =
+  call t (Recurrence_read (Definitions (actor, authorize)))
+;;
 
 let query_recurrences t ~actor ~authorize ~request =
-  call t (Query_recurrences (actor, authorize, request))
+  call t (Recurrence_read (Query (actor, authorize, request)))
 ;;
 
 let read_recurrence_planning t ~actor ~authorize =
-  call t (Read_recurrence_planning (actor, authorize))
+  call t (Recurrence_read (Planning (actor, authorize)))
 ;;
 
 let set_recurrence_planning_host t host = call t (Set_recurrence_planning_host host)

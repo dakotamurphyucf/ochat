@@ -1,4 +1,4 @@
-(** Compose the two explicit owned state/delta feature fences. Existing queue
+(** Compose the explicit owned queue, recurrence and native Goal state/delta feature fences. Existing queue
     semantics and marker ordering are preserved. No Store outer envelope or
     execution authority is added. *)
 val supported : string list
