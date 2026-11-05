@@ -1250,6 +1250,156 @@ let%expect_test "preparation preserves original CAS through owned history reserv
   |}]
 ;;
 
+let%expect_test
+    "common custody ACK retains initial closed evidence and constructor subset"
+  =
+  (* Local-domain custody/state law only: these candidates model acknowledged
+     steps. No Actor, Store, Factory cleanup or no-effects observation is issued. *)
+  with_actor_workspace (fun _env workspace_instance ->
+    let module R = A.Run_preparation in
+    let initial =
+      actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+    in
+    let owner = R.Owner.create () in
+    let source_owner = A.Runtime_source_owner.create () in
+    let principal =
+      P.Principal.create
+        ~id:principal_id
+        ~authentication_kind:"local"
+        ~scopes:(P.Scope.Set.of_list [ Send_messages ])
+        ~attributes:[]
+      |> protocol_ok
+    in
+    let original = Operator_authorization.trusted_local principal in
+    let request =
+      A.Run_admission_request.Headless.create
+        ~session_id:initial.identity.session_id
+        ~generation:initial.identity.generation
+        ~expected_revision:initial.counters.revision
+        ~mode:Workflow
+        ~input:Authored_start
+        ~key:(P.Idempotency_key.of_string "common-custody-state" |> protocol_ok)
+      |> protocol_ok
+      |> A.Run_admission_request.of_headless
+    in
+    let digest = A.Run_admission_request.request_sha256 request |> protocol_ok in
+    let deferred =
+      R.Deferred.create_authenticated_request
+        ~owner
+        ~source_owner:(A.Runtime_source_owner.identity source_owner)
+        ~state:initial
+        ~actor:original
+        ~request
+        ~request_sha256:digest
+        ~authorize:(fun _ -> Ok ())
+      |> protocol_ok
+    in
+    let preparation = R.Deferred.preparation deferred in
+    let custody = R.custody preparation in
+    let candidate state delta =
+      A.Session_transition.apply ~now:timestamp state ~delta ~payloads:[]
+      |> protocol_ok
+      |> fun (transition : A.Session_transition.t) -> transition.state
+    in
+    let job =
+      P.Job.
+        { id = P.Id.Job.create ()
+        ; session_id = initial.identity.session_id
+        ; generation = initial.identity.generation
+        ; kind = Async_tool
+        ; payload = `Null
+        ; status = Queued
+        ; retry_policy = Never
+        ; attempt = 0
+        ; created_at = timestamp
+        ; started_at = None
+        ; next_run_at = None
+        ; completed_at = None
+        ; result = None
+        ; delivery = Pending
+        ; launch = None
+        ; inference_origin = Some Unbound
+        ; progress = None
+        }
+    in
+    let add =
+      R.Constructor_jobs.prepare_add preparation ~owner ~state:initial ~job |> protocol_ok
+    in
+    R.Custody.Constructor_jobs.check_before_commit add ~owner ~state:initial
+    |> protocol_ok;
+    let admitted = candidate initial (Job_changed job) in
+    R.advance preparation ~owner ~previous:initial ~current:admitted |> protocol_ok;
+    R.Custody.Constructor_jobs.acknowledge add;
+    let ids, handoff =
+      R.Custody.Constructor_jobs.prepare_handoff custody ~owner ~state:admitted
+      |> protocol_ok
+    in
+    [%test_eq: P.Id.Job.t list] [ job.id ] ids;
+    R.Constructor_jobs.check_before_commit handoff ~owner ~state:admitted |> protocol_ok;
+    let joined =
+      candidate
+        admitted
+        (History_block_reserved
+           (Int64.succ admitted.conversation.reserved_history_through))
+    in
+    (* The LAST step deliberately bypasses the initial adapter: a sidecar updated
+       only by R.advance would remain stale and fail the completion check below. *)
+    R.Custody.advance custody ~owner ~previous:admitted ~current:joined |> protocol_ok;
+    R.Constructor_jobs.acknowledge handoff;
+    let remaining, _ =
+      R.Constructor_jobs.prepare_handoff preparation ~owner ~state:joined |> protocol_ok
+    in
+    [%test_eq: P.Id.Job.t list] [] remaining;
+    let original_identity_retained =
+      Int64.equal (R.request preparation).expected_revision request.expected_revision
+      && P.Idempotency_key.equal (R.request preparation).key request.key
+      && String.equal (R.request_sha256 preparation) digest
+      && Option.exists (R.original_actor preparation) ~f:(phys_equal original)
+    in
+    R.Custody.close custody;
+    assert (Result.is_error (R.check_basis preparation ~owner ~state:joined));
+    assert (Result.is_error (R.Deferred.check_basis deferred ~owner ~state:joined));
+    let closed = R.Deferred.close deferred ~owner ~state:joined |> protocol_ok in
+    let completion = R.Closed_attempt.complete closed ~source_owner |> protocol_ok in
+    let common_ack_source_completion =
+      Result.is_ok (R.Source_completion.check_basis completion ~owner ~state:joined)
+    in
+    let stale_and_foreign_rejected =
+      Result.is_error (R.Source_completion.check_basis completion ~owner ~state:admitted)
+      && Result.is_error
+           (R.Source_completion.check_basis
+              completion
+              ~owner:(R.Owner.create ())
+              ~state:joined)
+    in
+    let next =
+      candidate
+        joined
+        (History_block_reserved (Int64.succ joined.conversation.reserved_history_through))
+    in
+    let closed_advance_rejected =
+      Result.is_error (R.Custody.advance custody ~owner ~previous:joined ~current:next)
+    in
+    let closed_evidence_retained =
+      Result.is_ok (R.Source_completion.check_basis completion ~owner ~state:joined)
+    in
+    print_s
+      [%sexp
+        { constructor_subset_shared = (List.is_empty remaining : bool)
+        ; original_identity_retained : bool
+        ; common_ack_source_completion : bool
+        ; stale_and_foreign_rejected : bool
+        ; closed_advance_rejected : bool
+        ; closed_evidence_retained : bool
+        }]);
+  [%expect
+    {|
+    ((constructor_subset_shared true) (original_identity_retained true)
+     (common_ack_source_completion true) (stale_and_foreign_rejected true)
+     (closed_advance_rejected true) (closed_evidence_retained true))
+    |}]
+;;
+
 let%expect_test "unrelated reservation invalidates preparation without admitting a run" =
   with_startup_actor (fun actor _ _ request _ _ scope reference _ ->
     let original = request "displaced-preparation" in
