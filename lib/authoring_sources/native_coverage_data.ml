@@ -122,6 +122,7 @@ let features =
   ; ( "creation.lifetime_and_authority"
     , "Owned/authorized-independent lifetimes and inherited revocable execution authority"
     , [ "lib/agent_server/session_factory.ml"
+      ; "lib/agent_server/recurrence_authored_source.ml"
       ; "lib/agent_server/delegation_lifecycle.ml"
       ; "lib/agent_server/delegated_runtime.ml"
       ; "lib/agent_session/delegation_authority.ml"
@@ -257,8 +258,10 @@ let implementation_sources =
     , "d5db2b48aa4a0c4a1b05704054ef3c41557ea31c8c4b92d8f538406185af472c" )
   ; ( "lib/agent_server/managed_output_page.ml"
     , "a14130666a4495de0c35df1c01974922da31daed064f1f7622a9b686b9c38ba5" )
+  ; ( "lib/agent_server/recurrence_authored_source.ml"
+    , "e8f4b287579ae891c1d8197671c335e4e07afb02105ac206a44025701111bf3b" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "19db3b635a3ca8fdc74d016964add5b36444f8e29b02ec1c664e344bc769c4ad" )
+    , "042553aee19e00503664a2c3b43812bdd35cb0122014558911951e55a331e59a" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
@@ -326,7 +329,7 @@ let implementation_sources =
   ; ( "lib/agent_session/prompt_catalog.ml"
     , "a6b86884830197ff69113d8989280ef72bd33b61ccfa10d2e1b91bffbfc82505" )
   ; ( "lib/agent_session/runtime_builder.ml"
-    , "fb53a3d3640395ea7fc28299cdda205852e255a45d50e470801b1a874984bd1a" )
+    , "0fec32fbef60654f76947834245aaf0bd2fcf5027b1e2b37df06111972dbee6f" )
   ; ( "lib/agent_session/authored_source_preparation.ml"
     , "d8eea801d69ffa262cfc1d0a9bee45123ce8d4b08f74c25c67df450cd247600c" )
   ; ( "lib/agent_store/prompt_source_receipt.ml"

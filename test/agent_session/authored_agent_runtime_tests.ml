@@ -398,7 +398,7 @@ let on_event ctx state event = match event with
               ~prepared
               ~code:None
               ~authority
-              ~history:[]
+              ~existing_history:(Some [])
               ~sw
               ~env
               ~paths

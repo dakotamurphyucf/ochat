@@ -271,6 +271,7 @@
     lib/agent_server/managed_output_cursor.ml %{dep:../agent_server/managed_output_cursor.ml}
     lib/agent_server/managed_output_page.ml %{dep:../agent_server/managed_output_page.ml}
     lib/agent_server/session_factory.ml %{dep:../agent_server/session_factory.ml}
+    lib/agent_server/recurrence_authored_source.ml %{dep:../agent_server/recurrence_authored_source.ml}
     lib/shell_runtime/approval_broker.ml %{dep:../shell_runtime/approval_broker.ml}
     lib/shell_runtime/call_context.ml %{dep:../shell_runtime/call_context.ml}
     lib/agent_server/developer_approval_owner.ml %{dep:../agent_server/developer_approval_owner.ml}

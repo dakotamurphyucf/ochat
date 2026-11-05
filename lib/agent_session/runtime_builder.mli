@@ -700,9 +700,14 @@ val build_generated
     moderator manager, retaining the specialist's preadmitted private resources.
     Verifies both captured trees, exact source identity and the guard's live
     private registry before initialization. The host must retain the preparation
-    switch and provide actual-caller policy/approval services and canonical stored
-    history. This path never reconstructs tools or implicitly executes prompt
-    content while allocating initial history.
+    switch and provide actual-caller policy/approval services. Ordinary authored
+    selection requires canonical stored history. [existing_history = None] is
+    reserved for a genuinely fresh captured authored child under its actual held
+    Run and initialization owner, checked by the Factory before this constructor.
+    The same build/initial-history allocator consumes the option; no synthetic
+    stored history or second initialization path is introduced. This path never
+    reconstructs tools or implicitly executes prompt content while allocating
+    initial history.
 
     [code] supplies already preflighted selected code over these exact original
     private resources. The constructor checks its original/selected affinity,
@@ -724,7 +729,7 @@ val build_authored_child
   -> prepared:authored_resources
   -> code:Authored_code_preparation.t option
   -> authority:Delegation_authority.t
-  -> history:History_entry.t list
+  -> existing_history:History_entry.t list option
   -> sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> inference_context:Inference_runtime.Context.t

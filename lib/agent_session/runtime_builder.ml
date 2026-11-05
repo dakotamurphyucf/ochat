@@ -2983,7 +2983,7 @@ let build_authored_child
       ~prepared
       ~code
       ~authority
-      ~history
+      ~existing_history
   =
   build_with_services
     ~construction_checkpoint
@@ -2992,7 +2992,7 @@ let build_authored_child
     ~agent_source:None
     ~native_registrations:[]
     ~source:(Authored_child { revision; prepared; code; authority })
-    ~existing_history:(Some history)
+    ~existing_history
     ~extension_services:(Some services)
 ;;
 

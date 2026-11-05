@@ -869,3 +869,35 @@ val with_goal_job_runtime
   -> owner:Agent_session.Session_actor.Job_runtime_owner.t
   -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
+
+(** Discover one persistence-enabled specialist from this Factory's genuine
+    registered entry and its ALREADY loaded/realized authored resources.
+    No public capability registry, source path, replacement artifact or current
+    principal reconstructed from DATA is accepted.
+
+    [actor] is the original authenticated reader. [authorize] is the existing
+    trusted nonyielding host visibility policy; View_session_transcript and the
+    same original proof are checked before/after it and after capture. This does
+    not authorize a recurrence command, native effect or execution. Create/edit
+    keep their actual command admission and final Send_messages checks.
+
+    Holds the existing Factory-key source-capability lease only. It never loads
+    or initializes a runtime, realizes lazy native resources, creates an artifact
+    on disk, admits a recurrence/child/Run, or acquires another lease from inside
+    a native handler. Actor/policy callbacks run outside the Owner mutex.
+
+    The capture helper can also be reused by an already-admitted native callback
+    under its existing resource loan, without acquiring a second lease. Target
+    DATA includes full captured source and private pins and is for trusted host
+    composition; it is not a public status projection. Parent/source/configuration
+    changes during capture reject. Cancellation/exceptions preserve identity and
+    joined cleanup; a normal Error remains Error throughout the actual source
+    lease CPS. *)
+val preview_recurrence_authored_target
+  :  t
+  -> Session_registry.entry
+  -> actor:Operator_authorization.t
+  -> authorize:(Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> name:string
+  -> mode:Agent_protocol.Run.Mode.t
+  -> (Agent_session.Recurrence_target.t, Agent_protocol.Error.t) result

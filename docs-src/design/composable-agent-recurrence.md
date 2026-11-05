@@ -531,6 +531,23 @@ The upper creation owner validates a captured origin against the complete actual
 controller definition, including its target digest and original prompt definition.
 Decoding the lower delegation record alone cannot establish that association.
 
+Trusted hosts can capture a prepared specialist through
+`Session_factory.preview_recurrence_authored_target`. The caller supplies its
+original authenticated reader and visibility policy; the Factory checks the
+actual registered session and borrows its already loaded source resources. This
+operation does not initialize a runtime, realize private tools, create a child or
+admit execution. It captures the specialist's prepared v1 moderator and complete
+source closure, preserving the original artifact timestamp. Repeating the same
+capture produces the same target and publication identity. A changed source,
+resource binding or parent configuration rejects the capture.
+
+`Recurrence_authored_source` owns the shared capture and artifact-consistency
+operations. The Factory owns resource leases and current-authority checks. Child
+creation retains the parent's loan through reservation, artifact publication and
+reciprocal linkage; restoration keeps the captured source identity while using
+the existing delegated builder and private resource bindings. A missing private
+binding never selects the controller's public tools as a fallback.
+
 An authored specialist retains its own delegated compiler contract. The defining
 parent's `Headless` or `Ui` role remains source provenance; it does not select the
 child's role. An authored captured child uses the stored `Ui` family and the
