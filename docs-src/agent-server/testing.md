@@ -69,6 +69,19 @@ These use offline providers, production hosts and retained E2E artifacts. The
 required framework CI runs this alias in its E2E tier alongside the separate
 forced normal-test tier.
 
+The [full-profile Goal accounting retirement qualification](https://github.com/dakotamurphyucf/ochat/blob/main/test/goal_accounting_retirement/README.md)
+is an explicit slow local executable, outside normal CI and `runtest`:
+
+```sh
+dune build @test/goal_accounting_retirement/goal-accounting-retirement-local
+```
+
+It retains the real 256-admission boundary, atomic fold and physical reopen
+oracles, with phase/count progress and a 900-second fixture timeout. The shared
+Factory fixture keeps its normal 30-second default. Small accounting/retirement
+laws remain in ordinary testing; this local executable adds full-profile evidence
+when it completes, rather than turning a partial timeout into a pass.
+
 The ordinary `@test/agent_transport_stdio_client/runtest` suite runs a real
 Eio-owned child with separate stderr, checks bounded stderr retention and typed
 response correlation, and verifies concurrent close, partial-write cancellation,

@@ -79,3 +79,24 @@ oracle recomputes small exact totals from explicit test facts, rather than using
 production aggregate helpers. It exercises revision replacement, ordering,
 interruption, Untracked coverage and final sealing; separate int64 examples cover
 overflow and checked counter exhaustion.
+
+## Full-profile local retirement qualification
+
+The real 256-admission boundary and physical Store reopen are exercised by the
+[local retirement executable](https://github.com/dakotamurphyucf/ochat/blob/main/test/goal_accounting_retirement/README.md):
+
+```sh
+dune build @test/goal_accounting_retirement/goal-accounting-retirement-local
+```
+
+This slow qualification is outside normal CI and `runtest`; compact partition,
+retirement and preservation laws remain in ordinary tests. It preserves the
+durable 256-attempt/256-turn/4 MiB profile and every real Actor/Factory admission.
+Only the target Goal executes a provider. Unrelated pressure admissions are
+truthfully released before submission, with no fabricated completion or charge.
+The executable verifies one fold before retirement, duplicate/stale correction
+idempotency, physical reopen and rejection of retired-row resurrection. It uses a
+900-second local timeout and reports Eio wall time/phase every 32 admissions.
+The separate fixture timeout default remains 30 seconds. A diagnostic run that
+only reaches the boundary is not end-to-end qualification; retain the full local
+exit result when reporting retirement/reopen coverage.

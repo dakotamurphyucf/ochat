@@ -86,6 +86,7 @@ type counters =
   }
 
 let with_recoverable_fixture
+      ?(timeout = 30.)
       ?(wrap_env = Fn.id)
       ?(max_root_agents = 1)
       ?(post_stream = fun _ -> completed_response "539 retry complete")
@@ -115,13 +116,14 @@ let with_recoverable_fixture
     ~max_root_agents
     ~policy
     (fun env sw root daemon ->
-       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. (fun () ->
+       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) timeout (fun () ->
          Source.with_loaded_entry daemon (fun ~entry ~runtime ~revision ->
            f env sw root daemon policy entry runtime revision counters)))
 ;;
 
-let with_fixture ?wrap_env ?max_root_agents ?post_stream f =
+let with_fixture ?timeout ?wrap_env ?max_root_agents ?post_stream f =
   with_recoverable_fixture
+    ?timeout
     ?wrap_env
     ?max_root_agents
     ?post_stream
