@@ -16,18 +16,20 @@ let state entry =
   A.Session_actor.state entry.Agent_server.Session_registry.actor |> protocol_ok
 ;;
 
-let with_preparation entry key f =
+let headless_request entry key =
   let before = state entry in
-  let request =
-    A.Run_admission_request.Headless.create
-      ~session_id:before.identity.session_id
-      ~generation:before.identity.generation
-      ~expected_revision:before.counters.revision
-      ~mode:Single_turn
-      ~input:Authored_start
-      ~key:(P.Idempotency_key.of_string key |> protocol_ok)
-    |> protocol_ok
-  in
+  A.Run_admission_request.Headless.create
+    ~session_id:before.identity.session_id
+    ~generation:before.identity.generation
+    ~expected_revision:before.counters.revision
+    ~mode:Single_turn
+    ~input:Authored_start
+    ~key:(P.Idempotency_key.of_string key |> protocol_ok)
+  |> protocol_ok
+;;
+
+let with_preparation entry key f =
+  let request = headless_request entry key in
   let preparation =
     match
       A.Session_actor.begin_headless_run_preparation
@@ -182,7 +184,61 @@ let on_event ctx state event = Task.pure(state)
                  [%test_eq: string] "source staging has a foreign session store" message
                | Error _ | Ok _ ->
                  failwith "foreign Factory staged another owner's source");
-             [%test_eq: int] 0 !calls);
+             [%test_eq: int] 0 !calls;
+             let original = Operator_authorization.trusted_local (principal ()) in
+             let clean =
+               Factory.with_effect_deferred_run_source
+                 factory
+                 entry
+                 ~actor:original
+                 ~authorize:(fun _ -> Ok ())
+                 ~request:(headless_request entry "before-foreign-deferred-source")
+                 (fun _ prepared ->
+                    Owner.Prepared.check_basis prepared |> protocol_ok;
+                    Ok ())
+               |> protocol_ok
+             in
+             let module Attempt = Factory.Deferred_run_attempt in
+             let observation =
+               match clean with
+               | Attempt.Outcome.Attempted attempt ->
+                 Attempt.result attempt |> protocol_ok;
+                 Attempt.no_effects attempt |> Option.value_exn
+               | Retained _ -> failwith "clean foreign-control source retained a Run"
+             in
+             A.Session_actor.No_effects_observation.check_current observation
+             |> protocol_ok;
+             (match
+                Factory.with_effect_deferred_run_source
+                  (Daemon.factory foreign)
+                  entry
+                  ~actor:original
+                  ~authorize:(fun _ -> Ok ())
+                  ~request:(headless_request entry "foreign-deferred-source-factory")
+                  (fun _ _ ->
+                     Int.incr calls;
+                     Ok ())
+              with
+              | Error error ->
+                let expected =
+                  P.Error.create
+                    Permission_denied
+                    ~message:"source lifetime belongs to another Factory"
+                    ~retryable:false
+                    ()
+                in
+                assert (
+                  Jsonaf.exactly_equal (P.Error.to_json expected) (P.Error.to_json error))
+              | Ok _ -> failwith "foreign Factory issued deferred source ownership");
+             [%test_eq: int] 0 !calls;
+             A.Session_actor.No_effects_observation.check_current observation
+             |> protocol_ok;
+             A.Session_actor.No_effects_observation.check_basis observation |> protocol_ok;
+             assert_same before entry;
+             [%test_eq: string list] saved (frames env entry);
+             [%test_eq: int] initial_constructions !constructions;
+             [%test_eq: int] 0 !provider_calls;
+             assert (not (Owner.is_loaded entry.runtime)));
          (* Corrupt the consumed captured tree, not the deleted original source.
            The cached revision must not bypass the actual Factory verifier. *)
          let captured_file =
@@ -391,6 +447,122 @@ let on_event ctx state event = Task.pure(state)
        [%test_eq: string list] saved (frames env child);
        [%test_eq: int] baseline !constructions;
        [%test_eq: int] 0 !provider_calls;
+       (* Keep the real Factory-authenticated parent Owner. Its source lease
+          finalizer must join the actual parent mutex before an observation can
+          escape, even though the child has no new durable facts or effects. *)
+       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+         Eio.Switch.run (fun sw ->
+           let entered, entered_u = Eio.Promise.create () in
+           let returning, returning_u = Eio.Promise.create () in
+           let release, release_u = Eio.Promise.create () in
+           let blocker = ref None in
+           let closed_prepared = ref None in
+           let callbacks = ref 0 in
+           let primary =
+             P.Error.create
+               Invalid_request
+               ~message:"actual generated source callback rejection"
+               ~retryable:false
+               ~data:(`Object [ "retained", `Number "538" ])
+               ()
+           in
+           let release_parent () =
+             if Option.is_none (Eio.Promise.peek release)
+             then Eio.Promise.resolve release_u ()
+           in
+           let attempted =
+             Eio.Fiber.fork_promise ~sw (fun () ->
+               Factory.with_effect_deferred_run_source
+                 factory
+                 child
+                 ~actor:(Operator_authorization.trusted_local (principal ()))
+                 ~authorize:(fun _ -> Ok ())
+                 ~request:(headless_request child "generated-parent-source-join")
+                 (fun _ prepared ->
+                    Int.incr callbacks;
+                    closed_prepared := Some prepared;
+                    (match Source.selection (source prepared) with
+                     | Generated actual ->
+                       assert (
+                         P.Id.Prompt_revision.equal
+                           expected_revision
+                           (A.Generated_definition.artifact actual).revision_id)
+                     | Authored _ | Captured _ | Authored_child _ ->
+                       failwith "deferred generated source changed family");
+                    let held =
+                      Eio.Fiber.fork_promise ~sw (fun () ->
+                        Owner.For_testing.with_loaded_runtime parent.runtime (fun () ->
+                          Eio.Promise.resolve entered_u ();
+                          Eio.Promise.await release;
+                          Ok ()))
+                    in
+                    blocker := Some held;
+                    Eio.Promise.await entered;
+                    (* No yield follows this signal before the Error; the next
+                      wait is the real parent source-lease finalizer's mutex. *)
+                    Eio.Promise.resolve returning_u ();
+                    Error primary))
+           in
+           let capture f =
+             match f () with
+             | value -> Ok value
+             | exception exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+           in
+           let result =
+             capture (fun () ->
+               Eio.Fiber.first
+                 (fun () -> Eio.Promise.await returning)
+                 (fun () ->
+                    ignore (Eio.Promise.await_exn attempted);
+                    failwith "generated source returned before its parent mutex barrier");
+               [%test_eq: int] 1 !callbacks;
+               assert (Option.is_none (Eio.Promise.peek attempted));
+               assert_same before child;
+               [%test_eq: string list] saved (frames env child);
+               [%test_eq: int] baseline !constructions;
+               [%test_eq: int] 0 !provider_calls;
+               (* Do not reenter the parent's Owner while its mutex is held. *)
+               release_parent ();
+               Eio.Promise.await_exn (Option.value_exn !blocker) |> protocol_ok;
+               let module Attempt = Factory.Deferred_run_attempt in
+               let completed = Eio.Promise.await_exn attempted |> protocol_ok in
+               let attempt =
+                 match completed with
+                 | Attempt.Outcome.Attempted attempt -> attempt
+                 | Retained _ -> failwith "generated source reused a retained Run"
+               in
+               (match Attempt.result attempt with
+                | Error error ->
+                  assert (
+                    Jsonaf.exactly_equal (P.Error.to_json primary) (P.Error.to_json error))
+                | Ok _ -> failwith "generated source lost its callback Error");
+               let observation = Attempt.no_effects attempt |> Option.value_exn in
+               A.Session_actor.No_effects_observation.check_current observation
+               |> protocol_ok;
+               A.Session_actor.No_effects_observation.check_basis observation
+               |> protocol_ok;
+               assert (
+                 Result.is_error
+                   (Owner.Prepared.check_basis (Option.value_exn !closed_prepared)));
+               assert_same before child;
+               [%test_eq: string list] saved (frames env child);
+               [%test_eq: int] baseline !constructions;
+               [%test_eq: int] 0 !provider_calls;
+               assert (Owner.is_loaded parent.runtime);
+               assert (not (Owner.is_loaded child.runtime)))
+           in
+           let cleaned =
+             capture (fun () ->
+               Eio.Cancel.protect (fun () ->
+                 release_parent ();
+                 ignore (Eio.Promise.await_exn attempted);
+                 Option.iter !blocker ~f:(fun held ->
+                   Eio.Promise.await_exn held |> protocol_ok)))
+           in
+           match result, cleaned with
+           | Error (exn, backtrace), _ | Ok (), Error (exn, backtrace) ->
+             Exn.raise_with_original_backtrace exn backtrace
+           | Ok (), Ok () -> ()));
        (* Retained Running+moderator makes old generated_parent fingerprint try
          Runtime_owner.moderation_source, which used to load BEFORE the lease. *)
        let quiescent = state parent in

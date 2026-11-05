@@ -13,6 +13,20 @@ let ok = function
   | Error _ -> failwith "unexpected catalog admission fixture rejection"
 ;;
 
+(* Cleanup cannot replace the original assertion, cancellation or selected
+   writer failure. A successful body still has to complete cleanup successfully. *)
+let protect_cleanup ~finally f =
+  match f () with
+  | value ->
+    Eio.Cancel.protect finally;
+    value
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    (try Eio.Cancel.protect finally with
+     | _ -> ());
+    Exn.raise_with_original_backtrace exn backtrace
+;;
+
 let with_daemon
       ?(prompt_text = "<developer>Pinned source during creation.</developer>")
       ?(schemas = false)
@@ -21,6 +35,7 @@ let with_daemon
       ?(profile = permission_profile)
       ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
       ?(prepare_sources = fun _ _ -> ())
+      ?(wrap_env = Fn.id)
       ~policy
       f
   =
@@ -28,8 +43,8 @@ let with_daemon
     Mirage_crypto_rng_unix.use_default ();
     let root = temporary_root env in
     let path = Eio.Path.(env#fs / root) in
-    Fun.protect
-      ~finally:(fun () -> Eio.Cancel.protect (fun () -> Eio.Path.rmtree path))
+    protect_cleanup
+      ~finally:(fun () -> Eio.Path.rmtree path)
       (fun () ->
          let prompt = Filename.concat root "parent.chatmd" in
          Eio.Path.save ~create:(`Exclusive 0o600) Eio.Path.(env#fs / prompt) prompt_text;
@@ -60,7 +75,7 @@ let with_daemon
            let daemon =
              Daemon.start
                ~sw
-               ~env
+               ~env:(wrap_env (env :> Eio_unix.Stdenv.base))
                ~config:
                  (let config = config ~profile root root prompt in
                   { config with
@@ -79,7 +94,7 @@ let with_daemon
                ()
              |> protocol_ok
            in
-           Fun.protect
+           protect_cleanup
              ~finally:(fun () -> Daemon.shutdown daemon |> protocol_ok)
              (fun () -> f env sw root daemon))))
 ;;
