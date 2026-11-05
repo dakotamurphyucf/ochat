@@ -196,19 +196,19 @@ let%test_unit "single-turn startup requires exact completed prospective evidence
           Batch
             [ Moderator_execution_changed running; Moderator_execution_changed completed ]
       in
-      A.Session_delta.apply state delta |> protocol_ok
+      delta
     in
-    let prepare work_state =
+    let prepare work_delta =
       A.Run_transition.prepare
         state
         ~scope
         ~executing
-        ~work_state
+        ~work_delta
         ~owned_work:[]
         ~action:None
         ~now:timestamp
     in
-    assert (Result.is_error (prepare state));
+    assert (Result.is_error (prepare (Batch [])));
     assert (Result.is_error (prepare (projected executing)));
     let requests : P.Invocation.follow_up =
       { request_turn = false; request_compaction = false; end_session = None }
@@ -244,7 +244,9 @@ let%test_unit "single-turn startup requires exact completed prospective evidence
     assert (Option.is_none completed.requests);
     let prepared = prepare (projected completed) |> protocol_ok in
     let settled =
-      A.Session_delta.apply (projected completed) (A.Run_transition.delta prepared)
+      A.Session_delta.apply
+        state
+        (Batch [ projected completed; A.Run_transition.delta prepared ])
       |> protocol_ok
     in
     let index = Option.value_exn settled.run_state in

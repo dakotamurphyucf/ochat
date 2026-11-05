@@ -506,6 +506,61 @@ and initialization path; a failed borrow never silently selects that cold path.
 Resource borrowing checks the Job deadline again after potentially yielding
 authorization, before entering the caller's callback.
 
+Timer, queued Job-completion and subscription wakes use the same Factory source
+owner before constructing a cold runtime. They retain the waiting Run and its
+original authorization rather than issuing a Resume command or creating another
+episode. The actual producer acknowledgement and callback claim transfer queue
+ownership; a subscription wake transfers ownership at its Operation acknowledgement.
+Initialization and Session_resume finish before that transfer, and an installed
+runtime is reused without replaying either event. Ordinary notification turns
+exclude Goal-owned wakes, including ones newly committed in the same batch.
+The same selection rule applies at foreground safe points and again before accepting
+or discarding a wake. Publishing a notification into history does not authorize an
+unrelated turn to consume a Goal's pending Wait. Even an older Operation from the
+same Run must leave that future occurrence for its actual wake admission.
+
+A delivered timer settles its producer obligation in the same durable transaction
+as the Schedule fact. The retained identity, generation, source and original owner
+must agree. An actual delivery records success; a skipped occurrence records a
+limit outcome; cancellation and failure remain distinct. Re-reading a terminal
+Schedule or restoring a saved session cannot invent new completion evidence.
+
+A callback may request achievement and settle the Goal in one durable transaction.
+Each ordered Goal change is checked against its immediate predecessor; a direct
+revision jump is still invalid. The transaction carries that validated sequence
+through document encoding and replay while preserving unknown fields. Captured
+state templates contribute compatible preserved fields, not permission to replace
+the final validated Goal state.
+
+Producer completion does not complete its queued callback. A successful timer
+leaves its waiting Run available to the genuine callback, whose native effects and
+`Goal.finish` still require their own live authority and settled work. If the
+awaited timer is canceled, skipped or fails, the Run is interrupted with that known
+producer outcome; other unfinished work remains unconfirmed. Stop holds the Goal
+and cancels its pending timer; it does not leave the episode waiting for an
+occurrence that cannot fire. Source replacement retains its retirement semantics. Run evidence and callback
+revision changes become usable only after the actual save is acknowledged.
+
+Native background Jobs share the existing executor, request policy and deadline
+with ordinary execution. A request already expired in the queue returns Expired
+before acquiring an execution scope; the executor checks the deadline again after
+resource preparation. A local Stop cancellation unwinds the timer worker's joined
+resources without failing the shared daemon switch. Cancellation of the scheduler
+itself still propagates. If cancellation has already made a Job terminal, its
+still-owned native invocation can record its actual result using the retained
+original custody or known expiry. This settlement does not reopen the Job or
+permit new work; active admission still rejects terminal Job custody.
+
+Polling a Job or reading its session can briefly reserve the registry entry.
+That read does not revoke an already claimed Job. Loaded reuse and cold restoration
+retain the exact registered Actor, runtime and Store handle; failed cleanup and
+shutdown still reject access. Actual lifecycle retirement is enforced by the Actor
+fence and the runtime source owner, including checks after yielding preparation.
+Retained Goal and recurrence authorization callbacks check that same owner
+association around the original policy. New activation and source-selection
+entrypoints still reject a reserved entry; reading a session does not revoke the
+original authority of work already admitted.
+
 A held Goal's queued Jobs remain queued without advancing their attempts. The
 Actor checks this at the actual claim and repeats it before persisting the claim;
 the scheduler also excludes suspended candidates before fair ordering. Factual

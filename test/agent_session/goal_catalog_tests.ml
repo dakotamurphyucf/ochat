@@ -586,21 +586,92 @@ let%expect_test
            (Record_progress (id, progress "preserved")))
       |> committed
     in
-    let delta = A.Session_delta.Goal_catalog_changed next in
-    let delta_document =
-      A.Session_delta_document.create
-        delta
-        ~limits:document_limits
-        ~state_document:A.Session_state_document.authored
-      |> document_ok
+    let final, _ =
+      apply
+        next
+        ~current_source:actual_source
+        (request
+           next
+           ~current_source:actual_source
+           "doc-objective"
+           (Revise_objective (id, objective "ordered preservation")))
+      |> committed
     in
-    let adopted =
-      A.Session_delta_document.apply delta_document ~limits:document_limits carrier
-      |> document_ok
+    let delta =
+      A.Session_delta.Batch [ Goal_catalog_changed next; Goal_catalog_changed final ]
     in
-    let after =
-      A.Session_state_document.encode adopted ~limits:document_limits |> document_ok
+    (* Each leaf remains one exact revision. Removing or reversing the first
+       leaf must fail rather than allowing the final +2 projection directly. *)
+    List.iter
+      [ A.Session_delta.Goal_catalog_changed final
+      ; Batch [ Goal_catalog_changed final; Goal_catalog_changed next ]
+      ]
+      ~f:(fun invalid ->
+        List.iter
+          [ invalid; A.Session_delta.Batch [ Created native; invalid ] ]
+          ~f:(fun invalid ->
+            assert (Result.is_error (A.Session_delta.apply native invalid));
+            let document =
+              A.Session_delta_document.create
+                invalid
+                ~limits:document_limits
+                ~state_document:A.Session_state_document.authored
+              |> document_ok
+            in
+            assert (
+              Result.is_error
+                (A.Session_delta_document.apply document ~limits:document_limits carrier))));
+    let unvalidated =
+      A.Session_state_document.with_value
+        carrier
+        { native with goal_catalog = Some final }
     in
+    assert (
+      Result.is_error
+        (A.Session_state_document.encode unvalidated ~limits:document_limits));
+    let replay delta =
+      let next_state = A.Session_delta.apply native delta |> protocol_ok in
+      let admitted =
+        A.Session_document_transition.admit_encoded
+          carrier
+          ~delta
+          ~next:next_state
+          ~limits:document_limits
+        |> document_ok
+      in
+      let delta_document =
+        A.Session_delta_document.create
+          delta
+          ~limits:document_limits
+          ~state_document:A.Session_state_document.authored
+        |> document_ok
+      in
+      let adopted =
+        A.Session_delta_document.apply delta_document ~limits:document_limits carrier
+        |> document_ok
+      in
+      let after =
+        A.Session_state_document.encode adopted ~limits:document_limits |> document_ok
+      in
+      let admitted_raw =
+        A.Session_state_document.Admitted.document admitted
+        |> D.Document.payload
+        |> fun payload -> member payload "goal_catalog"
+      in
+      assert (D.Json.equal admitted_raw (member (D.Document.payload after) "goal_catalog"));
+      adopted, after
+    in
+    let adopted, after = replay delta in
+    let _, with_created = replay (A.Session_delta.Batch [ Created native; delta ]) in
+    assert (D.Json.equal (D.Document.json after) (D.Document.json with_created));
+    let actual =
+      A.Session_state_document.value adopted
+      |> fun state -> Option.value_exn state.A.Session_state.goal_catalog
+    in
+    [%test_eq: int64] Int64.(C.revision catalog + 2L) (C.revision actual);
+    [%test_eq: int64]
+      Int64.(G.revision (C.find catalog id |> Option.value_exn) + 2L)
+      (G.revision (C.find actual id |> Option.value_exn));
     let raw = member (D.Document.payload after) "goal_catalog" in
     assert (D.Json.equal (member raw "future_catalog") (`Object [ "keep", `Null ]));
     let goal_doc =

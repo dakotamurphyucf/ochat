@@ -110,27 +110,25 @@ module Context = struct
     { service; controller; controller_actor; target; target_actor; intent }
   ;;
 
-  let check_entries t =
+  let check_entries_with t check =
     let open Result.Let_syntax in
     let controller =
       Intent.occurrence t.intent
       |> A.Recurrence_identity.Occurrence.definition
       |> A.Recurrence_identity.Definition.controller
     in
-    let%bind () =
-      Factory.check_registered_entry t.service.factory t.controller ~session:controller
-    in
-    Factory.check_registered_entry
-      t.service.factory
-      t.target
-      ~session:(Intent.target t.intent)
+    let%bind () = check t.service.factory t.controller ~session:controller in
+    check t.service.factory t.target ~session:(Intent.target t.intent)
   ;;
+
+  let check_entries t = check_entries_with t Factory.check_registered_entry
+  let check_owners t = check_entries_with t Factory.check_registered_owner
 
   let authorize t actor state =
     let open Result.Let_syntax in
-    let%bind () = check_entries t in
+    let%bind () = check_owners t in
     let%bind () = t.service.authorize actor state in
-    check_entries t
+    check_owners t
   ;;
 
   let target_policy t = authorize t t.target_actor

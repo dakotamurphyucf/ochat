@@ -261,6 +261,11 @@ val commit_retired
     creation coordinators check this under their own creation lock before reserve. *)
 val lifecycle_reserved : t -> Agent_protocol.Id.Session.t -> bool
 
+(** Negative-only observation of retained failed cleanup for this session ID,
+    independent of a transient lifecycle/read reservation. It supplies no
+    admission or cleanup-completion proof. Same creating Eio domain only. *)
+val has_pending_cleanup : t -> Agent_protocol.Id.Session.t -> bool
+
 module Cleanup_owner : sig
   (** Actual retained close/abort authority; no fabricated loaded entry. *)
   type t

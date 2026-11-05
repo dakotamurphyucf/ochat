@@ -663,6 +663,29 @@ val recover_owned_session
 (** Pure same-host actual Handle ownership check before reconstruction transfer. *)
 val owns_handle : t -> Agent_store.Session_store.Handle.t -> bool
 
+(** Negative-only current owner association for retained execution policy. Checks
+    this Factory's exact registered Actor/Owner/Handle, Store identity, closing
+    and retained failed cleanup. A transient read/lifecycle reservation alone
+    does not revoke this association. No admission, selection, runtime or source
+    permission is granted; fresh entrypoints still use [check_registered_entry]
+    and actual Actor lifecycle and execution guards remain mandatory. Same
+    creating Eio domain only. *)
+val check_registered_owner
+  :  t
+  -> Session_registry.entry
+  -> session:Agent_protocol.Session_ref.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** [check_registered_owner] plus the existing canonical execution-selection
+    observation. For retained original policy only; fresh admission still uses
+    [check_execution_selected_entry]. Does not load or select an owner. Same
+    creating Eio domain only. *)
+val check_execution_selected_owner
+  :  t
+  -> Session_registry.entry
+  -> session:Agent_protocol.Session_ref.t
+  -> (unit, Agent_protocol.Error.t) result
+
 (** Pure negative association check against this Factory's actual registry,
     Actor/Owner pairing and owned Handle. [session] is expected-reference DATA,
     compared with the actual Store server and Handle session. Rejects closing,
@@ -913,3 +936,44 @@ val preview_recurrence_authored_target
   -> name:string
   -> mode:Agent_protocol.Run.Mode.t
   -> (Agent_session.Recurrence_target.t, Agent_protocol.Error.t) result
+
+(** Prepare exact immutable request/policy/deadline before actual Job scope and
+    any cold construction. Uses the same Factory policy as installed executor.
+    Goal and ordinary routing share the actual Owner executor/result body; this
+    never claims/completes/requeues the already Running Job. *)
+val execute_background_job
+  :  t
+  -> Session_registry.entry
+  -> Agent_protocol.Job.t
+  -> (Runtime_owner.background_result, Agent_protocol.Error.t) result
+
+module Goal_wake_result : sig
+  type t =
+    | No_work
+    | Suspended_goal of Agent_session.Goal_execution_selection.Suspension.t
+    | Handed_off of Agent_session.Session_actor.Goal_execution_runtime.Wake_result.t
+end
+
+(** Actual registered same Factory/Store/Actor/Owner entry. Uses SAME authenticated
+    source-owner reservation, selected-source/generated-parent CPS and full source
+    ABI; no new original is supplied or inferred from creator. The actual live Run
+    original supplies rights. Source joins then factual close finish before success.
+    Errors/exceptions/cancellation stay primary through actual target+parent cleanup;
+    known claim/install/Wait/Settlement ACK survives independently in Actor state.
+    This never grants NoEffects or reconstructs execution after physical recovery.
+    Reconciliation of already-consumed wake is No_work, not another callback.
+    Suspended is a genuine pre-effect selection, never a converted source error. *)
+val deliver_goal_wake
+  :  t
+  -> Session_registry.entry
+  -> wake:Agent_protocol.Run_wake.t
+  -> (Goal_wake_result.t, Agent_protocol.Error.t) result
+
+(** Fixed actual idle routing before any ordinary runtime load. Queued Goal
+    callbacks and subscription wakes use the exact source consumer above;
+    ordinary work keeps the existing adapter. A suspended wake remains factual
+    Pending data; no failed selection is converted into ordinary authority. *)
+val drain_idle_moderator
+  :  t
+  -> Session_registry.entry
+  -> (bool, Agent_protocol.Error.t) result

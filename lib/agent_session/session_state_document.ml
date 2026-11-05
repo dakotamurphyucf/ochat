@@ -983,6 +983,9 @@ module Original = struct
     ; jobs : P.Job.t list
     ; invocations : P.Invocation.t list
     ; queue_provenance : Queue_provenance_validation.t
+      (* The latest exactly validated Goal leaf. The original template remains
+       unchanged so transaction prefixes retain its complete extension custody. *)
+    ; goal_catalog : Goal_catalog.t option
     ; presence : Session_state_presence.t
     ; decode_evidence : Decode_evidence.t option
     }
@@ -1134,6 +1137,7 @@ let decoded ?evidence carrier ~limits =
         ; jobs = state.jobs
         ; invocations = state.invocations
         ; queue_provenance = S.queue_provenance state
+        ; goal_catalog = state.goal_catalog
         ; presence
         ; decode_evidence = evidence
         }
@@ -1700,15 +1704,7 @@ let validate_goal_update previous incoming =
 let validate_goal_carrier t =
   match t.original with
   | None -> Ok ()
-  | Some original ->
-    let open Result.Let_syntax in
-    let%bind previous =
-      match D.Json.field (D.Document.payload original.template) ~name:"goal_catalog" with
-      | Absent | Null -> Ok None
-      | Value raw ->
-        Goal_catalog.of_jsonaf raw |> X.document_result |> Result.map ~f:Option.some
-    in
-    validate_goal_update previous (value t).goal_catalog
+  | Some original -> validate_goal_update original.goal_catalog (value t).goal_catalog
 ;;
 
 let validate_instruction_update previous incoming =
@@ -2214,6 +2210,37 @@ module Admitted = struct
 
   let state_document t = t.state_document
   let document t = t.document
+
+  let merge_created t ~captured ~limits =
+    let open Result.Let_syntax in
+    let%bind _ = encode captured ~limits in
+    let previous = t.state_document in
+    let%bind _ = encode previous ~limits in
+    (* Ordered admission owns the final native projection. Created contributes
+       only its actual carried extension paths, never a new transition or basis. *)
+    let incoming = with_value captured (value previous) in
+    let%bind carrier =
+      D.Domain_codec.adopt
+        (codec_for previous ~limits)
+        ~previous:previous.carrier
+        ~incoming:incoming.carrier
+    in
+    (* Adoption unions preserved paths but decodes only the known projection.
+       Keep the exact admitted native value, including its private subcarriers. *)
+    let carrier = D.Extension_carrier.with_value carrier (value previous) in
+    let%bind state_document =
+      match previous.original with
+      | Some _ -> Ok { previous with carrier }
+      | None ->
+        (* An authored receiver has no original encoding basis. Capture the
+           actual merged template so encode cannot discard Created extensions,
+           then retain the receiver's exact already-admitted native custody. *)
+        let%map captured = decoded ~limits carrier in
+        with_value captured (value previous)
+    in
+    let%map document = encode state_document ~limits in
+    { state_document; document }
+  ;;
 end
 
 module Transaction = struct
@@ -2222,6 +2249,18 @@ module Transaction = struct
 
   let value t = value t.staged
   let with_value t state = { staged = with_value t.staged state }
+
+  let update_goal_catalog t incoming =
+    let open Result.Let_syntax in
+    let%bind () = validate_goal_carrier t.staged in
+    let%bind () = validate_goal_update (value t).goal_catalog (Some incoming) in
+    let staged = with_value t { (value t) with goal_catalog = Some incoming } in
+    let original =
+      Option.map staged.staged.original ~f:(fun original ->
+        { original with goal_catalog = Some incoming })
+    in
+    Ok { staged = { staged.staged with original } }
+  ;;
 
   let prefix_codec ~capture ~limits ~presence =
     match
@@ -2328,6 +2367,7 @@ module Transaction = struct
           ; jobs = state.jobs
           ; invocations = state.invocations
           ; queue_provenance = S.queue_provenance state
+          ; goal_catalog = state.goal_catalog
           ; presence
           ; decode_evidence = Some (Decode_evidence.Capture.finish capture)
           }

@@ -363,18 +363,23 @@ let exercise scenario =
                     let ledger = Goal_resume_tests.ledger_json held.inference_ledger in
                     let prior_startup = startup held in
                     let rejection =
-                      Factory.with_goal_job_runtime
-                        (Daemon.factory daemon)
-                        entry
-                        ~owner:services.runtime_owner
-                        (fun selected ->
-                           assert (phys_equal selected runtime);
-                           assert (
-                             Jsonaf.exactly_equal
-                               (P.Job.to_json claimed)
-                               (P.Job.to_json (one_job (state entry))));
-                           assert (Owner.is_loaded entry.runtime);
-                           Ok (fresh_denial ~sw entry selected services policy))
+                      Registry.with_loaded_read
+                        (Daemon.registry daemon)
+                        held.identity.session_id
+                        (fun actual ->
+                           assert (phys_equal actual entry);
+                           Factory.with_goal_job_runtime
+                             (Daemon.factory daemon)
+                             entry
+                             ~owner:services.runtime_owner
+                             (fun selected ->
+                                assert (phys_equal selected runtime);
+                                assert (
+                                  Jsonaf.exactly_equal
+                                    (P.Job.to_json claimed)
+                                    (P.Job.to_json (one_job (state entry))));
+                                assert (Owner.is_loaded entry.runtime);
+                                Ok (fresh_denial ~sw entry selected services policy)))
                       |> protocol_ok
                     in
                     let retained = state entry in

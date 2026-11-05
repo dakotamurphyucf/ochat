@@ -28,6 +28,13 @@ module Row = struct
       Error (P.Error.invalid_request "terminal Job custody cannot admit active work")
   ;;
 
+  let settlement_parent t =
+    match t.phase with
+    | Active admission | Terminal (Current admission) ->
+      Observation_continuation.Parent.Available admission
+    | Terminal Expired -> Observation_continuation.Parent.Expired
+  ;;
+
   let binding t = t.binding
 
   let retire t =

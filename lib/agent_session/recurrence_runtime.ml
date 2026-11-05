@@ -33,6 +33,7 @@ module Completion = struct
     }
 
   let sample ~wall ~monotonic = { wall; monotonic }
+  let wall sample = sample.wall
 
   let timing_error t =
     match t.timing with

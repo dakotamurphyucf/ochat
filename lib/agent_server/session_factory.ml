@@ -183,6 +183,10 @@ type t =
   ; journal_document_limits : Document_schema.Limits.t
   }
 
+(* One actual host ceiling feeds native execution, notification disclosure and
+   immutable pre-resource preparation. This DATA is never selected by a Job. *)
+let execution_request_policy = Chat_response.One_off_request.default_policy
+
 module Legacy_provenance = struct
   type t =
     { version : int
@@ -1703,11 +1707,10 @@ let extension_jobs t actor_ref registry native =
         ~binding
         ~launch:(Chat_response.Source_launch.conversation owner)
         ~request
-        ~max_registrations:
-          Chat_response.One_off_request.default_policy.execution.max_array_items
+        ~max_registrations:execution_request_policy.execution.max_array_items
         ~checkpoint)
     ~env:t.env
-    ~policy:Chat_response.One_off_request.default_policy
+    ~policy:execution_request_policy
     ~current_capabilities:(fun () -> registry)
     ~host
 ;;
@@ -2049,8 +2052,8 @@ let extension_services
             ~job
             ~current_capabilities:
               (Agent_session.Script_tool_calls.current_capabilities tools)
-            ~policy:Chat_response.One_off_request.default_policy)
-    ; one_off_policy = Chat_response.One_off_request.default_policy
+            ~policy:execution_request_policy)
+    ; one_off_policy = execution_request_policy
     ; native_service_revision =
         Agent_session.Session_management_channel.policy_fingerprint t.session_helpers
     ; authoring_validation_host = t.authoring_validation_host
@@ -2101,7 +2104,7 @@ let extension_services
               ~source
               ~current_capabilities:
                 (Agent_session.Script_tool_calls.current_capabilities tools)
-              ~policy:Chat_response.One_off_request.default_policy
+              ~policy:execution_request_policy
               ~max_count:t.limits.notifications.max_per_source
           in
           match
@@ -2121,7 +2124,7 @@ let extension_services
               ~source
               ~current_capabilities:
                 (Agent_session.Script_tool_calls.current_capabilities tools)
-              ~policy:Chat_response.One_off_request.default_policy
+              ~policy:execution_request_policy
               ~max_count:t.limits.notifications.max_per_source
           in
           match
@@ -2141,7 +2144,7 @@ let extension_services
               ~source
               ~current_capabilities:
                 (Agent_session.Script_tool_calls.current_capabilities tools)
-              ~policy:Chat_response.One_off_request.default_policy
+              ~policy:execution_request_policy
               ~max_count:t.limits.notifications.max_per_source
           in
           match
@@ -3997,7 +4000,7 @@ let independent_resource_host ?construction_checkpoint t =
                   ~native_service_revision:
                     (Agent_session.Session_management_channel.policy_fingerprint
                        t.session_helpers)
-                  ~one_off_policy:Chat_response.One_off_request.default_policy
+                  ~one_off_policy:execution_request_policy
                   ~authoring_validation_host:t.authoring_validation_host
               in
               let%bind inference_context = resolve_state_inference_context t state in
@@ -4027,7 +4030,7 @@ let independent_resource_host ?construction_checkpoint t =
                   ~storage_paths:paths
                   ~revision
                   ~session_id:state.identity.session_id
-                  ~one_off_policy:Chat_response.One_off_request.default_policy
+                  ~one_off_policy:execution_request_policy
                   ~authoring_validation_host:t.authoring_validation_host
                   ~manifest_authorizer:
                     (manifest_authorizer t profile revision state actor_ref shell_state)
@@ -4527,7 +4530,8 @@ let legacy_construction
     in
     let check_current () =
       let open Result.Let_syntax in
-      let%bind () = A.check_callback_current actor scope in
+      (* A preceding callback-owned ACK invalidates Store currentness. Refresh
+         the same constructor before its strict physical callback/effect gate. *)
       let%bind () = check_construction () in
       A.check_callback_current actor scope
     in
@@ -8415,7 +8419,12 @@ let read_session t index_entry =
 
 let owns_handle t handle = Agent_store.Session_store.owns_handle t.store handle
 
-let check_registered_entry t (entry : Session_registry.entry) ~session =
+(* A registry reservation also protects ordinary reads. Claimed Jobs retain
+   their exact registered owner while such a read is in progress; the Actor's
+   execution scope still enforces lifecycle retirement and cancellation. New
+   admission additionally requires reservation exclusion below; an existing
+   execution instead retains its actual Actor fence and Owner source stage. *)
+let check_registered_owner t (entry : Session_registry.entry) ~session =
   let module S = Agent_store.Session_store in
   let module P = Agent_protocol in
   let valid =
@@ -8428,7 +8437,7 @@ let check_registered_entry t (entry : Session_registry.entry) ~session =
         (P.Session_ref.create ~server_id:(S.server_id t.store) ~session_id:id)
       && S.owns_handle t.store handle
       && (not (Session_registry.is_closing t.registry))
-      && (not (Session_registry.lifecycle_reserved t.registry id))
+      && (not (Session_registry.has_pending_cleanup t.registry id))
       && Runtime_owner.belongs_to_actor entry.runtime entry.actor
       && Option.exists (Session_registry.find t.registry id) ~f:(fun actual ->
         phys_equal actual.actor entry.actor
@@ -8436,6 +8445,23 @@ let check_registered_entry t (entry : Session_registry.entry) ~session =
         && Option.exists actual.store_handle ~f:(phys_equal handle))
   in
   if valid
+  then Ok ()
+  else
+    Error
+      (unavailable
+         Conflict
+         "recurrence entry is not this Factory's current registered owner")
+;;
+
+let check_registered_entry t (entry : Session_registry.entry) ~session =
+  let open Result.Let_syntax in
+  let%bind () = check_registered_owner t entry ~session in
+  if
+    Option.exists entry.store_handle ~f:(fun handle ->
+      not
+        (Session_registry.lifecycle_reserved
+           t.registry
+           (Agent_store.Session_store.Handle.session_id handle)))
   then Ok ()
   else
     Error
@@ -11686,7 +11712,7 @@ let create
     | true ->
       Agent_session.Authoring_runtime.configure_host
         ?host:authoring_validation_host
-        ~policy:Chat_response.One_off_request.default_policy
+        ~policy:execution_request_policy
         ()
       |> Result.ok_or_failwith
       |> Option.some
@@ -12105,6 +12131,14 @@ let seed_session t ~principal ~request ~command_audit ~checkpoint =
 
 let reconcile_seed_creations t ~limits ~checkpoint =
   Session_seed_recovery.reconcile (seed_recovery t) ~limits ~checkpoint
+;;
+
+let check_execution_selected_owner t entry ~session =
+  let open Result.Let_syntax in
+  let%bind () = check_registered_owner t entry ~session in
+  if Session_registry.execution_selected t.registry entry
+  then Ok ()
+  else Error (unavailable Conflict "recurrence entry is not selected for execution")
 ;;
 
 let check_execution_selected_entry t entry ~session =
@@ -12637,7 +12671,7 @@ let with_goal_execution_source t (entry : Session_registry.entry) ~with_stage f 
       ~server_id:(Agent_store.Session_store.server_id t.store)
       ~session_id:state.identity.session_id
   in
-  let%bind () = check_registered_entry t entry ~session in
+  let%bind () = check_registered_owner t entry ~session in
   let%bind () =
     if Runtime_owner.belongs_to_actor entry.runtime entry.actor
     then Ok ()
@@ -12681,7 +12715,7 @@ let with_goal_job_runtime t (entry : Session_registry.entry) ~owner f =
       ~server_id:(Agent_store.Session_store.server_id t.store)
       ~session_id:state.identity.session_id
   in
-  let%bind () = check_registered_entry t entry ~session in
+  let%bind () = check_registered_owner t entry ~session in
   let%bind () =
     match Actor.Job_runtime_owner.attribution owner with
     | Goal -> Actor.check_job_runtime_owner entry.actor ~owner
@@ -12712,4 +12746,97 @@ let with_goal_job_runtime t (entry : Session_registry.entry) ~owner f =
          (unavailable
             Invalid_state
             "claimed Job source did not retain its actual execution"))
+;;
+
+let execute_background_job t (entry : Session_registry.entry) job =
+  let module Actor = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let%bind state = Actor.state entry.actor in
+  let session =
+    Agent_protocol.Session_ref.create
+      ~server_id:(Agent_store.Session_store.server_id t.store)
+      ~session_id:state.identity.session_id
+  in
+  let%bind () = check_registered_owner t entry ~session in
+  let%bind request =
+    Runtime_owner.Background_job.prepare ~policy:execution_request_policy job
+  in
+  if
+    Agent_protocol.Timestamp.compare
+      (Runtime_owner.Background_job.deadline request)
+      (now t)
+    <= 0
+  then Ok (Runtime_owner.Completed Agent_protocol.Completion.Expired)
+  else
+    Actor.with_job_execution
+      entry.actor
+      ~job_id:job.Agent_protocol.Job.id
+      ~generation:job.generation
+      ~attempt:job.attempt
+      ~deadline:(Some (Runtime_owner.Background_job.deadline request))
+      (fun execution ->
+         match Actor.Job_runtime_owner.attribution execution.runtime_owner with
+         | Ordinary ->
+           Runtime_owner.execute_background_job_in_scope entry.runtime ~execution ~request
+         | Goal ->
+           with_goal_job_runtime t entry ~owner:execution.runtime_owner (fun runtime ->
+             Runtime_owner.execute_background_job_runtime
+               entry.runtime
+               ~runtime
+               ~execution
+               ~request))
+;;
+
+module Goal_wake_result = struct
+  type t =
+    | No_work
+    | Suspended_goal of Agent_session.Goal_execution_selection.Suspension.t
+    | Handed_off of Agent_session.Session_actor.Goal_execution_runtime.Wake_result.t
+end
+
+let deliver_goal_wake t (entry : Session_registry.entry) ~wake =
+  let open Result.Let_syntax in
+  let%map decision =
+    with_goal_execution_source
+      t
+      entry
+      ~with_stage:
+        (Runtime_owner.with_goal_wake_source_reported
+           entry.runtime
+           ~source_owner:t.runtime_source_owner
+           ~wake)
+      (fun prepared execution ->
+         Runtime_owner.run_goal_wake_runtime
+           entry.runtime
+           ~prepared
+           ~execution
+           ~notification_policy:execution_request_policy
+           ~max_notifications:t.limits.notifications.max_per_source)
+  in
+  match decision with
+  | No_work -> Goal_wake_result.No_work
+  | Suspended_goal suspension -> Suspended_goal suspension
+  | Fresh result -> Handed_off result
+;;
+
+let drain_idle_moderator t (entry : Session_registry.entry) =
+  let module Actor = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let%bind state = Actor.state entry.actor in
+  let session =
+    Agent_protocol.Session_ref.create
+      ~server_id:(Agent_store.Session_store.server_id t.store)
+      ~session_id:state.identity.session_id
+  in
+  let%bind () = check_registered_entry t entry ~session in
+  let%bind () = Actor.reconcile_goal_wake_authority entry.actor ~request:Idle in
+  let%bind selection = Actor.select_goal_runtime_wake entry.actor ~request:Idle in
+  match selection with
+  | Ordinary -> Runtime_owner.drain_idle_moderator entry.runtime
+  | No_work | Suspended_goal _ -> Ok false
+  | Wake wake ->
+    let%map result = deliver_goal_wake t entry ~wake in
+    (match result with
+     | No_work | Suspended_goal _ -> false
+     | Handed_off _ -> true)
 ;;

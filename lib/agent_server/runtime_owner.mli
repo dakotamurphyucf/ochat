@@ -698,6 +698,40 @@ type background_result =
     moderator pre-tool requests use their persisted event intent. Unconsumed
     managed-handler/native requests still fail explicitly until their owning
     integration is installed. Does not admit or finish the job. *)
+module Background_job : sig
+  (** Non-executing validated DATA with the exact Job occurrence/payload, host
+      policy ceiling, effective request and absolute deadline. No resource or
+      Job claim is acquired. *)
+  type t
+
+  val prepare
+    :  policy:Chat_response.One_off_request.policy
+    -> Agent_protocol.Job.t
+    -> (t, Agent_protocol.Error.t) result
+
+  val deadline : t -> Agent_protocol.Timestamp.t
+end
+
+(** Shared actual executor/result body inside an already retained SAME runtime
+    bracket and actual with_job_execution. Rechecks physical installation and
+    opaque owner, exact Job/payload/deadline and identical executor policy. This
+    acquires no lease/claim; callers must join the surrounding bracket. *)
+val execute_background_job_runtime
+  :  t
+  -> runtime:Agent_session.Runtime_builder.t
+  -> execution:Agent_session.Session_actor.job_execution
+  -> request:Background_job.t
+  -> (background_result, Agent_protocol.Error.t) result
+
+(** Ordinary-attributed sibling: borrows its existing ordinary background runtime
+    after exact actual scope validation, then uses the SAME executor/result body.
+    A Goal owner rejects; it must use the genuine Factory resource route. *)
+val execute_background_job_in_scope
+  :  t
+  -> execution:Agent_session.Session_actor.job_execution
+  -> request:Background_job.t
+  -> (background_result, Agent_protocol.Error.t) result
+
 val execute_background_job
   :  t
   -> Agent_protocol.Job.t
@@ -925,3 +959,18 @@ val with_loaded_goal_job_runtime
   -> owner:Agent_session.Session_actor.Job_runtime_owner.t
   -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a Loaded_job_runtime.t, Agent_protocol.Error.t) result
+
+(** Fixed single-occurrence Goal wake consumer. Uses the actual shared runtime
+    construction/residency core and immutable producer/claim or Operation ACK.
+    Notification bounds/policy come from the same Factory host provider; neither
+    a callback return nor policy DATA certifies transfer. Loaded reuse skips Init
+    and resume; cold lifecycle Wait/Settlement is preserved. *)
+val run_goal_wake_runtime
+  :  t
+  -> prepared:Prepared_goal_execution.t
+  -> execution:Agent_session.Session_actor.Goal_execution_runtime.t
+  -> notification_policy:Chat_response.One_off_request.policy
+  -> max_notifications:int
+  -> ( Agent_session.Session_actor.Goal_execution_runtime.Wake_result.t
+       , Agent_protocol.Error.t )
+       result

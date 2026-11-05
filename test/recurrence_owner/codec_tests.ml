@@ -101,19 +101,16 @@ let check_produced_run_evidence ~initial ~snapshot ~intent =
       ~requests:{ request_turn = false; request_compaction = false; end_session = None }
     |> protocol_ok
   in
-  let work_state =
-    A.Session_delta.apply
-      state
-      (Batch
-         [ Moderator_execution_changed executing; Moderator_execution_changed completed ])
-    |> protocol_ok
+  let work_delta =
+    A.Session_delta.Batch
+      [ Moderator_execution_changed executing; Moderator_execution_changed completed ]
   in
   let transition =
     A.Run_transition.prepare
       state
       ~scope:(A.Run_scope.create ~run ~execution_id:executing.context.id |> protocol_ok)
       ~executing
-      ~work_state
+      ~work_delta
       ~owned_work:[]
       ~action:None
       ~now:timestamp

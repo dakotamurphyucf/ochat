@@ -50,6 +50,7 @@ let with_daemon
       ?(prepare_sources = fun _ _ -> ())
       ?(wrap_env = Fn.id)
       ?(max_root_agents = 1)
+      ?(chatml_runtime_policy = Chat_response.Runtime_semantics.default_policy)
       ~policy
       f
   =
@@ -109,6 +110,7 @@ let with_daemon
                    inference_policy = policy
                  ; startup_mode
                  ; qualify_chatml_extensions
+                 ; chatml_runtime_policy
                  }
                ()
              |> protocol_ok

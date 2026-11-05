@@ -29,6 +29,7 @@ let admit_encoded previous ~delta ~(next : Session_state.t) ~limits =
         ~archive:None
         ~expiry_archive:None
         ~limits
+    | Goal_catalog_changed incoming -> Transaction.update_goal_catalog carrier incoming
     | ( Created _
       | Lifecycle_changed _
       | Metadata_changed _
@@ -40,7 +41,6 @@ let admit_encoded previous ~delta ~(next : Session_state.t) ~limits =
       | Canonical_entries_appended _
       | Instruction_selection_changed _
       | Goal_accounts_changed _
-      | Goal_catalog_changed _
       | Recurrence_catalog_changed _
       | Run_state_changed _
       | Canonical_history_replaced _

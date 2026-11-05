@@ -136,7 +136,7 @@ let prepare_internal
       (state : Session_state.t)
       ~scope
       ~(executing : P.Moderator_execution.t)
-      ~work_state
+      ~work_delta
       ~owned_work
       ~now
   =
@@ -145,6 +145,17 @@ let prepare_internal
     match mode with
     | Checkpoint action -> action
     | Running_work -> None
+  in
+  let%bind index =
+    Result.of_option state.run_state ~error:(conflict "run index absent")
+  in
+  let%bind previous =
+    Result.of_option
+      (Run_state.find index (Run_scope.run_id scope))
+      ~error:(conflict "run absent")
+  in
+  let%bind work_state, schedule_proofs =
+    Run_schedule_settlement.capture state ~delta:work_delta ~run:previous ~owned_work
   in
   (* The work projection may introduce a Job whose immutable Run origin is
      captured in this same transaction. Its occurrence is added below, so the
@@ -157,14 +168,6 @@ let prepare_internal
       && Int.equal state.identity.generation work_state.identity.generation
     then Ok ()
     else Error (conflict "staged work belongs to another session or generation")
-  in
-  let%bind index =
-    Result.of_option state.run_state ~error:(conflict "run index absent")
-  in
-  let%bind previous =
-    Result.of_option
-      (Run_state.find index (Run_scope.run_id scope))
-      ~error:(conflict "run absent")
   in
   let%bind () =
     if
@@ -238,6 +241,14 @@ let prepare_internal
           Error (conflict "immediate work requires new occurrences and its live callback")
       in
       Ok previous.terminal_work
+  in
+  let%bind terminal_work =
+    match mode with
+    | Checkpoint _ -> Ok (terminal_work @ schedule_proofs)
+    | Running_work ->
+      if List.is_empty schedule_proofs
+      then Ok terminal_work
+      else Error (conflict "immediate work admission cannot complete a Schedule")
   in
   let evidence =
     Set.of_list
@@ -428,7 +439,7 @@ let prepare
       state
       ~scope
       ~executing
-      ~work_state
+      ~work_delta
       ~owned_work
       ~action
       ~now
@@ -440,7 +451,7 @@ let prepare
     state
     ~scope
     ~executing
-    ~work_state
+    ~work_delta
     ~owned_work
     ~now
 ;;
@@ -450,7 +461,7 @@ let add_owned_work
       state
       ~scope
       ~executing
-      ~work_state
+      ~work_delta
       ~owned_work
       ~now
   =
@@ -460,7 +471,7 @@ let add_owned_work
     state
     ~scope
     ~executing
-    ~work_state
+    ~work_delta
     ~owned_work
     ~now
 ;;

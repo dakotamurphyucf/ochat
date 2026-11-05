@@ -8,6 +8,7 @@
   run_state_tests
   run_replacement_tests
   run_admission_tests
+  run_schedule_settlement_tests
   headless_run_tests
   goal_catalog_tests
   goal_accounting_persistence_tests

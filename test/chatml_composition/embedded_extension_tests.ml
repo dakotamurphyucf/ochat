@@ -234,7 +234,15 @@ let%expect_test
           && List.for_all current.jobs ~f:(fun job ->
             match job.P.Job.delivery with
             | Delivered _ -> true
-            | _ -> false));
+            | _ -> false)
+          &&
+          match recipe with
+          | One_off | Standalone -> true
+          | Background ->
+            List.exists current.canonical_history.entries ~f:(fun entry ->
+              match entry.P.Public.History.provenance with
+              | Runtime_notification _ -> true
+              | _ -> false));
         let current = snapshot embedded in
         assert (
           P.Session.equal_execution_host current.session.spec.execution_host Embedded);

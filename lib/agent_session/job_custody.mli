@@ -24,6 +24,12 @@ module Row : sig
   (** Terminal custody cannot be reused by active execution. *)
   val admission : t -> (Execution_custody.Admission.t, Agent_protocol.Error.t) result
 
+  (** Raw original/expiry facts for a still-owned callback's actual result ACK.
+      Terminal custody stays terminal; this accessor invokes no guard, transfers
+      no loan, and cannot be used as fresh Job execution admission. The Actor
+      must first match the physical callback scope and exact retained Job. *)
+  val settlement_parent : t -> Observation_continuation.Parent.t
+
   val binding : t -> Moderator_binding.t
 end
 

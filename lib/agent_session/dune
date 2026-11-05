@@ -213,6 +213,7 @@
   run_state
   run_transition
   run_work_settlement
+  run_schedule_settlement
   run_child_work
   run_retirement
   run_source_change
@@ -309,6 +310,7 @@
   notification_history
   notification_readiness
   notification_delivery
+  notification_wake_selection
   chatmd_export
   durable_event_log
   live_event_buffer

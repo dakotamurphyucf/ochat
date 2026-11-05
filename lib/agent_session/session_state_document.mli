@@ -185,6 +185,16 @@ module Admitted : sig
 
   val state_document : t -> state_document
   val document : t -> Document_schema.Document.t
+
+  (** Union an actual Created carrier's compatible extension paths into this
+      ordered-admitted candidate. The receiver's exact final native value and
+      validated transition basis remain unchanged; captured known fields grant
+      no replacement permission. Full encoding/preservation checks still apply. *)
+  val merge_created
+    :  t
+    -> captured:state_document
+    -> limits:Document_schema.Limits.t
+    -> (t, Document_schema.Error.t) result
 end
 
 (** Opaque ordered transaction prefixes. Only validated checkpoints and [finish] return durable carriers;
@@ -200,6 +210,13 @@ module Transaction : sig
 
   val value : t -> Session_state.t
   val with_value : t -> Session_state.t -> t
+
+  (** Validate one ordered Goal-catalog leaf against the current prefix and
+      advance its preservation-validation basis. Every changed Goal and catalog
+      must still advance exactly once; the original extension template is kept.
+      [with_value] alone never advances this basis. Complete state, cross-record
+      evidence and capacity validation remain required at checkpoint/finish. *)
+  val update_goal_catalog : t -> Goal_catalog.t -> (t, Document_schema.Error.t) result
 
   (** Archive/retirement checkpoint validates current prefix completely; it cannot
       archive or expose an inconsistent native prefix. *)

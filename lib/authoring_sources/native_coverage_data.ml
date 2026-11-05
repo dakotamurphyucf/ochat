@@ -261,7 +261,7 @@ let implementation_sources =
   ; ( "lib/agent_server/recurrence_authored_source.ml"
     , "e8f4b287579ae891c1d8197671c335e4e07afb02105ac206a44025701111bf3b" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "7c3f107cf7d9449412c08c9ec9fb7de2243e41d6d3f7824cf68b1dbc6f7da3d7" )
+    , "f274748dd5c30677e7eee56ada5bfcb2ea7f29a413583eb9833ab88e4b444d6d" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"

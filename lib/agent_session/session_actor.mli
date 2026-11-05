@@ -878,6 +878,9 @@ module Job_runtime_owner : sig
       Ordinary cannot acquire a Goal later.
       Creating Eio domain only; a foreign-domain call raises Invalid_argument. *)
   val attribution : t -> Attribution.t
+
+  (** Immutable actual scope deadline DATA, creating Eio domain only. *)
+  val deadline : t -> Agent_protocol.Timestamp.t option
 end
 
 type job_execution =
@@ -3428,6 +3431,10 @@ module Goal_execution_runtime : sig
 
   val kind : t -> Kind.t
 
+  (** Exact immutable wake DATA from this owner. Claimed Job/Resume rejects.
+      Creating Eio domain only; no readiness or execution permission. *)
+  val wake : t -> (Agent_protocol.Run_wake.t, Agent_protocol.Error.t) result
+
   (** Physical source pair, issuing Actor/preparation and owner identity, not IDs. *)
   val check_source_binding
     :  t
@@ -4348,3 +4355,77 @@ val job_runtime_resource
   -> inference:Inference_client.Execution.t
   -> moderator_manager:Chat_response.Moderator_manager.t option
   -> (Runtime_construction_resource.t, Agent_protocol.Error.t) result
+
+(** Reuse exact enqueue writer/ACK and current Manager checkpoint. Only the
+    genuine matching Run Job delivery can be appended; not callback admission. *)
+val enqueue_goal_wake_job_delivery
+  :  t
+  -> execution:Goal_execution_runtime.t
+  -> delivery:Run_job_delivery.t
+  -> before:Session.Moderator_state.Identity_snapshot.t
+  -> after:Jsonaf.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Reuse actual complete_schedule writer and immutable claimed schedule. No new
+    raw legacy loan from equal observer; missing old physical custody rejects. *)
+val claim_goal_wake_schedule
+  :  t
+  -> execution:Goal_execution_runtime.t
+  -> schedule:Agent_protocol.Schedule.t
+  -> (Agent_protocol.Schedule.t option, Agent_protocol.Error.t) result
+
+val complete_goal_wake_schedule
+  :  t
+  -> execution:Goal_execution_runtime.t
+  -> expected:Session.Moderator_state.Identity_snapshot.t
+  -> expected_schedule:Agent_protocol.Schedule.t
+  -> moderator_manager:Chat_response.Moderator_manager.t
+  -> moderator_snapshot:Jsonaf.t
+  -> (Agent_protocol.Schedule.t, Agent_protocol.Error.t) result
+
+(** Exact installed v1 Manager queue ABI. Only matching actual queue head may
+    claim this wake; existing retirement/expiry rules remain first. SAME real
+    claim_wake + Moderator_execution ACK binds scope/inventory and marks immutable
+    handoff BEFORE publication. Retained/failed callback never replays. *)
+val with_current_goal_wake_queued_event_tools
+  :  t
+  -> execution:Goal_execution_runtime.t
+  -> Moderator_event.claim
+
+(** Subscription uses existing notification proposal + start_idle_turn/
+    Run_transition.admit_turn body. Select ONLY the exact matching Pending_wake;
+    unrelated pending inputs/follow-ups are not silently adopted by this consumer.
+    Actual Operation/Run_work + Wait consumption ACK marks handoff before publish.
+    Never manufacture a queued subscription frame or call queued claim_wake. *)
+val deliver_goal_wake_notifications
+  :  t
+  -> execution:Goal_execution_runtime.t
+  -> Notification_delivery.idle
+  -> (bool, Agent_protocol.Error.t) result
+
+(** Factual final selection after joined lifecycle and actual queue/turn adapter.
+    Returns SAME acknowledged transfer, or new lifecycle Wait/Settlement with its
+    actual ACK. An unchanged old Wait without transfer is not success. Original
+    loss/uncertainty/stale producer is Error; never infer transfer from unit/bool.
+    No automatic Administrative Operation is created here. *)
+val finish_goal_wake_runtime
+  :  t
+  -> execution:Goal_execution_runtime.t
+  -> (Goal_execution_runtime.Wake_result.t, Agent_protocol.Error.t) result
+
+val deliver_goal_wake_job
+  :  t
+  -> execution:Goal_execution_runtime.t
+  -> job:Agent_protocol.Job.t
+  -> before:Session.Moderator_state.Identity_snapshot.t
+  -> after:Jsonaf.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Negative-only maintenance before scheduling suspension. Validate exact current
+    producer DATA, then retire actual Waiting Goal Runs whose original custody is
+    lost using the existing factual interruption writer. Never claims, constructs,
+    selects, Enables or executes; no-work leaves the session unchanged. *)
+val reconcile_goal_wake_authority
+  :  t
+  -> request:Goal_execution_runtime.Wake_request.t
+  -> (unit, Agent_protocol.Error.t) result

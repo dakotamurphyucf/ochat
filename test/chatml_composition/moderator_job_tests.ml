@@ -78,9 +78,56 @@ let rec launched_job env actor =
   | _ -> failwith "moderator launched duplicate jobs"
 ;;
 
+let submit_during_loaded_read registry env entry request =
+  let initial = A.state entry.Agent_server.Session_registry.actor |> protocol_ok in
+  Agent_server.Session_registry.with_loaded_read
+    registry
+    initial.identity.session_id
+    (fun actual ->
+       assert (phys_equal actual entry);
+       let parent = submit entry request in
+       let rec await () =
+         let current = A.state entry.actor |> protocol_ok in
+         let parent_row =
+           List.find_exn current.jobs ~f:(fun job ->
+             Agent_protocol.Id.Job.equal job.J.id parent.id)
+         in
+         let terminal (job : J.t) =
+           match job.status with
+           | Queued | Running | Waiting_permission _ | Waiting_completion _ -> false
+           | Succeeded | Failed _ | Cancelled | Interrupted _ -> true
+         in
+         if terminal parent_row
+         then (
+           let completion =
+             Completion.of_json (Option.value_exn parent_row.result) |> protocol_ok
+           in
+           (match completion with
+            | Succeeded _ -> ()
+            | other ->
+              raise_s
+                [%sexp
+                  "parent failed during genuine read reservation", (other : Completion.t)]);
+           match List.filter current.jobs ~f:(fun job -> Option.is_some job.J.launch) with
+           | [ child ] when terminal child -> ()
+           | [] | [ _ ] ->
+             Eio.Fiber.yield ();
+             await ()
+           | _ -> failwith "read-reserved Pre_tool launched duplicate Jobs")
+         else (
+           Eio.Fiber.yield ();
+           await ())
+       in
+       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. await;
+       Ok parent)
+  |> protocol_ok
+;;
+
 let%expect_test "moderator launches survive handler, event and observation commits" =
   List.iter [ Lifecycle; Queued; Handler; Pre_tool; Observation ] ~f:(fun trigger ->
+    let registry = ref None in
     with_background_daemon
+      ~on_started:(fun daemon -> registry := Some (Agent_server.Daemon.registry daemon))
       ~agent:(agent trigger)
       ~sources:Background_moderator_tests.sources
       ?before_start:
@@ -93,7 +140,18 @@ let%expect_test "moderator launches survive handler, event and observation commi
            | Lifecycle | Queued -> None
            | Handler | Pre_tool ->
              let request = tool capabilities "counter" (`Object []) in
-             let parent = submit entry (B.to_json request) in
+             let parent =
+               match trigger with
+               | Pre_tool ->
+                 submit_during_loaded_read
+                   (Option.value_exn !registry)
+                   env
+                   entry
+                   (B.to_json request)
+               | Handler -> submit entry (B.to_json request)
+               | Lifecycle | Queued | Observation ->
+                 failwith "non-handler fixture entered its tool branch"
+             in
              let _, completion = await env client parent in
              (match completion with
               | Succeeded _ -> ()

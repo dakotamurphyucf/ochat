@@ -22,6 +22,11 @@ module Completion : sig
   type t
 
   val sample : wall:Agent_protocol.Timestamp.t -> monotonic:Mtime.t -> sample
+
+  (** The exact wall paired with this sample; reading it obtains no new clock or
+      completion authority. *)
+  val wall : sample -> Agent_protocol.Timestamp.t
+
   val timing_error : t -> Agent_protocol.Error.t option
 end
 

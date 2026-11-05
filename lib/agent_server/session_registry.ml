@@ -1156,6 +1156,10 @@ let commit_retired t reservation ~store =
     install_lifecycle_projection t reservation indexed)
 ;;
 
+let has_pending_cleanup t session_id =
+  Eio.Mutex.use_ro t.mutex (fun () -> cleanup_pending t session_id)
+;;
+
 let lifecycle_reserved t session_id =
   Eio.Mutex.use_ro t.mutex (fun () ->
     Map.mem t.reservations session_id || cleanup_pending t session_id)

@@ -1804,6 +1804,7 @@ let compose
   let schedule_scheduler =
     Schedule_scheduler.start_controlled
       ?recurrence_dispatcher
+      ~factory
       ~enabled:execution_enabled
       ~sw
       ~clock:(Eio.Stdenv.mono_clock env)

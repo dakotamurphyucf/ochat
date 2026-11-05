@@ -1405,7 +1405,7 @@ let apply t ?transaction_metadata ~limits previous =
     |> X.document_result
   in
   let%bind candidate =
-    Session_document_transition.admit previous ~delta:t.value ~next ~limits
+    Session_document_transition.admit_encoded previous ~delta:t.value ~next ~limits
   in
   let%bind changes = raw_changes t in
   (* Created is an immutable captured state document, carrying its full template.
@@ -1416,14 +1416,11 @@ let apply t ?transaction_metadata ~limits previous =
       | Value (`String "created") ->
         let%bind json = get_path change [ "state" ] in
         let%bind document = D.Document.inspect ~limits json in
-        let%bind incoming = Session_state_document.decode ~limits document in
-        Session_state_document.adopt
-          candidate
-          ~limits
-          (Session_state_document.with_value incoming next)
+        let%bind captured = Session_state_document.decode ~limits document in
+        Session_state_document.Admitted.merge_created candidate ~captured ~limits
       | _ -> Ok candidate)
   in
-  let%bind document = Session_state_document.encode candidate ~limits in
+  let document = Session_state_document.Admitted.document candidate in
   let%bind payload =
     List.fold_result changes ~init:(D.Document.payload document) ~f:(fun payload change ->
       let%bind kind =

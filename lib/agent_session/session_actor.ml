@@ -492,6 +492,12 @@ module Job_runtime_owner = struct
     then invalid_arg "Job runtime owner belongs to another Eio domain";
     t.attribution
   ;;
+
+  let deadline t =
+    if not (Int.equal t.domain (Stdlib.Domain.self () :> int))
+    then invalid_arg "Job runtime owner belongs to another Eio domain";
+    t.scope.deadline
+  ;;
 end
 
 module Goal_execution_handoff = struct
@@ -799,6 +805,16 @@ module Goal_execution_runtime = struct
        | Job_completion _ | Delivered_timer _ -> Queued_wake)
     | Claimed_job _ -> Kind.Claimed_job
     | Resume_command _ -> invalid_arg "Resume command is not a Goal execution owner"
+  ;;
+
+  let wake t =
+    let preparation = t.Existing_goal_preparation.binding.preparation in
+    if not (Int.equal preparation.domain (Stdlib.Domain.self () :> int))
+    then invalid_arg "Goal execution belongs to another Eio domain";
+    match preparation.cause with
+    | Pending_wake { wake; _ } -> Ok wake
+    | Resume_command _ | Claimed_job _ ->
+      Error (Agent_protocol.Error.invalid_request "Goal execution is not a pending wake")
   ;;
 
   let check_source_binding = Existing_goal_preparation.check_source_binding
@@ -1773,11 +1789,13 @@ module Queued_claim_acknowledgement : sig
   type t
 
   val prepare
-    :  previous:Session_state.t
+    :  ?goal_scope:Goal_continuation.runtime_scope
+    -> previous:Session_state.t
     -> authorities:Run_authorities.t
     -> resumed:Agent_protocol.Id.Run.t list
     -> candidate:Session_transition.t
     -> borrow:queued_event_borrow
+    -> unit
     -> (t, Agent_protocol.Error.t) result
 
   val scope : t -> Run_admission.Scope.t option
@@ -1808,17 +1826,20 @@ end = struct
     ; candidate : Session_transition.t
     ; binding : (P.Id.Run.t * Run_authorities.binding) option
     ; borrow : queued_event_borrow
+    ; goal_scope : Goal_continuation.runtime_scope option
     ; mutable phase : Phase.t
     }
 
   let conflict message = Error (P.Error.create Conflict ~message ~retryable:false ())
 
   let prepare
+        ?goal_scope
         ~(previous : Session_state.t)
         ~authorities
         ~resumed
         ~(candidate : Session_transition.t)
         ~(borrow : queued_event_borrow)
+        ()
     =
     let open Result.Let_syntax in
     let%bind binding =
@@ -1856,6 +1877,17 @@ end = struct
         else conflict "queued claim differs from its actual resumed Run"
       | _ :: _ :: _ -> conflict "queued claim has more than one resumed Run"
     in
+    let%bind () =
+      match goal_scope, binding with
+      | None, _ -> Ok ()
+      | Some (scope : Goal_continuation.runtime_scope), Some (run_id, binding)
+        when Agent_protocol.Id.Run.equal
+               run_id
+               scope.continuation.binding.preparation.run.id
+             && phys_equal binding scope.continuation.binding.preparation.binding -> Ok ()
+      | Some _, (Some _ | None) ->
+        conflict "Goal queue ACK lost its exact resumed binding"
+    in
     let admission =
       match binding with
       | None -> Queued_agent_admission.Contextual None
@@ -1870,7 +1902,14 @@ end = struct
       { previous
       ; candidate
       ; binding
-      ; borrow = { borrow with agent_admission = admission }
+      ; borrow =
+          { borrow with
+            agent_admission = admission
+          ; lifecycle_owner =
+              Option.map goal_scope ~f:(fun scope ->
+                Lifecycle_callback_owner.Existing_goal_resume scope)
+          }
+      ; goal_scope
       ; phase = Staged
       }
   ;;
@@ -1892,6 +1931,10 @@ end = struct
 
   let install t =
     t.phase <- Installed;
+    Option.iter t.goal_scope ~f:(fun scope ->
+      scope.callback <- Executing t.borrow.receipt.context.id;
+      scope.continuation.binding.preparation.runtime_phase
+      <- Handed_off (scope, Existing_execution (Queued_event t.borrow.receipt)));
     t.borrow
   ;;
 
@@ -2144,6 +2187,7 @@ module Goal_continuation_request = struct
     | Select_execution_wake :
         Goal_execution_runtime.Wake_request.t
         -> Goal_execution_runtime.Wake_selection.t t
+    | Reconcile_wake_authority : Goal_execution_runtime.Wake_request.t -> unit t
     | Begin_wake : Agent_protocol.Run_wake.t -> Goal_execution_runtime.Wake_issuance.t t
     | Begin_job : Job_runtime_owner.t -> Goal_execution_runtime.Preparation.t t
     | Bind_execution :
@@ -2161,6 +2205,37 @@ module Goal_continuation_request = struct
         * Inference_client.Execution.t
         * Chat_response.Moderator_manager.t option
         -> (Runtime_construction_resource.t * Run_admission.Scope.t) t
+    | Claim_wake_event :
+        Goal_execution_runtime.t
+        * Agent_protocol.Id.Moderator_execution.t
+        * Session.Moderator_state.Identity_snapshot.t
+        -> queued_event_borrow option t
+    | Enqueue_wake_job :
+        Goal_execution_runtime.t
+        * Run_job_delivery.t
+        * Session.Moderator_state.Identity_snapshot.t
+        * Jsonaf.t
+        -> unit t
+    | Claim_wake_schedule :
+        Goal_execution_runtime.t * Agent_protocol.Schedule.t
+        -> Agent_protocol.Schedule.t option t
+    | Complete_wake_schedule :
+        Goal_execution_runtime.t
+        * Agent_protocol.Schedule.t
+        * Session.Moderator_state.Identity_snapshot.t
+        * Chat_response.Moderator_manager.t
+        * Jsonaf.t
+        -> Agent_protocol.Schedule.t t
+    | Deliver_wake_job :
+        Goal_execution_runtime.t
+        * Agent_protocol.Job.t
+        * Session.Moderator_state.Identity_snapshot.t
+        * Jsonaf.t
+        -> unit t
+    | Deliver_wake_notifications :
+        Goal_execution_runtime.t * Notification_delivery.idle
+        -> bool t
+    | Finish_wake : Goal_execution_runtime.t -> Goal_execution_runtime.Wake_result.t t
 end
 
 module Runtime_constructor_mutation_request = struct
@@ -3849,6 +3924,34 @@ let goal_runtime_event_basis t (borrow : queued_event_borrow) scope =
   else Error (error Conflict "Goal resume Event is no longer current")
 ;;
 
+let goal_wake_transferred_borrow t (preparation : Goal_continuation.Preparation.t) =
+  match preparation.runtime_phase with
+  | Handed_off (scope, Existing_execution (Queued_event executing)) ->
+    phys_equal scope.continuation.binding.preparation preparation
+    && Option.exists t.queued_event_borrow ~f:(fun borrow ->
+      Agent_protocol.Moderator_execution.equal_context
+        borrow.receipt.context
+        executing.context
+      && Result.is_ok (goal_runtime_event_basis t borrow scope))
+  | Unclaimed
+  | Starting_writer _
+  | Starting_acknowledged
+  | Running_writer _
+  | Constructing
+  | Installed _
+  | Callback_completed _
+  | Retired _
+  | Closed
+  | Handed_off (_, Resume _)
+  | Handed_off
+      ( _
+      , Existing_execution
+          ( Subscription_turn _
+          | Claimed_job_resource _
+          | Lifecycle_wait _
+          | Lifecycle_settlement _ ) ) -> false
+;;
+
 let lifecycle_event_basis t borrow = function
   | Lifecycle_callback_owner.Initial_authored scope ->
     held_authored_event_basis t borrow scope
@@ -4851,6 +4954,90 @@ module Held_authored_callback_acknowledgement = struct
   let install t = Run_scope.Host.acknowledge_advance t.advance
 end
 
+(* A producer ACK can settle work while its actual callback remains Running.
+   This bookkeeping extends only that same physical callback, never a retained
+   ID, source replacement, terminal retirement or a newly admitted effect. *)
+module Schedule_callback_acknowledgement = struct
+  type actor = t
+
+  type t =
+    { previous : Session_state.t
+    ; candidate : Session_transition.t
+    ; borrow : queued_event_borrow
+    ; actions : Run_action_service.t
+    ; previous_run : Agent_protocol.Run.t
+    ; advance : Run_scope.Host.advance
+    }
+
+  let check t ~(actor : actor) ~candidate =
+    if
+      phys_equal t.previous actor.state
+      && phys_equal t.candidate candidate
+      && Option.exists actor.queued_event_borrow ~f:(phys_equal t.borrow)
+      && Option.exists t.borrow.run_actions ~f:(phys_equal t.actions)
+      && t.borrow.callback_active
+      && (not t.borrow.committed)
+      && Run_scope.is_open (Run_action_service.scope t.actions)
+      && Int64.equal
+           (Run_scope.revision (Run_action_service.scope t.actions))
+           t.previous_run.revision
+    then Ok ()
+    else Error (error Conflict "Schedule callback fact acknowledgement changed")
+  ;;
+
+  let prepare (actor : actor) ~candidate =
+    let open Result.Let_syntax in
+    match actor.queued_event_borrow with
+    | Some borrow when borrow.callback_active && not borrow.committed ->
+      (match borrow.run_actions with
+       | None -> Ok None
+       | Some actions ->
+         let scope = Run_action_service.scope actions in
+         let find state =
+           Option.bind state.Session_state.run_state ~f:(fun index ->
+             Run_state.find index (Run_scope.run_id scope))
+         in
+         (match find actor.state, find candidate.Session_transition.state with
+          | Some previous_run, Some next
+            when not (Agent_protocol.Run.equal previous_run next) ->
+            (match next.lifecycle with
+             | Terminal _ -> Ok None
+             | Admitted | Active | Waiting _ ->
+               let%bind _, proofs =
+                 Run_schedule_settlement.capture
+                   actor.state
+                   ~delta:candidate.delta
+                   ~run:previous_run
+                   ~owned_work:next.owned_work
+               in
+               if List.is_empty proofs
+               then Ok None
+               else (
+                 let%bind advance =
+                   Run_scope.Host.prepare_advance
+                     scope
+                     ~previous:previous_run
+                     ~next
+                     ~execution_id:borrow.receipt.context.id
+                 in
+                 let acknowledgement =
+                   { previous = actor.state
+                   ; candidate
+                   ; borrow
+                   ; actions
+                   ; previous_run
+                   ; advance
+                   }
+                 in
+                 let%map () = check acknowledgement ~actor ~candidate in
+                 Some acknowledgement))
+          | (Some _ | None), (Some _ | None) -> Ok None))
+    | None | Some _ -> Ok None
+  ;;
+
+  let install t = Run_scope.Host.acknowledge_advance t.advance
+end
+
 (* A single acknowledged candidate advances the exact runtime callback owner.
    This is staged DATA; only installation after the real writer changes custody. *)
 module Goal_runtime_acknowledgement = struct
@@ -4999,6 +5186,7 @@ module Goal_runtime_operation_acknowledgement = struct
     ; scope : Goal_continuation.runtime_scope
     ; held : Held_operation.t
     ; owner : Operation_owner.t
+    ; handoff : Goal_runtime_handoff.t
     }
 
   let check t ~(actor : actor) ~candidate =
@@ -5028,8 +5216,7 @@ module Goal_runtime_operation_acknowledgement = struct
     t.held.phase <- Pending_first_effect;
     actor.operation_agent_custody <- Some t.owner;
     t.scope.continuation.binding.preparation.runtime_phase
-    <- Handed_off
-         (t.scope, Resume (Goal_resume_result.Continuation.Started t.held.proof.operation))
+    <- Handed_off (t.scope, t.handoff)
   ;;
 end
 
@@ -5484,6 +5671,11 @@ let install
     Option.value_map job_custody ~default:(Ok ()) ~f:(fun update ->
       Job_custody.Update.check_before_commit update ~current:t.job_agent_custody)
   in
+  let%bind schedule_callback_acknowledgement =
+    match held_authored_callback_acknowledgement, goal_runtime_acknowledgement with
+    | None, None -> Schedule_callback_acknowledgement.prepare t ~candidate:transition
+    | (Some _ | None), (Some _ | None) -> Ok None
+  in
   let%bind completion_plan = prepare_completion_plan t transition completion_sample in
   let check_before_commit =
     match held_authored_callback_acknowledgement with
@@ -5511,6 +5703,21 @@ let install
             Option.value_map final_check ~default:(Ok ()) ~f:(fun check -> check ())
           in
           Goal_runtime_acknowledgement.check
+            acknowledgement
+            ~actor:t
+            ~candidate:transition)
+  in
+  let previous_check = check_before_commit in
+  let check_before_commit =
+    match schedule_callback_acknowledgement with
+    | None -> previous_check
+    | Some acknowledgement ->
+      Some
+        (fun () ->
+          let%bind () =
+            Option.value_map previous_check ~default:(Ok ()) ~f:(fun f -> f ())
+          in
+          Schedule_callback_acknowledgement.check
             acknowledgement
             ~actor:t
             ~candidate:transition)
@@ -5543,6 +5750,12 @@ let install
     transition;
   let%bind () =
     Option.value_map
+      schedule_callback_acknowledgement
+      ~default:(Ok ())
+      ~f:Schedule_callback_acknowledgement.install
+  in
+  let%bind () =
+    Option.value_map
       held_authored_callback_acknowledgement
       ~default:(Ok ())
       ~f:Held_authored_callback_acknowledgement.install
@@ -5566,16 +5779,44 @@ let current_snapshot t =
 (* Every actor candidate, including audited commits and speculative staged work,
    selects source retirement before validation. Persistence and installation
    consume this exact prepared candidate without rewriting it. *)
-let prepare_transition ?run_preparation t ~delta ~payloads =
+let completion_clock_pair t =
+  let wall = t.services.now () in
+  let monotonic = t.services.monotonic_now () in
+  wall, Recurrence_runtime.Completion.sample ~wall ~monotonic
+;;
+
+(* Only an actual selected producer transition requests this clock. Existing
+   callback/Job samples retain their exact wall; no later clock replaces it. *)
+let schedule_completion_sample ?completion_sample t ~delta =
+  match completion_sample with
+  | Some _ -> completion_sample
+  | None ->
+    if Run_schedule_settlement.requires_completion_sample t.state ~delta
+    then Some (snd (completion_clock_pair t))
+    else None
+;;
+
+let prepare_transition ?run_preparation ?completion_sample t ~delta ~payloads =
   let open Result.Let_syntax in
   let%bind () =
     match run_preparation with
     | None -> Ok ()
     | Some preparation -> check_run_preparation t preparation
   in
-  let now = t.services.now () in
+  let now =
+    match completion_sample with
+    | Some sample -> Recurrence_runtime.Completion.wall sample
+    | None -> t.services.now ()
+  in
   let%bind delta = Run_source_change.prepare t.state ~delta ~now in
   let%bind delta = Goal_catalog_source.prepare_change t.state ~delta in
+  let%bind delta =
+    Run_schedule_settlement.prepare
+      ?startup_run:(pending_held_startup_run t)
+      t.state
+      ~delta
+      ~now
+  in
   let%bind delta = Goal_run_settlement.prepare t.state ~delta in
   let%bind delta = Recurrence_source.prepare_change t.state ~delta in
   let%bind prepared = Session_transition.apply ~now t.state ~delta ~payloads in
@@ -5605,7 +5846,8 @@ let goal_runtime_transition
       ~payloads
   =
   let open Result.Let_syntax in
-  let%bind candidate = prepare_transition t ~delta ~payloads in
+  let completion_sample = schedule_completion_sample ?completion_sample t ~delta in
+  let%bind candidate = prepare_transition ?completion_sample t ~delta ~payloads in
   let%bind acknowledgement = Goal_runtime_acknowledgement.prepare t scope ~candidate in
   let%map () =
     install
@@ -5675,6 +5917,7 @@ let check_constructor_job_handoff
 ;;
 
 let transition
+      ?goal_runtime_scope
       ?check_before_commit
       ?constructor_stop_acknowledgement
       ?admission_hold
@@ -5691,9 +5934,32 @@ let transition
     ~finally:(fun () -> Option.iter job_custody ~f:Job_custody.Update.discard)
     ~f:(fun () ->
       let open Result.Let_syntax in
-      let%bind transition = prepare_transition ?run_preparation t ~delta ~payloads in
+      let completion_sample = schedule_completion_sample ?completion_sample t ~delta in
+      let%bind transition =
+        prepare_transition ?completion_sample ?run_preparation t ~delta ~payloads
+      in
+      let%bind goal_runtime_acknowledgement =
+        match goal_runtime_scope with
+        | None -> Ok None
+        | Some scope ->
+          Goal_runtime_acknowledgement.prepare t scope ~candidate:transition
+          |> Result.map ~f:Option.some
+      in
+      let check_before_commit =
+        match goal_runtime_scope with
+        | None -> check_before_commit
+        | Some scope ->
+          Some
+            (fun () ->
+              let%bind () =
+                Option.value_map check_before_commit ~default:(Ok ()) ~f:(fun check ->
+                  check ())
+              in
+              check_runtime_construction_effect (Existing_goal scope.continuation))
+      in
       let%map () =
         install
+          ?goal_runtime_acknowledgement
           ?check_before_commit
           ?constructor_stop_acknowledgement
           ?admission_hold
@@ -8545,7 +8811,10 @@ let initialization_transition ?admission_hold ?job_custody t scope ~delta ~paylo
     check_initialization_agent_actor scope
   in
   let%bind () = check_owner () in
-  let%bind candidate = prepare_transition ?run_preparation t ~delta ~payloads in
+  let completion_sample = schedule_completion_sample t ~delta in
+  let%bind candidate =
+    prepare_transition ?completion_sample ?run_preparation t ~delta ~payloads
+  in
   let acknowledgement =
     Initialization_scope.Acknowledgement.prepare scope candidate.state
   in
@@ -8561,6 +8830,7 @@ let initialization_transition ?admission_hold ?job_custody t scope ~delta ~paylo
     ?run_preparation
     ?admission_hold
     ?job_custody
+    ?completion_sample
     ~initialization_acknowledgement:acknowledgement
     ~check_before_commit
     t
@@ -9206,6 +9476,16 @@ let job_agent_admission t scope =
   | Some row -> Result.map (Job_custody.Row.admission row) ~f:Option.some
 ;;
 
+let job_settlement_parent t scope =
+  let open Result.Let_syntax in
+  let%bind job = job_scope_current t scope in
+  let%map row = Job_custody.find t.job_agent_custody ~job in
+  Option.value_map
+    row
+    ~default:Observation_continuation.Parent.Unavailable
+    ~f:Job_custody.Row.settlement_parent
+;;
+
 let job_callback_admission t scope ~manager ~source =
   let open Result.Let_syntax in
   let%bind job = job_scope_current t scope in
@@ -9248,13 +9528,13 @@ let moderator_settlement_parent t (borrow : moderator_borrow) =
          ~default:Observation_continuation.Parent.Unavailable
          ~f:Observation_continuation.parent)
   | Invocation ->
-    let admission =
-      match borrow.job_scope, borrow.operation_id with
-      | Some scope, _ -> job_agent_admission t scope
-      | None, Some id -> operation_agent_admission t id
-      | None, None -> Ok None
-    in
-    Result.map admission ~f:parent_of_admission
+    (match borrow.job_scope, borrow.operation_id with
+     | Some scope, _ -> job_settlement_parent t scope
+     | None, operation ->
+       let admission =
+         Option.value_map operation ~default:(Ok None) ~f:(operation_agent_admission t)
+       in
+       Result.map admission ~f:parent_of_admission)
 ;;
 
 let moderator_agent_admission t (borrow : moderator_borrow) =
@@ -9299,11 +9579,30 @@ let execution_agent_admission t (execution : invocation_execution) =
   | Background_job scope -> job_agent_admission t scope
 ;;
 
+let event_settlement_parent t (borrow : queued_event_borrow) =
+  match borrow.agent_admission with
+  | Resumed_run admission -> Ok (parent_of_admission admission)
+  | Contextual admission ->
+    (match t.legacy_callback_scope with
+     | Some scope when phys_equal scope.borrow borrow ->
+       Ok
+         (match scope.custody with
+          | Unavailable -> Observation_continuation.Parent.Unavailable
+          | Admitted admission -> Observation_continuation.Parent.Available admission)
+     | None | Some _ ->
+       (match borrow.job_scope, borrow.receipt.context.operation_id with
+        | Some scope, _ -> job_settlement_parent t scope
+        | None, Some id ->
+          Result.map (operation_agent_admission t id) ~f:parent_of_admission
+        | None, None -> Ok (parent_of_admission admission)))
+;;
+
 let execution_settlement_parent t (execution : invocation_execution) =
   match execution.owner with
   | Invocation_moderator borrow -> moderator_settlement_parent t borrow
-  | Foreground _ | Event_moderator _ | Background_job _ ->
-    Result.map (execution_agent_admission t execution) ~f:parent_of_admission
+  | Event_moderator borrow -> event_settlement_parent t borrow
+  | Background_job scope -> job_settlement_parent t scope
+  | Foreground id -> Result.map (operation_agent_admission t id) ~f:parent_of_admission
 ;;
 
 let settlement_custody = function
@@ -9915,12 +10214,37 @@ let check_run_binding t run_id =
 ;;
 
 let claim_queued_event
+      ?goal_execution
       t
       id
       operation_id
       (snapshot : Session.Moderator_state.Identity_snapshot.t)
   =
   let open Result.Let_syntax in
+  let%bind goal_scope =
+    match goal_execution with
+    | None -> Ok None
+    | Some execution ->
+      let%bind scope = select_goal_runtime t execution in
+      let%bind () = check_runtime_construction_effect (Existing_goal execution) in
+      let%bind () =
+        match scope.callback, execution.binding.preparation.runtime_phase with
+        | Joined, (Installed _ | Callback_completed _) -> Ok ()
+        | ( (Pending | Executing _ | Completed _ | Joined)
+          , ( Unclaimed
+            | Starting_writer _
+            | Starting_acknowledged
+            | Running_writer _
+            | Constructing
+            | Installed _
+            | Callback_completed _
+            | Handed_off _
+            | Retired _
+            | Closed ) ) ->
+          Error (error Conflict "Goal wake callback has no unconsumed installed owner")
+      in
+      Ok (Some scope)
+  in
   let%bind available =
     match operation_id with
     | None -> Ok (idle_moderator_eligible t)
@@ -9976,69 +10300,107 @@ let claim_queued_event
        let%bind resumed, run_deltas =
          Run_transition.claim_wake previous ~executing:receipt ~now:(t.services.now ())
        in
-       let%bind candidate =
-         prepare_transition
-           t
-           ~delta:
-             (Session_delta.Batch
-                (Session_delta.Moderator_execution_changed receipt :: run_deltas))
-           ~payloads:[]
+       let goal_runs =
+         List.filter resumed ~f:(fun run_id ->
+           Option.exists t.state.run_state ~f:(fun index ->
+             Option.is_some (Run_state.goal_link index run_id)))
        in
-       let%bind acknowledgement =
-         Queued_claim_acknowledgement.prepare
-           ~previous
-           ~authorities:t.run_authorities
-           ~resumed
-           ~candidate
-           ~borrow
-       in
-       Exn.protect
-         ~finally:(fun () -> Queued_claim_acknowledgement.discard acknowledgement)
-         ~f:(fun () ->
-           let check_basis () =
-             let%bind available =
-               match operation_id with
-               | None -> Ok (idle_moderator_eligible t)
-               | Some id ->
-                 let%map _ = running_operation t id in
-                 runtime_admission_open t
-                 && not (t.idle_moderator_borrowed || moderator_is_borrowed t)
+       if Option.is_none goal_execution && not (List.is_empty goal_runs)
+       then Ok None
+       else (
+         let%bind () =
+           match goal_execution, goal_scope, resumed with
+           | None, None, _ -> Ok ()
+           | Some execution, Some _, [ run_id ]
+             when Agent_protocol.Id.Run.equal run_id execution.binding.preparation.run.id
+             -> Ok ()
+           | (Some _ | None), (Some _ | None), _ ->
+             Error
+               (error Conflict "Goal queue claim differs from its exact selected wake")
+         in
+         let%bind candidate =
+           prepare_transition
+             t
+             ~delta:
+               (Session_delta.Batch
+                  (Session_delta.Moderator_execution_changed receipt :: run_deltas))
+             ~payloads:[]
+         in
+         let%bind acknowledgement =
+           Queued_claim_acknowledgement.prepare
+             ?goal_scope
+             ~previous
+             ~authorities:t.run_authorities
+             ~resumed
+             ~candidate
+             ~borrow
+             ()
+         in
+         let%bind goal_runtime_acknowledgement =
+           match goal_scope with
+           | None -> Ok None
+           | Some scope ->
+             Goal_runtime_acknowledgement.prepare t scope ~candidate
+             |> Result.map ~f:Option.some
+         in
+         Exn.protect
+           ~finally:(fun () -> Queued_claim_acknowledgement.discard acknowledgement)
+           ~f:(fun () ->
+             let check_basis () =
+               let%bind available =
+                 match operation_id with
+                 | None -> Ok (idle_moderator_eligible t)
+                 | Some id ->
+                   let%map _ = running_operation t id in
+                   runtime_admission_open t
+                   && not (t.idle_moderator_borrowed || moderator_is_borrowed t)
+               in
+               if t.stopped || not available
+               then Error (error Conflict "queued claim owner changed before ACK")
+               else
+                 Queued_claim_acknowledgement.check_basis
+                   acknowledgement
+                   ~previous:t.state
+                   ~authorities:t.run_authorities
+                   ~current_borrow:t.queued_event_borrow
+                   ~candidate
              in
-             if t.stopped || not available
-             then Error (error Conflict "queued claim owner changed before ACK")
-             else
-               Queued_claim_acknowledgement.check_basis
-                 acknowledgement
-                 ~previous:t.state
-                 ~authorities:t.run_authorities
-                 ~current_borrow:t.queued_event_borrow
-                 ~candidate
-           in
-           let check_before_commit () =
-             let%bind () = check_basis () in
-             let%bind () =
-               Option.value_map
-                 (Queued_claim_acknowledgement.scope acknowledgement)
-                 ~default:(Ok ())
-                 ~f:(fun scope -> Run_admission.Scope.authorize scope t.state)
+             let check_before_commit () =
+               let%bind () =
+                 Option.value_map goal_execution ~default:(Ok ()) ~f:(fun execution ->
+                   check_runtime_construction_effect (Existing_goal execution))
+               in
+               let%bind () = check_basis () in
+               let%bind () =
+                 Option.value_map
+                   (Queued_claim_acknowledgement.scope acknowledgement)
+                   ~default:(Ok ())
+                   ~f:(fun scope -> Run_admission.Scope.authorize scope t.state)
+               in
+               let%bind () =
+                 Option.value_map
+                   (Queued_claim_acknowledgement.scope acknowledgement)
+                   ~default:(Ok ())
+                   ~f:Run_admission.Scope.check_current
+               in
+               let%bind () =
+                 Option.value_map goal_execution ~default:(Ok ()) ~f:(fun execution ->
+                   let construction = Runtime_construction.Existing_goal execution in
+                   let%bind () = Runtime_construction.check_timing construction in
+                   Runtime_construction.check_policy construction)
+               in
+               check_basis ()
              in
-             let%bind () =
-               Option.value_map
-                 (Queued_claim_acknowledgement.scope acknowledgement)
-                 ~default:(Ok ())
-                 ~f:Run_admission.Scope.check_current
-             in
-             check_basis ()
-           in
-           Eio.Cancel.protect (fun () ->
-             let%map () =
-               install
-                 ~queued_claim_acknowledgement:acknowledgement
-                 ~check_before_commit
-                 t
-                 candidate
-             in
-             t.queued_event_borrow)))
+             Eio.Cancel.protect (fun () ->
+               let%map () =
+                 install
+                   ?goal_runtime_acknowledgement
+                   ~queued_claim_acknowledgement:acknowledgement
+                   ~check_before_commit
+                   t
+                   candidate
+               in
+               t.queued_event_borrow))))
 ;;
 
 type lifecycle_claim_handoff =
@@ -11344,18 +11706,24 @@ module Prepared_run_delta = struct
   let empty = { deltas = []; completion_sample = None }
 end
 
-let completion_clock_pair t =
-  let wall = t.services.now () in
-  let monotonic = t.services.monotonic_now () in
-  wall, Recurrence_runtime.Completion.sample ~wall ~monotonic
-;;
-
 let lifecycle_selection (borrow : queued_event_borrow) run =
   Option.bind borrow.lifecycle_owner ~f:(function
     | Lifecycle_callback_owner.Initial_authored _ ->
       Option.map run ~f:(fun run -> Run_transition.Lifecycle_selection.Authored_start run)
     | Existing_goal_resume _ ->
-      Option.map run ~f:(fun run -> Run_transition.Lifecycle_selection.Goal_resume run))
+      (match borrow.receipt.context.phase with
+       | Session_resume ->
+         Option.map run ~f:(fun run -> Run_transition.Lifecycle_selection.Goal_resume run)
+       | Internal_event ->
+         (* Already-owned queued callbacks use their actual Run_event_scope.
+            Physical Goal scope/borrow authority is validated independently. *)
+         None
+       | Session_start
+       | Turn_start
+       | Message_appended
+       | Pre_tool_call
+       | Post_tool_response
+       | Turn_end -> None))
 ;;
 
 let prepared_run_delta t (borrow : queued_event_borrow) completed requests job_deltas =
@@ -11434,7 +11802,7 @@ let prepared_run_delta t (borrow : queued_event_borrow) completed requests job_d
           t.state
           ~scope
           ~executing:borrow.receipt
-          ~work_state
+          ~work_delta
           ~owned_work
           ~action
           ~now
@@ -11641,18 +12009,27 @@ let commit_queued_event t borrow snapshot requests decision notifications =
         ~pending:(Observation_follow_up.pending_event completed)
         custody
         (fun ~job_custody ~check_jobs ~acknowledge ->
+           let delta =
+             Session_delta.Batch
+               (admission_deltas
+                @ [ Session_delta.Moderator_execution_changed completed
+                  ; Moderator_changed (Some encoded_snapshot)
+                  ]
+                @ job_deltas
+                @ run_change.deltas)
+           in
+           let completion_sample =
+             schedule_completion_sample
+               ?completion_sample:run_change.completion_sample
+               t
+               ~delta
+           in
            let%bind prepared =
              prepare_transition
                ?run_preparation
+               ?completion_sample
                t
-               ~delta:
-                 (Session_delta.Batch
-                    (admission_deltas
-                     @ [ Session_delta.Moderator_execution_changed completed
-                       ; Moderator_changed (Some encoded_snapshot)
-                       ]
-                     @ job_deltas
-                     @ run_change.deltas))
+               ~delta
                ~payloads:
                  (job_payloads
                   @ List.map notifications ~f:(fun message ->
@@ -11718,7 +12095,7 @@ let commit_queued_event t borrow snapshot requests decision notifications =
                |> Result.map ~f:Option.some
            in
            let%bind completion_plan =
-             prepare_completion_plan t prepared run_change.completion_sample
+             prepare_completion_plan t prepared completion_sample
            in
            let%bind () = queued_event_can_commit t borrow in
            let%bind () =
@@ -13839,6 +14216,15 @@ let consume_notifications_internal
         @ List.map discarded_wakes ~f:(fun value ->
           Session_delta.Delivery_wake_changed value)
       in
+      let%bind selection_state =
+        Session_delta.apply t.state (Session_delta.Batch deltas)
+      in
+      let%bind selected_wakes =
+        Notification_wake_selection.select
+          selection_state
+          ~context:Ordinary
+          (committed @ wakes)
+      in
       let%bind decoded = History_codec.all_of_protocol entries in
       let%map () =
         match deltas with
@@ -13856,12 +14242,11 @@ let consume_notifications_internal
         | _ -> []
       in
       let ids =
-        List.map (committed @ wakes) ~f:(fun value ->
-          value.Agent_protocol.Delivery.context.id)
+        List.map selected_wakes ~f:(fun value -> value.Agent_protocol.Delivery.context.id)
       in
       t.notification_inputs <- Some (operation_id, ids @ existing);
       let wake =
-        List.exists (committed @ wakes) ~f:(fun value ->
+        List.exists selected_wakes ~f:(fun value ->
           Agent_protocol.Completion.equal_wake value.context.wake Request_turn)
       in
       Chat_response.In_memory_stream.Safe_point_input.notification_entries
@@ -13876,13 +14261,18 @@ let notification_wake_deltas t operation_id ~accept =
     | Some (id, ids) when Agent_protocol.Id.Operation.equal id operation_id -> ids
     | _ -> []
   in
-  List.filter t.state.deliveries ~f:(fun value ->
-    List.mem ids value.context.id ~equal:Agent_protocol.Id.Delivery.equal
-    &&
-    match value.wake_disposition with
-    | Some Pending_wake -> true
-    | _ -> false)
-  |> List.map ~f:(fun value ->
+  let candidates =
+    List.filter t.state.deliveries ~f:(fun value ->
+      List.mem ids value.context.id ~equal:Agent_protocol.Id.Delivery.equal
+      &&
+      match value.wake_disposition with
+      | Some Pending_wake -> true
+      | _ -> false)
+  in
+  let%bind selected =
+    Notification_wake_selection.select t.state ~context:Ordinary candidates
+  in
+  List.map selected ~f:(fun value ->
     let%map value =
       match accept with
       | true -> Agent_protocol.Delivery.accept_wake value ~operation_id
@@ -20355,7 +20745,7 @@ let staged_child_run_delta t execution ~basis ~classification ~parent_work job_d
                  t.state
                  ~scope
                  ~executing:borrow.receipt
-                 ~work_state
+                 ~work_delta
                  ~owned_work:children
                  ~now:(t.services.now ())
              in
@@ -22036,7 +22426,7 @@ let prepare_run_job_enqueue t ~frame =
        [ Session_delta.Run_state_changed index ])
 ;;
 
-let enqueue_run_job_delivery t expected before after =
+let enqueue_run_job_delivery ?goal_runtime_scope t expected before after =
   let open Result.Let_syntax in
   let%bind () = check_expected_moderator_checkpoint t (Some before) in
   let%bind () =
@@ -22118,6 +22508,7 @@ let enqueue_run_job_delivery t expected before after =
   in
   let%map _ =
     transition
+      ?goal_runtime_scope
       t
       ~delta:
         (Session_delta.Batch (deltas @ job_deltas @ [ Moderator_changed (Some after) ]))
@@ -22127,6 +22518,7 @@ let enqueue_run_job_delivery t expected before after =
 ;;
 
 let deliver_job_without_legacy
+      ?goal_runtime_scope
       t
       job_id
       generation
@@ -22211,6 +22603,7 @@ let deliver_job_without_legacy
     let job = { job with delivery = Delivered (t.services.now ()) } in
     let%map _ =
       transition
+        ?goal_runtime_scope
         t
         ~delta:
           (Session_delta.Batch
@@ -22646,8 +23039,9 @@ let validate_schedule_generation t schedule generation =
   else Ok ()
 ;;
 
-let update_schedule ?run_preparation t schedule =
+let update_schedule ?goal_runtime_scope ?run_preparation t schedule =
   transition
+    ?goal_runtime_scope
     ?run_preparation
     t
     ~delta:(Session_delta.Schedule_changed schedule)
@@ -22684,7 +23078,7 @@ let due_schedules t =
     t.state.lifecycle.observed, schedules
 ;;
 
-let claim_schedule t schedule_id generation =
+let claim_schedule ?goal_runtime_scope t schedule_id generation =
   let open Result.Let_syntax in
   let%bind schedule = find_schedule t schedule_id in
   let%bind () = validate_schedule_generation t schedule generation in
@@ -22705,7 +23099,7 @@ let claim_schedule t schedule_id generation =
      | true ->
        let%bind () = require_selected_execution t in
        let schedule = { schedule with status = Delivering } in
-       let%map _ = update_schedule t schedule in
+       let%map _ = update_schedule ?goal_runtime_scope t schedule in
        Some schedule)
   | Delivering | Delivered | Cancelled | Failed _ -> Ok None
 ;;
@@ -22969,18 +23363,23 @@ let complete_legacy_schedule
           ~metadata:(Legacy_queue_checkpoint.metadata plan)
           ~staged
       in
+      let delta =
+        Session_delta.Batch
+          [ Run_state_changed index
+          ; Schedule_changed schedule
+          ; Moderator_changed (Some encoded)
+          ]
+      in
+      let completion_sample = schedule_completion_sample t ~delta in
       let%bind prepared =
         prepare_transition
+          ?completion_sample
           t
-          ~delta:
-            (Session_delta.Batch
-               [ Run_state_changed index
-               ; Schedule_changed schedule
-               ; Moderator_changed (Some encoded)
-               ])
+          ~delta
           ~payloads:
             [ Agent_protocol.Event.Durable.Payload.Schedule_state_changed schedule ]
       in
+      let%bind completion_plan = prepare_completion_plan t prepared completion_sample in
       let%bind _, final_source = current_source () in
       let%bind () =
         if Agent_protocol.Run_source.equal source final_source
@@ -22995,11 +23394,15 @@ let complete_legacy_schedule
         t.legacy_queue_custody
         <- Legacy_queue_custody.install t.legacy_queue_custody ~incoming:inventory;
         acknowledged := true;
+        Option.iter
+          completion_plan
+          ~f:(Recurrence_runtime.install_completions t.recurrence_runtime);
         publish_committed_transition t prepared;
         Ok schedule))
 ;;
 
 let complete_schedule
+      ?goal_runtime_scope
       t
       schedule_id
       generation
@@ -23090,6 +23493,15 @@ let complete_schedule
       | None, Some manager
         when Option.is_none (Chat_response.Moderator_manager.invocation_observer manager)
         ->
+        let%bind () =
+          match goal_runtime_scope with
+          | None -> Ok ()
+          | Some _ ->
+            Error
+              (error
+                 Permission_denied
+                 "Goal wake cannot restore a retired legacy Manager loan")
+        in
         complete_legacy_schedule
           t
           manager
@@ -23104,6 +23516,7 @@ let complete_schedule
       | (Some _ | None), _ ->
         let%map _ =
           transition
+            ?goal_runtime_scope
             t
             ~delta:
               (Session_delta.Batch
@@ -23276,22 +23689,54 @@ let callback_schedule_cancel t scope schedule_id =
     (* The genuine caller is checked, not the target timer's provenance. Keep
        legacy cancellation of any retained Scheduled ID, including old timers. *)
     let schedule = { schedule with status = Agent_protocol.Schedule.Cancelled } in
+    let delta = Session_delta.Schedule_changed schedule in
+    let completion_sample = schedule_completion_sample t ~delta in
     let%bind prepared =
       prepare_transition
+        ?completion_sample
         ?run_preparation:(callback_run_preparation scope)
         t
-        ~delta:(Session_delta.Schedule_changed schedule)
+        ~delta
         ~payloads:[ Agent_protocol.Event.Durable.Payload.Schedule_cancelled schedule ]
+    in
+    let%bind completion_plan = prepare_completion_plan t prepared completion_sample in
+    let%bind callback_acknowledgement =
+      Schedule_callback_acknowledgement.prepare t ~candidate:prepared
+    in
+    let initialization_acknowledgement =
+      Option.map scope.constructor_scope ~f:(fun constructor ->
+        Initialization_scope.Acknowledgement.prepare constructor prepared.state)
     in
     let%bind _ = callback_schedule_admission t scope in
     Eio.Cancel.protect (fun () ->
-      let%bind () = persist_transition t prepared in
+      let%bind () =
+        persist_transition t prepared ~check_before_commit:(fun () ->
+          let%bind _ = callback_schedule_admission t scope in
+          let%bind () =
+            Option.value_map
+              initialization_acknowledgement
+              ~default:(Ok ())
+              ~f:Initialization_scope.Acknowledgement.check_basis
+          in
+          Option.value_map callback_acknowledgement ~default:(Ok ()) ~f:(fun ack ->
+            Schedule_callback_acknowledgement.check ack ~actor:t ~candidate:prepared))
+      in
       (* The ordinary installation retention pass closes a matching timer loan
          before publication. Historical targets need not have a loan. *)
       install_committed_transition
         ?run_preparation:(callback_run_preparation scope)
+        ?initialization_acknowledgement
         t
         prepared;
+      let%bind () =
+        Option.value_map
+          callback_acknowledgement
+          ~default:(Ok ())
+          ~f:Schedule_callback_acknowledgement.install
+      in
+      Option.iter
+        completion_plan
+        ~f:(Recurrence_runtime.install_completions t.recurrence_runtime);
       publish_committed_transition t prepared;
       Ok schedule)
   | Delivering | Delivered | Cancelled | Failed _ ->
@@ -23319,7 +23764,206 @@ let drain_payloads (drain : Runtime_builder.moderator_drain) =
   List.map drain.Runtime_builder.notifications ~f:notification_payload
 ;;
 
+module Goal_operation_phase = struct
+  type t =
+    | Staged
+    | Installed
+    | Closed
+  [@@deriving equal]
+end
+
+(* Capture the real command original before source closure. Only this private
+   actual-ACK installer transfers it to the existing first-prefix owner. *)
+let goal_resume_operation_controller t (scope : Goal_continuation.runtime_scope) =
+  let open Result.Let_syntax in
+  let preparation = scope.continuation.binding.preparation in
+  let old_scope = Run_authorities.scope preparation.binding in
+  let%bind authorization =
+    Run_preparation.Custody.capture_authorization
+      (Goal_continuation.custody preparation)
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+  in
+  let%bind store = require_recurrence_controller t in
+  let policy = preparation.policy in
+  let association : Activation_association.t =
+    { issuer_policy = Goal policy
+    ; check_target =
+        (fun ~store:current ~state ~run ~admission ->
+          if Recurrence_controller.same_store store current
+          then Goal_activation_policy.check_association policy ~state ~run ~admission
+          else Error (error Conflict "Goal continuation Store changed"))
+    }
+  in
+  let phase = ref Goal_operation_phase.Staged in
+  let current = ref None in
+  let structural () =
+    let%bind () =
+      if Goal_operation_phase.equal !phase Installed
+      then Ok ()
+      else Error (error Conflict "Goal continuation Operation owner is not installed")
+    in
+    let%bind () =
+      Runtime_source_preparation.validate_target scope.continuation.binding.source t.state
+    in
+    let%bind index =
+      Result.of_option
+        t.state.run_state
+        ~error:(error Conflict "Goal Operation Run index is absent")
+    in
+    let%bind run =
+      Result.of_option
+        (Run_state.find index preparation.run.id)
+        ~error:(error Conflict "Goal Operation Run is absent")
+    in
+    let%bind () =
+      if Run_authorities.is_current t.run_authorities preparation.binding ~run_id:run.id
+      then Ok ()
+      else Error (error Permission_denied "Goal Operation lost its original binding")
+    in
+    Activation_association.check_target
+      association
+      ~store
+      ~state:t.state
+      ~run
+      ~admission:preparation.admission
+  in
+  let basis () =
+    let%bind () = structural () in
+    match !current with
+    | Some observed when Recurrence_controller.is_current observed -> Ok ()
+    | Some _ | None ->
+      Error (error Conflict "Goal continuation Operation requires fresh Store custody")
+  in
+  let originals () =
+    let%bind () = Run_admission.Scope.check_current old_scope in
+    Run_preparation.Authorization.check authorization t.state
+  in
+  let policy_check () =
+    let%bind () = structural () in
+    let%bind () = Run_admission.Scope.authorize old_scope t.state in
+    let%bind () = Goal_activation_policy.check_admitted_policy policy ~state:t.state in
+    let%bind () = originals () in
+    structural ()
+  in
+  let refresh () =
+    let%bind () = policy_check () in
+    let%bind observed = Recurrence_controller.observe store t.state in
+    current := Some observed;
+    basis ()
+  in
+  Ok
+    Activation_controller.Operation.
+      { association
+      ; install =
+          (fun () -> if Goal_operation_phase.equal !phase Staged then phase := Installed)
+      ; close = (fun () -> phase := Closed)
+      ; refresh
+      ; policy =
+          (fun () ->
+            let%bind () = basis () in
+            let%bind () = policy_check () in
+            basis ())
+      ; timing =
+          (fun () ->
+            let%bind () = basis () in
+            let%bind () =
+              Goal_activation_policy.check_deadline
+                policy
+                ~state:t.state
+                ~now:(t.services.now ())
+            in
+            basis ())
+      ; authority =
+          (fun () ->
+            let%bind () = basis () in
+            let%bind () = originals () in
+            basis ())
+      ; basis
+      }
+;;
+
+let prepare_goal_operation_ack
+      t
+      (scope : Goal_continuation.runtime_scope)
+      ~operation
+      ~candidate
+  =
+  let open Result.Let_syntax in
+  let continuation = scope.continuation in
+  let preparation = continuation.binding.preparation in
+  let%bind index =
+    Result.of_option
+      t.state.run_state
+      ~error:(error Conflict "Goal Operation Run index is absent")
+  in
+  let%bind run =
+    Result.of_option
+      (Run_state.find index preparation.run.id)
+      ~error:(error Conflict "Goal Operation Run is absent")
+  in
+  let%bind next =
+    Option.bind candidate.Session_transition.state.run_state ~f:(fun index ->
+      Run_state.find index run.id)
+    |> Result.of_option ~error:(error Conflict "Goal Operation candidate lost its Run")
+  in
+  let%bind () =
+    if
+      Agent_protocol.Goal_episode.matches_run
+        (Run_goal_link.episode preparation.link)
+        next
+      && List.exists next.owned_work ~f:(fun work ->
+        match work.Agent_protocol.Run_work.key with
+        | Operation id ->
+          Agent_protocol.Id.Operation.equal id operation.Agent_protocol.Operation.id
+        | Retained _ -> false)
+    then Ok ()
+    else Error (error Conflict "Goal Operation candidate lost its actual ownership")
+  in
+  let%bind handoff =
+    match preparation.cause with
+    | Resume_command _ -> Ok (Goal_runtime_handoff.Resume (Started operation))
+    | Pending_wake { wake; _ } ->
+      (match wake.occurrence with
+       | Subscription_delivery _ ->
+         Ok (Goal_runtime_handoff.Existing_execution (Subscription_turn operation))
+       | Job_completion _ | Delivered_timer _ ->
+         Error (error Invalid_request "queued Goal wake requires an Event claim"))
+    | Claimed_job _ ->
+      Error (error Invalid_request "claimed Goal Job cannot start another Operation")
+  in
+  let%bind controller = goal_resume_operation_controller t scope in
+  let old_scope = Run_authorities.scope preparation.binding in
+  let%bind original =
+    Result.of_option
+      (Run_admission.Scope.original_actor old_scope)
+      ~error:(error Permission_denied "Goal continuation has no original Run authority")
+  in
+  let proof : Held_operation.Proof.t =
+    { scope = old_scope
+    ; run
+    ; admission = preparation.admission
+    ; source = continuation.binding.source
+    ; operation
+    ; worker = scope.worker
+    ; binding = preparation.binding
+    ; controller
+    }
+  in
+  let held : Held_operation.t = { proof; phase = Staged; target_current = None } in
+  let owner : Operation_owner.t =
+    { operation_id = operation.id
+    ; admission = create_agent_admission (Some (create_agent_custody original))
+    ; held = Some held
+    }
+  in
+  ({ previous = t.state; candidate; scope; held; owner; handoff }
+   : Goal_runtime_operation_acknowledgement.t)
+  |> Result.return
+;;
+
 let start_idle_turn_unchecked
+      ?goal_runtime_scope
       ?continuation_custody
       ?follow_up_authority
       ?(extra_deltas = [])
@@ -23388,24 +24032,64 @@ let start_idle_turn_unchecked
   let installed = ref false in
   Exn.protect
     ~f:(fun () ->
-      let%map _ =
-        transition
-          t
-          ~check_before_commit:(fun () ->
-            let%bind () = check_turn_custody t agent_custody in
-            Option.value_map
-              follow_up_authority
-              ~default:(Ok ())
-              ~f:(check_follow_up_authority t))
-          ~delta:(Session_delta.Batch deltas)
-          ~payloads
+      let final_check () =
+        let%bind () = check_turn_custody t agent_custody in
+        Option.value_map
+          follow_up_authority
+          ~default:(Ok ())
+          ~f:(check_follow_up_authority t)
+      in
+      let%bind () =
+        match goal_runtime_scope with
+        | None ->
+          transition
+            t
+            ~check_before_commit:final_check
+            ~delta:(Session_delta.Batch deltas)
+            ~payloads
+          |> Result.map ~f:ignore
+        | Some scope ->
+          let%bind candidate =
+            prepare_transition t ~delta:(Session_delta.Batch deltas) ~payloads
+          in
+          let%bind ack = prepare_goal_operation_ack t scope ~operation ~candidate in
+          let%bind fact = Goal_runtime_acknowledgement.prepare t scope ~candidate in
+          let accepted = ref false in
+          Exn.protect
+            ~finally:(fun () ->
+              if not !accepted
+              then (
+                retire_agent_admission ack.owner.admission;
+                ack.held.proof.controller.close ()))
+            ~f:(fun () ->
+              let%bind () =
+                persist_transition t candidate ~check_before_commit:(fun () ->
+                  let%bind () = final_check () in
+                  let%bind () =
+                    check_runtime_construction_effect (Existing_goal scope.continuation)
+                  in
+                  let%bind () =
+                    Goal_runtime_operation_acknowledgement.check ack ~actor:t ~candidate
+                  in
+                  Goal_runtime_acknowledgement.check fact ~actor:t ~candidate)
+              in
+              install_committed_transition
+                ~goal_runtime_acknowledgement:fact
+                ~goal_operation_acknowledgement:ack
+                t
+                candidate;
+              accepted := true;
+              installed := true;
+              publish_committed_transition t candidate;
+              Ok ())
       in
       if Option.is_none t.operation_agent_custody
       then (
         install_operation_agent_custody t operation agent_custody;
         installed := true);
       prune_pending_agent_custody t;
-      launch_worker t operation)
+      launch_worker t operation;
+      Ok ())
     ~finally:(fun () ->
       if not !installed then Option.iter agent_custody ~f:retire_agent_custody)
 ;;
@@ -23744,6 +24428,7 @@ let suppress_follow_up_deltas t deltas ~reason =
 ;;
 
 let start_idle_turn
+      ?goal_runtime_scope
       ?continuation_custody
       ?follow_up_authority
       ?(extra_deltas = [])
@@ -23774,6 +24459,7 @@ let start_idle_turn
   match decision with
   | Allow_automatic_turn ->
     start_idle_turn_unchecked
+      ?goal_runtime_scope
       ?continuation_custody
       ?follow_up_authority
       ~extra_deltas
@@ -23886,8 +24572,30 @@ let stop_from_idle_moderator
   resolve_cleaned_permission_waiters t permissions
 ;;
 
-let deliver_idle_notifications_internal t (proposal : Notification_delivery.idle) =
+let deliver_idle_notifications_internal
+      ?goal_execution
+      t
+      (proposal : Notification_delivery.idle)
+  =
   let open Result.Let_syntax in
+  let%bind goal_runtime_scope =
+    match goal_execution with
+    | None -> Ok None
+    | Some execution ->
+      let%bind scope = select_goal_runtime t execution in
+      let%bind () = check_runtime_construction_effect (Existing_goal execution) in
+      let%bind () =
+        match execution.binding.preparation.cause, scope.callback with
+        | Pending_wake { wake; _ }, Joined ->
+          (match wake.occurrence with
+           | Subscription_delivery _ -> Ok ()
+           | Job_completion _ | Delivered_timer _ ->
+             Error (error Invalid_request "Goal queue wake requires Event admission"))
+        | (Resume_command _ | Pending_wake _ | Claimed_job _), _ ->
+          Error (error Conflict "Goal subscription lifecycle has not joined")
+      in
+      Ok (Some scope)
+  in
   match idle_moderator_eligible t with
   | false -> Ok false
   | true ->
@@ -23919,10 +24627,32 @@ let deliver_idle_notifications_internal t (proposal : Notification_delivery.idle
               | Some Pending_wake -> true
               | _ -> false)
           in
+          let%bind selection_state =
+            Session_delta.apply t.state (Session_delta.Batch deltas)
+          in
+          let%bind wake_context =
+            match goal_runtime_scope with
+            | None -> Ok Notification_wake_selection.Context.Ordinary
+            | Some scope ->
+              (* The actual scope was authenticated above. This projection is
+                 only routing DATA for that same unconsumed occurrence. *)
+              let%map wake = Goal_execution_runtime.wake scope.continuation in
+              Notification_wake_selection.Context.Goal_wake wake
+          in
+          let%bind notification_wakes =
+            Notification_wake_selection.select
+              selection_state
+              ~context:wake_context
+              notification_wakes
+          in
           (match deltas, notification_wakes with
            | [], [] -> Ok false
            | _ ->
-             let extra_deltas = deltas @ follow_up_deltas t follow_up in
+             let extra_deltas =
+               match goal_runtime_scope with
+               | None -> deltas @ follow_up_deltas t follow_up
+               | Some _ -> deltas
+             in
              let extra_payloads = notification_payloads entries in
              let drain : Runtime_builder.moderator_drain =
                { moderator_snapshot = t.state.moderator
@@ -23932,14 +24662,16 @@ let deliver_idle_notifications_internal t (proposal : Notification_delivery.idle
                }
              in
              let%bind eligible = eligible_pending t Idle_start in
-             let adopt_deferred = not (List.is_empty eligible) in
+             let adopt_deferred =
+               Option.is_none goal_runtime_scope && not (List.is_empty eligible)
+             in
              let needs_turn =
                adopt_deferred
                || (not (List.is_empty notification_wakes))
                ||
-               match follow_up.action with
-               | Turn -> true
-               | _ -> false
+               match goal_runtime_scope, follow_up.action with
+               | None, Turn -> true
+               | (Some _ | None), (Stop _ | Compact | Checkpoint | Turn) -> false
              in
              let%map () =
                match needs_turn, t.operation_worker with
@@ -23954,6 +24686,7 @@ let deliver_idle_notifications_internal t (proposal : Notification_delivery.idle
                    (error Invalid_state "notification wake requires an installed worker")
                | true, Some _ ->
                  start_idle_turn
+                   ?goal_runtime_scope
                    ~extra_deltas
                    ~extra_payloads
                    ~notification_wakes
@@ -24502,6 +25235,9 @@ let lifecycle_request_allowed : type a. a request -> bool = function
          ( Receipt _
          | Close _
          | Select_execution_wake _
+         | Reconcile_wake_authority _
+         | Complete_wake_schedule _
+         | Finish_wake _
          | Close_execution _
          | Check_job_owner _
          | Acknowledge_job_resource _
@@ -24597,7 +25333,12 @@ let lifecycle_request_allowed : type a. a request -> bool = function
          | Begin_wake _
          | Begin_job _
          | Bind_execution _
-         | Prepare_execution _ ))
+         | Prepare_execution _
+         | Claim_wake_event _
+         | Enqueue_wake_job _
+         | Claim_wake_schedule _
+         | Deliver_wake_job _
+         | Deliver_wake_notifications _ ))
   | Held_startup (Begin_authored _)
   | Held_startup (Ready_authored _)
   | Held_startup (Claim_authored _)
@@ -26260,8 +27001,39 @@ let classify_goal_wake t wake
          | Suspended_goal suspension -> Suspended_goal suspension))
 ;;
 
+let validate_goal_wake_request t (request : Goal_execution_runtime.Wake_request.t) =
+  let open Result.Let_syntax in
+  let changed () = Error (error Conflict "Goal wake producer changed before routing") in
+  match request with
+  | Idle -> Ok ()
+  | Timer expected ->
+    let%bind current = find_schedule t expected.id in
+    if
+      Jsonaf.exactly_equal
+        (Agent_protocol.Schedule.to_json current)
+        (Agent_protocol.Schedule.to_json expected)
+    then Ok ()
+    else changed ()
+  | Job_completion expected ->
+    let%bind current = find_job t expected.id in
+    if
+      Jsonaf.exactly_equal
+        (Agent_protocol.Job.to_json current)
+        (Agent_protocol.Job.to_json expected)
+    then Ok ()
+    else changed ()
+  | Job_delivery expected ->
+    let%bind current =
+      Option.bind t.state.run_state ~f:(fun index ->
+        Run_state.find_job_delivery index (Run_job_delivery.key expected))
+      |> Result.of_option ~error:(error Conflict "Goal retained Job delivery is absent")
+    in
+    if Run_job_delivery.equal current expected then Ok () else changed ()
+;;
+
 let select_goal_runtime_wake_internal t (request : Goal_execution_runtime.Wake_request.t) =
   let open Result.Let_syntax in
+  let%bind () = validate_goal_wake_request t request in
   let wakes =
     Option.value_map t.state.run_state ~default:[] ~f:(fun index ->
       List.filter_map (Run_state.runs index) ~f:(fun run ->
@@ -26278,14 +27050,6 @@ let select_goal_runtime_wake_internal t (request : Goal_execution_runtime.Wake_r
   match request with
   | Timer expected ->
     let%bind current = find_schedule t expected.id in
-    let%bind () =
-      if
-        Jsonaf.exactly_equal
-          (Agent_protocol.Schedule.to_json current)
-          (Agent_protocol.Schedule.to_json expected)
-      then Ok ()
-      else Error (error Conflict "Goal timer selection changed")
-    in
     matching (fun wake ->
       match wake.occurrence with
       | Delivered_timer { schedule_id; _ } ->
@@ -26293,30 +27057,12 @@ let select_goal_runtime_wake_internal t (request : Goal_execution_runtime.Wake_r
       | Job_completion _ | Subscription_delivery _ -> false)
   | Job_completion expected ->
     let%bind current = find_job t expected.id in
-    let%bind () =
-      if
-        Jsonaf.exactly_equal
-          (Agent_protocol.Job.to_json current)
-          (Agent_protocol.Job.to_json expected)
-      then Ok ()
-      else Error (error Conflict "Goal Job completion selection changed")
-    in
     matching (fun wake ->
       match wake.occurrence with
       | Job_completion { job_id; attempt } ->
         Agent_protocol.Id.Job.equal job_id current.id && Int.equal attempt current.attempt
       | Delivered_timer _ | Subscription_delivery _ -> false)
-  | Job_delivery expected ->
-    let%bind current =
-      Option.bind t.state.run_state ~f:(fun index ->
-        Run_state.find_job_delivery index (Run_job_delivery.key expected))
-      |> Result.of_option ~error:(error Conflict "Goal retained Job delivery is absent")
-    in
-    let%bind () =
-      if Run_job_delivery.equal current expected
-      then Ok ()
-      else Error (error Conflict "Goal retained Job delivery changed")
-    in
+  | Job_delivery current ->
     matching (fun wake ->
       Option.exists
         (Run_job_delivery.Key.of_wake wake)
@@ -26372,14 +27118,138 @@ let select_goal_runtime_wake_internal t (request : Goal_execution_runtime.Wake_r
           | 0 -> Agent_protocol.Id.Delivery.compare left.context.id right.context.id
           | order -> order)
       in
-      match deliveries with
-      | [] -> Ok Goal_execution_runtime.Wake_selection.Ordinary
-      | delivery :: _ ->
-        matching (fun wake ->
-          match wake.occurrence with
-          | Subscription_delivery { delivery_id; _ } ->
-            Agent_protocol.Id.Delivery.equal delivery.context.id delivery_id
-          | Job_completion _ | Delivered_timer _ -> false))
+      let rec select ~suspended = function
+        | [] ->
+          Ok
+            (Option.value
+               suspended
+               ~default:Goal_execution_runtime.Wake_selection.Ordinary)
+        | (delivery : Agent_protocol.Delivery.t) :: remaining ->
+          let%bind selection =
+            matching (fun wake ->
+              match wake.occurrence with
+              | Subscription_delivery { delivery_id; _ } ->
+                Agent_protocol.Id.Delivery.equal delivery.context.id delivery_id
+              | Job_completion _ | Delivered_timer _ -> false)
+          in
+          (match selection with
+           | Ordinary | Wake _ -> Ok selection
+           | No_work -> select ~suspended remaining
+           | Suspended_goal _ ->
+             select
+               ~suspended:(Some (Option.value suspended ~default:selection))
+               remaining)
+      in
+      select ~suspended:None deliveries)
+;;
+
+(* Negative-only original-custody maintenance. Routing DATA never permits a
+   source borrow or claim, including when Hold clears while callbacks yield. *)
+let reconcile_goal_wake_authority_internal t request =
+  let open Result.Let_syntax in
+  (* Reuse exact canonical DTO comparison before choosing any retained owner. *)
+  let%bind () = validate_goal_wake_request t request in
+  let matching (wake : Agent_protocol.Run_wake.t) =
+    match request, wake.occurrence with
+    | Goal_execution_runtime.Wake_request.Idle, _ -> true
+    | Timer schedule, Delivered_timer { schedule_id; _ } ->
+      Agent_protocol.Id.Schedule.equal schedule.id schedule_id
+    | Job_completion job, Job_completion { job_id; attempt } ->
+      Agent_protocol.Id.Job.equal job.id job_id && Int.equal job.attempt attempt
+    | Job_delivery delivery, Job_completion _ ->
+      Option.exists
+        (Run_job_delivery.Key.of_wake wake)
+        ~f:(Run_job_delivery.Key.equal (Run_job_delivery.key delivery))
+    | Timer _, (Job_completion _ | Subscription_delivery _)
+    | Job_completion _, (Delivered_timer _ | Subscription_delivery _)
+    | Job_delivery _, (Delivered_timer _ | Subscription_delivery _) -> false
+  in
+  let owners =
+    Option.value_map t.state.run_state ~default:[] ~f:(fun index ->
+      List.filter (Run_state.runs index) ~f:(fun run ->
+        match run.Agent_protocol.Run.lifecycle with
+        | Waiting wake -> matching wake
+        | Admitted | Active | Terminal _ -> false))
+  in
+  List.fold_result owners ~init:() ~f:(fun () expected_run ->
+    let%bind current =
+      Option.bind t.state.run_state ~f:(fun index -> Run_state.find index expected_run.id)
+      |> Result.of_option
+           ~error:(error Conflict "Goal wake disappeared during maintenance")
+    in
+    let%bind () =
+      if
+        Jsonaf.exactly_equal
+          (Agent_protocol.Run.to_json current)
+          (Agent_protocol.Run.to_json expected_run)
+      then Ok ()
+      else Error (error Conflict "Goal wake occurrence changed during maintenance")
+    in
+    (* Historical immutable association chooses factual maintenance. It does
+       not require current Goal Enabled/episode/source policy or issue rights. *)
+    let link =
+      Option.bind t.state.run_state ~f:(fun index -> Run_state.goal_link index current.id)
+    in
+    match link with
+    | None -> Ok ()
+    | Some _ ->
+      let expected = t.state in
+      let binding = Run_authorities.find t.run_authorities expected_run.id in
+      let check_original () =
+        let%bind index =
+          Result.of_option
+            t.state.run_state
+            ~error:(error Conflict "Goal wake source index disappeared")
+        in
+        let installation = Run_state.installation index in
+        if
+          Int.equal current.source.generation t.state.identity.generation
+          && Int64.equal current.source.installation_epoch installation.epoch
+          && Option.exists
+               installation.source
+               ~f:(Agent_protocol.Invocation.equal_observer current.source.observer)
+        then check_run_binding t expected_run.id
+        else Error (error Permission_denied "Goal wake lost its original source")
+      in
+      (match check_original () with
+       | Ok () -> Ok ()
+       | Error _ ->
+         let%bind () =
+           if
+             phys_equal expected t.state
+             && Option.equal
+                  phys_equal
+                  binding
+                  (Run_authorities.find t.run_authorities expected_run.id)
+           then Ok ()
+           else Error (error Conflict "Goal wake owner changed during retirement check")
+         in
+         let%bind index =
+           Result.of_option
+             t.state.run_state
+             ~error:(error Conflict "Goal wake Run index disappeared during retirement")
+         in
+         let%bind index =
+           Run_retirement.interrupt_run
+             index
+             ~run_id:expected_run.id
+             ~session_revision:(Int64.succ t.state.counters.revision)
+             ~now:(t.services.now ())
+         in
+         transition
+           t
+           ~check_before_commit:(fun () ->
+             if
+               phys_equal expected t.state
+               && Option.equal
+                    phys_equal
+                    binding
+                    (Run_authorities.find t.run_authorities expected_run.id)
+             then Ok ()
+             else Error (error Conflict "Goal wake changed before retirement ACK"))
+           ~delta:(Session_delta.Run_state_changed index)
+           ~payloads:[]
+         |> Result.map ~f:ignore))
 ;;
 
 let goal_existing_execution_quiescent t cause =
@@ -26509,12 +27379,16 @@ let goal_preparation_basis_for use t (preparation : Goal_continuation.Preparatio
     match preparation.cause with
     | Resume_command _ -> Ok ()
     | Pending_wake { wake; _ } ->
-      let%bind pending = pending_goal_wake_run t wake in
-      if
-        Option.exists pending ~f:(fun current ->
-          Agent_protocol.Id.Run.equal current.id run.id)
+      let transferred = goal_wake_transferred_borrow t preparation in
+      if transferred
       then Ok ()
-      else Error (error Conflict "Goal execution no longer owns its Pending Wait")
+      else (
+        let%bind pending = pending_goal_wake_run t wake in
+        if
+          Option.exists pending ~f:(fun current ->
+            Agent_protocol.Id.Run.equal current.id run.id)
+        then Ok ()
+        else Error (error Conflict "Goal execution no longer owns its Pending Wait"))
     | Claimed_job { owner; _ } ->
       let%bind current = job_scope_current t owner.scope in
       let%bind parent = job_runtime_run t current in
@@ -26691,8 +27565,11 @@ let goal_construction_timing t (preparation : Goal_continuation.Preparation.t) =
     match preparation.cause with
     | Resume_command _ -> Ok ()
     | Pending_wake { wake; _ } ->
-      let%bind ready = goal_wake_producer_ready t preparation.run wake in
-      if ready then Ok () else Error (error Conflict "Goal wake is no longer ready")
+      if goal_wake_transferred_borrow t preparation
+      then Ok ()
+      else (
+        let%bind ready = goal_wake_producer_ready t preparation.run wake in
+        if ready then Ok () else Error (error Conflict "Goal wake is no longer ready"))
     | Claimed_job { owner; _ } -> check_job_runtime_owner_internal t owner
   in
   goal_construction_basis t preparation
@@ -29486,125 +30363,6 @@ let finish_goal_resume_callback_internal t scope =
   Ok ()
 ;;
 
-module Goal_operation_phase = struct
-  type t =
-    | Staged
-    | Installed
-    | Closed
-  [@@deriving equal]
-end
-
-(* Capture the real command original before source closure. Only this private
-   actual-ACK installer transfers it to the existing first-prefix owner. *)
-let goal_resume_operation_controller t (scope : Goal_continuation.runtime_scope) =
-  let open Result.Let_syntax in
-  let preparation = scope.continuation.binding.preparation in
-  let old_scope = Run_authorities.scope preparation.binding in
-  let%bind authorization =
-    Run_preparation.Custody.capture_authorization
-      (Goal_continuation.custody preparation)
-      ~owner:t.run_preparation_owner
-      ~state:t.state
-  in
-  let%bind store = require_recurrence_controller t in
-  let policy = preparation.policy in
-  let association : Activation_association.t =
-    { issuer_policy = Goal policy
-    ; check_target =
-        (fun ~store:current ~state ~run ~admission ->
-          if Recurrence_controller.same_store store current
-          then Goal_activation_policy.check_association policy ~state ~run ~admission
-          else Error (error Conflict "Goal continuation Store changed"))
-    }
-  in
-  let phase = ref Goal_operation_phase.Staged in
-  let current = ref None in
-  let structural () =
-    let%bind () =
-      if Goal_operation_phase.equal !phase Installed
-      then Ok ()
-      else Error (error Conflict "Goal continuation Operation owner is not installed")
-    in
-    let%bind () =
-      Runtime_source_preparation.validate_target scope.continuation.binding.source t.state
-    in
-    let%bind index =
-      Result.of_option
-        t.state.run_state
-        ~error:(error Conflict "Goal Operation Run index is absent")
-    in
-    let%bind run =
-      Result.of_option
-        (Run_state.find index preparation.run.id)
-        ~error:(error Conflict "Goal Operation Run is absent")
-    in
-    let%bind () =
-      if Run_authorities.is_current t.run_authorities preparation.binding ~run_id:run.id
-      then Ok ()
-      else Error (error Permission_denied "Goal Operation lost its original binding")
-    in
-    Activation_association.check_target
-      association
-      ~store
-      ~state:t.state
-      ~run
-      ~admission:preparation.admission
-  in
-  let basis () =
-    let%bind () = structural () in
-    match !current with
-    | Some observed when Recurrence_controller.is_current observed -> Ok ()
-    | Some _ | None ->
-      Error (error Conflict "Goal continuation Operation requires fresh Store custody")
-  in
-  let originals () =
-    let%bind () = Run_admission.Scope.check_current old_scope in
-    Run_preparation.Authorization.check authorization t.state
-  in
-  let policy_check () =
-    let%bind () = structural () in
-    let%bind () = Run_admission.Scope.authorize old_scope t.state in
-    let%bind () = Goal_activation_policy.check_admitted_policy policy ~state:t.state in
-    let%bind () = originals () in
-    structural ()
-  in
-  let refresh () =
-    let%bind () = policy_check () in
-    let%bind observed = Recurrence_controller.observe store t.state in
-    current := Some observed;
-    basis ()
-  in
-  Ok
-    Activation_controller.Operation.
-      { association
-      ; install =
-          (fun () -> if Goal_operation_phase.equal !phase Staged then phase := Installed)
-      ; close = (fun () -> phase := Closed)
-      ; refresh
-      ; policy =
-          (fun () ->
-            let%bind () = basis () in
-            let%bind () = policy_check () in
-            basis ())
-      ; timing =
-          (fun () ->
-            let%bind () = basis () in
-            let%bind () =
-              Goal_activation_policy.check_deadline
-                policy
-                ~state:t.state
-                ~now:(t.services.now ())
-            in
-            basis ())
-      ; authority =
-          (fun () ->
-            let%bind () = basis () in
-            let%bind () = originals () in
-            basis ())
-      ; basis
-      }
-;;
-
 let goal_resume_settlement index preparation run =
   let open Result.Let_syntax in
   let receipts =
@@ -29622,6 +30380,84 @@ let goal_resume_settlement index preparation run =
     (Run_goal_link.episode preparation.Goal_continuation.link)
     ~run
     ~receipt
+;;
+
+let joined_goal_runtime_basis t (scope : Goal_continuation.runtime_scope) =
+  let open Result.Let_syntax in
+  let%bind () = goal_runtime_scope_basis t scope in
+  let%bind () =
+    match scope.callback with
+    | Joined
+      when Option.is_none t.queued_event_borrow
+           && (not (moderator_is_borrowed t))
+           && Option.is_none t.initialization_scope -> Ok ()
+    | Pending | Executing _ | Completed _ | Joined ->
+      Error (error Conflict "Goal lifecycle ownership has not joined")
+  in
+  Run_admission.Scope.check_current
+    (Run_authorities.scope scope.continuation.binding.preparation.binding)
+;;
+
+(* Shared actual aggregate writer for a joined existing-Goal lifecycle. A Finish
+   intent alone is not terminal evidence; only the real completion candidate and
+   terminal receipt can install a settlement/handoff. *)
+let finalize_goal_runtime_settlement t scope index run =
+  let open Result.Let_syntax in
+  let preparation = scope.Goal_continuation.continuation.binding.preparation in
+  let%bind () = joined_goal_runtime_basis t scope in
+  let now, sample = completion_clock_pair t in
+  let%bind settled =
+    Run_work_settlement.prepare
+      index
+      ~state:t.state
+      ~previous:run
+      ~owned_work:run.Agent_protocol.Run.owned_work
+      ~terminal_work:run.terminal_work
+      ~operation_id:None
+      ~now
+  in
+  let%bind settled_run =
+    Result.of_option
+      (Run_state.find settled run.id)
+      ~error:(error Conflict "Goal aggregate lost its Run")
+  in
+  match settled_run.lifecycle with
+  | Waiting _ ->
+    Error (error Internal_error "Goal aggregate introduced a wake without a callback")
+  | Admitted | Active -> Ok None
+  | Terminal _ ->
+    let%bind candidate =
+      prepare_transition t ~delta:(Run_state_changed settled) ~payloads:[]
+    in
+    let%bind acknowledgement = Goal_runtime_acknowledgement.prepare t scope ~candidate in
+    let%bind completions = prepare_completion_plan t candidate (Some sample) in
+    let%bind settlement = goal_resume_settlement settled preparation settled_run in
+    let%bind handoff =
+      match preparation.cause with
+      | Resume_command _ ->
+        Ok
+          (Goal_runtime_handoff.Resume
+             (Goal_resume_result.Continuation.Settled settlement))
+      | Pending_wake _ ->
+        Ok (Goal_runtime_handoff.Existing_execution (Lifecycle_settlement settlement))
+      | Claimed_job _ ->
+        Error (error Invalid_request "claimed Job cannot settle a lifecycle callback")
+    in
+    let%bind () =
+      persist_transition
+        ~check_before_commit:(fun () ->
+          let%bind () = joined_goal_runtime_basis t scope in
+          Goal_runtime_acknowledgement.check acknowledgement ~actor:t ~candidate)
+        t
+        candidate
+    in
+    install_committed_transition ~goal_runtime_acknowledgement:acknowledgement t candidate;
+    Option.iter
+      completions
+      ~f:(Recurrence_runtime.install_completions t.recurrence_runtime);
+    preparation.runtime_phase <- Handed_off (scope, handoff);
+    publish_committed_transition t candidate;
+    Ok (Some settlement)
 ;;
 
 let continue_goal_episode_internal t continuation =
@@ -29686,64 +30522,15 @@ let continue_goal_episode_internal t continuation =
          Goal_resume_result.Resumed
            { receipt = Goal_continuation.receipt continuation; continuation = result }
        | Admitted | Active ->
-         let%bind () = check_runtime_construction_effect (Existing_goal continuation) in
-         let now, sample = completion_clock_pair t in
-         let%bind settled =
-           Run_work_settlement.prepare
-             index
-             ~state:t.state
-             ~previous:run
-             ~owned_work:run.owned_work
-             ~terminal_work:run.terminal_work
-             ~operation_id:None
-             ~now
-         in
-         let%bind settled_run =
-           Result.of_option
-             (Run_state.find settled run.id)
-             ~error:(error Conflict "Goal aggregate lost its Run")
-         in
-         (match settled_run.lifecycle with
-          | Terminal _ ->
-            let%bind candidate =
-              prepare_transition t ~delta:(Run_state_changed settled) ~payloads:[]
-            in
-            let%bind acknowledgement =
-              Goal_runtime_acknowledgement.prepare t scope ~candidate
-            in
-            let%bind completions = prepare_completion_plan t candidate (Some sample) in
-            let%bind settlement =
-              goal_resume_settlement settled preparation settled_run
-            in
-            let result = Goal_resume_result.Continuation.Settled settlement in
-            let%bind () =
-              persist_transition
-                ~check_before_commit:(fun () ->
-                  let%bind () =
-                    check_runtime_construction_effect (Existing_goal continuation)
-                  in
-                  Goal_runtime_acknowledgement.check acknowledgement ~actor:t ~candidate)
-                t
-                candidate
-            in
-            install_committed_transition
-              ~goal_runtime_acknowledgement:acknowledgement
-              t
-              candidate;
-            Option.iter
-              completions
-              ~f:(Recurrence_runtime.install_completions t.recurrence_runtime);
-            preparation.runtime_phase <- Handed_off (scope, Resume result);
-            publish_committed_transition t candidate;
+         let%bind settlement = finalize_goal_runtime_settlement t scope index run in
+         (match settlement with
+          | Some settlement ->
             Ok
               (Goal_resume_result.Resumed
                  { receipt = Goal_continuation.receipt continuation
-                 ; continuation = result
+                 ; continuation = Goal_resume_result.Continuation.Settled settlement
                  })
-          | Waiting _ ->
-            Error
-              (error Internal_error "Goal aggregate introduced a wake without a callback")
-          | Admitted | Active ->
+          | None ->
             let pending_finish =
               List.exists (Run_state.intents index) ~f:(fun intent ->
                 Agent_protocol.Id.Run.equal intent.Run_intent.receipt.run_id run.id
@@ -29758,6 +30545,9 @@ let continue_goal_episode_internal t continuation =
               Error
                 (error Conflict "Goal continuation still awaits its actual Finish work")
             else (
+              let%bind () =
+                check_runtime_construction_effect (Existing_goal continuation)
+              in
               let%bind recovery =
                 History_continuation.prepare t.state ~retiring_history:false
               in
@@ -29795,40 +30585,11 @@ let continue_goal_episode_internal t continuation =
                   ~payloads:
                     (History_continuation.payloads recovery @ Turn_admission.payloads turn)
               in
-              let%bind controller = goal_resume_operation_controller t scope in
-              let old_scope = Run_authorities.scope preparation.binding in
-              let%bind original =
-                Result.of_option
-                  (Run_admission.Scope.original_actor old_scope)
-                  ~error:
-                    (error
-                       Permission_denied
-                       "Goal continuation has no original Run authority")
+              let%bind ack = prepare_goal_operation_ack t scope ~operation ~candidate in
+              let controller =
+                ack.Goal_runtime_operation_acknowledgement.held.proof.controller
               in
-              let proof : Held_operation.Proof.t =
-                { scope = old_scope
-                ; run
-                ; admission = preparation.admission
-                ; source = continuation.binding.source
-                ; operation
-                ; worker = scope.worker
-                ; binding = preparation.binding
-                ; controller
-                }
-              in
-              let held : Held_operation.t =
-                { proof; phase = Staged; target_current = None }
-              in
-              let owner : Operation_owner.t =
-                { operation_id = operation.id
-                ; admission =
-                    create_agent_admission (Some (create_agent_custody original))
-                ; held = Some held
-                }
-              in
-              let ack : Goal_runtime_operation_acknowledgement.t =
-                { previous = t.state; candidate; scope; held; owner }
-              in
+              let owner = ack.owner in
               let%bind fact = Goal_runtime_acknowledgement.prepare t scope ~candidate in
               let attempted = ref false in
               let installed = ref false in
@@ -29874,6 +30635,173 @@ let continue_goal_episode_internal t continuation =
   match proceed () with
   | Ok result -> Ok result
   | Error error -> failed error
+;;
+
+let with_goal_wake_scope t execution f =
+  let open Result.Let_syntax in
+  let%bind scope = select_goal_runtime t execution in
+  let%bind wake = Goal_execution_runtime.wake execution in
+  let%bind () = check_runtime_construction_effect (Existing_goal execution) in
+  let%bind () =
+    match
+      scope.callback, execution.Goal_continuation.binding.preparation.runtime_phase
+    with
+    | Joined, (Installed _ | Callback_completed _) -> Ok ()
+    | ( (Pending | Executing _ | Completed _ | Joined)
+      , ( Unclaimed
+        | Starting_writer _
+        | Starting_acknowledged
+        | Running_writer _
+        | Constructing
+        | Installed _
+        | Callback_completed _
+        | Handed_off _
+        | Retired _
+        | Closed ) ) ->
+      Error (error Conflict "Goal wake has no unconsumed joined runtime")
+  in
+  f scope wake
+;;
+
+let enqueue_goal_wake_job_internal t execution delivery before after =
+  with_goal_wake_scope t execution (fun scope wake ->
+    if
+      Option.exists
+        (Run_job_delivery.Key.of_wake wake)
+        ~f:(Run_job_delivery.Key.equal (Run_job_delivery.key delivery))
+    then enqueue_run_job_delivery ~goal_runtime_scope:scope t delivery before after
+    else Error (error Conflict "Goal wake differs from retained Job delivery"))
+;;
+
+let claim_goal_wake_schedule_internal t execution expected =
+  with_goal_wake_scope t execution (fun scope wake ->
+    let open Result.Let_syntax in
+    let%bind current = find_schedule t expected.Agent_protocol.Schedule.id in
+    let%bind () =
+      if
+        Jsonaf.exactly_equal
+          (Agent_protocol.Schedule.to_json current)
+          (Agent_protocol.Schedule.to_json expected)
+      then Ok ()
+      else Error (error Conflict "Goal wake schedule changed before claim")
+    in
+    match wake.occurrence with
+    | Delivered_timer { schedule_id; _ }
+      when Agent_protocol.Id.Schedule.equal schedule_id current.id ->
+      claim_schedule ~goal_runtime_scope:scope t current.id current.generation
+    | Delivered_timer _ | Job_completion _ | Subscription_delivery _ ->
+      Error (error Conflict "Goal wake differs from claimed schedule"))
+;;
+
+let complete_goal_wake_schedule_internal t execution expected before manager after =
+  with_goal_wake_scope t execution (fun scope wake ->
+    match wake.occurrence with
+    | Delivered_timer { schedule_id; _ }
+      when Agent_protocol.Id.Schedule.equal
+             schedule_id
+             expected.Agent_protocol.Schedule.id ->
+      complete_schedule
+        ~goal_runtime_scope:scope
+        t
+        expected.id
+        expected.generation
+        (Some before)
+        (Some expected)
+        (Some after)
+        (Some manager)
+    | Delivered_timer _ | Job_completion _ | Subscription_delivery _ ->
+      Error (error Conflict "Goal wake differs from completed schedule"))
+;;
+
+let deliver_goal_wake_job_internal t execution expected before after =
+  with_goal_wake_scope t execution (fun scope wake ->
+    match wake.occurrence with
+    | Job_completion { job_id; attempt }
+      when Agent_protocol.Id.Job.equal job_id expected.Agent_protocol.Job.id
+           && Int.equal attempt expected.attempt ->
+      deliver_job_without_legacy
+        ~goal_runtime_scope:scope
+        t
+        expected.id
+        expected.generation
+        (Some before)
+        (Some expected)
+        (Some after)
+      |> Result.map ~f:ignore
+    | Job_completion _ | Delivered_timer _ | Subscription_delivery _ ->
+      Error (error Conflict "Goal wake differs from completed Job"))
+;;
+
+let finish_goal_wake_runtime_internal t execution =
+  let open Result.Let_syntax in
+  let preparation = execution.Goal_continuation.binding.preparation in
+  let%bind scope = select_goal_runtime t execution in
+  let%bind () =
+    if
+      Option.is_none t.queued_event_borrow
+      && (not (moderator_is_borrowed t))
+      && Option.is_none t.initialization_scope
+    then Ok ()
+    else Error (error Conflict "Goal wake callback has not joined")
+  in
+  let result handoff =
+    match handoff with
+    | Goal_execution_handoff.Queued_event event ->
+      Ok (Goal_execution_runtime.Wake_result.Queued event)
+    | Subscription_turn operation ->
+      Ok (Goal_execution_runtime.Wake_result.Started operation)
+    | Lifecycle_wait wake -> Ok (Goal_execution_runtime.Wake_result.Waiting wake)
+    | Lifecycle_settlement settlement ->
+      Ok (Goal_execution_runtime.Wake_result.Settled settlement)
+    | Claimed_job_resource _ -> Error (error Invalid_request "claimed Job is not a wake")
+  in
+  match preparation.runtime_phase with
+  | Handed_off (current, Existing_execution handoff) when phys_equal current scope ->
+    result handoff
+  | Unclaimed
+  | Starting_writer _
+  | Starting_acknowledged
+  | Running_writer _
+  | Constructing
+  | Installed _
+  | Callback_completed _
+  | Handed_off _
+  | Retired _
+  | Closed ->
+    let%bind () = joined_goal_runtime_basis t scope in
+    let%bind previous = Goal_execution_runtime.wake execution in
+    let%bind index =
+      Result.of_option
+        t.state.run_state
+        ~error:(error Conflict "Goal wake Run index is absent")
+    in
+    let%bind run =
+      Result.of_option
+        (Run_state.find index preparation.run.id)
+        ~error:(error Conflict "Goal wake Run is absent")
+    in
+    let%bind handoff =
+      match run.lifecycle with
+      | Terminal _ ->
+        let%map settlement = goal_resume_settlement index preparation run in
+        Goal_execution_handoff.Lifecycle_settlement settlement
+      | Waiting wake when not (Agent_protocol.Run_wake.equal previous wake) ->
+        (* A genuinely joined callback wrote this distinct Wait. Returning its
+           factual ACK neither Enables nor starts another Operation. *)
+        Ok (Goal_execution_handoff.Lifecycle_wait wake)
+      | Admitted | Active ->
+        let%bind settlement = finalize_goal_runtime_settlement t scope index run in
+        (match settlement with
+         | Some settlement -> Ok (Goal_execution_handoff.Lifecycle_settlement settlement)
+         | None -> Error (error Conflict "Goal wake has no joined lifecycle outcome"))
+      | Waiting _ ->
+        Error
+          (error
+             Conflict
+             "Goal wake has no acknowledged handoff or new lifecycle outcome")
+    in
+    preparation.runtime_phase <- Handed_off (scope, Existing_execution handoff);
+    result handoff
 ;;
 
 let initialization_construction_resource t construction scope owner =
@@ -31597,6 +32525,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
           | Admit binding -> admit_goal_resume_internal t binding
           | Close preparation -> end_goal_continuation_preparation_internal t preparation
           | Select_execution_wake request -> select_goal_runtime_wake_internal t request
+          | Reconcile_wake_authority request ->
+            reconcile_goal_wake_authority_internal t request
           | Begin_wake wake -> begin_goal_wake_preparation_internal t wake
           | Begin_job owner -> begin_goal_job_runtime_preparation_internal t owner
           | Bind_execution (preparation, source) ->
@@ -31608,7 +32538,20 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
           | Acknowledge_job_resource execution ->
             acknowledge_goal_job_runtime_internal t execution
           | Job_resource (owner, worker, inference, manager) ->
-            job_runtime_resource_internal t owner worker inference manager)
+            job_runtime_resource_internal t owner worker inference manager
+          | Claim_wake_event (execution, id, snapshot) ->
+            claim_queued_event ~goal_execution:execution t id None snapshot
+          | Enqueue_wake_job (execution, delivery, before, after) ->
+            enqueue_goal_wake_job_internal t execution delivery before after
+          | Claim_wake_schedule (execution, schedule) ->
+            claim_goal_wake_schedule_internal t execution schedule
+          | Complete_wake_schedule (execution, schedule, before, manager, after) ->
+            complete_goal_wake_schedule_internal t execution schedule before manager after
+          | Deliver_wake_job (execution, job, before, after) ->
+            deliver_goal_wake_job_internal t execution job before after
+          | Deliver_wake_notifications (execution, proposal) ->
+            deliver_idle_notifications_internal ~goal_execution:execution t proposal
+          | Finish_wake execution -> finish_goal_wake_runtime_internal t execution)
        | Effect_deferred request -> effect_deferred_request t request
        | Input_graph request -> input_graph_request t request
        | Begin_authored (continuation, startup, snapshot) ->
@@ -33309,11 +34252,17 @@ let change_schedule_with_command_audit t ~command_audit ~attachment_id ~event sc
 
 let add_schedule t schedule = call t (Add_schedule schedule)
 
-let callback_schedule_services t ~scope : Runtime_builder.schedule_services =
+let callback_schedule_services t ~(scope : Callback_scope.t)
+  : Runtime_builder.schedule_services
+  =
   let message (error : Agent_protocol.Error.t) = error.message in
+  let fresh request =
+    let%bind.Result () = refresh_held_execution t (Inference_event scope.borrow) in
+    call t request
+  in
   { after_ms =
       (fun ~delay_ms ~payload ->
-        call t (Callback_schedule_after_ms (scope, delay_ms, payload))
+        fresh (Callback_schedule_after_ms (scope, delay_ms, payload))
         |> Result.map ~f:(fun schedule ->
           Agent_protocol.Id.Schedule.to_string schedule.Agent_protocol.Schedule.id)
         |> Result.map_error ~f:message)
@@ -33323,7 +34272,7 @@ let callback_schedule_services t ~scope : Runtime_builder.schedule_services =
         let%bind schedule_id =
           Agent_protocol.Id.Schedule.of_string id |> Result.map_error ~f:message
         in
-        call t (Callback_schedule_cancel (scope, schedule_id))
+        fresh (Callback_schedule_cancel (scope, schedule_id))
         |> Result.map ~f:ignore
         |> Result.map_error ~f:message)
   }
@@ -34077,4 +35026,81 @@ let job_runtime_resource t ~owner ~worker ~inference ~moderator_manager =
 
 let end_runtime_construction t ~construction =
   call t ~priority:Priority (Held_startup (Construction (End construction)))
+;;
+
+let refresh_goal_wake execution = Runtime_construction.refresh (Existing_goal execution)
+
+let enqueue_goal_wake_job_delivery t ~execution ~delivery ~before ~after =
+  let%bind.Result () = refresh_goal_wake execution in
+  call
+    t
+    (Held_startup
+       (Goal_continuation (Enqueue_wake_job (execution, delivery, before, after))))
+;;
+
+let claim_goal_wake_schedule t ~execution ~schedule =
+  let%bind.Result () = refresh_goal_wake execution in
+  call t (Held_startup (Goal_continuation (Claim_wake_schedule (execution, schedule))))
+;;
+
+let complete_goal_wake_schedule
+      t
+      ~execution
+      ~expected
+      ~expected_schedule
+      ~moderator_manager
+      ~moderator_snapshot
+  =
+  let%bind.Result () = refresh_goal_wake execution in
+  call
+    t
+    (Held_startup
+       (Goal_continuation
+          (Complete_wake_schedule
+             ( execution
+             , expected_schedule
+             , expected
+             , moderator_manager
+             , moderator_snapshot ))))
+;;
+
+let deliver_goal_wake_job t ~execution ~job ~before ~after =
+  let%bind.Result () = refresh_goal_wake execution in
+  call
+    t
+    (Held_startup (Goal_continuation (Deliver_wake_job (execution, job, before, after))))
+;;
+
+let with_current_goal_wake_queued_event_tools t ~execution ~snapshot f =
+  let%bind.Result () = refresh_goal_wake execution in
+  with_event_tools
+    t
+    ~claim:(fun () ->
+      let open Result.Let_syntax in
+      let%bind snapshot = snapshot () in
+      let%map () = refresh_goal_wake execution in
+      match snapshot.Session.Moderator_state.Identity_snapshot.queued_internal_events with
+      | [] -> None
+      | _ :: _ ->
+        Some
+          (Held_startup
+             (Goal_continuation
+                (Claim_wake_event
+                   (execution, Agent_protocol.Id.Moderator_execution.create (), snapshot)))))
+    f
+;;
+
+let deliver_goal_wake_notifications t ~execution proposal =
+  let%bind.Result () = refresh_goal_wake execution in
+  call
+    t
+    (Held_startup (Goal_continuation (Deliver_wake_notifications (execution, proposal))))
+;;
+
+let finish_goal_wake_runtime t ~execution =
+  call t (Held_startup (Goal_continuation (Finish_wake execution)))
+;;
+
+let reconcile_goal_wake_authority t ~request =
+  call t (Held_startup (Goal_continuation (Reconcile_wake_authority request)))
 ;;

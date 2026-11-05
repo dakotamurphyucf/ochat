@@ -52,6 +52,12 @@ let interrupted (run : P.Run.t) ~evidence ~now =
       ~updated_at:now)
 ;;
 
+let matches_interrupt ~previous current =
+  match interrupted previous ~evidence:[] ~now:current.P.Run.updated_at with
+  | Ok expected -> P.Run.equal expected current
+  | Error _ -> false
+;;
+
 let interrupt_with_evidence index ~run_id ~evidence ~session_revision ~now =
   let open Result.Let_syntax in
   let%bind run =

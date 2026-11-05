@@ -37,3 +37,9 @@ val interrupt_with_evidence
   -> session_revision:int64
   -> now:Agent_protocol.Timestamp.t
   -> (Run_state.t, Agent_protocol.Error.t) result
+
+(** Exact DATA recognition of this module's canonical next-revision interruption,
+    preserving prior outcomes and marking only unresolved retained work
+    Unconfirmed. This does not authorize retirement or accept arbitrary terminal
+    states. Used to preserve source/Stop precedence during producer evidence. *)
+val matches_interrupt : previous:Agent_protocol.Run.t -> Agent_protocol.Run.t -> bool

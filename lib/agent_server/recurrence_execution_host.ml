@@ -75,6 +75,12 @@ let check_entry t entry ~session =
   Session_factory.check_registered_entry t.factory entry ~session
 ;;
 
+let check_owner t entry ~session =
+  let open Result.Let_syntax in
+  let%bind () = current t in
+  Session_factory.check_registered_owner t.factory entry ~session
+;;
+
 let check_state session (state : A.Session_state.t) =
   if P.Id.Session.equal (P.Session_ref.session_id session) state.identity.session_id
   then Ok ()
@@ -109,9 +115,18 @@ module Controller = struct
       ~session:t.session
   ;;
 
+  let authority_basis t =
+    let open Result.Let_syntax in
+    let%bind () = current t.host in
+    Session_factory.check_execution_selected_owner
+      t.host.factory
+      t.entry
+      ~session:t.session
+  ;;
+
   let authorize t state =
     let open Result.Let_syntax in
-    let%bind () = basis t in
+    let%bind () = authority_basis t in
     check_state t.session state
   ;;
 
@@ -127,6 +142,7 @@ module Controller = struct
 
   let authorize_creation t state definition =
     let open Result.Let_syntax in
+    let%bind () = basis t in
     let%bind () = authorize t state in
     let%bind () = check_definition t definition in
     match A.Recurrence_target.view (A.Recurrence_definition.target definition) with
@@ -137,6 +153,7 @@ module Controller = struct
 
   let automatic_policy t state definition =
     let open Result.Let_syntax in
+    let%bind () = basis t in
     let%bind () = authorize t state in
     let%bind () = check_definition t definition in
     match A.Recurrence_target.view (A.Recurrence_definition.target definition) with
@@ -177,6 +194,10 @@ let controller host entry =
     let%bind () = current host in
     Session_factory.check_execution_selected_entry host.factory entry ~session
   in
+  let authority_basis () =
+    let%bind () = current host in
+    Session_factory.check_execution_selected_owner host.factory entry ~session
+  in
   let%bind () = basis () in
   let scopes = P.Scope.[ Send_messages; View_session_transcript ] in
   let scopes =
@@ -185,7 +206,7 @@ let controller host entry =
   let%map principal = principal host ~scopes in
   let actor =
     Operator_authorization.guarded ~principal ~is_current:(fun () ->
-      Result.is_ok (basis ()))
+      Result.is_ok (authority_basis ()))
   in
   { Controller.host; entry; session; grant; actor }
 ;;
@@ -229,9 +250,15 @@ module Selected_target = struct
     check_entry t.controller.host t.entry ~session:t.session
   ;;
 
+  let authority_basis t =
+    let open Result.Let_syntax in
+    let%bind () = Controller.authority_basis t.controller in
+    check_owner t.controller.host t.entry ~session:t.session
+  ;;
+
   let authorize t state =
     let open Result.Let_syntax in
-    let%bind () = basis t in
+    let%bind () = authority_basis t in
     let%bind () = check_state t.session state in
     match t.family with
     | Existing -> Ok ()
@@ -244,13 +271,17 @@ module Selected_target = struct
       let%bind () = Controller.basis controller in
       check_entry controller.host entry ~session
     in
+    let authority_basis () =
+      let%bind () = Controller.authority_basis controller in
+      check_owner controller.host entry ~session
+    in
     let%bind () = basis () in
     let%map principal =
       principal controller.host ~scopes:P.Scope.[ Send_messages; View_session_transcript ]
     in
     let actor =
       Operator_authorization.guarded ~principal ~is_current:(fun () ->
-        Result.is_ok (basis ()))
+        Result.is_ok (authority_basis ()))
     in
     { controller; entry; session; actor; family }
   ;;

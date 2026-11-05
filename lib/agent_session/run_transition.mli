@@ -1,7 +1,7 @@
 (** Pure actor-side run/action composition. No I/O, authorization lookup, provider
     calls or callback execution. The actor establishes live scope/authority and
-    passes a validated prospective state from its actual staged-work delta. New
-    custody is captured even without an authored action. It persists the returned
+    passes its exact actual staged-work delta, projected and validated once by the
+    producer evidence capture helper. New custody is captured even without an authored action. It persists the returned
     delta with its prospective moderator checkpoint and actual event receipt.
 
     An exact completed initial Single_turn callback with no action, owned work
@@ -38,15 +38,15 @@ val prepare
   -> Session_state.t
   -> scope:Run_scope.t
   -> executing:Agent_protocol.Moderator_execution.t
-  -> work_state:Session_state.t
+  -> work_delta:Session_delta.t
   -> owned_work:Agent_protocol.Run_work.t list
   -> action:Agent_protocol.Run_action.t option
   -> now:Agent_protocol.Timestamp.t
   -> (t, Agent_protocol.Error.t) result
 
 (** Immediate work admission while the same retained callback is still Running.
-    The actor supplies a validated prospective state containing the actual new
-    occurrences and commits both children together. Requires nonempty newly owned
+    The actor supplies its exact sequential staged-work delta, containing the
+    actual new occurrences, and commits both children together. Requires nonempty newly owned
     work; preserves prior terminal evidence and emits no action/terminal receipt.
     It does not complete the parent callback or change its staged action. *)
 val add_owned_work
@@ -54,7 +54,7 @@ val add_owned_work
   -> Session_state.t
   -> scope:Run_scope.t
   -> executing:Agent_protocol.Moderator_execution.t
-  -> work_state:Session_state.t
+  -> work_delta:Session_delta.t
   -> owned_work:Agent_protocol.Run_work.t list
   -> now:Agent_protocol.Timestamp.t
   -> (t, Agent_protocol.Error.t) result

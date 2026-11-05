@@ -3088,6 +3088,233 @@ type background_result =
   | Completed of Agent_protocol.Completion.t
   | Pending of Agent_protocol.Job.dependency
 
+module Background_job = struct
+  type t =
+    { job : Agent_protocol.Job.t
+    ; ceiling : Chat_response.One_off_request.policy
+    ; request : Chat_response.Background_request.t
+    ; deadline : Agent_protocol.Timestamp.t
+    }
+
+  let equal_policy
+        (left : Chat_response.One_off_request.policy)
+        (right : Chat_response.One_off_request.policy)
+    =
+    let equal_compilation
+          ({ wall_seconds; max_source_bytes } : Chatml_compilation.limits)
+          (right : Chatml_compilation.limits)
+      =
+      Float.equal wall_seconds right.wall_seconds
+      && Int.equal max_source_bytes right.max_source_bytes
+    in
+    let equal_execution
+          ({ fuel
+           ; max_tasks
+           ; wall_seconds
+           ; max_value_bytes
+           ; max_array_items
+           ; max_depth
+           ; allocation_bytes
+           ; max_calls
+           ; max_invocation_depth
+           } :
+            Chatml_execution.limits)
+          (right : Chatml_execution.limits)
+      =
+      Int.equal fuel right.fuel
+      && Int.equal max_tasks right.max_tasks
+      && Float.equal wall_seconds right.wall_seconds
+      && Int.equal max_value_bytes right.max_value_bytes
+      && Int.equal max_array_items right.max_array_items
+      && Int.equal max_depth right.max_depth
+      && Int.equal allocation_bytes right.allocation_bytes
+      && Int.equal max_calls right.max_calls
+      && Int.equal max_invocation_depth right.max_invocation_depth
+    in
+    equal_compilation left.compilation right.compilation
+    && equal_execution left.execution right.execution
+    && Int.equal left.max_output_bytes right.max_output_bytes
+  ;;
+
+  let prepare ~policy job =
+    let open Result.Let_syntax in
+    let%bind request =
+      Chat_response.Background_request.of_json ~policy job.Agent_protocol.Job.payload
+    in
+    let%map deadline =
+      Result.try_with (fun () ->
+        Time_ns.add
+          (Agent_protocol.Timestamp.to_time_ns job.created_at)
+          (Time_ns.Span.of_sec
+             (Chat_response.Background_request.policy request).execution.wall_seconds)
+        |> Agent_protocol.Timestamp.of_time_ns)
+      |> Result.map_error ~f:(fun _ ->
+        Agent_protocol.Error.invalid_request
+          "background deadline is outside the supported timestamp range")
+    in
+    { job; ceiling = policy; request; deadline }
+  ;;
+
+  let deadline t = t.deadline
+end
+
+let execute_background_job_runtime t ~runtime ~execution ~request =
+  let open Result.Let_syntax in
+  let%bind () =
+    Agent_session.Session_actor.check_job_runtime_owner
+      t.actor
+      ~owner:execution.Agent_session.Session_actor.runtime_owner
+  in
+  let%bind () =
+    if
+      Option.exists
+        (Agent_session.Session_actor.Job_runtime_owner.deadline execution.runtime_owner)
+        ~f:(Agent_protocol.Timestamp.equal request.Background_job.deadline)
+    then Ok ()
+    else
+      Error
+        (Agent_protocol.Error.invalid_request
+           "background scope deadline differs from its request")
+  in
+  let%bind () = check_runtime_execution runtime in
+  Eio.Fiber.check ();
+  let%bind () =
+    Eio.Mutex.use_ro t.mutex (fun () ->
+      if Option.exists t.runtime ~f:(phys_equal runtime)
+      then Ok ()
+      else
+        Error
+          (Agent_protocol.Error.create
+             Conflict
+             ~message:"background runtime installation changed"
+             ~retryable:false
+             ()))
+  in
+  let%bind executor =
+    Result.of_option
+      runtime.background_executor
+      ~error:
+        (Agent_protocol.Error.create
+           Invalid_state
+           ~message:"generic background execution is not configured"
+           ~retryable:false
+           ())
+  in
+  let%bind () =
+    if
+      Background_job.equal_policy request.Background_job.ceiling executor.policy
+      && Jsonaf.exactly_equal
+           (Agent_protocol.Job.to_json execution.job)
+           (Agent_protocol.Job.to_json request.job)
+    then Ok ()
+    else
+      Error
+        (Agent_protocol.Error.create
+           Conflict
+           ~message:"background Job occurrence or host policy changed"
+           ~retryable:false
+           ())
+  in
+  let%bind checked = Background_job.prepare ~policy:executor.policy execution.job in
+  let%bind () =
+    if Agent_protocol.Timestamp.equal checked.deadline request.deadline
+    then Ok ()
+    else Error (Agent_protocol.Error.invalid_request "background deadline changed")
+  in
+  let deadline = request.deadline in
+  let request = checked.request in
+  if Agent_protocol.Timestamp.compare deadline (executor.now ()) <= 0
+  then Ok (Completed Agent_protocol.Completion.Expired)
+  else (
+    let%bind result =
+      let job = execution.job in
+      let is_halted () =
+        match Agent_session.Session_actor.state t.actor with
+        | Error _ -> true
+        | Ok state ->
+          state.halted
+          || Option.is_some state.failure
+          || Agent_protocol.Session.equal_desired_state state.lifecycle.desired Stopped
+          || not
+               (List.exists state.jobs ~f:(fun current ->
+                  Agent_protocol.Id.Job.equal current.id job.id
+                  && Int.equal current.generation job.generation
+                  && Int.equal current.attempt job.attempt
+                  &&
+                  match current.status with
+                  | Running | Waiting_permission _ -> true
+                  | _ -> false))
+      in
+      executor.run
+        ~job
+        ~deadline
+        ~execute:execution.execute
+        ~moderator_execute:execution.moderator_execute
+        ~claim_event:execution.claim_event
+        ~is_halted
+        ~request
+    in
+    let%bind () =
+      match result.runtime_requests with
+      | [] -> Ok ()
+      | _ ->
+        Error
+          (Agent_protocol.Error.create
+             Invalid_state
+             ~message:"background runtime request consumption is not installed"
+             ~retryable:false
+             ())
+    in
+    match result.pending, result.resolved.status with
+    | Some target, Resolved (Complete _) ->
+      (match target.invocation.status, target.invocation.context.deadline with
+       | Resolved (Pending (work, _)), Some deadline ->
+         let policy = Chat_response.Background_request.policy request in
+         Ok
+           (Pending
+              { invocation_id = target.invocation.context.id
+              ; work
+              ; deadline
+              ; completion_schema = target.completion_schema
+              ; max_output_bytes = policy.max_output_bytes
+              ; max_output_depth = policy.execution.max_depth
+              })
+       | _ ->
+         Error
+           (Agent_protocol.Error.invalid_request
+              "background Pending target has no owned work or deadline"))
+    | None, Resolved (Complete value) ->
+      Ok (Completed (Agent_protocol.Completion.Succeeded value))
+    | _, Resolved (Fail error) -> Ok (Completed (Agent_protocol.Completion.Failed error))
+    | _, Resolved (Cancelled reason) ->
+      Ok (Completed (Agent_protocol.Completion.Cancelled reason))
+    | _ ->
+      Error
+        (Agent_protocol.Error.create
+           Invalid_state
+           ~message:"background execution did not produce a terminal outcome"
+           ~retryable:false
+           ()))
+;;
+
+let execute_background_job_in_scope t ~execution ~request =
+  let module Actor = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let%bind () =
+    Actor.check_job_runtime_owner t.actor ~owner:execution.Actor.runtime_owner
+  in
+  let%bind () =
+    match Actor.Job_runtime_owner.attribution execution.runtime_owner with
+    | Ordinary -> Ok ()
+    | Goal ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "Goal background Job requires its Factory source owner")
+  in
+  with_background_runtime t (fun runtime ->
+    execute_background_job_runtime t ~runtime ~execution ~request)
+;;
+
 let execute_background_job t (job : Agent_protocol.Job.t) =
   with_background_runtime t (fun runtime ->
     let open Result.Let_syntax in
@@ -3101,102 +3328,19 @@ let execute_background_job t (job : Agent_protocol.Job.t) =
              ~retryable:false
              ())
     in
-    let%bind request =
-      Chat_response.Background_request.of_json ~policy:executor.policy job.payload
-    in
-    let%bind deadline =
-      Result.try_with (fun () ->
-        Time_ns.add
-          (Agent_protocol.Timestamp.to_time_ns job.created_at)
-          (Time_ns.Span.of_sec
-             (Chat_response.Background_request.policy request).execution.wall_seconds)
-        |> Agent_protocol.Timestamp.of_time_ns)
-      |> Result.map_error ~f:(fun _ ->
-        Agent_protocol.Error.invalid_request
-          "background deadline is outside the supported timestamp range")
-    in
-    match Agent_protocol.Timestamp.compare deadline (executor.now ()) <= 0 with
-    | true -> Ok (Completed Agent_protocol.Completion.Expired)
-    | false ->
-      let%bind result =
-        Agent_session.Session_actor.with_job_execution
-          t.actor
-          ~job_id:job.id
-          ~generation:job.generation
-          ~attempt:job.attempt
-          ~deadline:(Some deadline)
-          (fun execution ->
-             let job = execution.job in
-             let is_halted () =
-               match Agent_session.Session_actor.state t.actor with
-               | Error _ -> true
-               | Ok state ->
-                 state.halted
-                 || Option.is_some state.failure
-                 || Agent_protocol.Session.equal_desired_state
-                      state.lifecycle.desired
-                      Stopped
-                 || not
-                      (List.exists state.jobs ~f:(fun current ->
-                         Agent_protocol.Id.Job.equal current.id job.id
-                         && Int.equal current.generation job.generation
-                         && Int.equal current.attempt job.attempt
-                         &&
-                         match current.status with
-                         | Running | Waiting_permission _ -> true
-                         | _ -> false))
-             in
-             executor.run
-               ~job
-               ~deadline
-               ~execute:execution.execute
-               ~moderator_execute:execution.moderator_execute
-               ~claim_event:execution.claim_event
-               ~is_halted
-               ~request)
-      in
-      let%bind () =
-        match result.runtime_requests with
-        | [] -> Ok ()
-        | _ ->
-          Error
-            (Agent_protocol.Error.create
-               Invalid_state
-               ~message:"background runtime request consumption is not installed"
-               ~retryable:false
-               ())
-      in
-      (match result.pending, result.resolved.status with
-       | Some target, Resolved (Complete _) ->
-         (match target.invocation.status, target.invocation.context.deadline with
-          | Resolved (Pending (work, _)), Some deadline ->
-            let policy = Chat_response.Background_request.policy request in
-            Ok
-              (Pending
-                 { invocation_id = target.invocation.context.id
-                 ; work
-                 ; deadline
-                 ; completion_schema = target.completion_schema
-                 ; max_output_bytes = policy.max_output_bytes
-                 ; max_output_depth = policy.execution.max_depth
-                 })
-          | _ ->
-            Error
-              (Agent_protocol.Error.invalid_request
-                 "background Pending target has no owned work or deadline"))
-       | None, Resolved (Complete value) ->
-         Ok (Completed (Agent_protocol.Completion.Succeeded value))
-       | _, Resolved (Fail error) ->
-         Ok (Completed (Agent_protocol.Completion.Failed error))
-       | _, Resolved (Cancelled reason) ->
-         Ok (Completed (Agent_protocol.Completion.Cancelled reason))
-       | _ ->
-         Error
-           (Agent_protocol.Error.create
-              Invalid_state
-              ~message:"background execution did not produce a terminal outcome"
-              ~retryable:false
-              ())))
+    let%bind request = Background_job.prepare ~policy:executor.policy job in
+    if
+      Agent_protocol.Timestamp.compare (Background_job.deadline request) (executor.now ())
+      <= 0
+    then Ok (Completed Agent_protocol.Completion.Expired)
+    else
+      Agent_session.Session_actor.with_job_execution
+        t.actor
+        ~job_id:job.id
+        ~generation:job.generation
+        ~attempt:job.attempt
+        ~deadline:(Some (Background_job.deadline request))
+        (fun execution -> execute_background_job_runtime t ~runtime ~execution ~request))
 ;;
 
 let deliver_model_job_completion t (job : Agent_protocol.Job.t) =
@@ -3309,6 +3453,275 @@ let deliver_background_job_completion t (job : Agent_protocol.Job.t) =
       Error
         (Agent_protocol.Error.invalid_request "standalone completion adapter unavailable")
     | false, _ -> deliver_moderated_background_job_completion t runtime job)
+;;
+
+module Goal_wake_consumer = struct
+  module Actor = Agent_session.Session_actor
+  module Builder = Agent_session.Runtime_builder
+
+  let conflict message = Agent_protocol.Error.create Conflict ~message ~retryable:false ()
+
+  let manager (runtime : Builder.t) =
+    match runtime.moderator_manager with
+    | Some manager
+      when Option.is_some (Chat_response.Moderator_manager.extension_definition manager)
+      -> Ok manager
+    | Some _ | None ->
+      Error
+        (Agent_protocol.Error.create
+           Permission_denied
+           ~message:"Goal wake requires its installed extension Manager"
+           ~retryable:false
+           ())
+  ;;
+
+  let encode_frame frame =
+    Chat_response.Background_delivery.capture frame
+    |> Chatml.Chatml_value_codec.Snapshot.of_value
+    |> Result.map ~f:Chatml.Chatml_value_codec.Snapshot.to_jsonaf
+    |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+  ;;
+
+  let enqueue_retained_job t runtime execution delivery =
+    let open Result.Let_syntax in
+    match Agent_session.Run_job_delivery.disposition delivery with
+    | Pending ->
+      Actor.with_moderator_checkpoint t.actor (fun () ->
+        let%bind payload = encode_frame (Agent_session.Run_job_delivery.frame delivery) in
+        runtime.Builder.enqueue_internal_event payload ~prepare:(fun ~before ~snapshot ->
+          Actor.enqueue_goal_wake_job_delivery
+            t.actor
+            ~execution
+            ~delivery
+            ~before
+            ~after:(Builder.encode_moderator_snapshot snapshot))
+        |> Result.map ~f:ignore)
+    | Enqueued _ -> Ok ()
+    | Claimed _ | Retired _ ->
+      Error (conflict "Goal Job wake has already been claimed or retired")
+  ;;
+
+  let enqueue_latest_job t runtime execution state job_id attempt =
+    let open Result.Let_syntax in
+    let%bind job =
+      List.find state.Agent_session.Session_state.jobs ~f:(fun job ->
+        Agent_protocol.Id.Job.equal job.Agent_protocol.Job.id job_id
+        && Int.equal job.attempt attempt)
+      |> Result.of_option ~error:(conflict "Goal Job wake occurrence is absent")
+    in
+    match job.delivery with
+    | Not_required -> Error (conflict "Goal Job has no completion delivery")
+    | Delivered _ -> Ok ()
+    | Discarded _ -> Error (conflict "Goal Job completion was discarded")
+    | Pending ->
+      Actor.with_moderator_checkpoint t.actor (fun () ->
+        let prepare ~before ~snapshot =
+          Actor.deliver_goal_wake_job
+            t.actor
+            ~execution
+            ~job
+            ~before
+            ~after:(Builder.encode_moderator_snapshot snapshot)
+        in
+        match job.kind with
+        | Model_call ->
+          runtime.Builder.enqueue_model_job_completion job ~prepare
+          |> Result.map ~f:ignore
+        | Async_tool ->
+          let%bind manager = manager runtime in
+          let%bind observer =
+            Chat_response.Moderator_manager.invocation_observer manager
+            |> Result.of_option ~error:(conflict "Goal Job moderator source is absent")
+          in
+          let%bind frame =
+            Agent_session.Background_job_event.frame ~state ~observer job
+          in
+          let%bind payload = encode_frame frame in
+          runtime.enqueue_internal_event payload ~prepare |> Result.map ~f:ignore
+        | Nested_agent | Scheduled_event | Shell_process | Compaction ->
+          Error (conflict "Goal Job kind has no supported completion adapter"))
+  ;;
+
+  let enqueue_job t runtime execution state wake =
+    let open Result.Let_syntax in
+    let%bind key =
+      Agent_session.Run_job_delivery.Key.of_wake wake
+      |> Result.of_option ~error:(conflict "Goal Job wake key is absent")
+    in
+    match
+      Option.bind state.Agent_session.Session_state.run_state ~f:(fun index ->
+        Agent_session.Run_state.find_job_delivery index key)
+    with
+    | Some delivery -> enqueue_retained_job t runtime execution delivery
+    | None ->
+      (match wake.Agent_protocol.Run_wake.occurrence with
+       | Job_completion { job_id; attempt } ->
+         enqueue_latest_job t runtime execution state job_id attempt
+       | Delivered_timer _ | Subscription_delivery _ ->
+         Error (conflict "Goal Job wake changed occurrence"))
+  ;;
+
+  let enqueue_timer t runtime execution state schedule_id =
+    let open Result.Let_syntax in
+    let%bind schedule =
+      List.find state.Agent_session.Session_state.schedules ~f:(fun schedule ->
+        Agent_protocol.Id.Schedule.equal schedule.Agent_protocol.Schedule.id schedule_id)
+      |> Result.of_option ~error:(conflict "Goal timer wake occurrence is absent")
+    in
+    let%bind schedule =
+      match schedule.status with
+      | Scheduled ->
+        Actor.claim_goal_wake_schedule t.actor ~execution ~schedule
+        |> Result.bind
+             ~f:(Result.of_option ~error:(conflict "Goal timer was not claimed"))
+      | Delivering | Delivered -> Ok schedule
+      | Cancelled | Failed _ -> Error (conflict "Goal timer is no longer deliverable")
+    in
+    match schedule.status with
+    | Delivered -> Ok ()
+    | Delivering ->
+      let%bind manager = manager runtime in
+      let%bind payload =
+        Chat_response.Schedule_delivery.capture schedule
+        |> Result.bind ~f:Chatml.Chatml_value_codec.Snapshot.of_value
+        |> Result.map ~f:Chatml.Chatml_value_codec.Snapshot.to_jsonaf
+        |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+      in
+      Actor.with_moderator_checkpoint t.actor (fun () ->
+        runtime.Builder.enqueue_internal_event payload ~prepare:(fun ~before ~snapshot ->
+          Actor.complete_goal_wake_schedule
+            t.actor
+            ~execution
+            ~expected:before
+            ~expected_schedule:schedule
+            ~moderator_manager:manager
+            ~moderator_snapshot:(Builder.encode_moderator_snapshot snapshot)
+          |> Result.map ~f:ignore)
+        |> Result.map ~f:ignore)
+    | Scheduled | Cancelled | Failed _ ->
+      Error (conflict "Goal timer lost its actual delivering claim")
+  ;;
+
+  let run_queue_head t runtime execution =
+    let open Result.Let_syntax in
+    let%bind manager = manager runtime in
+    let history = ref [] in
+    let claim ~snapshot handle =
+      Actor.with_current_goal_wake_queued_event_tools
+        t.actor
+        ~execution
+        ~snapshot
+        (fun
+            ~executing
+             ~model_jobs
+             ~allocate_inference
+             ~retirement_reason
+             ~event
+             ~execute
+             ~commit
+           ->
+           let%bind state = Actor.state t.actor in
+           let%bind entries =
+             Agent_session.History_codec.all_of_protocol
+               state.conversation.canonical_history
+           in
+           history := entries;
+           handle
+             ~executing
+             ~model_jobs
+             ~allocate_inference
+             ~retirement_reason
+             ~event
+             ~execute
+             ~commit)
+    in
+    Agent_session.Moderator_event.run_queued_idle
+      ~model_recipes:runtime.Builder.model_recipes
+      ~claim
+      ~run_actions:(Actor.run_actions t.actor)
+      ?script_tools:runtime.moderator_script_tools
+      ~manager
+      ~history:(fun () -> !history)
+      ~available_tools:runtime.moderator_tools
+      ~session_meta:`Null
+      ~now:runtime.now
+      ()
+    |> Result.map ~f:ignore
+  ;;
+
+  let subscription t runtime execution ~notification_policy ~max_notifications =
+    let open Result.Let_syntax in
+    let%bind tools =
+      runtime.Builder.moderator_script_tools
+      |> Result.of_option ~error:(conflict "Goal subscription tools are absent")
+    in
+    let%bind manager = manager runtime in
+    let%bind state = Actor.state t.actor in
+    let%bind proposal =
+      Agent_session.Notification_delivery.prepare_idle_for_runtime
+        ~state
+        ~source:(Chat_response.Moderator_manager.invocation_observer manager)
+        ~current_capabilities:(Agent_session.Script_tool_calls.current_capabilities tools)
+        ~policy:notification_policy
+        ~max_count:max_notifications
+    in
+    Actor.deliver_goal_wake_notifications t.actor ~execution proposal
+    |> Result.map ~f:ignore
+  ;;
+
+  let run t runtime execution ~notification_policy ~max_notifications =
+    let open Result.Let_syntax in
+    let%bind wake = Actor.Goal_execution_runtime.wake execution in
+    let%bind state = Actor.state t.actor in
+    let%bind run =
+      Option.bind state.run_state ~f:(fun index ->
+        Agent_session.Run_state.find index wake.run_id)
+      |> Result.of_option ~error:(conflict "Goal wake Run is absent after lifecycle")
+    in
+    let%bind () =
+      match run.lifecycle with
+      | Waiting current when Agent_protocol.Run_wake.equal current wake ->
+        (match wake.occurrence with
+         | Subscription_delivery _ ->
+           subscription t runtime execution ~notification_policy ~max_notifications
+         | Delivered_timer { schedule_id; _ } ->
+           let%bind () = enqueue_timer t runtime execution state schedule_id in
+           run_queue_head t runtime execution
+         | Job_completion _ ->
+           let%bind () = enqueue_job t runtime execution state wake in
+           run_queue_head t runtime execution)
+      | Waiting _ | Terminal _ | Admitted | Active ->
+        (* The actual finisher validates a new Wait or writes the same genuine
+           Finish aggregate. No second producer is enqueued after lifecycle use. *)
+        Ok ()
+    in
+    Actor.finish_goal_wake_runtime t.actor ~execution
+  ;;
+end
+
+let run_goal_wake_runtime t ~prepared ~execution ~notification_policy ~max_notifications =
+  let module Actor = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let%bind () =
+    match Actor.Goal_execution_runtime.kind execution with
+    | Queued_wake | Subscription_wake -> Ok ()
+    | Claimed_job ->
+      Error (Agent_protocol.Error.invalid_request "claimed Job is not a wake")
+  in
+  with_joined_existing_goal_runtime
+    t
+    (Runtime_request.Existing_goal_execution { prepared; execution })
+    ~run_resume:(fun execution resume ->
+      Actor.run_goal_execution_runtime_resume t.actor ~execution ~resume)
+    (fun runtime execution _construction ->
+       Eio.Mutex.use_ro t.moderator_work_mutex (fun () ->
+         with_activity runtime (fun () ->
+           Goal_wake_consumer.run
+             t
+             runtime
+             execution
+             ~notification_policy
+             ~max_notifications)))
 ;;
 
 let close t =

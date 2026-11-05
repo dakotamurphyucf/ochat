@@ -26,9 +26,11 @@ val reconcile_entry
     of any earlier callback holding this entry's runtime. Interrupted runtime
     delivery retries an uncommitted claim; it does not turn shutdown into a
     terminal schedule failure or undo a committed/cancelled schedule.
+    The actual Factory source owner is mandatory for Goal wake execution.
     Internal composition: false constructs a stopped service and starts no fiber. *)
 val start_controlled
   :  ?recurrence_dispatcher:Recurrence_dispatcher.t
+  -> factory:Session_factory.t
   -> enabled:bool
   -> sw:Eio.Switch.t
   -> clock:_ Eio.Time.Mono.t
@@ -36,7 +38,13 @@ val start_controlled
   -> unit
   -> t
 
-val start : sw:Eio.Switch.t -> clock:_ Eio.Time.Mono.t -> registry:Session_registry.t -> t
+val start
+  :  factory:Session_factory.t
+  -> sw:Eio.Switch.t
+  -> clock:_ Eio.Time.Mono.t
+  -> registry:Session_registry.t
+  -> t
+
 val close : t -> unit
 
 (** [close] also cancels in-flight bounded recurrence preparations. Join these

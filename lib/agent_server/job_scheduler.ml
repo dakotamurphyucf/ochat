@@ -385,7 +385,14 @@ let complete_background t entry (job : Agent_protocol.Job.t) outcome =
 
 let run_background_job t entry job =
   let outcome =
-    match Runtime_owner.execute_background_job entry.Session_registry.runtime job with
+    match
+      match t.conversation_host with
+      | Factory factory -> Session_factory.execute_background_job factory entry job
+      | Background_only ->
+        Runtime_owner.execute_background_job entry.Session_registry.runtime job
+      | Developer_only ->
+        Error (P.Error.invalid_request "developer host has no conversation executor")
+    with
     | Ok outcome -> outcome
     | Error error -> Runtime_owner.Completed (failure_completion error)
   in
@@ -597,23 +604,65 @@ let delivery_pending (job : Agent_protocol.Job.t) =
   | _ -> false
 ;;
 
+let drain_delivery_idle t entry =
+  let module Actor = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  match t.conversation_host with
+  | Factory factory -> Session_factory.drain_idle_moderator factory entry
+  | Developer_only -> Ok false
+  | Background_only ->
+    let%bind () =
+      Actor.reconcile_goal_wake_authority entry.Session_registry.actor ~request:Idle
+    in
+    let%bind selection =
+      Actor.select_goal_runtime_wake entry.Session_registry.actor ~request:Idle
+    in
+    (match selection with
+     | Ordinary -> Runtime_owner.drain_idle_moderator entry.runtime
+     | No_work | Suspended_goal _ | Wake _ -> Ok false)
+;;
+
+let deliver_selected_wake t entry ~request ordinary =
+  let module Actor = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let%bind () =
+    Actor.reconcile_goal_wake_authority entry.Session_registry.actor ~request
+  in
+  let%bind selection =
+    Actor.select_goal_runtime_wake entry.Session_registry.actor ~request
+  in
+  match selection with
+  | No_work | Suspended_goal _ -> Ok ()
+  | Wake wake ->
+    (match t.conversation_host with
+     | Factory factory ->
+       Session_factory.deliver_goal_wake factory entry ~wake |> Result.map ~f:ignore
+     | Background_only | Developer_only ->
+       Error
+         (P.Error.create
+            Invalid_state
+            ~message:"Goal wake requires its Factory source owner"
+            ~retryable:false
+            ()))
+  | Ordinary ->
+    let%bind () = ordinary () in
+    drain_delivery_idle t entry |> Result.map ~f:ignore
+;;
+
 let deliver t entry (job : Agent_protocol.Job.t) =
   match current_conversation_candidate t entry job with
   | Error _ | Ok (Agent_session.Goal_execution_selection.Suspended_goal _) -> ()
   | Ok Eligible ->
-    let delivery =
-      match job.kind with
-      | Async_tool ->
-        Runtime_owner.deliver_background_job_completion entry.Session_registry.runtime job
-      | Model_call | Nested_agent | Scheduled_event | Shell_process | Compaction ->
-        Runtime_owner.deliver_model_job_completion entry.runtime job
-    in
-    (match delivery with
-     | Error _ -> ()
-     | Ok () ->
-       ignore
-         (Runtime_owner.drain_idle_moderator entry.runtime
-          : (bool, Agent_protocol.Error.t) result))
+    ignore
+      (deliver_selected_wake t entry ~request:(Job_completion job) (fun () ->
+         match job.kind with
+         | Async_tool ->
+           Runtime_owner.deliver_background_job_completion
+             entry.Session_registry.runtime
+             job
+         | Model_call | Nested_agent | Scheduled_event | Shell_process | Compaction ->
+           Runtime_owner.deliver_model_job_completion entry.runtime job)
+       : (unit, Agent_protocol.Error.t) result)
 ;;
 
 let pending_run_deliveries t entry =
@@ -647,14 +696,10 @@ let pending_run_deliveries t entry =
 
 let deliver_pending t entry =
   List.iter (pending_run_deliveries t entry) ~f:(fun delivery ->
-    match
-      Runtime_owner.deliver_run_job_completion entry.Session_registry.runtime delivery
-    with
-    | Error _ -> ()
-    | Ok () ->
-      ignore
-        (Runtime_owner.drain_idle_moderator entry.runtime
-         : (bool, Agent_protocol.Error.t) result));
+    ignore
+      (deliver_selected_wake t entry ~request:(Job_delivery delivery) (fun () ->
+         Runtime_owner.deliver_run_job_completion entry.Session_registry.runtime delivery)
+       : (unit, Agent_protocol.Error.t) result));
   match Agent_session.Session_actor.state entry.actor with
   | Error _ -> ()
   | Ok state ->

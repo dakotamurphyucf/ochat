@@ -86,7 +86,9 @@ let prompt (surface : Surface.t) (decision : Decision.t) =
     match surface, decision with
     | Legacy, Continue ->
       ( {|<tool name="recipe_source" agent="goal-resume-init.chatmd" local/>|}
-      , {|let* called = Model.call("agent_prompt_v1", `Object([
+      , {|let* timer = Schedule.after_ms(600000, `String("cancel during actual Goal Init")) in
+  let* cancelled = Schedule.cancel(timer) in
+  let* called = Model.call("agent_prompt_v1", `Object([
     {key = "prompt"; value = `String("goal-resume-init.chatmd")},
     {key = "input"; value = `String("543_GOAL_INIT_MODEL")},
     {key = "is_local"; value = `Bool(true)}
@@ -819,7 +821,14 @@ let%expect_test "cold Goal continuation runs legacy and v1 Session_resume before
            admission
            operation;
          (match surface with
-          | Legacy -> assert_constructor_model stopped final admission probe
+          | Legacy ->
+            assert_constructor_model stopped final admission probe;
+            let timer = one_actual "actual canceled Init timer" final.schedules in
+            (match timer.status with
+             | Cancelled -> ()
+             | Scheduled | Delivering | Delivered | Failed _ ->
+               failwith "actual Init timer was not canceled");
+            [%test_eq: int] 0 timer.delivery_count
           | V1 -> assert (List.is_empty final.jobs));
          let resume = completed_resume final admission in
          assert_native final admission resume;

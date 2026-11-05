@@ -11,6 +11,7 @@ type t =
   ; mutable sweeps : sweep list
   ; idle : Eio.Condition.t
   ; recurrence_dispatcher : Recurrence_dispatcher.t option
+  ; factory : Session_factory.t
   }
 
 let failure message = Agent_protocol.Error.create Interrupted ~message ~retryable:false ()
@@ -56,13 +57,13 @@ let unload_if_stopped entry observed =
        : (unit, Agent_protocol.Error.t) result)
 ;;
 
-let drain_idle_moderator entry =
+let drain_idle_moderator factory entry =
   ignore
-    (Runtime_owner.drain_idle_moderator entry.Session_registry.runtime
+    (Session_factory.drain_idle_moderator factory entry
      : (bool, Agent_protocol.Error.t) result)
 ;;
 
-let deliver_claimed entry observed (schedule : Agent_protocol.Schedule.t) =
+let deliver_claimed factory entry observed (schedule : Agent_protocol.Schedule.t) =
   match Runtime_owner.deliver_schedule entry.Session_registry.runtime schedule with
   | Error { code = Interrupted; _ } ->
     (* Runtime retirement can interrupt a delivery before its checkpoint commit.
@@ -79,19 +80,40 @@ let deliver_claimed entry observed (schedule : Agent_protocol.Schedule.t) =
     fail_claim entry schedule error;
     unload_if_stopped entry observed
   | Ok () ->
-    drain_idle_moderator entry;
+    drain_idle_moderator factory entry;
     unload_if_stopped entry observed
 ;;
 
-let claim entry observed (schedule : Agent_protocol.Schedule.t) =
+let claim_ordinary factory entry observed (schedule : Agent_protocol.Schedule.t) =
   match
     Agent_session.Session_actor.claim_schedule
       entry.Session_registry.actor
       ~schedule_id:schedule.Agent_protocol.Schedule.id
       ~generation:schedule.generation
   with
-  | Ok (Some schedule) -> deliver_claimed entry observed schedule
+  | Ok (Some schedule) -> deliver_claimed factory entry observed schedule
   | Ok None | Error _ -> ()
+;;
+
+let claim t entry observed (schedule : Agent_protocol.Schedule.t) =
+  let module Actor = Agent_session.Session_actor in
+  let selection =
+    let open Result.Let_syntax in
+    let request = Actor.Goal_execution_runtime.Wake_request.Timer schedule in
+    let%bind () =
+      Actor.reconcile_goal_wake_authority entry.Session_registry.actor ~request
+    in
+    Actor.select_goal_runtime_wake entry.actor ~request
+  in
+  match selection with
+  | Error _ | Ok (No_work | Suspended_goal _) -> ()
+  | Ok Ordinary -> claim_ordinary t.factory entry observed schedule
+  | Ok (Wake wake) ->
+    (* The fixed consumer owns its actual producer claim. Do not preclaim here,
+       and never turn its source/known-ACK failure into an ordinary retry. *)
+    ignore
+      (Session_factory.deliver_goal_wake t.factory entry ~wake
+       : (Session_factory.Goal_wake_result.t, Agent_protocol.Error.t) result)
 ;;
 
 let process_entry t entry =
@@ -99,8 +121,8 @@ let process_entry t entry =
   | Error _ -> ()
   | Ok (observed, schedules) ->
     List.iter schedules ~f:(fun schedule ->
-      if not (Atomic.get t.closed) then claim entry observed schedule);
-    if not (Atomic.get t.closed) then drain_idle_moderator entry
+      if not (Atomic.get t.closed) then claim t entry observed schedule);
+    if not (Atomic.get t.closed) then drain_idle_moderator t.factory entry
 ;;
 
 let dispatch_entry t sw entry =
@@ -109,7 +131,15 @@ let dispatch_entry t sw entry =
     t.busy <- entry :: t.busy;
     Eio.Fiber.fork ~sw (fun () ->
       Exn.protect
-        ~f:(fun () -> if not (Atomic.get t.closed) then process_entry t entry)
+        ~f:(fun () ->
+          try if not (Atomic.get t.closed) then process_entry t entry with
+          | Eio.Cancel.Cancelled _ as exn ->
+            (* A Stop can cancel this session's joined runtime scope while the
+               scheduler worker remains live. Preserve caller cancellation, but
+               do not fail the shared daemon switch for a local interruption. *)
+            let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+            if Eio.Fiber.is_cancelled ()
+            then Exn.raise_with_original_backtrace exn backtrace)
         ~finally:(fun () ->
           t.busy <- List.filter t.busy ~f:(fun active -> not (phys_equal active entry));
           if List.is_empty t.busy then Eio.Condition.broadcast t.idle)))
@@ -179,20 +209,23 @@ let rec run t sw clock registry =
     run t sw clock registry)
 ;;
 
-let start_controlled ?recurrence_dispatcher ~enabled ~sw ~clock ~registry () =
+let start_controlled ?recurrence_dispatcher ~factory ~enabled ~sw ~clock ~registry () =
   let t =
     { closed = Atomic.make (not enabled)
     ; busy = []
     ; sweeps = []
     ; idle = Eio.Condition.create ()
     ; recurrence_dispatcher
+    ; factory
     }
   in
   if enabled then Eio.Fiber.fork ~sw (fun () -> run t sw clock registry);
   t
 ;;
 
-let start ~sw ~clock ~registry = start_controlled ~enabled:true ~sw ~clock ~registry ()
+let start ~factory ~sw ~clock ~registry =
+  start_controlled ~factory ~enabled:true ~sw ~clock ~registry ()
+;;
 
 let close t =
   Atomic.set t.closed true;

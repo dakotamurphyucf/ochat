@@ -154,6 +154,23 @@ let exercise selection =
             let execution =
               Host.Target.execution selected ~intent:occurrence.intent |> protocol_ok
             in
+            Registry.with_loaded_read
+              (Daemon.registry daemon)
+              (state target).identity.session_id
+              (fun actual ->
+                 assert (phys_equal actual target);
+                 assert (Operator_authorization.is_current actor);
+                 assert (Operator_authorization.is_current target_actor);
+                 Host.Controller.authorize selected_controller (state controller)
+                 |> protocol_ok;
+                 Host.Target.authorize selected (state target) |> protocol_ok;
+                 (match Host.Target.execution selected ~intent:occurrence.intent with
+                  | Error error ->
+                    [%test_eq: P.Error.code] Conflict error.code;
+                    assert (not error.retryable)
+                  | Ok _ -> failwith "new execution ignored its read reservation");
+                 Ok ())
+            |> protocol_ok;
             let bind host =
               let controller = Host.controller host controller |> protocol_ok in
               let target = Host.existing_target controller ~target |> protocol_ok in

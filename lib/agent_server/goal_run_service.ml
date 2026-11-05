@@ -79,9 +79,12 @@ module Context = struct
 
   let authorize t state =
     let open Result.Let_syntax in
-    let%bind () = check_entry t in
+    let check_owner () =
+      Factory.check_registered_owner t.service.factory t.entry ~session:t.session
+    in
+    let%bind () = check_owner () in
     let%bind () = t.service.authorize t.actor state in
-    check_entry t
+    check_owner ()
   ;;
 
   let receipt t =

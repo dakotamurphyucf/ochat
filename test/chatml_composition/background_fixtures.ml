@@ -16,6 +16,7 @@ let with_background_daemon
       ?(sources = [])
       ?model_post_stream
       ?(map_inference_policy = Fn.id)
+      ?(on_started = ignore)
       ?(runtime_policy = Agent_server.Daemon.default_options.chatml_runtime_policy)
       ?(expected_model_calls = 0)
       ?before_start
@@ -168,6 +169,7 @@ let with_background_daemon
                 shutdown daemon ~stage:"first daemon";
                 stage := "first daemon stopped")
               ~f:(fun () ->
+                on_started daemon;
                 List.iter
                   (Agent_session.Prompt_catalog.entries
                      (Agent_server.Daemon.prompts daemon))
