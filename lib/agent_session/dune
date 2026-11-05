@@ -191,6 +191,7 @@
   instruction_selection
   instruction_transition
   goal_command_transition
+  goal_control_transition
   goal_command_admission
   goal_catalog_source
   moderator_source_installation
@@ -345,6 +346,7 @@
   goal_admission_policy
   goal_ledger_reconciliation
   goal_work_attribution
+  goal_execution_selection
   goal_charge_admission
   host_turn_tracking
   goal_host_turn_admission

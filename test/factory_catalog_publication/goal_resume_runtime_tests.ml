@@ -983,6 +983,14 @@ let%expect_test
                 (Open (Held Operator_pause))
                 (G.state (Goal.goal waiting_held)));
             assert (P.Run.equal (run current admission) (run waiting_held admission));
+            (match
+               A.Goal_execution_selection.of_run waiting_held (run waiting_held admission)
+               |> protocol_ok
+             with
+             | Suspended_goal { goal_id; hold } ->
+               assert (P.Id.Goal.equal goal_id Goal.goal_id);
+               assert (G.Hold.equal hold Operator_pause)
+             | Eligible -> failwith "Held passive Goal wake was eligible");
             let schedules = List.map current.schedules ~f:P.Schedule.Storage.to_json in
             assert (
               List.equal
@@ -1019,6 +1027,21 @@ let%expect_test
             let resumed_waiting = settled_snapshot entry in
             Staging.assert_existing_episode waiting_held resumed_waiting;
             assert (G.State.equal (Open Enabled) (G.state (Goal.goal resumed_waiting)));
+            (match
+               A.Goal_execution_selection.of_run
+                 resumed_waiting
+                 (run resumed_waiting admission)
+               |> protocol_ok
+             with
+             | Eligible -> ()
+             | Suspended_goal _ -> failwith "resumed passive Goal wake remained suspended");
+            let selected_run = run resumed_waiting admission in
+            let stale_run = run stopped admission in
+            assert (not (P.Run.equal selected_run stale_run));
+            [%test_eq: P.Error.code]
+              Conflict
+              (A.Goal_execution_selection.of_run resumed_waiting stale_run |> rejected)
+                .code;
             assert (
               List.equal
                 Jsonaf.exactly_equal

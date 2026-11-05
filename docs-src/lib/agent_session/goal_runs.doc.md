@@ -190,6 +190,27 @@ cancellation leaves it unachieved. Explicit Hold retires pending activation even
 when its save fails; an automatic budget hold preserves the same already-admitted
 inference while denying fresh work.
 
-Selective continuation controls and configurable Goal helpers remain separate
-integration work. This component adds no second Workflow
-scheduler and does not complete end-to-end goal automation by itself.
+## Selective control transitions
+
+`Goal_control_transition` prepares retirement of future executable work in the
+same transaction as a fresh Hold command. It retires the selected Goal's pending
+Continue intents and pending Turn/Compact follow-ups using their retained Run
+association. It preserves passive Waits, Finish intents, admitted work, accounting
+and immutable outcomes. Unrelated work remains unchanged. An End_session request
+keeps its existing precedence over Turn/Compact; Hold does not suppress that stop
+request. A retained command returns its existing receipt without applying another
+retirement transition.
+
+Session Stop first saves a safety disposition for goals and recurrences. Enabled
+Goals become Held with `Operator_pause`, and existing hold reasons remain intact.
+This update uses no Goal command-receipt slot, so a full receipt collection does
+not prevent stopping. A later cancellation failure does not undo the saved hold
+or imply that cancellation completed.
+
+`Goal_execution_selection` supplies snapshot-only `Eligible` or `Suspended_goal`
+classification for an exact retained Run. Stale Run/episode/source evidence and
+closed Goals are rejected. Eligibility grants no authority: actual schedulers and
+execution owners must repeat their occurrence, original-permission and final
+admission checks. Wiring suspension through all wake consumers and configurable
+Goal helpers remains integration work. These components add no second Workflow
+scheduler and do not complete end-to-end goal automation by themselves.

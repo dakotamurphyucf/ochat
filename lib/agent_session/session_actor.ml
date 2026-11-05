@@ -5219,6 +5219,7 @@ let install
       ?commit_attempted
       ?job_custody
       ?completion_sample
+      ?(explicit_goal_holds = [])
       t
       transition
   =
@@ -5267,6 +5268,11 @@ let install
       t
       transition
   in
+  (* Fresh explicit controls revoke admitted policy cells at their actual
+     writer ACK, including a Hold equal to an automatic hold. Publication can
+     yield or fail, so it cannot own this denial. Failed saves never reach here;
+     automatic admission holds do not supply these control IDs. *)
+  List.iter explicit_goal_holds ~f:(invalidate_goal_inference_allocations t);
   install_committed_transition
     ?goal_runtime_acknowledgement
     ?queued_claim_acknowledgement
@@ -7400,36 +7406,61 @@ let cancel_independent_moderator t =
 ;;
 
 (* This safety disposition is durable before Stop effects. Its commit must not
-   accept the original Stop audit: a later Stop failure leaves recurrences paused
-   without claiming that stopping or external cancellation completed. The same
+   accept the original Stop audit: a later Stop failure leaves future Goal and
+   recurrence work paused without claiming that external cancellation completed. The same
    serialized command restores the original audit for its final Stop commit. *)
-let pause_recurrences_before_stop t =
+let pause_capabilities_before_stop t =
   let open Result.Let_syntax in
   let%bind paused =
     match t.state.recurrence_catalog with
     | None -> Ok None
     | Some catalog -> Recurrence_catalog.pause_for_stop catalog
   in
-  match paused with
-  | None -> Ok false
-  | Some catalog ->
+  let%bind goals = Goal_control_transition.prepare_stop t.state in
+  let changes =
+    Option.to_list goals
+    @ Option.to_list
+        (Option.map paused ~f:(fun catalog ->
+           Session_delta.Recurrence_catalog_changed catalog))
+  in
+  let goal_ids =
+    Option.value_map t.state.goal_catalog ~default:[] ~f:(fun catalog ->
+      List.filter_map (Goal_catalog.goals catalog) ~f:(fun goal ->
+        match Agent_protocol.Goal.state goal with
+        | Open (Enabled | Held _) -> Some (Agent_protocol.Goal.id goal)
+        | Closed _ -> None))
+  in
+  let retire_startups () = List.iter goal_ids ~f:(retire_goal_activation t) in
+  match changes with
+  | [] ->
+    (* An explicit Stop also revokes a pending startup whose Goal is already
+       Held. This is monotone local revocation, not a new durable command ACK. *)
+    retire_startups ();
+    Ok false
+  | changes ->
     let audit = t.command_audit in
     Exn.protect
       ~finally:(fun () -> t.command_audit <- audit)
       ~f:(fun () ->
         t.command_audit <- None;
-        let%map _ =
-          transition
+        let%bind candidate =
+          prepare_transition t ~delta:(Session_delta.Batch changes) ~payloads:[]
+        in
+        let%map () =
+          install
+            ~explicit_goal_holds:goal_ids
+            ~check_before_commit:(fun () ->
+              retire_startups ();
+              Ok ())
             t
-            ~delta:(Session_delta.Recurrence_catalog_changed catalog)
-            ~payloads:[]
+            candidate
         in
         true)
 ;;
 
 let stop_internal ?parent_stop_epoch ?managed_receipt t mode =
   let open Result.Let_syntax in
-  let%bind recurrence_paused = pause_recurrences_before_stop t in
+  let%bind capabilities_paused = pause_capabilities_before_stop t in
   let%bind extension_work =
     Extension_stop.prepare ~state:t.state ~mode ~now:(t.services.now ())
   in
@@ -7439,7 +7470,7 @@ let stop_internal ?parent_stop_epoch ?managed_receipt t mode =
     let%map session =
       match t.state.lifecycle.desired, t.state.lifecycle.observed with
       | Stopped, Stopped
-        when (not recurrence_paused)
+        when (not capabilities_paused)
              && (not t.state.pending_initial_start)
              && Option.for_all t.initialization_scope ~f:(fun scope ->
                match scope.Initialization_scope.callback with
@@ -30220,6 +30251,17 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         match prepared.delta with
         | None -> Ok ()
         | Some delta ->
+          let%bind delta =
+            match request.Goal_command.mutation with
+            | Hold (goal_id, _) ->
+              Goal_control_transition.prepare_hold t.state ~goal_id ~delta
+            | Create _
+            | Revise_objective _
+            | Record_progress _
+            | Change_budget _
+            | Adopt_source _
+            | Abandon _ -> Ok delta
+          in
           let%bind transition = prepare_transition t ~delta ~payloads:[] in
           let%bind () = Goal_command_admission.check_write actor ~authorize t.state in
           let check_before_commit =
@@ -30241,18 +30283,17 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
             | Adopt_source _
             | Abandon _ -> None
           in
-          let%map () = install ?check_before_commit t transition in
-          (* An explicit Hold is a revocation even when an earlier automatic
-             budget hold has exactly the same public value. Retained retries
-             and failed persistence never enter this acknowledged fresh branch. *)
-          (match request.Goal_command.mutation with
-           | Hold (id, _) -> invalidate_goal_inference_allocations t id
-           | Create _
-           | Revise_objective _
-           | Record_progress _
-           | Change_budget _
-           | Adopt_source _
-           | Abandon _ -> ())
+          let explicit_goal_holds =
+            match request.Goal_command.mutation with
+            | Hold (id, _) -> [ id ]
+            | Create _
+            | Revise_objective _
+            | Record_progress _
+            | Change_budget _
+            | Adopt_source _
+            | Abandon _ -> []
+          in
+          install ?check_before_commit ~explicit_goal_holds t transition
       in
       prepared.receipt
     | Update_metadata (attachment_id, expected_metadata_revision, patch) ->
