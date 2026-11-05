@@ -65,12 +65,12 @@ let manifest_path daemon revision =
        "manifest.sexp")
 ;;
 
-let with_driver daemon sw controllers target f =
+let with_driver ?(other_targets = []) daemon sw controllers target f =
   let session_id entry = (state entry).identity.session_id in
   let grant controller =
     Configuration.Controller.create
       ~session_id:(session_id controller)
-      ~existing_targets:[ session_id target ]
+      ~existing_targets:(List.map (target :: other_targets) ~f:session_id)
       ~captured_children:false
     |> protocol_ok
   in
@@ -417,4 +417,529 @@ let%expect_test "missing initial source completion never creates a replacement r
      performs no read, replacement request, controller record or effect";
   [%expect
     {| actual attachment during failed source preparation prevents completion; next pass performs no read, replacement request, controller record or effect |}]
+;;
+
+let%expect_test "bounded cursor reaches an independent target past 32 busy candidates" =
+  with_fixture
+    ~max_root_agents:3
+    (fun env sw daemon controller _runtime _revision counters ->
+       Source.with_loaded_entry
+         daemon
+         (fun ~entry:busy ~runtime:busy_runtime ~revision:_ ->
+            Source.with_loaded_entry
+              daemon
+              (fun ~entry:independent ~runtime:_ ~revision:_ ->
+                 let busy_id =
+                   P.Id.Recurrence.of_string "rec_485_a_busy" |> protocol_ok
+                 in
+                 let independent_id =
+                   P.Id.Recurrence.of_string "rec_485_z_independent" |> protocol_ok
+                 in
+                 let frontier id =
+                   Catalog.find
+                     (Option.value_exn (state controller).recurrence_catalog)
+                     id
+                   |> Option.value_exn
+                   |> Entry.frontier
+                   |> protocol_ok
+                 in
+                 let keys id =
+                   Frontier.ready (frontier id) |> List.map ~f:A.Recurrence_nominal.key
+                 in
+                 let command key mutation =
+                   let current = state controller in
+                   let catalog =
+                     Option.value current.recurrence_catalog ~default:Catalog.empty
+                   in
+                   let _, source = A.Goal_catalog_source.capture current |> protocol_ok in
+                   let request =
+                     A.Recurrence_command.create
+                       ~session_id:current.identity.session_id
+                       ~generation:current.identity.generation
+                       ~source:(Some source)
+                       ~expected_lifecycle_revision:
+                         (Some P.Session_lifecycle.Revision.zero)
+                       ~expected_catalog_revision:(Catalog.revision catalog)
+                       ~expected_control_revision:
+                         (Option.map
+                            (Catalog.find
+                               catalog
+                               (A.Recurrence_command.Mutation.id mutation))
+                            ~f:Entry.control_revision)
+                       ~key:(P.Idempotency_key.of_string key |> protocol_ok)
+                       ~mutation
+                     |> protocol_ok
+                   in
+                   Actor.recurrence_command
+                     controller.actor
+                     ~actor:original
+                     ~authorize
+                     ~request
+                   |> protocol_ok
+                   |> ignore
+                 in
+                 let create id target ~policy ~first_due =
+                   let current = state target in
+                   let session =
+                     P.Session_ref.create
+                       ~server_id:
+                         (Agent_store.Session_store.server_id (Daemon.store daemon))
+                       ~session_id:current.identity.session_id
+                   in
+                   let target =
+                     A.Recurrence_target.create_existing
+                       ~session
+                       ~source:(A.Recurrence_source.installed current |> protocol_ok)
+                       ~configuration_revision:current.spec.configuration_revision
+                       ~input:
+                         { kind = Plain_text
+                         ; text = "485 independent cursor work"
+                         ; attachments = []
+                         }
+                     |> protocol_ok
+                   in
+                   let period =
+                     Recurrence_rules.Rule.Period.create_ms 1000L
+                     |> Result.map_error ~f:(fun error ->
+                       Sexp.to_string_hum (Recurrence_rules.Timing_error.sexp_of_t error))
+                     |> Result.ok_or_failwith
+                   in
+                   let schedule =
+                     A.Recurrence_definition.Schedule.Interval
+                       { rule =
+                           Recurrence_rules.Rule.Interval.create ~mode:Fixed_rate ~period
+                       ; first_due
+                       }
+                   in
+                   let name = P.Id.Recurrence.to_string id in
+                   command (name ^ "-create") (Create (id, { schedule; target; policy }));
+                   command (name ^ "-enable") (Enable id)
+                 in
+                 with_planner env sw daemon controller (fun () ->
+                   let policy =
+                     A.Recurrence_policy.create
+                       ~misfire:(Catch_up 32)
+                       ~grace_ms:600_000L
+                       ~max_pending:32
+                       ~max_history:64
+                       ~max_calendar_steps:256
+                     |> protocol_ok
+                   in
+                   let now = P.Timestamp.now () |> P.Timestamp.to_time_ns in
+                   create
+                     busy_id
+                     busy
+                     ~policy
+                     ~first_due:(Time_ns.sub now (Time_ns.Span.of_int_sec 60));
+                   create
+                     independent_id
+                     independent
+                     ~policy:A.Recurrence_policy.default
+                     ~first_due:now;
+                   (* The real scheduler shares this planning owner. Wait for
+                      its bounded result instead of racing a second manual sweep. *)
+                   await env (fun () ->
+                     if
+                       List.length (keys busy_id) = 32
+                       && List.length (keys independent_id) = 1
+                     then Some ()
+                     else None));
+                 let busy_keys = keys busy_id in
+                 let independent_key =
+                   match keys independent_id with
+                   | [ key ] -> key
+                   | _ -> failwith "expected exactly one independent Ready occurrence"
+                 in
+                 [%test_eq: int] 32 (List.length busy_keys);
+                 let ordered =
+                   List.dedup_and_sort
+                     (independent_key :: busy_keys)
+                     ~compare:A.Recurrence_identity.Occurrence.compare
+                 in
+                 [%test_eq: int] 33 (List.length ordered);
+                 assert (
+                   List.equal
+                     A.Recurrence_identity.Occurrence.equal
+                     (List.take ordered 32)
+                     busy_keys);
+                 assert (
+                   A.Recurrence_identity.Occurrence.equal
+                     (List.last_exn ordered)
+                     independent_key);
+                 with_driver
+                   ~other_targets:[ independent ]
+                   daemon
+                   sw
+                   [ controller ]
+                   busy
+                   (fun driver ->
+                      let borrowed = ref None in
+                      let entered, signal_entered = Eio.Promise.create () in
+                      let release, signal_release = Eio.Promise.create () in
+                      let lease =
+                        Eio.Fiber.fork_promise ~sw (fun () ->
+                          Owner.with_background_runtime busy.runtime (fun actual ->
+                            borrowed := Some actual;
+                            Eio.Promise.resolve signal_entered ();
+                            Eio.Promise.await release;
+                            Ok ()))
+                      in
+                      let cleanup () =
+                        if Option.is_none (Eio.Promise.peek release)
+                        then Eio.Promise.resolve signal_release ();
+                        Eio.Promise.await_exn lease |> protocol_ok
+                      in
+                      protect_cleanup ~finally:cleanup (fun () ->
+                        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+                          Eio.Promise.await entered;
+                          (* Outside the adapter: this is the actual Factory resource. *)
+                          assert (phys_equal (Option.value_exn !borrowed) busy_runtime);
+                          let before = state controller in
+                          let busy_before = state busy in
+                          let independent_before = state independent in
+                          let frames = Existing.frames env controller in
+                          let busy_frames = Existing.frames env busy in
+                          let independent_frames = Existing.frames env independent in
+                          let ports = !(counters.inference_ports) in
+                          let first =
+                            Driver.process_entry driver controller |> rejected
+                          in
+                          [%test_eq: P.Error.code] Conflict first.code;
+                          assert (not first.retryable);
+                          Existing.assert_same before controller;
+                          Existing.assert_same busy_before busy;
+                          Existing.assert_same independent_before independent;
+                          [%test_eq: string list] frames (Existing.frames env controller);
+                          [%test_eq: string list] busy_frames (Existing.frames env busy);
+                          [%test_eq: string list]
+                            independent_frames
+                            (Existing.frames env independent);
+                          [%test_eq: int] ports !(counters.inference_ports);
+                          [%test_eq: int] 0 !(counters.providers);
+                          assert (Option.is_none (Eio.Promise.peek lease));
+                          assert (
+                            List.is_empty (Frontier.executions (frontier independent_id)));
+                          (* Same driver/cursor; the busy resource stays genuinely borrowed. *)
+                          Driver.process_entry driver controller |> protocol_ok;
+                          let actual =
+                            await env (fun () ->
+                              (match Driver.process_entry driver controller with
+                               | Ok () | Error { code = Conflict; _ } -> ()
+                               | Error error -> raise_s [%sexp (error : P.Error.t)]);
+                              match Frontier.executions (frontier independent_id) with
+                              | [ execution ] ->
+                                let attempt = Execution.current_attempt execution in
+                                (match Execution.Attempt.terminal attempt with
+                                 | Some terminal -> Some (execution, attempt, terminal)
+                                 | None -> None)
+                              | [] -> None
+                              | _ ->
+                                failwith
+                                  "independent occurrence was admitted more than once")
+                          in
+                          let execution, attempt, terminal = actual in
+                          assert (not (Execution.is_pending execution));
+                          assert (
+                            A.Recurrence_identity.Occurrence.equal
+                              (Intent.occurrence (Execution.intent execution))
+                              independent_key);
+                          let origin =
+                            Execution.Attempt.origin attempt |> Option.value_exn
+                          in
+                          let admission = A.Recurrence_run_origin.admission origin in
+                          let current = state independent in
+                          let run =
+                            A.Run_state.find
+                              (Option.value_exn current.run_state)
+                              admission.run_id
+                            |> Option.value_exn
+                          in
+                          A.Recurrence_run_origin.validate_run origin ~run ~admission
+                          |> protocol_ok;
+                          A.Recurrence_run_reference.validate
+                            terminal
+                            ~origin
+                            ~run
+                            ~receipt:(A.Recurrence_run_reference.receipt terminal)
+                          |> protocol_ok;
+                          assert (
+                            A.Recurrence_run_reference.Outcome.equal
+                              (A.Recurrence_run_reference.outcome terminal)
+                              Completed);
+                          assert (
+                            P.Id.Principal.equal
+                              run.principal_id
+                              (P.Id.Principal.of_string "pri_485_race_executor"
+                               |> protocol_ok));
+                          [%test_eq: int] 1 (List.length (Execution.attempts execution));
+                          [%test_eq: int] 1 !(counters.providers);
+                          assert (Option.is_none (Eio.Promise.peek lease));
+                          Existing.assert_same busy_before busy;
+                          [%test_eq: string list] busy_frames (Existing.frames env busy);
+                          assert (
+                            List.equal
+                              A.Recurrence_identity.Occurrence.equal
+                              busy_keys
+                              (keys busy_id));
+                          assert (List.is_empty (Frontier.executions (frontier busy_id)))))))));
+  print_endline
+    "real planner retains 32 earlier busy candidates; first pass performs no writes or \
+     effects; same cursor reaches and settles independent candidate 33 while busy lease \
+     remains live";
+  [%expect
+    {| real planner retains 32 earlier busy candidates; first pass performs no writes or effects; same cursor reaches and settles independent candidate 33 while busy lease remains live |}]
+;;
+
+let%expect_test "daemon shutdown joins its blocked recurrence source before closing Store"
+  =
+  let before_read = ref (fun _ -> Read_fault.Read) in
+  let wrap env = Read_fault.wrap env ~before_read:(fun path -> !before_read path) in
+  with_recoverable_fixture
+    ~wrap_env:wrap
+    ~max_root_agents:2
+    (fun env sw root old_daemon policy old_controller _runtime revision counters ->
+       Source.with_loaded_entry
+         old_daemon
+         (fun ~entry:old_target ~runtime:_ ~revision:_ ->
+            let _one = occurrence old_daemon env sw old_controller old_target in
+            let controller_before = state old_controller in
+            let controller_id = controller_before.identity.session_id in
+            let target_id = (state old_target).identity.session_id in
+            let manifest = manifest_path old_daemon revision in
+            let planning =
+              Agent_server.Recurrence_automation_configuration.create
+                ~principal_id:
+                  (P.Id.Principal.of_string "pri_485_shutdown_planner" |> protocol_ok)
+                ~controllers:[ controller_id ]
+                ~expires_at:None
+                ~zone_directory:None
+              |> protocol_ok
+            in
+            let grant =
+              Configuration.Controller.create
+                ~session_id:controller_id
+                ~existing_targets:[ target_id ]
+                ~captured_children:false
+              |> protocol_ok
+            in
+            let execution =
+              Configuration.create
+                ~principal_id:
+                  (P.Id.Principal.of_string "pri_485_shutdown_executor" |> protocol_ok)
+                ~controllers:[ grant ]
+                ~expires_at:None
+              |> protocol_ok
+            in
+            let config =
+              Creation_tests.with_max_root_agents
+                (config root root (Filename.concat root "parent.chatmd"))
+                ~max_root_agents:2
+            in
+            let config =
+              { config with
+                server =
+                  { config.server with
+                    recurrence_automation = Some planning
+                  ; recurrence_execution = Some execution
+                  }
+              }
+            in
+            Daemon.shutdown old_daemon |> protocol_ok;
+            let start startup_mode =
+              Daemon.start
+                ~sw
+                ~env:(wrap (env :> Eio_unix.Stdenv.base))
+                ~config
+                ~tool_dir:root
+                ~home:root
+                ~process_start_identity:None
+                ~options:
+                  { Daemon.default_options with
+                    startup_mode
+                  ; inference_policy = policy
+                  ; qualify_chatml_extensions = true
+                  }
+                ()
+              |> protocol_ok
+            in
+            let daemon = start On_demand in
+            let entered, signal_entered = Eio.Promise.create () in
+            let left, signal_left = Eio.Promise.create () in
+            let release, signal_release = Eio.Promise.create () in
+            let captured_target = ref None in
+            let cancelled = ref false in
+            let closing = ref None in
+            let cleanup () =
+              (before_read := fun _ -> Read_fault.Read);
+              if Option.is_none (Eio.Promise.peek release)
+              then Eio.Promise.resolve signal_release ();
+              match !closing with
+              | None -> Daemon.shutdown daemon |> protocol_ok
+              | Some promise -> Eio.Promise.await_exn promise |> protocol_ok
+            in
+            protect_cleanup ~finally:cleanup (fun () ->
+              let registry = Daemon.registry daemon in
+              [%test_eq: int] 0 (Registry.stats registry).loaded;
+              (before_read
+               := fun path ->
+                    if String.equal path manifest && Option.is_none !captured_target
+                    then (
+                      match Registry.find registry target_id with
+                      | Some target
+                        when (not (Registry.execution_selected registry target))
+                             && not (Owner.source_lane_idle target.runtime) ->
+                        (* Actual metadata recovery is published; preview had no source
+                   lane. This is the sole scheduler's real deferred source stage. *)
+                        captured_target := Some target;
+                        Eio.Promise.resolve signal_entered ();
+                        Exn.protect
+                          ~finally:(fun () -> Eio.Promise.resolve signal_left ())
+                          ~f:(fun () ->
+                            match Eio.Promise.await release with
+                            | () -> ()
+                            | exception exn ->
+                              let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+                              (match exn with
+                               | Eio.Cancel.Cancelled _ -> cancelled := true
+                               | _ -> ());
+                              Exn.raise_with_original_backtrace exn backtrace)
+                      | None | Some _ -> ());
+                    Read_fault.Read);
+              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+                let controller =
+                  Recurrence_target_acquisition_tests.select_controller
+                    env
+                    daemon
+                    controller_id
+                    controller_before
+                in
+                Eio.Promise.await entered;
+                let target = Option.value_exn !captured_target in
+                let host = Option.value_exn (Daemon.recurrence_execution_host daemon) in
+                let configured = Host.controller host controller |> protocol_ok in
+                let original = Host.Controller.actor configured in
+                assert (Operator_authorization.is_current original);
+                assert (not (Registry.execution_selected registry target));
+                assert (not (Owner.is_loaded target.runtime));
+                assert (not (Owner.has_activation_handoff target.runtime));
+                let controller_state = state controller in
+                let target_state = state target in
+                let controller_transactions =
+                  Retry_tests.transaction_payloads env controller
+                in
+                let target_transactions = Retry_tests.transaction_payloads env target in
+                let counts = !(counters.inference_ports), !(counters.providers) in
+                [%test_eq: int] 0 !(counters.providers);
+                let frontier =
+                  Catalog.find
+                    (Option.value_exn controller_state.recurrence_catalog)
+                    recurrence_id
+                  |> Option.value_exn
+                  |> Entry.frontier
+                  |> protocol_ok
+                in
+                [%test_eq: int] 1 (List.length (Frontier.ready frontier));
+                assert (List.is_empty (Frontier.executions frontier));
+                assert (Option.is_none target_state.active_operation);
+                assert (
+                  Option.value_map target_state.run_state ~default:true ~f:(fun index ->
+                    List.is_empty (A.Run_state.runs index)));
+                assert (
+                  List.is_empty target_state.jobs
+                  && List.is_empty target_state.invocations);
+                let shutdown =
+                  Eio.Fiber.fork_promise ~sw (fun () -> Daemon.shutdown daemon)
+                in
+                closing := Some shutdown;
+                Eio.Promise.await_exn shutdown |> protocol_ok;
+                (* Normal path never opens release: only actual scheduler cancellation
+               can unwind the blocked source; shutdown has joined all its cleanup. *)
+                assert (Option.is_none (Eio.Promise.peek release));
+                assert !cancelled;
+                assert (Option.is_some (Eio.Promise.peek left));
+                assert (Agent_store.Session_store.is_closed (Daemon.store daemon));
+                assert (not (Operator_authorization.is_current original));
+                assert (not (Owner.is_loaded target.runtime));
+                assert (not (Owner.has_activation_handoff target.runtime));
+                let callbacks = ref 0 in
+                let denied =
+                  Owner.with_background_runtime target.runtime (fun _ ->
+                    Int.incr callbacks;
+                    Ok ())
+                  |> rejected
+                in
+                [%test_eq: P.Error.code] Server_shutting_down denied.code;
+                [%test_eq: int] 0 !callbacks;
+                [%test_eq: int * int]
+                  counts
+                  (!(counters.inference_ports), !(counters.providers));
+                (* Shutdown may prune journal prefixes already captured by a
+                   snapshot. Every remaining transaction must be an exact suffix;
+                   the physical reopen below also checks the complete canonical
+                   state, including its transaction/revision counters. *)
+                let check_retained_transactions entry before =
+                  assert (
+                    List.is_suffix
+                      before
+                      ~suffix:(Retry_tests.transaction_payloads env entry)
+                      ~equal:String.equal)
+                in
+                check_retained_transactions controller controller_transactions;
+                check_retained_transactions target target_transactions;
+                (* The same physical Store is reopened only for immutable facts. No
+               old envelope, source lease, authority or pending grant is restored. *)
+                let reader = start Operator_only in
+                protect_cleanup
+                  ~finally:(fun () -> Daemon.shutdown reader |> protocol_ok)
+                  (fun () ->
+                     assert (Option.is_none (Daemon.recurrence_execution_host reader));
+                     [%test_eq: int] 0 (Registry.stats (Daemon.registry reader)).loaded;
+                     let read id =
+                       let session =
+                         P.Session_ref.create
+                           ~server_id:
+                             (Agent_store.Session_store.server_id (Daemon.store reader))
+                           ~session_id:id
+                       in
+                       Factory.read_recurrence_state
+                         (Daemon.factory reader)
+                         ~session
+                         ~actor:Retry_support.original
+                         ~authorize:(fun actual ->
+                           if P.Id.Session.equal actual.P.Session.id id
+                           then Ok ()
+                           else
+                             Error
+                               (P.Error.invalid_request
+                                  "shutdown reader returned wrong session"))
+                       |> protocol_ok
+                     in
+                     let recovered_controller = read controller_id in
+                     let recovered_target = read target_id in
+                     assert (
+                       Jsonaf.exactly_equal
+                         (state_document controller_state
+                          |> Existing.store_ok
+                          |> Document_schema.Document.json)
+                         (state_document recovered_controller
+                          |> Existing.store_ok
+                          |> Document_schema.Document.json));
+                     assert (
+                       Jsonaf.exactly_equal
+                         (state_document target_state
+                          |> Existing.store_ok
+                          |> Document_schema.Document.json)
+                         (state_document recovered_target
+                          |> Existing.store_ok
+                          |> Document_schema.Document.json));
+                     [%test_eq: int] 0 (Registry.stats (Daemon.registry reader)).loaded;
+                     [%test_eq: int * int]
+                       counts
+                       (!(counters.inference_ports), !(counters.providers)))))));
+  print_endline
+    "actual sole scheduler source is cancelled and joined by Daemon shutdown; no \
+     execution or handoff; Operator_only reopen preserves Ready and source facts without \
+     replay";
+  [%expect
+    {| actual sole scheduler source is cancelled and joined by Daemon shutdown; no execution or handoff; Operator_only reopen preserves Ready and source facts without replay |}]
 ;;
