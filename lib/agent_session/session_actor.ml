@@ -4957,7 +4957,7 @@ end
 (* A producer ACK can settle work while its actual callback remains Running.
    This bookkeeping extends only that same physical callback, never a retained
    ID, source replacement, terminal retirement or a newly admitted effect. *)
-module Schedule_callback_acknowledgement = struct
+module Producer_callback_acknowledgement = struct
   type actor = t
 
   type t =
@@ -4982,7 +4982,7 @@ module Schedule_callback_acknowledgement = struct
            (Run_scope.revision (Run_action_service.scope t.actions))
            t.previous_run.revision
     then Ok ()
-    else Error (error Conflict "Schedule callback fact acknowledgement changed")
+    else Error (error Conflict "producer callback fact acknowledgement changed")
   ;;
 
   let prepare (actor : actor) ~candidate =
@@ -5004,7 +5004,7 @@ module Schedule_callback_acknowledgement = struct
              | Terminal _ -> Ok None
              | Admitted | Active | Waiting _ ->
                let%bind _, proofs =
-                 Run_schedule_settlement.capture
+                 Run_producer_settlement.capture
                    actor.state
                    ~delta:candidate.delta
                    ~run:previous_run
@@ -5671,9 +5671,9 @@ let install
     Option.value_map job_custody ~default:(Ok ()) ~f:(fun update ->
       Job_custody.Update.check_before_commit update ~current:t.job_agent_custody)
   in
-  let%bind schedule_callback_acknowledgement =
+  let%bind producer_callback_acknowledgement =
     match held_authored_callback_acknowledgement, goal_runtime_acknowledgement with
-    | None, None -> Schedule_callback_acknowledgement.prepare t ~candidate:transition
+    | None, None -> Producer_callback_acknowledgement.prepare t ~candidate:transition
     | (Some _ | None), (Some _ | None) -> Ok None
   in
   let%bind completion_plan = prepare_completion_plan t transition completion_sample in
@@ -5709,7 +5709,7 @@ let install
   in
   let previous_check = check_before_commit in
   let check_before_commit =
-    match schedule_callback_acknowledgement with
+    match producer_callback_acknowledgement with
     | None -> previous_check
     | Some acknowledgement ->
       Some
@@ -5717,7 +5717,7 @@ let install
           let%bind () =
             Option.value_map previous_check ~default:(Ok ()) ~f:(fun f -> f ())
           in
-          Schedule_callback_acknowledgement.check
+          Producer_callback_acknowledgement.check
             acknowledgement
             ~actor:t
             ~candidate:transition)
@@ -5750,9 +5750,9 @@ let install
     transition;
   let%bind () =
     Option.value_map
-      schedule_callback_acknowledgement
+      producer_callback_acknowledgement
       ~default:(Ok ())
-      ~f:Schedule_callback_acknowledgement.install
+      ~f:Producer_callback_acknowledgement.install
   in
   let%bind () =
     Option.value_map
@@ -5787,11 +5787,11 @@ let completion_clock_pair t =
 
 (* Only an actual selected producer transition requests this clock. Existing
    callback/Job samples retain their exact wall; no later clock replaces it. *)
-let schedule_completion_sample ?completion_sample t ~delta =
+let producer_completion_sample ?completion_sample t ~delta =
   match completion_sample with
   | Some _ -> completion_sample
   | None ->
-    if Run_schedule_settlement.requires_completion_sample t.state ~delta
+    if Run_producer_settlement.requires_completion_sample t.state ~delta
     then Some (snd (completion_clock_pair t))
     else None
 ;;
@@ -5811,7 +5811,7 @@ let prepare_transition ?run_preparation ?completion_sample t ~delta ~payloads =
   let%bind delta = Run_source_change.prepare t.state ~delta ~now in
   let%bind delta = Goal_catalog_source.prepare_change t.state ~delta in
   let%bind delta =
-    Run_schedule_settlement.prepare
+    Run_producer_settlement.prepare
       ?startup_run:(pending_held_startup_run t)
       t.state
       ~delta
@@ -5846,7 +5846,7 @@ let goal_runtime_transition
       ~payloads
   =
   let open Result.Let_syntax in
-  let completion_sample = schedule_completion_sample ?completion_sample t ~delta in
+  let completion_sample = producer_completion_sample ?completion_sample t ~delta in
   let%bind candidate = prepare_transition ?completion_sample t ~delta ~payloads in
   let%bind acknowledgement = Goal_runtime_acknowledgement.prepare t scope ~candidate in
   let%map () =
@@ -5934,7 +5934,7 @@ let transition
     ~finally:(fun () -> Option.iter job_custody ~f:Job_custody.Update.discard)
     ~f:(fun () ->
       let open Result.Let_syntax in
-      let completion_sample = schedule_completion_sample ?completion_sample t ~delta in
+      let completion_sample = producer_completion_sample ?completion_sample t ~delta in
       let%bind transition =
         prepare_transition ?completion_sample ?run_preparation t ~delta ~payloads
       in
@@ -8811,7 +8811,7 @@ let initialization_transition ?admission_hold ?job_custody t scope ~delta ~paylo
     check_initialization_agent_actor scope
   in
   let%bind () = check_owner () in
-  let completion_sample = schedule_completion_sample t ~delta in
+  let completion_sample = producer_completion_sample t ~delta in
   let%bind candidate =
     prepare_transition ?completion_sample ?run_preparation t ~delta ~payloads
   in
@@ -11650,15 +11650,15 @@ let claim_event_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
 
 let check_run_authority t scope = check_run_binding t (Run_scope.run_id scope)
 
-let run_turn_deltas t operation events deliveries =
+let run_turn_deltas ?work_delta ?completion_sample t operation events deliveries =
   let open Result.Let_syntax in
+  let now =
+    match completion_sample with
+    | None -> t.services.now ()
+    | Some sample -> Recurrence_runtime.Completion.wall sample
+  in
   let%bind resumed, deltas =
-    Run_transition.admit_turn
-      t.state
-      ~operation
-      ~events
-      ~deliveries
-      ~now:(t.services.now ())
+    Run_transition.admit_turn ?work_delta t.state ~operation ~events ~deliveries ~now
   in
   let%map () =
     List.fold_result resumed ~init:() ~f:(fun () run_id -> check_run_binding t run_id)
@@ -12019,7 +12019,7 @@ let commit_queued_event t borrow snapshot requests decision notifications =
                 @ run_change.deltas)
            in
            let completion_sample =
-             schedule_completion_sample
+             producer_completion_sample
                ?completion_sample:run_change.completion_sample
                t
                ~delta
@@ -18835,7 +18835,8 @@ let install_held_authored_fact
   in
   let%bind () = basis () in
   let run_preparation = held_authored_factual_preparation t scope in
-  let%bind candidate = prepare_transition t ~delta ~payloads in
+  let completion_sample = producer_completion_sample ?completion_sample t ~delta in
+  let%bind candidate = prepare_transition ?completion_sample t ~delta ~payloads in
   let%bind held_authored_callback_acknowledgement =
     Held_authored_callback_acknowledgement.prepare t scope ~candidate
   in
@@ -18856,6 +18857,23 @@ let install_held_authored_fact
   Agent_protocol.Session.(Session_state.summary t.state)
 ;;
 
+let cancelled_subscription_timers t subscriptions =
+  let timer_ids =
+    List.filter_map subscriptions ~f:(fun next ->
+      match
+        next.Agent_protocol.Subscription.result, lookup_subscription t next.context.id
+      with
+      | Some _, Some previous -> previous.timer_id
+      | _ -> None)
+    |> Hash_set.of_list (module Agent_protocol.Id.Schedule)
+  in
+  List.filter_map t.state.schedules ~f:(fun schedule ->
+    match Hash_set.mem timer_ids schedule.id, schedule.status with
+    | true, (Agent_protocol.Schedule.Scheduled | Delivering) ->
+      Some { schedule with status = Agent_protocol.Schedule.Cancelled }
+    | _ -> None)
+;;
+
 let update_jobs
       ?authored_scope
       ?check_before_commit
@@ -18868,22 +18886,7 @@ let update_jobs
       t
       jobs
   =
-  let timer_ids =
-    List.filter_map subscriptions ~f:(fun next ->
-      match
-        next.Agent_protocol.Subscription.result, lookup_subscription t next.context.id
-      with
-      | Some _, Some previous -> previous.timer_id
-      | _ -> None)
-    |> Hash_set.of_list (module Agent_protocol.Id.Schedule)
-  in
-  let cancelled_timers =
-    List.filter_map t.state.schedules ~f:(fun schedule ->
-      match Hash_set.mem timer_ids schedule.id, schedule.status with
-      | true, (Agent_protocol.Schedule.Scheduled | Delivering) ->
-        Some { schedule with status = Agent_protocol.Schedule.Cancelled }
-      | _ -> None)
-  in
+  let cancelled_timers = cancelled_subscription_timers t subscriptions in
   let cancelled =
     List.filter jobs ~f:(fun job ->
       match job.Agent_protocol.Job.status with
@@ -19000,7 +19003,10 @@ let update_jobs
                   Error (error Conflict "initialization preparation owner retired"))
           in
           let%bind () = check_basis () in
-          let%bind prepared = prepare_transition t ~delta ~payloads in
+          let completion_sample =
+            producer_completion_sample ?completion_sample t ~delta
+          in
+          let%bind prepared = prepare_transition ?completion_sample t ~delta ~payloads in
           let acknowledgement =
             Initialization_scope.Acknowledgement.prepare scope prepared.state
           in
@@ -22252,7 +22258,15 @@ let complete_background_job
          | Expired -> Limited)
     in
     let%bind run_deltas =
+      let work_delta =
+        Session_delta.Batch
+          (List.map subscriptions ~f:(fun value ->
+             Session_delta.Subscription_changed value)
+           @ List.map (cancelled_subscription_timers t subscriptions) ~f:(fun value ->
+             Session_delta.Schedule_changed value))
+      in
       Run_job_completion.prepare
+        ~work_delta
         ~cancelled_dependencies:cancelled
         t.state
         ~running
@@ -23377,7 +23391,7 @@ let complete_legacy_schedule
           ; Moderator_changed (Some encoded)
           ]
       in
-      let completion_sample = schedule_completion_sample t ~delta in
+      let completion_sample = producer_completion_sample t ~delta in
       let%bind prepared =
         prepare_transition
           ?completion_sample
@@ -23697,7 +23711,7 @@ let callback_schedule_cancel t scope schedule_id =
        legacy cancellation of any retained Scheduled ID, including old timers. *)
     let schedule = { schedule with status = Agent_protocol.Schedule.Cancelled } in
     let delta = Session_delta.Schedule_changed schedule in
-    let completion_sample = schedule_completion_sample t ~delta in
+    let completion_sample = producer_completion_sample t ~delta in
     let%bind prepared =
       prepare_transition
         ?completion_sample
@@ -23708,7 +23722,7 @@ let callback_schedule_cancel t scope schedule_id =
     in
     let%bind completion_plan = prepare_completion_plan t prepared completion_sample in
     let%bind callback_acknowledgement =
-      Schedule_callback_acknowledgement.prepare t ~candidate:prepared
+      Producer_callback_acknowledgement.prepare t ~candidate:prepared
     in
     let initialization_acknowledgement =
       Option.map scope.constructor_scope ~f:(fun constructor ->
@@ -23726,7 +23740,7 @@ let callback_schedule_cancel t scope schedule_id =
               ~f:Initialization_scope.Acknowledgement.check_basis
           in
           Option.value_map callback_acknowledgement ~default:(Ok ()) ~f:(fun ack ->
-            Schedule_callback_acknowledgement.check ack ~actor:t ~candidate:prepared))
+            Producer_callback_acknowledgement.check ack ~actor:t ~candidate:prepared))
       in
       (* The ordinary installation retention pass closes a matching timer loan
          before publication. Historical targets need not have a loan. *)
@@ -23739,7 +23753,7 @@ let callback_schedule_cancel t scope schedule_id =
         Option.value_map
           callback_acknowledgement
           ~default:(Ok ())
-          ~f:Schedule_callback_acknowledgement.install
+          ~f:Producer_callback_acknowledgement.install
       in
       Option.iter
         completion_plan
@@ -24025,14 +24039,18 @@ let start_idle_turn_unchecked
       | Session_delta.Moderator_execution_changed event -> Some event
       | _ -> None)
   in
-  let%bind run_deltas = run_turn_deltas t operation events notification_wakes in
-  let deltas =
-    run_deltas
-    @ leading_deltas
+  let companion_deltas =
+    leading_deltas
     @ extra_deltas
     @ [ Session_delta.Moderator_changed drain.Runtime_builder.moderator_snapshot ]
     @ turn_deltas
   in
+  let work_delta = Session_delta.Batch companion_deltas in
+  let completion_sample = producer_completion_sample t ~delta:work_delta in
+  let%bind run_deltas =
+    run_turn_deltas ~work_delta ?completion_sample t operation events notification_wakes
+  in
+  let deltas = run_deltas @ companion_deltas in
   let payloads =
     drain_payloads drain @ leading_payloads @ extra_payloads @ turn_payloads
   in
@@ -24050,6 +24068,7 @@ let start_idle_turn_unchecked
         match goal_runtime_scope with
         | None ->
           transition
+            ?completion_sample
             t
             ~check_before_commit:final_check
             ~delta:(Session_delta.Batch deltas)
@@ -24057,7 +24076,14 @@ let start_idle_turn_unchecked
           |> Result.map ~f:ignore
         | Some scope ->
           let%bind candidate =
-            prepare_transition t ~delta:(Session_delta.Batch deltas) ~payloads
+            prepare_transition
+              ?completion_sample
+              t
+              ~delta:(Session_delta.Batch deltas)
+              ~payloads
+          in
+          let%bind completion_plan =
+            prepare_completion_plan t candidate completion_sample
           in
           let%bind ack = prepare_goal_operation_ack t scope ~operation ~candidate in
           let%bind fact = Goal_runtime_acknowledgement.prepare t scope ~candidate in
@@ -24087,6 +24113,9 @@ let start_idle_turn_unchecked
                 candidate;
               accepted := true;
               installed := true;
+              Option.iter
+                completion_plan
+                ~f:(Recurrence_runtime.install_completions t.recurrence_runtime);
               publish_committed_transition t candidate;
               Ok ())
       in

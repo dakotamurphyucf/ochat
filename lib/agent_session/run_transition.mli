@@ -94,9 +94,14 @@ val fail_callback
 
 (** Pair existing turn admission with only its exact applied handler request or
     bound subscription-delivery wake. Consumes the retained action once and binds
-    the actual operation; unrelated input never resumes a waiting run. *)
+    the actual operation; unrelated input never resumes a waiting run.
+    [work_delta] is the exact companion publication/turn delta committed by the
+    caller, with no Run-index change. Its actual producer evidence joins this
+    same Run revision before wake consumption and Operation ownership. Commit
+    those companion leaves exactly once alongside the returned Run delta. *)
 val admit_turn
-  :  Session_state.t
+  :  ?work_delta:Session_delta.t
+  -> Session_state.t
   -> operation:Agent_protocol.Operation.t
   -> events:Agent_protocol.Moderator_execution.t list
   -> deliveries:Agent_protocol.Delivery.t list

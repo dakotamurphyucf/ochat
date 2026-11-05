@@ -148,6 +148,7 @@ let cancelled_dependency_work
 
 let prepare
       ?startup_run
+      ?(work_delta = Session_delta.Batch [])
       ?(cancelled_dependencies = [])
       (state : Session_state.t)
       ~(running : P.Job.t)
@@ -266,15 +267,35 @@ let prepare
                 else P.Run_work.Terminal.create ~work ~outcome:Cancelled ~revision)
               |> Result.all
             in
+            let%bind producer_state, producer_proofs =
+              Run_producer_settlement.capture
+                state
+                ~delta:
+                  (Session_delta.Batch
+                     (work_delta
+                      :: Session_delta.Job_changed successor
+                      :: List.map cancelled_dependencies ~f:(fun job ->
+                        Session_delta.Job_changed job)))
+                ~run:previous
+                ~owned_work
+            in
+            let%bind () =
+              if Option.equal Run_state.equal state.run_state producer_state.run_state
+              then Ok ()
+              else
+                Error
+                  (P.Error.invalid_request "Job companion work cannot advance its Run")
+            in
             let%bind index =
-              Run_work_settlement.prepare
+              Run_producer_settlement.settle
                 ?startup_run
                 index
                 ~state
+                ~projected:producer_state
                 ~previous
                 ~owned_work
-                ~terminal_work:(proof :: (previous.terminal_work @ dependency_proofs))
-                ~operation_id:None
+                ~terminal_work:
+                  (proof :: (previous.terminal_work @ dependency_proofs @ producer_proofs))
                 ~now
             in
             if not (exact_wait previous running)

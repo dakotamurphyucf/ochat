@@ -76,7 +76,20 @@ let on_event ctx state event = match event with
     `Pending(`Subscription(subscription), `String("545 accepted subscription"))) in
   Task.pure({ subscription = subscription; invocation = p.context.invocation_id; waiting = false; completed_responses = 0 })
 | `Turn_end ->
-  if state.waiting then Task.pure(state) else
+  if state.waiting then
+    let* read = Tool.call("read_file", `Object([
+      {key = "root"; value = `String("data")},
+      {key = "file"; value = `String("545-subscription-context.json")}
+    ])) in
+    (match read with
+    | `Error(message) -> Task.fail(message)
+    | `Ok(`String(text)) ->
+      let lines = String.split(text, "\n") in
+      let context = Json.parse(lines[2]) in
+      (match field(context, "finish") with
+      | `Null -> Task.pure(state)
+      | intent -> Task.bind(Goal.finish(intent), fun ignored -> Task.pure(state)))
+    | `Ok(_) -> Task.fail("finish context read did not return actual text")) else
   if state.completed_responses == 0 then
     Task.pure({ state with completed_responses = 1 }) else
   let* read = Tool.call("read_file", `Object([
@@ -174,8 +187,45 @@ let assert_operation_owned current admission operation =
   assert (P.Id.Operation.equal operation.id (accepted current "545-subscription"))
 ;;
 
+let assert_succeeded_proof current admission key =
+  let run = Resume.run current admission in
+  let work =
+    P.Run_work.create ~key ~generation:current.A.Session_state.identity.generation
+    |> protocol_ok
+  in
+  assert (List.mem run.owned_work work ~equal:P.Run_work.equal);
+  let proof =
+    Resume.one_actual
+      "exact owned producer terminal proof"
+      (List.filter run.terminal_work ~f:(fun proof ->
+         P.Run_work.equal proof.P.Run_work.Terminal.work work))
+  in
+  [%test_eq: P.Run_work.Terminal.outcome] Succeeded proof.outcome;
+  assert (Int64.compare proof.revision run.revision <= 0)
+;;
+
+let assert_published_proof current admission correlation =
+  let value = delivery current correlation in
+  let history_id =
+    match value.status with
+    | Committed { history_id; _ } -> history_id
+    | Pending | Failed _ -> failwith "owned delivery has not published actual history"
+  in
+  let history =
+    Resume.one_actual
+      "actual correlated publication"
+      (List.filter current.A.Session_state.conversation.canonical_history ~f:(fun entry ->
+         P.History.Id.equal entry.P.History.id history_id))
+  in
+  (match history.provenance with
+   | Runtime_notification id -> assert (P.Id.Delivery.equal id value.context.id)
+   | Canonical | Moderator_inserted | Moderator_replaced _ | Runtime_authoring _ ->
+     failwith "publication history does not retain its actual notification ID");
+  assert_succeeded_proof current admission (Retained (Delivery value.context.id))
+;;
+
 let%expect_test
-    "cold Goal subscription owns one Operation without consuming a Held mixed wake"
+    "cold Goal subscription finishes only after correlated publication and its own turn"
   =
   let initial = Gate.create () in
   let resumed = Gate.create () in
@@ -386,6 +436,25 @@ let%expect_test
                   let operation = Option.value_exn first_effect.active_operation in
                   [%test_eq: P.Operation.kind] (Turn Idle_followup) operation.kind;
                   assert_operation_owned first_effect admission operation;
+                  let subscription =
+                    Resume.one_actual
+                      "actual correlated subscription"
+                      first_effect.subscriptions
+                  in
+                  assert_succeeded_proof
+                    first_effect
+                    admission
+                    (Retained (Subscription subscription.context.id));
+                  assert_published_proof first_effect admission "545-subscription";
+                  assert_published_proof first_effect admission "545-ordinary";
+                  assert (
+                    not
+                      (List.exists
+                         (Resume.run first_effect admission).terminal_work
+                         ~f:(fun proof ->
+                           match proof.P.Run_work.Terminal.work.key with
+                           | Operation id -> P.Id.Operation.equal id operation.id
+                           | Retained _ -> false)));
                   phase := "join actual cold source while provider4 blocked";
                   let rec await_source_join () =
                     observe (state entry);
@@ -397,6 +466,26 @@ let%expect_test
                   await_source_join ();
                   assert (Owner.source_lane_idle entry.runtime);
                   assert (Owner.is_loaded entry.runtime);
+                  let finish =
+                    P.Goal_achievement.Intent.create
+                      ~expected_goal_revision:(G.revision (Goal.goal first_effect))
+                      ~evidence:
+                        (G.Reason.of_string
+                           "Correlated subscription publication and actual owning turn"
+                         |> protocol_ok)
+                      ~action:(Finish { terminal = Completed None; relinquish = [] })
+                    |> protocol_ok
+                  in
+                  Eio.Path.save
+                    ~create:(`Or_truncate 0o600)
+                    Eio.Path.(Eio.Stdenv.fs env / root / context_file)
+                    (Jsonaf.to_string
+                       (`Object
+                           [ "run_id", P.Id.Run.to_json actual_run.id
+                           ; "source", P.Run_source.to_json actual_run.source
+                           ; "finish", P.Goal_achievement.Intent.to_json finish
+                           ])
+                     ^ "\n");
                   Gate.release resumed;
                   phase := "await actual subscription final turn";
                   let final =
@@ -409,6 +498,74 @@ let%expect_test
                       ~completed:3
                   in
                   Resume.assert_episode cold final admission;
+                  let subscription =
+                    Resume.one_actual "actual subscription" final.subscriptions
+                  in
+                  (match subscription.result with
+                   | Some (Succeeded (`String "545 ready")) -> ()
+                   | None | Some _ ->
+                     failwith "subscription lost its actual first terminal winner");
+                  assert (Option.is_some subscription.completed_at);
+                  assert_succeeded_proof
+                    final
+                    admission
+                    (Retained (Subscription subscription.context.id));
+                  assert_published_proof final admission "545-subscription";
+                  assert_published_proof final admission "545-ordinary";
+                  assert_succeeded_proof final admission (Operation operation.id);
+                  let final_run = Resume.run final admission in
+                  List.iter
+                    (Resume.run first_effect admission).terminal_work
+                    ~f:(fun proof ->
+                      assert (
+                        List.mem
+                          final_run.terminal_work
+                          proof
+                          ~equal:P.Run_work.Terminal.equal));
+                  [%test_eq: int64]
+                    (Int64.succ
+                       (A.Goal_accounting.admitted_attempts (Goal.accounting cold)))
+                    (A.Goal_accounting.admitted_attempts (Goal.accounting first_effect));
+                  [%test_eq: int64]
+                    (A.Goal_accounting.admitted_attempts (Goal.accounting first_effect))
+                    (A.Goal_accounting.admitted_attempts (Goal.accounting final));
+                  (match final_run.lifecycle, G.state (Goal.goal final) with
+                   | Terminal (Completed None), Closed (Achieved achievement) ->
+                     let request =
+                       G.achievement_request (Goal.goal final) |> Option.value_exn
+                     in
+                     assert (
+                       P.Goal_achievement.Request.equal
+                         request
+                         (P.Goal_achievement.request achievement));
+                     let terminal =
+                       Resume.one_actual
+                         "same Run terminal receipt"
+                         (List.filter
+                            (A.Run_state.receipts (Option.value_exn final.run_state))
+                            ~f:(fun receipt ->
+                              P.Id.Run.equal receipt.P.Run_receipt.run_id final_run.id
+                              && P.Run_receipt.Kind.equal receipt.kind Terminal))
+                     in
+                     assert (
+                       P.Run_receipt.equal
+                         terminal
+                         (P.Goal_achievement.receipt achievement));
+                     assert (
+                       P.Run_receipt.equal
+                         terminal
+                         (P.Goal_episode.Settlement.receipt
+                            (G.request_settlement (Goal.goal final) |> Option.value_exn)))
+                   | _ ->
+                     raise_s
+                       [%sexp
+                         "subscription Finish did not settle its actual Run"
+                       , (final_run : P.Run.t)
+                       , (G.state (Goal.goal final) : G.State.t)]);
+                  A.Goal_run_evidence.validate
+                    ~catalog:final.goal_catalog
+                    ~runs:final.run_state
+                  |> protocol_ok;
                   assert (
                     P.Id.Operation.equal
                       ordinary_operation
@@ -439,8 +596,9 @@ let%expect_test
                   Existing.assert_same stable entry;
                   [%test_eq: int] 4 !(counters.providers);
                   print_endline
-                    "mixed ordinary notice progresses while Goal stays pending; cold \
-                     subscription transfers one real Operation before provider")))
+                    "mixed notice stays isolated while Held; cold subscription \
+                     publishes, owns its real turn and achieves the same Goal without \
+                     replay")))
        with
        | Eio.Time.Timeout as exn ->
          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
@@ -479,5 +637,5 @@ let%expect_test
                  , (Option.value_map current.run_state ~default:[] ~f:A.Run_state.runs
                     : P.Run.t list)])));
   [%expect
-    {| mixed ordinary notice progresses while Goal stays pending; cold subscription transfers one real Operation before provider |}]
+    {| mixed notice stays isolated while Held; cold subscription publishes, owns its real turn and achieves the same Goal without replay |}]
 ;;

@@ -556,7 +556,7 @@ let moderator_features =
       ; "lib/agent_session/run_job_completion.ml"
       ; "lib/agent_session/run_transition.ml"
       ; "lib/agent_session/run_work_settlement.ml"
-      ; "lib/agent_session/run_schedule_settlement.ml"
+      ; "lib/agent_session/run_producer_settlement.ml"
       ]
     , "runtime.control"
     , [ "test/agent_docs/docs_chatml_control.ml"
@@ -575,10 +575,12 @@ let moderator_features =
       ; "lib/agent_session/run_job_completion.ml"
       ; "lib/agent_session/run_transition.ml"
       ; "lib/agent_session/run_work_settlement.ml"
-      ; "lib/agent_session/run_schedule_settlement.ml"
+      ; "lib/agent_session/run_producer_settlement.ml"
       ]
     , "runtime.jobs.acknowledgement"
     , [ "test/agent_session/run_schedule_settlement_tests.ml"
+      ; "test/agent_session/run_producer_settlement_tests.ml"
+      ; "test/factory_catalog_publication/goal_subscription_runtime_tests.ml"
       ; "test/factory_catalog_publication/goal_wake_runtime_tests.ml"
       ; "test/agent_session/background_delivery_tests.ml"
       ; "test/chatml_composition/background_moderator_tests.ml"
@@ -589,6 +591,7 @@ let moderator_features =
       ; "lib/agent_session/script_subscription_service.ml"
       ; "lib/agent_session/staged_subscriptions.ml"
       ; "lib/agent_protocol/subscription.ml"
+      ; "lib/agent_session/run_subscription_evidence.ml"
       ]
     , "runtime.jobs.subscriptions"
     , [ "test/chatml_composition/subscription_tests.ml"
@@ -612,6 +615,7 @@ let moderator_features =
       ; "lib/agent_session/script_notification_service.ml"
       ; "lib/agent_session/staged_notifications.ml"
       ; "lib/agent_protocol/delivery.ml"
+      ; "lib/agent_session/run_delivery_evidence.ml"
       ]
     , "runtime.delivery.notifications"
     , [ "test/chatml_composition/notification_admission_tests.ml"
@@ -678,11 +682,15 @@ let implementation_sources =
   ; ( "lib/chat_response/in_memory_stream.ml"
     , "d8726af77b14d98a0fd5231ce9a93704c96ba61eb88c8ec54d2395be0c1df112" )
   ; ( "lib/agent_session/run_job_completion.ml"
-    , "2b7aafe17a5f9a66febf7e2a3f62914ac9df83af68c4aa8fd8b73a88131810d4" )
+    , "f8d8d2b2523ba7de9df158362e4cf25a67f9334c58b293462451a53d208a788e" )
   ; ( "lib/agent_session/run_transition.ml"
-    , "733dfef4e8dbb4adfe1a42a134bc2b8bb42c1f50dd3a9fd4457992d0d5f5c80e" )
-  ; ( "lib/agent_session/run_schedule_settlement.ml"
-    , "fa2ed163ec486fbd7476938da62aa42b981261c62f6fc03e48148c9afdaef64a" )
+    , "a409d91056f413a6a4f694e8381d04633cd168f27fbb1da8c3fd0602f9c18ba3" )
+  ; ( "lib/agent_session/run_subscription_evidence.ml"
+    , "cd6f05412544bcf1154be210f332f737b58b66943b3ea47086550ec395e11cad" )
+  ; ( "lib/agent_session/run_delivery_evidence.ml"
+    , "c2b6b1b87d3070e96d4d1444e83b7054e89225546a11d5395472bb86dbe55de5" )
+  ; ( "lib/agent_session/run_producer_settlement.ml"
+    , "c619b5ee028ae63319da3c9166ab23aefd638775d725f75d3f9344a85fb57035" )
   ; ( "lib/agent_session/run_work_settlement.ml"
     , "3e4a12c5d3e9bd013110524c40a5590424cfed82b3088735b2516ac95ed512aa" )
   ; ( "lib/agent_session/constructor_permission_checkpoint.ml"
@@ -976,7 +984,7 @@ let implementation_sources =
   ; ( "lib/agent_session/notification_wake_selection.ml"
     , "001872ff3729d6a4a7cd861cd6ec4ebbf75296637bd5c5cdaf3ede82c6f9b6ba" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "5e9ce2b6fed2004dcfaa7509d8f57d9dd10f1a16eb80e1336053e4119ee19e0c" )
+    , "cce5c53c56d52c0a4e4008bdc608bb36c1175bc9aa462f0548eec473333cccd4" )
   ; ( "lib/agent_session/job_custody.ml"
     , "6a3b5951629d8440ebfcaf9f72aa625cf522087e8996bb73cec82ce16abfa120" )
   ; ( "lib/agent_session/staged_jobs.ml"

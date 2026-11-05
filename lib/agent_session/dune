@@ -213,7 +213,9 @@
   run_state
   run_transition
   run_work_settlement
-  run_schedule_settlement
+  run_subscription_evidence
+  run_delivery_evidence
+  run_producer_settlement
   run_child_work
   run_retirement
   run_source_change

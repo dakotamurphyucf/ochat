@@ -154,8 +154,8 @@ let prepare_internal
       (Run_state.find index (Run_scope.run_id scope))
       ~error:(conflict "run absent")
   in
-  let%bind work_state, schedule_proofs =
-    Run_schedule_settlement.capture state ~delta:work_delta ~run:previous ~owned_work
+  let%bind work_state, producer_proofs =
+    Run_producer_settlement.capture state ~delta:work_delta ~run:previous ~owned_work
   in
   (* The work projection may introduce a Job whose immutable Run origin is
      captured in this same transaction. Its occurrence is added below, so the
@@ -244,11 +244,11 @@ let prepare_internal
   in
   let%bind terminal_work =
     match mode with
-    | Checkpoint _ -> Ok (terminal_work @ schedule_proofs)
+    | Checkpoint _ -> Ok (terminal_work @ producer_proofs)
     | Running_work ->
-      if List.is_empty schedule_proofs
+      if List.is_empty producer_proofs
       then Ok terminal_work
-      else Error (conflict "immediate work admission cannot complete a Schedule")
+      else Error (conflict "immediate work admission cannot complete a producer")
   in
   let evidence =
     Set.of_list
@@ -631,6 +631,7 @@ let fail_callback
 ;;
 
 let admit_turn
+      ?(work_delta = Session_delta.Batch [])
       (state : Session_state.t)
       ~(operation : P.Operation.t)
       ~events
@@ -692,13 +693,21 @@ let admit_turn
                 Set.add (Set.of_list (module P.Run_work) run.owned_work) work
                 |> Set.to_list
               in
+              let%bind producer_state, proofs =
+                Run_producer_settlement.capture state ~delta:work_delta ~run ~owned_work
+              in
+              let%bind () =
+                if Option.equal Run_state.equal state.run_state producer_state.run_state
+                then Ok ()
+                else Error (conflict "turn companion work must not advance the Run index")
+              in
               let%bind next =
                 rebuild
                   run
                   ~lifecycle:Active
                   ~owned_work
                   ~relinquished_work:run.relinquished_work
-                  ~terminal_work:run.terminal_work
+                  ~terminal_work:(run.terminal_work @ proofs)
                   ~now
               in
               let%bind intent =

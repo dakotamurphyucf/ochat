@@ -532,6 +532,27 @@ through document encoding and replay while preserving unknown fields. Captured
 state templates contribute compatible preserved fields, not permission to replace
 the final validated Goal state.
 
+A subscription contributes terminal evidence only when its actual first winner
+is committed. Success, failure, cancellation and expiry remain distinct; merely
+arming the subscription does not finish it. A notification Delivery is complete
+only when its matching history entry is published, or when a nonretryable delivery
+failure is committed. Publication can succeed even when the subscription's payload
+reports failure. Neither publication nor an accepted wake proves that the separate
+agent Operation succeeded.
+
+These producer facts join the callback or Job's existing Run revision. Open
+subscriptions and unpublished notifications still prevent strict Finish. An
+adverse subscription result can still deliver its correlated wake; final failure
+of that exact awaited Delivery interrupts an undeliverable Wait. Retryable delivery
+failures remain unsettled. An owned Delivery with immutable failure evidence cannot
+be reused, even after its Run is terminal; ordinary unowned delivery retry behavior
+is unchanged.
+
+A host expiration is an external write. It can update producer evidence but cannot
+renew an in-progress constructor's authority. Only a write acknowledged by that
+exact constructor can advance its preparation; otherwise construction fails closed
+and preserves factual effects. A retained command receipt is not a replay request.
+
 Producer completion does not complete its queued callback. A successful timer
 leaves its waiting Run available to the genuine callback, whose native effects and
 `Goal.finish` still require their own live authority and settled work. If the

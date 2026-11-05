@@ -2,7 +2,7 @@ open! Core
 open Fixtures
 module A = Agent_session
 module P = Agent_protocol
-module Settlement = A.Run_schedule_settlement
+module Settlement = A.Run_producer_settlement
 
 (* Real admission supplies the retained Run/source. Schedule snapshots below are
    pure validated transition DATA, never execution or callback authority. *)

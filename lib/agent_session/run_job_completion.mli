@@ -24,7 +24,12 @@ val owns : Session_state.t -> Agent_protocol.Job.t -> bool
     pure DATA is not execution authority and must never be decoded as a live
     hold. Ordinary settlement without that owner remains unchanged. *)
 
-(** [cancelled_dependencies] contains only actual canonical Cancelled dependency
+(** [work_delta], when supplied, is the exact companion producer mutation delta
+    persisted with this Job completion (for example cancelling its actual waited
+    Subscription and timer). Producer proofs join this SAME next Run revision,
+    before aggregate settlement; no second producer transition is appended.
+
+    [cancelled_dependencies] contains only actual canonical Cancelled dependency
     snapshots persisted with this completion. They must be exactly the active
     descendants of the retained parent's real Waiting_completion Job chain,
     validated by Job_dependency.validate; stopped-at-terminal and Subscription
@@ -39,6 +44,7 @@ val owns : Session_state.t -> Agent_protocol.Job.t -> bool
     retains its existing result contract. *)
 val prepare
   :  ?startup_run:Agent_protocol.Run.t
+  -> ?work_delta:Session_delta.t
   -> ?cancelled_dependencies:Agent_protocol.Job.t list
   -> Session_state.t
   -> running:Agent_protocol.Job.t
