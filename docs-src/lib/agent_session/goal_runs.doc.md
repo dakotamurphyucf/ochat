@@ -8,15 +8,36 @@ link fields remain absent; admitted link envelopes preserve compatible unknowns.
 The existing Run index's finite bounds cover retained associations. There is no
 new store or lifecycle executor.
 
-`Goal_episode_admission.prepare` is a pure candidate planner for a real
-`Run_admission.t`. It requires an Enabled goal, matching session/principal/current
-source, both CAS frontiers and an exact new revision-zero Admitted Workflow. It
-produces reciprocal Run and Goal updates. The actual controller owner must mint
-and revalidate its reservation and commit those updates inside genuine Run
-admission. No public metadata attach-existing-Run command or optional goal field
-on ordinary Run start is supplied. Decoded transitions independently reject
-late additions, link removal, reassignment and final orphan associations. The
+`Goal_run_service.start_episode` is the authenticated host entry point for a new
+Goal episode. It accepts the actual Factory entry, original operator proof and an
+immutable `Goal_activation_request`: a headless Workflow request plus the original
+Goal/catalog CAS intent. An exact retained association returns its Admission as
+data before runtime borrowing. A same-key request cannot add, remove or replace
+that association. An ordinary Run-start retry cannot omit a Goal's original link.
+
+For fresh work, the Factory selects the actual compiled source without running
+its initializer. `Goal_episode_admission.prepare_held` consumes the real inert
+`Run_admission.Held_plan`, validates session/principal/source and both original CAS
+frontiers, and enables/binds the Goal with a single Goal revision advance. The
+actor commits Goal, Run Admission, episode and immutable link together. It installs
+inert ownership and publishes the acknowledged canonical state before issuing
+opaque live activation to the existing runtime owner. No input parsing, Model,
+native tool or startup callback precedes the association. The lower pure
+`prepare` planner remains available for a real `Run_admission.t`; it requires an
+already Enabled Goal and never supplies runtime authority itself.
+
+A new episode requires either no predecessor or its exact actual terminal Run
+receipt. It does not resume a live paused episode, clear unresolved achievement
+or reset cumulative accounting. Ordinary Run start has no optional Goal field;
+there is no metadata command to attach an existing Run. Decoded transitions also
+reject late additions, link removal, reassignment and orphan associations. The
 whole ordered Batch is checked after its intermediate deltas have been applied.
+
+The service preserves domain errors through the Factory's joined cleanup. An
+uncertain admission write remains uncertain. A known Admission whose activation
+fails is returned with that exact receipt and error; it is not a claim that all
+effects were rolled back or that replay is safe. Retained receipt data never
+recreates process-local activation custody.
 
 `Goal.finish` stages an untrusted bounded completion intent in the existing
 `Run_action_service`. The actor's actual queued callback borrow and current
@@ -76,10 +97,16 @@ before effects. An unbounded new worker body can still fail ordinary admission;
 the bounded truthful recovery disposition remains possible without claiming
 Completed or achieving the goal from missing evidence.
 
-The pure association and settlement model, actual recovery save failure and
-journal/snapshot restoration, and native compiler/Catch staging have focused
-fixtures. Authenticated controller enable/resume admission and a full authored
-Goal.finish through a genuine worker join remain the combined controller/settlement
-integration gate. Accounting, continuation policy and configurable Goal helpers
-remain separate integration work. This foundation adds no second Workflow
-scheduler and claims no completed end-to-end goal automation.
+Qualification includes the pure association and settlement model, actual recovery
+save failure and journal/snapshot restoration, and native compiler/Catch staging.
+The authenticated host fixtures now exercise actual catalog creation, loaded input
+and cold resume with one canonical attempt/host-turn charge, retained association
+retries, uncertain admission and physical reopen. An actual `Goal.finish` remains
+Open while its root worker is pending; matching completion achieves it, whereas
+cancellation leaves it unachieved. Explicit Hold retires pending activation even
+when its save fails; an automatic budget hold preserves the same already-admitted
+inference while denying fresh work.
+
+Same-live-episode resume, selective continuation controls and configurable Goal
+helpers remain separate integration work. This component adds no second Workflow
+scheduler and does not complete end-to-end goal automation by itself.

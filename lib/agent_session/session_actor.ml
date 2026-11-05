@@ -141,9 +141,16 @@ end
 (* Only concrete Actor-owned association issuers construct this link. It retains
    the actual Store and immutable admitted association; public DATA cannot issue
    or replace it. Checks are pure and never invoke supplied host callbacks. *)
+module Activation_issuer_policy = struct
+  type t =
+    | Recurrence
+    | Goal of Goal_activation_policy.t
+end
+
 module Activation_association = struct
   type t =
-    { check_target :
+    { issuer_policy : Activation_issuer_policy.t
+    ; check_target :
         store:Recurrence_controller.t
         -> state:Session_state.t
         -> run:Agent_protocol.Run.t
@@ -312,6 +319,8 @@ module Admitted_activation = struct
       ; controller : Activation_controller.t
       ; refresh : unit -> (unit, Agent_protocol.Error.t) result
       ; policy : unit -> (unit, Agent_protocol.Error.t) result
+      ; refresh_admitted_inference : unit -> (unit, Agent_protocol.Error.t) result
+      ; policy_admitted_inference : unit -> (unit, Agent_protocol.Error.t) result
       ; timing : unit -> (unit, Agent_protocol.Error.t) result
       ; authority : unit -> (unit, Agent_protocol.Error.t) result
       ; basis : unit -> (unit, Agent_protocol.Error.t) result
@@ -353,6 +362,30 @@ module Admitted_activation = struct
              ())
       else t.check_basis ()
     ;;
+  end
+end
+
+module Goal_activation = struct
+  type t =
+    { held : Held_run.t
+    ; checked : Admitted_activation.Checked.t
+    }
+
+  let held t = t.held
+  let checked t = t.checked
+
+  module Admission = struct
+    type activation = t
+
+    type t =
+      | Rejected of Agent_protocol.Error.t
+      | Uncertain of Agent_protocol.Error.t
+      | Retained of Agent_protocol.Run_receipt.t
+      | Activation_unavailable of
+          { admission : Agent_protocol.Run_receipt.t
+          ; error : Agent_protocol.Error.t
+          }
+      | Admitted of activation
   end
 end
 
@@ -1343,6 +1376,37 @@ type inference_execution =
   | Inference_initialization of Initialization_scope.t
   | Inference_initialization_job of Initialization_scope.t * Agent_protocol.Job.t
 
+type inference_basis =
+  { run : Agent_protocol.Run.t option
+  ; attribution : Goal_work_attribution.t option
+  ; operation_id : Agent_protocol.Id.Operation.t option
+  ; invocation_id : Agent_protocol.Id.Invocation.t option
+  ; preparation : Run_preparation.t option
+  }
+
+(* Captured only after the actual allocation ACK. This is not a second
+   allocation owner: its exact registration and physical execution must remain
+   registered at every refresh and final submission check. *)
+module Admitted_inference = struct
+  module Startup = struct
+    type t =
+      | Ordinary
+      | Initialization of Initialization_scope.t * Admitted_activation.Continuation.t
+      | Input of Held_input_scope.t
+      | Authored of Held_authored_start.t
+  end
+
+  type t =
+    { execution : inference_execution
+    ; owner : Inference_owner.t
+    ; registration : Inference_owner.Registration.t
+    ; handle : Inference_ledger.Handle.t
+    ; tracking : Inference_ledger.tracking
+    ; basis : inference_basis
+    ; startup : Startup.t
+    }
+end
+
 module History_edit_result = struct
   type t =
     { session : Agent_protocol.Session.t
@@ -1441,8 +1505,22 @@ module Effect_deferred_request = struct
         -> No_effects_observation.t t
 end
 
+module Goal_activation_request_message = struct
+  type _ t =
+    | Receipt :
+        Operator_authorization.t
+        * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+        * Goal_activation_request.t
+        * Agent_protocol.Session_ref.t
+        -> Agent_protocol.Run_receipt.t option t
+    | Admit :
+        Source_binding.t * Goal_episode_admission.intent * Agent_protocol.Session_ref.t
+        -> Goal_activation.Admission.t t
+end
+
 module Held_startup_request = struct
   type _ t =
+    | Goal : 'a Goal_activation_request_message.t -> 'a t
     | Effect_deferred : 'a Effect_deferred_request.t -> 'a t
     | Input_graph : 'a Input_graph_request.t -> 'a t
     | Begin_authored :
@@ -1511,9 +1589,7 @@ type _ request =
   | Admit_model_job :
       inference_execution * Agent_protocol.Job.t
       -> Agent_protocol.Job.t request
-  | Refresh_inference :
-      inference_execution * Inference_owner.t * Inference_ledger.Handle.t
-      -> (unit -> unit) request
+  | Refresh_inference : Admitted_inference.t -> (unit -> unit) request
   | Acknowledge_inference :
       Run_preparation.t option
       * Inference_owner.t
@@ -3067,35 +3143,8 @@ let refresh_held_background_owner t = function
 
 let inference_port t execution ~graph ~relation ~configuration =
   let open Result.Let_syntax in
-  let selected = held_authored_of_execution t execution in
-  let%bind () = Option.value_map selected ~default:(Ok ()) ~f:(refresh_held_authored t) in
-  let%map allocation =
-    call t (Allocate_inference (execution, graph, relation, configuration))
-  in
-  match selected with
-  | None -> allocation
-  | Some scope ->
-    (* The acknowledged handle is returned before a fallible refresh, so the
-       graph can register and release it even when submission is denied. *)
-    let require = function
-      | Ok () -> ()
-      | Error error -> raise (Inference_allocation.Rejected error)
-    in
-    let guard =
-      Inference_runtime.Submission_guard.create ~refresh:(fun () ->
-        refresh_held_authored t scope |> require;
-        fun () ->
-          if not (held_authored_handoff_acknowledged scope)
-          then (
-            held_authored_basis t scope |> require;
-            Admitted_activation.Continuation.check_basis scope.continuation |> require))
-    in
-    Inference_allocation.Host.create
-      ~handle:(Inference_allocation.handle allocation)
-      ~submission_guard:
-        (Inference_runtime.Submission_guard.compose
-           guard
-           (Inference_allocation.submission_guard allocation))
+  let%bind () = refresh_held_execution t execution in
+  call t (Allocate_inference (execution, graph, relation, configuration))
 ;;
 
 let model_job_port t execution =
@@ -3329,6 +3378,49 @@ let close_recurrence_activations t =
 let retain_recurrence_activations t state =
   t.recurrence_activations
   <- Activation_custody.retain_candidates t.recurrence_activations state
+;;
+
+let retain_goal_activation_owners t ~retained =
+  Option.iter t.held_activation ~f:(fun activation ->
+    if not (retained activation.Held_run.Activation.association)
+    then Held_run.Activation.close activation);
+  Option.iter t.operation_agent_custody ~f:(fun owner ->
+    Option.iter owner.Operation_owner.held ~f:(fun held ->
+      match held.Held_operation.phase with
+      | Staged | Pending_first_effect ->
+        if not (retained held.proof.controller.association)
+        then Held_operation.retire held
+      | Started | Retired -> ()))
+;;
+
+let retire_goal_activation t goal_id =
+  retain_goal_activation_owners t ~retained:(fun association ->
+    match association.Activation_association.issuer_policy with
+    | Recurrence -> true
+    | Goal policy ->
+      not (Agent_protocol.Id.Goal.equal (Goal_activation_policy.goal_id policy) goal_id))
+;;
+
+let retain_goal_activations ?admission_hold t (current : Session_state.t) =
+  let goal_state state id =
+    Option.bind state.Session_state.goal_catalog ~f:(fun catalog ->
+      Option.map (Goal_catalog.find catalog id) ~f:Agent_protocol.Goal.state)
+  in
+  retain_goal_activation_owners t ~retained:(fun association ->
+    match association.Activation_association.issuer_policy with
+    | Recurrence -> true
+    | Goal policy ->
+      let id = Goal_activation_policy.goal_id policy in
+      Result.is_ok (Goal_activation_policy.check_policy policy ~state:current)
+      || ((Option.exists admission_hold ~f:(Agent_protocol.Id.Goal.equal id)
+           || Option.equal
+                Agent_protocol.Goal.State.equal
+                (goal_state t.state id)
+                (goal_state current id))
+          && Result.is_ok
+               (Goal_activation_policy.check_admitted_policy policy ~state:t.state)
+          && Result.is_ok
+               (Goal_activation_policy.check_admitted_policy policy ~state:current)))
 ;;
 
 let invalidate_goal_inference_allocations t goal_id =
@@ -4003,6 +4095,7 @@ let rec deferred_admission_delta (previous : Session_state.t) (delta : Session_d
    fresh policy time; ledger/outcome/cleanup writes add no clock callback. *)
 let persist_transition
       ?run_preparation
+      ?admission_hold
       ?commit_attempted
       ?check_before_commit
       t
@@ -4065,7 +4158,10 @@ let persist_transition
   (* Source policy precedes the composed final guard. Only pure basis checks
      follow it, and the attempt becomes uncertain only at a real writer call. *)
   let requested = candidate in
-  let commit ~command_audit candidate =
+  let commit ?admission_hold ~command_audit candidate =
+    (* Retire live Goal prefixes before a yielding control writer. A failed save
+       cannot make a previously revoked checked view executable again. *)
+    retain_goal_activations ?admission_hold t candidate.Session_transition.state;
     if Option.is_some t.effect_deferred
     then
       if
@@ -4081,7 +4177,7 @@ let persist_transition
   match admission with
   | Allow ->
     retain_recurrence_activations t candidate.state;
-    commit ~command_audit:t.command_audit candidate
+    commit ?admission_hold ~command_audit:t.command_audit candidate
   | Held { goal_id; delta } ->
     let%bind () =
       match delta with
@@ -4097,7 +4193,7 @@ let persist_transition
             ~payloads:[]
         in
         retain_recurrence_activations t held.state;
-        let%map () = commit ~command_audit:None held in
+        let%map () = commit ~admission_hold:goal_id ~command_audit:None held in
         install_committed_transition ~admission_hold:goal_id t held;
         publish_committed_transition t held
     in
@@ -4156,6 +4252,7 @@ let install
   let%bind () =
     persist_transition
       ?run_preparation
+      ?admission_hold
       ?commit_attempted
       ?check_before_commit
       t
@@ -14676,6 +14773,21 @@ let check_run_caller ?preparation t caller =
      | None -> Error (error Permission_denied "headless admission requires actor custody"))
 ;;
 
+(* Ordinary retries cannot drop the immutable Goal association of an existing
+   admission. Generic Run_state receipt lookup remains factual: Goal and
+   recurrence owners validate their own exact associations separately. *)
+let ordinary_run_receipt t ~principal_id ~key ~request_sha256 =
+  let open Result.Let_syntax in
+  let index = Option.value t.state.run_state ~default:Run_state.empty in
+  let%bind receipt = Run_state.receipt index ~principal_id ~key ~request_sha256 in
+  match receipt with
+  | Some ({ kind = Admission; run_id; _ } as admission) ->
+    if Option.is_some (Run_state.goal_link index run_id)
+    then Error (error Conflict "ordinary Run request omits its original Goal association")
+    else Ok (Some admission)
+  | Some { kind = Action | Terminal; _ } | None -> Ok receipt
+;;
+
 let begin_run_preparation_internal
       ?original_actor
       t
@@ -14697,11 +14809,7 @@ let begin_run_preparation_internal
     else Error (error Invalid_request "run preparation targets another session")
   in
   let%bind receipt =
-    Run_state.receipt
-      (Option.value t.state.run_state ~default:Run_state.empty)
-      ~principal_id
-      ~key:request.key
-      ~request_sha256
+    ordinary_run_receipt t ~principal_id ~key:request.key ~request_sha256
   in
   match receipt with
   | Some ({ kind = Admission; _ } as receipt) ->
@@ -15616,10 +15724,9 @@ let admit_run
     else Error (error Invalid_request "run request does not identify this session")
   in
   let%bind () = check_run_caller ?preparation t request.caller in
-  let index = Option.value t.state.run_state ~default:Run_state.empty in
   let%bind retained =
-    Run_state.receipt
-      index
+    ordinary_run_receipt
+      t
       ~principal_id:(Run_admission.Scope.principal_id scope)
       ~key:request.key
       ~request_sha256
@@ -17509,14 +17616,6 @@ let validate_initialization_model_job t scope job_id generation attempt =
   else Error (error Conflict "initialization does not own this running model attempt")
 ;;
 
-type inference_basis =
-  { run : Agent_protocol.Run.t option
-  ; attribution : Goal_work_attribution.t option
-  ; operation_id : Agent_protocol.Id.Operation.t option
-  ; invocation_id : Agent_protocol.Id.Invocation.t option
-  ; preparation : Run_preparation.t option
-  }
-
 let inference_run_binding_current t (run : Agent_protocol.Run.t) =
   let open Result.Let_syntax in
   let%bind binding =
@@ -17585,7 +17684,7 @@ let captured_callback_run t ~allow_unavailable (scope : Callback_scope.t) =
     else Error (error Permission_denied "callback original Run source or session changed")
 ;;
 
-let execution_basis t (origins : execution_origin_lookup) execution =
+let execution_basis ?admitted t (origins : execution_origin_lookup) execution =
   let open Result.Let_syntax in
   let checked_admission admission =
     let%bind admission = admission in
@@ -17764,7 +17863,15 @@ let execution_basis t (origins : execution_origin_lookup) execution =
     | Inference_held_input scope ->
       let%bind () = Held_input_scope.parsing scope in
       let%bind () = input_scope_basis t scope in
-      let%bind () = check_held_effect scope.continuation in
+      let%bind () =
+        match admitted with
+        | Some selected ->
+          (match selected.Admitted_inference.startup with
+           | Input actual when phys_equal actual scope -> Ok ()
+           | Ordinary | Initialization _ | Input _ | Authored _ ->
+             Error (error Conflict "admitted inference input owner changed"))
+        | None -> check_held_effect scope.continuation
+      in
       let activation = Admitted_activation.Continuation.target scope.continuation in
       let%bind run =
         Option.bind t.state.run_state ~f:(fun index ->
@@ -17811,8 +17918,9 @@ let execution_basis t (origins : execution_origin_lookup) execution =
   result
 ;;
 
-let inference_execution_basis t execution =
+let inference_execution_basis ?admitted t execution =
   execution_basis
+    ?admitted
     t
     { job = Goal_work_attribution.run_of_job t.state
     ; invocation = Goal_work_attribution.run_of_invocation t.state
@@ -17997,9 +18105,9 @@ let authorize_inference_basis t ~read_current =
   { basis; check_current }
 ;;
 
-let authorized_inference_execution_basis t execution =
+let authorized_inference_execution_basis ?admitted t execution =
   authorize_inference_basis t ~read_current:(fun () ->
-    inference_execution_basis t execution)
+    inference_execution_basis ?admitted t execution)
 ;;
 
 type native_child_currentness =
@@ -18984,59 +19092,159 @@ let commit_moderator_invocation t borrow (resolved : Agent_protocol.Invocation.t
   Ok ()
 ;;
 
-let check_inference_allocation t (current : inference_currentness) owner handle =
+let admitted_inference_startup t execution =
+  match execution with
+  | Inference_held_input scope -> Admitted_inference.Startup.Input scope
+  | Inference_initialization scope | Inference_initialization_job (scope, _) ->
+    (match scope.Initialization_scope.held_continuation with
+     | Some continuation -> Initialization (scope, continuation)
+     | None -> Ordinary)
+  | Inference_operation _
+  | Inference_invocation _
+  | Inference_moderator _
+  | Inference_event _
+  | Inference_job _ ->
+    (match held_authored_of_execution t execution with
+     | Some scope -> Authored scope
+     | None -> Ordinary)
+;;
+
+let admitted_inference_continuation (selected : Admitted_inference.t) =
+  match selected.startup with
+  | Ordinary -> None
+  | Initialization (_, continuation) -> Some continuation
+  | Input scope -> Some scope.continuation
+  | Authored scope ->
+    if held_authored_handoff_acknowledged scope then None else Some scope.continuation
+;;
+
+let admitted_inference_owner t (selected : Admitted_inference.t) =
   let open Result.Let_syntax in
-  let authored_basis =
-    Option.bind t.held_authored_start ~f:(fun scope ->
-      let preparation =
-        (Admitted_activation.Continuation.target scope.continuation).preparation
-      in
-      if Option.exists current.basis.preparation ~f:(phys_equal preparation)
-      then
-        Some
-          (fun () ->
-            let%bind () = held_authored_basis t scope in
-            Admitted_activation.Continuation.check_basis scope.continuation)
-      else None)
+  let%bind actual = inference_registration t selected.owner selected.handle in
+  let%bind () =
+    if phys_equal actual selected.registration
+    then Ok ()
+    else Error (error Conflict "admitted inference registration was replaced")
   in
-  let held_basis =
-    Option.bind t.initialization_scope ~f:(fun scope ->
-      Option.bind scope.Initialization_scope.held_continuation ~f:(fun continuation ->
-        let activation = Admitted_activation.Continuation.target continuation in
-        if Option.exists current.basis.preparation ~f:(phys_equal activation.preparation)
-        then
-          Some
-            (fun () ->
-              if
-                Option.exists t.initialization_scope ~f:(phys_equal scope)
-                && Option.exists t.held_activation ~f:(phys_equal activation)
-              then Admitted_activation.Continuation.check_basis continuation
-              else Error (error Conflict "held inference owner changed during checks"))
-        else None))
+  let%bind () =
+    let ledger = t.state.inference_ledger in
+    if
+      Agent_protocol.Id.Session.equal
+        (Inference_ledger.Handle.session_id selected.handle)
+        (Inference_ledger.session_id ledger)
+      && Int.equal
+           (Inference_ledger.Handle.generation selected.handle)
+           (Inference_ledger.generation ledger)
+      &&
+      match
+        ( selected.tracking
+        , Inference_ledger.find
+            ledger
+            ~ordinal:(Inference_ledger.Handle.ordinal selected.handle) )
+      with
+      | Tracked, Some row ->
+        Inference_ledger.Handle.equal (Inference_ledger.Row.handle row) selected.handle
+      | Untracked _, None -> true
+      | Tracked, None | Untracked _, Some _ -> false
+    then Ok ()
+    else Error (error Conflict "admitted inference canonical ledger handle changed")
   in
-  let input_basis =
-    Option.map t.held_input_scope ~f:(fun scope ->
+  let%bind () =
+    if Inference_owner.Registration.policy_is_current selected.registration
+    then Ok ()
+    else Error (error Permission_denied "goal inference policy changed")
+  in
+  match selected.startup with
+  | Ordinary -> Ok ()
+  | Initialization (scope, continuation) ->
+    let%bind () = validate_initialization_scope_basis t scope in
+    if
+      Option.exists scope.held_continuation ~f:(phys_equal continuation)
+      && Option.exists t.held_activation ~f:(phys_equal continuation.target)
+    then continuation.target.owned_basis ()
+    else Error (error Conflict "admitted initializer owner changed")
+  | Input scope ->
+    let%bind () = Held_input_scope.parsing scope in
+    let%bind () = input_scope_basis t scope in
+    input_graph_basis t scope selected.owner
+  | Authored scope ->
+    if held_authored_handoff_acknowledged scope
+    then Ok ()
+    else held_authored_basis t scope
+;;
+
+let refresh_admitted_inference t selected =
+  let open Result.Let_syntax in
+  let%bind () = admitted_inference_owner t selected in
+  let%bind () =
+    Option.value_map
+      (admitted_inference_continuation selected)
+      ~default:(Ok ())
+      ~f:(fun continuation -> continuation.refresh_admitted_inference ())
+  in
+  admitted_inference_owner t selected
+;;
+
+let check_inference_allocation
+      t
+      (selected : Admitted_inference.t)
+      (current : inference_currentness)
+  =
+  let open Result.Let_syntax in
+  let same_run (left : Agent_protocol.Run.t) (right : Agent_protocol.Run.t) =
+    Agent_protocol.Id.Run.equal left.id right.id
+    && Agent_protocol.Id.Principal.equal left.principal_id right.principal_id
+    && Agent_protocol.Session_ref.equal left.session right.session
+    && Agent_protocol.Run_source.equal left.source right.source
+  in
+  let same_attribution left right =
+    Agent_protocol.Id.Goal.equal
+      (Goal_work_attribution.goal_id left)
+      (Goal_work_attribution.goal_id right)
+    && Agent_protocol.Goal_episode.equal
+         (Goal_work_attribution.episode left)
+         (Goal_work_attribution.episode right)
+  in
+  let check_basis () =
+    let%bind () = admitted_inference_owner t selected in
+    let%bind () =
       if
-        Option.exists
-          current.basis.preparation
-          ~f:
-            (phys_equal
-               (Admitted_activation.Continuation.target scope.continuation).preparation)
-      then
-        Some
-          (fun () ->
-            let%bind () = input_graph_basis t scope owner in
-            let%bind () = Held_input_scope.parsing scope in
-            Admitted_activation.Continuation.check_basis scope.continuation)
-      else None)
-    |> Option.join
+        Option.equal same_run selected.basis.run current.basis.run
+        && Option.equal
+             same_attribution
+             selected.basis.attribution
+             current.basis.attribution
+        && Option.equal
+             Agent_protocol.Id.Operation.equal
+             selected.basis.operation_id
+             current.basis.operation_id
+        && Option.equal
+             Agent_protocol.Id.Invocation.equal
+             selected.basis.invocation_id
+             current.basis.invocation_id
+        && Option.equal
+             Agent_protocol.Id.Goal.equal
+             (Option.map current.basis.attribution ~f:Goal_work_attribution.goal_id)
+             (Inference_owner.Registration.goal_id selected.registration)
+      then Ok ()
+      else Error (error Permission_denied "admitted inference immutable origin changed")
+    in
+    Option.value_map
+      (admitted_inference_continuation selected)
+      ~default:(Ok ())
+      ~f:Admitted_activation.Continuation.check_basis
   in
-  let%bind registration = inference_registration t owner handle in
-  (* Final checks run after every composed refresh. Sample only an actual
-     registered Goal deadline, before original/physical/policy checks. Sampling
-     in a refresh could stale across a later refresh. *)
+  let%bind () = check_basis () in
+  (* All issuer policies precede the fresh timing sample. This is the SAME
+     admitted allocation, not a new count/token eligibility check. *)
+  let%bind () =
+    Option.value_map
+      (admitted_inference_continuation selected)
+      ~default:(Ok ())
+      ~f:(fun continuation -> continuation.policy_admitted_inference ())
+  in
   let%bind deadline_sample =
-    match Inference_owner.Registration.goal_id registration with
+    match Inference_owner.Registration.goal_id selected.registration with
     | None -> Ok None
     | Some id ->
       let%map goal =
@@ -19047,47 +19255,23 @@ let check_inference_allocation t (current : inference_currentness) owner handle 
         (Agent_protocol.Goal.Budget.deadline (Agent_protocol.Goal.budget goal))
         ~f:(fun deadline -> deadline, t.services.now ())
   in
-  let%bind current_registration = inference_registration t owner handle in
-  let%bind () =
-    if phys_equal registration current_registration
-    then Ok ()
-    else Error (error Conflict "inference registration changed during deadline sampling")
-  in
-  let%bind () =
-    if Inference_owner.Registration.policy_is_current registration
-    then Ok ()
-    else Error (error Permission_denied "goal inference policy changed")
-  in
   let%bind () =
     Option.value_map
-      (held_startup_effect t current.basis.preparation)
+      (admitted_inference_continuation selected)
       ~default:(Ok ())
-      ~f:(fun check -> check ())
+      ~f:(fun continuation ->
+        let%bind () = continuation.timing () in
+        continuation.authority ())
   in
   let%bind () = current.check_current () in
-  let actual = Option.map current.basis.attribution ~f:Goal_work_attribution.goal_id in
-  let%bind () =
-    if
-      Option.equal
-        Agent_protocol.Id.Goal.equal
-        actual
-        (Inference_owner.Registration.goal_id registration)
-    then Ok ()
-    else Error (error Permission_denied "inference Goal origin changed")
-  in
   let%bind () =
     match deadline_sample with
     | Some (deadline, now) when Agent_protocol.Timestamp.compare now deadline >= 0 ->
       Error (error Permission_denied "goal deadline reached before submission")
     | None | Some _ -> Ok ()
   in
-  (* Original checks above may run trusted callbacks. Recheck the exact captured
-     startup owner last, without policy, clock, Store access or reselection. *)
-  let%bind () = Option.value_map held_basis ~default:(Ok ()) ~f:(fun check -> check ()) in
-  let%bind () =
-    Option.value_map input_basis ~default:(Ok ()) ~f:(fun check -> check ())
-  in
-  Option.value_map authored_basis ~default:(Ok ()) ~f:(fun check -> check ())
+  (* No reselection after trusted policy/original callbacks. *)
+  check_basis ()
 ;;
 
 let allocate_inference t execution owner relation configuration =
@@ -19221,26 +19405,45 @@ let allocate_inference t execution owner relation configuration =
          ~handle
          ~configuration
          ~goal_id:(Option.map admission ~f:fst));
+    (* Capture the SAME actual registration and startup scope now. A failed
+       invariant check is deferred to submission so graph tracking receives the
+       acknowledged handle and can release it through its normal finalizer. *)
+    let selected =
+      let%map registration = inference_registration t owner handle in
+      { Admitted_inference.execution
+      ; owner
+      ; registration
+      ; handle
+      ; tracking
+      ; basis
+      ; startup = admitted_inference_startup t execution
+      }
+    in
     let submission_guard =
       Inference_runtime.Submission_guard.create ~refresh:(fun () ->
-        match call t (Refresh_inference (execution, owner, handle)) with
+        let refreshed =
+          let%bind selected = selected in
+          let%bind () = refresh_admitted_inference t selected in
+          call t (Refresh_inference selected)
+        in
+        match refreshed with
         | Ok check -> check
         | Error error -> raise (Inference_allocation.Rejected error))
     in
     Ok (Inference_allocation.Host.create ~handle ~submission_guard)
 ;;
 
-let refresh_inference t execution owner handle =
+let refresh_inference t (selected : Admitted_inference.t) =
   let open Result.Let_syntax in
-  let%bind current = authorized_inference_execution_basis t execution in
-  let%map () = check_inference_allocation t current owner handle in
-  (* Host authorization refresh is finished. The captured exact physical owner,
-     binding, original proof, source and policy are checked directly after every
-     composed refresh and auth/transport wait. This closure samples the trusted
-     nonyielding wall clock before its final checks, performs no actor request or
-     host authorization refresh, and charges no fresh attempt. *)
+  let%bind () = admitted_inference_owner t selected in
+  let%bind current =
+    authorized_inference_execution_basis ~admitted:selected t selected.execution
+  in
+  let%map () = check_inference_allocation t selected current in
+  (* Captured physical registration and scope are checked after every composed
+     refresh/auth wait. This closure charges nothing and never reselects them. *)
   fun () ->
-    match check_inference_allocation t current owner handle with
+    match check_inference_allocation t selected current with
     | Ok () -> ()
     | Error error -> raise (Inference_allocation.Rejected error)
 ;;
@@ -22091,8 +22294,8 @@ let lifecycle_request_allowed : type a. a request -> bool = function
          | Finish _ ))
   | Held_startup (Close_input _)
   | Held_startup (End_held_activation _)
-  | Release_recurrence_due _
-  | Run_start_receipt _
+  | Release_recurrence_due _ | Run_start_receipt _
+  | Held_startup (Goal (Receipt _))
   | Complete_run_constructor_model_job _
   | Interrupt_run_constructor_job _
   | Cancel_run_constructor_schedule _
@@ -22272,6 +22475,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Begin_headless_run_preparation _
   | Bind_run_source _
   | Admit_held_recurrence_run _
+  | Held_startup (Goal (Admit _))
   | Held_startup (Begin_held_activation _)
   | Held_startup (Enable_turn_budget _)
   | Held_startup (Install_runtime _)
@@ -23325,7 +23529,8 @@ let check_recurrence_activation_internal
   let%bind () = observation.check_current () in
   let%bind current = Recurrence_controller.observe controller t.state in
   let association : Activation_association.t =
-    { check_target =
+    { issuer_policy = Recurrence
+    ; check_target =
         (fun ~store ~state ~run ~admission ->
           let%bind () =
             if
@@ -23565,7 +23770,16 @@ let check_recurrence_activation_internal
        : Activation_controller.Operation.t)
     in
     let controller : Activation_controller.t = { transfer } in
-    ({ target; controller; refresh; policy; timing; authority; basis }
+    ({ target
+     ; controller
+     ; refresh
+     ; policy
+     ; refresh_admitted_inference = refresh
+     ; policy_admitted_inference = policy
+     ; timing
+     ; authority
+     ; basis
+     }
      : Admitted_activation.Continuation.t)
   in
   ({ check_current
@@ -23578,6 +23792,461 @@ let check_recurrence_activation_internal
    ; consumed
    }
    : Recurrence_activation.Checked.t)
+;;
+
+let goal_run_receipt_internal t ~actor ~authorize ~request ~session =
+  let open Result.Let_syntax in
+  let check_authority () =
+    let%bind () = Run_command_authorization.check actor ~authorize t.state in
+    Result.map (Goal_command_admission.read t.state ~actor ~authorize) ~f:ignore
+  in
+  let%bind () = check_authority () in
+  let%bind controller = require_recurrence_controller t in
+  let%bind () =
+    if Agent_protocol.Session_ref.equal session (Recurrence_controller.session controller)
+    then Ok ()
+    else Error (error Invalid_request "Goal receipt targets another actor")
+  in
+  let headless = Goal_activation_request.request request in
+  let%bind digest =
+    Run_admission_request.request_sha256 (Run_admission_request.of_headless headless)
+  in
+  let%bind current = Recurrence_controller.observe controller t.state in
+  let%bind () = check_authority () in
+  let index = Option.value t.state.run_state ~default:Run_state.empty in
+  let%bind receipt =
+    Run_state.receipt
+      index
+      ~principal_id:(Operator_authorization.principal actor).id
+      ~key:headless.key
+      ~request_sha256:digest
+  in
+  let%bind () =
+    match receipt with
+    | None -> Ok ()
+    | Some receipt ->
+      let%bind link =
+        Result.of_option
+          (Run_state.goal_link index receipt.run_id)
+          ~error:(error Conflict "retained Run has no original Goal association")
+      in
+      if
+        Agent_protocol.Run_receipt.Kind.equal receipt.kind Admission
+        && String.equal
+             (Run_goal_link.intent_sha256 link)
+             (Goal_episode_admission.digest (Goal_activation_request.intent request))
+        && Agent_protocol.Run_receipt.equal
+             receipt
+             (Agent_protocol.Goal_episode.admission (Run_goal_link.episode link))
+      then Ok ()
+      else Error (error Conflict "retained Goal association intent changed")
+  in
+  let%bind () = check_authority () in
+  if Recurrence_controller.is_current current
+  then Ok receipt
+  else Error (error Conflict "Goal receipt Store observation changed")
+;;
+
+module Goal_controller_phase = struct
+  type t =
+    | Startup
+    | Operation of unit ref
+    | Closed
+end
+
+(* The Goal issuer is the same actual target actor. Its private continuation
+   retains original authorization independently of preparation cleanup. *)
+let checked_goal_activation t binding held policy authorization =
+  let open Result.Let_syntax in
+  let%bind controller = require_recurrence_controller t in
+  let%bind original =
+    Result.of_option
+      (Run_preparation.original_actor binding.Source_binding.preparation)
+      ~error:(error Permission_denied "Goal activation lost original authorization")
+  in
+  let phase = ref Goal_controller_phase.Startup in
+  let consumed = ref false in
+  let owner () = require_runtime_admission t in
+  let run () =
+    Option.bind t.state.run_state ~f:(fun index ->
+      Run_state.find index held.Held_run.run.id)
+    |> Result.of_option ~error:(error Conflict "Goal activation Run is absent")
+  in
+  let association : Activation_association.t =
+    { issuer_policy = Goal policy
+    ; check_target =
+        (fun ~store ~state ~run ~admission ->
+          if Recurrence_controller.same_store store controller
+          then Goal_activation_policy.check_association policy ~state ~run ~admission
+          else Error (error Conflict "Goal activation belongs to another Store"))
+    }
+  in
+  let check_association () =
+    let%bind () = owner () in
+    let%bind run = run () in
+    Activation_association.check_target
+      association
+      ~store:controller
+      ~state:t.state
+      ~run
+      ~admission:held.admission
+  in
+  let original_current () =
+    Run_command_authorization.check original ~authorize:(fun _ -> Ok ()) t.state
+  in
+  let policy_current () =
+    let%bind () = Run_preparation.Authorization.check authorization t.state in
+    Goal_activation_policy.check_policy policy ~state:t.state
+  in
+  let admitted_policy_current () =
+    let%bind () = Run_preparation.Authorization.check authorization t.state in
+    Goal_activation_policy.check_admitted_policy policy ~state:t.state
+  in
+  let deadline () =
+    let now = t.services.now () in
+    Goal_activation_policy.check_deadline policy ~state:t.state ~now
+  in
+  let%bind current = Recurrence_controller.observe controller t.state in
+  let checked_basis () =
+    let%bind () =
+      if
+        (not !consumed)
+        &&
+        match !phase with
+        | Startup -> true
+        | Operation _ | Closed -> false
+      then Ok ()
+      else Error (error Conflict "Goal activation view was consumed or retired")
+    in
+    let%bind () = Held_run.check_basis held in
+    let%bind () = check_association () in
+    if Recurrence_controller.is_current current
+    then Ok ()
+    else Error (error Conflict "Goal activation Store observation changed")
+  in
+  let check_policy () =
+    let%bind () = checked_basis () in
+    let%bind () = policy_current () in
+    checked_basis ()
+  in
+  let check_timing () =
+    let%bind () = checked_basis () in
+    let%bind () = deadline () in
+    checked_basis ()
+  in
+  let check_authority () =
+    let%bind () = checked_basis () in
+    let%bind () = original_current () in
+    checked_basis ()
+  in
+  let check_current () =
+    let%bind () = check_policy () in
+    let%bind () = check_timing () in
+    let%bind () = check_authority () in
+    checked_basis ()
+  in
+  let continue (target : Held_run.Activation.t) =
+    let refreshed = ref None in
+    let startup () =
+      if
+        Int.equal target.domain (Stdlib.Domain.self () :> int)
+        &&
+        match !phase with
+        | Startup -> true
+        | Operation _ | Closed -> false
+      then target.owned_basis ()
+      else Error (error Conflict "Goal startup owner is retired or foreign")
+    in
+    let basis () =
+      let%bind () = startup () in
+      let%bind () = check_association () in
+      let%bind () = Held_run.Activation.check_basis target in
+      match !refreshed with
+      | Some current when Recurrence_controller.is_current current -> Ok ()
+      | Some _ | None -> Error (error Conflict "Goal startup needs fresh Store custody")
+    in
+    let policy_check () =
+      let%bind () = basis () in
+      let%bind () = policy_current () in
+      let%bind () = target.check_policy () in
+      basis ()
+    in
+    let refresh () =
+      let%bind () = startup () in
+      let%bind () = policy_current () in
+      let%bind () = target.policy () in
+      let%bind current = Recurrence_controller.observe controller t.state in
+      refreshed := Some current;
+      policy_check ()
+    in
+    let policy_admitted_inference () =
+      let%bind () = basis () in
+      let%bind () = admitted_policy_current () in
+      let%bind () = target.check_policy () in
+      basis ()
+    in
+    let refresh_admitted_inference () =
+      let%bind () = startup () in
+      let%bind () = admitted_policy_current () in
+      let%bind () = target.policy () in
+      let%bind current = Recurrence_controller.observe controller t.state in
+      refreshed := Some current;
+      policy_admitted_inference ()
+    in
+    let timing () =
+      let%bind () = basis () in
+      let%bind () = deadline () in
+      basis ()
+    in
+    let authority () =
+      let%bind () = basis () in
+      let%bind () = target.authority () in
+      let%bind () = original_current () in
+      basis ()
+    in
+    let transfer () =
+      let%map () = basis () in
+      let token = ref () in
+      let fresh = ref None in
+      let operation_basis () =
+        let%bind () =
+          match !phase with
+          | Operation actual when phys_equal actual token -> check_association ()
+          | Startup | Operation _ | Closed ->
+            Error (error Conflict "Goal Operation custody is not acknowledged")
+        in
+        match !fresh with
+        | Some current when Recurrence_controller.is_current current -> Ok ()
+        | Some _ | None ->
+          Error (error Conflict "Goal Operation needs fresh Store custody")
+      in
+      let operation_policy () =
+        let%bind () = operation_basis () in
+        let%bind () = policy_current () in
+        operation_basis ()
+      in
+      let refresh () =
+        let%bind () =
+          match !phase with
+          | Operation actual when phys_equal actual token -> check_association ()
+          | Startup | Operation _ | Closed ->
+            Error (error Conflict "Goal Operation was retired")
+        in
+        let%bind () = policy_current () in
+        let%bind current = Recurrence_controller.observe controller t.state in
+        fresh := Some current;
+        operation_policy ()
+      in
+      let timing () =
+        let%bind () = operation_basis () in
+        let%bind () = deadline () in
+        operation_basis ()
+      in
+      let authority () =
+        let%bind () = operation_basis () in
+        let%bind () = original_current () in
+        operation_basis ()
+      in
+      ({ association
+       ; install =
+           (fun () ->
+             match !phase with
+             | Startup -> phase := Operation token
+             | Operation _ | Closed -> ())
+       ; close = (fun () -> phase := Closed)
+       ; refresh
+       ; policy = operation_policy
+       ; timing
+       ; authority
+       ; basis = operation_basis
+       }
+       : Activation_controller.Operation.t)
+    in
+    ({ target
+     ; controller = { transfer }
+     ; refresh
+     ; policy = policy_check
+     ; refresh_admitted_inference
+     ; policy_admitted_inference
+     ; timing
+     ; authority
+     ; basis
+     }
+     : Admitted_activation.Continuation.t)
+  in
+  let%map () = check_current () in
+  ({ check_current
+   ; check_policy
+   ; check_authority
+   ; check_timing
+   ; check_basis = checked_basis
+   ; association
+   ; continue
+   ; consumed
+   }
+   : Admitted_activation.Checked.t)
+;;
+
+let admit_held_goal_run_internal t ~binding ~intent ~session =
+  let open Result.Let_syntax in
+  let previous = t.state in
+  let preparation = binding.Source_binding.preparation in
+  let check_basis () =
+    let%bind () = check_bound_source t binding in
+    if Int64.equal previous.counters.revision t.state.counters.revision
+    then Ok ()
+    else Error (error Conflict "Goal admission candidate basis changed")
+  in
+  let%bind () = check_basis () in
+  let%bind controller = require_recurrence_controller t in
+  let%bind () =
+    if Agent_protocol.Session_ref.equal session (Recurrence_controller.session controller)
+    then Ok ()
+    else Error (error Invalid_request "Goal admission targets another actor")
+  in
+  let%bind () = Source_binding.check_current binding in
+  let request = Run_preparation.request preparation in
+  let%bind () =
+    if
+      Agent_protocol.Run.Mode.equal request.mode Workflow
+      && Run_admission_request.Caller.equal request.caller Headless_command
+    then Ok ()
+    else Error (error Invalid_request "Goal episode requires headless Workflow")
+  in
+  let index = Option.value previous.run_state ~default:Run_state.empty in
+  let%bind retained =
+    Run_state.receipt
+      index
+      ~principal_id:(Run_preparation.principal_id preparation)
+      ~key:request.key
+      ~request_sha256:(Run_preparation.request_sha256 preparation)
+  in
+  match retained with
+  | Some admission ->
+    let%bind link =
+      Result.of_option
+        (Run_state.goal_link index admission.run_id)
+        ~error:(error Conflict "retained Run has no Goal association")
+    in
+    if
+      String.equal
+        (Run_goal_link.intent_sha256 link)
+        (Goal_episode_admission.digest intent)
+      && Agent_protocol.Run_receipt.equal
+           admission
+           (Agent_protocol.Goal_episode.admission (Run_goal_link.episode link))
+    then Ok (Goal_activation.Admission.Retained admission)
+    else Error (error Conflict "retained Goal association intent changed")
+  | None ->
+    let%bind () = check_retry_execution t preparation in
+    let%bind () = check_selected_source t binding in
+    let%bind authorization =
+      Run_preparation.capture_authorization
+        preparation
+        ~owner:t.run_preparation_owner
+        ~state:t.state
+    in
+    let attempted = ref false in
+    let returned = ref false in
+    Exn.protect
+      ~finally:(fun () -> if not !returned then Source_binding.close binding)
+      ~f:(fun () ->
+        let prepare () =
+          let now = t.services.now () in
+          let%bind () = check_basis () in
+          let%bind facts =
+            Run_admission.prepare_held_from_preparation
+              previous
+              ~preparation
+              ~owner:t.run_preparation_owner
+              ~source:binding.source
+              ~session
+              ~run_id:(Agent_protocol.Id.Run.create ())
+              ~now
+          in
+          let%bind planned =
+            Goal_episode_admission.prepare_held previous ~admission:facts ~intent
+          in
+          let%bind policy =
+            Goal_activation_policy.create
+              ~goal:(Goal_episode_admission.goal planned)
+              ~link:(Goal_episode_admission.link planned)
+          in
+          let%bind candidate =
+            prepare_transition
+              ~run_preparation:preparation
+              t
+              ~delta:
+                (Session_delta.Batch
+                   [ Run_state_changed (Goal_episode_admission.run_state planned)
+                   ; Goal_catalog_changed (Goal_episode_admission.catalog planned)
+                   ])
+              ~payloads:[]
+          in
+          let check_before_commit () =
+            let%bind decision =
+              Goal_activation_policy.check_new_episode_eligibility
+                policy
+                ~state:candidate.state
+                ~now:(t.services.now ())
+            in
+            let%bind () =
+              match decision with
+              | Allow -> Ok ()
+              | Hold _ ->
+                Error (error Permission_denied "Goal policy holds new episode admission")
+            in
+            let%bind () = check_source_original t binding in
+            check_basis ()
+          in
+          let%bind () = check_before_commit () in
+          let held =
+            held_run
+              t
+              binding
+              (Run_admission.Held_plan.run facts)
+              (Run_admission.Held_plan.receipt facts)
+          in
+          Ok (candidate, held, policy, check_before_commit)
+        in
+        match prepare () with
+        | Error failure -> Ok (Goal_activation.Admission.Rejected failure)
+        | Ok (candidate, held, policy, check_before_commit) ->
+          binding.phase <- Open (Admission_pending attempted);
+          (match
+             persist_transition
+               ~run_preparation:preparation
+               ~commit_attempted:attempted
+               ~check_before_commit
+               t
+               candidate
+           with
+           | Error failure ->
+             Ok
+               (if !attempted
+                then Goal_activation.Admission.Uncertain failure
+                else Goal_activation.Admission.Rejected failure)
+           | Ok () ->
+             install_committed_transition ~run_preparation:preparation t candidate;
+             binding.phase
+             <- (match binding.phase with
+                 | Open _ -> Open (Admitted held.admission)
+                 | Closed _ -> Closed (Admitted held.admission));
+             (* The durable association is inert. Publish its canonical Store
+                projection before observing the SAME receipt for live issuance.
+                Reentrant publication may retire it; issuance then reports its
+                exact failure instead of fabricating a Current or permission. *)
+             publish_committed_transition t candidate;
+             let activation =
+               checked_goal_activation t binding held policy authorization
+             in
+             returned := true;
+             (match activation with
+              | Ok checked -> Ok (Goal_activation.Admission.Admitted { held; checked })
+              | Error error ->
+                Ok
+                  (Goal_activation.Admission.Activation_unavailable
+                     { admission = held.admission; error }))))
 ;;
 
 let begin_held_activation_internal t binding (held : Held_run.t) checked =
@@ -25816,7 +26485,26 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         | Some delta ->
           let%bind transition = prepare_transition t ~delta ~payloads:[] in
           let%bind () = Goal_command_admission.check_write actor ~authorize t.state in
-          let%map () = install t transition in
+          let check_before_commit =
+            match request.Goal_command.mutation with
+            | Hold (id, _) ->
+              Some
+                (fun () ->
+                  let%map () =
+                    Goal_command_admission.check_write actor ~authorize t.state
+                  in
+                  (* A fresh explicit Hold revokes pending startup even when its
+                   public value equals an automatic hold. Failed saves cannot
+                   revive that exact live cell; retained commands never enter. *)
+                  retire_goal_activation t id)
+            | Create _
+            | Revise_objective _
+            | Record_progress _
+            | Change_budget _
+            | Adopt_source _
+            | Abandon _ -> None
+          in
+          let%map () = install ?check_before_commit t transition in
           (* An explicit Hold is a revocation even when an earlier automatic
              budget hold has exactly the same public value. Retained retries
              and failed persistence never enter this acknowledged fresh branch. *)
@@ -25989,8 +26677,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
             | Ok receipt -> Ok (Run_admission_outcome.Admitted receipt)
             | Error failure ->
               let retained =
-                Run_state.receipt
-                  (Option.value t.state.run_state ~default:Run_state.empty)
+                ordinary_run_receipt
+                  t
                   ~principal_id:(Run_preparation.principal_id preparation)
                   ~key:(Run_preparation.request preparation).key
                   ~request_sha256:(Run_preparation.request_sha256 preparation)
@@ -26048,6 +26736,12 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
          enable_held_turn_budget_internal t continuation policy
        | Install_runtime (continuation, worker, inference, manager) ->
          install_held_runtime_internal t continuation worker inference manager
+       | Goal request ->
+         (match request with
+          | Receipt (actor, authorize, request, session) ->
+            goal_run_receipt_internal t ~actor ~authorize ~request ~session
+          | Admit (binding, intent, session) ->
+            admit_held_goal_run_internal t ~binding ~intent ~session)
        | Begin_held_activation (binding, held, checked) ->
          begin_held_activation_internal t binding held checked
        | Begin_held_initialization (activation, purpose, expected) ->
@@ -26075,11 +26769,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         else Error (error Invalid_request "run receipt targets another session")
       in
       let%bind retained =
-        Run_state.receipt
-          (Option.value t.state.run_state ~default:Run_state.empty)
-          ~principal_id
-          ~key:request.key
-          ~request_sha256
+        ordinary_run_receipt t ~principal_id ~key:request.key ~request_sha256
       in
       (match retained with
        | None -> Ok None
@@ -26303,8 +26993,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Allocate_inference (execution, owner, relation, configuration) ->
       allocate_inference t execution owner relation configuration
     | Admit_model_job (execution, job) -> admit_model_job t execution job
-    | Refresh_inference (execution, owner, handle) ->
-      refresh_inference t execution owner handle
+    | Refresh_inference selected -> refresh_inference t selected
     | Acknowledge_inference (run_preparation, owner, handle, attempt) ->
       acknowledge_inference ?run_preparation t owner handle attempt
     | Observe_inference (run_preparation, handle, incoming) ->
@@ -27369,30 +28058,7 @@ let initialization_model_admission t ~scope =
 ;;
 
 let initialization_model_allocation t ~scope ~job =
-  let allocate = inference_port t (Inference_initialization_job (scope, job)) in
-  fun ~graph ~relation ~configuration ->
-    let open Result.Let_syntax in
-    let%map allocation = allocate ~graph ~relation ~configuration in
-    match scope.Initialization_scope.held_continuation with
-    | None -> allocation
-    | Some continuation ->
-      let require = function
-        | Ok () -> ()
-        | Error error -> raise (Inference_allocation.Rejected error)
-      in
-      (* Constructing this guard cannot abandon an acknowledged allocation.
-         Graph tracking registers the same handle before submission refreshes. *)
-      let refresh =
-        Inference_runtime.Submission_guard.create ~refresh:(fun () ->
-          Admitted_activation.Continuation.refresh continuation |> require;
-          fun () -> Admitted_activation.Continuation.check_basis continuation |> require)
-      in
-      Inference_allocation.Host.create
-        ~handle:(Inference_allocation.handle allocation)
-        ~submission_guard:
-          (Inference_runtime.Submission_guard.compose
-             refresh
-             (Inference_allocation.submission_guard allocation))
+  inference_port t (Inference_initialization_job (scope, job))
 ;;
 
 let add_initialization_model_job t ~scope job =
@@ -27916,6 +28582,14 @@ let import_held_recurrence_execution
        (held, actor, authorize, automatic_policy, observation))
 ;;
 
+let goal_run_receipt t ~actor ~authorize ~request ~session =
+  call t (Held_startup (Goal (Receipt (actor, authorize, request, session))))
+;;
+
+let admit_held_goal_run t ~binding ~intent ~session =
+  call t (Held_startup (Goal (Admit (binding, intent, session))))
+;;
+
 let begin_held_activation t ~binding ~held ~checked =
   recurrence_call t (Held_startup (Begin_held_activation (binding, held, checked)))
 ;;
@@ -28055,27 +28729,9 @@ let with_held_input t ~continuation ~prepare f =
   in
   let allocate_inference ~graph ~relation ~configuration =
     let%bind () = checkpoint () in
-    let%map allocation =
-      inference_port t (Inference_held_input scope) ~graph ~relation ~configuration
-    in
-    (* Register this acknowledged handle before any fallible refresh. The composed
-       guard refreshes Store custody only at the real submission boundary. *)
-    let guard =
-      Inference_runtime.Submission_guard.create ~refresh:(fun () ->
-        match refresh () with
-        | Error error -> raise (Inference_allocation.Rejected error)
-        | Ok check ->
-          fun () ->
-            (match check () with
-             | Ok () -> ()
-             | Error error -> raise (Inference_allocation.Rejected error)))
-    in
-    Inference_allocation.Host.create
-      ~handle:(Inference_allocation.handle allocation)
-      ~submission_guard:
-        (Inference_runtime.Submission_guard.compose
-           guard
-           (Inference_allocation.submission_guard allocation))
+    (* The canonical allocation guard captures this actual Parsing scope and
+       registration. Do not compose a second fresh-work gate after admission. *)
+    inference_port t (Inference_held_input scope) ~graph ~relation ~configuration
   in
   let execution : Runtime_input_preparation.Execution.t =
     { request = scope.request; id = scope.id; checkpoint; refresh; allocate_inference }

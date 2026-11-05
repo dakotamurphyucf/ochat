@@ -44,7 +44,7 @@ let token_decision usage (stop : G.Budget.Token_stop.t) =
   else Allow
 ;;
 
-let check goal ~accounting:account ~ledger ~now ~dimension =
+let check_policy goal ~accounting:account ~ledger ~now ~dimension =
   let open Result.Let_syntax in
   let%bind () =
     if
@@ -64,25 +64,39 @@ let check goal ~accounting:account ~ledger ~now ~dimension =
         P.Timestamp.compare now deadline >= 0)
     then Ok (Hold Deadline_reached)
     else (
-      let count, ceiling, budget_dimension =
-        match dimension with
-        | Attempt ->
-          ( A.admitted_attempts account
-          , G.Budget.admitted_attempts budget
-          , G.Budget.Dimension.Admitted_attempts )
-        | Host_turn ->
-          ( A.admitted_turns account
-          , G.Budget.admitted_turns budget
-          , G.Budget.Dimension.Admitted_turns )
+      let count_hold =
+        Option.bind dimension ~f:(fun dimension ->
+          let count, ceiling, budget_dimension =
+            match dimension with
+            | Attempt ->
+              ( A.admitted_attempts account
+              , G.Budget.admitted_attempts budget
+              , G.Budget.Dimension.Admitted_attempts )
+            | Host_turn ->
+              ( A.admitted_turns account
+              , G.Budget.admitted_turns budget
+              , G.Budget.Dimension.Admitted_turns )
+          in
+          if Option.exists ceiling ~f:(fun ceiling -> Int64.(count >= ceiling))
+          then Some (G.Hold.Budget_gate budget_dimension)
+          else None)
       in
-      if Option.exists ceiling ~f:(fun ceiling -> Int64.(count >= ceiling))
-      then Ok (Hold (Budget_gate budget_dimension))
-      else
+      match count_hold with
+      | Some hold -> Ok (Hold hold)
+      | None ->
         Ok
           (Option.value_map
              (G.Budget.observed_tokens budget)
              ~default:Allow
              ~f:(token_decision usage)))
+;;
+
+let check goal ~accounting ~ledger ~now ~dimension =
+  check_policy goal ~accounting ~ledger ~now ~dimension:(Some dimension)
+;;
+
+let check_activation goal ~accounting ~ledger ~now =
+  check_policy goal ~accounting ~ledger ~now ~dimension:None
 ;;
 
 let same_allocation_policy before after =

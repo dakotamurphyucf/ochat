@@ -39,18 +39,26 @@ module Execution : sig
     ; refresh :
         unit
         -> (unit -> (unit, Agent_protocol.Error.t) result, Agent_protocol.Error.t) result
-      (** Refresh for existing Shell Call_context.with_narrowed_check and
-          Submission_guard. Returned nonyielding final check performs selected
+      (** Refresh for fresh effects, including Shell Call_context.with_narrowed_check.
+          Do not compose this fresh-work gate over an admitted inference guard.
+          Returned nonyielding final check performs selected
           current checks after inherited parent checks, ends in pure bases;
           it performs no Store/RPC. No generic close-to-Ok behavior. *)
     ; allocate_inference : Inference_allocation.Port.t
+      (** Fresh allocation checks the full Parsing/effect policy. Its returned
+          guard retains the exact acknowledged registration and scope through
+          provider submission, including automatic holds that deny new work. *)
     }
 end
 
 module Tracking : sig
   (** One actual lexical input Graph_tracking, bound to Execution's allocator.
       All callbacks retain same actual input scope/preparation for ACKs. These
-      replace the ordinary runtime tracker together; identity alone is unsound. *)
+      replace the ordinary runtime tracker together; identity alone is unsound.
+      Bind [identity] to the SAME execution allocator: its allocation guard owns
+      provider currentness after admission. Fresh native/Agent/file effects keep
+      [Execution.checkpoint]; no generic fresh allowance is reapplied to that
+      registered submission, and inherited parent submission guards remain. *)
   type t =
     { identity : Inference_client.Identity.t
     ; on_attempt : Inference_runtime.Attempt.t -> unit

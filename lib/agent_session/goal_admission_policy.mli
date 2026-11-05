@@ -23,6 +23,18 @@ val check
   -> dimension:dimension
   -> (decision, Agent_protocol.Error.t) result
 
+(** Global new-activation eligibility over actual stable accounting/canonical
+    usage: Enabled control, deadline and selected-token policy. No attempt or
+    host-turn count ceiling is tested or incremented. Those belong only to
+    [check] at their actual fresh admission. Never reuse this to validate an
+    already-admitted allocation or continuation. *)
+val check_activation
+  :  Agent_protocol.Goal.t
+  -> accounting:Goal_accounting.t
+  -> ledger:Inference_ledger.t
+  -> now:Agent_protocol.Timestamp.t
+  -> (decision, Agent_protocol.Error.t) result
+
 (** Compare the immutable attribution and configured budget/objective policy of
     two revisions of the same Goal for an already admitted allocation. Lifecycle
     state is deliberately separate: the actor distinguishes an automatic

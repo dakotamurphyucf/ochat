@@ -390,6 +390,7 @@ let%test_module "retained Developer Host policy" =
         ; server =
             { data_dir = Option.value data_dir ~default:(Filename.concat root "data")
             ; recurrence_automation = None
+            ; recurrence_execution = None
             ; session_helpers = []
             ; authoring_packages = []
             ; authoring_budget = None

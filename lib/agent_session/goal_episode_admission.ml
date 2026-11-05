@@ -34,10 +34,14 @@ let digest intent =
 type t =
   { run_state : Run_state.t
   ; catalog : Goal_catalog.t
+  ; goal : G.t
+  ; link : Run_goal_link.t
   }
 
 let run_state t = t.run_state
 let catalog t = t.catalog
+let goal t = t.goal
+let link t = t.link
 
 let previous_terminal index episode =
   let open Result.Let_syntax in
@@ -60,13 +64,17 @@ let previous_terminal index episode =
     conflict "goal episode replacement requires its exact actual terminal receipt"
 ;;
 
-let prepare (state : Session_state.t) ~admission ~(intent : intent) =
+let prepare_facts
+      (state : Session_state.t)
+      ~(run : P.Run.t)
+      ~index
+      ~receipt
+      ~(intent : intent)
+      ~enable
+  =
   let open Result.Let_syntax in
   let original_runs = Option.value state.run_state ~default:Run_state.empty in
   let catalog = Option.value state.goal_catalog ~default:Goal_catalog.empty in
-  let run = Run_admission.run admission in
-  let index = Run_admission.index admission in
-  let receipt = Run_admission.receipt admission in
   let%bind goal =
     Result.of_option
       (Goal_catalog.find catalog intent.goal_id)
@@ -76,7 +84,10 @@ let prepare (state : Session_state.t) ~admission ~(intent : intent) =
     if
       Int64.equal intent.expected_goal_revision (G.revision goal)
       && Int64.equal intent.expected_catalog_revision (Goal_catalog.revision catalog)
-      && G.State.equal (G.state goal) (Open Enabled)
+      && (match G.state goal with
+          | Open Enabled -> true
+          | Open (Held _) -> enable
+          | Closed _ -> false)
       && P.Id.Principal.equal (G.creator goal) run.principal_id
       && P.Session_ref.equal (G.session goal) run.session
       && P.Id.Session.equal
@@ -109,7 +120,11 @@ let prepare (state : Session_state.t) ~admission ~(intent : intent) =
     | None -> Ok None
     | Some episode -> Result.map (previous_terminal original_runs episode) ~f:Option.some
   in
-  let%bind goal = G.bind_episode goal episode ~previous in
+  let%bind goal =
+    if enable
+    then G.activate_episode goal episode ~previous
+    else G.bind_episode goal episode ~previous
+  in
   let%bind document =
     Result.of_option
       (Goal_catalog.document catalog intent.goal_id)
@@ -132,5 +147,29 @@ let prepare (state : Session_state.t) ~admission ~(intent : intent) =
       ~catalog:(Some catalog)
       ~runs:(Some run_state)
   in
-  { run_state; catalog }
+  { run_state; catalog; goal; link }
+;;
+
+let prepare state ~admission ~intent =
+  prepare_facts
+    state
+    ~run:(Run_admission.run admission)
+    ~index:(Run_admission.index admission)
+    ~receipt:(Run_admission.receipt admission)
+    ~intent
+    ~enable:false
+;;
+
+let prepare_held state ~admission ~intent =
+  let open Result.Let_syntax in
+  let run = Run_admission.Held_plan.run admission in
+  let receipt = Run_admission.Held_plan.receipt admission in
+  let%bind index =
+    Run_state.commit
+      (Run_admission.Held_plan.source_index admission)
+      ~run
+      ~receipt
+      ~intent:None
+  in
+  prepare_facts state ~run ~index ~receipt ~intent ~enable:true
 ;;

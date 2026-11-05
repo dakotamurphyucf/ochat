@@ -91,6 +91,7 @@ let server_config ~project_sources data_root =
   Config.Server.
     { data_dir = data_root
     ; recurrence_automation = None
+    ; recurrence_execution = None
     ; session_helpers = []
     ; authoring_packages = []
     ; authoring_budget = None

@@ -1392,6 +1392,103 @@ let parse_recurrence_automation context path sexp =
   |> admitted
 ;;
 
+let parse_recurrence_execution context path sexp =
+  let module C = Recurrence_execution_configuration in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let invalid () =
+    fail
+      context
+      ~code:"config.recurrence_execution"
+      ~path
+      ~message:"invalid or unbounded recurrence execution configuration"
+      ~remediation:
+        "Use a principal, at most 256 distinct controllers, explicit local target lists \
+         and captured-child grants, at most 1024 total edges, and optional UTC expiry \
+         within 64 KiB."
+  in
+  let rec bounded depth nodes bytes = function
+    | _ when depth > 16 || nodes <= 0 -> Error ()
+    | Sexp.Atom text ->
+      let length = String.length text in
+      if length > bytes then Error () else Ok (nodes - 1, bytes - length)
+    | List values ->
+      List.fold_result
+        values
+        ~init:(nodes - 1, bytes)
+        ~f:(fun (nodes, bytes) value -> bounded (depth + 1) nodes bytes value)
+  in
+  let%bind () =
+    match bounded 0 8192 65536 sexp with
+    | Ok _ -> Ok ()
+    | Error () -> invalid ()
+  in
+  let admitted = function
+    | Ok value -> Ok value
+    | Error _ -> invalid ()
+  in
+  let session_id path value =
+    atom context path value >>= fun value -> P.Id.Session.of_string value |> admitted
+  in
+  let%bind fields = record context path sexp in
+  let%bind () =
+    ensure_allowed context path fields [ "principal_id"; "controllers"; "expires_at" ]
+  in
+  let%bind principal_id =
+    required context path fields "principal_id"
+    >>= atom context (path ^ ".principal_id")
+    >>= fun value -> P.Id.Principal.of_string value |> admitted
+  in
+  let%bind controllers =
+    required context path fields "controllers"
+    >>= list context (path ^ ".controllers")
+    >>= fun values ->
+    if List.length values > 256
+    then invalid ()
+    else
+      List.map values ~f:(fun value ->
+        let row_path = path ^ ".controllers[]" in
+        let%bind fields = record context row_path value in
+        let%bind () =
+          ensure_allowed
+            context
+            row_path
+            fields
+            [ "session_id"; "existing_targets"; "captured_children" ]
+        in
+        let%bind id =
+          required context row_path fields "session_id"
+          >>= session_id (row_path ^ ".session_id")
+        in
+        let%bind existing_targets =
+          required context row_path fields "existing_targets"
+          >>= list context (row_path ^ ".existing_targets")
+          >>= fun values ->
+          if List.length values > 256
+          then invalid ()
+          else
+            List.map values ~f:(session_id (row_path ^ ".existing_targets[]"))
+            |> Result.all
+        in
+        let%bind captured_children =
+          required context row_path fields "captured_children"
+          >>= parse_bool context (row_path ^ ".captured_children")
+        in
+        C.Controller.create ~session_id:id ~existing_targets ~captured_children
+        |> admitted)
+      |> Result.all
+  in
+  let%bind expires_at =
+    match field fields "expires_at" with
+    | None -> Ok None
+    | Some value ->
+      atom context (path ^ ".expires_at") value
+      >>= fun value ->
+      P.Timestamp.of_string value |> admitted |> Result.map ~f:Option.some
+  in
+  C.create ~principal_id ~controllers ~expires_at |> admitted
+;;
+
 let parse_server context sexp =
   let path = "server" in
   let open Result.Let_syntax in
@@ -1399,6 +1496,7 @@ let parse_server context sexp =
   let allowed =
     [ "data_dir"
     ; "recurrence_automation"
+    ; "recurrence_execution"
     ; "project_sources"
     ; "authoring_project_access"
     ; "authoring_upload_access"
@@ -1426,6 +1524,13 @@ let parse_server context sexp =
     | None -> Ok None
     | Some value ->
       parse_recurrence_automation context "server.recurrence_automation" value
+      |> Result.map ~f:Option.some
+  in
+  let%bind recurrence_execution =
+    match field fields "recurrence_execution" with
+    | None -> Ok None
+    | Some value ->
+      parse_recurrence_execution context "server.recurrence_execution" value
       |> Result.map ~f:Option.some
   in
   let%bind project_sources =
@@ -1608,6 +1713,7 @@ let parse_server context sexp =
   Config.Server.
     { data_dir
     ; recurrence_automation
+    ; recurrence_execution
     ; project_sources
     ; authoring_project_access
     ; authoring_upload_access

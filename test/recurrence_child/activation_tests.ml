@@ -330,6 +330,14 @@ let cold_target
   target, observer
 ;;
 
+let create_cold_child daemon parent captured =
+  let permit = reserve parent captured in
+  let child =
+    Factory.create_recurrence_child (Daemon.factory daemon) ~parent ~permit |> protocol_ok
+  in
+  permit, child
+;;
+
 (* Parent is real Running/Ready/Idle after authenticated client create/start,
    with its actual planner installed via Support.with_planner. Source files and
    recipe file were written before Daemon.start. f stays within all live leases. *)
@@ -338,6 +346,7 @@ let with_cold_occurrence
       ?(check_prewarm = false)
       ?(catalog_target = false)
       ?(before_prepare = fun _ -> ())
+      ?create_child
       env
       daemon
       parent
@@ -349,11 +358,9 @@ let with_cold_occurrence
   let captured, target_observer =
     cold_target ~catalog_target ~mode env daemon parent ~root_file
   in
-  let permit = reserve parent captured in
+  let create_child = Option.value create_child ~default:(create_cold_child daemon) in
+  let permit, linked = create_child parent captured in
   let reservation = Actor.Recurrence_creation.reservation permit in
-  let linked =
-    Factory.create_recurrence_child (Daemon.factory daemon) ~parent ~permit |> protocol_ok
-  in
   let target_session = Factory.Recurrence_child.session linked in
   let child_id = P.Session_ref.session_id target_session in
   let child, _record = assert_dormant daemon child_id in

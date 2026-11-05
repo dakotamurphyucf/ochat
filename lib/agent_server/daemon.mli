@@ -779,6 +779,11 @@ val store : t -> Agent_store.Session_store.t
 (** Internal qualified host services; access is not caller authorization. *)
 val factory : t -> Session_factory.t
 
+(** Explicit configured execution policy bound to this actual Factory and host
+    lifetime. Absent configuration and Operator_only startup return None. This
+    accessor does not select/load sessions or issue execution authority. *)
+val recurrence_execution_host : t -> Recurrence_execution_host.t option
+
 val blob_store : t -> Agent_store.Blob_store.t
 val prompts : t -> Agent_session.Prompt_catalog.t
 

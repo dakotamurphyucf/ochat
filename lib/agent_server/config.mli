@@ -71,6 +71,10 @@ module Server : sig
           finite no-follow timezone directory. Absence disables automatic due
           publication while metadata and safety controls remain usable. This
           grants no target visibility, child creation or Run admission. *)
+    ; recurrence_execution : Recurrence_execution_configuration.t option [@sexp.option]
+      (** Explicit restart-bound local controller/target and captured-child execution
+          grants, independent of planning. Absence disables the execution host.
+          Configuration is DATA; startup binds proofs to actual Factory entries. *)
     ; project_sources : Project_source_configuration.t option [@sexp.option]
     ; authoring_project_access : Authoring_project_access_configuration.t option
           [@sexp.option]

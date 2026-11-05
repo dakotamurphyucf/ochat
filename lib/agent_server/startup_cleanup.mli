@@ -55,6 +55,10 @@ val adopt_start_scheduler_exn : t -> Start_scheduler.t -> unit
     shutdown. These are actual shared owners, not alternate schedulers. *)
 val adopt_recurrence_host_exn : t -> Recurrence_automation_host.t -> unit
 
+(** Revoke this exact execution host before any startup cleanup join. It owns
+    no alternate workers; existing Factory and scheduler owners join the work. *)
+val adopt_recurrence_execution_host_exn : t -> Recurrence_execution_host.t -> unit
+
 val adopt_schedule_scheduler_exn : t -> Schedule_scheduler.t -> unit
 
 (** Preserve original Error or exception/backtrace if ordered cleanup also fails.

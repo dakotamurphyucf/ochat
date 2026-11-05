@@ -71,6 +71,7 @@ type t =
   ; job_scheduler : Job_scheduler.t
   ; permission_scheduler : Permission_scheduler.t
   ; schedule_scheduler : Schedule_scheduler.t
+  ; recurrence_execution : Recurrence_execution_host.t option
   ; recurrence_automation : Recurrence_automation_host.t option
   ; maintenance : Maintenance.t
   ; config_watcher : Config_watcher.t
@@ -281,6 +282,7 @@ module For_testing = struct
 end
 
 let factory t = t.factory
+let recurrence_execution_host t = t.recurrence_execution
 let blob_store t = t.blob_store
 let prompts t = t.prompts
 let workspaces t = t.workspaces
@@ -1326,6 +1328,21 @@ let compose
       ~durability:(durability config.server)
       ~limits:factory_limits
   in
+  let%bind recurrence_execution =
+    match options.startup_mode, config.server.recurrence_execution with
+    | Operator_only, _ | (Execute | On_demand), None -> Ok None
+    | (Execute | On_demand), Some configuration ->
+      Recurrence_execution_host.create
+        configuration
+        ~factory
+        ~server_id:(Agent_store.Session_store.server_id store)
+        ~sw
+        ~now:(fun () -> timestamp env)
+      |> Result.map ~f:Option.some
+  in
+  Option.iter
+    recurrence_execution
+    ~f:(Startup_cleanup.adopt_recurrence_execution_host_exn startup_cleanup);
   let lifecycle_service =
     Session_lifecycle_service.create
       ~store
@@ -2034,6 +2051,7 @@ let compose
     ; permission_scheduler
     ; schedule_scheduler
     ; recurrence_automation
+    ; recurrence_execution
     ; maintenance
     ; config_watcher
     ; project_sources
@@ -2104,6 +2122,11 @@ let start
       | true ->
         Agent_session.Automatic_turn_budget.create options.chatml_runtime_policy
         |> Agent_session.Automatic_turn_budget.validate
+    in
+    let%bind () =
+      match config.server.recurrence_execution with
+      | None -> Ok ()
+      | Some configuration -> Recurrence_execution_configuration.validate configuration
     in
     let%bind () =
       match config.server.authoring_project_access with
@@ -2317,6 +2340,7 @@ let shutdown t =
   | Starting | Ready | Failed _ | Draining ->
     Eio.Cancel.protect (fun () ->
       t.status_ref := Draining;
+      Option.iter t.recurrence_execution ~f:Recurrence_execution_host.close;
       let open Result.Let_syntax in
       let%bind () = Dispatcher.close_and_wait t.dispatcher in
       let%map () = shutdown_remaining t in
