@@ -25,6 +25,22 @@ let configured controller target =
   |> protocol_ok
 ;;
 
+(* Manual acquisition protocols own a real execution host without registering an
+   automatic dispatcher for the same Ready occurrence. Automatic daemon delivery
+   has its own scheduler acceptance tests. *)
+let with_execution_host daemon sw configuration f =
+  let host =
+    Host.create
+      configuration
+      ~factory:(Daemon.factory daemon)
+      ~server_id:(Store.server_id (Daemon.store daemon))
+      ~sw
+      ~now:P.Timestamp.now
+    |> protocol_ok
+  in
+  protect_cleanup ~finally:(fun () -> Host.close host) (fun () -> f host)
+;;
+
 let select_entry daemon session_id =
   let indexed =
     Store.list_sessions_checked (Daemon.store daemon)
@@ -144,7 +160,7 @@ let with_indexed_targets ?wrap_env ?post_stream ?(check_operator_only = false) f
          let old_store = Daemon.store daemon in
          Daemon.shutdown daemon |> protocol_ok;
          assert (Store.is_closed old_store);
-         let start mode =
+         let start ~config mode =
            Daemon.start
              ~sw
              ~env:
@@ -167,7 +183,7 @@ let with_indexed_targets ?wrap_env ?post_stream ?(check_operator_only = false) f
          in
          if check_operator_only
          then (
-           let operator = start Operator_only in
+           let operator = start ~config Operator_only in
            protect_cleanup
              ~finally:(fun () -> Daemon.shutdown operator |> protocol_ok)
              (fun () ->
@@ -208,20 +224,33 @@ let with_indexed_targets ?wrap_env ?post_stream ?(check_operator_only = false) f
                 [%test_eq: int * int]
                   counts
                   (!(counters.providers), !(counters.inference_ports))));
-         let reopened = start On_demand in
+         let manual_config =
+           { config with server = { config.server with recurrence_execution = None } }
+         in
+         let reopened = start ~config:manual_config On_demand in
          protect_cleanup
            ~finally:(fun () -> Daemon.shutdown reopened |> protocol_ok)
            (fun () ->
-              let registry = Daemon.registry reopened in
-              [%test_eq: int] 0 (Registry.stats registry).loaded;
-              let host = Option.value_exn (Daemon.recurrence_execution_host reopened) in
-              let controller =
-                select_controller env reopened controller_id controller_before
-              in
-              assert (Option.is_none (Registry.find registry target_id));
-              [%test_eq: int] 1 (List.length (Registry.execution_entries registry));
-              let context = Host.controller host controller |> protocol_ok in
-              f env sw reopened old_target target_before controller context counters)))
+              assert (Option.is_none (Daemon.recurrence_execution_host reopened));
+              with_execution_host reopened sw execution_configuration (fun host ->
+                let registry = Daemon.registry reopened in
+                [%test_eq: int] 0 (Registry.stats registry).loaded;
+                let controller =
+                  select_controller env reopened controller_id controller_before
+                in
+                assert (Option.is_none (Registry.find registry target_id));
+                [%test_eq: int] 1 (List.length (Registry.execution_entries registry));
+                let context = Host.controller host controller |> protocol_ok in
+                f
+                  env
+                  sw
+                  reopened
+                  old_target
+                  target_before
+                  controller
+                  context
+                  host
+                  counters))))
 ;;
 
 let%expect_test
@@ -234,9 +263,8 @@ let%expect_test
     ~post_stream:(fun _ ->
       !provider_probe ();
       completed_response "544 acquired target complete")
-    (fun env sw reopened old_target target_before controller context counters ->
+    (fun env sw reopened old_target target_before controller context host counters ->
        let registry = Daemon.registry reopened in
-       let host = Option.value_exn (Daemon.recurrence_execution_host reopened) in
        let target_id = target_before.identity.session_id in
        let counts = !(counters.providers), !(counters.inference_ports) in
        let indexed_target () =
@@ -515,12 +543,10 @@ let on_event ctx state event = Task.pure(state + 1)
                      (config root root (Filename.concat root "parent.chatmd"))
                      ~max_root_agents:2
                  in
+                 let execution_configuration = configured controller_id target_id in
                  let config =
                    { config with
-                     server =
-                       { config.server with
-                         recurrence_execution = Some (configured controller_id target_id)
-                       }
+                     server = { config.server with recurrence_execution = None }
                    }
                  in
                  Daemon.shutdown daemon |> protocol_ok;
@@ -544,66 +570,70 @@ let on_event ctx state event = Task.pure(state + 1)
                  protect_cleanup
                    ~finally:(fun () -> Daemon.shutdown reopened |> protocol_ok)
                    (fun () ->
-                      let controller =
-                        select_controller env reopened controller_id controller_before
-                      in
-                      let registry = Daemon.registry reopened in
-                      assert (Option.is_none (Registry.find registry target_id));
-                      let host =
-                        Option.value_exn (Daemon.recurrence_execution_host reopened)
-                      in
-                      let context = Host.controller host controller |> protocol_ok in
-                      let counts = !constructions, !providers in
-                      let selected =
-                        Host.acquire_existing_target
-                          context
-                          ~session:(reference reopened target_id)
-                        |> protocol_ok
-                      in
-                      let target = Registry.find registry target_id |> Option.value_exn in
-                      assert_unselected registry target;
-                      [%test_eq: int * int] counts (!constructions, !providers);
-                      let acquired = state target in
-                      assert (
-                        List.equal
-                          P.Moderator_execution.equal
-                          target_before.moderator_executions
-                          acquired.moderator_executions);
-                      Host.preview_target_source selected |> protocol_ok |> ignore;
-                      Existing.assert_same acquired target;
-                      let promoted = select_entry reopened target_id in
-                      assert (phys_equal target promoted);
-                      assert (phys_equal target.actor promoted.actor);
-                      assert (phys_equal target.runtime promoted.runtime);
-                      assert (
-                        Option.equal phys_equal target.store_handle promoted.store_handle);
-                      assert (Registry.execution_selected registry target);
-                      assert (not (Owner.has_activation_handoff target.runtime));
-                      Owner.ensure_loaded_authenticated
-                        target.runtime
-                        ~actor:(Host.Target.actor selected)
-                      |> protocol_ok;
-                      let final =
-                        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
-                          Retry_rotation_tests.await_recovered target target_before)
-                      in
-                      assert (Owner.is_loaded target.runtime);
-                      assert (not (Owner.has_activation_handoff target.runtime));
-                      [%test_eq: int] (fst counts + 1) !constructions;
-                      [%test_eq: int] 0 !providers;
-                      [%test_eq: int]
-                        1
-                        (List.count final.moderator_executions ~f:(fun receipt ->
-                           P.Moderator_execution.equal_phase
-                             receipt.context.phase
-                             Session_resume));
-                      Host.controller host target |> protocol_ok |> ignore;
-                      print_endline
-                        "explicit selection retains the exact metadata owner and permits \
-                         one real legacy resume";
-                      print_endline
-                        "ordinary selection is genuine policy, not an invented \
-                         activation handoff"))));
+                      assert (Option.is_none (Daemon.recurrence_execution_host reopened));
+                      with_execution_host reopened sw execution_configuration (fun host ->
+                        let controller =
+                          select_controller env reopened controller_id controller_before
+                        in
+                        let registry = Daemon.registry reopened in
+                        assert (Option.is_none (Registry.find registry target_id));
+                        let context = Host.controller host controller |> protocol_ok in
+                        let counts = !constructions, !providers in
+                        let selected =
+                          Host.acquire_existing_target
+                            context
+                            ~session:(reference reopened target_id)
+                          |> protocol_ok
+                        in
+                        let target =
+                          Registry.find registry target_id |> Option.value_exn
+                        in
+                        assert_unselected registry target;
+                        [%test_eq: int * int] counts (!constructions, !providers);
+                        let acquired = state target in
+                        assert (
+                          List.equal
+                            P.Moderator_execution.equal
+                            target_before.moderator_executions
+                            acquired.moderator_executions);
+                        Host.preview_target_source selected |> protocol_ok |> ignore;
+                        Existing.assert_same acquired target;
+                        let promoted = select_entry reopened target_id in
+                        assert (phys_equal target promoted);
+                        assert (phys_equal target.actor promoted.actor);
+                        assert (phys_equal target.runtime promoted.runtime);
+                        assert (
+                          Option.equal
+                            phys_equal
+                            target.store_handle
+                            promoted.store_handle);
+                        assert (Registry.execution_selected registry target);
+                        assert (not (Owner.has_activation_handoff target.runtime));
+                        Owner.ensure_loaded_authenticated
+                          target.runtime
+                          ~actor:(Host.Target.actor selected)
+                        |> protocol_ok;
+                        let final =
+                          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+                            Retry_rotation_tests.await_recovered target target_before)
+                        in
+                        assert (Owner.is_loaded target.runtime);
+                        assert (not (Owner.has_activation_handoff target.runtime));
+                        [%test_eq: int] (fst counts + 1) !constructions;
+                        [%test_eq: int] 0 !providers;
+                        [%test_eq: int]
+                          1
+                          (List.count final.moderator_executions ~f:(fun receipt ->
+                             P.Moderator_execution.equal_phase
+                               receipt.context.phase
+                               Session_resume));
+                        Host.controller host target |> protocol_ok |> ignore;
+                        print_endline
+                          "explicit selection retains the exact metadata owner and \
+                           permits one real legacy resume";
+                        print_endline
+                          "ordinary selection is genuine policy, not an invented \
+                           activation handoff")))));
   [%expect
     {|
     explicit selection retains the exact metadata owner and permits one real legacy resume
@@ -692,7 +722,7 @@ let selection_cut cut =
         (match cut with
          | Root_before_sync -> true
          | Stop_source -> false)
-      (fun env sw daemon _old_target target_before controller context counters ->
+      (fun env sw daemon _old_target target_before controller context _host counters ->
          let registry = Daemon.registry daemon in
          let target_id = target_before.identity.session_id in
          let selected =
