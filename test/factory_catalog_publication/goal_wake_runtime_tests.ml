@@ -7,6 +7,7 @@ module Staging = Goal_resume_tests
 module Manual = Goal_job_runtime_tests
 module G = P.Goal
 module Service = Agent_server.Goal_run_service
+module Fault = Goal_wake_fault_support
 
 (* Actual executing host and timer scheduler. Both due clocks are controlled;
    the production scheduler owns source loading, producer ACK and callback claim. *)
@@ -139,9 +140,11 @@ module Scenario = struct
   type t =
     | Complete
     | Stop
+    | Claim_failure of Fault.Cut.t
 end
 
 let run (scenario : Scenario.t) =
+  let fault = Fault.State.create () in
   let construction_armed = ref false in
   let construction_entered, construction_enter = Eio.Promise.create () in
   let construction_release, construction_release_u = Eio.Promise.create () in
@@ -154,6 +157,7 @@ let run (scenario : Scenario.t) =
       Eio.Promise.resolve construction_release_u ())
   in
   let advance = ref (fun _ -> failwith "due clocks are not installed") in
+  let recovery_env = ref None in
   let counters : Retry_support.counters =
     { inference_ports = ref 0; providers = ref 0; transcripts = ref [] }
   in
@@ -176,16 +180,28 @@ let run (scenario : Scenario.t) =
     }
   in
   Creation_tests.with_daemon
-    ~wrap_env:(fun env -> with_due_clocks env advance)
+    ~wrap_env:(fun env ->
+      let wrapped = with_due_clocks env advance in
+      recovery_env := Some wrapped;
+      match scenario with
+      | Complete | Stop -> wrapped
+      | Claim_failure cut ->
+        Crash_fault_io.wrap
+          wrapped
+          ~boundary:(Fault.Cut.boundary cut)
+          ~matches:(fun path ->
+            String.is_substring path ~substring:"/journal/"
+            && String.is_suffix path ~suffix:".log")
+          ~reached:(Fault.State.reached fault env))
     ~max_root_agents:
       (match scenario with
-       | Complete -> 1
+       | Complete | Claim_failure _ -> 1
        | Stop -> 2)
     ~prompt_text:prompt
     ~qualify_chatml_extensions:true
     ~sources:[ context_file, "{}\n" ]
     ~policy
-    (fun env _sw root daemon ->
+    (fun env sw root daemon ->
        let phase = ref "initial runtime" in
        let observed = ref None in
        try
@@ -294,7 +310,9 @@ let run (scenario : Scenario.t) =
                       uses the original environment; no producer row is edited. *)
                      (match scenario with
                       | Complete -> ()
-                      | Stop -> construction_armed := true);
+                      | Stop -> construction_armed := true
+                      | Claim_failure _ ->
+                        fault.selected <- Some { state = cold; admission; wake });
                      !advance 601.;
                      match scenario with
                      | Stop ->
@@ -468,6 +486,57 @@ let run (scenario : Scenario.t) =
                        print_endline
                          "local Stop joins actual cold wake construction; an independent \
                           real session still executes"
+                     | Claim_failure cut ->
+                       phase := "await actual queued Goal claim writer failure";
+                       let rec await_failure () =
+                         let current = Resume.checkpoint entry in
+                         observed := Some current;
+                         match fault.candidate with
+                         | Some candidate when Owner.source_lane_idle entry.runtime ->
+                           current, candidate
+                         | Some _ | None ->
+                           Eio.Fiber.yield ();
+                           await_failure ()
+                       in
+                       let confirmed, candidate = await_failure () in
+                       [%test_eq: int] 1 fault.hits;
+                       [%test_eq: int64]
+                         (Int64.pred candidate.transaction.session_revision)
+                         confirmed.counters.revision;
+                       assert (P.Run_wake.equal wake (waiting confirmed admission));
+                       Fault.assert_no_queued_effect confirmed cold counters;
+                       assert (
+                         not
+                           (List.exists confirmed.moderator_executions ~f:(fun receipt ->
+                              P.Id.Moderator_execution.equal
+                                receipt.context.id
+                                candidate.executing.context.id)));
+                       let timer = one_schedule confirmed in
+                       (match timer.status with
+                        | Delivered -> ()
+                        | Scheduled | Delivering | Cancelled | Failed _ ->
+                          failwith "actual timer publication was not acknowledged");
+                       [%test_eq: int] 1 timer.delivery_count;
+                       phase := "physical reopen after unacknowledged Goal claim";
+                       Fault.reopen_claim_fault
+                         ~cut
+                         ~recovery_env:(Option.value_exn !recovery_env)
+                         ~before_reopen:confirmed
+                         env
+                         sw
+                         root
+                         daemon
+                         policy
+                         entry
+                         counters
+                         admission
+                         cold
+                         wake
+                         candidate;
+                       (* The scheduler correctly keeps this local write failure
+                          inside its worker. Preserve its actual selected I/O cause
+                          through the poisoned fixture's outer cleanup. *)
+                       raise (Fault.Observed_claim_fault (Option.value_exn fault.failure))
                      | Complete ->
                        let rec await_timer () =
                          let current = Resume.checkpoint entry in
@@ -605,4 +674,23 @@ let%expect_test
   run Stop;
   [%expect
     {| local Stop joins actual cold wake construction; an independent real session still executes |}]
+;;
+
+let%expect_test "failed Goal queued-claim ACK never transfers effects across recovery" =
+  List.iter
+    Fault.Cut.[ Before_sync; After_sync ]
+    ~f:(fun cut ->
+      (match run (Claim_failure cut) with
+       | () -> failwith "selected Goal queued-claim writer fault was not reached"
+       | exception Fault.Observed_claim_fault failure ->
+         (match failure with
+          | Core_unix.Unix_error (EIO, operation, _) ->
+            assert (String.equal operation "545 Goal wake claim sync")
+          | _ -> Exn.reraise failure "unexpected Goal queued-claim failure"));
+      print_s [%sexp (cut : Fault.Cut.t)]);
+  [%expect
+    {|
+    Before_sync
+    After_sync
+    |}]
 ;;
