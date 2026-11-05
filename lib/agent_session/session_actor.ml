@@ -1,6 +1,16 @@
 open! Core
 module Activation_custody = Recurrence_activation_custody
 
+module No_effects_observation = struct
+  type t =
+    { current : unit -> (unit, Agent_protocol.Error.t) result
+    ; basis : unit -> (unit, Agent_protocol.Error.t) result
+    }
+
+  let check_basis t = t.basis ()
+  let check_current t = t.current ()
+end
+
 module Source_binding = struct
   type disposition =
     | Selected
@@ -1289,8 +1299,25 @@ module Input_graph_request = struct
     | Finish : Held_input_scope.t * Inference_owner.t -> unit t
 end
 
+module Effect_deferred_request = struct
+  type _ t =
+    | Begin :
+        Operator_authorization.t
+        * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+        * Run_admission_request.Headless.t
+        -> Run_preparation.Deferred.Decision.t t
+    | Exclude : unit t
+    | Close : Run_preparation.Deferred.t -> Run_preparation.Closed_attempt.t t
+    | Observe :
+        Operator_authorization.t
+        * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+        * Run_preparation.Source_completion.t
+        -> No_effects_observation.t t
+end
+
 module Held_startup_request = struct
   type _ t =
+    | Effect_deferred : 'a Effect_deferred_request.t -> 'a t
     | Input_graph : 'a Input_graph_request.t -> 'a t
     | Begin_authored :
         Recurrence_activation.Continuation.t
@@ -2280,8 +2307,13 @@ type t =
   ; mutable pending_agent_custody : (Agent_protocol.History.entry * agent_custody) list
   ; mutable job_agent_custody : Job_custody.t
   ; mutable run_authorities : Run_authorities.t
+  ; runtime_source_owner : Runtime_source_owner.Identity.t option
+  ; runtime_source_domain : int
   ; run_preparation_owner : Run_preparation.Owner.t
   ; mutable run_preparation : Run_preparation.t option
+    (* Latest negative-only attempt cell survives logical prep/source closure.
+     It grants no admission or execution rights and never accumulates. *)
+  ; mutable effect_deferred : Run_preparation.Deferred.t option
   ; mutable run_source_binding : Source_binding.t option
   ; mutable held_activation : Held_run.Activation.t option
   ; mutable held_input_scope : Held_input_scope.t option
@@ -2310,6 +2342,14 @@ type t =
   }
 
 let error code message = Agent_protocol.Error.create code ~message ~retryable:false ()
+
+let exclude_effect_deferred t reason =
+  Option.iter t.effect_deferred ~f:(fun deferred ->
+    Run_preparation.Deferred.exclude deferred ~reason);
+  (* Existing completions retain this same excluded cell. Dropping the Actor's
+     negative-only pointer cannot restore them and avoids work on future commits. *)
+  t.effect_deferred <- None
+;;
 
 let agent_source_current t generation source =
   Int.equal generation t.state.identity.generation
@@ -3656,6 +3696,156 @@ let publish_committed_transition t (transition : Session_transition.t) =
   t.services.state_committed t.state transition.events
 ;;
 
+(* Inspect only the requested typed changes while an eligible negative cell
+   remains. Empty claim polls never reach this seam. Source/controller bookkeeping
+   and factual terminal/release deltas do not become effects merely by committing. *)
+let rec deferred_execution_delta (previous : Session_state.t) (delta : Session_delta.t) =
+  match delta with
+  | Batch deltas -> List.exists deltas ~f:(deferred_execution_delta previous)
+  | Active_operation_changed (Some operation) ->
+    not
+      (Option.exists previous.active_operation ~f:(fun current ->
+         Agent_protocol.Id.Operation.equal current.id operation.id))
+  | Job_changed job ->
+    (match job.status with
+     | Running ->
+       not
+         (List.exists previous.jobs ~f:(fun current ->
+            Agent_protocol.Id.Job.equal current.id job.id
+            && Int.equal current.attempt job.attempt
+            &&
+            match current.status with
+            | Running -> true
+            | _ -> false))
+     | Queued
+     | Waiting_permission _
+     | Waiting_completion _
+     | Succeeded
+     | Failed _
+     | Cancelled
+     | Interrupted _ -> false)
+  | Schedule_changed schedule ->
+    (match schedule.status with
+     | Delivering ->
+       not
+         (List.exists previous.schedules ~f:(fun current ->
+            Agent_protocol.Id.Schedule.equal current.id schedule.id
+            &&
+            match current.status with
+            | Delivering -> true
+            | _ -> false))
+     | Scheduled | Delivered | Cancelled | Failed _ -> false)
+  | Invocation_changed invocation ->
+    let prior =
+      List.find previous.invocations ~f:(fun current ->
+        Agent_protocol.Id.Invocation.equal current.context.id invocation.context.id)
+    in
+    let dispatching (value : Agent_protocol.Invocation.t) =
+      match value.status with
+      | Dispatching -> true
+      | Admitted | Resolved _ | Published _ -> false
+    in
+    let observing (value : Agent_protocol.Invocation.t) =
+      Option.exists value.observation ~f:(fun observation ->
+        match observation.status with
+        | Observing -> true
+        | Awaiting | Observed | Observation_failed _ -> false)
+    in
+    (dispatching invocation && not (Option.exists prior ~f:dispatching))
+    || (observing invocation && not (Option.exists prior ~f:observing))
+  | Moderator_execution_changed receipt ->
+    (match receipt.status with
+     | Running ->
+       not
+         (List.exists previous.moderator_executions ~f:(fun current ->
+            Agent_protocol.Id.Moderator_execution.equal
+              current.context.id
+              receipt.context.id
+            &&
+            match current.status with
+            | Running -> true
+            | _ -> false))
+     | Completed _ | Failed _ | Interrupted _ -> false)
+  | Created _
+  | Lifecycle_changed _
+  | Metadata_changed _
+  | Organization_changed _
+  | Initial_start_consumed
+  | Stop_epoch_changed _
+  | Parent_stop_epoch_changed _
+  | Workspace_changed _
+  | Canonical_entries_appended _
+  | Canonical_history_replaced _
+  | Authoring_references_forgotten _
+  | Authoring_publication_changed _
+  | Initial_prompt_count_changed _
+  | Deferred_entries_enqueued _
+  | Deferred_entries_adopted
+  | Pending_inputs_changed _
+  | Active_operation_changed None
+  | Automatic_turn_budget_enabled _
+  | Automatic_turn_pauses_changed _
+  | Attachment_added _
+  | Attachment_removed _
+  | Permission_changed _
+  | Grant_changed _
+  | Inference_target_captured _
+  | Configuration_revision_changed _
+  | Inference_target_changed _
+  | Model_job_target_captured _
+  | Model_job_recipe_target_captured _
+  | Model_job_target_restored _
+  | Inference_ledger_changed _
+  | Managed_submission_admitted _
+  | Managed_submission_changed _
+  | Managed_stop_admitted _
+  | Invocation_reconciled _
+  | Moderator_execution_reconciled _
+  | Subscription_changed _
+  | Subscription_expired _
+  | Subscription_cancelled _
+  | Delivery_changed _
+  | Ingress_changed _
+  | Delivery_committed _
+  | Delivery_wake_changed _
+  | Goal_catalog_changed _
+  | Goal_accounts_changed _
+  | Instruction_selection_changed _
+  | Recurrence_catalog_changed _
+  | Run_state_changed _
+  | Moderator_changed _
+  | Shell_changed _
+  | History_block_reserved _
+  | Compaction_generation_changed _
+  | Compaction_archived _
+  | History_deleted _
+  | History_edited _
+  | Owner_lease_generation_changed _
+  | Failure_changed _
+  | Halt_changed _
+  | Reset_generation _ -> false
+;;
+
+let rec deferred_admission_delta (previous : Session_state.t) (delta : Session_delta.t) =
+  match delta with
+  | Batch deltas -> List.exists deltas ~f:(deferred_admission_delta previous)
+  | Run_state_changed index ->
+    let before = Option.value previous.run_state ~default:Run_state.empty in
+    List.exists (Run_state.receipts index) ~f:(fun receipt ->
+      Agent_protocol.Run_receipt.Kind.equal receipt.kind Admission
+      &&
+      match
+        Run_state.receipt
+          before
+          ~principal_id:receipt.principal_id
+          ~key:receipt.key
+          ~request_sha256:receipt.request_sha256
+      with
+      | Ok (Some _) -> false
+      | Ok None | Error _ -> true)
+  | _ -> false
+;;
+
 (* Every actual durable write passes this seam. Only real Turn starts sample
    fresh policy time; ledger/outcome/cleanup writes add no clock callback. *)
 let persist_transition
@@ -3721,7 +3911,17 @@ let persist_transition
   in
   (* Source policy precedes the composed final guard. Only pure basis checks
      follow it, and the attempt becomes uncertain only at a real writer call. *)
+  let requested = candidate in
   let commit ~command_audit candidate =
+    if Option.is_some t.effect_deferred
+    then
+      if
+        (* Keep the requested candidate across Goal's metadata-only replacement.
+         The mark belongs to the actual writer attempt, never a no-write hold. *)
+        deferred_admission_delta t.state requested.delta
+      then exclude_effect_deferred t Admission_attempted
+      else if deferred_execution_delta t.state requested.delta
+      then exclude_effect_deferred t Ordinary_execution;
     Option.iter commit_attempted ~f:(fun attempted -> attempted := true);
     t.persistence.commit ~command_audit ~previous:t.state candidate
   in
@@ -4282,6 +4482,7 @@ let open_inference_owner t source =
         ~generation:t.state.identity.generation
         ~qualified_source
     in
+    exclude_effect_deferred t Ordinary_execution;
     t.inference_owners <- owner :: t.inference_owners;
     Ok owner
 ;;
@@ -6411,6 +6612,7 @@ let begin_initialization
       (expected : Session_state.t)
   =
   let open Result.Let_syntax in
+  exclude_effect_deferred t Ordinary_execution;
   let%bind () = validate_initialization_basis t ~purpose expected in
   let%bind () =
     match purpose with
@@ -14352,6 +14554,7 @@ let begin_run_preparation_internal
     (match t.run_preparation with
      | Some _ -> Error (error Conflict "another run admission is being prepared")
      | None ->
+       exclude_effect_deferred t Displaced;
        let%map preparation =
          (match original_actor with
           | None -> Run_preparation.create_request
@@ -14373,6 +14576,192 @@ let begin_run_preparation_internal
        in
        t.run_preparation <- Some preparation;
        Run_preparation.Decision.Prepare preparation)
+;;
+
+let effect_deferred_quiescent t =
+  let outstanding_inference =
+    List.exists t.inference_owners ~f:(fun owner ->
+      let registered = ref false in
+      Graph_owner.iter_registrations owner ~f:(fun _ -> registered := true);
+      !registered)
+  in
+  let live_runs =
+    Option.exists t.state.run_state ~f:(fun index ->
+      List.exists (Run_state.runs index) ~f:(fun run ->
+        match run.Agent_protocol.Run.lifecycle with
+        | Admitted | Active | Waiting _ -> true
+        | Terminal _ -> false))
+  in
+  if
+    (not t.stopped)
+    && Option.is_none (Eio.Promise.peek t.finished)
+    && Option.is_none t.lifecycle_fence
+    && Option.is_none t.runtime_retirement
+    && Option.is_none t.state.failure
+    && Option.is_none t.state.active_operation
+    && (match t.state.lifecycle.observed with
+        | Idle | Stopped -> true
+        | _ -> false)
+    && (not t.idle_moderator_borrowed)
+    && (not (moderator_is_borrowed t))
+    && Option.is_none t.queued_event_borrow
+    && Option.is_none t.legacy_callback_scope
+    && Option.is_none t.initialization_scope
+    && Option.is_none t.held_activation
+    && Option.is_none t.held_input_scope
+    && Option.is_none t.held_authored_start
+    && List.is_empty t.invocation_executions
+    (* An installed idle runtime owns its real graph before any provider call.
+       Only outstanding admitted handles prevent this new deferred attempt. *)
+    && (not outstanding_inference)
+    && List.is_empty t.job_scopes
+    && not live_runs
+  then require_runtime_admission t
+  else Error (error Conflict "effect-deferred issuance requires a quiescent actual actor")
+;;
+
+let begin_effect_deferred_internal t ~actor ~authorize ~request =
+  let open Result.Let_syntax in
+  let%bind () = Run_command_authorization.check actor ~authorize t.state in
+  let%bind source_owner =
+    Result.of_option
+      t.runtime_source_owner
+      ~error:(error Conflict "effect-deferred preparation requires its actual Factory")
+  in
+  let request = Run_admission_request.of_headless request in
+  let%bind request_sha256 = Run_admission_request.request_sha256 request in
+  let principal_id = (Operator_authorization.principal actor).id in
+  let%bind retained =
+    Run_state.receipt
+      (Option.value t.state.run_state ~default:Run_state.empty)
+      ~principal_id
+      ~key:request.key
+      ~request_sha256
+  in
+  match retained with
+  | Some ({ kind = Admission; _ } as receipt) ->
+    Ok (Run_preparation.Deferred.Decision.Retained receipt)
+  | Some { kind = Action | Terminal; _ } ->
+    Error (error Conflict "run start key belongs to another action")
+  | None ->
+    let%bind () = effect_deferred_quiescent t in
+    let%bind () =
+      if Option.is_none t.run_preparation
+      then Ok ()
+      else Error (error Conflict "another run admission is being prepared")
+    in
+    exclude_effect_deferred t Displaced;
+    let%bind deferred =
+      Run_preparation.Deferred.create_authenticated_request
+        ~owner:t.run_preparation_owner
+        ~source_owner
+        ~state:t.state
+        ~actor
+        ~request
+        ~request_sha256
+        ~authorize
+    in
+    (* Issuance policies may execute trusted callbacks. Revalidate actual state
+       and the newly selected preparation before publishing either reference. *)
+    let%bind () = effect_deferred_quiescent t in
+    let%bind () =
+      if Option.is_none t.run_preparation
+      then Ok ()
+      else Error (error Conflict "preparation slot changed during deferred issuance")
+    in
+    let%map () =
+      Run_preparation.Deferred.check_basis
+        deferred
+        ~owner:t.run_preparation_owner
+        ~state:t.state
+    in
+    t.run_preparation <- Some (Run_preparation.Deferred.preparation deferred);
+    t.effect_deferred <- Some deferred;
+    Run_preparation.Deferred.Decision.Prepare deferred
+;;
+
+let close_effect_deferred_internal t deferred =
+  let open Result.Let_syntax in
+  let%bind closed =
+    Run_preparation.Deferred.close deferred ~owner:t.run_preparation_owner ~state:t.state
+  in
+  let preparation = Run_preparation.Deferred.preparation deferred in
+  (match t.run_preparation with
+   | Some current when phys_equal current preparation -> close_run_preparation t
+   | Some _ | None -> ());
+  Ok closed
+;;
+
+let observe_no_run_effects_internal t ~actor ~authorize ~completion =
+  let open Result.Let_syntax in
+  let preparation = Run_preparation.Source_completion.preparation completion in
+  let request = Run_preparation.request preparation in
+  let deferred = Run_preparation.Deferred.of_preparation preparation in
+  let domain = t.runtime_source_domain in
+  let owner_basis () =
+    if not (Int.equal domain (Stdlib.Domain.self () :> int))
+    then
+      Error (error Invalid_request "no-effects observation belongs to another Eio domain")
+    else if
+      (not t.stopped)
+      && Option.is_none (Eio.Promise.peek t.finished)
+      && Option.is_none t.lifecycle_fence
+      && Option.equal phys_equal t.effect_deferred deferred
+    then
+      Run_preparation.Source_completion.check_basis
+        completion
+        ~owner:t.run_preparation_owner
+        ~state:t.state
+    else Error (error Conflict "no-effects observation lost its actual writer or attempt")
+  in
+  let absence () =
+    let%bind retained =
+      Run_state.receipt
+        (Option.value t.state.run_state ~default:Run_state.empty)
+        ~principal_id:(Run_preparation.principal_id preparation)
+        ~key:request.key
+        ~request_sha256:(Run_preparation.request_sha256 preparation)
+    in
+    match retained with
+    | None -> Ok ()
+    | Some _ -> Error (error Conflict "no-effects request already has retained evidence")
+  in
+  let check_read () =
+    let%bind () = owner_basis () in
+    Recurrence_command_admission.check_read actor ~authorize t.state
+  in
+  let%bind () = check_read () in
+  let%bind () = absence () in
+  let%bind controller = require_recurrence_controller t in
+  let%bind current = Recurrence_controller.observe controller t.state in
+  let basis () =
+    let%bind () = owner_basis () in
+    let%bind () = absence () in
+    if Recurrence_controller.is_current current
+    then owner_basis ()
+    else Error (error Conflict "no-effects Store observation changed")
+  in
+  let check () =
+    let%bind () = check_read () in
+    basis ()
+  in
+  let%map () = check () in
+  ({ current = check; basis } : No_effects_observation.t)
+;;
+
+let effect_deferred_request
+  : type a. t -> a Effect_deferred_request.t -> (a, Agent_protocol.Error.t) result
+  =
+  fun t request ->
+  match request with
+  | Begin (actor, authorize, request) ->
+    begin_effect_deferred_internal t ~actor ~authorize ~request
+  | Exclude ->
+    exclude_effect_deferred t Ordinary_execution;
+    Ok ()
+  | Close deferred -> close_effect_deferred_internal t deferred
+  | Observe (actor, authorize, completion) ->
+    observe_no_run_effects_internal t ~actor ~authorize ~completion
 ;;
 
 let bind_run_source_internal t ~preparation ~source =
@@ -16202,7 +16591,9 @@ let claim_job_scope t job_id generation attempt deadline =
      rejection. No durable state or runnable invocation is produced here. *)
   t.job_scopes <- scope :: t.job_scopes;
   match job_scope_can_execute t scope with
-  | Ok () -> Ok scope
+  | Ok () ->
+    exclude_effect_deferred t Ordinary_execution;
+    Ok scope
   | Error failure ->
     t.job_scopes
     <- List.filter t.job_scopes ~f:(fun other -> not (phys_equal scope other));
@@ -20016,6 +20407,7 @@ let claim_idle_moderator t =
   else
     History_codec.all_of_protocol t.state.conversation.canonical_history
     |> Result.map ~f:(fun history ->
+      exclude_effect_deferred t Ordinary_execution;
       t.idle_moderator_borrowed <- true;
       Some history)
 ;;
@@ -21189,6 +21581,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Seal_inference_owner _
   | Finish_inference_owner _
   | Close_run_preparation _
+  | Held_startup (Effect_deferred (Exclude | Close _))
   | Held_startup
       (Input_graph
          ( Acknowledge _
@@ -21276,6 +21669,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Checkpoint _
   | Quiescent_checkpoint _
   | Shutdown -> true
+  | Held_startup (Effect_deferred (Begin _ | Observe _))
   | Held_startup (Begin_authored _)
   | Held_startup (Ready_authored _)
   | Held_startup (Claim_authored _)
@@ -23692,11 +24086,38 @@ let retire_execution_custody t =
   t.initialization_scope <- None
 ;;
 
+(* Negative provenance only. These existing public ingress ports can return
+   fresh execution/resource/input capabilities without carrying a preparation.
+   Factual completion, denial, release and source bookkeeping are deliberately
+   absent. Every port retains its existing positive authorization unchanged. *)
+let exclude_ordinary_deferred_ingress : type a. t -> a request -> unit =
+  fun t request ->
+  match request with
+  | Admit_inference _
+  | Allocate_inference _
+  | Admit_model_job _
+  | Begin_initialization _
+  | Begin_run_initialization _
+  | Reserve_run_history_block _
+  | Checkpoint_run_moderator _
+  | Start_run_constructor_model_job _
+  | Add_run_constructor_job _
+  | Add_run_constructor_schedule _
+  | Add_initialization_model_job _
+  | Start_initialization_model_job _
+  | Claim_initialization_model_job _
+  | Capture_initialization_recipe_target _ -> exclude_effect_deferred t Ordinary_execution
+  | Held_startup (Begin_held_recurrence_activation _ | Begin_input _ | Begin_authored _)
+    -> exclude_effect_deferred t Activation_consumed
+  | _ -> ()
+;;
+
 let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   fun t request ->
   if Option.is_some t.lifecycle_fence && not (lifecycle_request_allowed request)
   then Error (error Conflict "session lifecycle is reserved")
   else (
+    exclude_ordinary_deferred_ingress t request;
     match request with
     | Begin_lifecycle (attachment_id, generation, revision) ->
       begin_lifecycle t attachment_id generation revision
@@ -24859,6 +25280,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       bind_run_source_internal t ~preparation ~source
     | Held_startup request ->
       (match request with
+       | Effect_deferred request -> effect_deferred_request t request
        | Input_graph request -> input_graph_request t request
        | Begin_authored (continuation, startup, snapshot) ->
          begin_held_authored_internal t continuation startup snapshot
@@ -25219,7 +25641,8 @@ let rec run t =
        Exn.raise_with_original_backtrace exn backtrace)
 ;;
 
-let create_with_owner_lease_duration
+let create_internal
+      ~runtime_source_owner
       ~schedule_permission_timeouts
       ~sw
       ~clock
@@ -25294,8 +25717,11 @@ let create_with_owner_lease_duration
     ; pending_agent_custody = []
     ; job_agent_custody = Job_custody.empty
     ; run_authorities = Run_authorities.empty
+    ; runtime_source_owner
+    ; runtime_source_domain = (Stdlib.Domain.self () :> int)
     ; run_preparation_owner = Run_preparation.Owner.create ()
     ; run_preparation = None
+    ; effect_deferred = None
     ; run_source_binding = None
     ; held_activation = None
     ; held_input_scope = None
@@ -25339,6 +25765,73 @@ let create_with_owner_lease_duration
   Option.iter (owner_attachment t) ~f:(fun attachment ->
     Option.iter attachment.owner_lease ~f:(schedule_owner_lease t));
   t
+;;
+
+let create_with_owner_lease_duration
+      ~schedule_permission_timeouts
+      ~sw
+      ~clock
+      ~mailbox_capacity
+      ~owner_lease_duration_ms
+      ~max_attachments
+      ~subscriber_capacity
+      ~compaction_env
+      ~initial_state
+      ~persistence
+      ~operation_worker
+      ~services
+  =
+  create_internal
+    ~runtime_source_owner:None
+    ~schedule_permission_timeouts
+    ~sw
+    ~clock
+    ~mailbox_capacity
+    ~owner_lease_duration_ms
+    ~max_attachments
+    ~subscriber_capacity
+    ~compaction_env
+    ~initial_state
+    ~persistence
+    ~operation_worker
+    ~services
+;;
+
+let create_with_runtime_source_owner
+      ~runtime_source_owner
+      ~schedule_permission_timeouts
+      ~sw
+      ~clock
+      ~mailbox_capacity
+      ~owner_lease_duration_ms
+      ~max_attachments
+      ~subscriber_capacity
+      ~compaction_env
+      ~initial_state
+      ~persistence
+      ~operation_worker
+      ~services
+  =
+  create_internal
+    ~runtime_source_owner:(Some runtime_source_owner)
+    ~schedule_permission_timeouts
+    ~sw
+    ~clock
+    ~mailbox_capacity
+    ~owner_lease_duration_ms
+    ~max_attachments
+    ~subscriber_capacity
+    ~compaction_env
+    ~initial_state
+    ~persistence
+    ~operation_worker
+    ~services
+;;
+
+let runtime_source_owner_identity t =
+  if not (Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int))
+  then invalid_arg "runtime source identity belongs to another Eio domain";
+  t.runtime_source_owner
 ;;
 
 let create
@@ -25797,6 +26290,20 @@ let begin_headless_run_preparation t ~actor ~authorize ~request =
 ;;
 
 let end_run_preparation t preparation = call t (Close_run_preparation preparation)
+
+let begin_effect_deferred_headless_preparation t ~actor ~authorize ~request =
+  call t (Held_startup (Effect_deferred (Begin (actor, authorize, request))))
+;;
+
+let exclude_effect_deferred_execution t = call t (Held_startup (Effect_deferred Exclude))
+
+let close_effect_deferred_preparation t deferred =
+  call t (Held_startup (Effect_deferred (Close deferred)))
+;;
+
+let observe_no_run_effects t ~actor ~authorize ~completion =
+  call t (Held_startup (Effect_deferred (Observe (actor, authorize, completion))))
+;;
 
 let bind_run_source t ~preparation ~source =
   call t (Bind_run_source (preparation, source))

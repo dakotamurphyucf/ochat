@@ -661,3 +661,28 @@ their normal meanings. The release acknowledgement records the resulting Run
 and terminal receipt together, when terminal, before startup ownership is
 released. Failed or uncertain writes preserve completed callback and child facts
 without claiming a successful handoff or replaying initialization.
+
+An absent Run receipt does not establish that a failed preparation had no
+effects. A new deferred attempt first reserves the runtime owner's exclusive
+source lane, then obtains its Actor-authenticated preparation. Existing ordinary
+runtime borrowers prevent this reservation. Static source verification can reuse
+already initialized bindings; this does not rerun their initializer.
+The Factory authenticates both the Actor and its runtime owner with its private
+issuer. Constructing a second owner for the same Actor does not grant access to
+this lane or bypass the original owner's active resource leases.
+
+The Factory keeps the attempt's result separate from its no-effects observation.
+It can obtain that observation only after all acquired target and source-parent
+leases have finished successfully, the Actor has closed the exact preparation,
+and a fresh observation of the actual Store confirms the request is absent.
+Inner lease cleanup and outer source cleanup are both checked. An earlier body
+error can remain the reported error when cleanup also fails, but that failure
+still prevents a no-effects observation.
+
+Ordinary execution, a Run admission write attempt, or consumed activation
+permanently disqualifies the attempt. Closing a source binding, recovering an
+empty Run index, or resolving a lease's finished promise cannot reverse this.
+Even an issued observation becomes invalid if subsequent ordinary execution or
+another preparation displaces its live basis. The observation is process-local
+evidence for a separate authorized retry decision; it never starts or retries
+work by itself.

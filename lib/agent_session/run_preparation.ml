@@ -11,6 +11,14 @@ type phase =
   | Open of int64
   | Closed
 
+type exclusion =
+  | Ordinary_execution
+  | Admission_attempted
+  | Activation_consumed
+  | Uncertain_write
+  | Displaced
+[@@deriving equal, sexp_of]
+
 type t =
   { owner : Owner.t
   ; original_actor : Operator_authorization.t option
@@ -20,6 +28,21 @@ type t =
   ; authorize : Session_state.t -> (unit, P.Error.t) result
   ; mutable phase : phase
   ; mutable constructor_jobs : P.Id.Job.t list
+  ; mutable deferred : deferred option
+  }
+
+and deferred =
+  { preparation : t
+  ; source_owner : Runtime_source_owner.Identity.t
+  ; domain : int
+  ; mutable revision : int64
+  ; mutable exclusion : exclusion option
+  ; mutable sealed : bool
+  }
+
+type closed_attempt =
+  { deferred : deferred
+  ; revision : int64
   }
 
 let conflict message = Error (P.Error.create Conflict ~message ~retryable:false ())
@@ -75,6 +98,7 @@ let create_request
       ; authorize
       ; phase = Open state.counters.revision
       ; constructor_jobs = []
+      ; deferred = None
       }
 ;;
 
@@ -186,11 +210,163 @@ let advance t ~owner ~(previous : Session_state.t) ~(current : Session_state.t) 
     then conflict "run preparation commit is not its next owned revision"
     else (
       t.phase <- Open current.counters.revision;
+      Option.iter t.deferred ~f:(fun deferred ->
+        deferred.revision <- current.counters.revision);
       Ok ())
   in
   Result.iter_error result ~f:(fun _ -> close t);
   result
 ;;
+
+let deferred_domain (t : deferred) = Int.equal t.domain (Stdlib.Domain.self () :> int)
+
+let deferred_association (t : deferred) ~owner ~(state : Session_state.t) =
+  if not (deferred_domain t)
+  then conflict "deferred preparation belongs to another Eio domain"
+  else if
+    phys_equal t.preparation.owner owner
+    && Option.exists t.preparation.deferred ~f:(phys_equal t)
+    && P.Id.Session.equal t.preparation.request.session_id state.identity.session_id
+    && Int.equal t.preparation.request.generation state.identity.generation
+    && Int64.equal t.revision state.counters.revision
+  then Ok ()
+  else conflict "deferred preparation owner or acknowledged basis changed"
+;;
+
+let deferred_eligible (t : deferred) =
+  match t.exclusion with
+  | None -> Ok ()
+  | Some _ -> conflict "deferred attempt entered execution or an admission writer"
+;;
+
+module Source_completion = struct
+  type preparation = t
+  type t = closed_attempt
+
+  let preparation t = t.deferred.preparation
+
+  let check_basis t ~owner ~state =
+    let open Result.Let_syntax in
+    let%bind () = deferred_association t.deferred ~owner ~state in
+    let%bind () = deferred_eligible t.deferred in
+    if
+      t.deferred.sealed
+      && Int64.equal t.revision t.deferred.revision
+      &&
+      match t.deferred.preparation.phase with
+      | Closed -> true
+      | Open _ -> false
+    then Ok ()
+    else conflict "source completion lost its exact closed attempt"
+  ;;
+end
+
+module Closed_attempt = struct
+  type t = closed_attempt
+
+  let complete t ~source_owner =
+    let open Result.Let_syntax in
+    let%bind () =
+      if
+        deferred_domain t.deferred
+        && Runtime_source_owner.matches source_owner t.deferred.source_owner
+      then Ok ()
+      else conflict "closed attempt belongs to another source issuer"
+    in
+    let%bind () = deferred_eligible t.deferred in
+    if t.deferred.sealed
+    then Ok t
+    else conflict "deferred attempt has not been factually closed"
+  ;;
+end
+
+module Deferred = struct
+  type preparation = t
+  type t = deferred
+
+  module Exclusion = struct
+    type t = exclusion =
+      | Ordinary_execution
+      | Admission_attempted
+      | Activation_consumed
+      | Uncertain_write
+      | Displaced
+    [@@deriving equal, sexp_of]
+  end
+
+  let create_authenticated_request
+        ~owner
+        ~source_owner
+        ~state
+        ~actor
+        ~request
+        ~request_sha256
+        ~authorize
+    =
+    let open Result.Let_syntax in
+    let%map preparation =
+      create_authenticated_request
+        ~owner
+        ~state
+        ~actor
+        ~request
+        ~request_sha256
+        ~authorize
+    in
+    let deferred =
+      { preparation
+      ; source_owner
+      ; domain = (Stdlib.Domain.self () :> int)
+      ; revision = state.Session_state.counters.revision
+      ; exclusion = None
+      ; sealed = false
+      }
+    in
+    preparation.deferred <- Some deferred;
+    deferred
+  ;;
+
+  let preparation t = t.preparation
+  let of_preparation (t : preparation) = t.deferred
+
+  let exclude t ~reason =
+    if not (deferred_domain t)
+    then invalid_arg "deferred preparation belongs to another Eio domain";
+    if Option.is_none t.exclusion then t.exclusion <- Some reason
+  ;;
+
+  let check_basis t ~owner ~state =
+    let open Result.Let_syntax in
+    let%bind () = deferred_association t ~owner ~state in
+    let%bind () = deferred_eligible t in
+    if t.sealed
+    then conflict "deferred preparation is already sealed"
+    else check_basis t.preparation ~owner ~state
+  ;;
+
+  let close t ~owner ~(state : Session_state.t) =
+    if not (deferred_domain t)
+    then conflict "deferred preparation belongs to another Eio domain"
+    else if not (phys_equal t.preparation.owner owner)
+    then conflict "deferred preparation belongs to another actor"
+    else (
+      (* Closure is factual even after displacement/exclusion. Eligibility is
+         checked separately; no failure here may leave this owner's prep open. *)
+      if Result.is_error (deferred_association t ~owner ~state)
+      then exclude t ~reason:Displaced;
+      close t.preparation;
+      t.sealed <- true;
+      Ok { deferred = t; revision = t.revision })
+  ;;
+
+  module Decision = struct
+    type deferred = t
+
+    type t =
+      | Retained of P.Run_receipt.t
+      | Prepare of deferred
+  end
+end
 
 module Constructor_jobs = struct
   type preparation = t

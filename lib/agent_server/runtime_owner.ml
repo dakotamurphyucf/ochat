@@ -65,6 +65,71 @@ type unload_outcome =
 
 exception Cleanup_failed of Agent_protocol.Error.t
 
+module Scope_outcome = struct
+  module Cleanup = struct
+    module Failure = struct
+      type t =
+        | Protocol of Agent_protocol.Error.t
+        | Raised of exn * Stdlib.Printexc.raw_backtrace
+    end
+
+    type status =
+      | Never_acquired
+      | Joined
+      | Failed of Failure.t * Failure.t list
+
+    type t = status
+
+    let status t = t
+
+    let combine first second =
+      match first, second with
+      | Failed (failure, rest), Failed (next, remaining) ->
+        Failed (failure, rest @ (next :: remaining))
+      | Failed _, (Never_acquired | Joined) -> first
+      | (Never_acquired | Joined), Failed _ -> second
+      | Never_acquired, Never_acquired -> Never_acquired
+      | (Never_acquired | Joined), (Never_acquired | Joined) -> Joined
+    ;;
+
+    let of_result ~acquired = function
+      | Ok (Ok ()) -> if acquired then Joined else Never_acquired
+      | Ok (Error failure) -> Failed (Protocol failure, [])
+      | Error (exn, backtrace) -> Failed (Raised (exn, backtrace), [])
+    ;;
+  end
+
+  type 'a primary =
+    | Returned of ('a, Agent_protocol.Error.t) result
+    | Raised of exn * Stdlib.Printexc.raw_backtrace
+
+  type 'a t =
+    { primary : 'a primary
+    ; cleanup : Cleanup.t
+    }
+
+  let primary t = t.primary
+  let cleanup t = t.cleanup
+
+  let capture f =
+    match f () with
+    | result -> Returned result
+    | exception exn -> Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+  ;;
+
+  let resume t =
+    match t.primary with
+    | Raised (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+    | Returned (Error _ as failure) -> failure
+    | Returned (Ok _ as result) ->
+      (match t.cleanup with
+       | Never_acquired | Joined -> result
+       | Failed (Protocol failure, _) -> Error failure
+       | Failed (Raised (exn, backtrace), _) ->
+         Exn.raise_with_original_backtrace exn backtrace)
+  ;;
+end
+
 type deferred_builder =
   source:Agent_session.Runtime_builder.Source.t
   -> preparation:Agent_session.Run_preparation.t
@@ -83,6 +148,7 @@ type builder =
 
 type t =
   { actor : Agent_session.Session_actor.t
+  ; runtime_source_owner : Agent_session.Runtime_source_owner.Identity.t option
   ; build : builder
   ; build_deferred : deferred_builder option
   ; before_unload : (closing:bool -> (unit, Agent_protocol.Error.t) result) option
@@ -135,8 +201,16 @@ let prepared_source_blocks_runtime ?execution_access t =
        | None, _, _ | _, None, _ | _, _, None -> false)
 ;;
 
-let create_internal ~before_unload ~actor ~initial ~build ~build_deferred =
+let create_internal
+      ~runtime_source_owner
+      ~before_unload
+      ~actor
+      ~initial
+      ~build
+      ~build_deferred
+  =
   { actor
+  ; runtime_source_owner
   ; build
   ; build_deferred
   ; before_unload
@@ -155,6 +229,7 @@ let create_internal ~before_unload ~actor ~initial ~build ~build_deferred =
 
 let create_with_unload ~before_unload ~actor ~initial ~build =
   create_internal
+    ~runtime_source_owner:None
     ~before_unload:(Some before_unload)
     ~actor
     ~initial
@@ -164,6 +239,7 @@ let create_with_unload ~before_unload ~actor ~initial ~build =
 
 let create ~actor ~initial ~build =
   create_internal
+    ~runtime_source_owner:None
     ~before_unload:None
     ~actor
     ~initial
@@ -173,6 +249,7 @@ let create ~actor ~initial ~build =
 
 let create_with_run_unload ~before_unload ~actor ~initial ~build =
   create_internal
+    ~runtime_source_owner:None
     ~before_unload:(Some before_unload)
     ~actor
     ~initial
@@ -182,6 +259,7 @@ let create_with_run_unload ~before_unload ~actor ~initial ~build =
 
 let create_with_authenticated_run_unload ~before_unload ~actor ~initial ~build =
   create_internal
+    ~runtime_source_owner:None
     ~before_unload:(Some before_unload)
     ~actor
     ~initial
@@ -189,8 +267,17 @@ let create_with_authenticated_run_unload ~before_unload ~actor ~initial ~build =
     ~build_deferred:None
 ;;
 
-let create_with_deferred_run_unload ~before_unload ~actor ~initial ~build ~build_deferred =
+let create_with_deferred_run_unload
+      ~source_owner
+      ~before_unload
+      ~actor
+      ~initial
+      ~build
+      ~build_deferred
+  =
   create_internal
+    ~runtime_source_owner:
+      (Some (Agent_session.Runtime_source_owner.identity source_owner))
     ~before_unload:(Some before_unload)
     ~actor
     ~initial
@@ -199,6 +286,7 @@ let create_with_deferred_run_unload ~before_unload ~actor ~initial ~build ~build
 ;;
 
 let is_loaded t = Eio.Mutex.use_ro t.mutex (fun () -> Option.is_some t.runtime)
+let belongs_to_actor t actor = phys_equal t.actor actor
 
 let install ?run_preparation ?original_actor t (runtime : Agent_session.Runtime_builder.t)
   =
@@ -355,9 +443,15 @@ let ensure_loaded_locked ?execution_access ?run_preparation ?original_actor t =
           failure))
 ;;
 
-let ensure_loaded t = with_owner_lock t ~protect:true (fun () -> ensure_loaded_locked t)
+let ensure_loaded t =
+  let open Result.Let_syntax in
+  let%bind () = Agent_session.Session_actor.exclude_effect_deferred_execution t.actor in
+  with_owner_lock t ~protect:true (fun () -> ensure_loaded_locked t)
+;;
 
 let ensure_loaded_authenticated t ~actor =
+  let open Result.Let_syntax in
+  let%bind () = Agent_session.Session_actor.exclude_effect_deferred_execution t.actor in
   with_owner_lock t ~protect:true (fun () -> ensure_loaded_locked ~original_actor:actor t)
 ;;
 
@@ -430,101 +524,147 @@ module Lease_admission = struct
     | Borrow of 'value * Agent_session.Runtime_builder.t option
 end
 
-let with_lease_internal ?execution_access ?(retire = ignore) t ~survives_stop ~admit f =
-  Eio.Cancel.sub (fun context ->
-    let active = Atomic.make true in
-    let finished, finish = Eio.Promise.create () in
-    let lease =
-      { finished
-      ; finish
-      ; survives_stop
-      ; resources = None
-      ; cancel =
-          (fun () ->
-            match Atomic.get active with
-            | true ->
-              retire ();
-              Eio.Cancel.cancel context Exit
-            | false -> ())
-      }
-    in
-    let admitted =
-      with_owner_lock t ~protect:true (fun () ->
-        let open Result.Let_syntax in
-        let%bind () =
-          if prepared_source_blocks_runtime ?execution_access t
-          then Error (background_busy ())
-          else Ok ()
-        in
-        let%map decision = admit () in
-        match decision with
-        | Lease_admission.No_work _ -> decision
-        | Borrow (_, resources) ->
-          lease.resources <- resources;
-          t.background_leases <- lease :: t.background_leases;
-          decision)
-    in
-    match admitted with
-    | Error _ as failure ->
-      Atomic.set active false;
-      failure
-    | Ok (Lease_admission.No_work result) ->
-      (* No work acquired ownership or exposed the cancellation callback. Keep
-         caller cancellation observable without publishing a background lease. *)
-      Atomic.set active false;
-      Eio.Fiber.check ();
-      Ok result
-    | Ok (Borrow (runtime, _)) ->
-      let cleanup () =
-        (* Cleanup must survive cancellation while waiting for another owner. *)
-        Eio.Cancel.protect (fun () ->
+let with_lease_reported_internal
+      ?execution_access
+      ?(retire = ignore)
+      t
+      ~survives_stop
+      ~admit
+      f
+  =
+  let completed = ref None in
+  let acquired = ref false in
+  try
+    Eio.Cancel.sub (fun context ->
+      let active = Atomic.make true in
+      let finished, finish = Eio.Promise.create () in
+      let lease =
+        { finished
+        ; finish
+        ; survives_stop
+        ; resources = None
+        ; cancel =
+            (fun () ->
+              match Atomic.get active with
+              | true ->
+                retire ();
+                Eio.Cancel.cancel context Exit
+              | false -> ())
+        }
+      in
+      let admitted =
+        with_owner_lock t ~protect:true (fun () ->
+          let open Result.Let_syntax in
+          let%bind () =
+            if prepared_source_blocks_runtime ?execution_access t
+            then Error (background_busy ())
+            else Ok ()
+          in
+          let%map decision = admit () in
+          match decision with
+          | Lease_admission.No_work _ -> decision
+          | Borrow (_, resources) ->
+            lease.resources <- resources;
+            t.background_leases <- lease :: t.background_leases;
+            acquired := true;
+            decision)
+      in
+      let report =
+        match admitted with
+        | Error _ as failure ->
           Atomic.set active false;
-          retire ();
-          Exn.protect
-            ~finally:(fun () -> Eio.Promise.resolve lease.finish ())
-            ~f:(fun () ->
-              with_owner_lock t ~protect:true (fun () ->
-                t.background_leases
-                <- List.filter t.background_leases ~f:(fun current ->
-                     not (phys_equal current lease));
-                Option.iter lease.resources ~f:(release_retired_resources_locked t);
-                match t.closed, t.background_leases, t.before_unload, t.unloading with
-                | true, [], None, None when foreground_retirement_finished t ->
-                  let result = retire_runtime_locked t in
-                  (match result with
-                   | Ok () -> t.close_finished <- true
-                   | Error _ -> ());
-                  result
-                | _ -> Ok ())
-              |> raise_cleanup))
+          { Scope_outcome.primary = Returned failure; cleanup = Never_acquired }
+        | Ok (Lease_admission.No_work result) ->
+          (* No work acquired ownership or exposed the cancellation callback. Keep
+         caller cancellation observable without publishing a background lease. *)
+          Atomic.set active false;
+          let primary =
+            Scope_outcome.capture (fun () ->
+              Eio.Fiber.check ();
+              Ok result)
+          in
+          { Scope_outcome.primary; cleanup = Never_acquired }
+        | Ok (Borrow (runtime, _)) ->
+          let cleanup () =
+            (* Cleanup must survive cancellation while waiting for another owner. *)
+            Eio.Cancel.protect (fun () ->
+              Atomic.set active false;
+              retire ();
+              Exn.protect
+                ~finally:(fun () -> Eio.Promise.resolve lease.finish ())
+                ~f:(fun () ->
+                  with_owner_lock t ~protect:true (fun () ->
+                    t.background_leases
+                    <- List.filter t.background_leases ~f:(fun current ->
+                         not (phys_equal current lease));
+                    Option.iter lease.resources ~f:(release_retired_resources_locked t);
+                    match t.closed, t.background_leases, t.before_unload, t.unloading with
+                    | true, [], None, None when foreground_retirement_finished t ->
+                      let result = retire_runtime_locked t in
+                      (match result with
+                       | Ok () -> t.close_finished <- true
+                       | Error _ -> ());
+                      result
+                    | _ -> Ok ())
+                  |> raise_cleanup))
+          in
+          let primary =
+            Scope_outcome.capture (fun () ->
+              Eio.Fiber.check ();
+              let result = f runtime in
+              (match result with
+               | Error _ -> ()
+               | Ok _ -> Eio.Fiber.check ());
+              result)
+          in
+          let cleaned =
+            try
+              cleanup ();
+              Ok (Ok ())
+            with
+            | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+          in
+          { Scope_outcome.primary
+          ; cleanup = Scope_outcome.Cleanup.of_result ~acquired:true cleaned
+          }
       in
-      let result =
-        try
-          Eio.Fiber.check ();
-          let result = f runtime in
-          (match result with
-           | Error _ -> ()
-           | Ok _ -> Eio.Fiber.check ());
-          Ok result
-        with
-        | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
-      in
-      let cleaned =
-        try
-          cleanup ();
-          Ok ()
-        with
-        | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
-      in
-      (match result, cleaned with
-       | Error (exn, backtrace), _ -> Exn.raise_with_original_backtrace exn backtrace
-       | Ok (Error _ as failure), _ -> failure
-       | Ok result, Ok () -> result
-       | Ok (Ok _), Error (exn, backtrace) ->
-         Exn.raise_with_original_backtrace exn backtrace))
+      completed := Some report;
+      report)
+  with
+  | exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    let primary = Scope_outcome.Raised (exn, backtrace) in
+    let cleanup =
+      match !completed with
+      | Some report -> Scope_outcome.cleanup report
+      | None ->
+        if !acquired
+        then Scope_outcome.Cleanup.Failed (Raised (exn, backtrace), [])
+        else Never_acquired
+    in
+    { Scope_outcome.primary; cleanup }
+;;
+
+let with_lease_internal ?execution_access ?retire t ~survives_stop ~admit f =
+  with_lease_reported_internal ?execution_access ?retire t ~survives_stop ~admit f
+  |> Scope_outcome.resume
+;;
+
+let with_lease_reported ?execution_access ?retire t ~survives_stop ~admit f =
+  with_lease_reported_internal
+    ?execution_access
+    ?retire
+    t
+    ~survives_stop
+    ~admit:(fun () ->
+      Result.map (admit ()) ~f:(fun (value, resources) ->
+        Lease_admission.Borrow (value, resources)))
+    f
 ;;
 
 let with_lease ?execution_access ?retire t ~survives_stop ~admit f =
+  let open Result.Let_syntax in
+  let%bind () = Agent_session.Session_actor.exclude_effect_deferred_execution t.actor in
   with_lease_internal
     ?execution_access
     ?retire
@@ -559,8 +699,8 @@ let with_runtime_lease ?execution_access ?run_preparation t ~retain_resources f 
     f
 ;;
 
-let with_loaded_runtime t f =
-  with_lease
+let with_loaded_runtime_reported_internal t f =
+  with_lease_reported
     t
     ~survives_stop:false
     ~admit:(fun () ->
@@ -585,6 +725,66 @@ let with_loaded_runtime t f =
       in
       runtime, None)
     f
+;;
+
+let with_loaded_runtime t f =
+  let open Result.Let_syntax in
+  let%bind () = Agent_session.Session_actor.exclude_effect_deferred_execution t.actor in
+  with_loaded_runtime_reported_internal t f |> Scope_outcome.resume
+;;
+
+let check_source_owner t source_owner =
+  match
+    ( t.runtime_source_owner
+    , Agent_session.Session_actor.runtime_source_owner_identity t.actor )
+  with
+  | Some owner, Some actor
+    when Agent_session.Runtime_source_owner.matches source_owner owner
+         && Agent_session.Runtime_source_owner.matches source_owner actor -> Ok ()
+  | (Some _ | None), (Some _ | None) ->
+    Error
+      (Agent_protocol.Error.create
+         Permission_denied
+         ~message:"source lifetime belongs to another Factory"
+         ~retryable:false
+         ())
+;;
+
+let with_loaded_source_capabilities_reported t ~source_owner f =
+  match Scope_outcome.capture (fun () -> check_source_owner t source_owner) with
+  | Raised (exn, backtrace) ->
+    { Scope_outcome.primary = Raised (exn, backtrace); cleanup = Never_acquired }
+  | Returned (Error failure) ->
+    { Scope_outcome.primary = Returned (Error failure); cleanup = Never_acquired }
+  | Returned (Ok ()) ->
+    with_loaded_runtime_reported_internal t (fun runtime ->
+      let open Result.Let_syntax in
+      let unavailable message =
+        Agent_protocol.Error.create Invalid_state ~message ~retryable:false ()
+      in
+      let%bind native =
+        Result.of_option
+          runtime.Agent_session.Runtime_builder.native_runtime
+          ~error:(unavailable "delegation parent has no loaded native bindings")
+      in
+      let%bind () =
+        if Lazy.is_val native.capabilities
+        then Ok ()
+        else
+          Error
+            (unavailable
+               "delegation parent native bindings have not already been realized")
+      in
+      let%bind capabilities =
+        Lazy.force native.capabilities
+        |> Result.map_error ~f:(fun error ->
+          Agent_protocol.Error.create
+            Permission_denied
+            ~message:error.Chat_response.Tool_capability.message
+            ~retryable:false
+            ())
+      in
+      f capabilities)
 ;;
 
 let with_background_runtime t f = with_runtime_lease t ~retain_resources:false f
@@ -806,25 +1006,75 @@ let unload_and_wait t =
     | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace)
 ;;
 
-let with_prepared_source t ~preparation ~source f =
-  let completed_retirement =
-    let candidate =
-      with_owner_lock t ~protect:true (fun () ->
-        match t.closed, t.unloading, t.runtime, t.foreground_retirement with
-        | false, None, None, Some retirement
-          when Agent_session.Session_actor.Runtime_retirement.is_finished retirement ->
-          Some retirement
-        | (true | false), (Some _ | None), (Some _ | None), (Some _ | None) -> None)
-    in
-    (* Joining even an already-finished handle belongs outside the owner mutex.
-       Admission below still requires the exact same completed retirement. *)
-    Option.bind candidate ~f:(fun retirement ->
-      match Agent_session.Session_actor.Runtime_retirement.await retirement with
-      | Ok () -> Some retirement
-      | Error _ -> None)
-  in
+let with_source_stage_reported t f =
   let reserved = ref None in
+  let lease_cleanup = ref Scope_outcome.Cleanup.Never_acquired in
   let retire () = Option.iter !reserved ~f:close_source_stage in
+  let primary =
+    try
+      let completed_retirement =
+        let candidate =
+          with_owner_lock t ~protect:true (fun () ->
+            match t.closed, t.unloading, t.runtime, t.foreground_retirement with
+            | false, None, None, Some retirement
+              when Agent_session.Session_actor.Runtime_retirement.is_finished retirement
+              -> Some retirement
+            | (true | false), (Some _ | None), (Some _ | None), (Some _ | None) -> None)
+        in
+        (* Joining even an already-finished handle belongs outside the owner mutex.
+       Admission below still requires the exact same completed retirement. *)
+        Option.bind candidate ~f:(fun retirement ->
+          match Agent_session.Session_actor.Runtime_retirement.await retirement with
+          | Ok () -> Some retirement
+          | Error _ -> None)
+      in
+      let report =
+        with_lease_reported
+          t
+          ~survives_stop:false
+          ~retire
+          ~admit:(fun () ->
+            (match
+               ( completed_retirement
+               , t.foreground_retirement
+               , t.closed
+               , t.unloading
+               , t.runtime )
+             with
+             | Some completed, Some current, false, None, None
+               when phys_equal completed current -> t.foreground_retirement <- None
+             | ( (Some _ | None)
+               , (Some _ | None)
+               , (true | false)
+               , (Some _ | None)
+               , (Some _ | None) ) -> ());
+            match t.closed, t.unloading, t.foreground_retirement, t.prepared_source with
+            | true, _, _, _ -> Error (closed_error ())
+            | false, Some _, _, _ | false, None, Some _, _ | false, None, None, Some _ ->
+              Error (background_busy ())
+            | false, None, None, None when not (List.is_empty t.background_leases) ->
+              Error (background_busy ())
+            | false, None, None, None ->
+              let stage =
+                { domain = (Stdlib.Domain.self () :> int)
+                ; runtime = t.runtime
+                ; binding = None
+                ; continuation = None
+                ; closed = false
+                ; retire_installed = None
+                ; handoff_runtime = None
+                }
+              in
+              reserved := Some stage;
+              t.prepared_source <- Some stage;
+              Ok (stage, t.runtime))
+          f
+      in
+      lease_cleanup := Scope_outcome.cleanup report;
+      Scope_outcome.primary report
+    with
+    | exn -> Scope_outcome.Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+  in
   let cleanup () =
     Eio.Cancel.protect (fun () ->
       retire ();
@@ -862,101 +1112,179 @@ let with_prepared_source t ~preparation ~source f =
            reload after this lease has released but before retirement begins. *)
         if retire_runtime then unload_and_wait t else Ok ()))
   in
-  let result =
-    try
-      Ok
-        (with_lease
-           t
-           ~survives_stop:false
-           ~retire
-           ~admit:(fun () ->
-             (match
-                ( completed_retirement
-                , t.foreground_retirement
-                , t.closed
-                , t.unloading
-                , t.runtime )
-              with
-              | Some completed, Some current, false, None, None
-                when phys_equal completed current -> t.foreground_retirement <- None
-              | ( (Some _ | None)
-                , (Some _ | None)
-                , (true | false)
-                , (Some _ | None)
-                , (Some _ | None) ) -> ());
-             match t.closed, t.unloading, t.foreground_retirement, t.prepared_source with
-             | true, _, _, _ -> Error (closed_error ())
-             | false, Some _, _, _ | false, None, Some _, _ | false, None, None, Some _ ->
-               Error (background_busy ())
-             | false, None, None, None when not (List.is_empty t.background_leases) ->
-               Error (background_busy ())
-             | false, None, None, None ->
-               let stage =
-                 { domain = (Stdlib.Domain.self () :> int)
-                 ; runtime = t.runtime
-                 ; binding = None
-                 ; continuation = None
-                 ; closed = false
-                 ; retire_installed = None
-                 ; handoff_runtime = None
-                 }
-               in
-               reserved := Some stage;
-               t.prepared_source <- Some stage;
-               Ok (stage, t.runtime))
-           (fun stage ->
-              let open Result.Let_syntax in
-              (* The mailbox call may yield. No owner mutex is held, and accepted
-                 retirement closes this stage before cancelling the lease. *)
-              let%bind binding =
-                Eio.Cancel.protect (fun () ->
-                  let result =
-                    Agent_session.Session_actor.bind_run_source
-                      t.actor
-                      ~preparation
-                      ~source
-                  in
-                  Result.iter result ~f:(fun binding -> stage.binding <- Some binding);
-                  result)
-              in
-              let prepared : Prepared.t =
-                { stage
-                ; binding
-                ; preparation
-                ; basis =
-                    (fun () ->
-                      if
-                        t.closed
-                        || Option.is_some t.unloading
-                        || Option.is_some t.foreground_retirement
-                        || (not (Option.exists t.prepared_source ~f:(phys_equal stage)))
-                        || not (Option.equal phys_equal t.runtime stage.runtime)
-                      then
-                        Error
-                          (Agent_protocol.Error.create
-                             Conflict
-                             ~message:"prepared runtime owner was displaced"
-                             ~retryable:false
-                             ())
-                      else Ok ())
-                }
-              in
-              let%bind () = Prepared.check_basis prepared in
-              Eio.Fiber.check ();
-              f prepared))
-    with
-    | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
-  in
   let cleaned =
     try Ok (cleanup ()) with
     | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
   in
-  match result, cleaned with
-  | Error (exn, backtrace), _ -> Exn.raise_with_original_backtrace exn backtrace
-  | Ok (Error _ as failure), _ -> failure
-  | Ok result, Ok (Ok ()) -> result
-  | Ok (Ok _), Ok (Error error) -> Error error
-  | Ok (Ok _), Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+  { Scope_outcome.primary
+  ; cleanup =
+      Scope_outcome.Cleanup.combine
+        !lease_cleanup
+        (Scope_outcome.Cleanup.of_result ~acquired:(Option.is_some !reserved) cleaned)
+  }
+;;
+
+let prepare_source t stage ~preparation ~source =
+  let open Result.Let_syntax in
+  let%bind binding =
+    Eio.Cancel.protect (fun () ->
+      let result =
+        Agent_session.Session_actor.bind_run_source t.actor ~preparation ~source
+      in
+      Result.iter result ~f:(fun binding -> stage.binding <- Some binding);
+      result)
+  in
+  let prepared : Prepared.t =
+    { stage
+    ; binding
+    ; preparation
+    ; basis =
+        (fun () ->
+          if
+            t.closed
+            || Option.is_some t.unloading
+            || Option.is_some t.foreground_retirement
+            || (not (Option.exists t.prepared_source ~f:(phys_equal stage)))
+            || not (Option.equal phys_equal t.runtime stage.runtime)
+          then
+            Error
+              (Agent_protocol.Error.create
+                 Conflict
+                 ~message:"prepared runtime owner was displaced"
+                 ~retryable:false
+                 ())
+          else Ok ())
+    }
+  in
+  let%bind () = Prepared.check_basis prepared in
+  Eio.Fiber.check ();
+  Ok prepared
+;;
+
+let with_prepared_source_reported t ~preparation ~source f =
+  with_source_stage_reported t (fun stage ->
+    let open Result.Let_syntax in
+    let%bind prepared = prepare_source t stage ~preparation ~source in
+    f prepared)
+;;
+
+let with_prepared_source t ~preparation ~source f =
+  with_prepared_source_reported t ~preparation ~source f |> Scope_outcome.resume
+;;
+
+module Deferred_source = struct
+  type owner = t
+
+  type t =
+    { owner : owner
+    ; stage : source_stage
+    ; deferred : Agent_session.Run_preparation.Deferred.t
+    ; mutable source_attempted : bool
+    }
+
+  let preparation t = t.deferred
+
+  let prepare t ~source =
+    let open Result.Let_syntax in
+    let%bind () =
+      if Int.equal t.stage.domain (Stdlib.Domain.self () :> int)
+      then Ok ()
+      else
+        Error
+          (Agent_protocol.Error.invalid_request
+             "deferred source belongs to another Eio domain")
+    in
+    let current =
+      with_owner_lock t.owner ~protect:true (fun () ->
+        if
+          (not t.source_attempted)
+          && (not t.stage.closed)
+          && (not t.owner.closed)
+          && Option.is_none t.owner.unloading
+          && Option.is_none t.owner.foreground_retirement
+          && Option.exists t.owner.prepared_source ~f:(phys_equal t.stage)
+          && Option.equal phys_equal t.owner.runtime t.stage.runtime
+          && Option.is_none t.stage.binding
+          && Option.is_none t.stage.continuation
+        then (
+          (* Consume selection before the Actor call can yield or fail. *)
+          t.source_attempted <- true;
+          true)
+        else false)
+    in
+    if not current
+    then
+      Error
+        (Agent_protocol.Error.create
+           Conflict
+           ~message:"deferred source was closed, displaced or already selected"
+           ~retryable:false
+           ())
+    else
+      prepare_source
+        t.owner
+        t.stage
+        ~preparation:(Agent_session.Run_preparation.Deferred.preparation t.deferred)
+        ~source
+  ;;
+
+  module Decision = struct
+    type 'a t =
+      | Retained of Agent_protocol.Run_receipt.t
+      | Fresh of 'a
+  end
+
+  module Report = struct
+    type 'a t =
+      { deferred : Agent_session.Run_preparation.Deferred.t option
+      ; outcome : 'a Decision.t Scope_outcome.t
+      }
+
+    let deferred t = t.deferred
+    let outcome t = t.outcome
+  end
+end
+
+let with_effect_deferred_source_reported t ~source_owner ~actor ~authorize ~request f =
+  let deferred = ref None in
+  let outcome =
+    match Scope_outcome.capture (fun () -> check_source_owner t source_owner) with
+    | Raised (exn, backtrace) ->
+      { Scope_outcome.primary = Raised (exn, backtrace); cleanup = Never_acquired }
+    | Returned (Error failure) ->
+      { Scope_outcome.primary = Returned (Error failure); cleanup = Never_acquired }
+    | Returned (Ok ()) ->
+      with_source_stage_reported t (fun stage ->
+        let open Result.Let_syntax in
+        let%bind decision =
+          Eio.Cancel.protect (fun () ->
+            let result =
+              Agent_session.Session_actor.begin_effect_deferred_headless_preparation
+                t.actor
+                ~actor
+                ~authorize
+                ~request
+            in
+            Result.iter result ~f:(function
+              | Agent_session.Run_preparation.Deferred.Decision.Prepare issued ->
+                deferred := Some issued
+              | Retained _ -> ());
+            result)
+        in
+        match decision with
+        | Retained receipt -> Ok (Deferred_source.Decision.Retained receipt)
+        | Prepare issued ->
+          let source =
+            { Deferred_source.owner = t
+            ; stage
+            ; deferred = issued
+            ; source_attempted = false
+            }
+          in
+          Eio.Fiber.check ();
+          Result.map (f source) ~f:(fun result -> Deferred_source.Decision.Fresh result))
+  in
+  { Deferred_source.Report.deferred = !deferred; outcome }
 ;;
 
 module Held_runtime_residency = struct
@@ -1415,9 +1743,12 @@ let reinitialize_administration t ~validate ~commit ~before_initialize =
 ;;
 
 let parse_user_content t ~id content =
+  let open Result.Let_syntax in
+  let%bind () = Agent_session.Session_actor.exclude_effect_deferred_execution t.actor in
   Eio.Mutex.use_ro t.mutex (fun () ->
     match t.closed, t.runtime with
     | true, _ -> Error (closed_error ())
+    | false, _ when prepared_source_blocks_runtime t -> Error (background_busy ())
     | false, Some runtime -> runtime.parse_user_content ~id content
     | false, None ->
       Error
@@ -1939,6 +2270,9 @@ let drain_idle_moderator_leased t =
       | None -> Ok false
       | Some runtime ->
         let open Result.Let_syntax in
+        let%bind () =
+          Agent_session.Session_actor.exclude_effect_deferred_execution t.actor
+        in
         Eio.Mutex.use_ro t.moderator_work_mutex (fun () ->
           with_activity runtime (fun () ->
             let%bind notifications = drain_loaded_notifications runtime in
@@ -1996,6 +2330,8 @@ let drain_idle_moderator t =
 ;;
 
 let with_locked_runtime t f =
+  let open Result.Let_syntax in
+  let%bind () = Agent_session.Session_actor.exclude_effect_deferred_execution t.actor in
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     let open Result.Let_syntax in
     let%bind () = ensure_loaded_locked t in

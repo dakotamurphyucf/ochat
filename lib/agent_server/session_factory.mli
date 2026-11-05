@@ -186,6 +186,51 @@ val with_prepared_run_source
   -> (Runtime_owner.Prepared.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
+module Deferred_run_attempt : sig
+  (** Result of one newly issued attempt after its actual source resources have
+      joined. An error is not evidence that no effects occurred. *)
+  type 'a t
+
+  val result : 'a t -> ('a, Agent_protocol.Error.t) result
+
+  (** Present only after successful cleanup, an eligible Actor-owned factual
+      close and fresh live Store observation. This grants no retry, rotation or
+      execution authority. An absent observation does not change [result]. *)
+  val no_effects : 'a t -> Agent_session.Session_actor.No_effects_observation.t option
+
+  module Outcome : sig
+    type 'a attempt = 'a t
+
+    type 'a t =
+      | Retained of Agent_protocol.Run_receipt.t
+      | Attempted of 'a attempt
+  end
+end
+
+(** Reserve the actual target's exclusive source lane before issuing a new
+    Actor-authenticated preparation. This excludes already active ordinary
+    runtime borrowers and prevents them from entering during source selection.
+    The callback receives the same preparation and Prepared lifetime; it cannot
+    retain either after return. A retained receipt bypasses the callback.
+
+    Selection uses the same captured-source verification as
+    [with_prepared_run_source]. Every acquired target and generated-parent lease
+    must finish successfully before the Factory can complete the Actor's closed
+    attempt and request a no-effects observation. Actual admission attempts or
+    execution irreversibly disqualify it. Primary errors take precedence over
+    cleanup failures; exceptions and cancellation propagate with their original
+    backtrace. This does not rotate an attempt or automatically retry work. *)
+val with_effect_deferred_run_source
+  :  t
+  -> Session_registry.entry
+  -> actor:Operator_authorization.t
+  -> authorize:(Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> request:Agent_session.Run_admission_request.Headless.t
+  -> (Agent_session.Run_preparation.Deferred.t
+      -> Runtime_owner.Prepared.t
+      -> ('a, Agent_protocol.Error.t) result)
+  -> ('a Deferred_run_attempt.Outcome.t, Agent_protocol.Error.t) result
+
 (** Parse the genuine held input with its own lexical inference graph. Call only
     from [Session_actor.with_held_input]'s preparation callback, while retaining
     the selected runtime and its source/parent leases. The supplied runtime is

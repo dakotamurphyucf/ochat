@@ -116,6 +116,7 @@ type t =
   ; env : Eio_unix.Stdenv.base
   ; store : Agent_store.Session_store.t
   ; registry : Session_registry.t
+  ; runtime_source_owner : Agent_session.Runtime_source_owner.t
   ; authored_resources : Authored_resources.t
   ; authored_services :
       Agent_session.Runtime_builder.authored_resources
@@ -2829,7 +2830,13 @@ let restore_authored_code t ~artifacts ~source record =
   |> Result.map ~f:Agent_session.Prompt_child_source.revision
 ;;
 
-let with_prepared_run_source t (entry : Session_registry.entry) ~preparation f =
+let with_selected_run_source
+      t
+      (entry : Session_registry.entry)
+      ~with_parent
+      ~with_source
+      f
+  =
   let module A = Agent_session in
   let module Source = A.Runtime_builder.Source in
   let module Store = Agent_store.Session_store in
@@ -2862,9 +2869,6 @@ let with_prepared_run_source t (entry : Session_registry.entry) ~preparation f =
   let%bind retained = restore_state_source t state in
   let invocation =
     A.Runtime_script_preparation.Invocation.of_root state.spec.root_invocation
-  in
-  let with_source source f =
-    Runtime_owner.with_prepared_source entry.runtime ~preparation ~source f
   in
   let select revision =
     Source.prepare
@@ -2911,7 +2915,7 @@ let with_prepared_run_source t (entry : Session_registry.entry) ~preparation f =
     let%bind parent, record = generated_parent_record t state in
     (* A source witness may select existing grants, never cause their creation.
        This lease spans the target's prepared callback, including any held ACK. *)
-    Runtime_owner.with_loaded_runtime parent.runtime (fun runtime ->
+    with_parent parent.runtime (fun public ->
       let%bind current_parent, current_record = generated_parent t state in
       let%bind () =
         if
@@ -2921,26 +2925,6 @@ let with_prepared_run_source t (entry : Session_registry.entry) ~preparation f =
         else
           Error
             (unavailable Conflict "delegation source owner changed before preparation")
-      in
-      let%bind native =
-        Result.of_option
-          runtime.A.Runtime_builder.native_runtime
-          ~error:
-            (unavailable Invalid_state "delegation parent has no loaded native bindings")
-      in
-      let%bind () =
-        if Lazy.is_val native.capabilities
-        then Ok ()
-        else
-          Error
-            (unavailable
-               Invalid_state
-               "delegation parent native bindings have not already been realized")
-      in
-      let%bind public =
-        Lazy.force native.capabilities
-        |> Result.map_error ~f:(fun error ->
-          unavailable Permission_denied error.Chat_response.Tool_capability.message)
       in
       let%bind artifacts =
         Agent_store.Prompt_artifact_store.open_existing
@@ -3010,6 +2994,157 @@ let with_prepared_run_source t (entry : Session_registry.entry) ~preparation f =
         in
         let%bind () = Runtime_owner.Prepared.check_basis prepared in
         f prepared))
+;;
+
+let with_prepared_run_source t entry ~preparation f =
+  with_selected_run_source
+    t
+    entry
+    ~with_parent:(fun owner f ->
+      Runtime_owner.with_loaded_source_capabilities_reported
+        owner
+        ~source_owner:t.runtime_source_owner
+        f
+      |> Runtime_owner.Scope_outcome.resume)
+    ~with_source:(fun source f ->
+      Runtime_owner.with_prepared_source entry.runtime ~preparation ~source f)
+    f
+;;
+
+module Deferred_run_attempt = struct
+  type 'a t =
+    { result : ('a, Agent_protocol.Error.t) result
+    ; no_effects : Agent_session.Session_actor.No_effects_observation.t option
+    }
+
+  let result t = t.result
+  let no_effects t = t.no_effects
+
+  module Outcome = struct
+    type 'a attempt = 'a t
+
+    type 'a t =
+      | Retained of Agent_protocol.Run_receipt.t
+      | Attempted of 'a attempt
+  end
+end
+
+module Deferred_parent_cleanup = struct
+  type t =
+    | Not_acquired
+    | Awaiting_report
+    | Reported of Runtime_owner.Scope_outcome.Cleanup.t
+
+  let succeeded = function
+    | Not_acquired -> true
+    | Awaiting_report -> false
+    | Reported report ->
+      (match Runtime_owner.Scope_outcome.Cleanup.status report with
+       | Never_acquired | Joined -> true
+       | Failed _ -> false)
+  ;;
+end
+
+let with_effect_deferred_run_source t entry ~actor ~authorize ~request f =
+  let module A = Agent_session in
+  let module Scope = Runtime_owner.Scope_outcome in
+  let module Deferred = Runtime_owner.Deferred_source in
+  let open Result.Let_syntax in
+  let%bind () =
+    if Runtime_owner.belongs_to_actor entry.Session_registry.runtime entry.actor
+    then Ok ()
+    else Error (unavailable Invalid_state "source runtime belongs to another Actor")
+  in
+  let capture f =
+    try Ok (f ()) with
+    | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+  in
+  let parent_cleanup = ref Deferred_parent_cleanup.Not_acquired in
+  let report =
+    Runtime_owner.with_effect_deferred_source_reported
+      entry.Session_registry.runtime
+      ~source_owner:t.runtime_source_owner
+      ~actor
+      ~authorize
+      ~request
+      (fun deferred ->
+         with_selected_run_source
+           t
+           entry
+           ~with_parent:(fun owner f ->
+             parent_cleanup := Awaiting_report;
+             let outcome =
+               Runtime_owner.with_loaded_source_capabilities_reported
+                 owner
+                 ~source_owner:t.runtime_source_owner
+                 f
+             in
+             parent_cleanup := Reported (Scope.cleanup outcome);
+             Scope.resume outcome)
+           ~with_source:(fun source f ->
+             Result.bind (Deferred.prepare deferred ~source) ~f)
+           (f (Deferred.preparation deferred)))
+  in
+  let outcome = Deferred.Report.outcome report in
+  (* Resumption only applies the established primary/cleanup precedence. Capture
+     its exception until the exact Actor preparation has been factually closed. *)
+  let primary = capture (fun () -> Scope.resume outcome) in
+  match Deferred.Report.deferred report with
+  | None ->
+    (match primary with
+     | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+     | Ok (Error _ as failure) -> failure
+     | Ok (Ok (Deferred.Decision.Retained receipt)) ->
+       Ok (Deferred_run_attempt.Outcome.Retained receipt)
+     | Ok (Ok (Fresh _)) ->
+       Error (unavailable Invalid_state "deferred source lost its issued preparation"))
+  | Some preparation ->
+    let closed =
+      Eio.Cancel.protect (fun () ->
+        capture (fun () ->
+          A.Session_actor.close_effect_deferred_preparation entry.actor preparation))
+    in
+    let no_effects () =
+      match Scope.Cleanup.status (Scope.cleanup outcome), closed with
+      | Joined, Ok (Ok closed) when Deferred_parent_cleanup.succeeded !parent_cleanup ->
+        let open Result.Let_syntax in
+        let%bind completion =
+          A.Run_preparation.Closed_attempt.complete
+            closed
+            ~source_owner:t.runtime_source_owner
+        in
+        A.Session_actor.observe_no_run_effects entry.actor ~actor ~authorize ~completion
+      | (Never_acquired | Joined | Failed _), _ ->
+        Error (unavailable Conflict "deferred source cleanup did not establish closure")
+    in
+    let finish result =
+      let observation =
+        (* Observation is factual finalization, never new execution. A failed
+           observation cannot replace the body's original failure or certify it. *)
+        match Eio.Cancel.protect (fun () -> capture no_effects) with
+        | Ok observation -> Result.ok observation
+        | Error (exn, backtrace) ->
+          (match result with
+           | Error _ -> None
+           | Ok _ -> Exn.raise_with_original_backtrace exn backtrace)
+      in
+      Ok (Deferred_run_attempt.Outcome.Attempted { result; no_effects = observation })
+    in
+    (match primary with
+     | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+     | Ok (Error _ as failure) -> finish failure
+     | Ok (Ok decision) ->
+       (match closed with
+        | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+        | Ok (Error error) -> finish (Error error)
+        | Ok (Ok _) ->
+          (match decision with
+           | Fresh value -> finish (Ok value)
+           | Retained _ ->
+             Error
+               (unavailable
+                  Invalid_state
+                  "retained Run unexpectedly issued a preparation"))))
 ;;
 
 let restore_authored_selection t ~artifacts ~public record =
@@ -6106,7 +6241,9 @@ let create_loaded_entry
       ~creating_principal:state.identity.creating_principal
   in
   let actor =
-    Agent_session.Session_actor.create_with_owner_lease_duration
+    Agent_session.Session_actor.create_with_runtime_source_owner
+      ~runtime_source_owner:
+        (Agent_session.Runtime_source_owner.identity t.runtime_source_owner)
       ~schedule_permission_timeouts:false
       ~sw:t.sw
       ~clock:(Eio.Stdenv.clock t.env)
@@ -6157,6 +6294,7 @@ let create_loaded_entry
   | Ok () ->
     let runtime =
       Runtime_owner.create_with_deferred_run_unload
+        ~source_owner:t.runtime_source_owner
         ~before_unload:(retire_owned_children t actor)
         ~actor
         ~initial:(Some runtime)
@@ -6318,7 +6456,9 @@ let create_unloaded_entry
         ~creating_principal:state.identity.creating_principal
     in
     let actor =
-      Agent_session.Session_actor.create_with_owner_lease_duration
+      Agent_session.Session_actor.create_with_runtime_source_owner
+        ~runtime_source_owner:
+          (Agent_session.Runtime_source_owner.identity t.runtime_source_owner)
         ~schedule_permission_timeouts:false
         ~sw:t.sw
         ~clock:(Eio.Stdenv.clock t.env)
@@ -6345,6 +6485,7 @@ let create_unloaded_entry
     in
     let runtime =
       Runtime_owner.create_with_deferred_run_unload
+        ~source_owner:t.runtime_source_owner
         ~before_unload:(retire_owned_children t actor)
         ~actor
         ~initial:None
@@ -10860,6 +11001,7 @@ let create
     ; env
     ; store
     ; registry
+    ; runtime_source_owner = Agent_session.Runtime_source_owner.create ()
     ; authored_resources = Authored_resources.create ()
     ; authored_services =
         (fun prepared borrowed -> authored_call_services t prepared borrowed)

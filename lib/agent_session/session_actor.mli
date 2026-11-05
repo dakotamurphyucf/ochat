@@ -420,6 +420,32 @@ val create_with_owner_lease_duration
   -> services:services
   -> t
 
+(** Actual Factory construction with its read-only source issuer identity. The
+    issuer key is never supplied to the Actor. Identity is fixed at creation;
+    ordinary constructors have none and cannot issue deferred-source completion.
+    All controls retain [create_with_owner_lease_duration]'s meaning. *)
+val create_with_runtime_source_owner
+  :  runtime_source_owner:Runtime_source_owner.Identity.t
+  -> schedule_permission_timeouts:bool
+  -> sw:Eio.Switch.t
+  -> clock:_ Eio.Time.clock
+  -> mailbox_capacity:int
+  -> owner_lease_duration_ms:int
+  -> max_attachments:int
+  -> subscriber_capacity:int
+  -> compaction_env:Eio_unix.Stdenv.base option
+  -> initial_state:Session_state.t
+  -> persistence:persistence
+  -> operation_worker:Operation_worker.t option
+  -> services:services
+  -> t
+
+(** Read-only immutable issuer association, not an issuer projection or resource
+    permission. The source host uses it to check its private Factory key against
+    this exact resource Actor. Same issuing Eio domain; performs no Actor request,
+    callback or Store I/O. *)
+val runtime_source_owner_identity : t -> Runtime_source_owner.Identity.t option
+
 val snapshot : t -> (Agent_protocol.Snapshot.t, Agent_protocol.Error.t) result
 
 (** One mailbox observation captures retained state and transient active calls
@@ -1462,6 +1488,64 @@ val begin_headless_run_preparation
   -> (Run_preparation.Decision.t, Agent_protocol.Error.t) result
 
 val end_run_preparation : t -> Run_preparation.t -> (unit, Agent_protocol.Error.t) result
+
+(** Issue NEW effect-deferred provenance under this Actor's existing preparation
+    owner and Factory identity captured at Actor creation. Original request/CAS,
+    current Send_messages/host policy, retained receipt and actual execution
+    quiescence are checked before issuance. Retained is DATA and creates no new
+    deferred owner. Ordinary preparation cannot be retrofitted. The host still
+    acquires the real source/resource lifetime; no runtime is loaded here. *)
+val begin_effect_deferred_headless_preparation
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> request:Run_admission_request.Headless.t
+  -> (Run_preparation.Deferred.Decision.t, Agent_protocol.Error.t) result
+
+(** Negative-only host entry before ordinary runtime effects or execution
+    resources escape. Irreversibly excludes this Actor's actual active deferred
+    attempt, including when the ordinary caller omits a preparation. It is a
+    no-op when no deferred cell exists and returns no permission or certificate.
+    Authoritative fresh capability gates repeat exclusion inside the mailbox. *)
+val exclude_effect_deferred_execution : t -> (unit, Agent_protocol.Error.t) result
+
+(** Seal the exact continuously owned deferred preparation without fresh effect
+    authorization. A logical [end_run_preparation]/source close cannot construct
+    this half or prove resource cleanup. The real Factory must separately join
+    its target and parent leases before completing it with its hidden issuer. *)
+val close_effect_deferred_preparation
+  :  t
+  -> Run_preparation.Deferred.t
+  -> (Run_preparation.Closed_attempt.t, Agent_protocol.Error.t) result
+
+module No_effects_observation : sig
+  (** Actual target observation for one genuinely closed, effect-deferred
+      request. Neither decoded absence nor recovery can issue it. No recurrence
+      origin, retry, execution authority or durable proof constructor is exposed. *)
+  type t
+
+  (** Current read policy and original visibility, followed by exact pure basis.
+      Trusted host callbacks must not yield. This authorizes no new work. *)
+  val check_current : t -> (unit, Agent_protocol.Error.t) result
+
+  (** Callback-free same Actor/Store Current, closed source/preparation and exact
+      retained-request absence. Current read authorization remains separately
+      mandatory; this observation is not permission to rotate or admit a Run. *)
+  val check_basis : t -> (unit, Agent_protocol.Error.t) result
+end
+
+(** Authenticate the Factory-completed exact closed attempt against this actual
+    live Store/writer and fresh retained state. Requires current transcript
+    visibility and nonyielding host read policy, repeated after Store observation.
+    Known/unknown Run admission, excluded or consumed execution, foreign issuer,
+    poisoned/dead/displaced owner and missing successful source completion reject.
+    No runtime loads and no retry/rotation occurs. Same issuing Eio domain. *)
+val observe_no_run_effects
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> completion:Run_preparation.Source_completion.t
+  -> (No_effects_observation.t, Agent_protocol.Error.t) result
 
 module Source_binding : sig
   (** Actor-issued captured source/preparation custody, not a runtime lease or

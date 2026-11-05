@@ -6,6 +6,44 @@ type t
 
 exception Cleanup_failed of Agent_protocol.Error.t
 
+module Scope_outcome : sig
+  module Cleanup : sig
+    module Failure : sig
+      type t =
+        | Protocol of Agent_protocol.Error.t
+        | Raised of exn * Stdlib.Printexc.raw_backtrace
+    end
+
+    (** Immutable DATA from the actual finalizers. No public constructor can
+        assert that a scope acquired or released resources. *)
+    type t
+
+    type status =
+      | Never_acquired
+      | Joined
+      | Failed of Failure.t * Failure.t list
+
+    val status : t -> status
+  end
+
+  type 'a primary =
+    | Returned of ('a, Agent_protocol.Error.t) result
+    | Raised of exn * Stdlib.Printexc.raw_backtrace
+
+  (** The callback outcome and all actually acquired cleanup outcomes remain
+      separate, including when a primary failure would conceal cleanup failure.
+      Neither this value nor a successful join grants source completion. *)
+  type 'a t
+
+  val primary : 'a t -> 'a primary
+  val cleanup : 'a t -> Cleanup.t
+
+  (** Restore the ordinary scope contract: a callback Error or exception remains
+      primary; cleanup failure is reported after successful work. Exceptions and
+      cancellation retain their original raw backtrace. *)
+  val resume : 'a t -> ('a, Agent_protocol.Error.t) result
+end
+
 val create
   :  actor:Agent_session.Session_actor.t
   -> initial:Agent_session.Runtime_builder.t option
@@ -42,6 +80,10 @@ val create_with_run_unload
 
 val is_loaded : t -> bool
 
+(** Deliberate physical association, not equality of session IDs. Call in this
+    owner's Eio domain; no Actor request, callback, mutation or authority grant. *)
+val belongs_to_actor : t -> Agent_session.Session_actor.t -> bool
+
 (** Existing Factory constructor for a source that has already passed actual
     retained-artifact verification. The neutral activation is issued by the
     exact target actor; no raw IDs, caller guard or alternate executor replace it.
@@ -66,11 +108,16 @@ val create_with_authenticated_run_unload
         -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
   -> t
 
-(** The actual verified-source Factory supplies this additional cold constructor.
-    Ordinary loading retains the existing authenticated builder. Deferred loading
-    is available only through the exact consumed prepared/held lifetime below. *)
+(** The actual verified-source Factory supplies this additional cold constructor
+    and its hidden issuer key. This owner captures its own immutable issuer
+    association, independently of its Actor. Ordinary constructors have no such
+    association; copying an Actor or its read-only identity cannot authenticate a
+    second runtime owner. Ordinary loading retains the existing authenticated
+    builder. Deferred loading is available only through the exact consumed
+    prepared/held lifetime below. No issuer getter or replacement exists. *)
 val create_with_deferred_run_unload
-  :  before_unload:(closing:bool -> (unit, Agent_protocol.Error.t) result)
+  :  source_owner:Agent_session.Runtime_source_owner.t
+  -> before_unload:(closing:bool -> (unit, Agent_protocol.Error.t) result)
   -> actor:Agent_session.Session_actor.t
   -> initial:Agent_session.Runtime_builder.t option
   -> build:
@@ -187,6 +234,20 @@ val with_loaded_runtime
   -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
+(** Fixed Factory source restoration with the actual private issuer key. It must
+    match both this actual owner's and its Actor's immutable identities. Borrows only an already
+    loaded runtime's already-realized native capabilities, without constructing
+    resources or exposing its worker/model execution closures. Ordinary owner
+    retirement/cancellation/execution checks remain mandatory. The callback is
+    the Factory's static source selection, never an execution escape. Its real
+    existing lease finalizer is reported separately from its primary outcome;
+    a unit lease-finished signal alone is not cleanup success. *)
+val with_loaded_source_capabilities_reported
+  :  t
+  -> source_owner:Agent_session.Runtime_source_owner.t
+  -> (Chat_response.Tool_capability.t -> ('a, Agent_protocol.Error.t) result)
+  -> 'a Scope_outcome.t
+
 (** Same existing lifetime lease with explicitly attributable constructor
     commits. The actor must have issued [preparation] first; every exit releases
     the runtime lease, including cancellation and unexpected exceptions. *)
@@ -227,6 +288,70 @@ val with_prepared_source
   -> source:Agent_session.Runtime_builder.Source.t
   -> (Prepared.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
+
+(** The same source-stage lease and finalizers, retaining callback Error/exn and
+    the actual inner lease release plus outer stage retirement/clear outcomes
+    separately. The report returns only after every acquired target finalizer
+    has joined. It does not end the Actor preparation, complete a source or prove
+    absence of effects. Never-acquired is derived from actual admission. *)
+val with_prepared_source_reported
+  :  t
+  -> preparation:Agent_session.Run_preparation.t
+  -> source:Agent_session.Runtime_builder.Source.t
+  -> (Prepared.t -> ('a, Agent_protocol.Error.t) result)
+  -> 'a Scope_outcome.t
+
+module Deferred_source : sig
+  (** The same exclusive source stage, reserved before the actual Actor issues
+      its NEW deferred preparation. No second lease or preparation registry.
+      It belongs to this lexical CPS and issuing Eio domain. *)
+  type t
+
+  val preparation : t -> Agent_session.Run_preparation.Deferred.t
+
+  (** Bind the selected source once, while retaining this exact reserved stage.
+      Selection is consumed before the Actor call, including rejected or raised
+      binding. No retry/fallback or retained Prepared after callback return. *)
+  val prepare
+    :  t
+    -> source:Agent_session.Runtime_builder.Source.t
+    -> (Prepared.t, Agent_protocol.Error.t) result
+
+  module Decision : sig
+    type 'a t =
+      | Retained of Agent_protocol.Run_receipt.t
+      | Fresh of 'a
+  end
+
+  module Report : sig
+    type 'a t
+
+    (** Actual accepted Deferred, also retained if pending cancellation prevented
+        the callback from running. The Factory must close it through its Actor
+        after joined cleanup; callback capture alone cannot cover that cut. *)
+    val deferred : 'a t -> Agent_session.Run_preparation.Deferred.t option
+
+    val outcome : 'a t -> 'a Decision.t Scope_outcome.t
+  end
+end
+
+(** Match the hidden Factory key against both this owner's and its Actor's
+    captured identities, then reserve this owner's existing source stage
+    under its mutex before deferred Actor issuance. Current ordinary leases
+    reject reservation; all new runtime entry remains excluded continuously.
+    Actor issuance runs outside the owner mutex, and its actual ACK is captured
+    before pending cancellation. Retained DATA never invokes [f]; Fresh invokes
+    it once. Reports actual target cleanup without replacing the primary outcome
+    or closing the Actor preparation. Factory owns the later exact close and
+    private source-completion issuance, after any parent cleanup inside [f]. *)
+val with_effect_deferred_source_reported
+  :  t
+  -> source_owner:Agent_session.Runtime_source_owner.t
+  -> actor:Operator_authorization.t
+  -> authorize:(Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> request:Agent_session.Run_admission_request.Headless.t
+  -> (Deferred_source.t -> ('a, Agent_protocol.Error.t) result)
+  -> 'a Deferred_source.Report.t
 
 (** Consume this exact Prepared/Held/Checked link into an actual scoped
     constructor or loaded-runtime reuse. The old staged owner is not widened.

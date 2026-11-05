@@ -1458,6 +1458,130 @@ let%expect_test "lease cleanup preserves primary failures and reports standalone
     {| typed error and exception retained; cleanup raised only after success; closed once |}]
 ;;
 
+let%expect_test "source report joins delayed cleanup and retains its hidden failure" =
+  let module A = Agent_session.Session_actor in
+  let module Scope = Owner.Scope_outcome in
+  with_source_stage_actor (fun fixture ->
+    let env, _workspace = fixture.environment in
+    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+      Eio.Switch.run (fun sw ->
+        let closing, closing_u = Eio.Promise.create () in
+        let release, release_u = Eio.Promise.create () in
+        let release_close () =
+          if Option.is_none (Eio.Promise.peek release)
+          then Eio.Promise.resolve release_u ()
+        in
+        let closes = ref 0 in
+        let owner =
+          Owner.create
+            ~actor:fixture.actor
+            ~initial:
+              (Some
+                 (runtime
+                    ~close:(fun () ->
+                      Int.incr closes;
+                      Eio.Promise.resolve closing_u ();
+                      Eio.Promise.await release;
+                      raise Lease_cleanup)
+                    ()))
+            ~build:(fun () -> failwith "reported cleanup reloaded a runtime")
+        in
+        let preparation = source_stage_preparation fixture "reported-close-failure" in
+        let primary =
+          Agent_protocol.Error.create
+            Invalid_request
+            ~message:"actual source callback failure"
+            ~retryable:false
+            ~data:(`Object [ "retained", `Number "538" ])
+            ()
+        in
+        let escaped = ref None in
+        let report =
+          Eio.Fiber.fork_promise ~sw (fun () ->
+            Owner.with_prepared_source_reported
+              owner
+              ~preparation
+              ~source:fixture.source
+              (fun prepared ->
+                 Owner.Prepared.check_basis prepared |> protocol_ok;
+                 escaped := Some prepared;
+                 (* Actual negative close cancels this lease. Preserve the
+                   callback's selected Error while real protected finalizers
+                   retire it; no effectful work is shielded from cancellation. *)
+                 Eio.Cancel.protect (fun () ->
+                   Owner.close owner;
+                   Error primary)))
+        in
+        let capture f =
+          match f () with
+          | value -> Ok value
+          | exception exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+        in
+        let result =
+          capture (fun () ->
+            Eio.Fiber.first
+              (fun () -> Eio.Promise.await closing)
+              (fun () ->
+                 let premature = Eio.Promise.await_exn report in
+                 match Scope.primary premature with
+                 | Raised (exn, backtrace) ->
+                   Exn.raise_with_original_backtrace exn backtrace
+                 | Returned (Error error) ->
+                   raise_s
+                     [%sexp
+                       "source returned before actual close"
+                     , (error : Agent_protocol.Error.t)]
+                 | Returned (Ok _) -> failwith "source succeeded before actual close");
+            [%test_eq: int] 1 !closes;
+            assert (Option.is_none (Eio.Promise.peek report));
+            (* The close holds the Owner mutex: observe only its already closed
+               Prepared and the report Promise, never reenter the Owner here. *)
+            assert (
+              Result.is_error (Owner.Prepared.check_basis (Option.value_exn !escaped)));
+            release_close ();
+            let outcome = Eio.Promise.await_exn report in
+            let exact_primary error =
+              assert (
+                Jsonaf.exactly_equal
+                  (Agent_protocol.Error.to_json primary)
+                  (Agent_protocol.Error.to_json error))
+            in
+            (match Scope.primary outcome with
+             | Returned (Error error) -> exact_primary error
+             | Returned (Ok _) -> failwith "source callback Error was lost"
+             | Raised (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace);
+            (match Scope.Cleanup.status (Scope.cleanup outcome) with
+             | Failed (Raised (Lease_cleanup, _), []) -> ()
+             | Failed _ -> failwith "report lost the exact inner cleanup failure"
+             | Never_acquired | Joined ->
+               failwith "successful outer source clear concealed failed inner close");
+            (match Scope.resume outcome with
+             | Error error -> exact_primary error
+             | Ok _ -> failwith "reported cleanup replaced its primary Error");
+            [%test_eq: int] 1 !closes;
+            assert (not (Owner.is_loaded owner)))
+        in
+        let cleanup =
+          capture (fun () ->
+            Eio.Cancel.protect (fun () ->
+              release_close ();
+              ignore (Eio.Promise.await_exn report);
+              Exn.protect
+                ~finally:(fun () -> Owner.close_and_wait owner)
+                ~f:(fun () ->
+                  A.end_run_preparation fixture.actor preparation |> protocol_ok)))
+        in
+        match result, cleanup with
+        | Error (exn, backtrace), _ | Ok (), Error (exn, backtrace) ->
+          Exn.raise_with_original_backtrace exn backtrace
+        | Ok (), Ok () -> ())));
+  print_endline
+    "no report before join; failed inner close survives outer clear; exact primary \
+     retained";
+  [%expect
+    {| no report before join; failed inner close survives outer clear; exact primary retained |}]
+;;
+
 let%expect_test
     "loaded-only inspection never builds and releases failed or cancelled borrows"
   =

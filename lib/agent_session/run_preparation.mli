@@ -111,6 +111,121 @@ val advance
 (** Idempotent release on all normal/error/cancellation/uncertain-write exits. *)
 val close : t -> unit
 
+module Source_completion : sig
+  type preparation := t
+
+  (** The actual Factory's completion of one Actor-issued closed deferred
+      attempt. Both private owners are required. This is immutable source-lifetime
+      evidence, not a no-effects observation, retry grant or execution scope.
+      The fixed Factory CPS issues it only after successful cleanup of every
+      actually acquired target and parent lease. A never-acquired branch is
+      distinct from a missing required cleanup result. No decoder exists. *)
+  type t
+
+  val preparation : t -> preparation
+
+  (** Callback-free association with the issuing Actor's private owner, closed
+      attempt and actual current generation. The Actor separately authenticates
+      its live Store/writer and exact retained request absence. This never runs
+      original effect authorization or reopens a preparation. *)
+  val check_basis
+    :  t
+    -> owner:Owner.t
+    -> state:Session_state.t
+    -> (unit, Agent_protocol.Error.t) result
+end
+
+module Closed_attempt : sig
+  (** Factual closure by the actual Actor's existing private Owner. It retains
+      exact request/principal/digest, source issuer identity and irreversible
+      exclusion/write disposition. Logical closure alone proves no resource join
+      or no-effects outcome. No constructor or decoder is exposed. *)
+  type t
+
+  (** The actual Factory retains [source_owner] privately and invokes this only
+      after its fixed outer source CPS has successfully joined every acquired
+      target and parent lease. A fresh/foreign issuer, excluded attempt or unknown
+      writer rejects. Neither a Boolean nor a caller cleanup callback can replace
+      that issuer. Belongs to the issuing Eio domain. *)
+  val complete
+    :  t
+    -> source_owner:Runtime_source_owner.t
+    -> (Source_completion.t, Agent_protocol.Error.t) result
+end
+
+module Deferred : sig
+  type preparation := t
+
+  (** Provenance attached when the actual Actor issues a NEW preparation. An
+      ordinary preparation cannot be upgraded. The existing preparation remains
+      the sole admission owner; this cell adds no registry or execution authority.
+      Exclusion is irreversible, including after logical closure. *)
+  type t
+
+  module Exclusion : sig
+    type t =
+      | Ordinary_execution
+      | Admission_attempted
+      | Activation_consumed
+      | Uncertain_write
+      | Displaced
+    [@@deriving equal, sexp_of]
+  end
+
+  (** Called only while issuing a fresh preparation under the Actor's existing
+      private Owner and its captured Factory identity. Original authenticated
+      request/current policy and CAS are checked as in ordinary issuance. The
+      Actor/host also establish their actual quiescent execution/source lifetime;
+      this constructor is not evidence of a Runtime_owner resource lease. *)
+  val create_authenticated_request
+    :  owner:Owner.t
+    -> source_owner:Runtime_source_owner.Identity.t
+    -> state:Session_state.t
+    -> actor:Operator_authorization.t
+    -> request:Run_admission_request.t
+    -> request_sha256:string
+    -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+    -> (t, Agent_protocol.Error.t) result
+
+  val preparation : t -> preparation
+
+  (** Returns the cell already attached at issuance, never retrofits provenance
+      or reconstructs it from durable request facts. *)
+  val of_preparation : preparation -> t option
+
+  (** Negative-only and monotone. This must precede ordinary effect/resource
+      escape or actual admission writer entry, even when an ordinary caller omits
+      the preparation. It cannot grant permission or clear an attempted write. *)
+  val exclude : t -> reason:Exclusion.t -> unit
+
+  (** Exact nonyielding issuing owner/current preparation and still-eligible
+      basis. This runs no original policy and grants no effect permission. *)
+  val check_basis
+    :  t
+    -> owner:Owner.t
+    -> state:Session_state.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Actual Actor-owned factual seal. Closes the same preparation and retains
+      its exact eligibility/disposition, never renewing original authority.
+      Foreign owners reject. Same-owner displaced, excluded or uncertain attempts
+      still close factually; completion and eligibility checks reject them. Public
+      [close] alone cannot synthesize this half. No source completion is implied. *)
+  val close
+    :  t
+    -> owner:Owner.t
+    -> state:Session_state.t
+    -> (Closed_attempt.t, Agent_protocol.Error.t) result
+
+  module Decision : sig
+    type deferred = t
+
+    type t =
+      | Retained of Agent_protocol.Run_receipt.t
+      | Prepare of deferred
+  end
+end
+
 module Constructor_jobs : sig
   type preparation := t
   type t
