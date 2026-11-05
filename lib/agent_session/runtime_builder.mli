@@ -321,6 +321,36 @@ module Authored_start : sig
     -> (unit, Agent_protocol.Error.t) result
 end
 
+module Runtime_resume : sig
+  (** Runtime-bound factual resume data, never admission or permission. The
+      Actor separately checks the exact installed worker, Manager, source,
+      current checkpoint and existing Run continuation. *)
+  type t
+
+  val worker : t -> Operation_worker.t
+  val manager : t -> Chat_response.Moderator_manager.t option
+
+  (** Extension data requires this runtime's unconsumed Session_resume lifecycle.
+      Legacy data requires its actual host-backed constructor ACK selected from
+      a restored moderator snapshot. A runtime without a moderator has no
+      callback. Fresh legacy startup and unowned encoding fallback reject;
+      acknowledged legacy data is not compared with later checkpoint bytes. *)
+  val check_pending : t -> (unit, Agent_protocol.Error.t) result
+
+  (** Recheck factual eligibility. Legacy and absent callbacks perform no effect.
+      The extension uses the same lifecycle coordinator and bound services with
+      the exact supplied Actor claim; only actual Activated succeeds.
+      Unavailable/Already_active reject. Exceptions/cancellation propagate.
+
+      Callback Wait/Finish requests are already durable in that real claim.
+      This unit result permits no synthetic Continue: the Actor must inspect
+      and honor the current same Run before attaching another Operation. *)
+  val run
+    :  t
+    -> claim:(event:Chat_response.Moderation.Event.t -> Moderator_event.claim)
+    -> (unit, Agent_protocol.Error.t) result
+end
+
 type t =
   { source_lease : Prompt_source_lease.t
   ; worker : Operation_worker.t
@@ -392,6 +422,9 @@ type t =
   ; authored_start : unit -> (Authored_start.t, Agent_protocol.Error.t) result
     (** Runtime-bound factual selector. Use [authored_start] on the runtime; fake
         runtimes without actual startup ownership must return unavailable. *)
+  ; runtime_resume : unit -> (Runtime_resume.t, Agent_protocol.Error.t) result
+    (** Runtime-bound cold resume selector. Loaded reuse never calls this.
+        Fake runtimes without actual resume ownership must return unavailable. *)
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
     (** First startup remains construction-fenced. After an actual host-backed
         legacy startup ACK, repeated calls return that exact acknowledged DATA
@@ -436,6 +469,8 @@ type t =
     initialize or admit work; absence is represented as No_callback and does not
     broaden held Run admission. Unacknowledged/non-host legacy startup rejects. *)
 val authored_start : t -> (Authored_start.t, Agent_protocol.Error.t) result
+
+val runtime_resume : t -> (Runtime_resume.t, Agent_protocol.Error.t) result
 
 (** Read the pinned runtime's moderator source DATA without loading resources,
     acquiring a Manager gate or granting authority. No manager returns None;

@@ -723,6 +723,14 @@ execution host. Closing the host revokes its original proofs before worker
 teardown; it does not alter another host's proofs. Configuration changes use the
 existing server restart boundary.
 
+Changing execution grants does not erase older occurrence records. An unresolved
+attempt may still name a target removed from the current allowlist, so that
+allowlist is not an inventory of outstanding work. Serial-dispatch checks must
+account for those retained attempts. If the host cannot read the facts needed to
+establish that a target is free, it must defer new conflicting execution rather
+than assume absence. Factual reconciliation remains distinct from permission to
+launch new work.
+
 For an existing target that is not selected, the host can acquire its metadata
 through the Factory. This opens its actual session owner for validation, reads
 and control without constructing the runtime, running `Session_resume`, migrating
@@ -762,8 +770,44 @@ A captured target requires the actual Factory-produced child and matching
 controller reservation, association and target delegation record. The host
 creates no alternate executor or permission registry. Lower owners still enforce
 current source, control, admission, reciprocal acknowledgement and cleanup.
-These composition APIs provide execution policy; the scheduler's launch and
-recovery integration is a separate requirement.
+The existing scheduler invokes a bounded dispatcher in the same per-controller
+sweep. It visits at most 32 distinct pending or ready occurrences per pass, using
+a rotating cursor so a busy target cannot permanently hide independent targets.
+It reconciles an occurrence's actual Run before retrying it and performs at most
+one activation or retry per pass. A nonterminal Workflow remains occupied even
+when it has no foreground turn.
+Execution intents retain the exact stored Ready occurrence, including its status
+and compatible unknown fields. The typed nominal view is for inspection;
+serializing that view cannot replace the complete stored record.
+
+Before new work, the dispatcher excludes concurrent preparation for that target,
+reads current occupancy, and checks the target again after source preview at the
+revision used for admission. The exclusion is scheduling bookkeeping, not an
+execution grant; the actual Factory and Actor still enforce authorization,
+source identity, revisions and writer acknowledgements.
+
+Occupancy includes pending executions retained by configured controllers that
+are indexed but not currently loaded. Changing a controller's target allowlist
+does not erase its historical target occupancy. If one of these records cannot
+be read, the dispatcher retains that uncertainty and rejects new work until the
+read succeeds; it does not assume the target is free or initialize the controller
+to inspect it.
+
+Only actual joined attempts can retain live retry evidence, bounded by the
+retained occurrence frontier. An initial source failure before recording an
+attempt may re-enter with its exact original request when its live no-effects
+evidence remains valid. A failed attempt with no joined retry evidence remains
+retained while its occurrence is pending; the next pass cannot silently issue a
+replacement request. A recorded attempt uses the existing checked retry path.
+Restarted hosts reconcile saved records; they cannot recreate that live evidence
+from a key, receipt or stored identifier.
+
+If a target finishes before its controller imports the terminal receipt, a fresh
+dispatcher can import that exact retained receipt after reopening the store.
+Reconciliation does not repeat the target's inference. Graceful daemon shutdown
+cancels and joins its scheduler's in-flight source preparation before closing the
+store. Unconsumed Ready occurrences remain durable; closing the process does not
+turn them into completed executions.
 
 A live daemon may continue after client disconnect. Embedded execution requires
 its controller to remain selected/open in the host; store reopening does not

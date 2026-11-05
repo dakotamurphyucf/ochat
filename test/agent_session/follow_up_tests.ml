@@ -945,6 +945,14 @@ let%expect_test "runtime owner drains observation batches and applies durable te
                       ~message:"fixture has no authored startup"
                       ~retryable:false
                       ()))
+           ; runtime_resume =
+               (fun () ->
+                 Error
+                   (Agent_protocol.Error.create
+                      Invalid_state
+                      ~message:"fixture has no runtime resume"
+                      ~retryable:false
+                      ()))
            ; start_moderator = (fun () -> failwith "unexpected startup")
            ; enqueue_internal_event =
                (fun ?prepare:_ _ -> failwith "unexpected external event")
@@ -1364,6 +1372,14 @@ let%expect_test
                        (Agent_protocol.Error.create
                           Invalid_state
                           ~message:"fixture has no authored startup"
+                          ~retryable:false
+                          ()))
+               ; runtime_resume =
+                   (fun () ->
+                     Error
+                       (Agent_protocol.Error.create
+                          Invalid_state
+                          ~message:"fixture has no runtime resume"
                           ~retryable:false
                           ()))
                ; start_moderator = (fun () -> failwith "unexpected startup")

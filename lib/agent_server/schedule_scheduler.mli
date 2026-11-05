@@ -28,10 +28,12 @@ val reconcile_entry
     terminal schedule failure or undo a committed/cancelled schedule.
     Internal composition: false constructs a stopped service and starts no fiber. *)
 val start_controlled
-  :  enabled:bool
+  :  ?recurrence_dispatcher:Recurrence_dispatcher.t
+  -> enabled:bool
   -> sw:Eio.Switch.t
   -> clock:_ Eio.Time.Mono.t
   -> registry:Session_registry.t
+  -> unit
   -> t
 
 val start : sw:Eio.Switch.t -> clock:_ Eio.Time.Mono.t -> registry:Session_registry.t -> t

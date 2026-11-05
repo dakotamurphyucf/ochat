@@ -46,6 +46,12 @@ val initial : Recurrence_definition.t -> (t, Agent_protocol.Error.t) result
 
 val ready : t -> Recurrence_nominal.t list
 
+(** Exact retained Ready row, including its unadmitted status and compatible
+    unknown fields. This is immutable DATA, not source, admission or execution
+    authority. A plain nominal projection cannot replace this complete carrier
+    when recording the occurrence's immutable execution intent. *)
+val find_ready_json : t -> Recurrence_identity.Occurrence.t -> Jsonaf.t option
+
 (** Unresolved protected rows remain retained through controls and history
     pruning. A known terminal execution releases pending occupancy; its complete
     reservation and association retire only with that execution's whole bundle

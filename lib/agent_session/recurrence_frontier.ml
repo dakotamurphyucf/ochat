@@ -34,6 +34,16 @@ let initial definition =
 ;;
 
 let ready t = List.map (value t).ready ~f:V.Stored_nominal.value
+
+let find_ready_json t occurrence =
+  List.find_map (value t).ready ~f:(fun nominal ->
+    Option.some_if
+      (I.Occurrence.equal
+         occurrence
+         (Recurrence_nominal.key (V.Stored_nominal.value nominal)))
+      (V.Stored_nominal.json nominal))
+;;
+
 let protected_children t = (value t).protected_children
 let child_associations t = (value t).child_associations
 let unlinked_children t = S.unlinked_children (value t)

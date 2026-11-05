@@ -10,6 +10,7 @@ type t =
   ; mutable busy : Session_registry.entry list
   ; mutable sweeps : sweep list
   ; idle : Eio.Condition.t
+  ; recurrence_dispatcher : Recurrence_dispatcher.t option
   }
 
 let failure message = Agent_protocol.Error.create Interrupted ~message ~retryable:false ()
@@ -134,10 +135,16 @@ let dispatch_recurrences t sw entry =
               Eio.Cancel.sub (fun cancel ->
                 sweep.cancel <- Some cancel;
                 if not (Atomic.get t.closed)
-                then
+                then (
                   ignore
                     (Agent_session.Session_actor.sweep_recurrences entry.actor
-                     : (unit, Agent_protocol.Error.t) result))
+                     : (unit, Agent_protocol.Error.t) result);
+                  Option.iter t.recurrence_dispatcher ~f:(fun dispatcher ->
+                    if not (Atomic.get t.closed)
+                    then
+                      ignore
+                        (Recurrence_dispatcher.process_entry dispatcher entry
+                         : (unit, Agent_protocol.Error.t) result))))
             with
             | Eio.Cancel.Cancelled _ as exn -> if not (Atomic.get t.closed) then raise exn)
           ~finally:release)
@@ -172,22 +179,24 @@ let rec run t sw clock registry =
     run t sw clock registry)
 ;;
 
-let start_controlled ~enabled ~sw ~clock ~registry =
+let start_controlled ?recurrence_dispatcher ~enabled ~sw ~clock ~registry () =
   let t =
     { closed = Atomic.make (not enabled)
     ; busy = []
     ; sweeps = []
     ; idle = Eio.Condition.create ()
+    ; recurrence_dispatcher
     }
   in
   if enabled then Eio.Fiber.fork ~sw (fun () -> run t sw clock registry);
   t
 ;;
 
-let start ~sw ~clock ~registry = start_controlled ~enabled:true ~sw ~clock ~registry
+let start ~sw ~clock ~registry = start_controlled ~enabled:true ~sw ~clock ~registry ()
 
 let close t =
   Atomic.set t.closed true;
+  Option.iter t.recurrence_dispatcher ~f:Recurrence_dispatcher.close;
   List.iter t.sweeps ~f:(fun sweep ->
     Option.iter sweep.cancel ~f:(fun cancel -> Eio.Cancel.cancel cancel Exit))
 ;;

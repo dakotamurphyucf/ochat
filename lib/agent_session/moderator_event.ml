@@ -428,6 +428,20 @@ module Lifecycle = struct
     | Internal_event _ -> false
   ;;
 
+  let resume_pending t =
+    pending t
+    &&
+    match t.event with
+    | Session_resume -> true
+    | Session_start
+    | Turn_start
+    | Item_appended _
+    | Pre_tool_call _
+    | Post_tool_response _
+    | Turn_end
+    | Internal_event _ -> false
+  ;;
+
   let run
         t
         ~claim

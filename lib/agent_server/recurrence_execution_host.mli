@@ -179,3 +179,44 @@ val acquire_existing_target
 val preview_target_source
   :  Target.t
   -> (Session_factory.Recurrence_source_preview.t, Agent_protocol.Error.t) result
+
+module Dispatch_occupancy : sig
+  module Known : sig
+    type t = private
+      { occurrence : Agent_session.Recurrence_identity.Occurrence.t
+      ; target : Agent_protocol.Session_ref.t
+      }
+  end
+
+  module Unknown : sig
+    (** An unreadable historical catalog conservatively covers every local target,
+        including targets removed from this restart-bound configuration. *)
+    type t = private
+      { controller : Agent_protocol.Session_ref.t
+      ; error : Agent_protocol.Error.t
+      }
+  end
+
+  type t = private
+    { known : Known.t list
+    ; unknown : Unknown.t list
+    }
+end
+
+(** Read actual immutable configured-controller states, including indexed and
+    unselected owners, through the existing Factory/Registry read lifetime.
+    No load, selection or effects. Per-controller failure retains its Error and
+    conservative all-local-target uncertainty rather than reporting empty occupancy.
+    Factual reconciliation remains available while new overlapping work defers.
+    Host closure/absolute expiry denies globally.
+    Actual target provenance/source/authority gates remain required before work. *)
+val pending_occupancy : t -> (Dispatch_occupancy.t, Agent_protocol.Error.t) result
+
+(** Obtain the genuine retained captured child through factual metadata recovery
+    and its actual reciprocal stored association. No creation permit or new
+    Enabled/grace qualification; current original visibility/captured-family
+    policy still applies. Missing facts never create a replacement. *)
+val acquire_captured_target
+  :  Controller.t
+  -> occurrence:Agent_session.Recurrence_identity.Occurrence.t
+  -> (Target.t, Agent_protocol.Error.t) result

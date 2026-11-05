@@ -57,13 +57,19 @@ let%expect_test
       set payload "ready" (`Array [ append original "future_nominal" (`Number "2.00e1") ]))
   in
   let original = original_nominal selected in
-  let intent = capture_intent definition selected original in
+  let nominal = H.ready (frontier selected) |> List.hd_exn in
+  let occurrence = N.key nominal in
+  let retained = H.find_ready_json (frontier selected) occurrence |> Option.value_exn in
+  assert (D.Json.equal original retained);
+  assert (not (D.Json.equal retained (N.to_json nominal)));
+  let intent = capture_intent definition selected retained in
   let attempt = request intent "frontier-execution:0" in
   let recorded, row = E.record_execution selected ~intent ~attempt |> protocol_ok in
   [%test_eq: int] (H.pending_count (frontier selected)) 1;
   [%test_eq: int] (H.pending_count (frontier recorded)) 1;
   [%test_eq: int] (H.pending_execution_steps (frontier recorded)) 2;
   [%test_eq: int] (List.length (H.ready (frontier recorded))) 0;
+  assert (Option.is_none (H.find_ready_json (frontier recorded) occurrence));
   assert (D.Json.equal original (Intent.nominal_json (Execution.intent row)));
   let replay, replay_row = E.record_execution recorded ~intent ~attempt |> protocol_ok in
   assert (D.Json.equal (entry_json recorded) (entry_json replay));

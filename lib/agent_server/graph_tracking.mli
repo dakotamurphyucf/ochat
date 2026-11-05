@@ -41,6 +41,19 @@ val create
   -> upstream:Upstream.t
   -> (t, Agent_protocol.Error.t) Result.t
 
+(** Same graph and acknowledgement body with the actual admitted constructor
+    context. Initial and existing-Goal construction remain distinct inside that
+    opaque context. Factual callbacks retain the exact issuing Init scope and
+    graph association after constructor cleanup. Every fresh inference requires
+    its actual execution allocation port; constructor custody and graph identity
+    never enable unbound inference. No mutable constructor state is retained. *)
+val create_for_runtime_construction
+  :  Agent_session.Session_actor.t
+  -> construction:Agent_session.Session_actor.Runtime_construction.t
+  -> source:Transcript.Source_id.t
+  -> upstream:Upstream.t
+  -> (t, Agent_protocol.Error.t) result
+
 (** One lexical input graph under the actual Actor-issued Parsing scope. All
     ledger callbacks select that same scope and graph for factual ACKs, including
     after original expiry. Fresh allocations still require its execution port;

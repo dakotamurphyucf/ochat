@@ -21,6 +21,7 @@ exception Rejected of Agent_protocol.Error.t
 module Mutation_owner = struct
   type t =
     | Runtime of Agent_session.Run_preparation.t option ref
+    | Runtime_construction of A.Runtime_constructor_graph.t
     | Held_input of A.Held_input_scope.t
 end
 
@@ -55,6 +56,20 @@ let create ?(run_preparation = ref None) actor ~source ~upstream =
       }))
 ;;
 
+let create_for_runtime_construction actor ~construction ~source ~upstream =
+  Eio.Cancel.protect (fun () ->
+    Result.map
+      (A.Runtime_constructor_mutations.open_inference_owner actor ~construction ~source)
+      ~f:(fun graph ->
+        { actor
+        ; mutation_owner = Runtime_construction graph
+        ; owner = A.Runtime_constructor_graph.owner graph
+        ; upstream
+        ; routing = Map.empty (module Transcript.Scope.Key)
+        ; finished = false
+        }))
+;;
+
 let create_for_held_input actor ~scope ~source ~upstream =
   Eio.Cancel.protect (fun () ->
     Result.map (A.Input_graph.open_owner actor ~scope ~source) ~f:(fun owner ->
@@ -80,13 +95,14 @@ let route t scope =
             ()))
 ;;
 
-let ledger_mutation t ~ordinary ~prepared ~input =
+let ledger_mutation t ~ordinary ~prepared ~construction ~input =
   match t.mutation_owner with
   | Held_input scope -> input scope
   | Runtime preparation ->
     (match !preparation with
      | None -> ordinary
      | Some preparation -> prepared preparation)
+  | Runtime_construction graph -> construction graph
 ;;
 
 let release t handle =
@@ -97,6 +113,8 @@ let release t handle =
          ~ordinary:A.release_inference
          ~prepared:(fun preparation ->
            A.Constructor_mutations.release_inference ~preparation)
+         ~construction:(fun graph actor ~owner:_ ->
+           A.Runtime_constructor_mutations.release_inference actor ~graph)
          ~input:(fun scope -> A.Input_graph.release_inference ~scope))
         t.actor
         ~owner:t.owner
@@ -118,34 +136,43 @@ let with_attempt t ?allocate prepared ~relation ~f =
             ~configuration:(R.Prepared.configuration prepared)
           |> require
         | None ->
-          let admit =
-            match t.mutation_owner with
-            | Held_input _ ->
-              raise
-                (Rejected
-                   (Agent_protocol.Error.create
-                      Permission_denied
-                      ~message:"held input requires its exact execution allocator"
-                      ~retryable:false
-                      ()))
-            | Runtime preparation ->
-              (match !preparation with
-               | None -> A.admit_inference
-               | Some preparation -> A.Constructor_mutations.admit_inference ~preparation)
+          let unbound admit =
+            let handle =
+              admit
+                t.actor
+                ~owner:t.owner
+                ~relation
+                ~operation_id:None
+                ~invocation_id:None
+                ~configuration:(R.Prepared.configuration prepared)
+              |> require
+            in
+            Agent_session.Inference_allocation.Host.create
+              ~handle
+              ~submission_guard:R.Submission_guard.empty
           in
-          let handle =
-            admit
-              t.actor
-              ~owner:t.owner
-              ~relation
-              ~operation_id:None
-              ~invocation_id:None
-              ~configuration:(R.Prepared.configuration prepared)
-            |> require
-          in
-          Agent_session.Inference_allocation.Host.create
-            ~handle
-            ~submission_guard:R.Submission_guard.empty
+          (match t.mutation_owner with
+           | Held_input _ ->
+             raise
+               (Rejected
+                  (Agent_protocol.Error.create
+                     Permission_denied
+                     ~message:"held input requires its exact execution allocator"
+                     ~retryable:false
+                     ()))
+           | Runtime preparation ->
+             unbound
+               (match !preparation with
+                | None -> A.admit_inference
+                | Some preparation -> A.Constructor_mutations.admit_inference ~preparation)
+           | Runtime_construction _ ->
+             raise
+               (Rejected
+                  (Agent_protocol.Error.create
+                     Permission_denied
+                     ~message:"constructed runtime requires its exact execution allocator"
+                     ~retryable:false
+                     ())))
       in
       let handle = Agent_session.Inference_allocation.handle allocation in
       t.routing
@@ -195,6 +222,8 @@ let on_attempt t attempt =
      ~ordinary:A.acknowledge_inference
      ~prepared:(fun preparation ->
        A.Constructor_mutations.acknowledge_inference ~preparation)
+     ~construction:(fun graph actor ~owner:_ ->
+       A.Runtime_constructor_mutations.acknowledge_inference actor ~graph)
      ~input:(fun scope -> A.Input_graph.acknowledge_inference ~scope))
     t.actor
     ~owner:t.owner
@@ -214,6 +243,8 @@ let on_observation t incoming =
         ~ordinary:A.observe_inference
         ~prepared:(fun preparation ->
           A.Constructor_mutations.observe_inference ~preparation)
+        ~construction:(fun graph actor ->
+          A.Runtime_constructor_mutations.observe_inference actor ~graph)
         ~input:(fun scope -> A.Input_graph.observe_inference ~scope ~owner:t.owner))
        t.actor
        ~handle
@@ -225,6 +256,8 @@ let on_observation t incoming =
         ~ordinary:A.observe_owned_inference
         ~prepared:(fun preparation ->
           A.Constructor_mutations.observe_owned_inference ~preparation)
+        ~construction:(fun graph actor ~owner:_ ->
+          A.Runtime_constructor_mutations.observe_owned_inference actor ~graph)
         ~input:(fun scope -> A.Input_graph.observe_owned_inference ~scope))
        t.actor
        ~owner:t.owner
@@ -242,6 +275,8 @@ let on_completion t completion =
      ~ordinary:A.complete_inference
      ~prepared:(fun preparation ->
        A.Constructor_mutations.complete_inference ~preparation)
+     ~construction:(fun graph actor ~owner:_ ->
+       A.Runtime_constructor_mutations.complete_inference actor ~graph)
      ~input:(fun scope -> A.Input_graph.complete_inference ~scope))
     t.actor
     ~owner:t.owner
@@ -257,6 +292,8 @@ let seal t =
   else (
     match t.mutation_owner with
     | Runtime _ -> A.seal_inference_owner t.actor ~owner:t.owner
+    | Runtime_construction graph ->
+      A.Runtime_constructor_mutations.seal_inference_owner t.actor ~graph
     | Held_input scope -> A.Input_graph.seal_inference_owner t.actor ~scope ~owner:t.owner)
 ;;
 
@@ -278,6 +315,8 @@ let finish t =
           ~ordinary:A.finish_inference_owner
           ~prepared:(fun preparation ->
             A.Constructor_mutations.finish_inference_owner ~preparation)
+          ~construction:(fun graph actor ~owner:_ ->
+            A.Runtime_constructor_mutations.finish_inference_owner actor ~graph)
           ~input:(fun scope -> A.Input_graph.finish_inference_owner ~scope))
          t.actor
          ~owner:t.owner)

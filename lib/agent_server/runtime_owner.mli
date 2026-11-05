@@ -24,6 +24,14 @@ module Scope_outcome : sig
       | Failed of Failure.t * Failure.t list
 
     val status : t -> status
+
+    (** Combine actual captured reports, retaining the ordered first failure and
+        every secondary failure. This cannot certify a missing required scope;
+        callers must record that absence as a failure. *)
+    val combine : t -> t -> t
+
+    (** Negative DATA only. This cannot assert acquisition or a successful join. *)
+    val failed : Failure.t -> t
   end
 
   type 'a primary =
@@ -80,19 +88,25 @@ val create_with_run_unload
 
 val is_loaded : t -> bool
 
+(** Callback-free negative scheduling snapshot under the existing Owner mutex.
+    False defers before freezing a request; true neither reserves the source lane
+    nor grants execution authority across a yield. The actual Factory stage and
+    Actor guards remain mandatory. Same creating Eio domain. *)
+val source_lane_idle : t -> bool
+
 (** Deliberate physical association, not equality of session IDs. Call in this
     owner's Eio domain; no Actor request, callback, mutation or authority grant. *)
 val belongs_to_actor : t -> Agent_session.Session_actor.t -> bool
 
 (** Existing Factory constructor for a source that has already passed actual
-    retained-artifact verification. The neutral activation is issued by the
-    exact target actor; no raw IDs, caller guard or alternate executor replace it.
-    Called only inside the consumed Prepared lifetime, after the first-effect
-    fence, and must preserve selected source/parent resource ownership. *)
+    retained-artifact verification. Its opaque context selects the exact initial
+    admitted continuation or existing Goal episode owner; neither is coerced into
+    the other. No raw IDs, caller guard or alternate executor replace it. Called
+    only inside the consumed source stage, after the first-effect fence, and must
+    preserve selected source/parent resource ownership. *)
 type deferred_builder =
   source:Agent_session.Runtime_builder.Source.t
-  -> preparation:Agent_session.Run_preparation.t
-  -> continuation:Agent_session.Session_actor.Admitted_activation.Continuation.t
+  -> construction:Agent_session.Session_actor.Runtime_construction.t
   -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result
 
 (** Actual factory constructor retaining an explicitly supplied original actor
@@ -744,3 +758,79 @@ end
     false. Retirement preserves this fact; it grants no fresh effect permission.
     No mutex, Actor RPC, clock or host callback is invoked. *)
 val has_activation_handoff : t -> bool
+
+module Prepared_goal_continuation : sig
+  (** One selected source in the same exclusive Owner source_stage. This is
+      existing-Run custody, never an initial Run_preparation/Prepared/Held value. *)
+  type t
+
+  val binding : t -> Agent_session.Session_actor.Goal_continuation.Source_binding.t
+  val check_basis : t -> (unit, Agent_protocol.Error.t) result
+end
+
+module Goal_resume_source : sig
+  (** The existing exclusive source stage plus the actual issued preparation.
+      Callback-local, same creating Eio domain, no second source/lease registry. *)
+  type t
+
+  val preparation : t -> Agent_session.Session_actor.Goal_continuation.Preparation.t
+
+  (** One selected source only. Consume before yielding the Actor bind call;
+      rejected/raised/uncertain binding cannot select another source. *)
+  val prepare
+    :  t
+    -> source:Agent_session.Runtime_builder.Source.t
+    -> (Prepared_goal_continuation.t, Agent_protocol.Error.t) result
+
+  module Decision : sig
+    type 'a t =
+      | Retained of Agent_session.Goal_command_receipt.t
+      | Fresh of 'a
+  end
+
+  module Report : sig
+    type 'a t
+
+    (** Capture the actual issued preparation before pending cancellation or
+        callback entry; missing means no issuance, never cleanup success. *)
+    val preparation
+      :  'a t
+      -> Agent_session.Session_actor.Goal_continuation.Preparation.t option
+
+    val outcome : 'a t -> 'a Decision.t Scope_outcome.t
+  end
+end
+
+(** Validate the private Factory issuer against this Owner AND its actual Actor,
+    then reserve the SAME existing source stage under Owner mutex before Begin.
+    Existing ordinary borrowers fail reservation; new borrowers remain excluded
+    continuously until real target cleanup joins. Begin and all policy/Actor
+    operations run outside Owner mutex. Capture issued preparation under finite
+    cancellation protection, then check cancellation before caller/source work.
+    Retained invokes no callback; Fresh invokes once. Actual inner lease release
+    and outer stage retirement/clear are both reported. This does not end the
+    preparation or claim NoEffects. Factory owns parent joins and factual close. *)
+val with_goal_resume_source_reported
+  :  t
+  -> source_owner:Agent_session.Runtime_source_owner.t
+  -> actor:Operator_authorization.t
+  -> authorize:(Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> session:Agent_protocol.Session_ref.t
+  -> request:Agent_session.Goal_resume_request.t
+  -> (Goal_resume_source.t -> ('a, Agent_protocol.Error.t) result)
+  -> 'a Goal_resume_source.Report.t
+
+(** Continue the SAME existing Goal episode inside its actual selected source
+    stage. Loaded runtime reuse performs no initialization or lifecycle replay.
+    Cold construction uses the exact command context, genuine Starting/Idle
+    transitions and the shared Factory constructor, then joins actual
+    Session_resume before deciding Started, Waiting or Settled. No new Run,
+    episode, account or input is admitted. Primary errors/cancellation preserve
+    their outcome; the enclosing Factory report retains actual receipt facts.
+    Runtime adoption requires the Actor's immutable actual final outcome,
+    including a validated Wait/Settlement, never a caller success flag. *)
+val resume_goal_episode
+  :  t
+  -> prepared:Prepared_goal_continuation.t
+  -> continuation:Agent_session.Session_actor.Goal_continuation.t
+  -> (Agent_session.Session_actor.Goal_resume_result.t, Agent_protocol.Error.t) result
