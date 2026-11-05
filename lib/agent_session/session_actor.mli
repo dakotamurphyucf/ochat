@@ -841,8 +841,28 @@ type legacy_callback_claim =
     an error. Job completion/retry must wait until this scope is released. A failed
     cleanup save retains an inactive owner for reconciliation, preventing reuse.
     Does not perform scheduler dispatch or transactional launch admission. *)
+module Job_runtime_owner : sig
+  (** Projection of SAME active job_scope created by with_job_execution. No
+      decoder/constructor, and no authority from a Job DTO or allocator closure. *)
+  type t
+
+  module Attribution : sig
+    type t =
+      | Ordinary
+      | Goal
+  end
+
+  (** Immutable causal routing DATA. Historical missing inference provenance
+      still retains genuine Run ancestry; Ordinary is not an inference Unbound
+      classification. The Goal branch needs actual source/scope/currentness;
+      Ordinary cannot acquire a Goal later.
+      Creating Eio domain only; a foreign-domain call raises Invalid_argument. *)
+  val attribution : t -> Attribution.t
+end
+
 type job_execution =
   { job : Agent_protocol.Job.t
+  ; runtime_owner : Job_runtime_owner.t
   ; allocate_inference : Inference_allocation.Port.t
   ; model_jobs : Model_job_admission.t
   ; execute : Native_tool_invocation.executor
@@ -3335,6 +3355,141 @@ module Goal_continuation : sig
   end
 end
 
+module Goal_execution_runtime : sig
+  module Handoff : sig
+    (** Factual outcome selected by the actual Actor owner, never by a caller's
+        callback return. These values grant no execution or resource authority. *)
+    type t = private
+      | Queued_event of Agent_protocol.Moderator_execution.t
+      | Subscription_turn of Agent_protocol.Operation.t
+      | Claimed_job_resource of Agent_protocol.Job.t
+      | Lifecycle_wait of Agent_protocol.Run_wake.t
+      | Lifecycle_settlement of Agent_protocol.Goal_episode.Settlement.t
+  end
+
+  module Preparation : sig
+    type t
+
+    (** Same-domain historical actual transfer. Known ACK survives closure or
+        publication failure. None is not a no-effects or no-writer certificate. *)
+    val handoff : t -> Handoff.t option
+  end
+
+  module Source_binding : sig
+    type t
+
+    val source : t -> Runtime_source_preparation.t
+    val check_basis : t -> (unit, Agent_protocol.Error.t) result
+
+    (** Pure irreversible revocation of fresh use; preserves custody, in-flight
+        writers and known ACK. Factual Actor close follows all actual joins. *)
+    val close : t -> unit
+  end
+
+  type t
+
+  module Kind : sig
+    type t =
+      | Queued_wake
+      | Subscription_wake
+      | Claimed_job
+  end
+
+  val kind : t -> Kind.t
+
+  (** Physical source pair, issuing Actor/preparation and owner identity, not IDs. *)
+  val check_source_binding
+    :  t
+    -> binding:Source_binding.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  module Wake_request : sig
+    (** Read-only production routing DATA. Exact canonical record comparison is
+        mandatory; a stale/foreign DTO is Error, never Ordinary fallback. *)
+    type t =
+      | Idle
+      | Timer of Agent_protocol.Schedule.t
+      | Job_delivery of Run_job_delivery.t
+      | Job_completion of Agent_protocol.Job.t
+  end
+
+  module Wake_selection : sig
+    type t =
+      | Ordinary
+      | No_work
+      | Suspended_goal of Goal_execution_selection.Suspension.t
+      | Wake of Agent_protocol.Run_wake.t
+  end
+
+  module Wake_issuance : sig
+    type t =
+      | No_work
+      | Suspended_goal of Goal_execution_selection.Suspension.t
+      | Prepare of Preparation.t
+  end
+
+  module Wake_result : sig
+    (** Returned only for actual acknowledged ownership or a joined lifecycle
+        outcome; ready-but-unclaimed is not Claimed. No new Administrative turn. *)
+    type t = private
+      | Queued of Agent_protocol.Moderator_execution.t
+      | Started of Agent_protocol.Operation.t
+      | Waiting of Agent_protocol.Run_wake.t
+      | Settled of Agent_protocol.Goal_episode.Settlement.t
+  end
+end
+
+(** Callback-free negative routing before any ordinary cold load. Reuses the
+    real producer/Goal selected-work planner, does no queue/claim/write or issuing.
+    Idle selects only actual next eligible canonical head/committed wake, not an
+    arbitrary later head. Ordinary permits existing ordinary path only after an
+    exact unbound/unrelated selection; it never means stale proof or read failure.
+    Source Begin repeats every check after actual Owner reservation. *)
+val select_goal_runtime_wake
+  :  t
+  -> request:Goal_execution_runtime.Wake_request.t
+  -> (Goal_execution_runtime.Wake_selection.t, Agent_protocol.Error.t) result
+
+(** After SAME Owner source-stage reservation, select exact pending Wait + equal
+    Waiting wake, actual live binding/Admission/episode/link/full source and real
+    producer readiness. Job must be canonical terminal/enqueued; timer actually
+    due and owned/Delivering or enqueued; subscription actually committed and
+    Pending_wake. validate(identity) alone is not readiness. Held is Suspended
+    without slot/write; original/producer/source loss is normal error/retirement.
+    Consumed/absent wake is No_work. No proof is reconstructed after recovery. *)
+val begin_goal_wake_preparation
+  :  t
+  -> wake:Agent_protocol.Run_wake.t
+  -> (Goal_execution_runtime.Wake_issuance.t, Agent_protocol.Error.t) result
+
+(** Actual Goal-attributed Running scope only, including generation/attempt and
+    SAME original binding. No second Job claim, Enabled mutation or new account.
+    Hold does not suspend/interrupt/requeue an already claimed Job. Fresh Init
+    effects remain canonical-policy gated; failure is a normal actual Job failure.
+    A stale/foreign/ordinary scope rejects rather than falling back to a loader. *)
+val begin_goal_job_runtime_preparation
+  :  t
+  -> owner:Job_runtime_owner.t
+  -> (Goal_execution_runtime.Preparation.t, Agent_protocol.Error.t) result
+
+val bind_goal_execution_runtime_source
+  :  t
+  -> preparation:Goal_execution_runtime.Preparation.t
+  -> source:Runtime_source_preparation.t
+  -> (Goal_execution_runtime.Source_binding.t, Agent_protocol.Error.t) result
+
+(** Bind only SAME source preparation and original execution. No Goal Enable,
+    Resume receipt, Held_run, Run, Admission, episode or Job claim is issued. *)
+val prepare_goal_execution_runtime
+  :  t
+  -> binding:Goal_execution_runtime.Source_binding.t
+  -> (Goal_execution_runtime.t, Agent_protocol.Error.t) result
+
+val end_goal_execution_runtime_preparation
+  :  t
+  -> preparation:Goal_execution_runtime.Preparation.t
+  -> (unit, Agent_protocol.Error.t) result
+
 module Runtime_construction : sig
   (** Closed private selection of the SAME Initial admitted continuation or
       Existing_goal Ready owner. No new custody, Run, binding or permission. *)
@@ -3342,6 +3497,7 @@ module Runtime_construction : sig
 
   val of_admitted : Admitted_activation.Continuation.t -> t
   val of_goal : Goal_continuation.t -> t
+  val of_existing_goal_execution : Goal_execution_runtime.t -> t
   val custody : t -> Run_preparation.Custody.t
   val source : t -> Runtime_source_preparation.t
 
@@ -4113,3 +4269,38 @@ val check_held_runtime_admission
   :  t
   -> continuation:Admitted_activation.Continuation.t
   -> (unit, Agent_protocol.Error.t) result
+
+(** Check actual issuing Actor and current scope before the ordinary background
+    adapter enters its runtime lease. No saved result grants rights across yield. *)
+val check_job_runtime_owner
+  :  t
+  -> owner:Job_runtime_owner.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Same Builder.Runtime_resume lifecycle and scoped native services as command
+    resume, under exact old Run original/account. Loaded reuse skips this call.
+    Session_resume Wait/Finish facts are retained, not translated into Continue. *)
+val run_goal_execution_runtime_resume
+  :  t
+  -> execution:Goal_execution_runtime.t
+  -> resume:Runtime_builder.Runtime_resume.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** After real resource install and joined cold lifecycle (or loaded reuse), bind
+    the SAME still-active acknowledged Job scope to that SAME installed worker/
+    Manager and original Run. Protected actual Actor acknowledgement marks the
+    resource handoff before caller cancellation; no new durable claim/attempt.
+    Hold alone does not reject this resource retention or truthful completion.
+    Fresh later effects retain canonical policy/expiry checks. *)
+val acknowledge_goal_job_runtime
+  :  t
+  -> execution:Goal_execution_runtime.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Pure projection of existing services after exact still-active physical scope,
+    actor and request occurrence check; creates no new scope or Job claim. The
+    returned canonical ports retain all original lifetime/effect guards. *)
+val goal_job_runtime_services
+  :  t
+  -> execution:Goal_execution_runtime.t
+  -> (job_execution, Agent_protocol.Error.t) result

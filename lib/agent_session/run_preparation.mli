@@ -193,6 +193,10 @@ module Goal_continuation : sig
           { run_id : Agent_protocol.Id.Run.t
           ; wake : Agent_protocol.Run_wake.t
           }
+      | Claimed_job of
+          { run_id : Agent_protocol.Id.Run.t
+          ; job : Agent_protocol.Job.t
+          }
   end
 
   (** Distinct request family over the SAME private Owner and common Custody.

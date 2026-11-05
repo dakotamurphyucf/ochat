@@ -410,6 +410,56 @@ module Goal_resume_result = struct
     | Uncertain of Agent_protocol.Error.t
 end
 
+type job_scope =
+  { job : Agent_protocol.Job.t
+  ; progress : Job_progress_buffer.t
+  ; deadline : Agent_protocol.Timestamp.t option
+  ; cancelled : unit Eio.Promise.t
+  ; cancel_signal : unit Eio.Promise.u
+  ; mutable active : bool
+  ; mutable cancel_requested : bool
+  ; mutable unfinished_on_return : bool
+  ; authority_live : bool Atomic.t
+  ; mutable cancel : (unit -> unit) option
+  }
+
+module Job_runtime_owner = struct
+  module Attribution = struct
+    type t =
+      | Ordinary
+      | Goal
+  end
+
+  type t =
+    { domain : int
+    ; issuing_actor : unit ref
+    ; scope : job_scope
+    ; execute : Native_tool_invocation.executor
+    ; attribution : Attribution.t
+    }
+
+  let attribution t =
+    if not (Int.equal t.domain (Stdlib.Domain.self () :> int))
+    then invalid_arg "Job runtime owner belongs to another Eio domain";
+    t.attribution
+  ;;
+end
+
+module Goal_execution_handoff = struct
+  type t =
+    | Queued_event of Agent_protocol.Moderator_execution.t
+    | Subscription_turn of Agent_protocol.Operation.t
+    | Claimed_job_resource of Agent_protocol.Job.t
+    | Lifecycle_wait of Agent_protocol.Run_wake.t
+    | Lifecycle_settlement of Agent_protocol.Goal_episode.Settlement.t
+end
+
+module Goal_runtime_handoff = struct
+  type t =
+    | Resume of Goal_resume_result.Continuation.t
+    | Existing_execution of Goal_execution_handoff.t
+end
+
 module Goal_runtime_phase = struct
   type 'scope t =
     | Unclaimed
@@ -419,7 +469,7 @@ module Goal_runtime_phase = struct
     | Constructing
     | Installed of 'scope
     | Callback_completed of 'scope
-    | Handed_off of 'scope * Goal_resume_result.Continuation.t
+    | Handed_off of 'scope * Goal_runtime_handoff.t
     | Retired of 'scope
     | Closed
 end
@@ -428,20 +478,34 @@ end
    over this same preparation and custody, never parallel constructor state. *)
 module Existing_goal_preparation = struct
   module Cause = struct
-    type t = Resume_command of Run_preparation.Goal_continuation.t
+    type t =
+      | Resume_command of Run_preparation.Goal_continuation.t
+      | Pending_wake of
+          { request : Run_preparation.Goal_continuation.t
+          ; wake : Agent_protocol.Run_wake.t
+          }
+      | Claimed_job of
+          { request : Run_preparation.Goal_continuation.t
+          ; owner : Job_runtime_owner.t
+          }
 
     let custody = function
-      | Resume_command request -> Run_preparation.Goal_continuation.custody request
+      | Resume_command request | Pending_wake { request; _ } | Claimed_job { request; _ }
+        -> Run_preparation.Goal_continuation.custody request
     ;;
 
     let resume_request = function
       | Resume_command request ->
         (match Run_preparation.Goal_continuation.cause request with
          | Resume request -> Ok request
-         | Wake _ ->
+         | Wake _ | Claimed_job _ ->
            Error
              (Agent_protocol.Error.invalid_request
-                "Goal wake is not an explicit resume command"))
+                "Goal execution is not an explicit resume command"))
+      | Pending_wake _ | Claimed_job _ ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "Goal execution is not an explicit resume command")
     ;;
   end
 
@@ -481,6 +545,7 @@ module Existing_goal_preparation = struct
     | Source_bound of source_binding
     | Writer_pending of source_binding * bool ref
     | Ready of source_binding * Goal_command_receipt.t
+    | Execution_ready of source_binding
     | Waiting of Goal_command_receipt.t * Agent_protocol.Run_wake.t
     | Closed of Goal_command_receipt.t option
 
@@ -493,8 +558,12 @@ module Existing_goal_preparation = struct
 
   and t =
     { binding : source_binding
-    ; receipt : Goal_command_receipt.t
+    ; purpose : purpose
     }
+
+  and purpose =
+    | Resume of Goal_command_receipt.t
+    | Existing_execution
 
   and runtime_scope =
     { issuing_actor : unit ref
@@ -520,7 +589,7 @@ module Existing_goal_preparation = struct
     match preparation.phase with
     | Ready (_, receipt) | Waiting (receipt, _) -> Some receipt
     | Closed receipt -> receipt
-    | Preparing | Source_bound _ | Writer_pending _ -> None
+    | Preparing | Source_bound _ | Writer_pending _ | Execution_ready _ -> None
   ;;
 
   let close preparation =
@@ -543,7 +612,13 @@ module Existing_goal_preparation = struct
     match preparation.phase with
     | Writer_pending (current, _) when phys_equal current binding ->
       preparation.phase <- Ready (binding, receipt)
-    | Preparing | Source_bound _ | Writer_pending _ | Ready _ | Waiting _ | Closed _ ->
+    | Preparing
+    | Source_bound _
+    | Writer_pending _
+    | Ready _
+    | Execution_ready _
+    | Waiting _
+    | Closed _ ->
       (* An ACK is factual even after revocation. Neither a closed source nor a
          closed/displaced preparation is reopened by writer completion. *)
       preparation.phase <- Closed (Some receipt)
@@ -580,7 +655,12 @@ module Existing_goal_preparation = struct
     ;;
   end
 
-  let receipt t = t.receipt
+  let receipt t =
+    match t.purpose with
+    | Resume receipt -> receipt
+    | Existing_execution ->
+      invalid_arg "existing Goal execution is not an explicit Resume continuation"
+  ;;
 
   let check_source_binding (t : t) ~(binding : Source_binding.t) =
     if not (Int.equal binding.preparation.domain (Stdlib.Domain.self () :> int))
@@ -627,6 +707,85 @@ end
    Its command receipt remains specific to the actual Resume cause. *)
 module Goal_continuation = Existing_goal_preparation
 
+module Goal_execution_runtime = struct
+  module Handoff = Goal_execution_handoff
+
+  module Preparation = struct
+    type t = Existing_goal_preparation.preparation
+
+    let handoff (t : t) =
+      if not (Int.equal t.domain (Stdlib.Domain.self () :> int))
+      then invalid_arg "Goal execution belongs to another Eio domain";
+      match t.runtime_phase with
+      | Handed_off (_, Existing_execution handoff) -> Some handoff
+      | Handed_off (_, Resume _)
+      | Unclaimed
+      | Starting_writer _
+      | Starting_acknowledged
+      | Running_writer _
+      | Constructing
+      | Installed _
+      | Callback_completed _
+      | Retired _
+      | Closed -> None
+    ;;
+  end
+
+  module Source_binding = Existing_goal_preparation.Source_binding
+
+  type t = Existing_goal_preparation.t
+
+  module Kind = struct
+    type t =
+      | Queued_wake
+      | Subscription_wake
+      | Claimed_job
+  end
+
+  let kind t =
+    match t.Existing_goal_preparation.binding.preparation.cause with
+    | Pending_wake { wake; _ } ->
+      (match wake.occurrence with
+       | Subscription_delivery _ -> Kind.Subscription_wake
+       | Job_completion _ | Delivered_timer _ -> Queued_wake)
+    | Claimed_job _ -> Kind.Claimed_job
+    | Resume_command _ -> invalid_arg "Resume command is not a Goal execution owner"
+  ;;
+
+  let check_source_binding = Existing_goal_preparation.check_source_binding
+
+  module Wake_request = struct
+    type t =
+      | Idle
+      | Timer of Agent_protocol.Schedule.t
+      | Job_delivery of Run_job_delivery.t
+      | Job_completion of Agent_protocol.Job.t
+  end
+
+  module Wake_selection = struct
+    type t =
+      | Ordinary
+      | No_work
+      | Suspended_goal of Goal_execution_selection.Suspension.t
+      | Wake of Agent_protocol.Run_wake.t
+  end
+
+  module Wake_issuance = struct
+    type t =
+      | No_work
+      | Suspended_goal of Goal_execution_selection.Suspension.t
+      | Prepare of Preparation.t
+  end
+
+  module Wake_result = struct
+    type t =
+      | Queued of Agent_protocol.Moderator_execution.t
+      | Started of Agent_protocol.Operation.t
+      | Waiting of Agent_protocol.Run_wake.t
+      | Settled of Agent_protocol.Goal_episode.Settlement.t
+  end
+end
+
 module Preparation_owner = struct
   type t =
     | Initial of Run_preparation.t
@@ -662,6 +821,7 @@ module Runtime_construction = struct
 
   let of_admitted continuation = Initial continuation
   let of_goal continuation = Existing_goal continuation
+  let of_existing_goal_execution execution = Existing_goal execution
 
   let preparation_owner = function
     | Initial continuation ->
@@ -1508,19 +1668,6 @@ module Extension_change = struct
     | Moderator_state of Jsonaf.t option
 end
 
-type job_scope =
-  { job : Agent_protocol.Job.t
-  ; progress : Job_progress_buffer.t
-  ; deadline : Agent_protocol.Timestamp.t option
-  ; cancelled : unit Eio.Promise.t
-  ; cancel_signal : unit Eio.Promise.u
-  ; mutable active : bool
-  ; mutable cancel_requested : bool
-  ; mutable unfinished_on_return : bool
-  ; authority_live : bool Atomic.t
-  ; mutable cancel : (unit -> unit) option
-  }
-
 type moderator_borrow_kind =
   | Invocation
   | Observation
@@ -1945,6 +2092,20 @@ module Goal_continuation_request = struct
         -> Goal_continuation.Source_binding.t t
     | Admit : Goal_continuation.Source_binding.t -> Goal_continuation.Admission.t t
     | Close : Goal_continuation.Preparation.t -> unit t
+    | Select_execution_wake :
+        Goal_execution_runtime.Wake_request.t
+        -> Goal_execution_runtime.Wake_selection.t t
+    | Begin_wake : Agent_protocol.Run_wake.t -> Goal_execution_runtime.Wake_issuance.t t
+    | Begin_job : Job_runtime_owner.t -> Goal_execution_runtime.Preparation.t t
+    | Bind_execution :
+        Goal_execution_runtime.Preparation.t * Runtime_source_preparation.t
+        -> Goal_execution_runtime.Source_binding.t t
+    | Prepare_execution :
+        Goal_execution_runtime.Source_binding.t
+        -> Goal_execution_runtime.t t
+    | Close_execution : Goal_execution_runtime.Preparation.t -> unit t
+    | Check_job_owner : Job_runtime_owner.t -> unit t
+    | Acknowledge_job_resource : Goal_execution_runtime.t -> unit t
 end
 
 module Runtime_constructor_mutation_request = struct
@@ -4231,7 +4392,7 @@ let retain_goal_activations ?admission_hold t (current : Session_state.t) =
         &&
         match preparation.phase with
         | Preparing | Source_bound _ | Writer_pending _ -> true
-        | Ready _ ->
+        | Ready _ | Execution_ready _ ->
           Result.is_ok
             (Goal_activation_policy.check_policy preparation.policy ~state:current)
           || Option.exists admission_hold ~f:(Agent_protocol.Id.Goal.equal id)
@@ -4797,7 +4958,8 @@ module Goal_runtime_operation_acknowledgement = struct
     t.held.phase <- Pending_first_effect;
     actor.operation_agent_custody <- Some t.owner;
     t.scope.continuation.binding.preparation.runtime_phase
-    <- Handed_off (t.scope, Goal_resume_result.Continuation.Started t.held.proof.operation)
+    <- Handed_off
+         (t.scope, Resume (Goal_resume_result.Continuation.Started t.held.proof.operation))
   ;;
 end
 
@@ -7987,7 +8149,13 @@ let initialization_callback_is_owned t (scope : Initialization_scope.t) =
   | None, _, _ | _, None, _ | _, _, None -> false
 ;;
 
-let validate_initialization_basis ?scope t ~purpose (expected : Session_state.t) =
+let validate_initialization_basis
+      ?scope
+      ?construction
+      t
+      ~purpose
+      (expected : Session_state.t)
+  =
   let open Result.Let_syntax in
   let%bind () =
     match purpose, expected.runtime_initialization, t.state.runtime_initialization with
@@ -8003,7 +8171,18 @@ let validate_initialization_basis ?scope t ~purpose (expected : Session_state.t)
     Option.is_some t.state.active_operation
     || (t.idle_moderator_borrowed
         && not (Option.exists scope ~f:(initialization_callback_is_owned t)))
-    || not (List.is_empty t.job_scopes)
+    || not
+         (List.for_all t.job_scopes ~f:(fun job ->
+            Option.exists
+              (Option.first_some
+                 (Option.bind scope ~f:Initialization_scope.construction)
+                 construction)
+              ~f:(function
+                | Existing_goal continuation ->
+                  (match continuation.binding.preparation.cause with
+                   | Claimed_job { owner; _ } -> phys_equal owner.scope job
+                   | Resume_command _ | Pending_wake _ -> false)
+                | Initial _ -> false)))
   then Error (error Conflict "initialization basis changed while resources were prepared")
   else validate_initialization_projection expected t.state
 ;;
@@ -8118,7 +8297,7 @@ let begin_initialization_owned
     | None -> require_selected_execution t
   in
   exclude_effect_deferred t Ordinary_execution;
-  let%bind () = validate_initialization_basis t ~purpose expected in
+  let%bind () = validate_initialization_basis ?construction t ~purpose expected in
   let%bind () =
     match purpose with
     | Pending_initialization -> Ok ()
@@ -15438,6 +15617,7 @@ let with_current_moderator_event t ~operation_id ~event ~snapshot f =
 
 type job_execution =
   { job : Agent_protocol.Job.t
+  ; runtime_owner : Job_runtime_owner.t
   ; allocate_inference : Inference_allocation.Port.t
   ; model_jobs : Model_job_admission.t
   ; execute : Native_tool_invocation.executor
@@ -15446,35 +15626,68 @@ type job_execution =
   ; claim_legacy_callback : legacy_callback_claim
   }
 
+(* Runtime routing is not inference classification. Historical native Jobs
+   retain their actual stored Run ancestry without acquiring Unbound inference;
+   explicit inference provenance remains strict, as at the existing native gate. *)
+let job_runtime_run t (job : Agent_protocol.Job.t) =
+  match job.inference_origin with
+  | Some _ -> Goal_work_attribution.run_of_job t.state job
+  | None ->
+    Result.map
+      (Goal_work_attribution.Retained_parent.of_job t.state job)
+      ~f:(Option.map ~f:(fun parent -> parent.Goal_work_attribution.Retained_parent.run))
+;;
+
+let job_execution_for_owner t (runtime_owner : Job_runtime_owner.t) =
+  let scope = runtime_owner.scope in
+  let claim_event ~event ~snapshot callback =
+    with_event_tools
+      t
+      ~claim:(fun () ->
+        Result.map (snapshot ()) ~f:(fun snapshot ->
+          Some
+            (Claim_job_event
+               (scope, Agent_protocol.Id.Moderator_execution.create (), snapshot, event))))
+      callback
+  in
+  let moderator_execute ~invocation callback =
+    with_moderator_gate t (fun () ->
+      with_moderator_borrow_unlocked
+        t
+        ~claim:(Claim_job_moderator (scope, invocation))
+        callback)
+  in
+  let claim_legacy_callback = with_legacy_callback_parent t (Callback_job scope) in
+  { job = scope.job
+  ; runtime_owner
+  ; allocate_inference = inference_port t (Inference_job scope)
+  ; model_jobs = model_job_port t (Inference_job scope)
+  ; execute = runtime_owner.execute
+  ; moderator_execute
+  ; claim_event
+  ; claim_legacy_callback
+  }
+;;
+
 let with_job_execution t ~job_id ~generation ~attempt ~deadline f =
   with_job_scope t ~job_id ~generation ~attempt ~deadline (fun ~scope ~execute ->
-    let claim_event ~event ~snapshot callback =
-      with_event_tools
-        t
-        ~claim:(fun () ->
-          Result.map (snapshot ()) ~f:(fun snapshot ->
-            Some
-              (Claim_job_event
-                 (scope, Agent_protocol.Id.Moderator_execution.create (), snapshot, event))))
-        callback
+    let open Result.Let_syntax in
+    let%bind parent = job_runtime_run t scope.job in
+    let%bind attribution =
+      Option.value_map parent ~default:(Ok None) ~f:(Goal_work_attribution.of_run t.state)
     in
-    let moderator_execute ~invocation callback =
-      with_moderator_gate t (fun () ->
-        with_moderator_borrow_unlocked
-          t
-          ~claim:(Claim_job_moderator (scope, invocation))
-          callback)
-    in
-    let claim_legacy_callback = with_legacy_callback_parent t (Callback_job scope) in
-    f
-      { job = scope.job
-      ; allocate_inference = inference_port t (Inference_job scope)
-      ; model_jobs = model_job_port t (Inference_job scope)
+    let runtime_owner : Job_runtime_owner.t =
+      { domain = (Stdlib.Domain.self () :> int)
+      ; issuing_actor = t.inference_owner_identity
+      ; scope
       ; execute
-      ; moderator_execute
-      ; claim_event
-      ; claim_legacy_callback
-      })
+      ; attribution =
+          (match attribution with
+           | None -> Ordinary
+           | Some _ -> Goal)
+      }
+    in
+    f (job_execution_for_owner t runtime_owner))
 ;;
 
 let with_job_invocations t ~job_id ~generation ~attempt ~deadline f =
@@ -24148,7 +24361,14 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Held_startup (Construction (End _ | Finish_resume _))
   | Release_recurrence_due _ | Run_start_receipt _
   | Held_startup (Goal (Receipt _))
-  | Held_startup (Goal_continuation (Receipt _ | Close _))
+  | Held_startup
+      (Goal_continuation
+         ( Receipt _
+         | Close _
+         | Select_execution_wake _
+         | Close_execution _
+         | Check_job_owner _
+         | Acknowledge_job_resource _ ))
   | Complete_run_constructor_model_job _
   | Interrupt_run_constructor_job _
   | Cancel_run_constructor_schedule _
@@ -24232,7 +24452,15 @@ let lifecycle_request_allowed : type a. a request -> bool = function
          | Complete_retry _
          | Check_execution _
          | Rotate_retry _ ))
-  | Held_startup (Goal_continuation (Begin _ | Bind _ | Admit _))
+  | Held_startup
+      (Goal_continuation
+         ( Begin _
+         | Bind _
+         | Admit _
+         | Begin_wake _
+         | Begin_job _
+         | Bind_execution _
+         | Prepare_execution _ ))
   | Held_startup (Begin_authored _)
   | Held_startup (Ready_authored _)
   | Held_startup (Claim_authored _)
@@ -25741,7 +25969,283 @@ let goal_resume_receipt_internal t ~actor ~authorize ~session ~request =
   else Error (error Conflict "Goal resume receipt Store observation changed")
 ;;
 
-let goal_resume_quiescent t =
+let check_job_runtime_owner_internal t (owner : Job_runtime_owner.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    if
+      Int.equal owner.domain (Stdlib.Domain.self () :> int)
+      && phys_equal owner.issuing_actor t.inference_owner_identity
+    then Ok ()
+    else Error (error Conflict "Job runtime owner belongs to another Actor")
+  in
+  job_scope_can_execute t owner.scope
+;;
+
+let pending_goal_wake_run t (wake : Agent_protocol.Run_wake.t) =
+  let open Result.Let_syntax in
+  let%bind () = Agent_protocol.Run_wake.validate wake in
+  match t.state.run_state with
+  | None -> Ok None
+  | Some index ->
+    (match Run_state.find index wake.run_id with
+     | None -> Ok None
+     | Some run ->
+       (match run.lifecycle with
+        | Waiting retained when Agent_protocol.Run_wake.equal retained wake ->
+          if
+            List.exists (Run_state.intents index) ~f:(fun intent ->
+              match intent.Run_intent.disposition, intent.action with
+              | Pending, Wait pending -> Agent_protocol.Run_wake.equal pending wake
+              | _ -> false)
+          then Ok (Some run)
+          else Error (error Conflict "Goal wake lost its actual Pending Wait")
+        | Admitted | Active | Waiting _ | Terminal _ -> Ok None))
+;;
+
+let goal_wake_queue_head t run wake =
+  let open Result.Let_syntax in
+  let%bind snapshot = Moderator_checkpoint.decode t.state.moderator in
+  match snapshot with
+  | None -> Ok false
+  | Some snapshot ->
+    (match snapshot.queued_internal_events with
+     | [] -> Ok false
+     | _ :: _ ->
+       (* This is the existing pure candidate validation, not a persisted claim.
+          Its fresh ID and returned receipt are never exposed as authority. *)
+       let%bind executing, event =
+         Queued_moderator_event.claim
+           ~state:t.state
+           ~id:(Agent_protocol.Id.Moderator_execution.create ())
+           ~snapshot
+           ~now:(t.services.now ())
+       in
+       let%bind reason =
+         Queued_moderator_event.delivery_retirement_reason
+           ~state:t.state
+           ~observer:executing.context.source
+           ~event
+           ~subscription_expired:(subscription_is_due t)
+       in
+       (match reason with
+        | Some _ -> Ok false
+        | None -> Run_wake_owner.claim_matches t.state ~run ~wake ~executing))
+;;
+
+let goal_wake_producer_ready t run (wake : Agent_protocol.Run_wake.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    match wake.occurrence with
+    | Job_completion _ ->
+      (match
+         Option.bind t.state.run_state ~f:(fun index ->
+           Option.bind
+             (Run_job_delivery.Key.of_wake wake)
+             ~f:(Run_state.find_job_delivery index))
+       with
+       | Some delivery ->
+         if
+           Agent_protocol.Id.Run.equal
+             (Run_job_delivery.run_id delivery)
+             run.Agent_protocol.Run.id
+           && Agent_protocol.Run_source.equal
+                (Run_job_delivery.source delivery)
+                wake.source
+         then Ok ()
+         else Error (error Conflict "retained Goal Job delivery owner changed")
+       | None -> Run_wake_owner.validate t.state ~run ~wake)
+    | Delivered_timer _ | Subscription_delivery _ ->
+      Run_wake_owner.validate t.state ~run ~wake
+  in
+  match wake.occurrence with
+  | Delivered_timer { schedule_id; _ } ->
+    let%bind schedule = find_schedule t schedule_id in
+    (match schedule.status with
+     | Scheduled | Delivering ->
+       Ok (Agent_protocol.Timestamp.compare schedule.next_due_at (t.services.now ()) <= 0)
+     | Delivered -> goal_wake_queue_head t run wake
+     | Cancelled | Failed _ -> Ok false)
+  | Job_completion { job_id; attempt } ->
+    let retained =
+      Option.bind t.state.run_state ~f:(fun index ->
+        Option.bind
+          (Run_job_delivery.Key.of_wake wake)
+          ~f:(Run_state.find_job_delivery index))
+    in
+    (match retained with
+     | Some delivery ->
+       (match Run_job_delivery.disposition delivery with
+        | Pending -> Ok true
+        | Enqueued _ -> goal_wake_queue_head t run wake
+        | Claimed _ | Retired _ -> Ok false)
+     | None ->
+       let%bind job = find_job t job_id in
+       if not (Int.equal attempt job.attempt)
+       then
+         Error (error Conflict "Goal wake Job attempt changed without retained delivery")
+       else (
+         match job.status, job.delivery with
+         | (Succeeded | Failed _ | Cancelled | Interrupted _), Pending -> Ok true
+         | (Succeeded | Failed _ | Cancelled | Interrupted _), Delivered _ ->
+           goal_wake_queue_head t run wake
+         | _ -> Ok false))
+  | Subscription_delivery { delivery_id; _ } ->
+    let%bind delivery =
+      List.find t.state.deliveries ~f:(fun delivery ->
+        Agent_protocol.Id.Delivery.equal delivery.context.id delivery_id)
+      |> Result.of_option ~error:(error Conflict "Goal wake delivery is absent")
+    in
+    Ok
+      (match delivery.status, delivery.wake_disposition with
+       | Committed _, Some Pending_wake -> true
+       | _ -> false)
+;;
+
+let classify_goal_wake t wake
+  : (Goal_execution_runtime.Wake_selection.t, Agent_protocol.Error.t) result
+  =
+  let open Result.Let_syntax in
+  let%bind run = pending_goal_wake_run t wake in
+  match run with
+  | None -> Ok Goal_execution_runtime.Wake_selection.No_work
+  | Some run ->
+    let%bind attribution = Goal_work_attribution.of_run t.state run in
+    (match attribution with
+     | None -> Ok Goal_execution_runtime.Wake_selection.Ordinary
+     | Some _ ->
+       let%bind ready = goal_wake_producer_ready t run wake in
+       if not ready
+       then Ok Goal_execution_runtime.Wake_selection.No_work
+       else (
+         let%map selection = Goal_execution_selection.of_run t.state run in
+         match selection with
+         | Eligible -> Goal_execution_runtime.Wake_selection.Wake wake
+         | Suspended_goal suspension -> Suspended_goal suspension))
+;;
+
+let select_goal_runtime_wake_internal t (request : Goal_execution_runtime.Wake_request.t) =
+  let open Result.Let_syntax in
+  let wakes =
+    Option.value_map t.state.run_state ~default:[] ~f:(fun index ->
+      List.filter_map (Run_state.runs index) ~f:(fun run ->
+        match run.Agent_protocol.Run.lifecycle with
+        | Waiting wake -> Some wake
+        | _ -> None))
+  in
+  let matching matches =
+    match List.filter wakes ~f:matches with
+    | [] -> Ok Goal_execution_runtime.Wake_selection.Ordinary
+    | [ wake ] -> classify_goal_wake t wake
+    | _ -> Error (error Conflict "producer references conflicting retained Wait owners")
+  in
+  match request with
+  | Timer expected ->
+    let%bind current = find_schedule t expected.id in
+    let%bind () =
+      if
+        Jsonaf.exactly_equal
+          (Agent_protocol.Schedule.to_json current)
+          (Agent_protocol.Schedule.to_json expected)
+      then Ok ()
+      else Error (error Conflict "Goal timer selection changed")
+    in
+    matching (fun wake ->
+      match wake.occurrence with
+      | Delivered_timer { schedule_id; _ } ->
+        Agent_protocol.Id.Schedule.equal schedule_id current.id
+      | Job_completion _ | Subscription_delivery _ -> false)
+  | Job_completion expected ->
+    let%bind current = find_job t expected.id in
+    let%bind () =
+      if
+        Jsonaf.exactly_equal
+          (Agent_protocol.Job.to_json current)
+          (Agent_protocol.Job.to_json expected)
+      then Ok ()
+      else Error (error Conflict "Goal Job completion selection changed")
+    in
+    matching (fun wake ->
+      match wake.occurrence with
+      | Job_completion { job_id; attempt } ->
+        Agent_protocol.Id.Job.equal job_id current.id && Int.equal attempt current.attempt
+      | Delivered_timer _ | Subscription_delivery _ -> false)
+  | Job_delivery expected ->
+    let%bind current =
+      Option.bind t.state.run_state ~f:(fun index ->
+        Run_state.find_job_delivery index (Run_job_delivery.key expected))
+      |> Result.of_option ~error:(error Conflict "Goal retained Job delivery is absent")
+    in
+    let%bind () =
+      if Run_job_delivery.equal current expected
+      then Ok ()
+      else Error (error Conflict "Goal retained Job delivery changed")
+    in
+    matching (fun wake ->
+      Option.exists
+        (Run_job_delivery.Key.of_wake wake)
+        ~f:(Run_job_delivery.Key.equal (Run_job_delivery.key current)))
+  | Idle ->
+    let%bind snapshot = Moderator_checkpoint.decode t.state.moderator in
+    let queued =
+      Option.exists snapshot ~f:(fun snapshot ->
+        not (List.is_empty snapshot.queued_internal_events))
+    in
+    if queued
+    then (
+      let%bind heads =
+        List.filter_map wakes ~f:(fun wake ->
+          match wake.Agent_protocol.Run_wake.occurrence with
+          | Subscription_delivery _ -> None
+          | Job_completion _ | Delivered_timer _ -> Some wake)
+        |> List.map ~f:(fun wake ->
+          let%bind run = pending_goal_wake_run t wake in
+          let%map matches =
+            Option.value_map run ~default:(Ok false) ~f:(fun run ->
+              goal_wake_queue_head t run wake)
+          in
+          Option.some_if matches wake)
+        |> Result.all
+        |> Result.map ~f:List.filter_opt
+      in
+      match heads with
+      | [] -> Ok Goal_execution_runtime.Wake_selection.Ordinary
+      | [ wake ] -> classify_goal_wake t wake
+      | _ -> Error (error Conflict "queue head has conflicting retained Goal wakes"))
+    else (
+      (* Same oldest-first durable wake order as Notification_delivery. A Wait
+         locator which has no eligible delivery never suppresses other work. *)
+      let deliveries =
+        List.filter t.state.deliveries ~f:(fun delivery ->
+          Int.equal
+            delivery.Agent_protocol.Delivery.context.generation
+            t.state.identity.generation
+          && (Option.is_some delivery.context.ownership
+              || Option.is_some delivery.completion_projection)
+          &&
+          match delivery.status, delivery.wake_disposition with
+          | Committed _, Some Pending_wake -> true
+          | (Pending | Failed _), _
+          | Committed _, (None | Some (Accepted_wake _ | Discarded_wake _)) -> false)
+        |> List.sort ~compare:(fun (left : Agent_protocol.Delivery.t) right ->
+          match
+            Agent_protocol.Timestamp.compare
+              left.context.created_at
+              right.context.created_at
+          with
+          | 0 -> Agent_protocol.Id.Delivery.compare left.context.id right.context.id
+          | order -> order)
+      in
+      match deliveries with
+      | [] -> Ok Goal_execution_runtime.Wake_selection.Ordinary
+      | delivery :: _ ->
+        matching (fun wake ->
+          match wake.occurrence with
+          | Subscription_delivery { delivery_id; _ } ->
+            Agent_protocol.Id.Delivery.equal delivery.context.id delivery_id
+          | Job_completion _ | Delivered_timer _ -> false))
+;;
+
+let goal_existing_execution_quiescent t cause =
   let open Result.Let_syntax in
   let%bind () = require_selected_execution t in
   let%bind () = require_runtime_admission t in
@@ -25762,10 +26266,16 @@ let goal_resume_quiescent t =
     && Option.is_none t.held_input_scope
     && Option.is_none t.held_authored_start
     && List.is_empty t.invocation_executions
-    && List.is_empty t.job_scopes
+    && List.for_all t.job_scopes ~f:(fun scope ->
+      match cause with
+      | Some (Existing_goal_preparation.Cause.Claimed_job { owner; _ }) ->
+        phys_equal owner.scope scope
+      | Some (Resume_command _ | Pending_wake _) | None -> false)
   then Ok ()
   else Error (error Conflict "Goal resume requires its actual idle construction lane")
 ;;
+
+let goal_resume_quiescent t = goal_existing_execution_quiescent t None
 
 type goal_preparation_use =
   | Fresh_effect
@@ -25858,16 +26368,59 @@ let goal_preparation_basis_for use t (preparation : Goal_continuation.Preparatio
   let%bind () =
     Goal_activation_policy.check_admitted_policy preparation.policy ~state:t.state
   in
-  match preparation.phase, Agent_protocol.Goal.state goal with
-  | (Preparing | Source_bound _ | Writer_pending _), Open (Held _) -> Ok ()
-  | Ready _, Open Enabled -> Ok ()
-  | Ready _, Open (Held _)
-    when match use with
-         | Registered_allocation -> true
-         | Fresh_effect -> false -> Ok ()
-  | (Preparing | Source_bound _ | Writer_pending _ | Ready _), (Open _ | Closed _)
-  | (Waiting _ | Closed _), _ ->
-    Error (error Permission_denied "Goal continuation is not live in its actual phase")
+  let%bind () =
+    match preparation.cause with
+    | Resume_command _ -> Ok ()
+    | Pending_wake { wake; _ } ->
+      let%bind pending = pending_goal_wake_run t wake in
+      if
+        Option.exists pending ~f:(fun current ->
+          Agent_protocol.Id.Run.equal current.id run.id)
+      then Ok ()
+      else Error (error Conflict "Goal execution no longer owns its Pending Wait")
+    | Claimed_job { owner; _ } ->
+      let%bind current = job_scope_current t owner.scope in
+      let%bind parent = job_runtime_run t current in
+      if
+        Option.exists parent ~f:(fun parent ->
+          Agent_protocol.Id.Run.equal parent.id run.id)
+      then Ok ()
+      else Error (error Conflict "Goal Job original Run changed")
+  in
+  match preparation.cause with
+  | Resume_command _ ->
+    (match preparation.phase, Agent_protocol.Goal.state goal with
+     | (Preparing | Source_bound _ | Writer_pending _), Open (Held _) -> Ok ()
+     | Ready _, Open Enabled -> Ok ()
+     | Ready _, Open (Held _)
+       when match use with
+            | Registered_allocation -> true
+            | Fresh_effect -> false -> Ok ()
+     | ( (Preparing | Source_bound _ | Writer_pending _ | Ready _ | Execution_ready _)
+       , (Open _ | Closed _) )
+     | (Waiting _ | Closed _), _ ->
+       Error (error Permission_denied "Goal continuation is not live in its actual phase"))
+  | Pending_wake _ ->
+    (match preparation.phase, Agent_protocol.Goal.state goal with
+     | (Preparing | Source_bound _ | Execution_ready _), Open Enabled -> Ok ()
+     | Execution_ready _, Open (Held _)
+       when match use with
+            | Registered_allocation -> true
+            | Fresh_effect -> false -> Ok ()
+     | _ -> Error (error Permission_denied "Goal wake construction is not live"))
+  | Claimed_job { owner; _ } ->
+    let%bind _ = job_scope_current t owner.scope in
+    let%bind () =
+      if
+        owner.scope.active
+        && (not owner.scope.cancel_requested)
+        && Atomic.get owner.scope.authority_live
+      then Ok ()
+      else Error (error Conflict "Goal Job scope is no longer active")
+    in
+    (match preparation.phase, Agent_protocol.Goal.state goal with
+     | (Preparing | Source_bound _ | Execution_ready _), Open (Enabled | Held _) -> Ok ()
+     | _ -> Error (error Permission_denied "claimed Goal Job construction is not live"))
 ;;
 
 let goal_preparation_basis t preparation =
@@ -25882,7 +26435,7 @@ let goal_registered_basis t (preparation : Goal_continuation.Preparation.t) =
   let open Result.Let_syntax in
   let%bind () = goal_preparation_basis_for Registered_allocation t preparation in
   match preparation.phase with
-  | Ready (binding, _) ->
+  | Ready (binding, _) | Execution_ready binding ->
     (match binding.source_phase with
      | Open -> Runtime_source_preparation.validate_target binding.source t.state
      | Closed -> Error (error Conflict "admitted Goal constructor source closed"))
@@ -25960,7 +26513,8 @@ let goal_construction_basis t (preparation : Goal_continuation.Preparation.t) =
   let%bind () = preparation.basis () in
   let%bind () =
     match preparation.phase with
-    | Ready (binding, _) -> Goal_continuation.Source_binding.check_basis binding
+    | Ready (binding, _) | Execution_ready binding ->
+      Goal_continuation.Source_binding.check_basis binding
     | Preparing | Source_bound _ | Writer_pending _ | Waiting _ | Closed _ ->
       Error (error Conflict "Goal construction requires its actual command ACK")
   in
@@ -25996,6 +26550,14 @@ let goal_construction_timing t (preparation : Goal_continuation.Preparation.t) =
       ~state:t.state
       ~now:(t.services.now ())
   in
+  let%bind () =
+    match preparation.cause with
+    | Resume_command _ -> Ok ()
+    | Pending_wake { wake; _ } ->
+      let%bind ready = goal_wake_producer_ready t preparation.run wake in
+      if ready then Ok () else Error (error Conflict "Goal wake is no longer ready")
+    | Claimed_job { owner; _ } -> check_job_runtime_owner_internal t owner
+  in
   goal_construction_basis t preparation
 ;;
 
@@ -26012,6 +26574,44 @@ let goal_construction_authority t (preparation : Goal_continuation.Preparation.t
       ~state:t.state
   in
   goal_construction_basis t preparation
+;;
+
+let make_existing_goal_preparation
+      t
+      ~cause
+      ~binding
+      ~run
+      ~admission
+      ~link
+      ~policy
+      ~session
+  =
+  let rec preparation : Goal_continuation.Preparation.t =
+    { cause
+    ; binding
+    ; run
+    ; admission
+    ; link
+    ; policy
+    ; session
+    ; domain = (Stdlib.Domain.self () :> int)
+    ; phase = Preparing
+    ; basis = (fun () -> goal_preparation_basis t preparation)
+    ; current = (fun () -> goal_preparation_current t preparation)
+    ; refresh = (fun () -> refresh_goal_construction t preparation)
+    ; policy_current = (fun () -> goal_construction_policy t preparation)
+    ; timing = (fun () -> goal_construction_timing t preparation)
+    ; authority = (fun () -> goal_construction_authority t preparation)
+    ; effect_basis = (fun () -> goal_construction_basis t preparation)
+    ; registered_basis = (fun () -> goal_registered_basis t preparation)
+    ; registered_refresh = (fun () -> refresh_goal_registered t preparation)
+    ; registered_policy = (fun () -> goal_registered_policy t preparation)
+    ; registered_authority = (fun () -> goal_registered_authority t preparation)
+    ; runtime_phase = Unclaimed
+    ; observed = None
+    }
+  in
+  preparation
 ;;
 
 let begin_goal_resume_preparation_internal t ~actor ~authorize ~session ~request =
@@ -26090,33 +26690,163 @@ let begin_goal_resume_preparation_internal t ~actor ~authorize ~session ~request
            ~goal:(Goal_resume_admission.goal plan)
            ~link:(Goal_resume_admission.link plan)
        in
-       let rec preparation : Goal_continuation.Preparation.t =
-         { cause = Resume_command custody
-         ; binding
-         ; run
-         ; admission = Goal_resume_admission.admission plan
-         ; link = Goal_resume_admission.link plan
-         ; policy
-         ; session
-         ; domain = (Stdlib.Domain.self () :> int)
-         ; phase = Preparing
-         ; basis = (fun () -> goal_preparation_basis t preparation)
-         ; current = (fun () -> goal_preparation_current t preparation)
-         ; refresh = (fun () -> refresh_goal_construction t preparation)
-         ; policy_current = (fun () -> goal_construction_policy t preparation)
-         ; timing = (fun () -> goal_construction_timing t preparation)
-         ; authority = (fun () -> goal_construction_authority t preparation)
-         ; effect_basis = (fun () -> goal_construction_basis t preparation)
-         ; registered_basis = (fun () -> goal_registered_basis t preparation)
-         ; registered_refresh = (fun () -> refresh_goal_registered t preparation)
-         ; registered_policy = (fun () -> goal_registered_policy t preparation)
-         ; registered_authority = (fun () -> goal_registered_authority t preparation)
-         ; runtime_phase = Unclaimed
-         ; observed = None
-         }
+       let preparation =
+         make_existing_goal_preparation
+           t
+           ~cause:(Resume_command custody)
+           ~binding
+           ~run
+           ~admission:(Goal_resume_admission.admission plan)
+           ~link:(Goal_resume_admission.link plan)
+           ~policy
+           ~session
        in
        t.run_preparation <- Some (Existing_goal preparation);
        Ok (Goal_continuation.Resume_issuance.Prepare preparation))
+;;
+
+module Goal_execution_issuance = struct
+  type t =
+    | Wake of Agent_protocol.Run_wake.t
+    | Job of Job_runtime_owner.t
+end
+
+let begin_goal_execution_preparation_internal t ~run ~execution =
+  let open Result.Let_syntax in
+  let%bind () = require_selected_execution t in
+  let%bind () = require_runtime_admission t in
+  let%bind () =
+    if Option.is_none t.run_preparation
+    then Ok ()
+    else Error (error Conflict "another source preparation is active")
+  in
+  let%bind index =
+    Result.of_option
+      t.state.run_state
+      ~error:(error Conflict "Goal execution Run index is absent")
+  in
+  let%bind link =
+    Result.of_option
+      (Run_state.goal_link index run.Agent_protocol.Run.id)
+      ~error:(error Conflict "Goal execution immutable link is absent")
+  in
+  let%bind goal =
+    Option.bind t.state.goal_catalog ~f:(fun catalog ->
+      Goal_catalog.find catalog (Run_goal_link.goal_id link))
+    |> Result.of_option ~error:(error Conflict "Goal execution Goal is absent")
+  in
+  let%bind binding =
+    Result.of_option
+      (Run_authorities.find t.run_authorities run.id)
+      ~error:(error Permission_denied "Goal execution has no surviving Run authority")
+  in
+  let scope = Run_authorities.scope binding in
+  let%bind original =
+    Result.of_option
+      (Run_admission.Scope.original_actor scope)
+      ~error:(error Permission_denied "Goal execution lost original Run authentication")
+  in
+  let%bind policy = Goal_activation_policy.create ~goal ~link in
+  let admission = Agent_protocol.Goal_episode.admission (Run_goal_link.episode link) in
+  let%bind () =
+    Goal_activation_policy.check_association policy ~state:t.state ~run ~admission
+  in
+  let expected = t.state in
+  let request_cause =
+    match execution with
+    | Goal_execution_issuance.Job owner ->
+      Run_preparation.Goal_continuation.Cause.Claimed_job
+        { run_id = run.id; job = owner.Job_runtime_owner.scope.job }
+    | Wake wake -> Run_preparation.Goal_continuation.Cause.Wake { run_id = run.id; wake }
+  in
+  let%bind () = Run_admission.Scope.authorize scope t.state in
+  let%bind () = Run_admission.Scope.check_current scope in
+  exclude_effect_deferred t Displaced;
+  let%bind request =
+    Run_preparation.Goal_continuation.create_authenticated
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+      ~actor:original
+      ~cause:request_cause
+      ~authorize:(Run_admission.Scope.authorize scope)
+  in
+  let cause =
+    match execution with
+    | Goal_execution_issuance.Job owner ->
+      Existing_goal_preparation.Cause.Claimed_job { request; owner }
+    | Wake wake -> Existing_goal_preparation.Cause.Pending_wake { request; wake }
+  in
+  let%bind () = goal_existing_execution_quiescent t (Some cause) in
+  let%bind () =
+    if
+      phys_equal expected t.state
+      && Option.is_none t.run_preparation
+      && Run_authorities.is_current t.run_authorities binding ~run_id:run.id
+    then Ok ()
+    else Error (error Conflict "Goal execution changed during original authorization")
+  in
+  let%bind () =
+    Run_preparation.Custody.check_current
+      (Run_preparation.Goal_continuation.custody request)
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+  in
+  let preparation =
+    make_existing_goal_preparation
+      t
+      ~cause
+      ~binding
+      ~run
+      ~admission
+      ~link
+      ~policy
+      ~session:run.session
+  in
+  t.run_preparation <- Some (Existing_goal preparation);
+  Ok preparation
+;;
+
+let begin_goal_wake_preparation_internal t wake =
+  let open Result.Let_syntax in
+  let%bind selection = classify_goal_wake t wake in
+  match selection with
+  | No_work -> Ok Goal_execution_runtime.Wake_issuance.No_work
+  | Suspended_goal suspension -> Ok (Suspended_goal suspension)
+  | Ordinary -> Error (error Invalid_request "ordinary wake has no Goal execution owner")
+  | Wake wake ->
+    let%bind run = pending_goal_wake_run t wake in
+    let%bind run =
+      Result.of_option
+        run
+        ~error:(error Conflict "Goal Wait changed before source issuance")
+    in
+    let%map preparation =
+      begin_goal_execution_preparation_internal t ~run ~execution:(Wake wake)
+    in
+    Goal_execution_runtime.Wake_issuance.Prepare preparation
+;;
+
+let begin_goal_job_runtime_preparation_internal t (owner : Job_runtime_owner.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_job_runtime_owner_internal t owner in
+  let%bind () =
+    match owner.attribution with
+    | Goal -> Ok ()
+    | Ordinary ->
+      Error (error Invalid_request "ordinary Job has no Goal construction owner")
+  in
+  let%bind job = job_scope_current t owner.scope in
+  let%bind run = job_runtime_run t job in
+  let%bind run =
+    Result.of_option run ~error:(error Conflict "Goal Job lost its original Run")
+  in
+  let%bind attribution = Goal_work_attribution.of_run t.state run in
+  let%bind () =
+    if Option.is_some attribution
+    then Ok ()
+    else Error (error Conflict "Goal Job lost its immutable attribution")
+  in
+  begin_goal_execution_preparation_internal t ~run ~execution:(Job owner)
 ;;
 
 let goal_source_basis t (binding : Goal_continuation.Source_binding.t) =
@@ -26130,10 +26860,18 @@ let goal_source_basis t (binding : Goal_continuation.Source_binding.t) =
   let%bind () = preparation.basis () in
   let%bind () =
     match preparation.phase with
-    | (Source_bound current | Writer_pending (current, _) | Ready (current, _))
+    | Source_bound current
+    | Writer_pending (current, _)
+    | Ready (current, _)
+    | Execution_ready current
       when phys_equal current binding -> Ok ()
-    | Preparing | Source_bound _ | Writer_pending _ | Ready _ | Waiting _ | Closed _ ->
-      Error (error Conflict "Goal source selection was consumed or replaced")
+    | Preparing
+    | Source_bound _
+    | Writer_pending _
+    | Ready _
+    | Execution_ready _
+    | Waiting _
+    | Closed _ -> Error (error Conflict "Goal source selection was consumed or replaced")
   in
   let%bind () = Runtime_source_preparation.validate_target binding.source t.state in
   match Runtime_source_preparation.moderator binding.source with
@@ -26149,7 +26887,7 @@ let bind_goal_continuation_source_internal t ~preparation ~source =
   let open Result.Let_syntax in
   let%bind () = goal_preparation_basis t preparation in
   let%bind () = preparation.Goal_continuation.current () in
-  let%bind () = goal_resume_quiescent t in
+  let%bind () = goal_existing_execution_quiescent t (Some preparation.cause) in
   let%bind () = Runtime_source_preparation.validate_target source t.state in
   let%bind () =
     match Runtime_source_preparation.moderator source with
@@ -26175,13 +26913,46 @@ let bind_goal_continuation_source_internal t ~preparation ~source =
      | Preparing ->
        preparation.phase <- Source_bound binding;
        Ok binding
-     | Source_bound _ | Writer_pending _ | Ready _ | Waiting _ | Closed _ ->
+     | Source_bound _
+     | Writer_pending _
+     | Ready _
+     | Execution_ready _
+     | Waiting _
+     | Closed _ ->
        Error (error Conflict "Goal source selection changed during original policy"))
   | Source_bound binding when phys_equal binding.source source ->
     Result.map (Goal_continuation.Source_binding.check_basis binding) ~f:(fun () ->
       binding)
-  | Source_bound _ | Writer_pending _ | Ready _ | Waiting _ | Closed _ ->
-    Error (error Conflict "Goal source is already selected or consumed")
+  | Source_bound _ | Writer_pending _ | Ready _ | Execution_ready _ | Waiting _ | Closed _
+    -> Error (error Conflict "Goal source is already selected or consumed")
+;;
+
+let prepare_goal_execution_runtime_internal
+      t
+      (binding : Goal_execution_runtime.Source_binding.t)
+  =
+  let open Result.Let_syntax in
+  let preparation = binding.preparation in
+  let%bind () = Goal_execution_runtime.Source_binding.check_basis binding in
+  let%bind () = preparation.current () in
+  let%bind () =
+    match preparation.cause with
+    | Pending_wake _ | Claimed_job _ -> Ok ()
+    | Resume_command _ ->
+      Error (error Invalid_request "Resume command needs its actual command ACK")
+  in
+  match preparation.phase with
+  | Source_bound current when phys_equal current binding ->
+    let%bind () = Goal_execution_runtime.Source_binding.check_basis binding in
+    preparation.phase <- Execution_ready binding;
+    Ok ({ binding; purpose = Existing_execution } : Goal_execution_runtime.t)
+  | Preparing
+  | Source_bound _
+  | Writer_pending _
+  | Ready _
+  | Execution_ready _
+  | Waiting _
+  | Closed _ -> Error (error Conflict "Goal execution source selection was consumed")
 ;;
 
 module Goal_resume_candidate = struct
@@ -26209,8 +26980,14 @@ let commit_goal_resume_internal t ~(binding : Goal_continuation.Source_binding.t
         let%bind () =
           match preparation.phase with
           | Source_bound current when phys_equal current binding -> Ok ()
-          | Preparing | Source_bound _ | Writer_pending _ | Ready _ | Waiting _ | Closed _
-            -> Error (error Conflict "Goal resume command selection is no longer fresh")
+          | Preparing
+          | Source_bound _
+          | Writer_pending _
+          | Ready _
+          | Execution_ready _
+          | Waiting _
+          | Closed _ ->
+            Error (error Conflict "Goal resume command selection is no longer fresh")
         in
         let%bind () = preparation.current () in
         let%bind () = goal_resume_quiescent t in
@@ -26314,7 +27091,9 @@ let commit_goal_resume_internal t ~(binding : Goal_continuation.Source_binding.t
                  preparation.phase <- Waiting (receipt, wake);
                  Ok (Goal_continuation.Admission.Waiting { receipt; wake })
                | Admitted | Active ->
-                 Ok (Goal_continuation.Admission.Ready { binding; receipt })
+                 Ok
+                   (Goal_continuation.Admission.Ready
+                      { binding; purpose = Resume receipt })
                | Terminal _ ->
                  (* The pure plan rejects this; keep known ACK truth if an
                    unexpected future lifecycle extension reaches this branch. *)
@@ -26337,7 +27116,13 @@ let admit_goal_resume_internal t (binding : Goal_continuation.Source_binding.t) 
   | Ready (current, receipt) when phys_equal current binding ->
     let%map () = binding.preparation.current () in
     Goal_continuation.Admission.Retained receipt
-  | Preparing | Source_bound _ | Writer_pending _ | Ready _ | Waiting _ | Closed _ ->
+  | Preparing
+  | Source_bound _
+  | Writer_pending _
+  | Ready _
+  | Execution_ready _
+  | Waiting _
+  | Closed _ ->
     Ok
       (Goal_continuation.Admission.Rejected
          (error Conflict "Goal resume command selection is no longer fresh"))
@@ -28391,6 +29176,37 @@ let select_goal_runtime t continuation =
   scope
 ;;
 
+let acknowledge_goal_job_runtime_internal t (execution : Goal_execution_runtime.t) =
+  let open Result.Let_syntax in
+  let preparation = execution.binding.preparation in
+  let%bind owner =
+    match preparation.cause with
+    | Claimed_job { owner; _ } -> Ok owner
+    | Resume_command _ | Pending_wake _ ->
+      Error
+        (error Invalid_request "resource acknowledgement requires the actual claimed Job")
+  in
+  let%bind scope = select_goal_runtime t execution in
+  let%bind () = preparation.registered_basis () in
+  let%bind () = preparation.registered_authority () in
+  let%bind () = goal_construction_basis t preparation in
+  let%bind job = job_scope_current t owner.scope in
+  if
+    owner.scope.active
+    && (not owner.scope.cancel_requested)
+    && Atomic.get owner.scope.authority_live
+    && Option.is_none t.initialization_scope
+    &&
+    match scope.callback with
+    | Joined -> true
+    | Pending | Executing _ | Completed _ -> false
+  then (
+    preparation.runtime_phase
+    <- Handed_off (scope, Existing_execution (Claimed_job_resource job));
+    Ok ())
+  else Error (error Conflict "claimed Goal Job did not join its actual runtime lifecycle")
+;;
+
 let begin_goal_resume_callback_internal t continuation resume =
   let open Result.Let_syntax in
   let%bind scope = select_goal_runtime t continuation in
@@ -28688,7 +29504,9 @@ let continue_goal_episode_internal t continuation =
   let open Result.Let_syntax in
   let preparation = continuation.Goal_continuation.binding.preparation in
   let failed error =
-    Ok (Goal_resume_result.Resume_failed { receipt = continuation.receipt; error })
+    Ok
+      (Goal_resume_result.Resume_failed
+         { receipt = Goal_continuation.receipt continuation; error })
   in
   let proceed () =
     let%bind scope = select_goal_runtime t continuation in
@@ -28716,10 +29534,10 @@ let continue_goal_episode_internal t continuation =
         ~error:(error Conflict "Goal continuation Run is absent")
     in
     match preparation.runtime_phase with
-    | Handed_off (actual, result) when phys_equal actual scope ->
+    | Handed_off (actual, Resume result) when phys_equal actual scope ->
       Ok
         (Goal_resume_result.Resumed
-           { receipt = continuation.receipt; continuation = result })
+           { receipt = Goal_continuation.receipt continuation; continuation = result })
     | _ ->
       let%bind () =
         if
@@ -28734,15 +29552,15 @@ let continue_goal_episode_internal t continuation =
        | Terminal _ ->
          let%map settlement = goal_resume_settlement index preparation run in
          let result = Goal_resume_result.Continuation.Settled settlement in
-         preparation.runtime_phase <- Handed_off (scope, result);
+         preparation.runtime_phase <- Handed_off (scope, Resume result);
          Goal_resume_result.Resumed
-           { receipt = continuation.receipt; continuation = result }
+           { receipt = Goal_continuation.receipt continuation; continuation = result }
        | Waiting wake ->
          let%map () = check_runtime_construction_effect (Existing_goal continuation) in
          let result = Goal_resume_result.Continuation.Waiting wake in
-         preparation.runtime_phase <- Handed_off (scope, result);
+         preparation.runtime_phase <- Handed_off (scope, Resume result);
          Goal_resume_result.Resumed
-           { receipt = continuation.receipt; continuation = result }
+           { receipt = Goal_continuation.receipt continuation; continuation = result }
        | Admitted | Active ->
          let%bind () = check_runtime_construction_effect (Existing_goal continuation) in
          let now, sample = completion_clock_pair t in
@@ -28791,11 +29609,13 @@ let continue_goal_episode_internal t continuation =
             Option.iter
               completions
               ~f:(Recurrence_runtime.install_completions t.recurrence_runtime);
-            preparation.runtime_phase <- Handed_off (scope, result);
+            preparation.runtime_phase <- Handed_off (scope, Resume result);
             publish_committed_transition t candidate;
             Ok
               (Goal_resume_result.Resumed
-                 { receipt = continuation.receipt; continuation = result })
+                 { receipt = Goal_continuation.receipt continuation
+                 ; continuation = result
+                 })
           | Waiting _ ->
             Error
               (error Internal_error "Goal aggregate introduced a wake without a callback")
@@ -28923,7 +29743,7 @@ let continue_goal_episode_internal t continuation =
                   launch_worker t operation;
                   Ok
                     (Goal_resume_result.Resumed
-                       { receipt = continuation.receipt
+                       { receipt = Goal_continuation.receipt continuation
                        ; continuation = Started operation
                        })))))
   in
@@ -30524,7 +31344,18 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
           | Bind (preparation, source) ->
             bind_goal_continuation_source_internal t ~preparation ~source
           | Admit binding -> admit_goal_resume_internal t binding
-          | Close preparation -> end_goal_continuation_preparation_internal t preparation)
+          | Close preparation -> end_goal_continuation_preparation_internal t preparation
+          | Select_execution_wake request -> select_goal_runtime_wake_internal t request
+          | Begin_wake wake -> begin_goal_wake_preparation_internal t wake
+          | Begin_job owner -> begin_goal_job_runtime_preparation_internal t owner
+          | Bind_execution (preparation, source) ->
+            bind_goal_continuation_source_internal t ~preparation ~source
+          | Prepare_execution binding -> prepare_goal_execution_runtime_internal t binding
+          | Close_execution preparation ->
+            end_goal_continuation_preparation_internal t preparation
+          | Check_job_owner owner -> check_job_runtime_owner_internal t owner
+          | Acknowledge_job_resource execution ->
+            acknowledge_goal_job_runtime_internal t execution)
        | Effect_deferred request -> effect_deferred_request t request
        | Input_graph request -> input_graph_request t request
        | Begin_authored (continuation, startup, snapshot) ->
@@ -32611,6 +33442,34 @@ let end_goal_continuation_preparation t ~preparation =
   call t (Held_startup (Goal_continuation (Close preparation)))
 ;;
 
+let select_goal_runtime_wake t ~request =
+  call t (Held_startup (Goal_continuation (Select_execution_wake request)))
+;;
+
+let begin_goal_wake_preparation t ~wake =
+  call t (Held_startup (Goal_continuation (Begin_wake wake)))
+;;
+
+let begin_goal_job_runtime_preparation t ~owner =
+  call t (Held_startup (Goal_continuation (Begin_job owner)))
+;;
+
+let bind_goal_execution_runtime_source t ~preparation ~source =
+  call t (Held_startup (Goal_continuation (Bind_execution (preparation, source))))
+;;
+
+let prepare_goal_execution_runtime t ~binding =
+  call t (Held_startup (Goal_continuation (Prepare_execution binding)))
+;;
+
+let end_goal_execution_runtime_preparation t ~preparation =
+  call t (Held_startup (Goal_continuation (Close_execution preparation)))
+;;
+
+let check_job_runtime_owner t ~owner =
+  call t (Held_startup (Goal_continuation (Check_job_owner owner)))
+;;
+
 let admit_held_goal_run t ~binding ~intent ~session =
   call t (Held_startup (Goal (Admit (binding, intent, session))))
 ;;
@@ -32892,6 +33751,30 @@ let run_goal_runtime_resume t ~continuation ~resume =
   let%bind () = Runtime_builder.Runtime_resume.run resume ~claim in
   Eio.Cancel.protect (fun () ->
     call t (Held_startup (Construction (Finish_resume scope))))
+;;
+
+let run_goal_execution_runtime_resume t ~execution ~resume =
+  run_goal_runtime_resume t ~continuation:execution ~resume
+;;
+
+let acknowledge_goal_job_runtime t ~execution =
+  let%bind.Result () =
+    execution.Existing_goal_preparation.binding.preparation.registered_refresh ()
+  in
+  Eio.Cancel.protect (fun () ->
+    call t (Held_startup (Goal_continuation (Acknowledge_job_resource execution))))
+;;
+
+let goal_job_runtime_services t ~execution =
+  let open Result.Let_syntax in
+  let%bind owner =
+    match execution.Existing_goal_preparation.binding.preparation.cause with
+    | Claimed_job { owner; _ } -> Ok owner
+    | Resume_command _ | Pending_wake _ ->
+      Error (error Invalid_request "runtime has no claimed Job services")
+  in
+  let%map () = check_job_runtime_owner t ~owner in
+  job_execution_for_owner t owner
 ;;
 
 let continue_goal_episode t ~continuation =

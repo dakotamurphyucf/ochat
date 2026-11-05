@@ -2,41 +2,12 @@ open! Core
 open Creation_support
 module Actor = A.Session_actor
 module G = P.Goal
-module Catalog = A.Goal_catalog
 module Ledger = A.Inference_ledger
 module Runtime = Inference_runtime
-module Owner = Agent_server.Runtime_owner
 
 (* Exercise the real Store/controller publication boundary with an ordinary
    Operation allocation, after the held activation has handed off. *)
-let goal_id = P.Id.Goal.of_string "goal_publication_fence" |> protocol_ok
-
-let goal current =
-  Catalog.find (Option.value_exn current.A.Session_state.goal_catalog) goal_id
-  |> Option.value_exn
-;;
-
-let command actor ~key mutation =
-  let current = state actor in
-  let catalog = Option.value current.goal_catalog ~default:Catalog.empty in
-  let source =
-    if A.Goal_command.Mutation.needs_source mutation
-    then Some (A.Goal_catalog_source.capture current |> protocol_ok |> snd)
-    else None
-  in
-  let request =
-    A.Goal_command.create
-      ~session_id:current.identity.session_id
-      ~generation:current.identity.generation
-      ~source
-      ~expected_catalog_revision:(Catalog.revision catalog)
-      ~expected_goal_revision:(Option.map (Catalog.find catalog goal_id) ~f:G.revision)
-      ~key:(P.Idempotency_key.of_string key |> protocol_ok)
-      ~mutation
-    |> protocol_ok
-  in
-  Actor.goal_command actor ~actor:proof ~authorize ~session ~request |> protocol_ok
-;;
+module Goal = Goal_worker_support
 
 let configuration () =
   let fixture =
@@ -93,7 +64,7 @@ let%expect_test "same-value explicit Goal Hold revokes before publication yields
     | Some key ->
       let catalog = Option.value_exn current.goal_catalog in
       if
-        List.exists (Catalog.receipts catalog) ~f:(fun receipt ->
+        List.exists (A.Goal_catalog.receipts catalog) ~f:(fun receipt ->
           P.Idempotency_key.equal receipt.A.Goal_command_receipt.key key)
       then (
         expected_receipt := None;
@@ -177,7 +148,6 @@ let%expect_test "same-value explicit Goal Hold revokes before publication yields
                     ; runtime_requests = []
                     })
               in
-              Actor.set_operation_worker actor (Some worker) |> protocol_ok;
               let budget =
                 G.Budget.create
                   ~admitted_turns:None
@@ -186,125 +156,32 @@ let%expect_test "same-value explicit Goal Hold revokes before publication yields
                   ~deadline:None
                 |> protocol_ok
               in
-              command
-                actor
-                ~key:"publication-create"
-                (Create
-                   { id = goal_id
-                   ; objective =
-                       G.Objective.of_string "Fence one admitted inference" |> protocol_ok
-                   ; budget
-                   })
-              |> ignore;
-              let before = state actor in
-              let request =
-                A.Run_admission_request.Headless.create
-                  ~session_id:before.identity.session_id
-                  ~generation:before.identity.generation
-                  ~expected_revision:before.counters.revision
-                  ~mode:Workflow
-                  ~input:
-                    (User_submission
-                       { kind = Plain_text
-                       ; text = "actual Goal control publication"
-                       ; attachments = []
-                       })
-                  ~key:(P.Idempotency_key.of_string "publication-episode" |> protocol_ok)
-                |> protocol_ok
-              in
-              let intent =
-                A.Goal_episode_admission.intent
-                  ~goal_id
-                  ~expected_goal_revision:(G.revision (goal before))
-                  ~expected_catalog_revision:
-                    (Catalog.revision (Option.value_exn before.goal_catalog))
-                |> protocol_ok
-              in
-              let preparation =
-                match
-                  Actor.begin_headless_run_preparation
-                    actor
-                    ~actor:proof
-                    ~authorize
-                    ~request
-                  |> protocol_ok
-                with
-                | Prepare preparation -> preparation
-                | Retained _ -> failwith "fresh Goal publication fixture retained a Run"
-              in
-              let submitted =
-                Handoff_tests.protect_cleanup
-                  ~finally:(fun () ->
-                    Actor.end_run_preparation actor preparation |> protocol_ok)
-                  (fun () ->
-                     Owner.with_prepared_source
-                       owner
-                       ~preparation
-                       ~source
-                       (fun prepared ->
-                          let binding = Owner.Prepared.binding prepared in
-                          let activation =
-                            match
-                              Actor.admit_held_goal_run actor ~binding ~intent ~session
-                              |> protocol_ok
-                            with
-                            | Admitted activation -> activation
-                            | Rejected error
-                            | Uncertain error
-                            | Activation_unavailable { error; _ } ->
-                              raise_s [%sexp (error : P.Error.t)]
-                            | Retained _ ->
-                              failwith "actual Goal admission unexpectedly retained"
-                          in
-                          let continuation =
-                            Actor.begin_held_activation
-                              actor
-                              ~binding
-                              ~held:(Actor.Goal_activation.held activation)
-                              ~checked:(Actor.Goal_activation.checked activation)
-                            |> protocol_ok
-                          in
-                          Handoff_tests.protect_cleanup
-                            ~finally:(fun () ->
-                              Actor.end_held_activation
-                                actor
-                                ~activation:
-                                  (Actor.Admitted_activation.Continuation.target
-                                     continuation)
-                              |> protocol_ok)
-                            (fun () ->
-                               Actor.Admitted_activation.Continuation.refresh continuation
-                               |> protocol_ok;
-                               Actor.with_held_input
-                                 actor
-                                 ~continuation
-                                 ~prepare:Handoff_tests.plain_input
-                                 (fun ~scope ~input ->
-                                    Actor.submit_held_run_input actor ~scope ~input)))
-                     |> protocol_ok)
-              in
+              let submitted = Goal.start actor source owner ~budget ~worker in
               let operation_id = Option.value_exn submitted.operation_id in
               Eio.Promise.await refreshed;
               let held = state actor in
               assert (
                 G.State.equal
                   (Open (Held (Budget_gate Admitted_attempts)))
-                  (G.state (goal held)));
+                  (G.state (Goal.goal held)));
               let key =
                 P.Idempotency_key.of_string "publication-explicit-hold" |> protocol_ok
               in
               expected_receipt := Some key;
               let holding =
                 Eio.Fiber.fork_promise ~sw:fixture.sw (fun () ->
-                  command
+                  Goal.command
                     actor
                     ~key:"publication-explicit-hold"
-                    (Hold (goal_id, Budget_gate Admitted_attempts)))
+                    (Hold (Goal.goal_id, Budget_gate Admitted_attempts)))
               in
               joins := [ (fun () -> Eio.Promise.await_exn holding |> ignore) ];
               Eio.Promise.await published;
               let acknowledged = Option.value_exn !callback_state in
-              assert (G.State.equal (G.state (goal held)) (G.state (goal acknowledged)));
+              assert (
+                G.State.equal
+                  (G.state (Goal.goal held))
+                  (G.state (Goal.goal acknowledged)));
               let handle = Option.value_exn !selected_handle in
               let row =
                 Ledger.find
@@ -342,7 +219,8 @@ let%expect_test "same-value explicit Goal Hold revokes before publication yields
               let run =
                 A.Run_state.find
                   (Option.value_exn final.run_state)
-                  (P.Goal_episode.admission (G.episode (goal final) |> Option.value_exn))
+                  (P.Goal_episode.admission
+                     (G.episode (Goal.goal final) |> Option.value_exn))
                     .run_id
                 |> Option.value_exn
               in

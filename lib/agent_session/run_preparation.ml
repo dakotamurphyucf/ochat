@@ -248,6 +248,10 @@ module Goal_continuation = struct
           { run_id : P.Id.Run.t
           ; wake : P.Run_wake.t
           }
+      | Claimed_job of
+          { run_id : P.Id.Run.t
+          ; job : P.Job.t
+          }
   end
 
   type t =
@@ -280,6 +284,23 @@ module Goal_continuation = struct
           && Int.equal wake.source.generation state.identity.generation
         then Ok ()
         else conflict "Goal continuation wake identity or generation changed"
+      | Claimed_job { run_id; job } ->
+        let%bind _ = P.Id.Run.of_json (P.Id.Run.to_json run_id) in
+        if
+          P.Id.Session.equal job.session_id state.identity.session_id
+          && Int.equal job.generation state.identity.generation
+          &&
+          match job.status with
+          | Running -> true
+          | Queued
+          | Waiting_permission _
+          | Waiting_completion _
+          | Succeeded
+          | Failed _
+          | Cancelled
+          | Interrupted _ -> false
+        then Ok ()
+        else conflict "Goal continuation Job session, generation or status changed"
     in
     Ok
       { cause
