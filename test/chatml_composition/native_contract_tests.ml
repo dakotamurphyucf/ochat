@@ -41,6 +41,15 @@ let all_registrations env host =
 let documentation name =
   let shared = [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ] in
   match name with
+  | "recurrence_create"
+  | "recurrence_list"
+  | "recurrence_get"
+  | "recurrence_edit"
+  | "recurrence_pause"
+  | "recurrence_resume"
+  | "recurrence_cancel"
+  | "recurrence_status"
+  | "recurrence_history" -> "runtime.recurrence", shared
   | "run_chatml" -> "runtime.native.requests", shared
   | "agent_create" -> "runtime.delegation.creation", shared
   | "agent_status" | "agent_send" -> "runtime.delegation.submissions", shared
@@ -114,8 +123,8 @@ let%expect_test "runtime native catalog contracts remain paired with reviewed re
      f151690e0f4692e8aaf9aa6b4454b1306d8bcf1f4432c6759fecf5cbb1cce4f8
      f1f3f713b6b4e6e7e1606945763d52931f2ad7a60546e3257bada7ffc62c5643)
     (ochat_authoring_context authoring.reference
-     5af75d5c259034e3e5ed36b55716575412a4b6633fc35b771a260e4ef4a3a9f3
-     7684a3aa2f943911039a35d1430b4922b9383c015a1293dbaa2c18e370dcb7f7)
+     ac6b50652da6d40561b29b87dfd1709eafb31d728d863d3f81e02b4590116647
+     c9fb4ef833b03ebbb428ba83cf856712054a2cf7dfe1608493d8b303b0f2c268)
     (instructions_refresh instructions.sources
      7e7602e9a7cb3b07316c036607484ab66493d061de0c46b7471657213eb9ecce
      a75d305fe5c228d85ab983e21d5c5d93721b08ba4715d815a9a2da0f3b4ac123)
@@ -131,6 +140,33 @@ let%expect_test "runtime native catalog contracts remain paired with reviewed re
     (instructions_status instructions.sources
      9aa238203e9443b0a8d51f41421fd455b18291a8b306ff76b209a5ae6e2c9934
      a75d305fe5c228d85ab983e21d5c5d93721b08ba4715d815a9a2da0f3b4ac123)
+    (recurrence_create runtime.recurrence
+     a640749b03237f585387cee9c6562cc9cc2560af1d4f67cf8de1c115ff7379f7
+     02012d0e153775779d3ed4d3e479b6967d9608db5ce5d1b0b629dd7ecde8feef)
+    (recurrence_list runtime.recurrence
+     e8f0ec7896e58af08b6bfabfda3cecfdd86dd0a0c5f42e90cb55cf4a57d5d373
+     02012d0e153775779d3ed4d3e479b6967d9608db5ce5d1b0b629dd7ecde8feef)
+    (recurrence_get runtime.recurrence
+     1c229dd8219650ff274cc633733ff25ac9d8d554679c4c2f366a3578070f1187
+     02012d0e153775779d3ed4d3e479b6967d9608db5ce5d1b0b629dd7ecde8feef)
+    (recurrence_edit runtime.recurrence
+     e99cde739818601145d3bc52fcd59e78aa887d2cb26057b9e4748403e8b95c04
+     02012d0e153775779d3ed4d3e479b6967d9608db5ce5d1b0b629dd7ecde8feef)
+    (recurrence_pause runtime.recurrence
+     0eb6efea54e64cd2cda3dce586ae6eda25c975729cb1191b7a203c3c965163d9
+     02012d0e153775779d3ed4d3e479b6967d9608db5ce5d1b0b629dd7ecde8feef)
+    (recurrence_resume runtime.recurrence
+     7d67f87b0f58acfe6a244831ae0fbfc313e03b730712a26dc2de64728c90a299
+     02012d0e153775779d3ed4d3e479b6967d9608db5ce5d1b0b629dd7ecde8feef)
+    (recurrence_cancel runtime.recurrence
+     b5956b32ae20efff038163ef6800ea9372dc100907aecc970e18014ff29ccd02
+     02012d0e153775779d3ed4d3e479b6967d9608db5ce5d1b0b629dd7ecde8feef)
+    (recurrence_status runtime.recurrence
+     64d91fd2c4056dd2c6ba89471c6cacb7715ad5df458171c12ab808042591ce23
+     02012d0e153775779d3ed4d3e479b6967d9608db5ce5d1b0b629dd7ecde8feef)
+    (recurrence_history runtime.recurrence
+     341d5ee94a789d80e3aacac5609ba64fccaba4ee5e625a0c3647dea5840a8d33
+     02012d0e153775779d3ed4d3e479b6967d9608db5ce5d1b0b629dd7ecde8feef)
     |}]
 ;;
 

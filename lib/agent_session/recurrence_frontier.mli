@@ -40,6 +40,24 @@ module Issue : sig
   [@@deriving equal, sexp_of]
 end
 
+module History : sig
+  type kind =
+    | Skipped
+    | Withdrawn
+
+  type t = private
+    { definition : Recurrence_identity.Definition.t
+    ; first_slot : int64
+    ; last_slot : int64
+    ; kind : kind
+    ; reason : Reason.t
+    }
+end
+
+(** Safe immutable retained-detail projection. No original carrier, input,
+    reservation locator, private source or claim/terminal proof is exposed. *)
+val history : t -> History.t list
+
 (** Initial construction requires a new revision-zero recurrence identity and is valid only with the actual definition's initial cursor.
     Historical advanced cursors cannot reconstruct missing consumed evidence. *)
 val initial : Recurrence_definition.t -> (t, Agent_protocol.Error.t) result

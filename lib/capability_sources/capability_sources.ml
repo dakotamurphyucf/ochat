@@ -45,6 +45,14 @@ let instruction_members =
     ]
 ;;
 
+let recurrence_members =
+  [ "examples/libraries/recurrence-requests/chatml.project.json"
+  ; "examples/libraries/recurrence-requests/src/recurrence_requests.chatml"
+  ; "examples/libraries/recurrence-requests/src/recurrence_requests.chatmli"
+  ; "agent-server/recurring-automation.md"
+  ]
+;;
+
 let installed ~limits ~checkpoint =
   Capability_source_inventory.admit
     [ { id = "lifecycle"
@@ -53,6 +61,13 @@ let installed ~limits ~checkpoint =
       ; members =
           List.filter Bundled_capability_sources.documents ~f:(fun (path, _) ->
             List.mem lifecycle_members path ~equal:String.equal)
+      }
+    ; { id = "recurrence-requests"
+      ; title = "Pure explicit recurring automation request constructors"
+      ; entry = "examples/libraries/recurrence-requests/chatml.project.json"
+      ; members =
+          List.filter Bundled_capability_sources.documents ~f:(fun (path, _) ->
+            List.mem recurrence_members path ~equal:String.equal)
       }
     ; { id = "instruction-selection"
       ; title = "Explicit instruction requests and Lifecycle review"

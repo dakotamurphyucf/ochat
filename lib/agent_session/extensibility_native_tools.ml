@@ -17,6 +17,15 @@ type t =
   | Instructions_activate
   | Instructions_deactivate
   | Instructions_status
+  | Recurrence_create
+  | Recurrence_list
+  | Recurrence_get
+  | Recurrence_edit
+  | Recurrence_pause
+  | Recurrence_resume
+  | Recurrence_cancel
+  | Recurrence_status
+  | Recurrence_history
 [@@deriving enumerate]
 
 let name = function
@@ -34,6 +43,15 @@ let name = function
   | Instructions_activate -> Instruction_native_admission.Effect.name Activate
   | Instructions_deactivate -> Instruction_native_admission.Effect.name Deactivate
   | Instructions_status -> Instruction_native_admission.Effect.name Status
+  | Recurrence_create -> Recurrence_native_admission.Effect.name Create
+  | Recurrence_list -> Recurrence_native_admission.Effect.name List
+  | Recurrence_get -> Recurrence_native_admission.Effect.name Get
+  | Recurrence_edit -> Recurrence_native_admission.Effect.name Edit
+  | Recurrence_pause -> Recurrence_native_admission.Effect.name Pause
+  | Recurrence_resume -> Recurrence_native_admission.Effect.name Resume
+  | Recurrence_cancel -> Recurrence_native_admission.Effect.name Cancel
+  | Recurrence_status -> Recurrence_native_admission.Effect.name Status
+  | Recurrence_history -> Recurrence_native_admission.Effect.name History
 ;;
 
 let names = List.map all ~f:name
@@ -67,6 +85,15 @@ let registration ~env ~one_off_policy ~authoring_validation_host kind =
   let present value = Ok (Some value) in
   let unavailable message = P.Error.create Invalid_state ~message ~retryable:false () in
   match kind, one_off_policy with
+  | Recurrence_create, _ -> Recurrence_native_tool.registration Create |> present
+  | Recurrence_list, _ -> Recurrence_native_tool.registration List |> present
+  | Recurrence_get, _ -> Recurrence_native_tool.registration Get |> present
+  | Recurrence_edit, _ -> Recurrence_native_tool.registration Edit |> present
+  | Recurrence_pause, _ -> Recurrence_native_tool.registration Pause |> present
+  | Recurrence_resume, _ -> Recurrence_native_tool.registration Resume |> present
+  | Recurrence_cancel, _ -> Recurrence_native_tool.registration Cancel |> present
+  | Recurrence_status, _ -> Recurrence_native_tool.registration Status |> present
+  | Recurrence_history, _ -> Recurrence_native_tool.registration History |> present
   | Instructions_refresh, _ -> Instruction_native_tool.registration Refresh |> present
   | Instructions_read, _ -> Instruction_native_tool.registration Read |> present
   | Instructions_activate, _ -> Instruction_native_tool.registration Activate |> present

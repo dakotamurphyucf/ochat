@@ -3624,7 +3624,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "854c730bd39b61ed4339ea9c625d1259583f32fcd9168c6798f66c00d00fe3ef"
+                   [ "63936636765cf67fa4c3116a2ea184e8004ac7e8c19c3fb434adde038f2ed56a"
                    ; "8bbaa8b6aa72f9ed301d17ac5ce4ddb94f35e07b49ee679a8e9b0cfdf2465d6b"
                    ; "94d2d6461640995f15b97e69675fa0133b46f79bdfc7216f321751a73a5a149c"
                    ]
@@ -3700,6 +3700,30 @@ let runtime_foundation ~sources =
                    ; "test/chatmd_prompt_content/content_tests.ml"
                    ; "test/prompt_content_custody/owner_tests.ml"
                    ; "test/chatmd_authoring_assistance/assistance_tests.ml"
+                   ]
+               }
+         }
+       ]
+     @ [ { id = "runtime.recurrence"
+         ; title = "Recurring automation metadata, exact requests and retained outcomes"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "agent-server/recurring-automation.md"
+               ; heading = "# Recurring automation from an agent"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "ca40e51d82cce7a2bf679019bd96900020ec6d0d69094acaf394070d27a4c55e" ]
+               ; evidence =
+                   [ "test/recurrence_creation/recurrence_native_request_tests.ml"
+                   ; "test/chatml_composition/recurrence_runtime_tests.ml"
+                   ; "test/chatml_composition/recurrence_execution_tests.ml"
+                   ; "test/factory_catalog_publication/recurrence_policy_tests.ml"
+                   ; "test/lifecycle_helpers/recurrence_helper_tests.ml"
                    ]
                }
          }

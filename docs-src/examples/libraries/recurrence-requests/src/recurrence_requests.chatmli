@@ -1,0 +1,45 @@
+(* Pure bounded request construction. No Tool.call, source loan, permit or hidden
+   CAS refresh. Generation must be in 0..9007199254740991, the exact-safe
+   ChatML JSON integer range; larger values reject before encoding. This does not
+   narrow the native decoder's host integer domain. Echo an actual read's
+   generation/source/frontiers exactly. Keep
+   a saved key/request unchanged after acknowledgement; a fresh Edit recaptures.
+   The selected native decoder still validates full integer ranges, IDs, digest,
+   schedule/calendar/policy semantics, attachments and total encoded limits. *)
+type session = {server_id:string; session_id:string}
+type source = {script_id:string; source_sha256:string; generation:int; installation_epoch:string}
+type basis = {generation:int; catalog_revision:string; source:source; lifecycle_revision:string; key:string}
+type safe_basis = {generation:int; catalog_revision:string; key:string}
+type content_kind = [ `Plain_text | `Chatmd ]
+type input = {kind:content_kind; text:string; attachments:json array}
+type mode = [ `Single_turn | `Workflow ]
+type target = [ `Existing({session:session; input:input}) | `Authored({name:string; mode:mode}) ]
+type capture = {schedule:json; target:target; policy:json}
+type error = [ `Invalid_generation | `Invalid_revision | `Invalid_key | `Invalid_source | `Invalid_target | `Input_too_large | `Invalid_schedule | `Invalid_policy ]
+type 'a checked = [ `Ok('a) | `Error(error) ]
+
+val list : fun() -> json
+val get : fun(string) -> json
+val status : fun(string) -> json
+val history : fun(string) -> json
+val create : fun(string, basis, capture) -> json checked
+val edit : fun(string, basis, string, capture) -> json checked
+val resume : fun(string, basis, string) -> json checked
+val pause : fun(string, safe_basis, string) -> json checked
+val cancel : fun(string, safe_basis, string) -> json checked
+
+type interval_mode = [ `Fixed_rate | `Fixed_delay ]
+type pattern = [ `Daily | `Weekdays(int array) | `Month_days(int array) ]
+type gap = [ `Skip_gap | `At_gap_end ]
+type repeat = [ `Earlier | `Later | `Both ]
+type ending = [ `No_end | `Through(string) ]
+type calendar = {pattern:pattern; ofday:string; zone:string; start_date:string; ending:ending; gap:gap; repeat:repeat}
+type misfire = [ `Skip_missed | `Coalesce | `Catch_up(int) ]
+type policy = {misfire:misfire; grace_ms:string; max_pending:int; max_history:int; max_calendar_steps:int}
+
+(* Ergonomic bounded constructors. The native decoder remains authoritative for
+   int64 endpoints, timestamp/date/ofday/zone validity, ordered dates and policy
+   arithmetic; helpers do not reproduce the calendar engine or issue authority. *)
+val interval : fun(interval_mode, string, string) -> json checked
+val calendar : fun(calendar) -> json checked
+val policy : fun(policy) -> json checked

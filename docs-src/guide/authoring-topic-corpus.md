@@ -107,7 +107,8 @@ behavior remains qualified by the separately referenced suites. This does not
 claim that every existing shell security configuration is a new E09 feature.
 
 The runtime's [native extension catalog](../../lib/agent_session/extensibility_native_tools.mli)
-constructs the nine standard execution, child-session and authoring registrations.
+constructs explicitly declared execution, child-session, instruction, authoring
+and recurrence registrations.
 Runtime construction and the [native contract test](../../test/chatml_composition/native_contract_tests.ml)
 use that same exhaustive catalog. The test pins each actual description, input
 schema, strictness and result convention together with its reviewed reference
@@ -118,17 +119,18 @@ from this public API snapshot. Registration inspection does not invoke tools or
 borrow a session. This check detects API/reference drift; it does not replace
 native lifecycle, authority, persistence or failure-behavior qualification.
 
-`Coverage.native_features` separately records 17 reviewed native behavior groups:
+`Coverage.native_features` separately records reviewed native behavior groups:
 one-off requests/ownership/results, validation requests and deferred checks,
 reference operations and paging, captured creation/retries/lifetimes, management
-authority, status/submission/output/wait/stop and the shared helper adapter.
-Its 68 mappings cover readable guidance on the four extension surfaces, with
-35 implementation source pins and 28 prerequisite-closure pins. These include
+authority, status/submission/output/wait/stop, the shared helper adapter and
+recurrence admission/capture/retry/observation contracts.
+Its mappings cover readable guidance on the four extension surfaces, with
+reviewed implementation source and prerequisite-closure pins. These include
 actual native adapters, request decoders, delegation authority, receipt/output
 code and the shared session factory. Hashes detect changes to these sources;
 they do not automatically discover new semantics or prove all behavior correct.
-The source participation gate now covers 74 distinct language, declaration and
-native implementation files. Query-service construction checks native mappings
+The source participation gate checks the union of all declared language,
+declaration, native and runtime implementation paths. Query-service construction checks native mappings
 alongside the other maintained inventories before serving documentation.
 
 The native request guide closes the field-level gaps for `run_chatml` and all
@@ -216,6 +218,15 @@ shared deadlines and outcome handling, plus the four validation request shapes
 and interpretation of reports. It is readable on all four extension surfaces;
 the computation and validation tool descriptions link directly to it. This does
 not make native tools available outside the invoking scope's selection.
+
+`runtime.recurrence` retrieves the same [recurring automation guide](../agent-server/recurring-automation.md)
+embedded in the installed application. It covers all nine explicitly selected
+controls, exact generation/CAS echo and immutable retry requests, persistent
+ChatMD workers, the pure request package and separately authorized target views.
+Tool registration, imported helper code, captured source and retained receipts do
+not grant an execution host or current launch/effect authority. The native catalog
+contract maps each recurrence operation to this reviewed topic on all four
+extension surfaces; executing behavior remains qualified by its separate suites.
 
 `authoring.reference` explains the query helper itself: its single strict request
 shape, task and feature IDs, search versus full-topic retrieval, selected schema

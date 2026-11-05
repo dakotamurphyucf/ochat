@@ -14,6 +14,7 @@ let () =
   let sources = Sources.installed () |> Result.ok_or_failwith in
   let expected =
     [ "agent-server/extensibility-foundations.md"
+    ; "agent-server/recurring-automation.md"
     ; "design/composable-agent-instructions-and-packages.md"
     ; "guide/admitted-instructions.md"
     ; "guide/authoring-context-tool.md"

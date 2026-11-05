@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "namespace": "ochat.capabilities.recurrence-requests",
+  "modules": {
+    "Recurrence_requests": {
+      "implementation": "src/recurrence_requests.chatml",
+      "interface": "src/recurrence_requests.chatmli"
+    }
+  },
+  "environments": {
+    "pure": {
+      "modules": {
+        "Recurrence_requests": "self.Recurrence_requests"
+      }
+    }
+  },
+  "default_environment": "pure"
+}

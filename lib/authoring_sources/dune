@@ -19,6 +19,13 @@
   (with-stdout-to %{targets}
    (run %{exe:embed_contracts.exe}
     lib/agent_server/authoring_instruction_sources.ml %{dep:../agent_server/authoring_instruction_sources.ml}
+    lib/agent_session/recurrence_native_admission.ml %{dep:../agent_session/recurrence_native_admission.ml}
+    lib/agent_session/recurrence_native_schema.ml %{dep:../agent_session/recurrence_native_schema.ml}
+    lib/agent_session/recurrence_native_request.ml %{dep:../agent_session/recurrence_native_request.ml}
+    lib/agent_session/recurrence_native_tool.ml %{dep:../agent_session/recurrence_native_tool.ml}
+    lib/agent_session/recurrence_query.ml %{dep:../agent_session/recurrence_query.ml}
+    lib/agent_session/recurrence_target_view.ml %{dep:../agent_session/recurrence_target_view.ml}
+    lib/agent_session/recurrence_service.ml %{dep:../agent_session/recurrence_service.ml}
     lib/agent_session/instruction_source_port.ml %{dep:../agent_session/instruction_source_port.ml}
     lib/agent_session/instruction_source_request.ml %{dep:../agent_session/instruction_source_request.ml}
     lib/agent_session/instruction_native_admission.ml %{dep:../agent_session/instruction_native_admission.ml}
@@ -417,6 +424,7 @@
     guide/chatml-surface-inventory.md %{dep:../../docs-src/guide/chatml-surface-inventory.md}
     overview/chatmd-language.md %{dep:../../docs-src/overview/chatmd-language.md}
     guide/chatmd-shell-extensions.md %{dep:../../docs-src/guide/chatmd-shell-extensions.md}
+    agent-server/recurring-automation.md %{dep:../../docs-src/agent-server/recurring-automation.md}
     agent-server/extensibility-foundations.md %{dep:../../docs-src/agent-server/extensibility-foundations.md}))))
 
 (library

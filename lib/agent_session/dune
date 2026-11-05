@@ -60,6 +60,13 @@
   recurrence_controller
   recurrence_command_transition
   recurrence_command_admission
+  recurrence_native_admission
+  recurrence_native_schema
+  recurrence_native_request
+  recurrence_target_view
+  recurrence_query
+  recurrence_service
+  recurrence_native_tool
   recurrence_creation_admission
   recurrence_execution_admission
   recurrence_retry_admission

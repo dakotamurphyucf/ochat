@@ -154,6 +154,10 @@ type t =
       -> ( Agent_session.Authored_agent_call.host * Agent_session.Managed_session_service.t
            , Agent_protocol.Invocation.tool_error )
            result
+  ; recurrence_service :
+      Agent_session.Permission_policy.t
+      -> Agent_session.Session_actor.t option ref
+      -> Agent_session.Recurrence_service.t
   ; generated_creation_mutex : Eio.Mutex.t
   ; idempotency_store : Agent_store.Idempotency_store.t
   ; blob_store : Agent_store.Blob_store.t
@@ -1965,6 +1969,10 @@ let native_script_tools
   Agent_session.Script_tool_calls.with_instruction_service
     tools
     (instruction_service t actor_ref)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_recurrence_service
+    tools
+    (t.recurrence_service profile actor_ref)
   |> fun tools ->
   Agent_session.Script_tool_calls.with_shell_context tools shell_context
   |> fun tools ->
@@ -11678,6 +11686,486 @@ let create_from_native t borrowed (request : Agent_session.Generated_session_req
     }
 ;;
 
+let check_recurrence_original actor =
+  let principal = Operator_authorization.principal actor in
+  if
+    Operator_authorization.is_current actor
+    && Agent_protocol.Principal.has_scope principal Send_messages
+    && Agent_protocol.Principal.has_scope principal View_session_transcript
+  then Ok ()
+  else
+    Error (unavailable Permission_denied "recurrence target original authority expired")
+;;
+
+let check_recurrence_target_state ~session ~actor ~authorize state =
+  let open Result.Let_syntax in
+  let%bind () = check_recurrence_original actor in
+  let%bind () =
+    if
+      Agent_protocol.Id.Session.equal
+        (Agent_protocol.Session_ref.session_id session)
+        state.Agent_session.Session_state.identity.session_id
+    then Ok ()
+    else Error (unavailable Conflict "recurrence target state belongs to another session")
+  in
+  let%bind () = authorize state in
+  check_recurrence_original actor
+;;
+
+let qualify_metadata_target t entry =
+  let module S = Agent_store.Session_store in
+  let open Result.Let_syntax in
+  let qualify () =
+    let%bind () =
+      Recovery_work.jobs
+        entry
+        ~max_count:t.limits.job_result_recovery_max_count
+        ~max_total_bytes:t.limits.job_result_recovery_max_bytes
+    in
+    let%bind () = Recovery_work.schedules entry ~startup_time:(now t) in
+    let%bind handle =
+      Result.of_option
+        entry.Session_registry.store_handle
+        ~error:(unavailable Internal_error "recovered target has no owned Handle")
+    in
+    let%bind indexed =
+      Agent_store.Session_index.find_checked
+        (S.session_index t.store)
+        (S.Handle.session_id handle)
+      |> Result.map_error ~f:protocol_of_store
+      |> Result.bind ~f:(fun value ->
+        Result.of_option value ~error:(unavailable Session_not_found "target disappeared"))
+    in
+    let%map current =
+      S.current_lifecycle t.store handle ~current_entry:indexed
+      |> Result.map_error ~f:protocol_of_store
+    in
+    entry, current
+  in
+  match qualify () with
+  | Ok _ as success -> success
+  | Error error as failure ->
+    Session_registry.rollback_recovered
+      t.registry
+      ~primary:(Session_registry.Cleanup_failure.rejected error)
+      [ entry ];
+    failure
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    Session_registry.rollback_recovered
+      t.registry
+      ~primary:(Session_registry.Cleanup_failure.raised exn backtrace)
+      [ entry ];
+    Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let acquire_recurrence_target t ~session ~actor ~authorize =
+  let module P = Agent_protocol in
+  let module S = Agent_store.Session_store in
+  let module R = Session_registry in
+  let open Result.Let_syntax in
+  let%bind () = check_recurrence_original actor in
+  let%bind () =
+    if P.Id.Server.equal (P.Session_ref.server_id session) (S.server_id t.store)
+    then Ok ()
+    else Error (unavailable Invalid_request "recurrence target belongs to another host")
+  in
+  let check_state = check_recurrence_target_state ~session ~actor ~authorize in
+  let check_loaded entry =
+    let%bind () = check_registered_entry t entry ~session in
+    let%bind state = Agent_session.Session_actor.state entry.R.actor in
+    let%bind () = check_state state in
+    let%map () = check_registered_entry t entry ~session in
+    entry
+  in
+  let%bind entry =
+    match R.find t.registry (P.Session_ref.session_id session) with
+    | Some entry -> check_loaded entry
+    | None ->
+      R.with_lifecycle t.registry (P.Session_ref.session_id session) (fun reservation ->
+        match R.Lifecycle_reservation.target reservation with
+        | Absent -> Error (unavailable Session_not_found "recurrence target is absent")
+        | Loaded entry ->
+          let%bind state = Agent_session.Session_actor.state entry.actor in
+          let%map () = check_state state in
+          entry
+        | Indexed indexed ->
+          let%bind handle =
+            S.open_session
+              t.store
+              ~sw:t.sw
+              ~actor_lock_nonce:(P.Id.Transaction.create () |> P.Id.Transaction.to_string)
+              indexed.session.id
+            |> Result.map_error ~f:protocol_of_store
+          in
+          let recovered = ref None in
+          R.acquire_indexed_target
+            t.registry
+            reservation
+            ~store:t.store
+            ~handle
+            ~authorize:(fun _summary ->
+              let%bind state =
+                match !recovered with
+                | None -> read_owned_session t handle
+                | Some entry -> Agent_session.Session_actor.state entry.R.actor
+              in
+              check_state state)
+            ~recover:(fun () ->
+              let%bind entry =
+                recover_open_handle
+                  ~purpose:Metadata_target_recovery
+                  ~prepare_parent_policy:(fun () ->
+                    Recovery_parent.create
+                      ~store:t.store
+                      ~registry:t.registry
+                      ~max_depth:t.limits.delegation_max_depth
+                      ~read_owned:(read_owned_session t)
+                      ~authorize_independent:(authorize_independent t)
+                    |> Result.map ~f:(fun retained -> Retained_unselected retained))
+                  t
+                  handle
+              in
+              let%map entry, current = qualify_metadata_target t entry in
+              recovered := Some entry;
+              entry, current))
+  in
+  check_loaded entry
+;;
+
+module Recurrence_source_preview = struct
+  type t =
+    { source : Agent_protocol.Run_source.t
+    ; expected_revision : int64
+    }
+
+  let source t = t.source
+  let expected_revision t = t.expected_revision
+end
+
+let preview_recurrence_source_with_parent t entry ~actor ~authorize ~with_parent =
+  let module A = Agent_session in
+  let module S = A.Runtime_builder.Source in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let%bind handle =
+    Result.of_option
+      entry.Session_registry.store_handle
+      ~error:(unavailable Invalid_state "recurrence source requires an owned Handle")
+  in
+  let session =
+    P.Session_ref.create
+      ~server_id:(Agent_store.Session_store.server_id t.store)
+      ~session_id:(Agent_store.Session_store.Handle.session_id handle)
+  in
+  let check state =
+    let%bind () = check_registered_entry t entry ~session in
+    check_recurrence_target_state ~session ~actor ~authorize state
+  in
+  let%bind before = A.Session_actor.state entry.actor in
+  let%bind () = check before in
+  let%bind selected =
+    with_selected_source
+      t
+      entry
+      ~with_parent
+      ~with_source:(fun source f -> f source)
+      ~check_selected:(fun source -> S.validate_target source before)
+      (fun source ->
+         let%map () = S.validate_target source before in
+         source)
+  in
+  (* All source/parent resource scopes have joined before any proposal escapes. *)
+  let%bind after = A.Session_actor.state entry.actor in
+  let%bind () = check after in
+  let%bind () = S.validate_target selected after in
+  let%bind () =
+    if
+      Int64.equal before.counters.revision after.counters.revision
+      && Int.equal before.identity.generation after.identity.generation
+    then Ok ()
+    else Error (unavailable Conflict "recurrence target changed during source preview")
+  in
+  let%bind observer =
+    match S.moderator selected with
+    | Legacy observer | Extension observer -> Ok observer
+    | No_moderator ->
+      Error (unavailable Invalid_state "recurrence source has no moderator")
+  in
+  let%bind index = A.Run_admission.prepare_source_index after ~observer in
+  let%map source =
+    A.Run_source_installation.captured
+      (A.Run_state.installation index)
+      ~generation:after.identity.generation
+  in
+  { Recurrence_source_preview.source; expected_revision = after.counters.revision }
+;;
+
+let preview_recurrence_source t entry ~actor ~authorize =
+  preview_recurrence_source_with_parent
+    t
+    entry
+    ~actor
+    ~authorize
+    ~with_parent:(fun owner f ->
+      Runtime_owner.with_loaded_source_capabilities_reported
+        owner
+        ~source_owner:t.runtime_source_owner
+        f
+      |> Runtime_owner.Scope_outcome.resume)
+;;
+
+(* Native services invoke this closure only inside the same actual registered
+   invoking session's native dispatch. *)
+exception Recurrence_capture_rejected of Agent_protocol.Error.t
+
+let recurrence_service t (profile : Agent_session.Permission_policy.t) actor_ref =
+  let module A = Agent_session in
+  let module Actor = A.Session_actor in
+  let module Admission = A.Recurrence_native_admission in
+  let module Query = A.Recurrence_query in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let session id =
+    P.Session_ref.create
+      ~server_id:(Agent_store.Session_store.server_id t.store)
+      ~session_id:id
+  in
+  let state () = Result.bind (extension_actor actor_ref) ~f:Actor.state in
+  let pure admission (state : A.Session_state.t) =
+    let%bind () =
+      Admission.check_now admission state ~effect_kind:(Admission.effect_kind admission)
+    in
+    if
+      String.equal
+        profile.A.Permission_policy.revision_digest
+        state.A.Session_state.spec.permission_profile_digest
+    then Ok ()
+    else Error (unavailable Permission_denied "recurrence native profile changed")
+  in
+  let registered admission =
+    let%bind actor = extension_actor actor_ref in
+    let%bind state = Actor.state actor in
+    let%bind () = pure admission state in
+    let%bind entry =
+      Session_registry.find t.registry state.identity.session_id
+      |> Result.of_option
+           ~error:
+             (unavailable Session_not_found "invoking recurrence controller is absent")
+    in
+    let%bind () =
+      if phys_equal entry.actor actor
+      then Ok ()
+      else
+        Error (unavailable Permission_denied "recurrence native controller was replaced")
+    in
+    let%map () =
+      check_registered_owner t entry ~session:(session state.identity.session_id)
+    in
+    entry, state
+  in
+  let recheck admission services entry =
+    let%bind () =
+      A.Script_tool_calls.check_current_metadata_admission
+        services
+        (Admission.invocation admission)
+        (Admission.binding admission)
+    in
+    let%bind actual, current = registered admission in
+    if
+      phys_equal actual.actor entry.Session_registry.actor
+      && phys_equal actual.runtime entry.runtime
+    then Ok current
+    else Error (unavailable Permission_denied "recurrence invoking owner changed")
+  in
+  let begin_call admission =
+    let%bind services =
+      A.Script_tool_calls.current_native_services ()
+      |> Result.map_error ~f:P.Error.invalid_request
+    in
+    let%bind entry, _ = registered admission in
+    let%map current = recheck admission services entry in
+    services, entry, current
+  in
+  let target_visible admission controller_state summary =
+    let%bind () = pure admission controller_state in
+    let principal = Operator_authorization.principal (Admission.actor admission) in
+    if
+      P.Principal.has_scope principal View_session_transcript
+      && Authorization.session_visible_to principal summary
+    then Ok ()
+    else
+      Error (unavailable Permission_denied "recurrence target is not currently visible")
+  in
+  A.Recurrence_service.create
+    ~state
+    ~query:(fun ~admission ~request ->
+      let%bind services, entry, controller_state = begin_call admission in
+      let read () =
+        Actor.query_recurrences
+          entry.actor
+          ~actor:(Admission.actor admission)
+          ~authorize:(pure admission)
+          ~request
+      in
+      let%bind observed = read () in
+      let read_target target =
+        let%bind () =
+          if
+            P.Id.Server.equal
+              (P.Session_ref.server_id target)
+              (Agent_store.Session_store.server_id t.store)
+          then Ok ()
+          else
+            Error
+              (unavailable Invalid_request "recurrence target belongs to another host")
+        in
+        Session_registry.read_state
+          t.registry
+          ~authorize:(target_visible admission controller_state)
+          (P.Session_ref.session_id target)
+      in
+      let%bind json = Query.render observed ~read_target in
+      (* All Actor/registration IO precedes the final yielding host guard. *)
+      let%bind actual, current = registered admission in
+      let%bind () =
+        if phys_equal actual.actor entry.actor && phys_equal actual.runtime entry.runtime
+        then Ok ()
+        else Error (unavailable Permission_denied "recurrence invoking owner changed")
+      in
+      let%bind final = read () in
+      let%bind () =
+        A.Script_tool_calls.check_current_metadata_admission
+          services
+          (Admission.invocation admission)
+          (Admission.binding admission)
+      in
+      (* Pure checks only from here through disclosure. Target data remains
+         a separately authorized historical snapshot, not an atomic live view. *)
+      let%bind () = pure admission current in
+      let%bind () = Query.check_current final in
+      if Query.Basis.equal (Query.basis observed) (Query.basis final)
+      then Ok json
+      else Error (unavailable Conflict "recurrence controller changed during target read"))
+    ~capture_target:(fun ~admission ~target ->
+      let%bind services, entry, before = begin_call admission in
+      let checkpoint () =
+        Eio.Fiber.check ();
+        match recheck admission services entry with
+        | Ok _ -> ()
+        | Error error -> raise (Recurrence_capture_rejected error)
+      in
+      let%bind captured =
+        match target with
+        | A.Recurrence_native_request.Target.Authored_child { name; mode } ->
+          let%bind () =
+            if
+              P.Principal.has_scope
+                (Operator_authorization.principal (Admission.actor admission))
+                View_session_transcript
+            then Ok ()
+            else
+              Error
+                (unavailable
+                   Permission_denied
+                   "recurrence source capture requires transcript-read authority")
+          in
+          let%bind public = Admission.capabilities admission in
+          (try
+             Recurrence_authored_source.capture
+               t.authored_resources
+               ~state:before
+               ~public
+               ~name
+               ~mode
+               ~checkpoint
+           with
+           | Recurrence_capture_rejected error -> Error error)
+        | Existing_session { session = target_session; input } ->
+          let original = Admission.actor admission in
+          let authorize target_state =
+            target_visible admission before (A.Session_state.summary target_state)
+          in
+          let%bind target_entry =
+            acquire_recurrence_target t ~session:target_session ~actor:original ~authorize
+          in
+          let%bind preview =
+            preview_recurrence_source_with_parent
+              t
+              target_entry
+              ~actor:original
+              ~authorize
+              ~with_parent:(fun owner f ->
+                if phys_equal owner entry.runtime
+                then (
+                  let%bind _ = recheck admission services entry in
+                  let%bind capabilities = Admission.capabilities admission in
+                  let%bind source = f capabilities in
+                  let%map _ = recheck admission services entry in
+                  source)
+                else
+                  Runtime_owner.with_loaded_source_capabilities_reported
+                    owner
+                    ~source_owner:t.runtime_source_owner
+                    f
+                  |> Runtime_owner.Scope_outcome.resume)
+          in
+          let%bind current = Actor.state target_entry.actor in
+          let%bind () = check_registered_entry t target_entry ~session:target_session in
+          let%bind () = authorize current in
+          if
+            Int64.equal
+              current.counters.revision
+              preview.Recurrence_source_preview.expected_revision
+          then
+            A.Recurrence_target.create_existing
+              ~session:target_session
+              ~source:preview.source
+              ~configuration_revision:current.spec.configuration_revision
+              ~input
+          else Error (unavailable Conflict "recurrence target changed after preview")
+      in
+      let%bind after = recheck admission services entry in
+      if Int64.equal before.counters.revision after.counters.revision
+      then Ok captured
+      else Error (unavailable Conflict "recurrence controller changed during capture"))
+    ~apply:(fun ~admission ~request ->
+      let%bind services, entry, _state = begin_call admission in
+      (* The registered tuple has already been checked. The full inherited
+         host check is last before enqueue; never perform Actor/Owner IO after
+         it or invoke this yielding callback inside the Actor authorizer. *)
+      let%bind () =
+        A.Script_tool_calls.check_current_metadata_admission
+          services
+          (Admission.invocation admission)
+          (Admission.binding admission)
+      in
+      let authorize current =
+        let%bind () = pure admission current in
+        if
+          current.halted
+          || Option.is_some current.failure
+          || P.Session.equal_desired_state current.lifecycle.desired Stopped
+          || Option.exists current.active_operation ~f:(fun operation ->
+            match operation.P.Operation.state with
+            | Cancelling | Cancelled | Failed _ | Interrupted _ -> true
+            | Starting | Running | Completed -> false)
+        then Error (unavailable Permission_denied "recurrence native owner has stopped")
+        else Ok ()
+      in
+      (* This is already-admitted metadata work. The Actor repeats exact local
+         original/binding/generation/profile/stop checks at its writer boundary.
+         Cross-Actor inherited policy was checked immediately before submission;
+         it is not an atomic global policy transaction across writer IO. Stored
+         recurrence metadata grants no future launch/target authority. Return a
+         real ACK directly rather than concealing it with post-ACK rejection. *)
+      Actor.recurrence_command
+        entry.actor
+        ~actor:(Admission.actor admission)
+        ~authorize
+        ~request)
+;;
+
 let create
       ~sw
       ~env
@@ -11733,6 +12221,8 @@ let create
     ; authored_resources = Authored_resources.create ()
     ; authored_services =
         (fun prepared borrowed -> authored_call_services t prepared borrowed)
+    ; recurrence_service =
+        (fun profile actor_ref -> recurrence_service t profile actor_ref)
     ; generated_creation_mutex = Eio.Mutex.create ()
     ; idempotency_store
     ; blob_store
@@ -12149,153 +12639,6 @@ let check_execution_selected_entry t entry ~session =
   else Error (unavailable Conflict "recurrence entry is not selected for execution")
 ;;
 
-let check_recurrence_original actor =
-  let principal = Operator_authorization.principal actor in
-  if
-    Operator_authorization.is_current actor
-    && Agent_protocol.Principal.has_scope principal Send_messages
-    && Agent_protocol.Principal.has_scope principal View_session_transcript
-  then Ok ()
-  else
-    Error (unavailable Permission_denied "recurrence target original authority expired")
-;;
-
-let check_recurrence_target_state ~session ~actor ~authorize state =
-  let open Result.Let_syntax in
-  let%bind () = check_recurrence_original actor in
-  let%bind () =
-    if
-      Agent_protocol.Id.Session.equal
-        (Agent_protocol.Session_ref.session_id session)
-        state.Agent_session.Session_state.identity.session_id
-    then Ok ()
-    else Error (unavailable Conflict "recurrence target state belongs to another session")
-  in
-  let%bind () = authorize state in
-  check_recurrence_original actor
-;;
-
-let qualify_metadata_target t entry =
-  let module S = Agent_store.Session_store in
-  let open Result.Let_syntax in
-  let qualify () =
-    let%bind () =
-      Recovery_work.jobs
-        entry
-        ~max_count:t.limits.job_result_recovery_max_count
-        ~max_total_bytes:t.limits.job_result_recovery_max_bytes
-    in
-    let%bind () = Recovery_work.schedules entry ~startup_time:(now t) in
-    let%bind handle =
-      Result.of_option
-        entry.Session_registry.store_handle
-        ~error:(unavailable Internal_error "recovered target has no owned Handle")
-    in
-    let%bind indexed =
-      Agent_store.Session_index.find_checked
-        (S.session_index t.store)
-        (S.Handle.session_id handle)
-      |> Result.map_error ~f:protocol_of_store
-      |> Result.bind ~f:(fun value ->
-        Result.of_option value ~error:(unavailable Session_not_found "target disappeared"))
-    in
-    let%map current =
-      S.current_lifecycle t.store handle ~current_entry:indexed
-      |> Result.map_error ~f:protocol_of_store
-    in
-    entry, current
-  in
-  match qualify () with
-  | Ok _ as success -> success
-  | Error error as failure ->
-    Session_registry.rollback_recovered
-      t.registry
-      ~primary:(Session_registry.Cleanup_failure.rejected error)
-      [ entry ];
-    failure
-  | exception exn ->
-    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-    Session_registry.rollback_recovered
-      t.registry
-      ~primary:(Session_registry.Cleanup_failure.raised exn backtrace)
-      [ entry ];
-    Exn.raise_with_original_backtrace exn backtrace
-;;
-
-let acquire_recurrence_target t ~session ~actor ~authorize =
-  let module P = Agent_protocol in
-  let module S = Agent_store.Session_store in
-  let module R = Session_registry in
-  let open Result.Let_syntax in
-  let%bind () = check_recurrence_original actor in
-  let%bind () =
-    if P.Id.Server.equal (P.Session_ref.server_id session) (S.server_id t.store)
-    then Ok ()
-    else Error (unavailable Invalid_request "recurrence target belongs to another host")
-  in
-  let check_state = check_recurrence_target_state ~session ~actor ~authorize in
-  let check_loaded entry =
-    let%bind () = check_registered_entry t entry ~session in
-    let%bind state = Agent_session.Session_actor.state entry.R.actor in
-    let%bind () = check_state state in
-    let%map () = check_registered_entry t entry ~session in
-    entry
-  in
-  let%bind entry =
-    match R.find t.registry (P.Session_ref.session_id session) with
-    | Some entry -> check_loaded entry
-    | None ->
-      R.with_lifecycle t.registry (P.Session_ref.session_id session) (fun reservation ->
-        match R.Lifecycle_reservation.target reservation with
-        | Absent -> Error (unavailable Session_not_found "recurrence target is absent")
-        | Loaded entry ->
-          let%bind state = Agent_session.Session_actor.state entry.actor in
-          let%map () = check_state state in
-          entry
-        | Indexed indexed ->
-          let%bind handle =
-            S.open_session
-              t.store
-              ~sw:t.sw
-              ~actor_lock_nonce:(P.Id.Transaction.create () |> P.Id.Transaction.to_string)
-              indexed.session.id
-            |> Result.map_error ~f:protocol_of_store
-          in
-          let recovered = ref None in
-          R.acquire_indexed_target
-            t.registry
-            reservation
-            ~store:t.store
-            ~handle
-            ~authorize:(fun _summary ->
-              let%bind state =
-                match !recovered with
-                | None -> read_owned_session t handle
-                | Some entry -> Agent_session.Session_actor.state entry.R.actor
-              in
-              check_state state)
-            ~recover:(fun () ->
-              let%bind entry =
-                recover_open_handle
-                  ~purpose:Metadata_target_recovery
-                  ~prepare_parent_policy:(fun () ->
-                    Recovery_parent.create
-                      ~store:t.store
-                      ~registry:t.registry
-                      ~max_depth:t.limits.delegation_max_depth
-                      ~read_owned:(read_owned_session t)
-                      ~authorize_independent:(authorize_independent t)
-                    |> Result.map ~f:(fun retained -> Retained_unselected retained))
-                  t
-                  handle
-              in
-              let%map entry, current = qualify_metadata_target t entry in
-              recovered := Some entry;
-              entry, current))
-  in
-  check_loaded entry
-;;
-
 let read_recurrence_state t ~session ~actor ~authorize =
   let module P = Agent_protocol in
   let open Result.Let_syntax in
@@ -12450,79 +12793,6 @@ let acquire_recurrence_child t ~parent ~actor ~authorize ~occurrence =
   in
   let%map () = check_registered_entry t entry ~session in
   { Recurrence_child.session; reference }, entry
-;;
-
-module Recurrence_source_preview = struct
-  type t =
-    { source : Agent_protocol.Run_source.t
-    ; expected_revision : int64
-    }
-
-  let source t = t.source
-  let expected_revision t = t.expected_revision
-end
-
-let preview_recurrence_source t entry ~actor ~authorize =
-  let module A = Agent_session in
-  let module S = A.Runtime_builder.Source in
-  let module P = Agent_protocol in
-  let open Result.Let_syntax in
-  let%bind handle =
-    Result.of_option
-      entry.Session_registry.store_handle
-      ~error:(unavailable Invalid_state "recurrence source requires an owned Handle")
-  in
-  let session =
-    P.Session_ref.create
-      ~server_id:(Agent_store.Session_store.server_id t.store)
-      ~session_id:(Agent_store.Session_store.Handle.session_id handle)
-  in
-  let check state =
-    let%bind () = check_registered_entry t entry ~session in
-    check_recurrence_target_state ~session ~actor ~authorize state
-  in
-  let%bind before = A.Session_actor.state entry.actor in
-  let%bind () = check before in
-  let%bind selected =
-    with_selected_source
-      t
-      entry
-      ~with_parent:(fun owner f ->
-        Runtime_owner.with_loaded_source_capabilities_reported
-          owner
-          ~source_owner:t.runtime_source_owner
-          f
-        |> Runtime_owner.Scope_outcome.resume)
-      ~with_source:(fun source f -> f source)
-      ~check_selected:(fun source -> S.validate_target source before)
-      (fun source ->
-         let%map () = S.validate_target source before in
-         source)
-  in
-  (* All source/parent resource scopes have joined before any proposal escapes. *)
-  let%bind after = A.Session_actor.state entry.actor in
-  let%bind () = check after in
-  let%bind () = S.validate_target selected after in
-  let%bind () =
-    if
-      Int64.equal before.counters.revision after.counters.revision
-      && Int.equal before.identity.generation after.identity.generation
-    then Ok ()
-    else Error (unavailable Conflict "recurrence target changed during source preview")
-  in
-  let%bind observer =
-    match S.moderator selected with
-    | Legacy observer | Extension observer -> Ok observer
-    | No_moderator ->
-      Error (unavailable Invalid_state "recurrence source has no moderator")
-  in
-  let%bind index = A.Run_admission.prepare_source_index after ~observer in
-  let%map source =
-    A.Run_source_installation.captured
-      (A.Run_state.installation index)
-      ~generation:after.identity.generation
-  in
-  { Recurrence_source_preview.source; expected_revision = after.counters.revision }
 ;;
 
 let select_existing_goal_source t entry ~parent_cleanup ~prepare ~check_selected f =

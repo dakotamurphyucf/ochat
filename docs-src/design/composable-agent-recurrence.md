@@ -1221,3 +1221,31 @@ Activation must consume the same genuine `Prepared` and `Held_run` owners throug
 a one-shot phase, without widening staged quiescence or accepting an arbitrary
 runtime replacement. This inert admission seam starts no deferred effects and
 issues no no-effects proof.
+
+## Selected native and authored controls
+
+The session-owned native adapter exposes Create/List/Get/Edit/Resume/Pause/Cancel/
+Status/History only through explicitly declared admitted bindings. It repeats
+actual current controller policy and strict generation/source/catalog/control/
+lifecycle CAS. Create starts paused; fresh Edit captures once. Exact receipt retry
+resolves the retained acknowledged definition, validates every accepted original
+target selector and complete request, and never recaptures newer source.
+
+The native surface selects Existing(session,input) or a declared authored worker
+name with explicit mode. Paths/project/environment overrides and private pins are
+not accepted wire selectors. Ordinary configured ChatMD project/private resources
+remain supported; operator Artifact targets retain their host API.
+
+Query target disclosure uses the real immutable Registry reader under current
+transcript-read/visibility, not an activating loader. Target snapshots are labeled
+historical and separately authorized. Registration and controller-basis IO finish
+before the final SAME-service host check; only pure current observation/admission/
+basis checks follow it. No history row or read snapshot grants execution or retry.
+
+Writes follow existing admitted-native metadata semantics: inherited host policy
+is checked immediately before submission and actual local original/binding/source/
+profile/stop/cancellation predicates remain at Actor commit. There is no atomic
+global cross-Actor policy transaction across mailbox/writer IO; successful ACKs
+remain acknowledged. Future launches/effects always need their own current checks.
+See the [native recurring automation guide](../agent-server/recurring-automation.md)
+for exact wire/CAS, both target families and timing/visibility limits.

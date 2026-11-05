@@ -3,6 +3,10 @@
  (action
   (with-stdout-to %{targets}
    (run %{exe:../authoring_sources/embed_documents.exe}
+    examples/libraries/recurrence-requests/chatml.project.json %{dep:../../docs-src/examples/libraries/recurrence-requests/chatml.project.json}
+    examples/libraries/recurrence-requests/src/recurrence_requests.chatml %{dep:../../docs-src/examples/libraries/recurrence-requests/src/recurrence_requests.chatml}
+    examples/libraries/recurrence-requests/src/recurrence_requests.chatmli %{dep:../../docs-src/examples/libraries/recurrence-requests/src/recurrence_requests.chatmli}
+    agent-server/recurring-automation.md %{dep:../../docs-src/agent-server/recurring-automation.md}
     examples/learning/instruction-selection/agent.chatmd %{dep:../../docs-src/examples/learning/instruction-selection/agent.chatmd}
     examples/learning/instruction-selection/chatml.project.json %{dep:../../docs-src/examples/learning/instruction-selection/chatml.project.json}
     examples/learning/instruction-selection/moderator.chatml %{dep:../../docs-src/examples/learning/instruction-selection/moderator.chatml}

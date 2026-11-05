@@ -282,6 +282,26 @@ let%expect_test
   let content = field orientation "content" in
   require_json (`Array []) (field content "selected_tools");
   let guides = field content "guides" |> Jsonaf.list_exn in
+  assert (
+    List.exists guides ~f:(fun guide ->
+      List.exists
+        (field guide "topic_ids" |> Jsonaf.list_exn)
+        ~f:(fun id -> String.equal (Jsonaf.string_exn id) "runtime.recurrence")));
+  let recurrence =
+    query
+      (request
+         ~task:"one_off_script"
+         ~features:[ "recurrences" ]
+         ~max_tokens:1_000_000
+         "prepare")
+  in
+  assert (not (has_error recurrence));
+  require_json `True (field recurrence "complete");
+  assert (
+    List.exists (items recurrence) ~f:(fun item ->
+      match Jsonaf.member "topic_id" item with
+      | Some (`String "runtime.recurrence") -> true
+      | _ -> false));
   (* Follow every advertised direct route through real surface/dependency checks. *)
   List.iter guides ~f:(fun guide ->
     let task = field guide "suggested_task" |> Jsonaf.string_exn in

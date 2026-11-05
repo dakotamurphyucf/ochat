@@ -25,6 +25,35 @@ let protocol result =
 ;;
 
 let value (t : t) = C.value t
+
+module History = struct
+  type kind =
+    | Skipped
+    | Withdrawn
+
+  type t =
+    { definition : Recurrence_identity.Definition.t
+    ; first_slot : int64
+    ; last_slot : int64
+    ; kind : kind
+    ; reason : Reason.t
+    }
+end
+
+let history t =
+  List.map (value t).history ~f:(fun (detail : V.Detail.t) ->
+    History.
+      { definition = detail.definition
+      ; first_slot = detail.first_slot
+      ; last_slot = detail.last_slot
+      ; kind =
+          (match detail.kind with
+           | Skipped -> Skipped
+           | Withdrawn -> Withdrawn)
+      ; reason = detail.reason
+      })
+;;
+
 let limits = Codec.limits
 
 let initial definition =

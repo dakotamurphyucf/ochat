@@ -70,6 +70,7 @@ type t =
   ; generated_creation_service : Generated_session_request.service option
   ; managed_session_service : Managed_session_service.t option
   ; instruction_service : Instruction_service.t option
+  ; recurrence_service : Recurrence_service.t option
   ; bind_inference_identity :
       (Inference_allocation.Port.t -> Inference_client.Identity.t) option
   ; agent_source_code_view : Agent_source_code_view.t option
@@ -272,6 +273,13 @@ let require_final_metadata_admission t binding =
     Native_tool_invocation.require_native_admission borrowed ~binding)
 ;;
 
+let check_current_metadata_admission t invocation binding =
+  let open Result.Let_syntax in
+  let%bind () = require_final_metadata_admission t binding in
+  let%bind () = check_metadata_admission t invocation binding in
+  require_final_metadata_admission t binding
+;;
+
 let agent_artifact t =
   let open Result.Let_syntax in
   let denied message = Error (Agent_protocol.Error.invalid_request message) in
@@ -466,6 +474,7 @@ let create
   ; generated_creation_service = None
   ; managed_session_service = None
   ; instruction_service = None
+  ; recurrence_service = None
   ; bind_inference_identity = None
   ; agent_source_code_view = None
   ; shell_code_view = None
@@ -476,6 +485,8 @@ let create
 let with_shell_context t services = { t with shell_context = Some services }
 let with_instruction_service t service = { t with instruction_service = Some service }
 let instruction_service t = t.instruction_service
+let with_recurrence_service t service = { t with recurrence_service = Some service }
+let recurrence_service t = t.recurrence_service
 
 let with_inference_identity_binding t ~bind =
   { t with bind_inference_identity = Some bind }

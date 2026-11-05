@@ -214,6 +214,48 @@ let features =
       ; "test/agent_server_config_test.ml"
       ; "test/chatml_composition/authoring_reference_scope_tests.ml"
       ] )
+  ; ( "recurrence.selected_metadata"
+    , "Nine explicitly selected same-controller native metadata operations with genuine \
+       invocation/current original checks and admitted write semantics"
+    , [ "lib/agent_session/recurrence_native_admission.ml"
+      ; "lib/agent_session/recurrence_native_tool.ml"
+      ]
+    , "runtime.recurrence"
+    , [ "test/recurrence_creation/recurrence_native_request_tests.ml"
+      ; "test/chatml_composition/recurrence_runtime_tests.ml"
+      ; "test/chatml_composition/recurrence_execution_tests.ml"
+      ; "test/factory_catalog_publication/recurrence_policy_tests.ml"
+      ; "test/lifecycle_helpers/recurrence_helper_tests.ml"
+      ] )
+  ; ( "recurrence.capture_and_retry"
+    , "Exact echoed generation/CAS and original request identity; persistent authored or \
+       existing target capture without receipt authority"
+    , [ "lib/agent_session/recurrence_native_schema.ml"
+      ; "lib/agent_session/recurrence_native_request.ml"
+      ; "lib/agent_session/recurrence_service.ml"
+      ; "lib/agent_server/session_factory.ml"
+      ]
+    , "runtime.recurrence"
+    , [ "test/recurrence_creation/recurrence_native_request_tests.ml"
+      ; "test/chatml_composition/recurrence_runtime_tests.ml"
+      ; "test/chatml_composition/recurrence_execution_tests.ml"
+      ; "test/factory_catalog_publication/recurrence_policy_tests.ml"
+      ; "test/lifecycle_helpers/recurrence_helper_tests.ml"
+      ] )
+  ; ( "recurrence.observation"
+    , "Bounded controller evidence and separately authorized historical target snapshots \
+       with a final same-service disclosure guard"
+    , [ "lib/agent_session/recurrence_query.ml"
+      ; "lib/agent_session/recurrence_target_view.ml"
+      ; "lib/agent_server/session_factory.ml"
+      ]
+    , "runtime.recurrence"
+    , [ "test/recurrence_creation/recurrence_native_request_tests.ml"
+      ; "test/chatml_composition/recurrence_runtime_tests.ml"
+      ; "test/chatml_composition/recurrence_execution_tests.ml"
+      ; "test/factory_catalog_publication/recurrence_policy_tests.ml"
+      ; "test/lifecycle_helpers/recurrence_helper_tests.ml"
+      ] )
   ]
 ;;
 
@@ -261,7 +303,7 @@ let implementation_sources =
   ; ( "lib/agent_server/recurrence_authored_source.ml"
     , "e8f4b287579ae891c1d8197671c335e4e07afb02105ac206a44025701111bf3b" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "f274748dd5c30677e7eee56ada5bfcb2ea7f29a413583eb9833ab88e4b444d6d" )
+    , "f88a2f916a6a2782042b8a8a0070976adb8532cf1ea23e0e87749542a1761aa4" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
@@ -305,7 +347,7 @@ let implementation_sources =
   ; ( "lib/agent_session/run_chatml_tool.ml"
     , "eadb7cf2ac6622e977db08798fbfce7661062c47883cdf4f28700f1c85249b75" )
   ; ( "lib/agent_session/script_tool_calls.ml"
-    , "b824ec6a408294f367fb7f955424f294ebfba824f785ce3e32bb62c52c0f0a6f" )
+    , "ba391e326cf6e4cc7711d2070c912b728f5343f70b2c3f18235c935f59cd04cc" )
   ; ( "lib/agent_session/session_management.ml"
     , "18431c4fd97a2d24a72b927fe8f0d20b8aea561f1f119d8f122d943f2a137f86" )
   ; ( "lib/agent_session/session_management_native.ml"
@@ -313,7 +355,7 @@ let implementation_sources =
   ; ( "lib/agent_store/delegation_store.ml"
     , "995e942b820e7812192f247ec6d7cea6b69f9137c8fb1b93dbca0db7ab19da88" )
   ; ( "lib/chat_response/authoring_context.ml"
-    , "b9d759b7df1c3dfb613756547325ad8b52082b571cc5e51a7a03c6bedbd009b8" )
+    , "b12dd8cc2405019d95b7713039fc6737397df2619da736f6478a5143cb1b358b" )
   ; ( "lib/chat_response/authoring_validation.ml"
     , "71b6c71022bde3b92bfd1954904fc516994532e938b74ebe0fb3b2f6ca948694" )
   ; ( "lib/chat_response/generated_admission.ml"
@@ -334,6 +376,20 @@ let implementation_sources =
     , "d8eea801d69ffa262cfc1d0a9bee45123ce8d4b08f74c25c67df450cd247600c" )
   ; ( "lib/agent_store/prompt_source_receipt.ml"
     , "d1089027dc9f0e69fb6db67815b2de78086d88a29334ac7c12ec6aa9f9b8258e" )
+  ; ( "lib/agent_session/recurrence_native_admission.ml"
+    , "6dedc770d93c9329092e2ec809b1e5f4158065aef2a9fba365770f012dc71297" )
+  ; ( "lib/agent_session/recurrence_native_schema.ml"
+    , "b35c2fc2e32603cfc6442f775ba80deef311d2a208768187e7aa023da2028b8a" )
+  ; ( "lib/agent_session/recurrence_native_request.ml"
+    , "03f798a7c41d5e9faffa17c1af94939238518cccac4592684ab1a155386c22ea" )
+  ; ( "lib/agent_session/recurrence_native_tool.ml"
+    , "816ff274052c38bb80b6a841cc1869143f7ac5459cc7df4198f326b23d650c85" )
+  ; ( "lib/agent_session/recurrence_query.ml"
+    , "5e6091a6154727980b4e6c69bb742ea2be8439317a7f36f035a8d9b5324fdeb4" )
+  ; ( "lib/agent_session/recurrence_target_view.ml"
+    , "fcb6bd74ac79a90cff4e472a9f90610d1425b68f94bd5fb347de1552eb8411aa" )
+  ; ( "lib/agent_session/recurrence_service.ml"
+    , "ee3c04f4c48a296d9ce311656c386709da550569513ac3995d44f30d52cccd41" )
   ]
 ;;
 
@@ -355,7 +411,7 @@ let topic_contracts =
     , "5ce300e2cce67ff2c39b548e3fd8d44b244207c7d7e6637626fe6ece0f7780ff" )
   ; ( "one_off_v1"
     , "authoring.reference"
-    , "551884bf0e3eec7b15c19abef77502c75744211a8a51494ca79cf603e9c56e97" )
+    , "3144c80ec148fea7da1a3e326d550cd088d5406db6cec9ad046213a78bd818cf" )
   ; ( "one_off_v1"
     , "runtime.delegation.generated"
     , "d302c4bb2cdb44cd4297c4ca7f32eb729e45397b7ac62f4d859f2eb00b1bd13d" )
@@ -376,7 +432,7 @@ let topic_contracts =
     , "744d516de226470f4f9fe73951c9fe399b0d42028e1e61da7add0f9d61cf39e1" )
   ; ( "tool_v1"
     , "authoring.reference"
-    , "dd874d6d66ab4fd587ad87e581c41eb6600770a503fd9194ced62ae506e0f4ca" )
+    , "e8ad92de376e5f06f713365be43cdfacd88f3ba86016000cee7965865306ce60" )
   ; ( "tool_v1"
     , "runtime.delegation.generated"
     , "d4d35599dd7ac65a9254a2eadf63292e48701c7b386510b75b6ed8eca14bfe4f" )
@@ -397,7 +453,7 @@ let topic_contracts =
     , "2cffdc2c42b8dc4daf6c040ba46553b7ba919860809f589a19b800e8bc81c0bd" )
   ; ( "moderator_v1"
     , "authoring.reference"
-    , "ad8e067d874c286eb4b067084b9558113617985ba0a190284290c15c583c3294" )
+    , "e0c3b31a2e977b6f79ba24a61288c9091a4befa260cf9ba7de97b9a405e0dd64" )
   ; ( "moderator_v1"
     , "runtime.delegation.generated"
     , "70fef1d772ad30ee50f0553374e920992775f9e7a8a17c101c979c9579b68340" )
@@ -418,7 +474,7 @@ let topic_contracts =
     , "ff2e3bb85a521f6daf0b6f64f2d6fb6f669e7decf35c98335d5d7dbb986a4c28" )
   ; ( "delegated_moderator_v1"
     , "authoring.reference"
-    , "4abe98ad1b9f860a28a97775f1c35c2e232f41f4c8c93e6e3c7ceb78ba38bd40" )
+    , "a53e47861488d01e10a95ad400c675ede2648ce0b05e6e4b4f258b12f5ad70f2" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.generated"
     , "7394ed04d093974f70797617c65c168e1a87f1d4fca5ed062adf9df3c156df85" )
@@ -434,5 +490,17 @@ let topic_contracts =
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.stop-helper"
     , "fd5987bafa6c687aa5bdb2e3ae3cda7d2f9fe3789a03a4ea7494d964c0cc467e" )
+  ; ( "one_off_v1"
+    , "runtime.recurrence"
+    , "c7c4d6f5879afae1a4550bbd42cd9ec3db94f2849c88789d8e9815210a5e3ebb" )
+  ; ( "tool_v1"
+    , "runtime.recurrence"
+    , "1465856336850d3303cc0c5c6073a75414645cfffa417c6e196348b5a134e025" )
+  ; ( "moderator_v1"
+    , "runtime.recurrence"
+    , "8bad6285d1f892174d2de3dba36c803a7af17c2720bd025596c40cb2bfe15980" )
+  ; ( "delegated_moderator_v1"
+    , "runtime.recurrence"
+    , "67c46da5b0c221e9d663c4c7d25bee64ff31977d3326891e01ef35d359b9a150" )
   ]
 ;;

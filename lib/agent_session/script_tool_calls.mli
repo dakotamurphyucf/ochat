@@ -25,6 +25,22 @@ val with_instruction_service : t -> Instruction_service.t -> t
 
 val instruction_service : t -> Instruction_service.t option
 
+(** Actual invoking session's recurrence metadata consumer. Installation grants
+    no selected tool, source, controller or execution authority. *)
+val with_recurrence_service : t -> Recurrence_service.t -> t
+
+val recurrence_service : t -> Recurrence_service.t option
+
+(** Require this SAME current native service and completed admitted binding,
+    then run the inherited host check before/after yielding and recheck physical
+    services/native admission. Reuses metadata policy; never requests approval.
+    Must run outside an Actor mailbox callback. Cancellation propagates. *)
+val check_current_metadata_admission
+  :  t
+  -> Agent_protocol.Invocation.t
+  -> Chat_response.Tool_capability.binding
+  -> (unit, Agent_protocol.Error.t) result
+
 (** Bind native Agent inference to the exact invoking handler's expiring
     actor-issued allocator, using this runtime's existing graph identity.
     The binding creates no authority and leaves unbound/selected contexts alone. *)

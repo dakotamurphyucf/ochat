@@ -84,3 +84,23 @@ let%expect_test "installed instruction helper closure reuses canonical pure libr
   [%expect
     {| instruction-selection: exact helper, three projects, shared canonical Lifecycle bytes |}]
 ;;
+
+let%expect_test "installed recurrence request helper has one pure ordinary project" =
+  Eio_main.run (fun _ ->
+    let selected = resource ~id:"recurrence-requests" () in
+    [%test_eq: int] (List.length (Sources.Resource.members selected)) 4;
+    match Sources.Resource.projects selected with
+    | [ project ] ->
+      [%test_eq: string]
+        (Sources.Project_summary.namespace project)
+        "ochat.capabilities.recurrence-requests";
+      [%test_eq: string list] (Sources.Project_summary.required_tools project) [];
+      [%test_eq: string list]
+        (List.map (Sources.Project_summary.environments project) ~f:fst)
+        [ "pure" ];
+      print_endline
+        "one pure project; explicit request sources and shared recurring automation guide"
+    | _ -> failwith "recurrence helper inventory does not match its actual project");
+  [%expect
+    {| one pure project; explicit request sources and shared recurring automation guide |}]
+;;

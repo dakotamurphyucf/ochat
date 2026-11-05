@@ -2891,6 +2891,11 @@ type _ request =
       Operator_authorization.t
       * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
       -> Recurrence_view.t list request
+  | Query_recurrences :
+      Operator_authorization.t
+      * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+      * Recurrence_query.request
+      -> Recurrence_query.t request
   | Read_recurrence_planning :
       Operator_authorization.t
       * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
@@ -25506,6 +25511,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Begin_recurrence_due _
   | Finish_recurrence_due _
   | Read_recurrence_planning _
+  | Query_recurrences _
   | Apply_recurrence_command _
   | Reserve_recurrence_child _
   | Check_recurrence_creation _
@@ -32132,6 +32138,14 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       let open Result.Let_syntax in
       let%bind controller = require_recurrence_controller t in
       Recurrence_command_admission.read t.state ~controller ~actor ~authorize
+    | Query_recurrences (actor, authorize, request) ->
+      let open Result.Let_syntax in
+      let%bind () = Recurrence_command_admission.check_read actor ~authorize t.state in
+      let%bind controller = require_recurrence_controller t in
+      let%bind planning =
+        Recurrence_runtime.status t.recurrence_runtime ~state:t.state ~controller
+      in
+      Recurrence_query.read t.state ~controller ~actor ~authorize ~planning ~request
     | Read_recurrence_planning (actor, authorize) ->
       let open Result.Let_syntax in
       let%bind () = Recurrence_command_admission.check_read actor ~authorize t.state in
@@ -34516,6 +34530,10 @@ let recurrence_command t ~actor ~authorize ~request =
 ;;
 
 let read_recurrences t ~actor ~authorize = call t (Read_recurrences (actor, authorize))
+
+let query_recurrences t ~actor ~authorize ~request =
+  call t (Query_recurrences (actor, authorize, request))
+;;
 
 let read_recurrence_planning t ~actor ~authorize =
   call t (Read_recurrence_planning (actor, authorize))

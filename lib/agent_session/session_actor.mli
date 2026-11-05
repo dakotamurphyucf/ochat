@@ -4148,6 +4148,17 @@ val read_recurrences
   -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
   -> (Recurrence_view.t list, Agent_protocol.Error.t) result
 
+(** Same original read/current lifecycle policy as read_recurrence_planning.
+    Returns bounded controller DATA only. Target visibility IO/rendering happens
+    outside the mailbox; re-read and compare the exact basis after that IO.
+    No source loan/runtime/target observation, import or retry proof is issued. *)
+val query_recurrences
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> request:Recurrence_query.request
+  -> (Recurrence_query.t, Agent_protocol.Error.t) result
+
 module Recurrence_planning_read : sig
   type t =
     { entries : Recurrence_view.t list
