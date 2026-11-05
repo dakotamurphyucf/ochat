@@ -422,7 +422,7 @@ let change_budget t budget = change t ~f:(fun t -> { t with budget })
 let hold t reason = change t ~f:(fun t -> { t with state = Open (Held reason) })
 let resume t = change t ~f:(fun t -> { t with state = Open Enabled })
 
-let bind_episode t episode ~previous =
+let episode_predecessor t episode ~previous =
   let open Result.Let_syntax in
   let admission = Episode.admission episode in
   let%bind () =
@@ -452,7 +452,20 @@ let bind_episode t episode ~previous =
       invalid "goal episode identity cannot be reused"
     | None | Some _ -> Ok ()
   in
+  Ok previous_episode_settlement
+;;
+
+let bind_episode t episode ~previous =
+  let open Result.Let_syntax in
+  let%bind previous_episode_settlement = episode_predecessor t episode ~previous in
   change t ~f:(fun t -> { t with episode = Some episode; previous_episode_settlement })
+;;
+
+let activate_episode t episode ~previous =
+  let open Result.Let_syntax in
+  let%bind previous_episode_settlement = episode_predecessor t episode ~previous in
+  change t ~f:(fun t ->
+    { t with state = Open Enabled; episode = Some episode; previous_episode_settlement })
 ;;
 
 let request_achievement t request =

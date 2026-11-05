@@ -101,6 +101,15 @@ val bind_episode
   -> previous:(Run.t * Run_receipt.t) option
   -> (t, Error.t) result
 
+(** Enable and bind a new episode atomically, advancing the Goal revision
+    exactly once. All [bind_episode] association and predecessor requirements
+    apply. This pure transition grants no admission or execution authority. *)
+val activate_episode
+  :  t
+  -> Episode.t
+  -> previous:(Run.t * Run_receipt.t) option
+  -> (t, Error.t) result
+
 val request_achievement : t -> Achievement_request.t -> (t, Error.t) result
 
 (** Retain adverse terminal association, preserving any existing hold (including

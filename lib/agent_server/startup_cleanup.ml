@@ -22,6 +22,7 @@ type t =
   ; mutable developer_close : (unit -> (unit, Agent_protocol.Error.t) result) option
   ; mutable job_scheduler : Job_scheduler.t option
   ; mutable start_scheduler : Start_scheduler.t option
+  ; mutable recurrence_execution_host : Recurrence_execution_host.t option
   ; mutable recurrence_host : Recurrence_automation_host.t option
   ; mutable schedule_scheduler : Schedule_scheduler.t option
   ; mutable registry_closed : bool
@@ -120,6 +121,7 @@ let close_events t =
 
 let close t =
   Eio.Cancel.protect (fun () ->
+    Option.iter t.recurrence_execution_host ~f:Recurrence_execution_host.close;
     let open Result.Let_syntax in
     let%bind () = close_events t in
     let%map () = close_remaining t in
@@ -145,6 +147,7 @@ let create ~sw ~store =
     ; developer_close = None
     ; job_scheduler = None
     ; start_scheduler = None
+    ; recurrence_execution_host = None
     ; recurrence_host = None
     ; schedule_scheduler = None
     ; registry_closed = false
@@ -225,6 +228,12 @@ let adopt_start_scheduler_exn t scheduler =
   if (not t.active) || t.start_scheduler_closed || Option.is_some t.start_scheduler
   then failwith "startup start scheduler ownership has already transferred";
   t.start_scheduler <- Some scheduler
+;;
+
+let adopt_recurrence_execution_host_exn t host =
+  if (not t.active) || Option.is_some t.recurrence_execution_host
+  then failwith "startup recurrence execution ownership has already transferred";
+  t.recurrence_execution_host <- Some host
 ;;
 
 let adopt_recurrence_host_exn t host =

@@ -27,7 +27,9 @@ val create
 
     Durable receipt retry is checked before parsing/reserving user history. A
     lost reply is reconciled by the exact original principal/key/digest; it never
-    recreates runtime authority or replays initialization. *)
+    recreates runtime authority or replays initialization. An ordinary request
+    cannot reuse a Goal-associated Admission: omitting that immutable association
+    conflicts, including retained receipt reconciliation. *)
 val start
   :  t
   -> actor:Operator_authorization.t

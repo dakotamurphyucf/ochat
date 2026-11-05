@@ -71,14 +71,39 @@ before persistence. Wait requires an exact host-issued timer delivery, job attem
 or subscription occurrence; human intervention is a held goal policy, not a fake
 wake occurrence. No new language syntax is required.
 
-Goal activation uses the existing checked Run preparation and admission path.
-Current public Run starts require an actual writable attachment, and
-`Authored_start` requires genuine unconsumed startup. Headless automation and goal
-reactivation therefore need one shared typed actor admission extension. It must
-capture current host authority from the actual controller occurrence or authorized
-command, recheck it at final commit, and retain the existing preparation and
-persistence-before-worker handoff. It must not fabricate an attachment or replay
-consumed startup.
+A new episode uses
+[`Goal_run_service.start_episode`](../../lib/agent_server/goal_run_service.mli)
+with an actual selected Factory entry, current operator proof, headless Workflow
+request and the original Goal/catalog revision intent. The service looks up an
+exact retained Goal association before borrowing a runtime. A retained receipt
+is data; it neither replays startup nor grants new execution authority. An
+ordinary Run receipt or a different association cannot satisfy the same request.
+Conversely, retrying a Goal-associated admission through ordinary Run start
+conflicts: the same key cannot silently drop its original Goal association.
+
+For a fresh episode, the actor validates the original revisions, creator, source,
+canonical account and current policy. It atomically persists the enabled Goal,
+new Run admission, episode and immutable link. Only an acknowledged write issues
+the live activation consumed by the existing runtime owner. No Model, native tool
+or startup callback runs before this association. Callback errors remain errors
+until the Factory's cleanup has joined; a later result can distinguish known
+admission from an uncertain write without claiming rollback or safe replay.
+
+Starting a new episode requires no previous episode or its exact terminal Run
+receipt. Resuming a live paused episode is a separate control operation; it must
+not replace the Run or rearm the old activation. Source replacement needs
+explicit adoption, and a new episode does not reset cumulative accounting.
+Episode eligibility checks global deadline and token policy. Actual inference
+and host-turn owners enforce and charge their respective count limits at their
+own admission boundaries.
+
+Submission of an already admitted inference keeps its exact registered handle,
+source, attribution and original authorization. It does not spend another attempt
+or reapply the count/token allowance to that same attempt. A later automatic
+budget hold blocks fresh work while preserving already admitted work. Deadline,
+owner and explicit control checks still apply. A fresh explicit Hold retires
+pending startup custody before its writer call, even if its public hold value
+matches an earlier automatic hold; a failed save cannot revive that custody.
 
 ## Continuation and control
 
@@ -183,11 +208,13 @@ implemented. Internal original-operator commands cover create/read, objective an
 progress edits, hold, permitted budget changes, explicit source adoption and
 abandonment. They never enable or resume execution. A minimal scoped `Goal.finish`
 primitive stages completion beside the actual Run Action receipt and checkpoint;
-only actual matching terminal evidence closes the objective. Its pure admission
-association planner still requires an authenticated controller consumer. Actual
-controller-admitted authored execution and worker-join qualification, configurable
-native/tool wrappers, continuation and cumulative accounting remain integration
-work. The [episode and settlement contract](../lib/agent_session/goal_runs.doc.md)
+only actual matching terminal evidence closes the objective. The authenticated
+`Goal_run_service` now consumes the association planner through the actual Factory
+and runtime owner. Loaded input and cold resume exercise canonical inference and
+host-turn accounting; actual worker completion versus cancellation qualifies the
+achievement boundary. Same-episode resume and selective continuation controls,
+configurable native/tool wrappers and their complete composed qualification remain
+integration work. The [episode and settlement contract](../lib/agent_session/goal_runs.doc.md)
 details these boundaries. The
 [metadata command contract](../lib/agent_session/goal_catalog.doc.md) specifies the
 16-goal/256-receipt finite retention policy, source/reset/recovery holds and complete

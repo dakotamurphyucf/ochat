@@ -67,6 +67,7 @@ module Server = struct
   type t =
     { data_dir : string
     ; recurrence_automation : Recurrence_automation_configuration.t option [@sexp.option]
+    ; recurrence_execution : Recurrence_execution_configuration.t option [@sexp.option]
     ; project_sources : Project_source_configuration.t option [@sexp.option]
     ; authoring_project_access : Authoring_project_access_configuration.t option
           [@sexp.option]

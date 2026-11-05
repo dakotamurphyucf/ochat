@@ -1524,12 +1524,10 @@ let parse_prepared_input
       ~on_attempt:tracking.on_attempt
       ~on_observation:tracking.on_observation
       ~on_completion:tracking.on_completion
-    |> fun ctx ->
-    Chat_response.Ctx.with_effect_checkpoint ctx ~check:checkpoint
-    |> fun ctx ->
-    Chat_response.Ctx.with_submission_guard
-      ctx
-      (Inference_runtime.Submission_guard.create ~refresh)
+    |> fun ctx -> Chat_response.Ctx.with_effect_checkpoint ctx ~check:checkpoint
+    (* Preserve the inherited parent submission guard. The bound allocator
+       supplies the actual same-registration input guard after admission;
+       fresh native/Agent/file effects retain the checkpoint above. *)
   in
   let convert content =
     let open Result.Let_syntax in

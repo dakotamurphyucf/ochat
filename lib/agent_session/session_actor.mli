@@ -3156,6 +3156,10 @@ module Admitted_activation : sig
     val check_basis : t -> (unit, Agent_protocol.Error.t) result
   end
 
+  (** Fresh effect checks require current issuer policy. An actual registered
+      inference allocation uses its Actor-owned same-registration submission
+      guard; automatic admission holds stop new work without re-admitting or
+      cancelling that allocation. This distinction grants no caller bypass. *)
   module Continuation : sig
     (** One exact consumed Checked/Held link. The actual admitted association
         remains live through construction and acknowledged handoff; no returned
@@ -3181,6 +3185,62 @@ module Admitted_activation : sig
     val check_basis : t -> (unit, Agent_protocol.Error.t) result
   end
 end
+
+(** Actual Goal episode admission and neutral activation through the issuing
+    actor, its selected source and original command custody. *)
+module Goal_activation : sig
+  (** Real ACK-only same-actor Goal episode/Run association and original command
+      custody. No constructor/decoder or supplied validation callback. *)
+  type t
+
+  val held : t -> Held_run.t
+
+  (** SAME live one-shot association; not a new issue on each call. Invalidation
+      before pause/source/control writer attempts is monotone, even after resume. *)
+  val checked : t -> Admitted_activation.Checked.t
+
+  module Admission : sig
+    type activation = t
+
+    type t =
+      | Rejected of Agent_protocol.Error.t
+      | Uncertain of Agent_protocol.Error.t
+      | Retained of Agent_protocol.Run_receipt.t
+      | Activation_unavailable of
+          { admission : Agent_protocol.Run_receipt.t
+          ; error : Agent_protocol.Error.t
+          }
+      | Admitted of activation
+  end
+end
+
+(** Authenticate actual selected Source_binding/preparation and its retained
+    original command. Validate exact goal intent/current source/Goal creator,
+    Workflow request, CAS, capacity and existing accounting. Atomically commit
+    Enabled policy, original new Run/Admission and immutable episode/link. The
+    request comes ONLY from preparation; no optional Goal on ordinary writers.
+    Captured actual writer-attempt evidence governs Rejected vs Uncertain. ACK
+    installs inert association before publication; no input/native/initializer.
+    Activation_unavailable preserves that known admission and exact live-issuance
+    error; Retained reports only an exact preexisting receipt lookup. *)
+val admit_held_goal_run
+  :  t
+  -> binding:Source_binding.t
+  -> intent:Goal_episode_admission.intent
+  -> session:Agent_protocol.Session_ref.t
+  -> (Goal_activation.Admission.t, Agent_protocol.Error.t) result
+
+(** Actual command+read lookup before acquiring any source/runtime. Derive
+    original principal/key/digest from authenticated command and exact request;
+    require exact immutable Run_goal_link intent and episode association. Missing
+    DATA does NOT prove no effects and grants no permission. Does not create custody. *)
+val goal_run_receipt
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> request:Goal_activation_request.t
+  -> session:Agent_protocol.Session_ref.t
+  -> (Agent_protocol.Run_receipt.t option, Agent_protocol.Error.t) result
 
 module Recurrence_activation : sig
   (** Revocable process-local controller custody for one exact acknowledged

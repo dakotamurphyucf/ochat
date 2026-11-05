@@ -2,7 +2,9 @@
     Prompt preflight uses bounded owned parsing, including captured-document and
     configured-script declarations. It does not acquire documents or project
     dependencies, compile scripts, or initialize modules. Actual source capture
-    and admission remain the catalog's responsibility. Cancellation propagates. *)
+    and admission remain the catalog's responsibility. Optional recurrence execution
+    policy uses bounded explicit local grants, separately from planning.
+    Cancellation propagates. *)
 
 val validate
   :  env:Eio_unix.Stdenv.base

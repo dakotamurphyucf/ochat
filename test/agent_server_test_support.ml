@@ -440,6 +440,7 @@ let config
     ; server =
         { data_dir = Filename.concat root "data"
         ; recurrence_automation = None
+        ; recurrence_execution = None
         ; session_helpers = []
         ; authoring_packages = []
         ; authoring_budget = None

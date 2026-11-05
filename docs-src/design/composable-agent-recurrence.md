@@ -692,6 +692,52 @@ Daemon closure revokes planning, cancels and joins sweeps, then closes borrowed
 timezone resources. Termination of the actor while protected acquisition or
 cleanup waits is an unavailable owner, never an acknowledgement or retry permit.
 
+### Explicit execution grants
+
+Planning configuration alone cannot launch work. A separate optional
+`server.recurrence_execution` grants exact local controller-to-target edges and,
+independently, permission to create captured children:
+
+```lisp
+(recurrence_execution
+ ((principal_id pri_recurrence_executor)
+  (controllers
+   (((session_id ses_controller)
+     (existing_targets (ses_controller ses_worker))
+     (captured_children true))))
+  (expires_at 2050-01-01T00:00:00Z)))
+```
+
+Self-targeting requires the controller ID in `existing_targets`. An empty target
+list is useful for a captured-child-only controller; a row granting neither
+kind is rejected. Omit `expires_at` for authority limited to the current host's
+lifetime. The entire configuration is bounded to 64 KiB, 256 controllers,
+256 targets per controller and 1,024 total target edges. Duplicate or malformed
+IDs are rejected on construction and decoding; there are no wildcard grants.
+
+[`Recurrence_execution_host`](../../lib/agent_server/recurrence_execution_host.mli)
+belongs to the actual daemon or embedded composition. It issues current proofs
+only for entries already registered with that composition's Factory. Selecting
+a target does not load or initialize it. On-demand configuration therefore does
+not select all configured sessions. Operator-only mode creates no execution
+host. Closing the host revokes its original proofs before worker teardown; it
+does not alter another host's proofs. Configuration changes use the existing
+server restart boundary.
+
+The selected controller proof has message and transcript scopes, adding session
+creation only for an explicit captured-child grant. Target proofs have message
+and transcript scopes. The original absolute expiry remains unchanged through
+source preview, intent selection, retries and reconciliation. Stored creator IDs
+and retained receipts cannot recreate these proofs.
+
+The host delegates to the existing child-creation and recurrence Run services.
+A captured target requires the actual Factory-produced child and matching
+controller reservation, association and target delegation record. The host
+creates no alternate executor or permission registry. Lower owners still enforce
+current source, control, admission, reciprocal acknowledgement and cleanup.
+These composition APIs provide execution policy; the scheduler's launch and
+recovery integration is a separate requirement.
+
 A live daemon may continue after client disconnect. Embedded execution requires
 its controller to remain selected/open in the host; store reopening does not
 implicitly select every recurrence. Operator-only mode does not execute. Durable
