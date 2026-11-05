@@ -48,6 +48,7 @@ let protected_children t = (value t).protected_children
 let child_associations t = (value t).child_associations
 let unlinked_children t = S.unlinked_children (value t)
 let pending_count t = S.pending_count (value t)
+let unresolved_count t = S.unresolved_count (value t)
 let delay_basis t = (value t).delay_basis
 let executions t = S.execution_rows (value t)
 let find_execution t occurrence = S.find_execution (value t) occurrence

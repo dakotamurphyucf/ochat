@@ -595,8 +595,20 @@ val fold_indexed_retained_states
   -> f:('a -> Agent_session.Session_state.t -> ('a, Agent_protocol.Error.t) Result.t)
   -> ('a, Agent_protocol.Error.t) Result.t
 
-(** Reconstructs one indexed session on demand. The caller must serialize
-    loads for a session ID and register the returned entry exactly once. *)
+(** Automatic host recovery, retaining the actual recovery selection through
+    startup or lazy registry publication. Validated captured recurrence children
+    undergo normal durable/Run recovery without runtime construction and remain
+    unselected until a genuine new activation handoff. Caller serializes the ID
+    and must publish with [Session_registry.add_recovered] or the recovery loader. *)
+val recover_registered_session
+  :  t
+  -> Agent_store.Session_index.Entry.t
+  -> (Session_registry.Recovered.t, Agent_protocol.Error.t) result
+
+(** Reconstructs one genuinely ordinary indexed session on demand. The caller must
+    serialize loads for a session ID and register the returned entry exactly once.
+    Captured recurrence children require [recover_registered_session]; this entry-
+    only compatibility path refuses them rather than discarding selection. *)
 val recover_session
   :  t
   -> Agent_store.Session_index.Entry.t

@@ -13,6 +13,7 @@ module Cut = struct
   type t =
     | Activate
     | Revoked
+    | Source_replaced
   [@@deriving sexp_of]
 end
 
@@ -32,15 +33,19 @@ let specialist_prompt =
 <tool name="read_file"><read id="private" path="${workspace}"/></tool>
 <script id="specialist" language="chatml" kind="moderator" api="extensibility-v1">
 let initial_state = 0
-let on_event ctx state event = match event with
-| `Session_start ->
+let read_private state =
   let* result = Tool.call("read_file", `Object([
     {key = "root"; value = `String("private")},
     {key = "file"; value = `String("private.txt")}
   ])) in
   (match result with
   | `Error(message) -> Task.fail(message)
-  | `Ok(_) -> let* ignored = Run.continue() in Task.pure(state + 1))
+  | `Ok(_) -> Task.pure(state + 1))
+let on_event ctx state event = match event with
+| `Session_start ->
+  let* next = read_private(state) in
+  let* ignored = Run.continue() in Task.pure(next)
+| `Session_resume -> read_private(state)
 | _ -> Task.pure(state)
 </script>|}
 ;;
@@ -48,14 +53,16 @@ let on_event ctx state event = match event with
 (* Support.with_daemon intentionally exercises the default Ui family. Keep this
    small composition-root variant so this law uses a real Headless definition;
    no copied definition, capability registry or admission issuer is supplied. *)
-let with_headless_daemon env root config ~providers ~constructions f =
+let with_headless_daemon ?(provider_limit = 1) env root config ~providers ~constructions f
+  =
   Eio.Switch.run (fun sw ->
     let policy =
       T.inference_policy
         ~default_model:"fixture-model"
         ~post_stream:(fun ~sw:_ ~inputs:_ ->
           Int.incr providers;
-          if !providers > 1 then failwith "authored recurrence replayed provider";
+          if !providers > provider_limit
+          then failwith "authored recurrence replayed provider";
           Cold.completed_response "546 actual recurrence provider")
     in
     let policy =
@@ -223,6 +230,16 @@ let stage_observer env daemon child (artifact : Artifact.Artifact.t) =
   observer
 ;;
 
+let activation_attempt child intent =
+  Attempt.create
+    ~intent
+    ~number:0
+    ~principal_id:principal.id
+    ~expected_revision:(state child).counters.revision
+    ~key:(P.Idempotency_key.of_string "546-actual-activation" |> protocol_ok)
+  |> protocol_ok
+;;
+
 let intent_attempt daemon parent child reservation observer =
   let recurrence = entry parent in
   let association =
@@ -256,16 +273,7 @@ let intent_attempt daemon parent child reservation observer =
       ~child:(Some child_data)
     |> protocol_ok
   in
-  let attempt =
-    Attempt.create
-      ~intent
-      ~number:0
-      ~principal_id:principal.id
-      ~expected_revision:current.counters.revision
-      ~key:(P.Idempotency_key.of_string "546-actual-activation" |> protocol_ok)
-    |> protocol_ok
-  in
-  intent, attempt
+  intent, activation_attempt child intent
 ;;
 
 let await_completed env child providers =
@@ -292,6 +300,446 @@ let await_completed env child providers =
         loop ())
     in
     loop ())
+;;
+
+(* Replace the actual selected parent through ordinary authenticated control and
+   prompt upgrade, not filesystem edits alone or a copied registry. The old
+   captured target remains frozen; its live source/resource association changes. *)
+let replace_parent_source env root sw daemon connection parent old_target =
+  let before = state parent in
+  let handle =
+    Agent_client.Session_handle.attach
+      ~sw
+      ~clock:(Eio.Stdenv.clock env)
+      ~connection
+      ~session_id:before.identity.session_id
+      ~mode:Read_write
+      ~subscribe:false
+      ()
+    |> protocol_ok
+  in
+  protect_cleanup
+    ~finally:(fun () -> Agent_client.Session_handle.close handle)
+    (fun () ->
+       Agent_client.Session_handle.stop handle ~mode:Cancel |> protocol_ok |> ignore;
+       Owner.unload_and_wait parent.runtime |> protocol_ok;
+       assert (not (Owner.is_loaded parent.runtime));
+       Eio.Path.save
+         ~create:(`Or_truncate 0o600)
+         Eio.Path.(env#fs / root / "specialist.chatmd")
+         (specialist_prompt
+          ^ "\n<developer>546 replaced actual authored source.</developer>");
+       let catalog = Daemon.prompts daemon in
+       let definitions =
+         A.Prompt_catalog.entries catalog
+         |> List.map ~f:(fun entry -> entry.A.Prompt_catalog.definition)
+       in
+       let prepared =
+         A.Prompt_catalog.prepare
+           catalog
+           ~transaction_id:(fun _ -> P.Id.Transaction.create ())
+           ~created_at:(P.Timestamp.now ())
+           definitions
+       in
+       A.Prompt_catalog.install catalog prepared;
+       let target_revision =
+         A.Prompt_catalog.entries catalog
+         |> List.find_exn ~f:(fun entry ->
+           Option.exists
+             before.spec.prompt_definition_id
+             ~f:(P.Id.Prompt_definition.equal entry.A.Prompt_catalog.definition.id))
+         |> fun entry ->
+         match entry.A.Prompt_catalog.availability with
+         | Ready revision -> A.Prompt_revision.id revision
+         | _ -> failwith "actual replacement prompt is not Ready"
+       in
+       assert (
+         not (P.Id.Prompt_revision.equal before.spec.prompt_revision_id target_revision));
+       Agent_client.Connection.request
+         connection
+         (Session_upgrade_prompt
+            { session_id = before.identity.session_id
+            ; attachment_id = (Agent_client.Session_handle.attachment handle).id
+            ; expected_revision = (state parent).counters.revision
+            ; target_revision
+            ; allow_migration = true
+            ; idempotency_key =
+                P.Idempotency_key.of_string "546-real-parent-source-upgrade"
+                |> protocol_ok
+            })
+       |> protocol_ok
+       |> ignore;
+       start_parent_settled env sw connection parent;
+       assert (
+         P.Id.Prompt_revision.equal (state parent).spec.prompt_revision_id target_revision);
+       let replaced = preview daemon parent in
+       assert (not (Jsonaf.exactly_equal (target_json old_target) (target_json replaced)));
+       let authored_selector target : Kind.Authored_tool.t =
+         match Target.view target with
+         | Fresh_child { source_kind = Authored_tool selected; _ } -> selected
+         | Fresh_child { source_kind = Artifact; _ } | Existing_session _ ->
+           failwith "actual replacement lost authored source selection"
+       in
+       assert (
+         not
+           (String.equal
+              (authored_selector old_target).source_sha256
+              (authored_selector replaced).source_sha256));
+       let public = public_names parent in
+       assert (List.mem public "specialist" ~equal:String.equal);
+       assert (not (List.mem public "read_file" ~equal:String.equal)))
+;;
+
+let ready_input_attempt daemon parent child source =
+  let prior = Entry.current (entry parent) in
+  let schedule =
+    match A.Recurrence_definition.schedule prior with
+    | Interval { rule; _ } ->
+      A.Recurrence_definition.Schedule.Interval
+        { rule; first_due = P.Timestamp.to_time_ns (P.Timestamp.now ()) }
+    | Calendar _ -> failwith "private recurrence fixture requires an interval"
+  in
+  let target =
+    Target.create_existing
+      ~session:
+        (P.Session_ref.create
+           ~server_id:(S.server_id (Daemon.store daemon))
+           ~session_id:(state child).identity.session_id)
+      ~source
+      ~configuration_revision:(state child).spec.configuration_revision
+      ~input:
+        { kind = Plain_text; text = "546 initialized private runtime"; attachments = [] }
+    |> protocol_ok
+  in
+  command
+    parent
+    "546-ready-edit"
+    (Edit
+       (recurrence_id, { schedule; target; policy = A.Recurrence_definition.policy prior }))
+  |> ignore;
+  command parent "546-ready-enable" (Enable recurrence_id) |> ignore;
+  Actor.sweep_recurrences parent.actor |> protocol_ok;
+  let recurrence = entry parent in
+  let definition = Entry.current recurrence in
+  let frontier = Entry.frontier recurrence |> protocol_ok in
+  let nominal =
+    Frontier.ready frontier
+    |> List.find ~f:(fun nominal ->
+      A.Recurrence_identity.Definition.equal
+        (A.Recurrence_identity.Occurrence.definition (A.Recurrence_nominal.key nominal))
+        (A.Recurrence_definition.key definition))
+    |> Option.value_or_thunk ~default:(fun () ->
+      raise_s
+        [%sexp
+          "new initialized input occurrence is not ready"
+        , (Entry.to_document recurrence |> document_ok |> D.Document.json : Jsonaf.t)])
+  in
+  let intent =
+    Intent.create
+      ~definition
+      ~control_revision:(Entry.control_revision recurrence)
+      ~nominal_json:
+        (Frontier.find_ready_json frontier (A.Recurrence_nominal.key nominal)
+         |> Option.value_exn)
+      ~target:
+        (P.Session_ref.create
+           ~server_id:(S.server_id (Daemon.store daemon))
+           ~session_id:(state child).identity.session_id)
+      ~source
+      ~child:None
+    |> protocol_ok
+  in
+  let attempt =
+    Attempt.create
+      ~intent
+      ~number:0
+      ~principal_id:principal.id
+      ~expected_revision:(state child).counters.revision
+      ~key:(P.Idempotency_key.of_string "546-ready-input" |> protocol_ok)
+    |> protocol_ok
+  in
+  intent, attempt
+;;
+
+let initialized_restart
+      env
+      root
+      configuration
+      ~providers
+      ~constructions
+      ~parent_id
+      ~child_id
+      ~reservation
+      ~target
+      ~admission
+      ~completed
+  =
+  with_headless_daemon
+    ~provider_limit:2
+    env
+    root
+    configuration
+    ~providers
+    ~constructions
+    (fun sw daemon connection ->
+       let parent = Registry.load (Daemon.registry daemon) parent_id |> protocol_ok in
+       start_parent_settled env sw connection parent;
+       with_planner env sw daemon parent (fun () ->
+         let session =
+           P.Session_ref.create
+             ~server_id:(S.server_id (Daemon.store daemon))
+             ~session_id:child_id
+         in
+         let child =
+           Factory.acquire_recurrence_target
+             (Daemon.factory daemon)
+             ~session
+             ~actor:proof
+             ~authorize
+           |> protocol_ok
+         in
+         let restored = state child in
+         assert (
+           A.Session_state.Runtime_initialization.equal
+             Ready
+             restored.runtime_initialization);
+         assert (not (Owner.is_loaded child.runtime));
+         assert (not (Owner.has_activation_handoff child.runtime));
+         assert (not (Registry.execution_selected (Daemon.registry daemon) child));
+         let old_index = Option.value_exn restored.run_state in
+         let old_run =
+           A.Run_state.find old_index admission.P.Run_receipt.run_id |> Option.value_exn
+         in
+         (match old_run.lifecycle with
+          | Terminal Interrupted -> ()
+          | _ ->
+            raise_s [%sexp "prior Workflow must remain interrupted", (old_run : P.Run.t)]);
+         assert (
+           List.exists (A.Run_state.receipts old_index) ~f:(P.Run_receipt.equal admission));
+         assert (
+           List.equal
+             P.Moderator_execution.equal
+             completed.A.Session_state.moderator_executions
+             restored.moderator_executions);
+         let record =
+           Ledger.resolve
+             (S.delegations (Daemon.store daemon))
+             (Option.value_exn restored.spec.delegation)
+           |> store_ok
+         in
+         let origin = A.Recurrence_child_origin.of_record record |> protocol_ok in
+         let original_key =
+           A.Recurrence_identity.Occurrence.definition
+             (Reservation.occurrence reservation)
+         in
+         let original_definition =
+           Entry.definitions (entry parent)
+           |> List.find_exn ~f:(fun definition ->
+             A.Recurrence_identity.Definition.equal
+               (A.Recurrence_definition.key definition)
+               original_key)
+         in
+         A.Recurrence_child_origin.validate_definition origin original_definition
+         |> protocol_ok;
+         let counts = !constructions, !providers in
+         let preview =
+           Factory.preview_recurrence_source
+             (Daemon.factory daemon)
+             child
+             ~actor:proof
+             ~authorize
+           |> protocol_ok
+         in
+         let source = Factory.Recurrence_source_preview.source preview in
+         assert (P.Run_source.equal old_run.source source);
+         [%test_eq: int * int] counts (!constructions, !providers);
+         assert (not (Owner.is_loaded child.runtime));
+         let history = restored.conversation.canonical_history in
+         let service =
+           Service.create
+             ~factory:(Daemon.factory daemon)
+             ~authorize:(fun _ current -> authorize current)
+             ~automatic_policy:(fun _ _ -> Ok true)
+         in
+         let execution =
+           Entry.frontier (entry parent)
+           |> protocol_ok
+           |> fun frontier ->
+           Frontier.find_execution frontier (Reservation.occurrence reservation)
+           |> Option.value_exn
+         in
+         (* Import the old Run's factual terminal outcome before planning more
+            work; an unreconciled admission correctly retains pending capacity. *)
+         (match
+            Service.reconcile
+              service
+              ~controller:parent
+              ~controller_actor:proof
+              ~target:child
+              ~target_actor:proof
+              ~intent:(A.Recurrence_execution.intent execution)
+              ~attempt:
+                (A.Recurrence_execution.current_attempt execution
+                 |> A.Recurrence_execution.Attempt.request)
+            |> protocol_ok
+          with
+          | Absent -> failwith "recovered original admission disappeared"
+          | Retained retained ->
+            assert (P.Run_receipt.equal admission retained.admission);
+            retained.reconciliation |> protocol_ok |> ignore);
+         [%test_eq: int * int] counts (!constructions, !providers);
+         assert (not (Owner.is_loaded child.runtime));
+         let intent, attempt = ready_input_attempt daemon parent child source in
+         (* The original child remains tied to the historical Fresh definition,
+            while this NEW Existing-session occurrence owns its NEW Run. *)
+         A.Recurrence_child_origin.validate_definition origin original_definition
+         |> protocol_ok;
+         let next_admission =
+           Service.activate
+             service
+             ~controller:parent
+             ~controller_actor:proof
+             ~target:child
+             ~target_actor:proof
+             ~intent
+             ~attempt
+           |> Run_service_tests.activated child
+         in
+         assert (not (P.Id.Run.equal admission.run_id next_admission.run_id));
+         let final =
+           Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+             let rec loop () =
+               let current = Dispatch_captured_tests.healthy child in
+               let run =
+                 A.Run_state.find
+                   (Option.value_exn current.run_state)
+                   next_admission.run_id
+                 |> Option.value_exn
+               in
+               let resumes =
+                 List.filter current.moderator_executions ~f:(fun receipt ->
+                   P.Moderator_execution.equal_phase receipt.context.phase Session_resume)
+               in
+               if
+                 Int.equal !providers 2
+                 && Option.is_none current.active_operation
+                 && T.observed_idle current.lifecycle.observed
+                 && (match run.lifecycle with
+                     | Terminal (Completed _) -> true
+                     | _ -> false)
+                 &&
+                 match resumes with
+                 | [ { status = Completed _; _ } ] -> true
+                 | _ -> false
+               then current
+               else (
+                 Eio.Fiber.yield ();
+                 loop ())
+             in
+             loop ())
+         in
+         let final_index = Option.value_exn final.run_state in
+         assert (
+           P.Run.equal
+             old_run
+             (A.Run_state.find final_index admission.run_id |> Option.value_exn));
+         assert (
+           List.equal
+             P.History.equal_entry
+             history
+             (List.take final.conversation.canonical_history (List.length history)));
+         let next_run =
+           A.Run_state.find final_index next_admission.run_id |> Option.value_exn
+         in
+         assert (P.Run.Mode.equal Single_turn next_run.mode);
+         let next_origin =
+           A.Run_state.recurrence_origin final_index next_run.id |> Option.value_exn
+         in
+         A.Recurrence_run_origin.validate next_origin ~intent ~attempt |> protocol_ok;
+         A.Recurrence_run_origin.validate_run
+           next_origin
+           ~run:next_run
+           ~admission:next_admission
+         |> protocol_ok;
+         let starts =
+           List.filter final.moderator_executions ~f:(fun receipt ->
+             P.Moderator_execution.equal_phase receipt.context.phase Session_start)
+         in
+         let old_starts =
+           List.filter completed.moderator_executions ~f:(fun receipt ->
+             P.Moderator_execution.equal_phase receipt.context.phase Session_start)
+         in
+         assert (List.equal P.Moderator_execution.equal old_starts starts);
+         [%test_eq: int] 1 (List.length starts);
+         let resume =
+           List.find_exn final.moderator_executions ~f:(fun receipt ->
+             P.Moderator_execution.equal_phase receipt.context.phase Session_resume)
+         in
+         let old_invocation = List.hd_exn completed.invocations in
+         let native =
+           match
+             List.filter final.invocations ~f:(fun invocation ->
+               not (P.Id.Invocation.equal invocation.context.id old_invocation.context.id))
+           with
+           | [ invocation ] -> invocation
+           | invocations ->
+             raise_s
+               [%sexp
+                 "one genuine initialized private effect"
+               , (invocations : P.Invocation.t list)]
+         in
+         [%test_eq: string] "read_file" native.context.tool_name;
+         assert (
+           Option.equal
+             P.Inference_origin.equal
+             native.inference_origin
+             (Some (Run next_run.id)));
+         assert (
+           Option.equal
+             P.Id.Moderator_execution.equal
+             native.parent_event
+             (Some resume.context.id));
+         (match native.status with
+          | Resolved (Complete result) | Published (Complete result) ->
+            assert (String.is_substring (Jsonaf.to_string result) ~substring:native_result)
+          | _ -> raise_s [%sexp (native : P.Invocation.t)]);
+         assert (
+           P.Id.Prompt_revision.equal
+             restored.spec.prompt_revision_id
+             final.spec.prompt_revision_id);
+         let artifact = captured_artifact target in
+         let retained_artifact =
+           Artifact.load
+             (Artifact.open_existing
+                ~env
+                ~root:
+                  (Agent_store.Data_root.prompt_artifacts_path
+                     (S.data_root (Daemon.store daemon)))
+              |> store_ok)
+             artifact.revision_id
+           |> store_ok
+         in
+         [%test_eq: string] artifact.manifest_sha256 retained_artifact.manifest_sha256;
+         assert (P.Timestamp.equal artifact.created_at retained_artifact.created_at);
+         let stable = document child, !constructions, !providers in
+         (match
+            Service.activate
+              service
+              ~controller:parent
+              ~controller_actor:proof
+              ~target:child
+              ~target_actor:proof
+              ~intent
+              ~attempt
+            |> protocol_ok
+          with
+          | Retained retained ->
+            assert (P.Run_receipt.equal next_admission retained.admission);
+            retained.reconciliation |> protocol_ok |> ignore
+          | Attempted _ -> failwith "initialized duplicate recreated runtime authority");
+         let saved, builds, calls = stable in
+         assert (Jsonaf.exactly_equal saved (document child));
+         [%test_eq: int * int] (builds, calls) (!constructions, !providers)))
 ;;
 
 let run env (cut : Cut.t) =
@@ -359,6 +807,7 @@ let run env (cut : Cut.t) =
                 [%test_eq: int] 0 !providers;
                 created.id, child_id, reservation, target))
        in
+       let initialized = ref None in
        (* New daemon/Store/Actor/Owner lifetimes; no previous permit, runtime,
          prepared source, native registry or inferred authority survives. *)
        with_headless_daemon
@@ -375,6 +824,7 @@ let run env (cut : Cut.t) =
             with_planner env sw daemon parent (fun () ->
               Registry.load (Daemon.registry daemon) child_id |> protocol_ok |> ignore;
               let child, record = assert_dormant daemon child_id in
+              assert (not (Registry.execution_selected (Daemon.registry daemon) child));
               A.Recurrence_child_origin.of_record record
               |> protocol_ok
               |> fun origin ->
@@ -390,6 +840,27 @@ let run env (cut : Cut.t) =
               let intent, attempt =
                 intent_attempt daemon parent child reservation observer
               in
+              (match cut with
+               | Activate | Revoked -> ()
+               | Source_replaced ->
+                 replace_parent_source env root sw daemon connection parent target;
+                 let reference = Option.value_exn (state child).spec.delegation in
+                 let current_record =
+                   Ledger.resolve (S.delegations (Daemon.store daemon)) reference
+                   |> store_ok
+                 in
+                 assert (Option.is_none current_record.revocation);
+                 assert (
+                   Option.equal
+                     Int64.equal
+                     (state child).parent_stop_epoch
+                     (Some (state parent).stop_epoch));
+                 assert (not (Owner.is_loaded child.runtime)));
+              let attempt =
+                match cut with
+                | Activate | Revoked -> attempt
+                | Source_replaced -> activation_attempt child intent
+              in
               let service =
                 Service.create
                   ~factory:(Daemon.factory daemon)
@@ -400,7 +871,7 @@ let run env (cut : Cut.t) =
               let before_frames = frames env child in
               let counts = !constructions, !providers in
               (match cut with
-               | Activate -> ()
+               | Activate | Source_replaced -> ()
                | Revoked ->
                  let revoked =
                    Ledger.revoke
@@ -425,7 +896,7 @@ let run env (cut : Cut.t) =
                   ~attempt
               in
               match cut with
-              | Revoked ->
+              | Revoked | Source_replaced ->
                 let rejected =
                   match result with
                   | Error error -> Error error
@@ -489,7 +960,23 @@ let run env (cut : Cut.t) =
                    assert (P.Run_receipt.equal admission retained.admission);
                    retained.reconciliation |> protocol_ok |> ignore
                  | Attempted _ -> failwith "duplicate workflow reentered source/runtime");
-                [%test_eq: int * int] stable (!constructions, !providers))))
+                [%test_eq: int * int] stable (!constructions, !providers);
+                initialized := Some (admission, current)));
+       match !initialized with
+       | None -> ()
+       | Some (admission, completed) ->
+         initialized_restart
+           env
+           root
+           configuration
+           ~providers
+           ~constructions
+           ~parent_id
+           ~child_id
+           ~reservation
+           ~target
+           ~admission
+           ~completed)
 ;;
 
 let%expect_test
@@ -497,7 +984,7 @@ let%expect_test
   =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
-    List.iter [ Cut.Activate; Revoked ] ~f:(fun cut ->
+    List.iter [ Cut.Source_replaced; Activate; Revoked ] ~f:(fun cut ->
       try run env cut with
       | exn ->
         Exn.reraise
@@ -506,7 +993,8 @@ let%expect_test
              [%sexp "actual captured authored recurrence", (cut : Cut.t)])));
   print_endline
     "Headless provenance; deterministic selected private capture; real cold child \
-     Run/native dispatch once; revoked source refuses before effects";
+     Run/native dispatch once; initialized cold child uses a NEW real input Run; revoked \
+     or replaced source refuses before effects";
   [%expect
-    {| Headless provenance; deterministic selected private capture; real cold child Run/native dispatch once; revoked source refuses before effects |}]
+    {| Headless provenance; deterministic selected private capture; real cold child Run/native dispatch once; initialized cold child uses a NEW real input Run; revoked or replaced source refuses before effects |}]
 ;;

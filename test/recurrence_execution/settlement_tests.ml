@@ -130,6 +130,58 @@ let assert_roundtrip entry =
   assert (D.Json.equal (entry_json entry) (entry_json (restore entry)))
 ;;
 
+let settlement_catalog ~revision entries =
+  A.Recurrence_catalog.of_jsonaf
+    (`Object
+        [ "revision", `String (Int64.to_string revision)
+        ; ( "entries"
+          , `Array
+              (List.map entries ~f:(fun entry ->
+                 `Object
+                   [ "id", P.Id.Recurrence.to_json (E.id entry)
+                   ; "document", entry_json entry
+                   ])) )
+        ; "receipts", `Array []
+        ])
+  |> protocol_ok
+;;
+
+(* Pure catalog DATA, not Actor/Store authority. The existing Entry projection is
+   the oracle; catalog import must preserve its sibling and exact duplicate. *)
+let assert_catalog_import previous expected (origin, terminal) =
+  let module Catalog = A.Recurrence_catalog in
+  let sibling = enabled (definition "settlement_catalog_sibling") in
+  let before = settlement_catalog ~revision:3L [ previous; sibling ] in
+  let imported, _ =
+    Catalog.import_execution
+      before
+      ~origin
+      ~terminal:(Some terminal)
+      ~automatic:Current_policy_allows
+    |> protocol_ok
+  in
+  [%test_eq: int64] (Catalog.revision imported) 4L;
+  let find catalog entry = Catalog.find catalog (E.id entry) |> Option.value_exn in
+  assert (D.Json.equal (entry_json expected) (entry_json (find imported expected)));
+  assert (D.Json.equal (entry_json sibling) (entry_json (find imported sibling)));
+  Catalog.validate_transition before ~incoming:imported |> protocol_ok;
+  let replay, _ =
+    Catalog.import_execution
+      imported
+      ~origin
+      ~terminal:(Some terminal)
+      ~automatic:Current_policy_allows
+    |> protocol_ok
+  in
+  assert (phys_equal imported replay);
+  let mixed =
+    settlement_catalog
+      ~revision:4L
+      [ expected; E.pause sibling ~reason:Source_review |> protocol_ok ]
+  in
+  assert (Result.is_error (Catalog.validate_transition before ~incoming:mixed))
+;;
+
 let%expect_test
     "atomic completion data, paused delay enable and out-of-order detail retirement"
   =
@@ -210,7 +262,55 @@ let%expect_test
       assert (D.Json.equal before (entry_json held));
       assert (E.equal_control (E.control held) (Paused reason));
       assert (Option.is_none (H.alarm (frontier held)));
-      assert_roundtrip held);
+      assert_roundtrip held;
+      assert_catalog_import paused held interrupted);
+  let interrupted = evidence execution ~completed_at ~outcome:Interrupted in
+  List.iter
+    [ recorded; E.retire recorded ~reason:Operator_retire |> protocol_ok ]
+    ~f:(fun previous ->
+      let held, _ = import previous interrupted in
+      assert_catalog_import previous held interrupted);
+  let module Catalog = A.Recurrence_catalog in
+  let sibling = enabled (definition "settlement_control_sibling") in
+  let before = settlement_catalog ~revision:3L [ recorded; sibling ] in
+  let subset =
+    settlement_catalog
+      ~revision:4L
+      [ E.pause recorded ~reason:Source_review |> protocol_ok; sibling ]
+  in
+  assert (Result.is_error (Catalog.validate_transition before ~incoming:subset));
+  let coalesce =
+    A.Recurrence_policy.create
+      ~misfire:Coalesce
+      ~grace_ms:60_000L
+      ~max_pending:1
+      ~max_history:1
+      ~max_calendar_steps:256
+    |> protocol_ok
+  in
+  let selected, phase, _ =
+    step
+      (enabled (definition "execution_capacity" ~policy:coalesce))
+      ~phase:None
+      (snapshot ~wall:(at_ms 0) ~elapsed_ms:0)
+  in
+  [%test_eq: int64 list] (slots selected) [ 0L ];
+  [%test_eq: int] (H.unresolved_count (frontier selected)) 0;
+  let replaced, _, _ =
+    step selected ~phase (snapshot ~wall:(at_ms 1000) ~elapsed_ms:1000)
+  in
+  [%test_eq: int64 list] (slots replaced) [ 1L ];
+  [%test_eq: int64] (H.summary (frontier replaced)).withdrawn 1L;
+  let unresolved, _ = record selected 0L in
+  assert (List.is_empty (H.protected_children (frontier unresolved)));
+  [%test_eq: int] (H.unresolved_count (frontier unresolved)) 1;
+  let blocked, _, _ =
+    step unresolved ~phase (snapshot ~wall:(at_ms 1000) ~elapsed_ms:1000)
+  in
+  [%test_eq: int64 list] (slots blocked) [];
+  [%test_eq: int] (H.pending_count (frontier blocked)) 1;
+  [%test_eq: int64] (H.summary (frontier blocked)).omitted 1L;
+  assert_roundtrip blocked;
   List.iter
     [ [ 1L; 2L ]; [ 2L; 1L ] ]
     ~f:(fun order ->

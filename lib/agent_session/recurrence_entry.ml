@@ -651,6 +651,67 @@ let enable_projection p =
         })
 ;;
 
+let execution_import_evidence p n =
+  match p.frontier, n.frontier with
+  | Some old, Some next ->
+    List.filter_map (Recurrence_frontier.executions next.value) ~f:(fun execution ->
+      let key =
+        Recurrence_execution_intent.occurrence (Recurrence_execution.intent execution)
+      in
+      match Recurrence_frontier.find_execution old.value key with
+      | None -> None
+      | Some previous ->
+        let old = Recurrence_execution.current_attempt previous in
+        let next = Recurrence_execution.current_attempt execution in
+        if
+          Option.equal
+            Recurrence_run_origin.equal
+            (Recurrence_execution.Attempt.origin old)
+            (Recurrence_execution.Attempt.origin next)
+          && Option.equal
+               Recurrence_run_reference.equal
+               (Recurrence_execution.Attempt.terminal old)
+               (Recurrence_execution.Attempt.terminal next)
+        then None
+        else Some execution)
+  | None, _ | Some _, None -> []
+;;
+
+let validate_execution_import previous ~incoming =
+  let open Result.Let_syntax in
+  let p = C.value previous
+  and n = C.value incoming in
+  let%bind () =
+    if List.equal same_definition p.definitions n.definitions
+    then Ok ()
+    else invalid "entry imports multiple facts or changes definitions"
+  in
+  match execution_import_evidence p n with
+  | [ execution ] ->
+    let attempt = Recurrence_execution.current_attempt execution in
+    let%bind origin =
+      Result.of_option
+        (Recurrence_execution.Attempt.origin attempt)
+        ~error:(P.Error.invalid_request "settlement entry lacks origin")
+    in
+    let terminal = Recurrence_execution.Attempt.terminal attempt in
+    let candidate automatic =
+      let%map expected, _ = settlement_projection p ~origin ~terminal ~automatic in
+      D.Json.equal (raw_json expected) (raw_json n)
+    in
+    (match candidate Historical_only with
+     | Ok true -> Ok ()
+     | Ok false | Error _ ->
+       (match p.control with
+        | Paused _ | Retired _ ->
+          invalid "held or retired settlement cannot rearm or alter control"
+        | Enabled ->
+          (match candidate Current_policy_allows with
+           | Ok true -> Ok ()
+           | Ok false | Error _ -> invalid "entry differs from exact atomic settlement")))
+  | [] | _ :: _ :: _ -> invalid "entry imports multiple facts or changes definitions"
+;;
+
 let validate_transition previous ~incoming =
   let open Result.Let_syntax in
   let%bind () = validate_projection (C.value incoming) in
@@ -677,31 +738,7 @@ let validate_transition previous ~incoming =
     && Int64.equal p.control_revision n.control_revision
     && not unchanged
   in
-  let evidence =
-    match p.frontier, n.frontier with
-    | Some old, Some next ->
-      List.filter_map (Recurrence_frontier.executions next.value) ~f:(fun execution ->
-        let key =
-          Recurrence_execution_intent.occurrence (Recurrence_execution.intent execution)
-        in
-        match Recurrence_frontier.find_execution old.value key with
-        | None -> None
-        | Some previous ->
-          let old = Recurrence_execution.current_attempt previous in
-          let next = Recurrence_execution.current_attempt execution in
-          if
-            Option.equal
-              Recurrence_run_origin.equal
-              (Recurrence_execution.Attempt.origin old)
-              (Recurrence_execution.Attempt.origin next)
-            && Option.equal
-                 Recurrence_run_reference.equal
-                 (Recurrence_execution.Attempt.terminal old)
-                 (Recurrence_execution.Attempt.terminal next)
-          then None
-          else Some execution)
-    | None, _ | Some _, None -> []
-  in
+  let evidence = execution_import_evidence p n in
   let%bind () =
     if unchanged
     then
@@ -709,33 +746,7 @@ let validate_transition previous ~incoming =
       then Ok ()
       else invalid "unchanged recurrence advanced control"
     else if not (List.is_empty evidence)
-    then (
-      match evidence, added with
-      | [ execution ], [] ->
-        let attempt = Recurrence_execution.current_attempt execution in
-        let%bind origin =
-          Result.of_option
-            (Recurrence_execution.Attempt.origin attempt)
-            ~error:(P.Error.invalid_request "settlement entry lacks origin")
-        in
-        let terminal = Recurrence_execution.Attempt.terminal attempt in
-        let candidate automatic =
-          let%map expected, _ = settlement_projection p ~origin ~terminal ~automatic in
-          D.Json.equal (raw_json expected) (raw_json n)
-        in
-        (match candidate Historical_only with
-         | Ok true -> Ok ()
-         | Ok false | Error _ ->
-           (match p.control with
-            | Paused _ | Retired _ ->
-              invalid "held or retired settlement cannot rearm or alter control"
-            | Enabled ->
-              (match candidate Current_policy_allows with
-               | Ok true -> Ok ()
-               | Ok false | Error _ ->
-                 invalid "entry differs from exact atomic settlement")))
-      | [], _ | _ :: _ :: _, _ | [ _ ], _ :: _ ->
-        invalid "entry imports multiple facts or changes definitions")
+    then validate_execution_import previous ~incoming
     else if
       List.is_empty added
       &&

@@ -217,7 +217,16 @@ let on_event ctx state event = Task.pure(state)
                      let before_construction = !constructions in
                      assert_captured_source env daemon child;
                      [%test_eq: int] before_construction !constructions;
-                     assert_ordinary_execution_blocked env sw connection daemon child_id;
+                     assert_ordinary_execution_blocked
+                       env
+                       sw
+                       connection
+                       daemon
+                       child_id
+                       ~start_error:
+                         ( Invalid_state
+                         , "captured recurrence child requires reciprocal occurrence Run \
+                            admission" );
                      [%test_eq: int] 0 !provider_calls;
                      print_endline
                        "same exact artifact; distinct child; parent association then \
@@ -234,6 +243,7 @@ let on_event ctx state event = Task.pure(state)
               let child_id = Option.value_exn !child in
               Registry.load (Daemon.registry daemon) child_id |> protocol_ok |> ignore;
               let child, _ = assert_dormant daemon child_id in
+              assert (not (Registry.execution_selected (Daemon.registry daemon) child));
               let before_construction = !constructions in
               assert_captured_source env daemon child;
               [%test_eq: int] before_construction !constructions;
@@ -242,7 +252,14 @@ let on_event ctx state event = Task.pure(state)
                 ~finally:(fun () -> Agent_client.Connection.close connection)
                 (fun () ->
                    T.initialize connection;
-                   assert_ordinary_execution_blocked env sw connection daemon child_id);
+                   assert_ordinary_execution_blocked
+                     env
+                     sw
+                     connection
+                     daemon
+                     child_id
+                     ~start_error:
+                       (Conflict, "target has not been selected for ordinary execution"));
               [%test_eq: int] 0 !provider_calls;
               print_endline "ordinary Start/Send rejected; reopened dormant from capture")));
   [%expect

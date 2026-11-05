@@ -76,6 +76,12 @@ val link_child : t -> Recurrence_child_association.t -> (t, Agent_protocol.Error
     no permission to dispatch another occurrence. *)
 val pending_count : t -> int
 
+(** Pending occupancy excluding Ready rows: unresolved execution occurrences and
+    protected children without an execution. A child and its execution count
+    once; retained terminal bundles consume no occupancy. Coalescing may replace
+    Ready rows, but cannot replace these unresolved claims. *)
+val unresolved_count : t -> int
+
 val executions : t -> Recurrence_execution.t list
 
 val find_execution

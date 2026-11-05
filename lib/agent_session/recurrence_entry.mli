@@ -115,6 +115,13 @@ val retire_lifecycle : t -> (t option, Agent_protocol.Error.t) result
     entries admit exact evidence-only settlement without resurrection. *)
 val validate_transition : t -> incoming:t -> (unit, Agent_protocol.Error.t) result
 
+(** Validate only the exact single execution-origin/terminal import projection by
+    reconstructing the existing atomic settlement. Paused/retired entries cannot
+    rearm; only Enabled may use current automatic policy. This is DATA validation,
+    not target observation or permission, and does not replace [validate_transition]
+    and its complete extension-carrier retention checks. *)
+val validate_execution_import : t -> incoming:t -> (unit, Agent_protocol.Error.t) result
+
 val of_document : Document_schema.Document.t -> (t, Document_schema.Error.t) result
 val to_document : t -> (Document_schema.Document.t, Document_schema.Error.t) result
 

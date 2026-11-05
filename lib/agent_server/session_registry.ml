@@ -44,6 +44,14 @@ module Binding = struct
   ;;
 end
 
+module Recovered = struct
+  type t = Binding.t
+
+  let ordinary entry = { Binding.entry; selection = Ordinary }
+  let metadata entry = { Binding.entry; selection = Metadata_acquired }
+  let entry t = t.Binding.entry
+end
+
 module Lifecycle_reservation = struct
   type target =
     | Loaded of entry
@@ -157,7 +165,8 @@ type t =
        -> (Agent_session.Session_state.t, Agent_protocol.Error.t) result)
         option
   ; mutable loader :
-      (Agent_store.Session_index.Entry.t -> (entry, Agent_protocol.Error.t) result) option
+      (Agent_store.Session_index.Entry.t -> (Recovered.t, Agent_protocol.Error.t) result)
+        option
   }
 
 type stats =
@@ -186,11 +195,16 @@ let cleanup_pending t session_id =
     Agent_protocol.Id.Session.equal cleanup.Failed_cleanup.session_id session_id)
 ;;
 
-let install_loader t loader =
+let install_recovery_loader t loader =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     match Atomic.get t.closing with
     | true -> ()
     | false -> t.loader <- Some loader)
+;;
+
+let install_loader t loader =
+  install_recovery_loader t (fun indexed ->
+    Result.map (loader indexed) ~f:Recovered.ordinary)
 ;;
 
 let install_reader t reader =
@@ -219,7 +233,7 @@ let shutting_down () =
     ()
 ;;
 
-let add t ~session_id entry =
+let add_recovered t ~session_id (recovered : Recovered.t) =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     if Atomic.get t.closing
     then Error (shutting_down ())
@@ -242,13 +256,12 @@ let add t ~session_id entry =
     else (
       Atomic.set
         t.sessions
-        (Map.set
-           (Atomic.get t.sessions)
-           ~key:session_id
-           ~data:{ Binding.entry; selection = Ordinary });
+        (Map.set (Atomic.get t.sessions) ~key:session_id ~data:recovered);
       t.indexed <- Map.remove t.indexed session_id;
       Ok ()))
 ;;
+
+let add t ~session_id entry = add_recovered t ~session_id (Recovered.ordinary entry)
 
 let find t session_id =
   Map.find (Atomic.get t.sessions) session_id
@@ -449,20 +462,21 @@ let close_provisional t ~session_id entry result =
     Exn.raise_with_original_backtrace exn backtrace
 ;;
 
-let with_recovery_owner t owner f =
+let with_recovered_owner t owner f =
   let session_id = Session_recovery_owner.session_id owner in
   let close primary =
     cleanup_after_failure t ~session_id ~owner:(Cleanup_owner.Recovery owner) ~primary
   in
   let run () =
     let open Result.Let_syntax in
-    let%bind entry = f () in
+    let%bind recovered = f () in
+    let entry = Recovered.entry recovered in
     if
       Session_recovery_owner.owns_actor owner entry.actor
       && Option.exists
            entry.store_handle
            ~f:(phys_equal (Session_recovery_owner.handle owner))
-    then Ok entry
+    then Ok recovered
     else Error (lifecycle_conflict "recovery returned a different resource owner")
   in
   match run () with
@@ -474,6 +488,11 @@ let with_recovery_owner t owner f =
     let backtrace = Stdlib.Printexc.get_raw_backtrace () in
     close (Cleanup_failure.Raised (exn, backtrace));
     Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let with_recovery_owner t owner f =
+  with_recovered_owner t owner (fun () -> Result.map (f ()) ~f:Recovered.ordinary)
+  |> Result.map ~f:Recovered.entry
 ;;
 
 let with_recovery_handle t ~store handle f =
@@ -540,7 +559,8 @@ let load_reserved t reservation =
       Eio.Mutex.use_ro t.mutex (fun () ->
         Result.of_option t.loader ~error:(shutting_down ()))
     in
-    let%bind entry = loader indexed in
+    let%bind recovered = loader indexed in
+    let entry = Recovered.entry recovered in
     close_provisional t ~session_id entry (fun () ->
       let%bind () = check_retained_owner entry in
       let%bind state = Agent_session.Session_actor.state entry.actor in
@@ -572,10 +592,7 @@ let load_reserved t reservation =
           let%bind () = check_retained_owner entry in
           Atomic.set
             t.sessions
-            (Map.set
-               (Atomic.get t.sessions)
-               ~key:session_id
-               ~data:{ Binding.entry; selection = Ordinary });
+            (Map.set (Atomic.get t.sessions) ~key:session_id ~data:recovered);
           t.indexed <- Map.remove t.indexed session_id;
           Ok entry)))
 ;;

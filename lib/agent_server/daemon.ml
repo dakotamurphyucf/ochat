@@ -1430,7 +1430,10 @@ let compose
              |> Result.map_error ~f:project_error)
          : (int, Agent_store.Store_error.t) result));
   if execute
-  then Session_registry.install_loader registry (Session_factory.recover_session factory);
+  then
+    Session_registry.install_recovery_loader
+      registry
+      (Session_factory.recover_registered_session factory);
   let%bind () =
     if not execute
     then Ok ()

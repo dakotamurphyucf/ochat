@@ -26,6 +26,11 @@ type recovery_purpose =
   | Ordinary_recovery
   | Metadata_target_recovery
 
+type recovery_selection =
+  | Explicit_recovery of recovery_purpose
+  | Registered_recovery
+  | Ordinary_entry_recovery
+
 type generated_lifetime =
   | Owned
   | Independent
@@ -7917,10 +7922,10 @@ let persist_recovered_state t handle journal persistence state =
   persist_metadata t handle state |> Result.map_error ~f:protocol_of_store
 ;;
 
-let recover_open_handle
+let recover_open_handle_with_selection
       ?original_actor
       ?(prepare_parent_policy = fun () -> Ok Loaded_only)
-      ?(purpose = Ordinary_recovery)
+      ?(selection = Explicit_recovery Ordinary_recovery)
       t
       handle
   =
@@ -7932,7 +7937,7 @@ let recover_open_handle
       ~job_capacity:t.job_capacity
       ~capacity:None
   in
-  Session_registry.with_recovery_owner t.registry owner (fun () ->
+  Session_registry.with_recovered_owner t.registry owner (fun () ->
     let%bind () = require_seed_success t handle in
     let%bind parent_policy = prepare_parent_policy () in
     let%bind lifecycle_observation =
@@ -7977,6 +7982,20 @@ let recover_open_handle
     let%bind parent_stop = parent_stop_recovery t ~policy:parent_policy state in
     let stopping = Option.exists parent_stop ~f:(fun parent -> parent.stop) in
     let%bind revision = recovered_revision t state in
+    let%bind purpose =
+      match selection, revision with
+      | Registered_recovery, Captured_delegation _ -> Ok Metadata_target_recovery
+      | Registered_recovery, (Authored _ | Generated_artifact _) -> Ok Ordinary_recovery
+      | Ordinary_entry_recovery, Captured_delegation _ ->
+        Error
+          (unavailable
+             Invalid_state
+             "captured recurrence recovery requires retained execution selection")
+      | Ordinary_entry_recovery, (Authored _ | Generated_artifact _) ->
+        Ok Ordinary_recovery
+      | ( Explicit_recovery purpose
+        , (Authored _ | Generated_artifact _ | Captured_delegation _) ) -> Ok purpose
+    in
     let%bind legacy_activation_blocked =
       legacy_checkpoint_activation_blocked state revision
     in
@@ -8206,7 +8225,25 @@ let recover_open_handle
                       Runtime_owner.ensure_loaded_authenticated entry.runtime ~actor)))
          in
          let%map () = restored () in
-         entry))
+         (match purpose with
+          | Ordinary_recovery -> Session_registry.Recovered.ordinary entry
+          | Metadata_target_recovery -> Session_registry.Recovered.metadata entry)))
+;;
+
+let recover_open_handle
+      ?original_actor
+      ?prepare_parent_policy
+      ?(purpose = Ordinary_recovery)
+      t
+      handle
+  =
+  recover_open_handle_with_selection
+    ?original_actor
+    ?prepare_parent_policy
+    ~selection:(Explicit_recovery purpose)
+    t
+    handle
+  |> Result.map ~f:Session_registry.Recovered.entry
 ;;
 
 type archive_validation =
@@ -8527,7 +8564,7 @@ let recover_owned_session t handle ~actor =
     handle
 ;;
 
-let recover_index_entry t index_entry =
+let recover_index_entry_with_selection t ~selection index_entry =
   let session_id = index_entry.Agent_store.Session_index.Entry.session.id in
   let handle_result =
     Agent_store.Session_store.open_session
@@ -8541,10 +8578,17 @@ let recover_index_entry t index_entry =
   in
   match handle_result with
   | Error _ as failure -> failure
-  | Ok handle -> recover_open_handle t handle
+  | Ok handle -> recover_open_handle_with_selection ~selection t handle
 ;;
 
-let recover_session = recover_index_entry
+let recover_registered_session t index_entry =
+  recover_index_entry_with_selection t ~selection:Registered_recovery index_entry
+;;
+
+let recover_session t index_entry =
+  recover_index_entry_with_selection t ~selection:Ordinary_entry_recovery index_entry
+  |> Result.map ~f:Session_registry.Recovered.entry
+;;
 
 let checkpoint_recovered_index t entry =
   match entry.Session_registry.store_handle with
@@ -8723,10 +8767,13 @@ let recover_sessions t =
       let pending = ref None in
       let step () =
         let open Result.Let_syntax in
-        let%bind entry = recover_index_entry t index_entry in
+        let%bind recovered_entry = recover_registered_session t index_entry in
+        let entry = Session_registry.Recovered.entry recovered_entry in
         pending := Some entry;
         let id = index_entry.session.id in
-        let%map () = Session_registry.add t.registry ~session_id:id entry in
+        let%map () =
+          Session_registry.add_recovered t.registry ~session_id:id recovered_entry
+        in
         (id, entry) :: recovered
       in
       let owned () =

@@ -18,6 +18,17 @@ type entry =
   ; close : unit -> unit
   }
 
+(** Recovery publication carries execution selection alongside the same actual
+    entry. Metadata recovery remains unselected until that actual Owner records
+    an activation handoff. This is negative registration DATA, not admission. *)
+module Recovered : sig
+  type t
+
+  val ordinary : entry -> t
+  val metadata : entry -> t
+  val entry : t -> entry
+end
+
 type t
 
 type stats =
@@ -35,6 +46,14 @@ val create : unit -> t
     cleanup. It must return the actual checked same-session owner. A failed provisional close
     retains that owner and both failure diagnostics for shutdown retry; its issuing
     ID remains unavailable for fresh ownership until cleanup completes. *)
+val install_recovery_loader
+  :  t
+  -> (Agent_store.Session_index.Entry.t -> (Recovered.t, Agent_protocol.Error.t) result)
+  -> unit
+
+(** Compatibility adapter for genuinely ordinary recovered entries. Metadata-only
+    recovery must use [install_recovery_loader]; projecting its entry here would
+    discard its required execution exclusion. *)
 val install_loader
   :  t
   -> (Agent_store.Session_index.Entry.t -> (entry, Agent_protocol.Error.t) result)
@@ -96,6 +115,14 @@ val read_observation
 
 val index : t -> Agent_store.Session_index.Entry.t -> unit
 val index_all : t -> Agent_store.Session_index.Entry.t list -> unit
+
+(** Publish the exact recovered entry and its execution selection under the same
+    registration checks as [add]. *)
+val add_recovered
+  :  t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> Recovered.t
+  -> (unit, Agent_protocol.Error.t) result
 
 val add
   :  t
@@ -285,6 +312,15 @@ val with_recovery_owner
   -> Session_recovery_owner.t
   -> (unit -> (entry, Agent_protocol.Error.t) Result.t)
   -> (entry, Agent_protocol.Error.t) Result.t
+
+(** Same concrete recovery-owner check and joined failure cleanup as
+    [with_recovery_owner], retaining the returned entry's execution selection.
+    The wrapper cannot substitute another Actor or Handle for the actual owner. *)
+val with_recovered_owner
+  :  t
+  -> Session_recovery_owner.t
+  -> (unit -> (Recovered.t, Agent_protocol.Error.t) Result.t)
+  -> (Recovered.t, Agent_protocol.Error.t) Result.t
 
 (** Startup rollback closes the actual entry while preserving its loaded binding;
     detach only successful close. Cleanup failure retains exact owner and both

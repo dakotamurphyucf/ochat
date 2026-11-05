@@ -560,9 +560,20 @@ compiler surface, changes captured code, or grants native tool access.
 Fresh captured children have no admitted conversation history before their Run.
 Their initial source messages must be evaluated and allocated through the common
 initialization owner after held admission. Ordinary authored children keep their
-existing admitted-history requirement; resumed captured children use retained
-history. Reusing the delegated builder must preserve that distinction instead of
-fabricating an empty stored history or evaluating initial content before admission.
+existing admitted-history requirement; a newly admitted run on an initialized
+captured child uses retained history. Reusing the delegated builder preserves that
+distinction instead of fabricating an empty stored history or evaluating initial
+content before admission.
+
+Daemon recovery restores captured children as metadata owners, retaining history
+and recording interrupted Runs without loading their runtime. Startup and lazy
+registry loading preserve this execution exclusion until an actual activation
+handoff. Repeating the old occurrence returns its retained outcome; it does not
+resume or replay that Run. A new existing-session occurrence can admit new input
+to the same child under current authentication and private-resource checks. The
+controller must first reconcile the old admission's terminal outcome so its
+pending capacity is released. The child keeps its original captured creation
+origin while the new occurrence receives its own Run and admission.
 
 A fresh child is a new session and transaction; its captured source may be
 identical to the controller's source. Only the captured-recurrence source kind
@@ -965,6 +976,14 @@ before a separate owned effect. The observation loads no runtime and grants no
 execution permission; a missing request is not a no-effects or retry proof.
 The controller actor imports this evidence through its settlement owner;
 observation alone grants no deferred activation permission.
+
+The catalog accepts an exact execution-evidence import for a single recurrence,
+including paused and retired definitions. It reuses the entry's atomic settlement
+validation and preserves every unrelated entry and command receipt. This can
+record a factual outcome and release its pending capacity without enabling new
+work. Paused or retired definitions cannot rearm through an import; automatic
+successors remain subject to the existing enabled-state policy. Arbitrary partial
+pause or retirement updates still cannot replace a whole-controller disposition.
 
 
 The frontier can retain one immutable original execution request per selected

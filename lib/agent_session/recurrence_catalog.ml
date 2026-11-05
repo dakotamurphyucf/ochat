@@ -406,8 +406,9 @@ let validate_command previous incoming (receipt : R.t) =
         | None | Some _ -> invalid "one recurrence command changed another identity"))
 ;;
 
-(* Receipt-free changes are whole-owner dispositions. No arbitrary safe-looking
-   subset can consume the frontier reserved for a later bulk pause/retirement. *)
+(* Receipt-free changes are exact single-entry planning/imports or whole-owner
+   safety dispositions. No arbitrary safe-looking subset can consume the frontier
+   reserved for a later bulk pause/retirement. *)
 let validate_internal previous incoming =
   let disposition reason =
     List.for_all previous.entries ~f:(fun old ->
@@ -428,13 +429,13 @@ let validate_internal previous incoming =
          | Enabled | Paused _ ->
            E.equal_control (E.control next.value) (Retired Lifecycle_changed)))
   in
+  let changed =
+    List.filter previous.entries ~f:(fun old ->
+      Option.for_all
+        (stored incoming (E.id old.Stored.value))
+        ~f:(fun next -> not (same_entry old next)))
+  in
   let due =
-    let changed =
-      List.filter previous.entries ~f:(fun old ->
-        Option.for_all
-          (stored incoming (E.id old.Stored.value))
-          ~f:(fun next -> not (same_entry old next)))
-    in
     match changed with
     | [ old ] ->
       (match stored incoming (E.id old.value) with
@@ -445,9 +446,23 @@ let validate_internal previous incoming =
        | None -> false)
     | [] | _ :: _ :: _ -> false
   in
+  let execution_import () =
+    match changed with
+    | [ old ] ->
+      Option.exists
+        (stored incoming (E.id old.value))
+        ~f:(fun next ->
+          Result.is_ok (E.validate_execution_import old.value ~incoming:next.value))
+    | [] | _ :: _ :: _ -> false
+  in
   if List.length previous.entries <> List.length incoming.entries
   then invalid "internal recurrence disposition changed identity inventory"
-  else if due || disposition Controller_stop || disposition Source_review || retirement
+  else if
+    due
+    || execution_import ()
+    || disposition Controller_stop
+    || disposition Source_review
+    || retirement
   then Ok ()
   else invalid "receipt-free recurrence update is not a complete safety disposition"
 ;;

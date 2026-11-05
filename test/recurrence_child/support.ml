@@ -388,7 +388,7 @@ let assert_dormant daemon id =
   child, record
 ;;
 
-let assert_ordinary_execution_blocked env sw connection daemon child_id =
+let assert_ordinary_execution_blocked env sw connection daemon child_id ~start_error =
   let handle =
     Agent_client.Session_handle.attach
       ~sw
@@ -399,9 +399,9 @@ let assert_ordinary_execution_blocked env sw connection daemon child_id =
       ()
     |> protocol_ok
   in
-  let rejected ~message ~retryable = function
+  let rejected ~code ~message ~retryable = function
     | Error (error : P.Error.t) ->
-      [%test_eq: P.Error.code] Invalid_state error.code;
+      [%test_eq: P.Error.code] code error.code;
       [%test_eq: string] message error.message;
       [%test_eq: bool] retryable error.retryable
     | Ok _ -> failwith "ordinary execution activated a captured recurrence child"
@@ -409,15 +409,16 @@ let assert_ordinary_execution_blocked env sw connection daemon child_id =
   protect_cleanup
     ~finally:(fun () -> Agent_client.Session_handle.close handle)
     (fun () ->
+       let code, message = start_error in
        Agent_client.Session_handle.start handle ~queue_if_limited:false
-       |> rejected
-            ~message:
-              "captured recurrence child requires reciprocal occurrence Run admission"
-            ~retryable:false;
+       |> rejected ~code ~message ~retryable:false;
        Agent_client.Session_handle.send_message
          handle
          { kind = Plain_text; text = "ordinary send must stay inert"; attachments = [] }
-       |> rejected ~message:"session runtime is not already loaded" ~retryable:true);
+       |> rejected
+            ~code:Invalid_state
+            ~message:"session runtime is not already loaded"
+            ~retryable:true);
   assert_dormant daemon child_id |> ignore
 ;;
 

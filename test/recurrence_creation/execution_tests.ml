@@ -294,6 +294,36 @@ let%expect_test
     [%test_eq: int] (List.length (H.executions (Due.frontier settled))) 1;
     [%test_eq: int] (List.length (H.protected_children (Due.frontier settled))) 1;
     [%test_eq: int] (List.length (H.child_associations (Due.frontier settled))) 1;
+    [%test_eq: int] (H.unresolved_count (Due.frontier settled)) 0;
+    (* Historical child custody remains retained while its terminal occurrence
+       frees scheduling occupancy. A literal protected-row count would block the
+       new one-credit Coalesce policy forever. *)
+    let coalesce =
+      A.Recurrence_policy.create
+        ~misfire:Coalesce
+        ~grace_ms:60_000L
+        ~max_pending:1
+        ~max_history:1
+        ~max_calendar_steps:256
+      |> protocol_ok
+    in
+    let reenabled =
+      E.edit settled (redefine definition ~key:next_key ~policy:coalesce)
+      |> protocol_ok
+      |> E.enable
+      |> protocol_ok
+    in
+    [%test_eq: int] (List.length (H.protected_children (Due.frontier reenabled))) 1;
+    let released, _, _ =
+      Due.step
+        reenabled
+        ~phase:None
+        (Due.snapshot ~wall:(Due.at_ms 2000) ~elapsed_ms:2000)
+    in
+    [%test_eq: int64 list] (Due.slots released) [ 2L ];
+    [%test_eq: int] (H.pending_count (Due.frontier released)) 1;
+    [%test_eq: int] (H.unresolved_count (Due.frontier released)) 0;
+    assert (D.Json.equal (Due.entry_json released) (Due.entry_json (Due.restore released)));
     let raw = H.to_document (Due.frontier settled) |> document_ok |> D.Document.payload in
     (match Due.field raw "executions" with
      | `Array [ row ] ->

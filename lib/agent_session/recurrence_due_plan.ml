@@ -91,7 +91,7 @@ let select_interval
       ~(range : R.Cursor.Interval.due_range)
       ~lateness
       ~pending
-      ~protected
+      ~unresolved
   =
   let open Result.Let_syntax in
   let policy = F.policy definition in
@@ -112,7 +112,7 @@ let select_interval
   let first_selected, count_selected, policy_reason =
     match Recurrence_policy.misfire policy with
     | Skip when pending > 0 -> range.count, 0, H.Reason.Policy_skip
-    | (Skip | Coalesce) when protected >= Recurrence_policy.max_pending policy ->
+    | (Skip | Coalesce) when unresolved >= Recurrence_policy.max_pending policy ->
       range.count, 0, H.Reason.Pending_capacity
     | Skip | Coalesce ->
       if Int64.equal eligible 0L
@@ -196,7 +196,7 @@ let prepare_rate definition ~old_cursor ~frontier ~interval ~phase ~snapshot ~wo
           ~range
           ~lateness
           ~pending:(H.pending_count frontier)
-          ~protected:(List.length (H.protected_children frontier))
+          ~unresolved:(H.unresolved_count frontier)
       in
       let%bind work = W.consume_interval work ~range ~selected ~omitted in
       let%bind step = C.consume_interval old_cursor ~rule ~count:range.count in
