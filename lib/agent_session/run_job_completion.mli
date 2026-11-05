@@ -24,8 +24,22 @@ val owns : Session_state.t -> Agent_protocol.Job.t -> bool
     pure DATA is not execution authority and must never be decoded as a live
     hold. Ordinary settlement without that owner remains unchanged. *)
 
+(** [cancelled_dependencies] contains only actual canonical Cancelled dependency
+    snapshots persisted with this completion. They must be exactly the active
+    descendants of the retained parent's real Waiting_completion Job chain,
+    validated by Job_dependency.validate; stopped-at-terminal and Subscription
+    leaves add no child Job. The actual parent Cancelled/Expired result selects
+    this cancellation law. Each supplied row is checked against its exact
+    retained active row and truthful terminal result. A queued child retains its
+    planned occurrence (current attempt+1). Only children already owned by the
+    same parent-owning Run receive evidence, in the SAME next revision as the
+    parent, before one aggregate settlement. No child is cancelled by this pure
+    function; no status is backfilled and unrelated Run custody is unchanged.
+    Without a Run index, no evidence is produced and ordinary Job completion
+    retains its existing result contract. *)
 val prepare
   :  ?startup_run:Agent_protocol.Run.t
+  -> ?cancelled_dependencies:Agent_protocol.Job.t list
   -> Session_state.t
   -> running:Agent_protocol.Job.t
   -> terminal:Agent_protocol.Job.t

@@ -22252,7 +22252,14 @@ let complete_background_job
          | Expired -> Limited)
     in
     let%bind run_deltas =
-      Run_job_completion.prepare t.state ~running ~terminal ~successor:job ~outcome ~now
+      Run_job_completion.prepare
+        ~cancelled_dependencies:cancelled
+        t.state
+        ~running
+        ~terminal
+        ~successor:job
+        ~outcome
+        ~now
     in
     let%bind job_custody =
       match job.status with

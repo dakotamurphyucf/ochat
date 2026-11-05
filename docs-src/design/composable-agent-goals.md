@@ -551,6 +551,12 @@ still-owned native invocation can record its actual result using the retained
 original custody or known expiry. This settlement does not reopen the Job or
 permit new work; active admission still rejects terminal Job custody.
 
+Canceling or expiring a Job that is waiting for another Job records the actual
+canceled dependency chain in the same owning Run revision. A queued child keeps
+its planned first occurrence even though execution has not started. Only exact
+validated dependency rows already owned by that Run receive terminal evidence;
+unrelated jobs and historical terminal rows cannot supply it.
+
 Polling a Job or reading its session can briefly reserve the registry entry.
 That read does not revoke an already claimed Job. Loaded reuse and cold restoration
 retain the exact registered Actor, runtime and Store handle; failed cleanup and

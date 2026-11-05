@@ -27,8 +27,128 @@ let awaits (state : Session_state.t) job =
     List.exists (Run_state.runs index) ~f:(fun run -> exact_wait run job))
 ;;
 
+let cancelled_dependency_work
+      (state : Session_state.t)
+      ~(parent : P.Job.t)
+      ~result
+      cancelled
+  =
+  let open Result.Let_syntax in
+  let invalid message = Error (P.Error.invalid_request message) in
+  let%bind () =
+    if
+      List.exists state.jobs ~f:(fun actual ->
+        Jsonaf.exactly_equal (P.Job.to_json actual) (P.Job.to_json parent))
+    then Ok ()
+    else invalid "dependency cancellation requires its exact retained parent"
+  in
+  let rec descendants seen (job : P.Job.t) =
+    let key = P.Id.Job.to_string job.id in
+    if Set.mem seen key
+    then invalid "cancelled dependency chain contains a cycle"
+    else (
+      let seen = Set.add seen key in
+      match job.status with
+      | Waiting_completion dependency ->
+        let%bind () =
+          Job_dependency.validate
+            ~invocations:state.invocations
+            ~events:state.moderator_executions
+            ~jobs:state.jobs
+            ~subscriptions:state.subscriptions
+            job
+        in
+        (match dependency.work with
+         | Subscription _ -> Ok []
+         | Job id ->
+           let%bind child =
+             List.find state.jobs ~f:(fun child -> P.Id.Job.equal child.P.Job.id id)
+             |> Result.of_option
+                  ~error:
+                    (P.Error.invalid_request "cancelled dependency target disappeared")
+           in
+           let%bind terminal = P.Job.terminal_result child in
+           (match terminal with
+            | Some _ -> Ok []
+            | None ->
+              let%map rest = descendants seen child in
+              child :: rest))
+      | Queued
+      | Running
+      | Waiting_permission _
+      | Succeeded
+      | Failed _
+      | Cancelled
+      | Interrupted _ -> Ok [])
+  in
+  let%bind expected =
+    match Option.map result ~f:P.Stored_completion.outcome with
+    | Some (Cancelled | Expired) -> descendants String.Set.empty parent
+    | Some (Succeeded | Failed) | None ->
+      if List.is_empty cancelled
+      then Ok []
+      else invalid "non-cancelling parent outcome cannot cancel dependencies"
+  in
+  let%bind expected = List.map expected ~f:Run_job_occurrence.work |> Result.all in
+  let expected = Set.of_list (module P.Run_work) expected in
+  let%bind actual =
+    List.fold_result
+      cancelled
+      ~init:(Set.empty (module P.Run_work))
+      ~f:(fun work terminal ->
+        let%bind before =
+          List.find state.jobs ~f:(fun job ->
+            P.Id.Job.equal job.P.Job.id terminal.P.Job.id)
+          |> Result.of_option
+               ~error:(P.Error.invalid_request "cancelled dependency is not retained")
+        in
+        let%bind _ = P.Job.of_json (P.Job.to_json terminal) in
+        let projection =
+          { before with
+            status = terminal.status
+          ; result = terminal.result
+          ; completed_at = terminal.completed_at
+          ; delivery = terminal.delivery
+          }
+        in
+        let%bind () =
+          if
+            (not (P.Id.Job.equal before.id parent.id))
+            && Jsonaf.exactly_equal (P.Job.to_json projection) (P.Job.to_json terminal)
+            &&
+            match before.status, terminal.status with
+            | (Queued | Running | Waiting_permission _ | Waiting_completion _), Cancelled
+              -> true
+            | _ -> false
+          then Ok ()
+          else invalid "cancelled dependency differs from its actual active occurrence"
+        in
+        let%bind () =
+          P.Job.validate_delivery_transition ~previous:(Some before) terminal
+        in
+        let%bind result = P.Job.terminal_result terminal in
+        let%bind () =
+          if
+            Option.exists result ~f:(fun stored ->
+              P.Stored_completion.equal_outcome
+                (P.Stored_completion.outcome stored)
+                Cancelled)
+          then Ok ()
+          else invalid "cancelled dependency has no actual cancellation result"
+        in
+        let%bind occurrence = Run_job_occurrence.work before in
+        if Set.mem work occurrence
+        then invalid "cancelled dependency occurrence is repeated"
+        else Ok (Set.add work occurrence))
+  in
+  if Set.equal expected actual
+  then Ok actual
+  else invalid "cancelled dependencies differ from the actual parent dependency chain"
+;;
+
 let prepare
       ?startup_run
+      ?(cancelled_dependencies = [])
       (state : Session_state.t)
       ~(running : P.Job.t)
       ~(terminal : P.Job.t)
@@ -64,6 +184,9 @@ let prepare
   | None -> Ok []
   | Some original ->
     let%bind result = P.Job.terminal_result terminal in
+    let%bind cancelled =
+      cancelled_dependency_work state ~parent:running ~result cancelled_dependencies
+    in
     let%bind () =
       match result with
       | None -> Error (P.Error.invalid_request "owned job has no actual terminal result")
@@ -130,6 +253,19 @@ let prepare
                   (P.Error.invalid_request "terminal job successor is still executing")
               | Succeeded | Failed _ | Cancelled | Interrupted _ -> Ok previous.owned_work
             in
+            let%bind dependency_proofs =
+              List.filter previous.owned_work ~f:(fun work -> Set.mem cancelled work)
+              |> List.map ~f:(fun work ->
+                if
+                  List.exists previous.terminal_work ~f:(fun old ->
+                    P.Run_work.equal old.work work)
+                then
+                  Error
+                    (P.Error.invalid_request
+                       "cancelled dependency already has immutable terminal evidence")
+                else P.Run_work.Terminal.create ~work ~outcome:Cancelled ~revision)
+              |> Result.all
+            in
             let%bind index =
               Run_work_settlement.prepare
                 ?startup_run
@@ -137,7 +273,7 @@ let prepare
                 ~state
                 ~previous
                 ~owned_work
-                ~terminal_work:(proof :: previous.terminal_work)
+                ~terminal_work:(proof :: (previous.terminal_work @ dependency_proofs))
                 ~operation_id:None
                 ~now
             in

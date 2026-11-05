@@ -3176,6 +3176,239 @@ let stage_bounded_owned_wait actor manager =
   Option.value_exn !staged, before
 ;;
 
+let%expect_test "owned nested cancellation settles both exact Job occurrences once" =
+  let principal =
+    P.Principal.create
+      ~id:principal_id
+      ~authentication_kind:"local"
+      ~scopes:(P.Scope.Set.of_list [ Send_messages ])
+      ~attributes:[]
+    |> protocol_ok
+  in
+  let bounded = ref (fun f -> f ()) in
+  with_startup_actor
+    ~original_actor:(Operator_authorization.trusted_local principal)
+    ~prepare:(fun env ->
+      bounded := fun f -> Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. f)
+    (fun actor _ _ request start manager _ _ _ ->
+       !bounded (fun () ->
+         ignore (start (request "owned-nested-cancel") |> protocol_ok : P.Run_receipt.t);
+         let staged_parent, before = stage_bounded_owned_wait actor manager in
+         let parent =
+           A.Session_actor.claim_job
+             actor
+             ~job_id:staged_parent.id
+             ~generation:staged_parent.generation
+           |> protocol_ok
+           |> Option.value_exn
+         in
+         let captured =
+           Background_execution_tests.capture_tool
+             (native_registry (ref 0) ~raises:false)
+             { Chat_response.One_off_request.default_policy with max_output_bytes = 512 }
+         in
+         let invocation = Job_fixtures.root parent in
+         let selected = ref None in
+         Job_fixtures.with_job actor parent (fun ~job:_ ~execute ->
+           execute ~invocation (fun ~dispatched ~capabilities:_ ->
+             let owner = P.Job.Invocation dispatched.context.id in
+             let child =
+               A.Session_actor.prepare_background_job_launch actor ~owner captured
+               |> protocol_ok
+             in
+             selected := Some child;
+             A.Session_actor.stage_background_job
+               actor
+               ~job:child
+               ~capacity:{ publish = ignore; abort = ignore }
+             |> protocol_ok;
+             A.Session_actor.select_background_jobs actor ~owner ~ids:[ child.id ]
+             |> protocol_ok;
+             Ok
+               (P.Invocation.Pending (Job child.id, `String "selected nested dependency"))))
+         |> protocol_ok
+         |> ignore;
+         let child = Option.value_exn !selected in
+         [%test_eq: int] 0 child.attempt;
+         (match child.status, child.launch with
+          | Queued, Some { owner = Invocation owner; parent_job = Some (id, attempt); _ }
+            ->
+            assert (P.Id.Invocation.equal owner invocation.context.id);
+            assert (P.Id.Job.equal id parent.id);
+            [%test_eq: int] parent.attempt attempt
+          | _ -> raise_s [%sexp (child : P.Job.t)]);
+         let dependency : P.Job.dependency =
+           { invocation_id = invocation.context.id
+           ; work = Job child.id
+           ; deadline = Option.value_exn invocation.context.deadline
+           ; completion_schema = None
+           ; max_output_bytes = 512
+           ; max_output_depth = 128
+           }
+         in
+         let waiting =
+           A.Session_actor.defer_background_job
+             actor
+             ~job_id:parent.id
+             ~generation:parent.generation
+             ~attempt:parent.attempt
+             dependency
+           |> protocol_ok
+         in
+         (match waiting.status with
+          | Waiting_completion actual -> assert (P.Job.equal_dependency dependency actual)
+          | _ -> raise_s [%sexp (waiting : P.Job.t)]);
+         let state () = A.Session_actor.state actor |> protocol_ok in
+         let run state =
+           Option.value_exn state.A.Session_state.run_state
+           |> A.Run_state.runs
+           |> List.hd_exn
+         in
+         let previous_state = state () in
+         let previous = run previous_state in
+         let parent_work = A.Run_job_occurrence.work parent |> protocol_ok in
+         let child_work = A.Run_job_occurrence.work child |> protocol_ok in
+         List.iter [ parent; child ] ~f:(fun job ->
+           assert (
+             Option.equal
+               P.Inference_origin.equal
+               job.inference_origin
+               (Some (Run previous.id))));
+         List.iter [ parent_work; child_work ] ~f:(fun work ->
+           assert (List.mem previous.owned_work work ~equal:P.Run_work.equal);
+           assert (
+             not
+               (List.exists previous.terminal_work ~f:(fun proof ->
+                  P.Run_work.equal proof.work work))));
+         (match child_work.key with
+          | Retained (Job { id; attempt = 1 }) -> assert (P.Id.Job.equal id child.id)
+          | _ -> failwith "queued child did not retain its planned first occurrence");
+         let terminal =
+           A.Session_actor.cancel_job_internal actor ~job_id:parent.id |> protocol_ok
+         in
+         let cancelled_state = state () in
+         let cancelled = run cancelled_state in
+         [%test_eq: int64]
+           (Int64.succ previous_state.counters.revision)
+           cancelled_state.counters.revision;
+         [%test_eq: int64] (Int64.succ previous.revision) cancelled.revision;
+         assert (P.Id.Run.equal previous.id cancelled.id);
+         assert (P.Run_source.equal previous.source cancelled.source);
+         assert (List.equal P.Run_work.equal previous.owned_work cancelled.owned_work);
+         List.iter previous.terminal_work ~f:(fun proof ->
+           assert (List.mem cancelled.terminal_work proof ~equal:P.Run_work.Terminal.equal));
+         List.iter [ parent_work; child_work ] ~f:(fun work ->
+           let proof =
+             List.find_exn cancelled.terminal_work ~f:(fun proof ->
+               P.Run_work.equal proof.work work)
+           in
+           assert (P.Run_work.Terminal.equal_outcome proof.outcome Cancelled);
+           [%test_eq: int64] cancelled.revision proof.revision);
+         [%test_eq: int]
+           (List.length previous.terminal_work + 2)
+           (List.length cancelled.terminal_work);
+         let cancelled_child =
+           List.find_exn cancelled_state.jobs ~f:(fun job ->
+             P.Id.Job.equal job.id child.id)
+         in
+         List.iter [ terminal; cancelled_child ] ~f:(fun job ->
+           (match job.status with
+            | Cancelled -> ()
+            | _ -> raise_s [%sexp (job : P.Job.t)]);
+           match P.Job.terminal_completion job |> protocol_ok with
+           | Some (Cancelled _) -> ()
+           | _ -> failwith "actual cancellation did not retain its terminal result");
+         [%test_eq: int] parent.attempt terminal.attempt;
+         [%test_eq: int] 0 cancelled_child.attempt;
+         (* Invalid DATA projections of the actual completed cancellation do
+            not establish alternate cancellation owners. *)
+         let project cancelled_dependencies =
+           A.Run_job_completion.prepare
+             ~cancelled_dependencies
+             previous_state
+             ~running:waiting
+             ~terminal
+             ~successor:terminal
+             ~outcome:Cancelled
+             ~now:(Option.value_exn terminal.completed_at)
+         in
+         ignore (project [ cancelled_child ] |> protocol_ok : A.Session_delta.t list);
+         List.iter
+           [ []
+           ; [ cancelled_child; cancelled_child ]
+           ; [ { cancelled_child with attempt = Int.succ cancelled_child.attempt } ]
+           ]
+           ~f:(fun cancelled_dependencies ->
+             match project cancelled_dependencies with
+             | Error error -> assert (P.Error.equal_code error.code Invalid_request)
+             | Ok _ -> failwith "invalid cancelled dependency set produced Run evidence");
+         let index = Option.value_exn cancelled_state.run_state in
+         let delivery = A.Run_state.job_deliveries index |> List.hd_exn in
+         let event =
+           A.Run_job_delivery.frame delivery
+           |> Chat_response.Background_delivery.capture
+           |> Session.Snapshot.of_value
+           |> Result.ok_or_failwith
+         in
+         let queued =
+           { before with
+             queued_internal_events = before.queued_internal_events @ [ event ]
+           }
+         in
+         A.Session_actor.enqueue_run_job_delivery
+           actor
+           ~delivery
+           ~before
+           ~after:(A.Moderator_checkpoint.encode queued)
+         |> protocol_ok;
+         A.Session_actor.with_idle_queued_moderator_event_tools
+           actor
+           ~snapshot:queued
+           (fun
+               ~executing
+                ~model_jobs:_
+                ~allocate_inference:_
+                ~retirement_reason
+                ~event:_
+                ~execute:_
+                ~commit
+              ->
+              assert (Option.is_none retirement_reason);
+              let service =
+                A.Session_actor.run_actions actor executing
+                |> protocol_ok
+                |> Option.value_exn
+              in
+              let transaction = A.Run_action_service.transaction service in
+              let ticket =
+                transaction.handlers.stage
+                  (Finish { terminal = Cancelled; relinquish = [] })
+                |> Result.ok_or_failwith
+              in
+              ignore
+                (transaction.prepare [ ticket ] |> Result.ok_or_failwith
+                 : P.Run_action.t option);
+              commit
+                ~snapshot:{ queued with queued_internal_events = [] }
+                ~requests:
+                  { request_turn = false; request_compaction = false; end_session = None })
+         |> protocol_ok
+         |> ignore;
+         let finished = run (state ()) in
+         assert (P.Run.Lifecycle.equal finished.lifecycle (Terminal Cancelled));
+         List.iter [ parent_work; child_work ] ~f:(fun work ->
+           let proof =
+             List.find_exn finished.terminal_work ~f:(fun proof ->
+               P.Run_work.equal proof.work work)
+           in
+           [%test_eq: int64] cancelled.revision proof.revision);
+         print_endline
+           "actual parent and queued child cancel in one Run revision; strict Finish \
+            joins both"));
+  [%expect
+    {| actual parent and queued child cancel in one Run revision; strict Finish joins both |}]
+;;
+
 let%expect_test "owned job cancellation and interruption preserve actual custody" =
   List.iter [ `Before_claim; `Cancel_running; `Interrupt_running ] ~f:(fun control ->
     with_startup_actor (fun actor _ _ request start manager _ _ _ ->

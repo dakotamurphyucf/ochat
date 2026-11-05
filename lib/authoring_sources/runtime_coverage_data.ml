@@ -678,7 +678,7 @@ let implementation_sources =
   ; ( "lib/chat_response/in_memory_stream.ml"
     , "d8726af77b14d98a0fd5231ce9a93704c96ba61eb88c8ec54d2395be0c1df112" )
   ; ( "lib/agent_session/run_job_completion.ml"
-    , "378b464c44a8d17c52465bccf12fcbe54eff64c5be6ec6b67cd441f5f9d11bb1" )
+    , "2b7aafe17a5f9a66febf7e2a3f62914ac9df83af68c4aa8fd8b73a88131810d4" )
   ; ( "lib/agent_session/run_transition.ml"
     , "733dfef4e8dbb4adfe1a42a134bc2b8bb42c1f50dd3a9fd4457992d0d5f5c80e" )
   ; ( "lib/agent_session/run_schedule_settlement.ml"
@@ -976,7 +976,7 @@ let implementation_sources =
   ; ( "lib/agent_session/notification_wake_selection.ml"
     , "001872ff3729d6a4a7cd861cd6ec4ebbf75296637bd5c5cdaf3ede82c6f9b6ba" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "c3924b6726be6296a2e65f3652a6e5909cf3bda2c6dc8c679e71720124346fbf" )
+    , "5e9ce2b6fed2004dcfaa7509d8f57d9dd10f1a16eb80e1336053e4119ee19e0c" )
   ; ( "lib/agent_session/job_custody.ml"
     , "6a3b5951629d8440ebfcaf9f72aa625cf522087e8996bb73cec82ce16abfa120" )
   ; ( "lib/agent_session/staged_jobs.ml"
