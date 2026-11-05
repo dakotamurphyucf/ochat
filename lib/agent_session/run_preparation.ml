@@ -240,6 +240,62 @@ module Custody = struct
   end
 end
 
+module Goal_continuation = struct
+  module Cause = struct
+    type t =
+      | Resume of Goal_resume_request.t
+      | Wake of
+          { run_id : P.Id.Run.t
+          ; wake : P.Run_wake.t
+          }
+  end
+
+  type t =
+    { cause : Cause.t
+    ; custody : Custody.t
+    }
+
+  let cause t = t.cause
+  let custody t = t.custody
+
+  let create_authenticated ~owner ~(state : Session_state.t) ~actor ~cause ~authorize =
+    let open Result.Let_syntax in
+    let authorize = Run_command_authorization.check actor ~authorize in
+    let%bind () = authorize state in
+    let%bind () =
+      match (cause : Cause.t) with
+      | Resume request ->
+        if
+          P.Id.Session.equal
+            (Goal_resume_request.session_id request)
+            state.identity.session_id
+          && Int.equal (Goal_resume_request.generation request) state.identity.generation
+        then Ok ()
+        else conflict "Goal continuation original session or generation changed"
+      | Wake { run_id; wake } ->
+        let%bind _ = P.Id.Run.of_json (P.Id.Run.to_json run_id) in
+        let%bind () = P.Run_wake.validate wake in
+        if
+          P.Id.Run.equal run_id wake.run_id
+          && Int.equal wake.source.generation state.identity.generation
+        then Ok ()
+        else conflict "Goal continuation wake identity or generation changed"
+    in
+    Ok
+      { cause
+      ; custody =
+          Custody.create
+            ~owner
+            ~original_actor:(Some actor)
+            ~principal_id:(Operator_authorization.principal actor).id
+            ~session_id:state.identity.session_id
+            ~generation:state.identity.generation
+            ~revision:state.counters.revision
+            ~authorize
+      }
+  ;;
+end
+
 type exclusion =
   | Ordinary_execution
   | Admission_attempted

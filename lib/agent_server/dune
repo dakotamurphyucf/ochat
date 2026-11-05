@@ -11,6 +11,7 @@
   recurrence_automation_host
   recurrence_execution_configuration
   recurrence_execution_host
+  recurrence_dispatcher
   config_parser
   embedded_local_template
   project_source_configuration

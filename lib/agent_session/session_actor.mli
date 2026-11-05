@@ -1123,6 +1123,22 @@ val initialization_model_job_is_current
   -> attempt:int
   -> (bool, Agent_protocol.Error.t) result
 
+(** Cancellation-watch liveness for this scope's exact already claimed Running
+    Model job, generation and attempt. It retains both original authorizations,
+    source/custody and admitted policy/deadline checks. An owned inference ACK's
+    Store revision change alone is not cancellation; automatic budget Hold does
+    not cancel admitted work, while explicit control revokes the actual custody.
+    This query grants no execution permission. Fresh attempt checks must use
+    [initialization_model_job_is_current] and the actual allocation/submission
+    ports. Ordinary initializer behavior is unchanged. *)
+val initialization_model_job_is_running
+  :  t
+  -> scope:Initialization_scope.t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> attempt:int
+  -> (bool, Agent_protocol.Error.t) result
+
 (** Capture / complete only a running attempt actually admitted by this scope.
     Capability checks and durable mutation share the same actor request. *)
 val capture_initialization_recipe_target
@@ -3251,6 +3267,402 @@ val goal_run_receipt
   -> request:Goal_activation_request.t
   -> session:Agent_protocol.Session_ref.t
   -> (Agent_protocol.Run_receipt.t option, Agent_protocol.Error.t) result
+
+module Goal_continuation : sig
+  module Preparation : sig
+    (** Actual registered existing-episode request custody under this Actor's
+        private preparation owner. No constructor, decoder or permission from
+        Run/source IDs. The original Run binding remains independently required. *)
+    type t
+
+    (** Factual known command ACK in the issuing Eio domain, retained even after
+        negative closure or a publication exception. This neither reauthorizes
+        nor rebuilds custody. A foreign-domain call raises Invalid_argument. *)
+    val receipt : t -> Goal_command_receipt.t option
+  end
+
+  module Source_binding : sig
+    (** One actual source selection bound to the SAME preparation and old Run
+        installation. This cannot replace initial Source_binding or Held_run. *)
+    type t
+
+    val source : t -> Runtime_source_preparation.t
+    val check_basis : t -> (unit, Agent_protocol.Error.t) result
+
+    (** Same-domain irreversible local fresh-source revocation before yielding
+        resource joins. Does not erase an in-flight writer's known ACK or close
+        factual preparation custody; the Actor release runs after joined cleanup.
+        Idempotent; a foreign-domain call raises Invalid_argument. *)
+    val close : t -> unit
+  end
+
+  (** Known command-ACK owner over the SAME existing Run binding, Admission,
+      episode and account. Source/runtime execution still requires the actual
+      construction consumer; receipt DATA alone cannot recreate this owner. *)
+  type t
+
+  val receipt : t -> Goal_command_receipt.t
+
+  (** Same-domain actual physical source-pair validation. This grants no fresh
+      execution and never infers association from matching source identifiers. *)
+  val check_source_binding
+    :  t
+    -> binding:Source_binding.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  module Resume_issuance : sig
+    type t =
+      | Retained of Goal_command_receipt.t
+      | Prepare of Preparation.t
+  end
+
+  module Admission : sig
+    type continuation = t
+
+    type t =
+      | Retained of Goal_command_receipt.t
+      | Waiting of
+          { receipt : Goal_command_receipt.t
+          ; wake : Agent_protocol.Run_wake.t
+          }
+      | Ready of continuation
+      | Rejected of Agent_protocol.Error.t
+      | Uncertain of Agent_protocol.Error.t
+      | Resume_failed of
+          { receipt : Goal_command_receipt.t
+          ; error : Agent_protocol.Error.t
+          }
+  end
+end
+
+module Runtime_construction : sig
+  (** Closed private selection of the SAME Initial admitted continuation or
+      Existing_goal Ready owner. No new custody, Run, binding or permission. *)
+  type t
+
+  val of_admitted : Admitted_activation.Continuation.t -> t
+  val of_goal : Goal_continuation.t -> t
+  val custody : t -> Run_preparation.Custody.t
+  val source : t -> Runtime_source_preparation.t
+
+  (** Local irreversible fresh-use revocation, same domain, no RPC/policy/clock.
+      Known command and final adoption ACK facts survive. Called before Owner
+      resource joins. Does not erase a writer's subsequent factual known ACK. *)
+  val close : t -> unit
+
+  (** Historical final adoption ACK fact only: same physical runtime additionally
+      required by Owner. Covers actual Started, Waiting and Settled outcomes. *)
+  val handoff_acknowledged : t -> bool
+
+  (** Refresh Store outside mailbox/Owner mutex. Final pure stages are repeated
+      after callbacks/yields; actual acknowledged inference registrations retain
+      their existing private admitted-only guard, never this fresh admission. *)
+  val refresh : t -> (unit, Agent_protocol.Error.t) result
+
+  val check_policy : t -> (unit, Agent_protocol.Error.t) result
+  val check_timing : t -> (unit, Agent_protocol.Error.t) result
+  val check_authority : t -> (unit, Agent_protocol.Error.t) result
+  val check_basis : t -> (unit, Agent_protocol.Error.t) result
+end
+
+val check_runtime_construction_admission
+  :  t
+  -> construction:Runtime_construction.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Same synchronous physical installation body. Initial adapter preserves its
+    None->Some law. Goal permits exact existing worker/Manager reuse or the exact
+    cold constructor's empty slot; competing runtime/borrow rejects. Optional
+    policy DATA uses the existing turn-budget writer with this exact final guard.
+    Store refresh repeats after any policy ACK and before physical install. *)
+val install_runtime_construction
+  :  ?automatic_turn_policy:Chat_response.Runtime_semantics.policy
+  -> ?moderator_manager:Chat_response.Moderator_manager.t
+  -> t
+  -> construction:Runtime_construction.t
+  -> worker:Operation_worker.t
+  -> inference:Inference_client.Execution.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Cold-only: actual bound Runtime_resume eligibility and installed worker/Manager
+    checked before entering its SAME lifecycle. Inject exact Session_resume claim
+    into the existing queued-event runner. Legacy invokes no callback again:
+    its real restored constructor ACK already happened inside Factory build.
+    Loaded reuse skips this API. Actor records joined completion before final
+    continuation can proceed. Actual callback Run.wait/Goal.finish is retained. *)
+val run_goal_runtime_resume
+  :  t
+  -> continuation:Goal_continuation.t
+  -> resume:Runtime_builder.Runtime_resume.t
+  -> (unit, Agent_protocol.Error.t) result
+
+module Goal_resume_result : sig
+  module Continuation : sig
+    type t =
+      | Started of Agent_protocol.Operation.t
+      | Waiting of Agent_protocol.Run_wake.t
+      | Settled of Agent_protocol.Goal_episode.Settlement.t
+  end
+
+  type t =
+    | Resumed of
+        { receipt : Goal_command_receipt.t
+        ; continuation : Continuation.t
+        }
+    | Retained of Goal_command_receipt.t
+    | Resume_failed of
+        { receipt : Goal_command_receipt.t
+        ; error : Agent_protocol.Error.t
+        }
+    | Rejected of Agent_protocol.Error.t
+    | Uncertain of Agent_protocol.Error.t
+end
+
+(** Final actual same-Run decision after loaded reuse or joined cold lifecycle.
+    Release only the real constructor hold through existing aggregate settlement.
+    Waiting returns the actual retained wake. Terminal returns Settlement.create
+    from original episode + actual Run + exact terminal receipt. Only live
+    Admitted/Active with no pending Finish attaches a new Administrative Operation
+    from retained history. No parser, User input, Continue intent or second Run.
+    Known command ACK remains in every post-ACK failure. *)
+val continue_goal_episode
+  :  t
+  -> continuation:Goal_continuation.t
+  -> (Goal_resume_result.t, Agent_protocol.Error.t) result
+
+module Runtime_construction_resource : sig
+  (** Resource DATA borrow only; no effect permission. Exact current physical
+      Event/Invocation/acknowledged child execution remains mandatory. *)
+  type t
+
+  val check_basis : t -> (unit, Agent_protocol.Error.t) result
+end
+
+val runtime_construction_resource
+  :  t
+  -> construction:Runtime_construction.t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> (Runtime_construction_resource.t, Agent_protocol.Error.t) result
+
+(** Factual cleanup of this exact construction inventory after local close and resource joins. Preserves the existing Run, unrelated work, passive Wait and known ACK facts. *)
+val end_runtime_construction
+  :  t
+  -> construction:Runtime_construction.t
+  -> (unit, Agent_protocol.Error.t) result
+
+module Runtime_constructor_graph : sig
+  (** Immutable association of the actual issuing Init scope and SAME registered
+      Inference_owner. It owns no execution permission or second graph registry.
+      The Actor authenticates factual handle/registration membership even after
+      Init/Stop. Forwarded Custody must still be the exact current owner. *)
+  type t
+
+  val owner : t -> Inference_owner.t
+end
+
+module Runtime_constructor_mutations : sig
+  val open_inference_owner
+    :  t
+    -> construction:Runtime_construction.t
+    -> source:Transcript.Source_id.t
+    -> (Runtime_constructor_graph.t, Agent_protocol.Error.t) result
+
+  val acknowledge_inference
+    :  t
+    -> graph:Runtime_constructor_graph.t
+    -> handle:Inference_ledger.Handle.t
+    -> Inference_runtime.Attempt.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val observe_inference
+    :  t
+    -> graph:Runtime_constructor_graph.t
+    -> handle:Inference_ledger.Handle.t
+    -> Inference.Observation.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val observe_owned_inference
+    :  t
+    -> graph:Runtime_constructor_graph.t
+    -> Inference.Observation.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val complete_inference
+    :  t
+    -> graph:Runtime_constructor_graph.t
+    -> handle:Inference_ledger.Handle.t
+    -> Inference_client.Completion.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val release_inference
+    :  t
+    -> graph:Runtime_constructor_graph.t
+    -> handle:Inference_ledger.Handle.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val seal_inference_owner
+    :  t
+    -> graph:Runtime_constructor_graph.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val finish_inference_owner
+    :  t
+    -> graph:Runtime_constructor_graph.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val replace_shell_approval_grants
+    :  t
+    -> construction:Runtime_construction.t
+    -> Session.Shell_state.Approval_grant.persisted list
+    -> (unit, Agent_protocol.Error.t) result
+
+  val replace_shell_extension_snapshots
+    :  t
+    -> construction:Runtime_construction.t
+    -> Session.Shell_state.Extension_snapshot.t list
+    -> (unit, Agent_protocol.Error.t) result
+
+  val add_shell_manifest_grant
+    :  t
+    -> construction:Runtime_construction.t
+    -> Session.Shell_state.Manifest_grant.persisted
+    -> (unit, Agent_protocol.Error.t) result
+
+  val add_job
+    :  t
+    -> construction:Runtime_construction.t
+    -> Agent_protocol.Job.t
+    -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+  val add_schedule
+    :  t
+    -> construction:Runtime_construction.t
+    -> Agent_protocol.Schedule.t
+    -> (Agent_protocol.Schedule.t, Agent_protocol.Error.t) result
+
+  val cancel_schedule
+    :  t
+    -> construction:Runtime_construction.t
+    -> schedule_id:Agent_protocol.Id.Schedule.t
+    -> (Agent_protocol.Schedule.t, Agent_protocol.Error.t) result
+
+  val capture_model_source
+    :  t
+    -> construction:Runtime_construction.t
+    -> job_id:Agent_protocol.Id.Job.t
+    -> generation:int
+    -> target:Inference.Request.Target.t
+    -> limits:Document_schema.Limits.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val capture_recipe_target
+    :  t
+    -> construction:Runtime_construction.t
+    -> job_id:Agent_protocol.Id.Job.t
+    -> generation:int
+    -> attempt:int
+    -> target:Inference.Request.Target.t
+    -> limits:Document_schema.Limits.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val complete_model_job
+    :  t
+    -> construction:Runtime_construction.t
+    -> job_id:Agent_protocol.Id.Job.t
+    -> generation:int
+    -> attempt:int
+    -> Runtime_builder.model_job_outcome
+    -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+  val interrupt_model_job
+    :  t
+    -> construction:Runtime_construction.t
+    -> job_id:Agent_protocol.Id.Job.t
+    -> generation:int
+    -> attempt:int
+    -> reason:string
+    -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+  val checkpoint_moderator
+    :  ?moderator_manager:Chat_response.Moderator_manager.t
+    -> t
+    -> construction:Runtime_construction.t
+    -> Jsonaf.t option
+    -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+end
+
+(** Called ONLY when Owner actually has no runtime. Requires the exact new Goal
+    owner and no installed worker/borrow. Genuine lifecycle Starting then Idle
+    ACKs retain that owner and both originals. Public wrapper refreshes outside
+    Actor BETWEEN these two phase-specific requests, not under one mailbox call. No public ordinary Start, new Run
+    or operation. A failed second ACK does not erase the first command receipt. *)
+val begin_goal_runtime_construction
+  :  t
+  -> construction:Runtime_construction.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** One initial/existing-goal Init body. The old begin_held_initialization remains
+    a used Initial adapter. Ordinary legacy Init with no context is unchanged. *)
+val begin_runtime_initialization
+  :  t
+  -> construction:Runtime_construction.t
+  -> purpose:Initialization_scope.Purpose.t
+  -> expected:Session_state.t
+  -> (Initialization_scope.t, Agent_protocol.Error.t) result
+
+val reserve_runtime_history_block
+  :  t
+  -> construction:Runtime_construction.t
+  -> count:int
+  -> (History_id_source.reservation, Agent_protocol.Error.t) result
+
+(** Current command/read-authorized exact principal/key/digest receipt lookup
+    before runtime/source acquisition. Historical DATA remains reportable after
+    later episode revisions and grants no resumed execution authority. *)
+val goal_resume_receipt
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> session:Agent_protocol.Session_ref.t
+  -> request:Goal_resume_request.t
+  -> (Goal_command_receipt.t option, Agent_protocol.Error.t) result
+
+(** Owner must first reserve its actual exclusive source stage. Select the
+    existing physical Run binding and both originals, immutable episode/Admission,
+    original Goal/catalog/Run CAS and full source epoch. Capture actual session
+    revision separately; no new Run, Scope, account or initial preparation. *)
+val begin_goal_resume_preparation
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> session:Agent_protocol.Session_ref.t
+  -> request:Goal_resume_request.t
+  -> (Goal_continuation.Resume_issuance.t, Agent_protocol.Error.t) result
+
+(** Bind the actual Factory-restored source, without executing or adopting it.
+    Exact existing Run/Goal/request installation and same live owner are required. *)
+val bind_goal_continuation_source
+  :  t
+  -> preparation:Goal_continuation.Preparation.t
+  -> source:Runtime_source_preparation.t
+  -> (Goal_continuation.Source_binding.t, Agent_protocol.Error.t) result
+
+(** Commit only Enabled+the exact command receipt. Unknown first writer installs
+    no Ready owner; known ACK is retained before canonical publication and later
+    issuance errors are Resume_failed. Waiting preserves its actual passive Wait
+    and creates no Operation. Exceptions/cancellation preserve their primary. *)
+val admit_goal_resume
+  :  t
+  -> binding:Goal_continuation.Source_binding.t
+  -> (Goal_continuation.Admission.t, Agent_protocol.Error.t) result
+
+(** Factual same-owner release after joined source resources. No fresh original
+    authorization, new admission, passive-wake cancellation or Run interruption.
+    Actual known receipt DATA remains retained even when construction is closed. *)
+val end_goal_continuation_preparation
+  :  t
+  -> preparation:Goal_continuation.Preparation.t
+  -> (unit, Agent_protocol.Error.t) result
 
 module Recurrence_activation : sig
   (** Revocable process-local controller custody for one exact acknowledged

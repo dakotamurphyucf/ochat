@@ -1,8 +1,8 @@
 open! Core
 
-(** Starts a new Goal episode through the actual Factory source lifetime and
-    existing admitted-runtime consumers. This service owns no scheduler or
-    separate executor. *)
+(** Starts new Goal episodes and resumes existing episodes through the actual
+    Factory source lifetime and shared runtime consumers. This service owns no
+    scheduler or separate executor. *)
 type t
 
 (** [authorize] is the host's current nonyielding policy for the original actor
@@ -73,3 +73,34 @@ val start_episode
   -> session:Agent_protocol.Session_ref.t
   -> request:Agent_session.Goal_activation_request.t
   -> (Outcome.t, Agent_protocol.Error.t) result
+
+module Resume_result = Agent_session.Session_actor.Goal_resume_result
+
+(** Resume the same held nonterminal Goal episode. Authenticate the actual
+    registered target and check its retained command receipt before borrowing a
+    runtime, including while the owner is busy. A retained receipt is historical
+    data; it cannot reconstruct runtime custody or replay execution.
+
+    A fresh command uses the Factory's actual selected source, both the existing
+    Run original and the new operator proof, and the shared runtime owner. An
+    already Waiting Run preserves its exact wake without constructing a runtime.
+    Loaded resume does not rerun initialization. Cold resume runs the genuine
+    Session_resume lifecycle before the existing worker can start a continuation.
+
+    Source scopes join before result classification. Rejected is a prewriter
+    rejection; Uncertain means the first command acknowledgement is unknown.
+    A known command acknowledgement followed by any expected construction,
+    operation or cleanup failure returns Resume_failed with the exact receipt.
+    Resumed describes an actual Started, Waiting or Settled outcome and never
+    creates a second Run, Admission, or account. Entry/authentication failures
+    before source association remain outer errors. A callback error or exception
+    remains primary if cleanup also fails; cleanup failure replaces only a
+    successful callback result. Primary cancellation and unexpected exceptions
+    propagate with their original backtraces after factual cleanup. *)
+val resume_episode
+  :  t
+  -> entry:Session_registry.entry
+  -> actor:Operator_authorization.t
+  -> session:Agent_protocol.Session_ref.t
+  -> request:Agent_session.Goal_resume_request.t
+  -> (Resume_result.t, Agent_protocol.Error.t) result

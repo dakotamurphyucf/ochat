@@ -490,3 +490,130 @@ let preview_target_source (target : Target.t) =
     ~actor:target.actor
     ~authorize:(Target.authorize target)
 ;;
+
+module Dispatch_occupancy = struct
+  module Known = struct
+    type t =
+      { occurrence : A.Recurrence_identity.Occurrence.t
+      ; target : P.Session_ref.t
+      }
+  end
+
+  module Unknown = struct
+    type t =
+      { controller : P.Session_ref.t
+      ; error : P.Error.t
+      }
+  end
+
+  type t =
+    { known : Known.t list
+    ; unknown : Unknown.t list
+    }
+end
+
+let pending_occupancy host =
+  let module O = Dispatch_occupancy in
+  let open Result.Let_syntax in
+  let%bind () = current host in
+  let%bind principal =
+    principal host ~scopes:P.Scope.[ Send_messages; View_session_transcript ]
+  in
+  let actor =
+    Operator_authorization.guarded ~principal ~is_current:(fun () ->
+      Result.is_ok (current host))
+  in
+  let inspect (grant : Configuration.Controller.t) =
+    let controller =
+      P.Session_ref.create ~server_id:host.server_id ~session_id:grant.session_id
+    in
+    let read () =
+      let%bind state =
+        Session_factory.read_recurrence_state
+          host.factory
+          ~session:controller
+          ~actor
+          ~authorize:(fun summary ->
+            let%bind () = current host in
+            if P.Id.Session.equal summary.P.Session.id grant.session_id
+            then Ok ()
+            else conflict "recurrence occupancy read returned another controller")
+      in
+      let entries =
+        Option.value_map
+          state.recurrence_catalog
+          ~default:[]
+          ~f:A.Recurrence_catalog.entries
+      in
+      List.fold_result entries ~init:[] ~f:(fun known entry ->
+        let%map frontier = A.Recurrence_entry.frontier entry in
+        let executions =
+          A.Recurrence_frontier.executions frontier
+          |> List.filter ~f:A.Recurrence_execution.is_pending
+          |> List.map ~f:(fun execution ->
+            let intent = A.Recurrence_execution.intent execution in
+            { O.Known.occurrence = Intent.occurrence intent
+            ; target = Intent.target intent
+            })
+        in
+        let protected =
+          A.Recurrence_frontier.protected_children frontier
+          |> List.filter_map ~f:(fun reservation ->
+            let occurrence = A.Recurrence_child_reservation.occurrence reservation in
+            let terminal =
+              Option.exists
+                (A.Recurrence_frontier.find_execution frontier occurrence)
+                ~f:(fun execution -> not (A.Recurrence_execution.is_pending execution))
+            in
+            if terminal
+            then None
+            else
+              Some
+                { O.Known.occurrence
+                ; target =
+                    P.Session_ref.create
+                      ~server_id:host.server_id
+                      ~session_id:
+                        (A.Recurrence_child_reservation.child_session_id reservation)
+                })
+        in
+        known @ executions @ protected)
+    in
+    match read () with
+    | Ok known -> known, None
+    | Error error ->
+      (* The unreadable durable catalog may retain targets removed from this
+         restart's configuration. Its uncertainty therefore covers every local
+         target; current grant selectors cannot prove historical nonoverlap. *)
+      [], Some { O.Unknown.controller; error }
+  in
+  let known, unknown =
+    List.fold
+      host.configuration.controllers
+      ~init:([], [])
+      ~f:(fun (known, unknown) grant ->
+        let next, failure = inspect grant in
+        known @ next, Option.to_list failure @ unknown)
+  in
+  let%map () = current host in
+  { O.known; unknown = List.rev unknown }
+;;
+
+let acquire_captured_target (controller : Controller.t) ~occurrence =
+  let open Result.Let_syntax in
+  let%bind () = Controller.basis controller in
+  let%bind () =
+    if controller.grant.captured_children
+    then Ok ()
+    else denied "captured recurrence recovery is not configured"
+  in
+  let%bind child, target =
+    Session_factory.acquire_recurrence_child
+      controller.host.factory
+      ~parent:controller.entry
+      ~actor:controller.actor
+      ~authorize:(Controller.authorize_creation controller)
+      ~occurrence
+  in
+  captured_target controller ~child ~target
+;;

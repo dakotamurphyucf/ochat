@@ -1,6 +1,27 @@
 open! Core
 module Catalogs = Session_factory_catalogs
 
+module Constructor_owner = struct
+  type selection =
+    | Initial of Agent_session.Run_preparation.t
+    | Runtime_construction of Agent_session.Session_actor.Runtime_construction.t
+
+  type t =
+    | Ordinary of Agent_session.Run_preparation.t option ref
+    | Admitted of Agent_session.Session_actor.Runtime_construction.t option ref
+
+  let current = function
+    | Ordinary preparation -> Option.map !preparation ~f:(fun value -> Initial value)
+    | Admitted construction ->
+      Option.map !construction ~f:(fun value -> Runtime_construction value)
+  ;;
+
+  let clear = function
+    | Ordinary preparation -> preparation := None
+    | Admitted construction -> construction := None
+  ;;
+end
+
 type recovery_purpose =
   | Ordinary_recovery
   | Metadata_target_recovery
@@ -1034,7 +1055,12 @@ let shell_store_error (error : Agent_protocol.Error.t) =
     { code = "shell.actor_store_failed"; message = error.message }
 ;;
 
-let shell_approval_store ?(run_preparation = ref None) state actor_ref shell_state =
+let shell_approval_store
+      ?(run_preparation = Constructor_owner.Ordinary (ref None))
+      state
+      actor_ref
+      shell_state
+  =
   let load () =
     match !actor_ref with
     | None -> Ok !shell_state.Session.Shell_state.approval_grants
@@ -1048,13 +1074,19 @@ let shell_approval_store ?(run_preparation = ref None) state actor_ref shell_sta
       shell_state := { !shell_state with approval_grants };
       Ok ()
     | Some actor ->
-      (match !run_preparation with
+      (match Constructor_owner.current run_preparation with
        | None ->
          Agent_session.Session_actor.replace_shell_approval_grants actor approval_grants
-       | Some preparation ->
+       | Some (Constructor_owner.Initial preparation) ->
          Agent_session.Session_actor.Constructor_mutations.replace_shell_approval_grants
            actor
            ~preparation
+           approval_grants
+       | Some (Runtime_construction construction) ->
+         Agent_session.Session_actor.Runtime_constructor_mutations
+         .replace_shell_approval_grants
+           actor
+           ~construction
            approval_grants)
       |> Result.map_error ~f:shell_store_error
   in
@@ -1133,7 +1165,7 @@ let operator_manifest_authorizer
 
 let manifest_authorizer
       ?manifest_sha256
-      ?(run_preparation = ref None)
+      ?(run_preparation = Constructor_owner.Ordinary (ref None))
       t
       profile
       revision
@@ -1155,12 +1187,18 @@ let manifest_authorizer
       := { !shell_state with manifest_grants = grant :: !shell_state.manifest_grants };
       Ok ()
     | Some actor ->
-      (match !run_preparation with
+      (match Constructor_owner.current run_preparation with
        | None -> Agent_session.Session_actor.add_shell_manifest_grant actor grant
-       | Some preparation ->
+       | Some (Constructor_owner.Initial preparation) ->
          Agent_session.Session_actor.Constructor_mutations.add_shell_manifest_grant
            actor
            ~preparation
+           grant
+       | Some (Runtime_construction construction) ->
+         Agent_session.Session_actor.Runtime_constructor_mutations
+         .add_shell_manifest_grant
+           actor
+           ~construction
            grant)
       |> Result.map_error ~f:manifest_store_error
   in
@@ -1196,12 +1234,17 @@ type pending_schedule_operation =
 let add_bound_schedule actor_ref pending ~run_preparation schedule =
   match !actor_ref with
   | Some actor ->
-    (match !run_preparation with
+    (match Constructor_owner.current run_preparation with
      | None -> Agent_session.Session_actor.add_schedule actor schedule
-     | Some preparation ->
+     | Some (Constructor_owner.Initial preparation) ->
        Agent_session.Session_actor.add_run_constructor_schedule
          actor
          ~preparation
+         schedule
+     | Some (Runtime_construction construction) ->
+       Agent_session.Session_actor.Runtime_constructor_mutations.add_schedule
+         actor
+         ~construction
          schedule)
     |> Result.map ~f:(fun schedule ->
       Agent_protocol.Id.Schedule.to_string schedule.Agent_protocol.Schedule.id)
@@ -1251,12 +1294,17 @@ let schedule_services t state actor_ref pending ~run_preparation =
     in
     match !actor_ref with
     | Some actor ->
-      (match !run_preparation with
+      (match Constructor_owner.current run_preparation with
        | None -> Agent_session.Session_actor.cancel_schedule_internal actor ~schedule_id
-       | Some preparation ->
+       | Some (Constructor_owner.Initial preparation) ->
          Agent_session.Session_actor.cancel_run_constructor_schedule
            actor
            ~preparation
+           ~schedule_id
+       | Some (Runtime_construction construction) ->
+         Agent_session.Session_actor.Runtime_constructor_mutations.cancel_schedule
+           actor
+           ~construction
            ~schedule_id)
       |> Result.map ~f:(fun _ -> ())
       |> Result.map_error ~f:(fun error -> error.message)
@@ -1272,19 +1320,29 @@ let flush_pending_schedules ?run_preparation actor operations =
     | Add schedule ->
       (match run_preparation with
        | None -> Agent_session.Session_actor.add_schedule actor schedule
-       | Some preparation ->
+       | Some (Constructor_owner.Initial preparation) ->
          Agent_session.Session_actor.add_run_constructor_schedule
            actor
            ~preparation
+           schedule
+       | Some (Runtime_construction construction) ->
+         Agent_session.Session_actor.Runtime_constructor_mutations.add_schedule
+           actor
+           ~construction
            schedule)
       |> Result.map ~f:(fun _ -> ())
     | Cancel schedule_id ->
       (match run_preparation with
        | None -> Agent_session.Session_actor.cancel_schedule_internal actor ~schedule_id
-       | Some preparation ->
+       | Some (Constructor_owner.Initial preparation) ->
          Agent_session.Session_actor.cancel_run_constructor_schedule
            actor
            ~preparation
+           ~schedule_id
+       | Some (Runtime_construction construction) ->
+         Agent_session.Session_actor.Runtime_constructor_mutations.cancel_schedule
+           actor
+           ~construction
            ~schedule_id)
       |> Result.map ~f:(fun _ -> ())
   in
@@ -2106,7 +2164,7 @@ let rec await_call_cancellation t actor initialization_scope (job : Agent_protoc
     match initialization_scope with
     | None -> true
     | Some scope ->
-      Agent_session.Session_actor.initialization_model_job_is_current
+      Agent_session.Session_actor.initialization_model_job_is_running
         actor
         ~scope
         ~job_id:job.id
@@ -2144,10 +2202,18 @@ let interrupt_constructor_job actor ~run_preparation (job : Agent_protocol.Job.t
       ~generation:job.generation
       ~attempt:job.attempt
       ~reason
-  | Some preparation ->
+  | Some (Constructor_owner.Initial preparation) ->
     Agent_session.Session_actor.interrupt_run_constructor_job
       actor
       ~preparation
+      ~job_id:job.id
+      ~generation:job.generation
+      ~attempt:job.attempt
+      ~reason
+  | Some (Runtime_construction construction) ->
+    Agent_session.Session_actor.Runtime_constructor_mutations.interrupt_model_job
+      actor
+      ~construction
       ~job_id:job.id
       ~generation:job.generation
       ~attempt:job.attempt
@@ -2169,7 +2235,7 @@ let cancelled_call actor ~run_preparation (job : Agent_protocol.Job.t) =
 ;;
 
 let prepare_model_job_inference
-      ?(run_preparation = ref None)
+      ?(run_preparation = Constructor_owner.Ordinary (ref None))
       t
       actor
       ~initialization_scope
@@ -2204,7 +2270,7 @@ let prepare_model_job_inference
             (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
       in
       let%map () =
-        match !run_preparation with
+        match Constructor_owner.current run_preparation with
         | None ->
           Agent_session.Session_actor.capture_model_job_source
             actor
@@ -2212,10 +2278,18 @@ let prepare_model_job_inference
             ~generation:job.generation
             ~target
             ~limits:t.journal_document_limits
-        | Some preparation ->
+        | Some (Constructor_owner.Initial preparation) ->
           Agent_session.Session_actor.capture_run_constructor_model_source
             actor
             ~preparation
+            ~job_id:job.id
+            ~generation:job.generation
+            ~target
+            ~limits:t.journal_document_limits
+        | Some (Runtime_construction construction) ->
+          Agent_session.Session_actor.Runtime_constructor_mutations.capture_model_source
+            actor
+            ~construction
             ~job_id:job.id
             ~generation:job.generation
             ~target
@@ -2235,7 +2309,7 @@ let prepare_model_job_inference
       (fun target ->
         match initialization_scope with
         | None ->
-          (match !run_preparation with
+          (match Constructor_owner.current run_preparation with
            | None ->
              Agent_session.Session_actor.capture_recipe_target
                actor
@@ -2244,10 +2318,20 @@ let prepare_model_job_inference
                ~attempt:job.attempt
                ~target
                ~limits:t.journal_document_limits
-           | Some preparation ->
+           | Some (Constructor_owner.Initial preparation) ->
              Agent_session.Session_actor.capture_run_constructor_recipe_target
                actor
                ~preparation
+               ~job_id:job.id
+               ~generation:job.generation
+               ~attempt:job.attempt
+               ~target
+               ~limits:t.journal_document_limits
+           | Some (Runtime_construction construction) ->
+             Agent_session.Session_actor.Runtime_constructor_mutations
+             .capture_recipe_target
+               actor
+               ~construction
                ~job_id:job.id
                ~generation:job.generation
                ~attempt:job.attempt
@@ -2308,7 +2392,7 @@ let job_services
     in
     (match scope with
      | None ->
-       (match !run_preparation with
+       (match Constructor_owner.current run_preparation with
         | None ->
           Agent_session.Session_actor.complete_job
             actor
@@ -2316,10 +2400,18 @@ let job_services
             ~generation:job.generation
             ~attempt:job.attempt
             outcome
-        | Some preparation ->
+        | Some (Constructor_owner.Initial preparation) ->
           Agent_session.Session_actor.complete_run_constructor_model_job
             actor
             ~preparation
+            ~job_id:job.id
+            ~generation:job.generation
+            ~attempt:job.attempt
+            outcome
+        | Some (Runtime_construction construction) ->
+          Agent_session.Session_actor.Runtime_constructor_mutations.complete_model_job
+            actor
+            ~construction
             ~job_id:job.id
             ~generation:job.generation
             ~attempt:job.attempt
@@ -2344,13 +2436,17 @@ let job_services
            `Cancelled)
     with
     | `Completed result -> complete_call actor scope job result
-    | `Cancelled -> cancelled_call actor ~run_preparation:!run_preparation job
+    | `Cancelled ->
+      cancelled_call
+        actor
+        ~run_preparation:(Constructor_owner.current run_preparation)
+        job
     | exception (Eio.Cancel.Cancelled _ as exn) ->
       Eio.Cancel.protect (fun () ->
         ignore
           (interrupt_constructor_job
              actor
-             ~run_preparation:!run_preparation
+             ~run_preparation:(Constructor_owner.current run_preparation)
              job
              ~reason:"synchronous model call was cancelled"
            : (Agent_protocol.Job.t, Agent_protocol.Error.t) result));
@@ -2531,8 +2627,13 @@ let flush_pending_jobs ?run_preparation actor jobs =
   List.fold_result jobs ~init:() ~f:(fun () job ->
     (match run_preparation with
      | None -> Agent_session.Session_actor.add_job actor job
-     | Some preparation ->
-       Agent_session.Session_actor.add_run_constructor_job actor ~preparation job)
+     | Some (Constructor_owner.Initial preparation) ->
+       Agent_session.Session_actor.add_run_constructor_job actor ~preparation job
+     | Some (Runtime_construction construction) ->
+       Agent_session.Session_actor.Runtime_constructor_mutations.add_job
+         actor
+         ~construction
+         job)
     |> Result.map ~f:(fun _ -> ()))
 ;;
 
@@ -2544,11 +2645,18 @@ let install_moderator_if_changed
   =
   let open Result.Let_syntax in
   match run_preparation with
-  | Some preparation ->
+  | Some (Constructor_owner.Initial preparation) ->
     Agent_session.Session_actor.checkpoint_run_moderator
       ?moderator_manager
       actor
       ~preparation
+      moderator_snapshot
+    |> Result.map ~f:ignore
+  | Some (Runtime_construction construction) ->
+    Agent_session.Session_actor.Runtime_constructor_mutations.checkpoint_moderator
+      ?moderator_manager
+      actor
+      ~construction
       moderator_snapshot
     |> Result.map ~f:ignore
   | None ->
@@ -2600,7 +2708,20 @@ let create_graph_tracking ?run_preparation t actor_ref =
   in
   let%bind upstream = runtime_inference_ports t actor_ref in
   let%bind source = create_graph_source () in
-  Graph_tracking.create ?run_preparation actor ~source ~upstream
+  match run_preparation with
+  | None -> Graph_tracking.create actor ~source ~upstream
+  | Some (Constructor_owner.Ordinary preparation) ->
+    Graph_tracking.create ~run_preparation:preparation actor ~source ~upstream
+  | Some (Admitted construction) ->
+    let%bind construction =
+      Result.of_option
+        !construction
+        ~error:
+          (unavailable
+             Invalid_state
+             "runtime construction graph requires its actual constructor")
+    in
+    Graph_tracking.create_for_runtime_construction actor ~construction ~source ~upstream
 ;;
 
 exception Inference_graph_cleanup_failed of Agent_protocol.Error.t
@@ -3563,16 +3684,22 @@ let prepare_authored_code
         match !actor_ref with
         | None -> Ok ()
         | Some actor ->
-          (match !run_preparation with
+          (match Constructor_owner.current run_preparation with
            | None ->
              Agent_session.Session_actor.replace_shell_extension_snapshots
                actor
                extension_snapshots
-           | Some preparation ->
+           | Some (Constructor_owner.Initial preparation) ->
              Agent_session.Session_actor.Constructor_mutations
              .replace_shell_extension_snapshots
                actor
                ~preparation
+               extension_snapshots
+           | Some (Runtime_construction construction) ->
+             Agent_session.Session_actor.Runtime_constructor_mutations
+             .replace_shell_extension_snapshots
+               actor
+               ~construction
                extension_snapshots)
           |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
       in
@@ -4441,7 +4568,7 @@ let legacy_construction
       pending_jobs
       ~initialization_scope:(ref None)
       ~initialization_jobs:(ref [])
-      ~run_preparation:(ref None)
+      ~run_preparation:(Constructor_owner.Ordinary (ref None))
   in
   let installed_claim ~operation_id ~manager ~callback f =
     match !actor_ref with
@@ -5794,16 +5921,15 @@ let close_unregistered_runtime t handle runtime writer actor capacity =
   Agent_store.Commit_writer.close writer
 ;;
 
-let refresh_held_construction continuation =
+let refresh_runtime_construction construction =
   let module A = Agent_session.Session_actor in
-  let module C = A.Admitted_activation.Continuation in
+  let module C = A.Runtime_construction in
   let open Result.Let_syntax in
-  let%bind () = C.refresh continuation in
-  let%bind () = C.check_policy continuation in
-  let%bind () = C.check_timing continuation in
-  let%bind () = C.check_authority continuation in
-  let%bind () = A.Held_run.Activation.check_basis (C.target continuation) in
-  C.check_basis continuation
+  let%bind () = C.refresh construction in
+  let%bind () = C.check_policy construction in
+  let%bind () = C.check_timing construction in
+  let%bind () = C.check_authority construction in
+  C.check_basis construction
 ;;
 
 let selected_runtime_source t source =
@@ -5841,15 +5967,15 @@ let selected_runtime_source t source =
 let build_runtime_for_actor ?run_preparation ?original_actor ?deferred t handle actor =
   let open Result.Let_syntax in
   let check_deferred () =
-    Option.value_map deferred ~default:(Ok ()) ~f:(fun (_, continuation) ->
-      refresh_held_construction continuation)
+    Option.value_map deferred ~default:(Ok ()) ~f:(fun (_, construction) ->
+      refresh_runtime_construction construction)
   in
   let%bind () = check_deferred () in
   let%bind () =
     match deferred with
     | None -> Agent_session.Session_actor.check_runtime_admission actor
-    | Some (_, continuation) ->
-      Agent_session.Session_actor.check_held_runtime_admission actor ~continuation
+    | Some (_, construction) ->
+      Agent_session.Session_actor.check_runtime_construction_admission actor ~construction
   in
   let%bind state = Agent_session.Session_actor.state actor in
   let%bind revision =
@@ -5874,10 +6000,10 @@ let build_runtime_for_actor ?run_preparation ?original_actor ?deferred t handle 
   let%bind () = check_deferred () in
   let%bind reservation =
     match deferred, run_preparation with
-    | Some (_, continuation), _ ->
-      Agent_session.Session_actor.reserve_held_history_block
+    | Some (_, construction), _ ->
+      Agent_session.Session_actor.reserve_runtime_history_block
         actor
-        ~continuation
+        ~construction
         ~count:t.limits.moderator_reservation_size
     | None, None ->
       Agent_session.Session_actor.reserve_history_block
@@ -5924,10 +6050,10 @@ let build_runtime_for_actor ?run_preparation ?original_actor ?deferred t handle 
           | Terminal _ -> false))
     in
     match deferred with
-    | Some (_, continuation) ->
-      Agent_session.Session_actor.begin_held_initialization
+    | Some (_, construction) ->
+      Agent_session.Session_actor.begin_runtime_initialization
         actor
-        ~continuation
+        ~construction
         ~purpose
         ~expected
       |> Result.map ~f:Option.some
@@ -5956,7 +6082,11 @@ let build_runtime_for_actor ?run_preparation ?original_actor ?deferred t handle 
          |> Result.map ~f:Option.some)
   in
   let initialization_scope = ref scope in
-  let constructor_preparation = ref run_preparation in
+  let constructor_preparation =
+    match deferred with
+    | None -> Constructor_owner.Ordinary (ref run_preparation)
+    | Some (_, construction) -> Admitted (ref (Some construction))
+  in
   let initialization_jobs = ref [] in
   let actor_ref = ref (Some actor) in
   let schedules = ref [] in
@@ -6014,8 +6144,11 @@ let build_runtime_for_actor ?run_preparation ?original_actor ?deferred t handle 
       let%bind () = check_deferred () in
       let%bind moderator = runtime.start_moderator () in
       let%bind () = check_deferred () in
-      let%bind () = flush_pending_schedules ?run_preparation actor !schedules in
-      let%bind () = flush_pending_jobs ?run_preparation actor !jobs in
+      let current_constructor = Constructor_owner.current constructor_preparation in
+      let%bind () =
+        flush_pending_schedules ?run_preparation:current_constructor actor !schedules
+      in
+      let%bind () = flush_pending_jobs ?run_preparation:current_constructor actor !jobs in
       let%bind () =
         match pending with
         | None ->
@@ -6029,7 +6162,7 @@ let build_runtime_for_actor ?run_preparation ?original_actor ?deferred t handle 
              |> Result.map ~f:ignore
            | None ->
              install_moderator_if_changed
-               ?run_preparation
+               ?run_preparation:current_constructor
                ?moderator_manager:runtime.moderator_manager
                actor
                moderator)
@@ -6094,7 +6227,8 @@ let build_runtime_for_actor ?run_preparation ?original_actor ?deferred t handle 
         record_failure (unavailable Invalid_state "runtime initialization failed");
         Exn.raise_with_original_backtrace exn backtrace)
     ~finally:(fun () ->
-      constructor_preparation := None;
+      let current_constructor = Constructor_owner.current constructor_preparation in
+      Constructor_owner.clear constructor_preparation;
       initialization_scope := None;
       (* End before the runtime escapes. Residual exact synchronous attempts are
          interrupted on failed preparation/cancellation; queued async work is
@@ -6112,7 +6246,7 @@ let build_runtime_for_actor ?run_preparation ?original_actor ?deferred t handle 
               ignore
                 (interrupt_constructor_job
                    actor
-                   ~run_preparation
+                   ~run_preparation:current_constructor
                    job
                    ~reason:"runtime initialization scope ended"
                  : (Agent_protocol.Job.t, Agent_protocol.Error.t) result)
@@ -6436,13 +6570,8 @@ let create_loaded_entry
         ~initial:(Some runtime)
         ~build:(fun ~original_actor run_preparation ->
           build_runtime_for_actor ?run_preparation ?original_actor t handle actor)
-        ~build_deferred:(fun ~source ~preparation ~continuation ->
-          build_runtime_for_actor
-            ~run_preparation:preparation
-            ~deferred:(source, continuation)
-            t
-            handle
-            actor)
+        ~build_deferred:(fun ~source ~construction ->
+          build_runtime_for_actor ~deferred:(source, construction) t handle actor)
     in
     runtime_owner := Some runtime;
     let finish () =
@@ -6648,13 +6777,8 @@ let create_unloaded_entry
         ~initial:None
         ~build:(fun ~original_actor run_preparation ->
           build_runtime_for_actor ?run_preparation ?original_actor t handle actor)
-        ~build_deferred:(fun ~source ~preparation ~continuation ->
-          build_runtime_for_actor
-            ~run_preparation:preparation
-            ~deferred:(source, continuation)
-            t
-            handle
-            actor)
+        ~build_deferred:(fun ~source ~construction ->
+          build_runtime_for_actor ~deferred:(source, construction) t handle actor)
     in
     runtime_owner := Some runtime;
     Session_recovery_owner.adopt_runtime_exn owner runtime;
@@ -11799,6 +11923,162 @@ let acquire_recurrence_target t ~session ~actor ~authorize =
   check_loaded entry
 ;;
 
+let read_recurrence_state t ~session ~actor ~authorize =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let check summary =
+    let%bind () = check_recurrence_original actor in
+    let%bind () =
+      if
+        P.Id.Server.equal
+          (P.Session_ref.server_id session)
+          (Agent_store.Session_store.server_id t.store)
+        && P.Id.Session.equal (P.Session_ref.session_id session) summary.P.Session.id
+      then Ok ()
+      else
+        Error (unavailable Invalid_request "recurrence read belongs to another session")
+    in
+    let%bind () = authorize summary in
+    check_recurrence_original actor
+  in
+  let%bind () = check_recurrence_original actor in
+  let%bind () =
+    if
+      P.Id.Server.equal
+        (P.Session_ref.server_id session)
+        (Agent_store.Session_store.server_id t.store)
+    then Ok ()
+    else Error (unavailable Invalid_request "recurrence read belongs to another host")
+  in
+  let%bind state =
+    Session_registry.read_state
+      t.registry
+      ~authorize:check
+      (P.Session_ref.session_id session)
+  in
+  let%map () = check (Agent_session.Session_state.summary state) in
+  state
+;;
+
+let acquire_recurrence_child t ~parent ~actor ~authorize ~occurrence =
+  let module A = Agent_session in
+  let module P = Agent_protocol in
+  let module D = Agent_store.Delegation_store in
+  let module R = A.Recurrence_child_reservation in
+  let open Result.Let_syntax in
+  let parent_session =
+    A.Recurrence_identity.Occurrence.definition occurrence
+    |> A.Recurrence_identity.Definition.controller
+  in
+  let facts () =
+    let%bind () = check_recurrence_original actor in
+    let%bind () = check_registered_entry t parent ~session:parent_session in
+    let%bind state = A.Session_actor.state parent.Session_registry.actor in
+    let entries =
+      Option.value_map
+        state.recurrence_catalog
+        ~default:[]
+        ~f:A.Recurrence_catalog.entries
+    in
+    let%bind entry =
+      List.find entries ~f:(fun entry ->
+        P.Id.Recurrence.equal
+          (A.Recurrence_entry.id entry)
+          (A.Recurrence_identity.Occurrence.definition occurrence
+           |> A.Recurrence_identity.Definition.recurrence_id))
+      |> Result.of_option
+           ~error:(unavailable Conflict "captured occurrence is not retained")
+    in
+    let%bind definition =
+      List.find (A.Recurrence_entry.definitions entry) ~f:(fun definition ->
+        A.Recurrence_identity.Definition.equal
+          (A.Recurrence_definition.key definition)
+          (A.Recurrence_identity.Occurrence.definition occurrence))
+      |> Result.of_option
+           ~error:(unavailable Conflict "captured definition is not retained")
+    in
+    let%bind () = authorize state definition in
+    let%bind frontier = A.Recurrence_entry.frontier entry in
+    let%bind reservation =
+      List.find (A.Recurrence_frontier.protected_children frontier) ~f:(fun row ->
+        A.Recurrence_identity.Occurrence.equal occurrence (R.occurrence row))
+      |> Result.of_option
+           ~error:(unavailable Conflict "captured reservation is not retained")
+    in
+    let%bind association =
+      List.find (A.Recurrence_frontier.child_associations frontier) ~f:(fun row ->
+        A.Recurrence_identity.Occurrence.equal
+          occurrence
+          (A.Recurrence_child_association.occurrence row))
+      |> Result.of_option ~error:(unavailable Conflict "captured child is not linked")
+    in
+    let%bind () = A.Recurrence_child_association.validate association ~reservation in
+    let reference = A.Recurrence_child_association.reference association in
+    let%bind record =
+      D.resolve (Agent_store.Session_store.delegations t.store) reference
+      |> Result.map_error ~f:protocol_of_store
+    in
+    let%bind () =
+      if D.equal_stage record.stage Linked
+      then Ok ()
+      else Error (unavailable Conflict "captured child has no actual linked publication")
+    in
+    let%bind origin = A.Recurrence_child_origin.of_record record in
+    let%bind () =
+      if R.equal reservation (A.Recurrence_child_origin.reservation origin)
+      then Ok ()
+      else Error (unavailable Conflict "captured record has another reservation")
+    in
+    let%bind () = check_recurrence_original actor in
+    let%map () = check_registered_entry t parent ~session:parent_session in
+    reference, record, origin, state, definition
+  in
+  let%bind reference, _, origin, parent_state, definition = facts () in
+  let session =
+    P.Session_ref.create
+      ~server_id:(Agent_store.Session_store.server_id t.store)
+      ~session_id:reference.child_session_id
+  in
+  let verify state =
+    let%bind () = check_recurrence_original actor in
+    let%bind () = authorize parent_state definition in
+    A.Recurrence_child_origin.validate_source origin state
+  in
+  let%bind entry = acquire_recurrence_target t ~session ~actor ~authorize:verify in
+  let%bind state = A.Session_actor.state entry.Session_registry.actor in
+  let%bind current, record, origin, _, _ = facts () in
+  let%bind () =
+    if D.Reference.equal reference current
+    then Ok ()
+    else Error (unavailable Conflict "captured child association changed")
+  in
+  let%bind () = A.Recurrence_child_origin.validate_source origin state in
+  let%bind artifact_store =
+    Agent_store.Prompt_artifact_store.open_existing
+      ~env:t.env
+      ~root:
+        (Agent_store.Data_root.prompt_artifacts_path
+           (Agent_store.Session_store.data_root t.store))
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let%bind _ =
+    A.Captured_recurrence_source.restore
+      ~artifact_store
+      ~content_limits:t.content_limits
+      ~record
+      ~state
+      ~checkpoint:Eio.Fiber.check
+  in
+  let%bind final_reference, final_record, _, _, _ = facts () in
+  let%bind () =
+    if D.Reference.equal reference final_reference && D.equal_record record final_record
+    then Ok ()
+    else Error (unavailable Conflict "captured record changed during recovery")
+  in
+  let%map () = check_registered_entry t entry ~session in
+  { Recurrence_child.session; reference }, entry
+;;
+
 module Recurrence_source_preview = struct
   type t =
     { source : Agent_protocol.Run_source.t
@@ -11870,4 +12150,117 @@ let preview_recurrence_source t entry ~actor ~authorize =
       ~generation:after.identity.generation
   in
   { Recurrence_source_preview.source; expected_revision = after.counters.revision }
+;;
+
+module Goal_resume_source = struct
+  module Decision = Runtime_owner.Goal_resume_source.Decision
+
+  type 'a t =
+    { outcome : 'a Decision.t Runtime_owner.Scope_outcome.t
+    ; receipt : Agent_session.Goal_command_receipt.t option
+    ; cleanup : Runtime_owner.Scope_outcome.Cleanup.t
+    }
+
+  let receipt t = t.receipt
+  let cleanup t = t.cleanup
+
+  let result t =
+    match Runtime_owner.Scope_outcome.resume t.outcome with
+    | Error _ as failure -> failure
+    | Ok _ as result ->
+      (match Runtime_owner.Scope_outcome.Cleanup.status t.cleanup with
+       | Never_acquired | Joined -> result
+       | Failed (Protocol failure, _) -> Error failure
+       | Failed (Raised (exn, backtrace), _) ->
+         Exn.raise_with_original_backtrace exn backtrace)
+  ;;
+end
+
+let with_goal_resume_source_reported
+      t
+      (entry : Session_registry.entry)
+      ~actor
+      ~authorize
+      ~session
+      ~request
+      f
+  =
+  let module Actor = Agent_session.Session_actor in
+  let module Scope = Runtime_owner.Scope_outcome in
+  let module Source = Runtime_owner.Goal_resume_source in
+  let open Result.Let_syntax in
+  let%bind () = check_registered_entry t entry ~session in
+  let%bind () =
+    if Runtime_owner.belongs_to_actor entry.runtime entry.actor
+    then Ok ()
+    else Error (unavailable Invalid_state "source runtime belongs to another Actor")
+  in
+  let parent_cleanup = ref Deferred_parent_cleanup.Not_acquired in
+  let report =
+    Runtime_owner.with_goal_resume_source_reported
+      entry.runtime
+      ~source_owner:t.runtime_source_owner
+      ~actor
+      ~authorize
+      ~session
+      ~request
+      (fun stage ->
+         with_selected_source
+           t
+           entry
+           ~with_parent:(fun owner f ->
+             parent_cleanup := Awaiting_report;
+             let outcome =
+               Runtime_owner.with_loaded_source_capabilities_reported
+                 owner
+                 ~source_owner:t.runtime_source_owner
+                 f
+             in
+             parent_cleanup := Reported (Scope.cleanup outcome);
+             Scope.resume outcome)
+           ~with_source:(fun source f -> Result.bind (Source.prepare stage ~source) ~f)
+           ~check_selected:Runtime_owner.Prepared_goal_continuation.check_basis
+           f)
+  in
+  let outcome = Source.Report.outcome report in
+  let cleanup =
+    match !parent_cleanup with
+    | Not_acquired -> Scope.cleanup outcome
+    | Reported parent -> Scope.Cleanup.combine parent (Scope.cleanup outcome)
+    | Awaiting_report ->
+      Scope.Cleanup.combine
+        (Scope.Cleanup.failed
+           (Protocol
+              (unavailable
+                 Internal_error
+                 "Goal resume parent source cleanup report is unavailable")))
+        (Scope.cleanup outcome)
+  in
+  let cleanup =
+    match Source.Report.preparation report with
+    | None -> cleanup
+    | Some preparation ->
+      (* Both source scopes have returned and joined before this factual close.
+         Local source revocation already excluded fresh admission before joins. *)
+      let closed =
+        Eio.Cancel.protect (fun () ->
+          try Ok (Actor.end_goal_continuation_preparation entry.actor ~preparation) with
+          | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+      in
+      (match closed with
+       | Ok (Ok ()) -> cleanup
+       | Ok (Error failure) ->
+         Scope.Cleanup.combine cleanup (Scope.Cleanup.failed (Protocol failure))
+       | Error (exn, backtrace) ->
+         Scope.Cleanup.combine cleanup (Scope.Cleanup.failed (Raised (exn, backtrace))))
+  in
+  let receipt =
+    match Source.Report.preparation report with
+    | Some preparation -> Actor.Goal_continuation.Preparation.receipt preparation
+    | None ->
+      (match Scope.primary outcome with
+       | Returned (Ok (Source.Decision.Retained receipt)) -> Some receipt
+       | Returned (Ok (Fresh _) | Error _) | Raised _ -> None)
+  in
+  Ok { Goal_resume_source.outcome; receipt; cleanup }
 ;;

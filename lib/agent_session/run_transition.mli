@@ -11,18 +11,29 @@
     explicit session-end disposition remains effective. Workflow is unchanged. *)
 type t
 
+module Lifecycle_selection : sig
+  (** Exact retained Run selection DATA supplied by the Actor's live lifecycle
+      owner. Neither case authenticates a caller or grants execution authority.
+      The Actor must validate the same physical borrow and writer at commit. *)
+  type t =
+    | Authored_start of Agent_protocol.Run.t
+    | Goal_resume of Agent_protocol.Run.t
+end
+
 (** [startup_run], when supplied by the actual actor, is the exact retained Run
     selected by its live held startup/Init owner. It defers quiescent terminal
     completion while real input/startup handoff remains pending. This optional
     pure DATA is not execution authority and must never be decoded as a live
     hold. Ordinary settlement without that owner remains unchanged. *)
 
-(** [authored_start_run] is distinct exact selection DATA from a real
-    actor-owned held Session_start borrow. It must equal the retained Run and
-    executing source/generation; default generic callback selection is unchanged.
-    The actor must validate its physical scope again at the writer. *)
+(** [lifecycle_selection] identifies the exact retained Run from the Actor's
+    actual lifecycle borrow. Authored_start retains the held Session_start law.
+    Goal_resume requires a nonterminal Workflow with its immutable Goal episode
+    link, unchanged source installation and actual Session_resume execution.
+    Both exclude operation, Job and delegated contexts. Default generic callback
+    selection remains unchanged. *)
 val prepare
-  :  ?authored_start_run:Agent_protocol.Run.t
+  :  ?lifecycle_selection:Lifecycle_selection.t
   -> ?startup_run:Agent_protocol.Run.t
   -> Session_state.t
   -> scope:Run_scope.t
@@ -39,7 +50,7 @@ val prepare
     work; preserves prior terminal evidence and emits no action/terminal receipt.
     It does not complete the parent callback or change its staged action. *)
 val add_owned_work
-  :  ?authored_start_run:Agent_protocol.Run.t
+  :  ?lifecycle_selection:Lifecycle_selection.t
   -> Session_state.t
   -> scope:Run_scope.t
   -> executing:Agent_protocol.Moderator_execution.t

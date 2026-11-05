@@ -157,6 +157,47 @@ module Authored_start = struct
   ;;
 end
 
+module Runtime_resume = struct
+  type t =
+    { worker : Operation_worker.t
+    ; manager : Manager.t option
+    ; kind : Authored_start.kind
+    }
+
+  let worker t = t.worker
+  let manager t = t.manager
+
+  let unavailable message =
+    Agent_protocol.Error.create Conflict ~message ~retryable:false ()
+  ;;
+
+  let check_pending t =
+    match t.kind with
+    | Legacy check -> check ()
+    | Absent -> Ok ()
+    | Extension { lifecycle; run = _ } ->
+      if Moderator_event.Lifecycle.resume_pending lifecycle
+      then Ok ()
+      else
+        Error
+          (unavailable "runtime resume requires an unconsumed Session_resume lifecycle")
+  ;;
+
+  let run t ~claim =
+    let open Result.Let_syntax in
+    let%bind () = check_pending t in
+    match t.kind with
+    | Legacy _ | Absent -> Ok ()
+    | Extension { lifecycle = _; run } ->
+      let%bind outcome = run ~claim in
+      (match outcome with
+       | Activated _ -> Ok ()
+       | Unavailable -> Error (unavailable "runtime resume callback was unavailable")
+       | Already_active ->
+         Error (unavailable "runtime resume lifecycle was already activated"))
+  ;;
+end
+
 type t =
   { source_lease : Prompt_source_lease.t
   ; worker : Operation_worker.t
@@ -193,6 +234,7 @@ type t =
   ; activity : Runtime_activity.t option
   ; native_runtime : Agent_runtime.t option
   ; authored_start : unit -> (Authored_start.t, Agent_protocol.Error.t) result
+  ; runtime_resume : unit -> (Runtime_resume.t, Agent_protocol.Error.t) result
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; enqueue_internal_event :
       ?prepare:prepare_enqueue
@@ -221,6 +263,7 @@ type t =
   }
 
 let authored_start t = t.authored_start ()
+let runtime_resume t = t.runtime_resume ()
 
 type schedule_services = Legacy_callback_runtime.Services.schedules =
   { after_ms : delay_ms:int -> payload:Jsonaf.t -> (string, string) result
@@ -1069,7 +1112,10 @@ let create_moderator
       ( None
       , (fun () -> Ok None)
       , (fun _ -> String.Map.empty)
-      , fun () -> Error (failure "runtime has no host-backed legacy startup ACK") )
+      , (fun () -> Error (failure "runtime has no host-backed legacy startup ACK"))
+      , fun () ->
+          Error
+            (Runtime_resume.unavailable "runtime has no host-backed legacy resume ACK") )
   | Some artifact ->
     let executor =
       model_executor ~sw ~ctx ~manifest_authorizer ~approval_provider ~response_dir
@@ -1232,6 +1278,21 @@ let create_moderator
       | (Some _ | None), (Some _ | None), (true | false), (Some _ | None) ->
         Error (failure "authored legacy startup requires its actual host-backed ACK")
     in
+    let check_legacy_resume_acknowledged () =
+      match
+        ( Manager.extension_definition manager
+        , legacy_construction
+        , snapshot
+        , !started
+        , !acknowledged_snapshot )
+      with
+      | None, Some _, Some _, true, Some _ -> Ok ()
+      | (Some _ | None), (Some _ | None), (Some _ | None), (true | false), (Some _ | None)
+        ->
+        Error
+          (Runtime_resume.unavailable
+             "runtime resume requires its actual host-backed Session_resume ACK")
+    in
     Ok
       ( Some moderator_pair
       , start
@@ -1245,7 +1306,8 @@ let create_moderator
               ~session_text
               ~bind_inference_identity
               (job_services.for_execution admission))
-      , check_legacy_acknowledged )
+      , check_legacy_acknowledged
+      , check_legacy_resume_acknowledged )
 ;;
 
 let encode_moderator_snapshot = Moderator_checkpoint.encode
@@ -2117,7 +2179,13 @@ let build_with_services
         tools
         ~bind:bind_inference_identity)
   in
-  let%bind moderator, start_moderator_once, model_recipes, check_legacy_acknowledged =
+  let%bind
+      ( moderator
+      , start_moderator_once
+      , model_recipes
+      , check_legacy_acknowledged
+      , check_legacy_resume_acknowledged )
+    =
     create_moderator
       ~construction_checkpoint
       ~definition
@@ -2556,31 +2624,31 @@ let build_with_services
         Runtime_activity.with_switch activity (fun ~sw ->
           Operation_worker.run worker ~sw ~input capabilities))
   in
+  let runtime_lifecycle_kind =
+    match moderator, lifecycle, extension_services with
+    | None, _, _ -> Ok Authored_start.Absent
+    | Some (moderator, _), Some lifecycle, Some services
+      when Option.is_some (Manager.extension_definition moderator.manager) ->
+      Ok
+        (Authored_start.Extension
+           { lifecycle
+           ; run =
+               (fun ~claim ->
+                 with_activity (fun () ->
+                   activate
+                     lifecycle
+                     ~claim
+                     ~run_actions:services.run_actions
+                     ~history:services.history))
+           })
+    | Some (moderator, _), _, _ ->
+      if Option.is_some (Manager.extension_definition moderator.manager)
+      then Error (failure "authored extension startup has no actual lifecycle owner")
+      else Ok (Authored_start.Legacy check_legacy_acknowledged)
+  in
   let authored_start =
-    let kind =
-      match moderator, lifecycle, extension_services with
-      | None, _, _ -> Ok Authored_start.Absent
-      | Some (moderator, _), Some lifecycle, Some services
-        when Option.is_some (Manager.extension_definition moderator.manager) ->
-        Ok
-          (Authored_start.Extension
-             { lifecycle
-             ; run =
-                 (fun ~claim ->
-                   with_activity (fun () ->
-                     activate
-                       lifecycle
-                       ~claim
-                       ~run_actions:services.run_actions
-                       ~history:services.history))
-             })
-      | Some (moderator, _), _, _ ->
-        if Option.is_some (Manager.extension_definition moderator.manager)
-        then Error (failure "authored extension startup has no actual lifecycle owner")
-        else Ok (Authored_start.Legacy check_legacy_acknowledged)
-    in
     let startup =
-      Result.map kind ~f:(fun kind ->
+      Result.map runtime_lifecycle_kind ~f:(fun kind ->
         ({ worker
          ; manager = Option.map moderator ~f:(fun (moderator, _) -> moderator.manager)
          ; kind
@@ -2591,6 +2659,26 @@ let build_with_services
       let%bind startup = startup in
       let%map () = Authored_start.check_pending startup in
       startup
+  in
+  let runtime_resume =
+    let resume =
+      Result.map runtime_lifecycle_kind ~f:(fun kind ->
+        let kind =
+          match kind with
+          | Authored_start.Legacy _ ->
+            Authored_start.Legacy check_legacy_resume_acknowledged
+          | Extension _ | Absent -> kind
+        in
+        ({ worker
+         ; manager = Option.map moderator ~f:(fun (moderator, _) -> moderator.manager)
+         ; kind
+         }
+         : Runtime_resume.t))
+    in
+    fun () ->
+      let%bind resume = resume in
+      let%map () = Runtime_resume.check_pending resume in
+      resume
   in
   let parse_user_content =
     match delegated with
@@ -2750,6 +2838,7 @@ let build_with_services
          | None -> None
          | Some _ -> Some agent_runtime)
     ; authored_start
+    ; runtime_resume
     ; start_moderator =
         (fun () ->
           let open Result.Let_syntax in

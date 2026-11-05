@@ -155,6 +155,10 @@ module Lifecycle : sig
       is never an authored no-input start. *)
   val startup_pending : t -> bool
 
+  (** Genuine unconsumed Session_resume lifecycle. Fresh Session_start and
+      completed, failed or interrupted activation are unavailable. *)
+  val resume_pending : t -> bool
+
   (** Concurrent callers serialize outside the actor through the shared execution
       coordinator. Recursive/cyclic activation fails before waiting. Unavailable
       actors leave activation ready for a later runnable boundary; successful

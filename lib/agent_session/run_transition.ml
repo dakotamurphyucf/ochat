@@ -6,6 +6,12 @@ module Execution_id = struct
   include Comparator.Make (P.Id.Moderator_execution)
 end
 
+module Lifecycle_selection = struct
+  type t =
+    | Authored_start of P.Run.t
+    | Goal_resume of P.Run.t
+end
+
 type t =
   { run : P.Run.t
   ; delta : Session_delta.t
@@ -68,8 +74,63 @@ type preparation =
   | Checkpoint of P.Run_action.t option
   | Running_work
 
+let select_lifecycle
+      (state : Session_state.t)
+      index
+      (previous : P.Run.t)
+      (executing : P.Moderator_execution.t)
+      selection
+  =
+  let open Result.Let_syntax in
+  let selected, phase, failure =
+    match selection with
+    | Lifecycle_selection.Authored_start selected ->
+      ( selected
+      , P.Moderator_execution.Session_start
+      , "held authored selection differs from its actual callback" )
+    | Goal_resume selected ->
+      selected, Session_resume, "Goal resume selection differs from its actual callback"
+  in
+  let%bind () =
+    if
+      P.Run.equal selected previous
+      && P.Moderator_execution.equal_phase executing.context.phase phase
+      && Option.is_none executing.context.operation_id
+      && Option.is_none executing.context.job
+      && Option.is_none executing.delegation
+      && Int.equal executing.context.generation previous.source.generation
+      && P.Invocation.equal_observer executing.context.source previous.source.observer
+      && List.exists state.moderator_executions ~f:(fun retained ->
+        P.Moderator_execution.equal_context retained.context executing.context)
+    then Ok ()
+    else Error (conflict failure)
+  in
+  let%map () =
+    match selection with
+    | Authored_start _ -> Ok ()
+    | Goal_resume _ ->
+      let%bind installed =
+        Run_source_installation.captured
+          (Run_state.installation index)
+          ~generation:state.identity.generation
+      in
+      if
+        P.Run.Mode.equal previous.mode Workflow
+        && P.Run_source.equal previous.source installed
+        && (match previous.lifecycle with
+            | Admitted | Active | Waiting _ -> true
+            | Terminal _ -> false)
+        && Option.exists (Run_state.goal_link index previous.id) ~f:(fun link ->
+          P.Id.Run.equal (Run_goal_link.run_id link) previous.id
+          && P.Goal_episode.matches_run (Run_goal_link.episode link) previous)
+      then Ok ()
+      else Error (conflict failure)
+  in
+  Some selected
+;;
+
 let prepare_internal
-      ?authored_start_run
+      ?lifecycle_selection
       ?startup_run
       mode
       (state : Session_state.t)
@@ -119,23 +180,12 @@ let prepare_internal
     else Error (conflict "run callback scope changed before commit")
   in
   let%bind selected =
-    match authored_start_run with
+    match lifecycle_selection with
     | None -> Run_event_scope.select state ~executing
-    | Some selected ->
+    | Some selection ->
       (* Exact selection DATA from the actor's physically owned held lifecycle
          borrow. This does not authenticate a caller or widen generic selection. *)
-      if
-        P.Run.equal selected previous
-        && P.Moderator_execution.equal_phase executing.context.phase Session_start
-        && Option.is_none executing.context.operation_id
-        && Option.is_none executing.context.job
-        && Option.is_none executing.delegation
-        && Int.equal executing.context.generation previous.source.generation
-        && P.Invocation.equal_observer executing.context.source previous.source.observer
-        && List.exists state.moderator_executions ~f:(fun retained ->
-          P.Moderator_execution.equal_context retained.context executing.context)
-      then Ok (Some selected)
-      else Error (conflict "held authored selection differs from its actual callback")
+      select_lifecycle state index previous executing selection
   in
   let%bind () =
     if Option.exists selected ~f:(fun run -> P.Id.Run.equal run.id previous.id)
@@ -373,7 +423,7 @@ let prepare_internal
 ;;
 
 let prepare
-      ?authored_start_run
+      ?lifecycle_selection
       ?startup_run
       state
       ~scope
@@ -384,7 +434,7 @@ let prepare
       ~now
   =
   prepare_internal
-    ?authored_start_run
+    ?lifecycle_selection
     ?startup_run
     (Checkpoint action)
     state
@@ -396,7 +446,7 @@ let prepare
 ;;
 
 let add_owned_work
-      ?authored_start_run
+      ?lifecycle_selection
       state
       ~scope
       ~executing
@@ -405,7 +455,7 @@ let add_owned_work
       ~now
   =
   prepare_internal
-    ?authored_start_run
+    ?lifecycle_selection
     Running_work
     state
     ~scope

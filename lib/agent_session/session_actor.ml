@@ -183,8 +183,7 @@ end
 module Held_operation = struct
   module Proof = struct
     type t =
-      { preparation : Run_preparation.t
-      ; scope : Run_admission.Scope.t
+      { scope : Run_admission.Scope.t
       ; run : Agent_protocol.Run.t
       ; admission : Agent_protocol.Run_receipt.t
       ; source : Runtime_source_preparation.t
@@ -389,6 +388,333 @@ module Goal_activation = struct
   end
 end
 
+module Goal_resume_result = struct
+  module Continuation = struct
+    type t =
+      | Started of Agent_protocol.Operation.t
+      | Waiting of Agent_protocol.Run_wake.t
+      | Settled of Agent_protocol.Goal_episode.Settlement.t
+  end
+
+  type t =
+    | Resumed of
+        { receipt : Goal_command_receipt.t
+        ; continuation : Continuation.t
+        }
+    | Retained of Goal_command_receipt.t
+    | Resume_failed of
+        { receipt : Goal_command_receipt.t
+        ; error : Agent_protocol.Error.t
+        }
+    | Rejected of Agent_protocol.Error.t
+    | Uncertain of Agent_protocol.Error.t
+end
+
+module Goal_runtime_phase = struct
+  type 'scope t =
+    | Unclaimed
+    | Starting_writer of bool ref
+    | Starting_acknowledged
+    | Running_writer of bool ref
+    | Constructing
+    | Installed of 'scope
+    | Callback_completed of 'scope
+    | Handed_off of 'scope * Goal_resume_result.Continuation.t
+    | Retired of 'scope
+    | Closed
+end
+
+module Goal_continuation = struct
+  module Source_phase = struct
+    type t =
+      | Open
+      | Closed
+  end
+
+  type preparation =
+    { request : Run_preparation.Goal_continuation.t
+    ; binding : Run_authorities.binding
+    ; run : Agent_protocol.Run.t
+    ; admission : Agent_protocol.Run_receipt.t
+    ; link : Run_goal_link.t
+    ; policy : Goal_activation_policy.t
+    ; session : Agent_protocol.Session_ref.t
+    ; domain : int
+    ; mutable phase : phase
+    ; basis : unit -> (unit, Agent_protocol.Error.t) result
+    ; current : unit -> (unit, Agent_protocol.Error.t) result
+    ; refresh : unit -> (unit, Agent_protocol.Error.t) result
+    ; policy_current : unit -> (unit, Agent_protocol.Error.t) result
+    ; timing : unit -> (unit, Agent_protocol.Error.t) result
+    ; authority : unit -> (unit, Agent_protocol.Error.t) result
+    ; effect_basis : unit -> (unit, Agent_protocol.Error.t) result
+    ; registered_basis : unit -> (unit, Agent_protocol.Error.t) result
+    ; registered_refresh : unit -> (unit, Agent_protocol.Error.t) result
+    ; registered_policy : unit -> (unit, Agent_protocol.Error.t) result
+    ; registered_authority : unit -> (unit, Agent_protocol.Error.t) result
+    ; mutable runtime_phase : runtime_scope Goal_runtime_phase.t
+    ; mutable observed : Recurrence_controller.observation option
+    }
+
+  and phase =
+    | Preparing
+    | Source_bound of source_binding
+    | Writer_pending of source_binding * bool ref
+    | Ready of source_binding * Goal_command_receipt.t
+    | Waiting of Goal_command_receipt.t * Agent_protocol.Run_wake.t
+    | Closed of Goal_command_receipt.t option
+
+  and source_binding =
+    { preparation : preparation
+    ; source : Runtime_source_preparation.t
+    ; mutable source_phase : Source_phase.t
+    ; basis : unit -> (unit, Agent_protocol.Error.t) result
+    }
+
+  and t =
+    { binding : source_binding
+    ; receipt : Goal_command_receipt.t
+    }
+
+  and runtime_scope =
+    { issuing_actor : unit ref
+    ; continuation : t
+    ; worker : Operation_worker.t
+    ; manager : Chat_response.Moderator_manager.t option
+    ; cold : bool
+    ; mutable resume : Runtime_builder.Runtime_resume.t option
+    ; mutable callback : runtime_callback
+    ; mutable jobs : Agent_protocol.Job.t list
+    ; mutable graphs : Inference_graph_owner.t list
+    }
+
+  and runtime_callback =
+    | Pending
+    | Executing of Agent_protocol.Id.Moderator_execution.t
+    | Completed of Agent_protocol.Id.Moderator_execution.t
+    | Joined
+
+  let custody preparation = Run_preparation.Goal_continuation.custody preparation.request
+
+  let known_receipt preparation =
+    match preparation.phase with
+    | Ready (_, receipt) | Waiting (receipt, _) -> Some receipt
+    | Closed receipt -> receipt
+    | Preparing | Source_bound _ | Writer_pending _ -> None
+  ;;
+
+  let close preparation =
+    let receipt = known_receipt preparation in
+    preparation.phase <- Closed receipt;
+    (match preparation.runtime_phase with
+     | Handed_off _ | Retired _ -> ()
+     | Installed scope | Callback_completed scope ->
+       preparation.runtime_phase <- Retired scope
+     | Unclaimed
+     | Starting_writer _
+     | Starting_acknowledged
+     | Running_writer _
+     | Constructing
+     | Closed -> preparation.runtime_phase <- Closed);
+    Run_preparation.Custody.close (custody preparation)
+  ;;
+
+  let acknowledge preparation binding receipt =
+    match preparation.phase with
+    | Writer_pending (current, _) when phys_equal current binding ->
+      preparation.phase <- Ready (binding, receipt)
+    | Preparing | Source_bound _ | Writer_pending _ | Ready _ | Waiting _ | Closed _ ->
+      (* An ACK is factual even after revocation. Neither a closed source nor a
+         closed/displaced preparation is reopened by writer completion. *)
+      preparation.phase <- Closed (Some receipt)
+  ;;
+
+  module Preparation = struct
+    type t = preparation
+
+    let receipt t =
+      if not (Int.equal t.domain (Stdlib.Domain.self () :> int))
+      then invalid_arg "Goal continuation belongs to another Eio domain";
+      known_receipt t
+    ;;
+  end
+
+  module Source_binding = struct
+    type t = source_binding
+
+    let source t = t.source
+
+    let check_basis t =
+      if Int.equal t.preparation.domain (Stdlib.Domain.self () :> int)
+      then t.basis ()
+      else
+        Error
+          (Agent_protocol.Error.invalid_request
+             "Goal source binding belongs to another Eio domain")
+    ;;
+
+    let close t =
+      if not (Int.equal t.preparation.domain (Stdlib.Domain.self () :> int))
+      then invalid_arg "Goal source binding belongs to another Eio domain";
+      t.source_phase <- Closed
+    ;;
+  end
+
+  let receipt t = t.receipt
+
+  let check_source_binding (t : t) ~(binding : Source_binding.t) =
+    if not (Int.equal binding.preparation.domain (Stdlib.Domain.self () :> int))
+    then
+      Error
+        (Agent_protocol.Error.invalid_request "Goal source belongs to another Eio domain")
+    else if phys_equal t.binding binding
+    then Ok ()
+    else
+      Error
+        (Agent_protocol.Error.create
+           Conflict
+           ~message:"Goal source and continuation belong to different owners"
+           ~retryable:false
+           ())
+  ;;
+
+  module Resume_issuance = struct
+    type t =
+      | Retained of Goal_command_receipt.t
+      | Prepare of Preparation.t
+  end
+
+  module Admission = struct
+    type continuation = t
+
+    type t =
+      | Retained of Goal_command_receipt.t
+      | Waiting of
+          { receipt : Goal_command_receipt.t
+          ; wake : Agent_protocol.Run_wake.t
+          }
+      | Ready of continuation
+      | Rejected of Agent_protocol.Error.t
+      | Uncertain of Agent_protocol.Error.t
+      | Resume_failed of
+          { receipt : Goal_command_receipt.t
+          ; error : Agent_protocol.Error.t
+          }
+  end
+end
+
+module Preparation_owner = struct
+  type t =
+    | Initial of Run_preparation.t
+    | Existing_goal of Goal_continuation.Preparation.t
+
+  let initial = function
+    | Initial preparation -> Some preparation
+    | Existing_goal _ -> None
+  ;;
+
+  let custody = function
+    | Initial preparation -> Run_preparation.custody preparation
+    | Existing_goal preparation -> Goal_continuation.custody preparation
+  ;;
+
+  let same left right =
+    match left, right with
+    | Initial left, Initial right -> phys_equal left right
+    | Existing_goal left, Existing_goal right -> phys_equal left right
+    | Initial _, Existing_goal _ | Existing_goal _, Initial _ -> false
+  ;;
+
+  let close = function
+    | Initial preparation -> Run_preparation.close preparation
+    | Existing_goal preparation -> Goal_continuation.close preparation
+  ;;
+end
+
+module Runtime_construction = struct
+  type t =
+    | Initial of Admitted_activation.Continuation.t
+    | Existing_goal of Goal_continuation.t
+
+  let of_admitted continuation = Initial continuation
+  let of_goal continuation = Existing_goal continuation
+
+  let preparation_owner = function
+    | Initial continuation ->
+      Preparation_owner.Initial
+        continuation.Admitted_activation.Continuation.target.preparation
+    | Existing_goal continuation ->
+      Existing_goal continuation.Goal_continuation.binding.preparation
+  ;;
+
+  let custody t = Preparation_owner.custody (preparation_owner t)
+
+  let source = function
+    | Initial continuation -> continuation.Admitted_activation.Continuation.target.source
+    | Existing_goal continuation -> continuation.Goal_continuation.binding.source
+  ;;
+
+  let close = function
+    | Initial continuation ->
+      Held_run.Activation.close continuation.Admitted_activation.Continuation.target
+    | Existing_goal continuation ->
+      Goal_continuation.Source_binding.close continuation.Goal_continuation.binding;
+      Goal_continuation.close continuation.binding.preparation
+  ;;
+
+  let handoff_acknowledged = function
+    | Initial continuation ->
+      Held_run.Activation.handoff_acknowledged
+        continuation.Admitted_activation.Continuation.target
+    | Existing_goal continuation ->
+      let preparation = continuation.Goal_continuation.binding.preparation in
+      if not (Int.equal preparation.domain (Stdlib.Domain.self () :> int))
+      then invalid_arg "Goal construction belongs to another Eio domain";
+      (match preparation.runtime_phase with
+       | Handed_off _ -> true
+       | Unclaimed
+       | Starting_writer _
+       | Starting_acknowledged
+       | Running_writer _
+       | Constructing
+       | Installed _
+       | Callback_completed _
+       | Retired _
+       | Closed -> false)
+  ;;
+
+  let refresh = function
+    | Initial continuation -> Admitted_activation.Continuation.refresh continuation
+    | Existing_goal continuation ->
+      continuation.Goal_continuation.binding.preparation.refresh ()
+  ;;
+
+  let check_policy = function
+    | Initial continuation -> Admitted_activation.Continuation.check_policy continuation
+    | Existing_goal continuation ->
+      continuation.Goal_continuation.binding.preparation.policy_current ()
+  ;;
+
+  let check_timing = function
+    | Initial continuation -> Admitted_activation.Continuation.check_timing continuation
+    | Existing_goal continuation ->
+      continuation.Goal_continuation.binding.preparation.timing ()
+  ;;
+
+  let check_authority = function
+    | Initial continuation ->
+      Admitted_activation.Continuation.check_authority continuation
+    | Existing_goal continuation ->
+      continuation.Goal_continuation.binding.preparation.authority ()
+  ;;
+
+  let check_basis = function
+    | Initial continuation -> Admitted_activation.Continuation.check_basis continuation
+    | Existing_goal continuation ->
+      continuation.Goal_continuation.binding.preparation.effect_basis ()
+  ;;
+end
+
 module Recurrence_activation = struct
   type t = Activation_custody.t
 
@@ -435,6 +761,17 @@ module Held_authored_start = struct
     }
 end
 
+module Lifecycle_callback_owner = struct
+  type t =
+    | Initial_authored of Held_authored_start.t
+    | Existing_goal_resume of Goal_continuation.runtime_scope
+
+  let initial = function
+    | Initial_authored scope -> Some scope
+    | Existing_goal_resume _ -> None
+  ;;
+end
+
 module Held_authored_resource = struct
   type t =
     { domain : int
@@ -449,6 +786,12 @@ module Held_authored_resource = struct
         (Agent_protocol.Error.invalid_request
            "held authored resource belongs to another Eio domain")
   ;;
+end
+
+module Runtime_construction_resource = struct
+  type t = Held_authored_resource.t
+
+  let check_basis = Held_authored_resource.check_basis
 end
 
 module Held_input_scope = struct
@@ -938,18 +1281,48 @@ module Initialization_scope = struct
     ;;
   end
 
+  module Custody = struct
+    type t =
+      | Ordinary
+      | Prepared of Run_preparation.t
+      | Runtime of Runtime_construction.t
+  end
+
   type t =
     { owner : unit ref
     ; purpose : Purpose.t
     ; expected : Session_state.t
     ; mutable acknowledged : Acknowledged.t
     ; mutable jobs : Agent_protocol.Id.Job.t list
+    ; mutable graphs : Inference_owner.t list
     ; mutable callback : Callback.t
     ; mutable resource : Resource.t option
-    ; run_preparation : Run_preparation.t option
-    ; held_continuation : Admitted_activation.Continuation.t option
+    ; custody : Custody.t
     ; agent_admission : agent_admission
     }
+
+  let preparation_owner t =
+    match t.custody with
+    | Ordinary -> None
+    | Prepared preparation -> Some (Preparation_owner.Initial preparation)
+    | Runtime construction -> Some (Runtime_construction.preparation_owner construction)
+  ;;
+
+  let initial_preparation t =
+    Option.bind (preparation_owner t) ~f:Preparation_owner.initial
+  ;;
+
+  let initial_continuation t =
+    match t.custody with
+    | Runtime (Initial continuation) -> Some continuation
+    | Ordinary | Prepared _ | Runtime (Existing_goal _) -> None
+  ;;
+
+  let construction t =
+    match t.custody with
+    | Runtime construction -> Some construction
+    | Ordinary | Prepared _ -> None
+  ;;
 
   module Acknowledgement = struct
     type scope = t
@@ -1031,6 +1404,16 @@ module Initialization_scope = struct
       t.scope.jobs <- t.jobs
     ;;
   end
+end
+
+module Runtime_constructor_graph = struct
+  type t =
+    { scope : Initialization_scope.t
+    ; construction : Runtime_construction.t
+    ; owner : Inference_owner.t
+    }
+
+  let owner t = t.owner
 end
 
 type persistence =
@@ -1148,7 +1531,7 @@ end
 
 type queued_event_borrow =
   { kind : event_borrow_kind
-  ; held_authored : Held_authored_start.t option
+  ; lifecycle_owner : Lifecycle_callback_owner.t option
   ; job_scope : job_scope option
   ; agent_admission : Queued_agent_admission.t
   ; receipt : Agent_protocol.Moderator_execution.t
@@ -1391,9 +1774,10 @@ module Admitted_inference = struct
   module Startup = struct
     type t =
       | Ordinary
-      | Initialization of Initialization_scope.t * Admitted_activation.Continuation.t
+      | Initialization of Initialization_scope.t * Runtime_construction.t
       | Input of Held_input_scope.t
       | Authored of Held_authored_start.t
+      | Goal_runtime of Goal_continuation.runtime_scope
   end
 
   type t =
@@ -1518,9 +1902,147 @@ module Goal_activation_request_message = struct
         -> Goal_activation.Admission.t t
 end
 
+module Goal_continuation_request = struct
+  type _ t =
+    | Receipt :
+        Operator_authorization.t
+        * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+        * Agent_protocol.Session_ref.t
+        * Goal_resume_request.t
+        -> Goal_command_receipt.t option t
+    | Begin :
+        Operator_authorization.t
+        * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+        * Agent_protocol.Session_ref.t
+        * Goal_resume_request.t
+        -> Goal_continuation.Resume_issuance.t t
+    | Bind :
+        Goal_continuation.Preparation.t * Runtime_source_preparation.t
+        -> Goal_continuation.Source_binding.t t
+    | Admit : Goal_continuation.Source_binding.t -> Goal_continuation.Admission.t t
+    | Close : Goal_continuation.Preparation.t -> unit t
+end
+
+module Runtime_constructor_mutation_request = struct
+  type _ t =
+    | Open_graph :
+        Runtime_construction.t * Transcript.Source_id.t
+        -> Runtime_constructor_graph.t t
+    | Acknowledge :
+        Runtime_constructor_graph.t
+        * Inference_ledger.Handle.t
+        * Inference_runtime.Attempt.t
+        -> unit t
+    | Observe :
+        Runtime_constructor_graph.t * Inference_ledger.Handle.t * Inference.Observation.t
+        -> unit t
+    | Observe_owned : Runtime_constructor_graph.t * Inference.Observation.t -> unit t
+    | Complete :
+        Runtime_constructor_graph.t
+        * Inference_ledger.Handle.t
+        * Inference_client.Completion.t
+        -> unit t
+    | Release : Runtime_constructor_graph.t * Inference_ledger.Handle.t -> unit t
+    | Seal : Runtime_constructor_graph.t -> unit t
+    | Finish : Runtime_constructor_graph.t -> unit t
+    | Shell_approvals :
+        Runtime_construction.t * Session.Shell_state.Approval_grant.persisted list
+        -> unit t
+    | Shell_snapshots :
+        Runtime_construction.t * Session.Shell_state.Extension_snapshot.t list
+        -> unit t
+    | Shell_manifest :
+        Runtime_construction.t * Session.Shell_state.Manifest_grant.persisted
+        -> unit t
+    | Add_job : Runtime_construction.t * Agent_protocol.Job.t -> Agent_protocol.Job.t t
+    | Add_schedule :
+        Runtime_construction.t * Agent_protocol.Schedule.t
+        -> Agent_protocol.Schedule.t t
+    | Cancel_schedule :
+        Runtime_construction.t * Agent_protocol.Id.Schedule.t
+        -> Agent_protocol.Schedule.t t
+    | Capture_source :
+        Runtime_construction.t
+        * Agent_protocol.Id.Job.t
+        * int
+        * Inference.Request.Target.t
+        * Document_schema.Limits.t
+        -> unit t
+    | Capture_recipe :
+        Runtime_construction.t
+        * Agent_protocol.Id.Job.t
+        * int
+        * int
+        * Inference.Request.Target.t
+        * Document_schema.Limits.t
+        -> unit t
+    | Complete_model :
+        Runtime_construction.t
+        * Agent_protocol.Id.Job.t
+        * int
+        * int
+        * Runtime_builder.model_job_outcome
+        -> Agent_protocol.Job.t t
+    | Interrupt_model :
+        Runtime_construction.t * Agent_protocol.Id.Job.t * int * int * string
+        -> Agent_protocol.Job.t t
+    | Checkpoint :
+        Runtime_construction.t
+        * Jsonaf.t option
+        * Chat_response.Moderator_manager.t option
+        -> Agent_protocol.Session.t t
+end
+
+module Runtime_construction_request = struct
+  module Step = struct
+    type t =
+      | Starting
+      | Running
+  end
+
+  type _ t =
+    | Mutate : 'a Runtime_constructor_mutation_request.t -> 'a t
+    | Check_admission : Runtime_construction.t -> unit t
+    | Begin_goal : Runtime_construction.t * Step.t -> unit t
+    | Begin_initialization :
+        Runtime_construction.t * Initialization_scope.Purpose.t * Session_state.t
+        -> Initialization_scope.t t
+    | Reserve_history : Runtime_construction.t * int -> History_id_source.reservation t
+    | Add_model : Initialization_scope.t * Agent_protocol.Job.t -> Agent_protocol.Job.t t
+    | Model_running :
+        Initialization_scope.t * Agent_protocol.Id.Job.t * int * int
+        -> bool t
+    | Enable_budget :
+        Runtime_construction.t * Chat_response.Runtime_semantics.policy
+        -> unit t
+    | Install :
+        Runtime_construction.t
+        * Operation_worker.t
+        * Inference_client.Execution.t
+        * Chat_response.Moderator_manager.t option
+        -> unit t
+    | Begin_resume :
+        Goal_continuation.t * Runtime_builder.Runtime_resume.t
+        -> Goal_continuation.runtime_scope t
+    | Claim_resume :
+        Goal_continuation.runtime_scope
+        * Agent_protocol.Id.Moderator_execution.t
+        * Session.Moderator_state.Identity_snapshot.t
+        * Chat_response.Moderation.Event.t
+        -> queued_event_borrow option t
+    | Finish_resume : Goal_continuation.runtime_scope -> unit t
+    | Continue_goal : Goal_continuation.t -> Goal_resume_result.t t
+    | Resource :
+        Runtime_construction.t * Agent_protocol.Job.launch_owner
+        -> Runtime_construction_resource.t t
+    | End : Runtime_construction.t -> unit t
+end
+
 module Held_startup_request = struct
   type _ t =
+    | Construction : 'a Runtime_construction_request.t -> 'a t
     | Goal : 'a Goal_activation_request_message.t -> 'a t
+    | Goal_continuation : 'a Goal_continuation_request.t -> 'a t
     | Effect_deferred : 'a Effect_deferred_request.t -> 'a t
     | Input_graph : 'a Input_graph_request.t -> 'a t
     | Begin_authored :
@@ -1560,14 +2082,6 @@ module Held_startup_request = struct
         * Chat_response.Moderator_manager.t option
         -> unit t
     | End_held_activation : Held_run.Activation.t -> unit t
-    | Begin_held_initialization :
-        Admitted_activation.Continuation.t
-        * Initialization_scope.Purpose.t
-        * Session_state.t
-        -> Initialization_scope.t t
-    | Reserve_held_history_block :
-        Admitted_activation.Continuation.t * int
-        -> History_id_source.reservation t
 end
 
 type _ request =
@@ -2515,7 +3029,7 @@ type t =
   ; ordinary_execution_admission : unit -> (unit, Agent_protocol.Error.t) result
   ; runtime_source_domain : int
   ; run_preparation_owner : Run_preparation.Owner.t
-  ; mutable run_preparation : Run_preparation.t option
+  ; mutable run_preparation : Preparation_owner.t option
     (* Latest negative-only attempt cell survives logical prep/source closure.
      It grants no admission or execution rights and never accumulates. *)
   ; mutable effect_deferred : Deferred_owner.t option
@@ -2547,6 +3061,7 @@ type t =
   }
 
 let error code message = Agent_protocol.Error.create code ~message ~retryable:false ()
+let initial_run_preparation t = Option.bind t.run_preparation ~f:Preparation_owner.initial
 
 let exclude_effect_deferred t reason =
   match t.effect_deferred with
@@ -2933,6 +3448,15 @@ let check_held_effect continuation =
   Admitted_activation.Continuation.check_basis continuation
 ;;
 
+let check_runtime_construction_effect construction =
+  let open Result.Let_syntax in
+  let%bind () = Runtime_construction.check_basis construction in
+  let%bind () = Runtime_construction.check_policy construction in
+  let%bind () = Runtime_construction.check_timing construction in
+  let%bind () = Runtime_construction.check_authority construction in
+  Runtime_construction.check_basis construction
+;;
+
 let held_authored_basis t (scope : Held_authored_start.t) =
   let open Result.Let_syntax in
   let activation = Admitted_activation.Continuation.target scope.continuation in
@@ -2980,7 +3504,9 @@ let held_authored_event_basis t (borrow : queued_event_borrow) scope =
   let%bind () = held_authored_basis t scope in
   if
     Option.exists t.queued_event_borrow ~f:(phys_equal borrow)
-    && Option.exists borrow.held_authored ~f:(phys_equal scope)
+    && Option.exists
+         (Option.bind borrow.lifecycle_owner ~f:Lifecycle_callback_owner.initial)
+         ~f:(phys_equal scope)
     && t.idle_moderator_borrowed
     && borrow.callback_active
     && Atomic.get borrow.authority_live
@@ -3007,6 +3533,118 @@ let held_authored_event_basis t (borrow : queued_event_borrow) scope =
   else Error (error Conflict "held authored Event is no longer current")
 ;;
 
+(* The payload is retained by the one actual preparation phase. This predicate
+   authenticates a physical runtime/callback; it grants no fresh effect right. *)
+let goal_runtime_scope_basis t (scope : Goal_continuation.runtime_scope) =
+  let open Result.Let_syntax in
+  let preparation = scope.continuation.binding.preparation in
+  let%bind () =
+    if
+      Int.equal preparation.domain (Stdlib.Domain.self () :> int)
+      && phys_equal scope.issuing_actor t.inference_owner_identity
+      && Run_preparation.Custody.belongs_to
+           (Goal_continuation.custody preparation)
+           ~owner:t.run_preparation_owner
+      && Option.exists t.operation_worker ~f:(phys_equal scope.worker)
+      && Option.equal phys_equal t.moderator_manager scope.manager
+      &&
+      match preparation.runtime_phase with
+      | Installed current | Callback_completed current -> phys_equal current scope
+      | Handed_off (current, _) | Retired current -> phys_equal current scope
+      | _ -> false
+    then Ok ()
+    else Error (error Conflict "Goal resume runtime owner changed")
+  in
+  Runtime_source_preparation.validate_target scope.continuation.binding.source t.state
+;;
+
+let goal_runtime_run t (scope : Goal_continuation.runtime_scope) =
+  let open Result.Let_syntax in
+  let%bind () = goal_runtime_scope_basis t scope in
+  Option.bind t.state.run_state ~f:(fun index ->
+    Run_state.find index scope.continuation.binding.preparation.run.id)
+  |> Result.of_option ~error:(error Conflict "Goal resume Run is absent")
+;;
+
+let goal_runtime_event_basis t (borrow : queued_event_borrow) scope =
+  let open Result.Let_syntax in
+  let%bind () = goal_runtime_scope_basis t scope in
+  if
+    Option.exists t.queued_event_borrow ~f:(phys_equal borrow)
+    && Option.exists borrow.lifecycle_owner ~f:(function
+      | Existing_goal_resume current -> phys_equal current scope
+      | Initial_authored _ -> false)
+    && t.idle_moderator_borrowed
+    && borrow.callback_active
+    && Atomic.get borrow.authority_live
+    && (not (borrow.committed || borrow.cancel_requested))
+    && (match scope.Goal_continuation.callback with
+        | Executing id ->
+          Agent_protocol.Id.Moderator_execution.equal id borrow.receipt.context.id
+        | Pending | Completed _ | Joined -> false)
+    && List.exists t.state.moderator_executions ~f:(fun retained ->
+      Agent_protocol.Moderator_execution.equal_context
+        retained.context
+        borrow.receipt.context
+      &&
+      match retained.status with
+      | Running -> true
+      | _ -> false)
+  then Ok ()
+  else Error (error Conflict "Goal resume Event is no longer current")
+;;
+
+let lifecycle_event_basis t borrow = function
+  | Lifecycle_callback_owner.Initial_authored scope ->
+    held_authored_event_basis t borrow scope
+  | Existing_goal_resume scope -> goal_runtime_event_basis t borrow scope
+;;
+
+let lifecycle_event_effect t borrow owner =
+  let open Result.Let_syntax in
+  let%bind () = lifecycle_event_basis t borrow owner in
+  let%bind () =
+    match owner with
+    | Lifecycle_callback_owner.Initial_authored scope ->
+      check_held_effect scope.continuation
+    | Existing_goal_resume scope ->
+      check_runtime_construction_effect (Existing_goal scope.continuation)
+  in
+  lifecycle_event_basis t borrow owner
+;;
+
+let lifecycle_event_run t borrow owner =
+  let open Result.Let_syntax in
+  let%bind () = lifecycle_event_basis t borrow owner in
+  match owner with
+  | Lifecycle_callback_owner.Initial_authored scope -> held_authored_run t scope
+  | Existing_goal_resume scope -> goal_runtime_run t scope
+;;
+
+let goal_runtime_of_borrow (borrow : queued_event_borrow) =
+  Option.bind borrow.lifecycle_owner ~f:(function
+    | Lifecycle_callback_owner.Existing_goal_resume scope -> Some scope
+    | Initial_authored _ -> None)
+;;
+
+let goal_runtime_scope t =
+  Option.bind t.run_preparation ~f:(function
+    | Existing_goal preparation ->
+      (match preparation.runtime_phase with
+       | Installed scope | Callback_completed scope -> Some scope
+       | _ -> None)
+    | Initial _ -> None)
+;;
+
+let goal_runtime_job t (job : Agent_protocol.Job.t) =
+  Option.bind (goal_runtime_scope t) ~f:(fun scope ->
+    Option.some_if
+      (List.exists scope.jobs ~f:(fun owned ->
+         Agent_protocol.Id.Job.equal owned.id job.id
+         && Int.equal owned.generation job.generation))
+      scope)
+;;
+
 let held_authored_factual_preparation t (scope : Held_authored_start.t) =
   let preparation =
     (Admitted_activation.Continuation.target scope.continuation).preparation
@@ -3014,7 +3652,7 @@ let held_authored_factual_preparation t (scope : Held_authored_start.t) =
   if
     phys_equal scope.issuing_actor t.inference_owner_identity
     && Option.exists t.held_authored_start ~f:(phys_equal scope)
-    && Option.exists t.run_preparation ~f:(phys_equal preparation)
+    && Option.exists (initial_run_preparation t) ~f:(phys_equal preparation)
     && Result.is_ok
          (Run_preparation.check_basis
             preparation
@@ -3025,7 +3663,7 @@ let held_authored_factual_preparation t (scope : Held_authored_start.t) =
 ;;
 
 let held_authored_of_borrow _t (borrow : queued_event_borrow) =
-  match borrow.held_authored with
+  match Option.bind borrow.lifecycle_owner ~f:Lifecycle_callback_owner.initial with
   | None -> None
   | Some scope -> Some scope
 ;;
@@ -3113,11 +3751,64 @@ let refresh_held_authored t scope =
     held_authored_basis t scope)
 ;;
 
+let initialization_construction_of_execution t = function
+  | Inference_initialization scope | Inference_initialization_job (scope, _) ->
+    if Option.exists t.initialization_scope ~f:(phys_equal scope)
+    then Initialization_scope.construction scope
+    else None
+  | Inference_event borrow ->
+    Option.bind t.legacy_callback_scope ~f:(fun callback ->
+      if phys_equal callback.borrow borrow
+      then Option.bind callback.constructor_scope ~f:Initialization_scope.construction
+      else None)
+  | Inference_invocation execution ->
+    (match execution.owner with
+     | Event_moderator borrow ->
+       Option.bind t.legacy_callback_scope ~f:(fun callback ->
+         if phys_equal callback.borrow borrow
+         then Option.bind callback.constructor_scope ~f:Initialization_scope.construction
+         else None)
+     | Foreground _ | Background_job _ | Invocation_moderator _ -> None)
+  | Inference_operation _
+  | Inference_held_input _
+  | Inference_job _
+  | Inference_moderator _ -> None
+;;
+
+let goal_runtime_of_execution t = function
+  | Inference_event borrow -> goal_runtime_of_borrow borrow
+  | Inference_invocation execution ->
+    (match execution.owner with
+     | Event_moderator borrow -> goal_runtime_of_borrow borrow
+     | Background_job job -> goal_runtime_job t job.job
+     | Foreground _ | Invocation_moderator _ -> None)
+  | Inference_job job -> goal_runtime_job t job.job
+  | Inference_moderator borrow ->
+    Option.bind borrow.job_scope ~f:(fun job -> goal_runtime_job t job.job)
+  | Inference_operation _
+  | Inference_held_input _
+  | Inference_initialization _
+  | Inference_initialization_job _ -> None
+;;
+
 let refresh_held_execution t execution =
-  Option.value_map
-    (held_authored_of_execution t execution)
-    ~default:(Ok ())
-    ~f:(refresh_held_authored t)
+  let open Result.Let_syntax in
+  let%bind () =
+    Option.value_map
+      (held_authored_of_execution t execution)
+      ~default:(Ok ())
+      ~f:(refresh_held_authored t)
+  in
+  let%bind () =
+    Option.value_map
+      (goal_runtime_of_execution t execution)
+      ~default:(Ok ())
+      ~f:(fun scope -> Runtime_construction.refresh (Existing_goal scope.continuation))
+  in
+  match initialization_construction_of_execution t execution with
+  | Some (Runtime_construction.Existing_goal _ as construction) ->
+    Runtime_construction.refresh construction
+  | Some (Initial _) | None -> Ok ()
 ;;
 
 (* The supplied key selects an existing physical execution only. The actual
@@ -3176,24 +3867,26 @@ let held_startup_effect t preparation =
   | Some _ -> authored
   | None ->
     Option.bind t.initialization_scope ~f:(fun scope ->
-      Option.bind scope.Initialization_scope.held_continuation ~f:(fun continuation ->
-        let activation = Admitted_activation.Continuation.target continuation in
-        if Option.exists preparation ~f:(phys_equal activation.preparation)
-        then
-          Some
-            (fun () ->
-              let open Result.Let_syntax in
-              let%bind () = check_held_effect continuation in
-              if
-                Option.exists t.initialization_scope ~f:(phys_equal scope)
-                && Option.exists t.held_activation ~f:(phys_equal activation)
-              then
-                Run_preparation.check_basis
-                  activation.preparation
-                  ~owner:t.run_preparation_owner
-                  ~state:t.state
-              else Error (error Conflict "held Init effect owner changed"))
-        else None))
+      Option.bind
+        (Initialization_scope.initial_continuation scope)
+        ~f:(fun continuation ->
+          let activation = Admitted_activation.Continuation.target continuation in
+          if Option.exists preparation ~f:(phys_equal activation.preparation)
+          then
+            Some
+              (fun () ->
+                let open Result.Let_syntax in
+                let%bind () = check_held_effect continuation in
+                if
+                  Option.exists t.initialization_scope ~f:(phys_equal scope)
+                  && Option.exists t.held_activation ~f:(phys_equal activation)
+                then
+                  Run_preparation.check_basis
+                    activation.preparation
+                    ~owner:t.run_preparation_owner
+                    ~state:t.state
+                else Error (error Conflict "held Init effect owner changed"))
+          else None))
 ;;
 
 let close_run_preparation t =
@@ -3215,16 +3908,21 @@ let close_run_preparation t =
            | Terminal _ -> false)));
   Option.iter t.run_source_binding ~f:Source_binding.close;
   t.run_source_binding <- None;
-  Option.iter t.run_preparation ~f:Run_preparation.close;
+  Option.iter t.run_preparation ~f:Preparation_owner.close;
   t.run_preparation <- None
 ;;
 
 let close_bound_run_preparation t =
-  if Option.is_some t.run_source_binding || Option.is_some t.held_activation
+  if
+    Option.is_some t.run_source_binding
+    || Option.is_some t.held_activation
+    || Option.exists t.run_preparation ~f:(function
+      | Existing_goal _ -> true
+      | Initial _ -> false)
   then close_run_preparation t
 ;;
 
-let pending_held_startup_run t =
+let pending_initial_startup_run t =
   Option.bind t.held_activation ~f:(fun activation ->
     let retained () =
       let open Result.Let_syntax in
@@ -3278,7 +3976,7 @@ let pending_held_startup_run t =
         | None -> true
         | Some scope ->
           Option.exists
-            scope.Initialization_scope.held_continuation
+            (Initialization_scope.initial_continuation scope)
             ~f:(fun continuation ->
               phys_equal activation (Admitted_activation.Continuation.target continuation))
       in
@@ -3287,19 +3985,62 @@ let pending_held_startup_run t =
       else None)
 ;;
 
+let pending_held_startup_run t =
+  match pending_initial_startup_run t with
+  | Some _ as run -> run
+  | None ->
+    Option.bind t.run_preparation ~f:(function
+      | Initial _ -> None
+      | Existing_goal preparation ->
+        let owns_hold =
+          match preparation.runtime_phase with
+          | Installed scope | Callback_completed scope ->
+            Result.is_ok (goal_runtime_scope_basis t scope)
+          | Constructing ->
+            Option.exists t.initialization_scope ~f:(fun scope ->
+              match Initialization_scope.construction scope with
+              | Some (Existing_goal continuation) ->
+                phys_equal continuation.binding.preparation preparation
+              | Some (Initial _) | None -> false)
+          | Unclaimed
+          | Starting_writer _
+          | Starting_acknowledged
+          | Running_writer _
+          | Handed_off _
+          | Retired _
+          | Closed -> false
+        in
+        if owns_hold && Result.is_ok (preparation.registered_basis ())
+        then
+          Option.bind t.state.run_state ~f:(fun index ->
+            Option.filter (Run_state.find index preparation.run.id) ~f:(fun run ->
+              match run.Agent_protocol.Run.lifecycle with
+              | Admitted | Active | Waiting _ -> true
+              | Terminal _ -> false))
+        else None)
+;;
+
 let initialization_held_run t (scope : Initialization_scope.t) =
-  match
-    ( Option.map scope.held_continuation ~f:Admitted_activation.Continuation.target
-    , t.initialization_scope )
-  with
-  | Some activation, Some current
-    when phys_equal scope current
-         && Option.exists t.held_activation ~f:(phys_equal activation)
-         && Option.exists scope.run_preparation ~f:(phys_equal activation.preparation) ->
-    (match !(activation.phase) with
-     | Reserved | Constructing -> pending_held_startup_run t
-     | Handed_off _ | Closed -> None)
-  | (Some _ | None), (Some _ | None) -> None
+  if not (Option.exists t.initialization_scope ~f:(phys_equal scope))
+  then None
+  else (
+    match Initialization_scope.construction scope with
+    | Some (Existing_goal continuation) ->
+      let preparation = continuation.Goal_continuation.binding.preparation in
+      if Result.is_ok (preparation.basis ())
+      then
+        Option.bind t.state.run_state ~f:(fun index ->
+          Run_state.find index preparation.run.id)
+      else None
+    | Some (Initial continuation) ->
+      let activation = continuation.Admitted_activation.Continuation.target in
+      if Option.exists t.held_activation ~f:(phys_equal activation)
+      then (
+        match !(activation.phase) with
+        | Reserved | Constructing -> pending_held_startup_run t
+        | Handed_off _ | Closed -> None)
+      else None
+    | None -> None)
 ;;
 
 let held_initialization_of_execution t = function
@@ -3330,7 +4071,7 @@ let held_initialization_of_execution t = function
 
 let check_registered_run_preparation t preparation =
   match t.run_preparation with
-  | Some active when phys_equal active preparation ->
+  | Some (Initial active) when phys_equal active preparation ->
     Run_preparation.check preparation ~owner:t.run_preparation_owner ~state:t.state
   | Some _ | None ->
     Error (error Conflict "run preparation is not this actor's live admission")
@@ -3401,7 +4142,15 @@ let retire_goal_activation t goal_id =
     match association.Activation_association.issuer_policy with
     | Recurrence -> true
     | Goal policy ->
-      not (Agent_protocol.Id.Goal.equal (Goal_activation_policy.goal_id policy) goal_id))
+      not (Agent_protocol.Id.Goal.equal (Goal_activation_policy.goal_id policy) goal_id));
+  Option.iter t.run_preparation ~f:(function
+    | Existing_goal preparation ->
+      if
+        Agent_protocol.Id.Goal.equal
+          (Goal_activation_policy.goal_id preparation.policy)
+          goal_id
+      then Goal_continuation.close preparation
+    | Initial _ -> ())
 ;;
 
 let retain_goal_activations ?admission_hold t (current : Session_state.t) =
@@ -3423,7 +4172,52 @@ let retain_goal_activations ?admission_hold t (current : Session_state.t) =
           && Result.is_ok
                (Goal_activation_policy.check_admitted_policy policy ~state:t.state)
           && Result.is_ok
-               (Goal_activation_policy.check_admitted_policy policy ~state:current)))
+               (Goal_activation_policy.check_admitted_policy policy ~state:current)));
+  Option.iter t.run_preparation ~f:(function
+    | Initial _ -> ()
+    | Existing_goal preparation ->
+      let id = Goal_activation_policy.goal_id preparation.policy in
+      let compatible =
+        Result.is_ok
+          (Goal_activation_policy.check_admitted_policy preparation.policy ~state:current)
+        && Option.exists current.run_state ~f:(fun index ->
+          Option.exists (Run_state.find index preparation.run.id) ~f:(fun run ->
+            (match run.Agent_protocol.Run.lifecycle with
+             | Admitted | Active | Waiting _ -> true
+             | Terminal _ -> false)
+            && Result.is_ok
+                 (Goal_activation_policy.check_association
+                    preparation.policy
+                    ~state:current
+                    ~run
+                    ~admission:preparation.admission)
+            && Result.is_ok
+                 (let open Result.Let_syntax in
+                  let%bind captured_index, source =
+                    Moderator_source_installation.capture current
+                  in
+                  if
+                    Run_state.equal captured_index index
+                    && Agent_protocol.Run_source.equal source preparation.run.source
+                  then Ok ()
+                  else Error (error Conflict "Goal resume source candidate changed"))))
+      in
+      let retained =
+        compatible
+        &&
+        match preparation.phase with
+        | Preparing | Source_bound _ | Writer_pending _ -> true
+        | Ready _ ->
+          Result.is_ok
+            (Goal_activation_policy.check_policy preparation.policy ~state:current)
+          || Option.exists admission_hold ~f:(Agent_protocol.Id.Goal.equal id)
+          || Option.equal
+               Agent_protocol.Goal.State.equal
+               (goal_state t.state id)
+               (goal_state current id)
+        | Waiting _ | Closed _ -> false
+      in
+      if not retained then Goal_continuation.close preparation)
 ;;
 
 let invalidate_goal_inference_allocations t goal_id =
@@ -3722,7 +4516,9 @@ module Held_authored_callback_acknowledgement = struct
       && phys_equal t.scope.issuing_actor actor.inference_owner_identity
       && Option.exists actor.held_authored_start ~f:(phys_equal t.scope)
       && Option.exists actor.queued_event_borrow ~f:(phys_equal t.borrow)
-      && Option.exists t.borrow.held_authored ~f:(phys_equal t.scope)
+      && Option.exists
+           (Option.bind t.borrow.lifecycle_owner ~f:Lifecycle_callback_owner.initial)
+           ~f:(phys_equal t.scope)
       && Option.exists t.borrow.run_actions ~f:(phys_equal t.actions)
       && t.borrow.callback_active
       && (not t.borrow.committed)
@@ -3746,7 +4542,9 @@ module Held_authored_callback_acknowledgement = struct
     let open Result.Let_syntax in
     match scope.phase, actor.queued_event_borrow with
     | Executing id, Some borrow
-      when Option.exists borrow.held_authored ~f:(phys_equal scope)
+      when Option.exists
+             (Option.bind borrow.lifecycle_owner ~f:Lifecycle_callback_owner.initial)
+             ~f:(phys_equal scope)
            && Agent_protocol.Id.Moderator_execution.equal id borrow.receipt.context.id
            && borrow.callback_active
            && not borrow.committed ->
@@ -3798,6 +4596,97 @@ module Held_authored_callback_acknowledgement = struct
   let install t = Run_scope.Host.acknowledge_advance t.advance
 end
 
+(* A single acknowledged candidate advances the exact runtime callback owner.
+   This is staged DATA; only installation after the real writer changes custody. *)
+module Goal_runtime_acknowledgement = struct
+  type actor = t
+
+  type t =
+    { previous : Session_state.t
+    ; candidate : Session_transition.t
+    ; scope : Goal_continuation.runtime_scope
+    ; jobs : Agent_protocol.Job.t list
+    ; callback_advance : Run_scope.Host.advance option
+    }
+
+  let check t ~(actor : actor) ~candidate =
+    let open Result.Let_syntax in
+    let%bind () = goal_runtime_scope_basis actor t.scope in
+    if phys_equal t.previous actor.state && phys_equal t.candidate candidate
+    then Ok ()
+    else Error (error Conflict "Goal runtime acknowledgement candidate changed")
+  ;;
+
+  let prepare (actor : actor) scope ~candidate =
+    let open Result.Let_syntax in
+    let%bind () = goal_runtime_scope_basis actor scope in
+    let%bind callback_advance =
+      match actor.queued_event_borrow with
+      | Some borrow
+        when Option.exists (goal_runtime_of_borrow borrow) ~f:(phys_equal scope)
+             && borrow.callback_active
+             && not borrow.committed ->
+        (match borrow.run_actions with
+         | None -> Ok None
+         | Some actions ->
+           let find state =
+             Option.bind state.Session_state.run_state ~f:(fun index ->
+               Run_state.find
+                 index
+                 scope.Goal_continuation.continuation.binding.preparation.run.id)
+           in
+           (match find actor.state, find candidate.Session_transition.state with
+            | Some previous, Some next when not (Agent_protocol.Run.equal previous next)
+              ->
+              (match next.lifecycle with
+               | Terminal _ -> Ok None
+               | Admitted | Active | Waiting _ ->
+                 Run_scope.Host.prepare_advance
+                   (Run_action_service.scope actions)
+                   ~previous
+                   ~next
+                   ~execution_id:borrow.receipt.context.id
+                 |> Result.map ~f:Option.some)
+            | _ -> Ok None))
+      | None | Some _ -> Ok None
+    in
+    let rec jobs = function
+      | Session_delta.Batch deltas -> List.concat_map deltas ~f:jobs
+      | Job_changed job -> [ job ]
+      | _ -> []
+    in
+    Ok
+      { previous = actor.state
+      ; candidate
+      ; scope
+      ; jobs = jobs candidate.delta
+      ; callback_advance
+      }
+  ;;
+
+  let install t =
+    t.scope.jobs <- t.jobs @ t.scope.jobs;
+    Option.iter t.callback_advance ~f:(fun advance ->
+      match Run_scope.Host.acknowledge_advance advance with
+      | Ok () -> ()
+      | Error error ->
+        raise_s
+          [%message
+            "acknowledged Goal callback advance lost its exact basis"
+              (error : Agent_protocol.Error.t)]);
+    match t.scope.callback with
+    | Executing id ->
+      Option.iter
+        (List.find t.candidate.state.moderator_executions ~f:(fun receipt ->
+           Agent_protocol.Id.Moderator_execution.equal receipt.context.id id))
+        ~f:(fun receipt ->
+          match receipt.status with
+          | Completed _ -> t.scope.callback <- Completed id
+          | Running | Failed _ | Interrupted _ -> ())
+    | Pending | Completed _ | Joined -> ()
+  ;;
+end
+
 module Held_operation_acknowledgement = struct
   type actor = t
 
@@ -3846,15 +4735,59 @@ module Held_operation_acknowledgement = struct
   ;;
 end
 
-let install_committed_transition
+module Goal_runtime_operation_acknowledgement = struct
+  type actor = t
+
+  type t =
+    { previous : Session_state.t
+    ; candidate : Session_transition.t
+    ; scope : Goal_continuation.runtime_scope
+    ; held : Held_operation.t
+    ; owner : Operation_owner.t
+    }
+
+  let check t ~(actor : actor) ~candidate =
+    let open Result.Let_syntax in
+    let%bind () = goal_runtime_scope_basis actor t.scope in
+    if
+      phys_equal t.previous actor.state
+      && phys_equal t.candidate candidate
+      && Option.is_none actor.operation_agent_custody
+      && Option.is_none actor.state.active_operation
+      && (match t.held.phase with
+          | Staged -> true
+          | _ -> false)
+      && (match t.scope.callback with
+          | Joined -> true
+          | _ -> false)
+      && Run_authorities.is_current
+           actor.run_authorities
+           t.held.proof.binding
+           ~run_id:t.held.proof.run.id
+    then Ok ()
+    else Error (error Conflict "Goal continuation Operation acknowledgement changed")
+  ;;
+
+  let install t ~(actor : actor) =
+    t.held.proof.controller.install ();
+    t.held.phase <- Pending_first_effect;
+    actor.operation_agent_custody <- Some t.owner;
+    t.scope.continuation.binding.preparation.runtime_phase
+    <- Handed_off (t.scope, Goal_resume_result.Continuation.Started t.held.proof.operation)
+  ;;
+end
+
+let install_committed_transition_owned
       ?held_authored_acknowledgement
+      ?goal_runtime_acknowledgement
       ?held_operation_acknowledgement
+      ?goal_operation_acknowledgement
       ?queued_claim_acknowledgement
       ?authored_run_acknowledgement
       ?legacy_queue_custody
       ?legacy_schedule_custody
       ?retire_legacy_custody
-      ?run_preparation
+      ~preparation_owner
       ?job_custody
       ?initialization_acknowledgement
       ?constructor_stop_acknowledgement
@@ -3867,11 +4800,11 @@ let install_committed_transition
     | Running, Stopped -> true
     | Running, Running | Stopped, Running | Stopped, Stopped -> false
   in
-  (match t.run_preparation, run_preparation with
-   | Some active, Some supplied when phys_equal active supplied ->
+  (match t.run_preparation, preparation_owner with
+   | Some active, Some supplied when Preparation_owner.same active supplied ->
      (match
-        Run_preparation.advance
-          active
+        Run_preparation.Custody.advance
+          (Preparation_owner.custody active)
           ~owner:t.run_preparation_owner
           ~previous:t.state
           ~current:transition.state
@@ -3880,6 +4813,7 @@ let install_committed_transition
       | Error _ -> close_run_preparation t)
    | Some _, (Some _ | None) -> close_run_preparation t
    | None, (Some _ | None) -> ());
+  Option.iter goal_runtime_acknowledgement ~f:Goal_runtime_acknowledgement.install;
   t.command_audit <- None;
   invalidate_goal_inference_policy ?admission_hold t transition.state;
   t.state <- transition.state;
@@ -3889,6 +4823,9 @@ let install_committed_transition
   Option.iter
     held_operation_acknowledgement
     ~f:(Held_operation_acknowledgement.install ~actor:t);
+  Option.iter
+    goal_operation_acknowledgement
+    ~f:(Goal_runtime_operation_acknowledgement.install ~actor:t);
   Option.iter
     constructor_stop_acknowledgement
     ~f:(Constructor_stop_acknowledgement.install ~actor:t);
@@ -3936,6 +4873,59 @@ let install_committed_transition
     t.queued_event_borrow <- Some (Queued_claim_acknowledgement.install acknowledgement);
     t.idle_moderator_borrowed <- true);
   Atomic.set t.event_sequence t.state.counters.event_sequence
+;;
+
+(* Initial callers retain their typed adapter; the shared ACK installation owns
+   exactly one closed preparation family, never two optional mutable owners. *)
+let install_committed_transition
+      ?held_authored_acknowledgement
+      ?goal_runtime_acknowledgement
+      ?held_operation_acknowledgement
+      ?goal_operation_acknowledgement
+      ?queued_claim_acknowledgement
+      ?authored_run_acknowledgement
+      ?legacy_queue_custody
+      ?legacy_schedule_custody
+      ?retire_legacy_custody
+      ?run_preparation
+      ?job_custody
+      ?initialization_acknowledgement
+      ?constructor_stop_acknowledgement
+      ?admission_hold
+      t
+      transition
+  =
+  install_committed_transition_owned
+    ?held_authored_acknowledgement
+    ?goal_runtime_acknowledgement
+    ?held_operation_acknowledgement
+    ?goal_operation_acknowledgement
+    ?queued_claim_acknowledgement
+    ?authored_run_acknowledgement
+    ?legacy_queue_custody
+    ?legacy_schedule_custody
+    ?retire_legacy_custody
+    ?job_custody
+    ?initialization_acknowledgement
+    ?constructor_stop_acknowledgement
+    ?admission_hold
+    ~preparation_owner:
+      (match goal_runtime_acknowledgement, initialization_acknowledgement with
+       | Some acknowledgement, _ ->
+         Some
+           (Existing_goal
+              acknowledgement.Goal_runtime_acknowledgement.scope.continuation.binding
+                .preparation)
+       | None, Some (acknowledgement : Initialization_scope.Acknowledgement.t) ->
+         (* This private ACK pins the authentic Init scope and its previous
+            projection before the writer. Its same closed owner advances at
+            ACK; it cannot substitute whichever constructor is now current. *)
+         Initialization_scope.preparation_owner acknowledgement.scope
+       | None, None ->
+         Option.map run_preparation ~f:(fun preparation ->
+           Preparation_owner.Initial preparation))
+    t
+    transition
 ;;
 
 let publish_committed_transition t (transition : Session_transition.t) =
@@ -4217,6 +5207,7 @@ let prepare_completion_plan t (transition : Session_transition.t) completion_sam
 
 let install
       ?held_authored_callback_acknowledgement
+      ?goal_runtime_acknowledgement
       ?queued_claim_acknowledgement
       ?authored_run_acknowledgement
       ?initialization_acknowledgement
@@ -4252,6 +5243,21 @@ let install
             ~actor:t
             ~candidate:transition)
   in
+  let final_check = check_before_commit in
+  let check_before_commit =
+    match goal_runtime_acknowledgement with
+    | None -> final_check
+    | Some acknowledgement ->
+      Some
+        (fun () ->
+          let%bind () =
+            Option.value_map final_check ~default:(Ok ()) ~f:(fun check -> check ())
+          in
+          Goal_runtime_acknowledgement.check
+            acknowledgement
+            ~actor:t
+            ~candidate:transition)
+  in
   let%bind () =
     persist_transition
       ?run_preparation
@@ -4262,6 +5268,7 @@ let install
       transition
   in
   install_committed_transition
+    ?goal_runtime_acknowledgement
     ?queued_claim_acknowledgement
     ?authored_run_acknowledgement
     ?initialization_acknowledgement
@@ -4323,6 +5330,32 @@ let prepare_transition ?run_preparation t ~delta ~payloads =
         (Run_state.to_jsonaf index)
   in
   prepared
+;;
+
+let goal_runtime_transition
+      ?admission_hold
+      ?job_custody
+      ?completion_sample
+      ?check_before_commit
+      t
+      scope
+      ~delta
+      ~payloads
+  =
+  let open Result.Let_syntax in
+  let%bind candidate = prepare_transition t ~delta ~payloads in
+  let%bind acknowledgement = Goal_runtime_acknowledgement.prepare t scope ~candidate in
+  let%map () =
+    install
+      ?admission_hold
+      ~goal_runtime_acknowledgement:acknowledgement
+      ?job_custody
+      ?completion_sample
+      ?check_before_commit
+      t
+      candidate
+  in
+  Session_state.summary t.state
 ;;
 
 let prepare_constructor_job_handoff ?run_preparation t ~delta ~payloads ~ids ~manager =
@@ -4445,7 +5478,7 @@ let input_scope_basis t (scope : Held_input_scope.t) =
       phys_equal scope.issuing_actor t.inference_owner_identity
       && Option.exists t.held_input_scope ~f:(phys_equal scope)
       && Option.exists t.held_activation ~f:(phys_equal activation)
-      && Option.exists t.run_preparation ~f:(phys_equal activation.preparation)
+      && Option.exists (initial_run_preparation t) ~f:(phys_equal activation.preparation)
     then Ok ()
     else Error (error Conflict "held input owner was displaced")
   in
@@ -4475,6 +5508,7 @@ module Owned_inference_mutation = struct
     type t =
       | Input of Held_input_scope.t
       | Authored of Held_authored_start.t
+      | Initialization of Runtime_constructor_graph.t
   end
 
   type t =
@@ -4484,9 +5518,29 @@ module Owned_inference_mutation = struct
     }
 end
 
+let initialization_graph_basis t (graph : Runtime_constructor_graph.t) =
+  if
+    phys_equal graph.scope.owner t.initialization_owner
+    && List.mem graph.scope.graphs graph.owner ~equal:phys_equal
+    && List.mem t.inference_owners graph.owner ~equal:phys_equal
+    && phys_equal t.inference_owner_identity (Graph_owner.issuing_actor graph.owner)
+    && Option.exists
+         (Initialization_scope.construction graph.scope)
+         ~f:(fun construction ->
+           Preparation_owner.same
+             (Runtime_construction.preparation_owner construction)
+             (Runtime_construction.preparation_owner graph.construction))
+  then Ok ()
+  else Error (error Conflict "constructor graph belongs to another or substituted scope")
+;;
+
 let owned_graph_basis t (mutation : Owned_inference_mutation.t) =
   match mutation.scope with
   | Input scope -> input_graph_basis t scope mutation.owner
+  | Initialization graph ->
+    if phys_equal graph.owner mutation.owner
+    then initialization_graph_basis t graph
+    else Error (error Conflict "constructor graph owner was substituted")
   | Authored scope ->
     if
       phys_equal scope.issuing_actor t.inference_owner_identity
@@ -4497,10 +5551,12 @@ let owned_graph_basis t (mutation : Owned_inference_mutation.t) =
     else Error (error Conflict "graph does not belong to this held authored startup")
 ;;
 
-let owned_graph_continuation (mutation : Owned_inference_mutation.t) =
+let owned_graph_preparation (mutation : Owned_inference_mutation.t) =
   match mutation.scope with
-  | Input scope -> scope.continuation
-  | Authored scope -> scope.continuation
+  | Input scope -> Some (Preparation_owner.Initial scope.continuation.target.preparation)
+  | Authored scope ->
+    Some (Preparation_owner.Initial scope.continuation.target.preparation)
+  | Initialization graph -> Initialization_scope.preparation_owner graph.scope
 ;;
 
 let select_authored_graph t owner acknowledgement =
@@ -4543,14 +5599,25 @@ let install_input_graph_acknowledgement t (mutation : Owned_inference_mutation.t
        <- List.filter scope.graphs ~f:(fun owner -> not (phys_equal owner mutation.owner))
      | Authored scope ->
        scope.graphs
-       <- List.filter scope.graphs ~f:(fun owner -> not (phys_equal owner mutation.owner)))
+       <- List.filter scope.graphs ~f:(fun owner -> not (phys_equal owner mutation.owner))
+     | Initialization graph ->
+       graph.scope.graphs
+       <- List.filter graph.scope.graphs ~f:(fun owner ->
+            not (phys_equal owner mutation.owner)))
 ;;
 
 module Held_inference_allocation_acknowledgement = struct
   type actor = t
 
+  module Scope = struct
+    type t =
+      | Authored of Held_authored_start.t
+      | Goal_runtime of Goal_continuation.runtime_scope
+      | Initialization of Initialization_scope.t
+  end
+
   type t =
-    { scope : Held_authored_start.t
+    { scope : Scope.t
     ; owner : Inference_owner.t
     ; ledger : Inference_ledger.t
     ; handle : Inference_ledger.Handle.t
@@ -4560,7 +5627,35 @@ module Held_inference_allocation_acknowledgement = struct
 
   let check t ~(actor : actor) ~ledger =
     let open Result.Let_syntax in
-    let%bind () = held_authored_basis actor t.scope in
+    let%bind () =
+      match t.scope with
+      | Authored scope -> held_authored_basis actor scope
+      | Goal_runtime scope ->
+        let%bind () = goal_runtime_scope_basis actor scope in
+        scope.continuation.binding.preparation.registered_basis ()
+      | Initialization scope ->
+        let%bind () =
+          if List.mem scope.graphs t.owner ~equal:phys_equal
+          then Ok ()
+          else Error (error Conflict "allocation is outside its actual Init graph")
+        in
+        if
+          phys_equal scope.owner actor.initialization_owner
+          && Option.exists actor.initialization_scope ~f:(phys_equal scope)
+        then
+          Option.value_map
+            (Initialization_scope.preparation_owner scope)
+            ~default:(Ok ())
+            ~f:(fun selected ->
+              if Option.exists actor.run_preparation ~f:(Preparation_owner.same selected)
+              then
+                Run_preparation.Custody.check_basis
+                  (Preparation_owner.custody selected)
+                  ~owner:actor.run_preparation_owner
+                  ~state:actor.state
+              else Error (error Conflict "allocation Init preparation was displaced"))
+        else Error (error Conflict "allocation Init was displaced")
+    in
     if
       phys_equal t.ledger ledger
       && List.mem actor.inference_owners t.owner ~equal:phys_equal
@@ -4579,8 +5674,16 @@ module Held_inference_allocation_acknowledgement = struct
       ~handle:t.handle
       ~configuration:t.configuration
       ~goal_id:t.goal_id;
-    if not (List.mem t.scope.graphs t.owner ~equal:phys_equal)
-    then t.scope.graphs <- t.owner :: t.scope.graphs
+    match t.scope with
+    | Goal_runtime scope ->
+      if not (List.mem scope.graphs t.owner ~equal:phys_equal)
+      then scope.graphs <- t.owner :: scope.graphs
+    | Authored scope ->
+      if not (List.mem scope.graphs t.owner ~equal:phys_equal)
+      then scope.graphs <- t.owner :: scope.graphs
+    | Initialization scope ->
+      if not (List.mem scope.graphs t.owner ~equal:phys_equal)
+      then scope.graphs <- t.owner :: scope.graphs
   ;;
 end
 
@@ -4640,17 +5743,45 @@ let commit_inference_ledger
         Held_inference_allocation_acknowledgement.check acknowledgement ~actor:t ~ledger
       in
       let%bind candidate = prepare_transition ?run_preparation t ~delta ~payloads in
+      let initialization_acknowledgement =
+        match acknowledgement.scope with
+        | Authored _ | Goal_runtime _ -> None
+        | Initialization scope ->
+          Some (Initialization_scope.Acknowledgement.prepare scope candidate.state)
+      in
+      let%bind goal_runtime_acknowledgement =
+        match acknowledgement.scope with
+        | Goal_runtime scope ->
+          Goal_runtime_acknowledgement.prepare t scope ~candidate
+          |> Result.map ~f:Option.some
+        | Authored _ | Initialization _ -> Ok None
+      in
       let final_check () =
         let%bind () =
           Option.value_map check_before_commit ~default:(Ok ()) ~f:(fun check -> check ())
         in
-        Held_inference_allocation_acknowledgement.check acknowledgement ~actor:t ~ledger
+        let%bind () =
+          Held_inference_allocation_acknowledgement.check acknowledgement ~actor:t ~ledger
+        in
+        let%bind () =
+          Option.value_map
+            initialization_acknowledgement
+            ~default:(Ok ())
+            ~f:Initialization_scope.Acknowledgement.check_basis
+        in
+        Option.value_map goal_runtime_acknowledgement ~default:(Ok ()) ~f:(fun ack ->
+          Goal_runtime_acknowledgement.check ack ~actor:t ~candidate)
       in
       Eio.Cancel.protect (fun () ->
         let%bind () =
           persist_transition ?run_preparation ~check_before_commit:final_check t candidate
         in
-        install_committed_transition ?run_preparation t candidate;
+        install_committed_transition
+          ?goal_runtime_acknowledgement
+          ?run_preparation
+          ?initialization_acknowledgement
+          t
+          candidate;
         Held_inference_allocation_acknowledgement.install acknowledgement;
         publish_committed_transition t candidate;
         Ok ())
@@ -4660,42 +5791,54 @@ let commit_inference_ledger
       transition ?check_before_commit ?run_preparation t ~delta ~payloads
       |> Result.map ~f:ignore
     | None, Some mutation ->
-      let continuation = owned_graph_continuation mutation in
+      let goal_scope =
+        Option.filter (goal_runtime_scope t) ~f:(fun scope ->
+          List.mem scope.graphs mutation.owner ~equal:phys_equal)
+      in
+      let selected_preparation =
+        match goal_scope with
+        | Some scope ->
+          Some (Preparation_owner.Existing_goal scope.continuation.binding.preparation)
+        | None -> owned_graph_preparation mutation
+      in
       (* This selected factual path never reauthorizes a produced result. The
          exact graph and preparation are retained, and only their basis advances
          after ACK. Preparing without a preparation avoids fresh-effect policy. *)
       let revision = t.state.counters.revision in
       let%bind candidate = prepare_transition t ~delta ~payloads in
-      let preparation =
-        (Admitted_activation.Continuation.target continuation).preparation
+      let%bind goal_runtime_acknowledgement =
+        Option.value_map goal_scope ~default:(Ok None) ~f:(fun scope ->
+          Goal_runtime_acknowledgement.prepare t scope ~candidate
+          |> Result.map ~f:Option.some)
       in
-      let run_preparation =
-        if
-          Option.exists t.run_preparation ~f:(phys_equal preparation)
+      let preparation_owner =
+        Option.filter selected_preparation ~f:(fun preparation ->
+          Option.exists t.run_preparation ~f:(Preparation_owner.same preparation)
           && Result.is_ok
-               (Run_preparation.check_basis
-                  preparation
+               (Run_preparation.Custody.check_basis
+                  (Preparation_owner.custody preparation)
                   ~owner:t.run_preparation_owner
-                  ~state:t.state)
-        then Some preparation
-        else None
+                  ~state:t.state))
       in
+      let run_preparation = Option.bind preparation_owner ~f:Preparation_owner.initial in
       let%bind () =
         persist_transition
           ?run_preparation
           ~check_before_commit:(fun () ->
             let%bind () = owned_graph_basis t mutation in
             let%bind () =
-              match run_preparation with
+              match preparation_owner with
               | None -> Ok ()
               | Some preparation ->
-                if Option.exists t.run_preparation ~f:(phys_equal preparation)
+                if Option.exists t.run_preparation ~f:(Preparation_owner.same preparation)
                 then
-                  Run_preparation.check_basis
-                    preparation
+                  Run_preparation.Custody.check_basis
+                    (Preparation_owner.custody preparation)
                     ~owner:t.run_preparation_owner
                     ~state:t.state
-                else Error (error Conflict "input factual preparation changed before ACK")
+                else
+                  Error
+                    (error Conflict "constructor factual preparation changed before ACK")
             in
             if Int64.equal revision t.state.counters.revision
             then Ok ()
@@ -4703,7 +5846,11 @@ let commit_inference_ledger
           t
           candidate
       in
-      install_committed_transition ?run_preparation t candidate;
+      install_committed_transition_owned
+        ?goal_runtime_acknowledgement
+        ~preparation_owner
+        t
+        candidate;
       install_input_graph_acknowledgement t mutation;
       publish_committed_transition t candidate;
       Ok ())
@@ -5908,7 +7055,7 @@ let lifecycle
           | None -> Ok ()
           | Some preparation ->
             (match t.run_preparation with
-             | Some current when phys_equal current preparation ->
+             | Some (Initial current) when phys_equal current preparation ->
                Run_preparation.check_basis
                  preparation
                  ~owner:t.run_preparation_owner
@@ -6825,48 +7972,61 @@ let validate_initialization_scope_basis t scope =
     Initialization_scope.Acknowledged.apply scope.acknowledged scope.expected
   in
   let%bind () = validate_initialization_basis ~scope t ~purpose:scope.purpose expected in
-  Option.value_map scope.run_preparation ~default:(Ok ()) ~f:(fun preparation ->
-    if Option.exists t.run_preparation ~f:(phys_equal preparation)
-    then
-      Run_preparation.check_basis
-        preparation
-        ~owner:t.run_preparation_owner
-        ~state:t.state
-    else Error (error Conflict "initializer Run preparation is no longer active"))
+  Option.value_map
+    (Initialization_scope.preparation_owner scope)
+    ~default:(Ok ())
+    ~f:(fun preparation ->
+      if Option.exists t.run_preparation ~f:(Preparation_owner.same preparation)
+      then
+        Run_preparation.Custody.check_basis
+          (Preparation_owner.custody preparation)
+          ~owner:t.run_preparation_owner
+          ~state:t.state
+      else Error (error Conflict "initializer preparation is no longer active"))
 ;;
 
 let validate_initialization_scope_current t scope =
   let open Result.Let_syntax in
   let%bind () = validate_initialization_scope_basis t scope in
-  let check_held_owner () =
+  let check_runtime_owner () =
     Option.value_map
-      scope.Initialization_scope.held_continuation
+      (Initialization_scope.construction scope)
       ~default:(Ok ())
-      ~f:(fun continuation ->
-        (Admitted_activation.Continuation.target continuation).owned_basis ())
+      ~f:(function
+      | Initial continuation ->
+        continuation.Admitted_activation.Continuation.target.owned_basis ()
+      | Existing_goal continuation ->
+        continuation.Goal_continuation.binding.preparation.basis ())
   in
-  let%bind () = check_held_owner () in
+  let%bind () = check_runtime_owner () in
   let%bind () =
-    Option.value_map scope.run_preparation ~default:(Ok ()) ~f:(fun preparation ->
-      Run_preparation.check_current
-        preparation
-        ~owner:t.run_preparation_owner
-        ~state:t.state)
+    Option.value_map
+      (Initialization_scope.preparation_owner scope)
+      ~default:(Ok ())
+      ~f:(fun preparation ->
+        Run_preparation.Custody.check_current
+          (Preparation_owner.custody preparation)
+          ~owner:t.run_preparation_owner
+          ~state:t.state)
   in
-  let%bind () = check_held_owner () in
+  let%bind () = check_runtime_owner () in
   validate_initialization_scope_basis t scope
 ;;
 
 let validate_initialization_scope t scope =
   let open Result.Let_syntax in
   let%bind () = validate_initialization_scope_current t scope in
-  match scope.Initialization_scope.run_preparation with
-  | None -> Ok ()
-  | Some preparation -> check_run_preparation t preparation
+  match scope.Initialization_scope.custody with
+  | Ordinary -> Ok ()
+  | Prepared preparation -> check_run_preparation t preparation
+  | Runtime (Initial continuation) ->
+    check_run_preparation t continuation.target.preparation
+  | Runtime (Existing_goal _ as construction) ->
+    check_runtime_construction_effect construction
 ;;
 
-let begin_initialization
-      ?held_continuation
+let begin_initialization_owned
+      ?construction
       ?run_preparation
       ?original_actor
       ?(purpose = Initialization_scope.Purpose.Pending_initialization)
@@ -6875,7 +8035,30 @@ let begin_initialization
   =
   let open Result.Let_syntax in
   let%bind () =
-    match held_continuation with
+    match t.run_preparation with
+    | Some (Existing_goal preparation) ->
+      (match construction with
+       | Some (Runtime_construction.Existing_goal continuation)
+         when phys_equal continuation.binding.preparation preparation ->
+         (match preparation.runtime_phase with
+          | Constructing -> check_runtime_construction_effect (Existing_goal continuation)
+          | Unclaimed
+          | Starting_writer _
+          | Starting_acknowledged
+          | Running_writer _
+          | Installed _
+          | Callback_completed _
+          | Handed_off _
+          | Retired _
+          | Closed ->
+            Error (error Conflict "Goal initializer has no actual cold construction ACK"))
+       | Some (Initial _) | Some (Existing_goal _) | None ->
+         Error (error Conflict "existing Goal construction requires its actual owner"))
+    | Some (Initial _) | None ->
+      Option.value_map construction ~default:(Ok ()) ~f:check_runtime_construction_effect
+  in
+  let%bind () =
+    match construction with
     | Some _ -> Ok ()
     | None -> require_selected_execution t
   in
@@ -6887,7 +8070,9 @@ let begin_initialization
     | Runtime_construction ->
       if
         Int64.equal expected.counters.revision t.state.counters.revision
-        && (Option.is_some original_actor || Option.is_some run_preparation)
+        && (Option.is_some original_actor
+            || Option.is_some run_preparation
+            || Option.is_some construction)
       then Ok ()
       else
         Error
@@ -6905,6 +8090,12 @@ let begin_initialization
   match t.initialization_scope with
   | Some _ -> Error (error Conflict "another initialization scope is active")
   | None ->
+    let custody : Initialization_scope.Custody.t =
+      match construction, run_preparation with
+      | Some construction, _ -> Runtime construction
+      | None, Some preparation -> Prepared preparation
+      | None, None -> Ordinary
+    in
     let scope =
       Initialization_scope.
         { owner = t.initialization_owner
@@ -6912,16 +8103,20 @@ let begin_initialization
         ; expected
         ; acknowledged = Acknowledged.capture expected
         ; jobs = []
+        ; graphs = []
         ; callback = Callback.Unclaimed
         ; resource = None
-        ; run_preparation
-        ; held_continuation
+        ; custody
         ; agent_admission =
             create_agent_admission (Option.map original_actor ~f:create_agent_custody)
         }
     in
     t.initialization_scope <- Some scope;
     Ok scope
+;;
+
+let begin_initialization ?run_preparation ?original_actor ?purpose t expected =
+  begin_initialization_owned ?run_preparation ?original_actor ?purpose t expected
 ;;
 
 (* Selected keys identify only this constructor's already acknowledged rows.
@@ -7022,17 +8217,50 @@ let check_initialization_agent_actor scope =
 
 let prepare_initialization_job_selection t (scope : Initialization_scope.t) =
   let open Result.Let_syntax in
-  match scope.run_preparation with
+  match Initialization_scope.preparation_owner scope with
   | None -> Ok (scope.jobs, None)
   | Some preparation ->
     let%map ids, selection =
-      Run_preparation.Constructor_jobs.prepare_handoff
-        preparation
+      Run_preparation.Custody.Constructor_jobs.prepare_handoff
+        (Preparation_owner.custody preparation)
         ~owner:t.run_preparation_owner
         ~state:t.state
     in
     ( List.dedup_and_sort (scope.jobs @ ids) ~compare:Agent_protocol.Id.Job.compare
     , Some selection )
+;;
+
+(* All fresh constructor DATA writers use the authentic Init checkpoint and
+   one actual preparation owner. The initial adapter still supplies its typed
+   RP where source binding requires it; an existing Goal is never coerced. *)
+let initialization_transition ?admission_hold ?job_custody t scope ~delta ~payloads =
+  let open Result.Let_syntax in
+  let run_preparation = Initialization_scope.initial_preparation scope in
+  let check_owner () =
+    let%bind () = validate_initialization_scope t scope in
+    check_initialization_agent_actor scope
+  in
+  let%bind () = check_owner () in
+  let%bind candidate = prepare_transition ?run_preparation t ~delta ~payloads in
+  let acknowledgement =
+    Initialization_scope.Acknowledgement.prepare scope candidate.state
+  in
+  let check_before_commit () =
+    let%bind () = check_owner () in
+    let%bind () =
+      Option.value_map job_custody ~default:(Ok ()) ~f:(fun update ->
+        Job_custody.Update.check_before_commit update ~current:t.job_agent_custody)
+    in
+    Initialization_scope.Acknowledgement.check_basis acknowledgement
+  in
+  install
+    ?run_preparation
+    ?admission_hold
+    ?job_custody
+    ~initialization_acknowledgement:acknowledgement
+    ~check_before_commit
+    t
+    candidate
 ;;
 
 let complete_initialization t scope (candidate : Session_state.t) moderator_manager =
@@ -7117,7 +8345,7 @@ let complete_initialization t scope (candidate : Session_state.t) moderator_mana
     }
   in
   let%bind () = Session_state.validate state in
-  let run_preparation = scope.Initialization_scope.run_preparation in
+  let run_preparation = Initialization_scope.initial_preparation scope in
   let%bind ids, selection = prepare_initialization_job_selection t scope in
   let%bind prepared, job_custody, _, revision =
     prepare_constructor_job_handoff
@@ -7192,7 +8420,7 @@ let checkpoint_runtime_construction t scope moderator moderator_manager =
       ~incoming:moderator
   in
   let%bind ids, selection = prepare_initialization_job_selection t scope in
-  let run_preparation = scope.Initialization_scope.run_preparation in
+  let run_preparation = Initialization_scope.initial_preparation scope in
   let%bind prepared, job_custody, source_changed, revision =
     prepare_constructor_job_handoff
       ?run_preparation
@@ -7337,7 +8565,7 @@ let fail_initialization t scope failure =
     { t.state.lifecycle with Session_state.Lifecycle.observed = Failed failure }
   in
   transition
-    ?run_preparation:scope.Initialization_scope.run_preparation
+    ?run_preparation:(Initialization_scope.initial_preparation scope)
     t
     ~delta:
       (Session_delta.Batch [ Failure_changed (Some failure); Lifecycle_changed lifecycle ])
@@ -7500,10 +8728,8 @@ let event_inference_origin t (receipt : Agent_protocol.Moderator_execution.t) =
     Option.bind t.queued_event_borrow ~f:(fun borrow ->
       if Agent_protocol.Moderator_execution.equal borrow.receipt receipt
       then
-        Option.map borrow.held_authored ~f:(fun scope ->
-          let open Result.Let_syntax in
-          let%bind () = held_authored_event_basis t borrow scope in
-          let%map run = held_authored_run t scope in
+        Option.map borrow.lifecycle_owner ~f:(fun owner ->
+          let%map.Result run = lifecycle_event_run t borrow owner in
           Some (Agent_protocol.Inference_origin.Run run.id))
       else None)
   in
@@ -8163,24 +9389,20 @@ let check_follow_up_authority t (authority : Follow_up_authority.t) =
 ;;
 
 let event_run_preparation t (borrow : queued_event_borrow) =
-  match borrow.held_authored with
+  match Option.bind borrow.lifecycle_owner ~f:Lifecycle_callback_owner.initial with
   | Some scope -> held_authored_factual_preparation t scope
   | None ->
     Option.bind t.legacy_callback_scope ~f:(fun callback ->
       if phys_equal callback.borrow borrow
       then
         Option.bind callback.constructor_scope ~f:(fun scope ->
-          scope.Initialization_scope.run_preparation)
+          Initialization_scope.initial_preparation scope)
       else None)
 ;;
 
 let selected_event_run t (borrow : queued_event_borrow) =
-  match borrow.held_authored with
-  | Some scope ->
-    let open Result.Let_syntax in
-    let%bind () = held_authored_event_basis t borrow scope in
-    let%map run = held_authored_run t scope in
-    Some run
+  match borrow.lifecycle_owner with
+  | Some owner -> Result.map (lifecycle_event_run t borrow owner) ~f:Option.some
   | None -> Run_event_scope.select t.state ~executing:borrow.receipt
 ;;
 
@@ -8206,7 +9428,7 @@ let check_constructor_invocation_basis t (scope : Initialization_scope.t) =
       (Initialization_scope.Acknowledged.apply scope.acknowledged scope.expected)
       t.state
   in
-  match scope.run_preparation with
+  match Initialization_scope.initial_preparation scope with
   | None -> Ok ()
   | Some preparation ->
     Run_preparation.check_basis preparation ~owner:t.run_preparation_owner ~state:t.state
@@ -8424,7 +9646,7 @@ let claim_queued_event
     in
     let borrow =
       { kind = Queued
-      ; held_authored = None
+      ; lifecycle_owner = None
       ; job_scope = None
       ; agent_admission = Contextual None
       ; receipt
@@ -8603,7 +9825,7 @@ let claim_held_authored_event t (scope : Held_authored_start.t) id snapshot even
       let%bind run_scope = Run_scope.create ~run ~execution_id:receipt.context.id in
       let borrow : queued_event_borrow =
         { kind = Ordinary
-        ; held_authored = Some scope
+        ; lifecycle_owner = Some (Initial_authored scope)
         ; job_scope = None
         ; agent_admission = Contextual (Some (lifecycle_claim_admission handoff))
         ; receipt
@@ -8704,7 +9926,7 @@ let claim_ordinary_event t id operation_id snapshot event =
       ~f:(fun () ->
         let borrow =
           { kind = Ordinary
-          ; held_authored = None
+          ; lifecycle_owner = None
           ; job_scope = None
           ; agent_admission = Contextual agent_admission
           ; receipt
@@ -8774,7 +9996,7 @@ let claim_delegated_event t id delegation snapshot event =
         in
         let borrow =
           { kind = Ordinary
-          ; held_authored = None
+          ; lifecycle_owner = None
           ; job_scope = None
           ; agent_admission = Contextual None
           ; receipt
@@ -8818,7 +10040,7 @@ let claim_job_event t scope id snapshot event =
   in
   let borrow =
     { kind = Ordinary
-    ; held_authored = None
+    ; lifecycle_owner = None
     ; job_scope = Some scope
     ; agent_admission = Contextual None
     ; receipt
@@ -8982,7 +10204,7 @@ let claim_initialization_callback
     ~f:(fun () ->
       let%bind prepared =
         prepare_transition
-          ?run_preparation:constructor.run_preparation
+          ?run_preparation:(Initialization_scope.initial_preparation constructor)
           t
           ~delta:
             (Session_delta.Batch
@@ -9015,7 +10237,7 @@ let claim_initialization_callback
       in
       let borrow =
         { kind = Ordinary
-        ; held_authored = None
+        ; lifecycle_owner = None
         ; job_scope = None
         ; agent_admission = Contextual None
         ; receipt
@@ -9059,13 +10281,16 @@ let claim_initialization_callback
         in
         let%bind () =
           persist_transition
-            ?run_preparation:constructor.run_preparation
-            ?check_before_commit:(held_startup_effect t constructor.run_preparation)
+            ?run_preparation:(Initialization_scope.initial_preparation constructor)
+            ?check_before_commit:
+              (held_startup_effect
+                 t
+                 (Initialization_scope.initial_preparation constructor))
             t
             prepared
         in
         install_committed_transition
-          ?run_preparation:constructor.run_preparation
+          ?run_preparation:(Initialization_scope.initial_preparation constructor)
           ~initialization_acknowledgement:acknowledgement
           t
           prepared;
@@ -9177,7 +10402,7 @@ let claim_legacy_boundary t manager callback parent event =
           install_committed_transition t prepared;
           let borrow =
             { kind = Ordinary
-            ; held_authored = None
+            ; lifecycle_owner = None
             ; job_scope =
                 (match parent with
                  | Callback_job scope -> Some scope
@@ -9320,7 +10545,7 @@ let claim_legacy_head t manager callback operation_id =
         in
         let borrow =
           { kind = Queued
-          ; held_authored = None
+          ; lifecycle_owner = None
           ; job_scope = None
           ; agent_admission = Contextual None
           ; receipt
@@ -9415,7 +10640,7 @@ let claim_queued_retirement t id snapshot reason =
     in
     let borrow =
       { kind = Queued
-      ; held_authored = None
+      ; lifecycle_owner = None
       ; job_scope = None
       ; agent_admission = Contextual None
       ; receipt
@@ -9492,9 +10717,12 @@ let constructor_event_current t borrow scope =
   else Error (error Conflict "constructor callback is no longer current")
 ;;
 
-let queued_event_inference_current t borrow =
-  match borrow.held_authored with
-  | Some scope -> held_authored_event_basis t borrow scope
+let queued_event_inference_current t (borrow : queued_event_borrow) =
+  match borrow.lifecycle_owner with
+  | Some (Existing_goal_resume scope as owner) ->
+    let%bind.Result () = lifecycle_event_basis t borrow owner in
+    scope.continuation.binding.preparation.basis ()
+  | Some owner -> lifecycle_event_basis t borrow owner
   | None ->
     (match constructor_scope_of_borrow t borrow with
      | None -> queued_event_can_commit_installed t borrow
@@ -9504,13 +10732,9 @@ let queued_event_inference_current t borrow =
        constructor_event_current t borrow scope)
 ;;
 
-let queued_event_can_commit t borrow =
-  match borrow.held_authored with
-  | Some scope ->
-    let open Result.Let_syntax in
-    let%bind () = held_authored_event_basis t borrow scope in
-    let%bind () = check_held_effect scope.continuation in
-    held_authored_event_basis t borrow scope
+let queued_event_can_commit t (borrow : queued_event_borrow) =
+  match borrow.lifecycle_owner with
+  | Some owner -> lifecycle_event_effect t borrow owner
   | None ->
     (match constructor_scope_of_borrow t borrow with
      | None -> queued_event_can_commit_installed t borrow
@@ -9521,7 +10745,8 @@ let queued_event_can_commit t borrow =
 ;;
 
 let callback_run_preparation (scope : Callback_scope.t) =
-  Option.bind scope.constructor_scope ~f:(fun constructor -> constructor.run_preparation)
+  Option.bind scope.constructor_scope ~f:(fun constructor ->
+    Initialization_scope.initial_preparation constructor)
 ;;
 
 let check_callback_scope_current t (scope : Callback_scope.t) =
@@ -9711,6 +10936,11 @@ let claim_event_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
   let%bind initialization_acknowledgement =
     prepare_constructor_invocation_ack t borrow ~before:None ~after:dispatched prepared
   in
+  let%bind goal_runtime_acknowledgement =
+    Option.value_map (goal_runtime_of_borrow borrow) ~default:(Ok None) ~f:(fun scope ->
+      Goal_runtime_acknowledgement.prepare t scope ~candidate:prepared
+      |> Result.map ~f:Option.some)
+  in
   let execution =
     { owner = Event_moderator borrow
     ; dispatched
@@ -9732,11 +10962,15 @@ let claim_event_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
       let%bind () =
         persist_transition
           ?run_preparation
-          ?check_before_commit:(held_startup_effect t run_preparation)
+          ~check_before_commit:(fun () ->
+            let%bind () = queued_event_can_commit t borrow in
+            Option.value_map goal_runtime_acknowledgement ~default:(Ok ()) ~f:(fun ack ->
+              Goal_runtime_acknowledgement.check ack ~actor:t ~candidate:prepared))
           t
           prepared
       in
       install_committed_transition
+        ?goal_runtime_acknowledgement
         ?run_preparation
         ?initialization_acknowledgement
         t
@@ -9812,6 +11046,14 @@ let completion_clock_pair t =
   wall, Recurrence_runtime.Completion.sample ~wall ~monotonic
 ;;
 
+let lifecycle_selection (borrow : queued_event_borrow) run =
+  Option.bind borrow.lifecycle_owner ~f:(function
+    | Lifecycle_callback_owner.Initial_authored _ ->
+      Option.map run ~f:(fun run -> Run_transition.Lifecycle_selection.Authored_start run)
+    | Existing_goal_resume _ ->
+      Option.map run ~f:(fun run -> Run_transition.Lifecycle_selection.Goal_resume run))
+;;
+
 let prepared_run_delta t (borrow : queued_event_borrow) completed requests job_deltas =
   let open Result.Let_syntax in
   match borrow.run_actions with
@@ -9871,7 +11113,7 @@ let prepared_run_delta t (borrow : queued_event_borrow) completed requests job_d
       && List.is_empty owned_work
       && (not owns_callback)
       && (not initial_single_turn)
-      && Option.is_none borrow.held_authored
+      && Option.is_none borrow.lifecycle_owner
     then Ok Prepared_run_delta.empty
     else (
       let%bind work_delta =
@@ -9883,7 +11125,7 @@ let prepared_run_delta t (borrow : queued_event_borrow) completed requests job_d
       let now, completion_sample = completion_clock_pair t in
       let%bind prepared =
         Run_transition.prepare
-          ?authored_start_run:(if Option.is_some borrow.held_authored then run else None)
+          ?lifecycle_selection:(lifecycle_selection borrow run)
           ?startup_run:(pending_held_startup_run t)
           t.state
           ~scope
@@ -10018,7 +11260,7 @@ let commit_queued_event t borrow snapshot requests decision notifications =
     Option.filter t.legacy_callback_scope ~f:(fun scope -> phys_equal scope.borrow borrow)
   in
   let run_preparation =
-    match borrow.held_authored with
+    match Option.bind borrow.lifecycle_owner ~f:Lifecycle_callback_owner.initial with
     | Some _ -> event_run_preparation t borrow
     | None -> Option.bind legacy_scope ~f:callback_run_preparation
   in
@@ -10164,6 +11406,13 @@ let commit_queued_event t borrow snapshot requests decision notifications =
              | Some _, None | None, Some _ ->
                Error (error Internal_error "constructor queue plan lost its callback")
            in
+           let%bind goal_runtime_acknowledgement =
+             match goal_runtime_of_borrow borrow with
+             | None -> Ok None
+             | Some scope ->
+               Goal_runtime_acknowledgement.prepare t scope ~candidate:prepared
+               |> Result.map ~f:Option.some
+           in
            let%bind completion_plan =
              prepare_completion_plan t prepared run_change.completion_sample
            in
@@ -10188,12 +11437,22 @@ let commit_queued_event t borrow snapshot requests decision notifications =
                persist_transition
                  ?run_preparation
                  ?check_before_commit:
-                   (Option.bind borrow.held_authored ~f:(fun _ ->
-                      held_startup_effect t run_preparation))
+                   (Option.map borrow.lifecycle_owner ~f:(fun owner ->
+                      fun () ->
+                      let%bind () = lifecycle_event_effect t borrow owner in
+                      Option.value_map
+                        goal_runtime_acknowledgement
+                        ~default:(Ok ())
+                        ~f:(fun ack ->
+                          Goal_runtime_acknowledgement.check
+                            ack
+                            ~actor:t
+                            ~candidate:prepared)))
                  t
                  prepared
              in
              install_committed_transition
+               ?goal_runtime_acknowledgement
                ?run_preparation
                ~job_custody
                ~legacy_queue_custody:inventory
@@ -10204,13 +11463,15 @@ let commit_queued_event t borrow snapshot requests decision notifications =
                completion_plan
                ~f:(Recurrence_runtime.install_completions t.recurrence_runtime);
              borrow.committed <- true;
-             Option.iter borrow.held_authored ~f:(fun scope ->
-               scope.jobs
-               <- List.filter_map job_deltas ~f:(function
-                    | Session_delta.Job_changed job -> Some job
-                    | _ -> None)
-                  @ scope.jobs;
-               scope.Held_authored_start.phase <- Completed borrow.receipt.context.id);
+             Option.iter
+               (Option.bind borrow.lifecycle_owner ~f:Lifecycle_callback_owner.initial)
+               ~f:(fun scope ->
+                 scope.jobs
+                 <- List.filter_map job_deltas ~f:(function
+                      | Session_delta.Job_changed job -> Some job
+                      | _ -> None)
+                    @ scope.jobs;
+                 scope.Held_authored_start.phase <- Completed borrow.receipt.context.id);
              Option.iter legacy_scope ~f:(fun scope ->
                scope.Callback_scope.committed_checkpoint <- Some prepared.state.moderator);
              acknowledged := true;
@@ -10225,9 +11486,12 @@ let commit_queued_event t borrow snapshot requests decision notifications =
    acknowledged projection. Ordinary event settlement retains its existing path. *)
 let commit_event_failure ?completion_sample t borrow ~delta ~payloads =
   let open Result.Let_syntax in
-  match constructor_scope_of_borrow t borrow with
-  | None -> transition ?completion_sample t ~delta ~payloads |> Result.map ~f:ignore
-  | Some constructor ->
+  match goal_runtime_of_borrow borrow, constructor_scope_of_borrow t borrow with
+  | Some scope, _ ->
+    goal_runtime_transition ?completion_sample t scope ~delta ~payloads
+    |> Result.map ~f:ignore
+  | None, None -> transition ?completion_sample t ~delta ~payloads |> Result.map ~f:ignore
+  | None, Some constructor ->
     let%bind () = validate_initialization_owner t constructor in
     let%bind () =
       match t.initialization_scope, constructor.callback with
@@ -10820,6 +12084,24 @@ let stage_schedule_mutation_internal
   receipt
 ;;
 
+(* Capture historical creator DATA from the same authenticated lifecycle borrow.
+   The staged timer and its callback ACK remain the only new-work writers. *)
+let lifecycle_schedule_provenance t owner =
+  let open Result.Let_syntax in
+  match owner, t.queued_event_borrow with
+  | Agent_protocol.Job.Moderator_event id, Some borrow
+    when Agent_protocol.Id.Moderator_execution.equal id borrow.receipt.context.id ->
+    (match borrow.lifecycle_owner with
+     | None -> Ok None
+     | Some lifecycle ->
+       let%bind run = lifecycle_event_run t borrow lifecycle in
+       Agent_protocol.Schedule_provenance.create
+         ~source:run.source
+         ~origin:(Some (Run run.id))
+       |> Result.map ~f:Option.some)
+  | Moderator_event _, None | Moderator_event _, Some _ | Invocation _, _ -> Ok None
+;;
+
 let create_script_schedule_internal t owner source delay_ms payload misfire =
   let open Result.Let_syntax in
   let%bind _ = subscription_owner_active t owner source in
@@ -10828,6 +12110,7 @@ let create_script_schedule_internal t owner source delay_ms payload misfire =
     | true -> Ok ()
     | false -> Error (error Invalid_request "schedule delay exceeds host policy")
   in
+  let%bind inference_provenance = lifecycle_schedule_provenance t owner in
   let created_at = t.services.now () in
   let monotonic_created_at = t.services.monotonic_now () in
   let%bind next_due_at = Agent_protocol.Timestamp.add_ms created_at delay_ms in
@@ -10842,7 +12125,7 @@ let create_script_schedule_internal t owner source delay_ms payload misfire =
     ; status = Scheduled
     ; delivery_count = 0
     ; last_delivery_at = None
-    ; inference_provenance = None
+    ; inference_provenance
     ; delivery_cancellation = None
     ; ownership = Some { source; creator = owner; subscription = None }
     }
@@ -14882,7 +16165,7 @@ let begin_run_preparation_internal
            ~request_sha256
            ~authorize
        in
-       t.run_preparation <- Some preparation;
+       t.run_preparation <- Some (Initial preparation);
        Run_preparation.Decision.Prepare preparation)
 ;;
 
@@ -14983,7 +16266,7 @@ let begin_effect_deferred_internal t ~actor ~authorize ~request =
         ~owner:t.run_preparation_owner
         ~state:t.state
     in
-    t.run_preparation <- Some (Run_preparation.Deferred.preparation deferred);
+    t.run_preparation <- Some (Initial (Run_preparation.Deferred.preparation deferred));
     t.effect_deferred <- Some (Ordinary deferred);
     Run_preparation.Deferred.Decision.Prepare deferred
 ;;
@@ -14995,7 +16278,7 @@ let close_effect_deferred_internal t deferred =
   in
   let preparation = Run_preparation.Deferred.preparation deferred in
   (match t.run_preparation with
-   | Some current when phys_equal current preparation -> close_run_preparation t
+   | Some (Initial current) when phys_equal current preparation -> close_run_preparation t
    | Some _ | None -> ());
   Ok closed
 ;;
@@ -15098,7 +16381,7 @@ let retry_target_basis t retry =
   | Preparing_source | Selected_source _ | Writer_pending _ | Acknowledged _ ->
     let preparation = Run_preparation.Deferred.preparation retry.deferred in
     let%bind () =
-      if Option.exists t.run_preparation ~f:(phys_equal preparation)
+      if Option.exists (initial_run_preparation t) ~f:(phys_equal preparation)
       then Ok ()
       else Error (error Conflict "retry preparation was displaced")
     in
@@ -15302,7 +16585,7 @@ let begin_recurrence_retry_internal
           retry_target_basis t retry)
     }
   in
-  t.run_preparation <- Some (Run_preparation.Deferred.preparation deferred);
+  t.run_preparation <- Some (Initial (Run_preparation.Deferred.preparation deferred));
   t.effect_deferred <- Some (Retry retry);
   Ok (retry, deferred)
 ;;
@@ -15376,7 +16659,7 @@ let resume_recurrence_retry_internal t ~retry ~actor ~authorize =
   in
   retry.deferred <- deferred;
   retry.phase <- Preparing_source;
-  t.run_preparation <- Some (Run_preparation.Deferred.preparation deferred);
+  t.run_preparation <- Some (Initial (Run_preparation.Deferred.preparation deferred));
   Ok (retry, deferred)
 ;;
 
@@ -16110,6 +17393,7 @@ end
 type selected_permission_owner =
   | Initialization_permission of Constructor_permission_owner.t
   | Held_authored_permission of invocation_execution * Held_authored_start.t
+  | Goal_resume_permission of invocation_execution * Goal_continuation.runtime_scope
 
 let held_permission_basis t execution (scope : Held_authored_start.t) =
   if
@@ -16123,6 +17407,30 @@ let held_permission_basis t execution (scope : Held_authored_start.t) =
          ~f:(Agent_protocol.Invocation.equal execution.dispatched)
   then Ok ()
   else Error (error Conflict "held permission Invocation owner changed")
+;;
+
+let goal_permission_basis t execution scope =
+  let open Result.Let_syntax in
+  let%bind () = goal_runtime_scope_basis t scope in
+  let%bind () =
+    match execution.owner with
+    | Event_moderator borrow -> goal_runtime_event_basis t borrow scope
+    | Background_job job ->
+      if Option.exists (goal_runtime_job t job.job) ~f:(phys_equal scope)
+      then Ok ()
+      else Error (error Conflict "Goal permission Job belongs to another startup")
+    | Foreground _ | Invocation_moderator _ ->
+      Error (error Conflict "Goal permission Invocation has another owner")
+  in
+  if
+    List.mem t.invocation_executions execution ~equal:phys_equal
+    && execution.accepts_children
+    && Atomic.get execution.authority_live
+    && List.exists
+         t.state.invocations
+         ~f:(Agent_protocol.Invocation.equal execution.dispatched)
+  then Ok ()
+  else Error (error Conflict "Goal permission Invocation execution ended")
 ;;
 
 let check_constructor_permission_owner t (owner : Constructor_permission_owner.t) =
@@ -16153,22 +17461,27 @@ let constructor_permission_owner t (permission : Agent_protocol.Permission.t) =
      with
      | None -> Ok None
      | Some execution ->
-       (match held_authored_of_execution t (Inference_invocation execution) with
+       (match goal_runtime_of_execution t (Inference_invocation execution) with
         | Some scope ->
-          let%map () = held_permission_basis t execution scope in
-          Some (Held_authored_permission (execution, scope))
+          let%map () = goal_permission_basis t execution scope in
+          Some (Goal_resume_permission (execution, scope))
         | None ->
-          (match execution.owner with
-           | Event_moderator borrow ->
-             (match constructor_scope_of_borrow t borrow with
-              | None -> Ok None
-              | Some scope ->
-                let owner : Constructor_permission_owner.t =
-                  { execution; borrow; scope }
-                in
-                let%map () = check_constructor_permission_owner t owner in
-                Some (Initialization_permission owner))
-           | Foreground _ | Invocation_moderator _ | Background_job _ -> Ok None)))
+          (match held_authored_of_execution t (Inference_invocation execution) with
+           | Some scope ->
+             let%map () = held_permission_basis t execution scope in
+             Some (Held_authored_permission (execution, scope))
+           | None ->
+             (match execution.owner with
+              | Event_moderator borrow ->
+                (match constructor_scope_of_borrow t borrow with
+                 | None -> Ok None
+                 | Some scope ->
+                   let owner : Constructor_permission_owner.t =
+                     { execution; borrow; scope }
+                   in
+                   let%map () = check_constructor_permission_owner t owner in
+                   Some (Initialization_permission owner))
+              | Foreground _ | Invocation_moderator _ | Background_job _ -> Ok None))))
 ;;
 
 (* The selected owner is captured before clocks/IDs are sampled. Only this
@@ -16224,8 +17537,38 @@ let commit_permission_transition
         else Error (error Conflict "held permission basis changed before ACK"))
       t
       candidate
+  | Some (Goal_resume_permission (execution, scope)) ->
+    let%bind () = goal_permission_basis t execution scope in
+    let%bind () =
+      match write with
+      | Admission -> check_runtime_construction_effect (Existing_goal scope.continuation)
+      | Negative_resolution ->
+        if
+          Option.is_none grant
+          && List.for_all permissions ~f:(fun permission ->
+            Option.exists
+              permission.Agent_protocol.Permission.resolution
+              ~f:(fun resolution ->
+                Agent_protocol.Permission.equal_choice resolution.choice Deny))
+        then Ok ()
+        else Error (error Conflict "negative Goal permission ACK contains approval")
+    in
+    let%map _ =
+      goal_runtime_transition t scope ~delta ~payloads ~check_before_commit:(fun () ->
+        let%bind () =
+          match write with
+          | Admission ->
+            check_runtime_construction_effect (Existing_goal scope.continuation)
+          | Negative_resolution -> Ok ()
+        in
+        let%bind () = goal_permission_basis t execution scope in
+        if Int64.equal revision t.state.counters.revision
+        then Ok ()
+        else Error (error Conflict "Goal permission basis changed before ACK"))
+    in
+    ()
   | Some (Initialization_permission owner) ->
-    let run_preparation = owner.scope.run_preparation in
+    let run_preparation = Initialization_scope.initial_preparation owner.scope in
     let%bind () = check_constructor_permission_owner t owner in
     let%bind prepared =
       match write with
@@ -16696,12 +18039,22 @@ let capture_recipe_target
     | None -> check_before_commit
   in
   let%bind captured = Model_job_target.capture_recipe binding ~target ~limits in
-  transition
-    ?check_before_commit
-    ?run_preparation
-    t
-    ~delta:(Session_delta.Model_job_recipe_target_captured captured)
-    ~payloads:[]
+  (match goal_runtime_job t job with
+   | Some scope ->
+     goal_runtime_transition
+       ~check_before_commit:(fun () ->
+         check_runtime_construction_effect (Existing_goal scope.continuation))
+       t
+       scope
+       ~delta:(Session_delta.Model_job_recipe_target_captured captured)
+       ~payloads:[]
+   | None ->
+     transition
+       ?check_before_commit
+       ?run_preparation
+       t
+       ~delta:(Session_delta.Model_job_recipe_target_captured captured)
+       ~payloads:[])
   |> Result.map ~f:ignore
 ;;
 
@@ -16869,6 +18222,21 @@ let update_jobs
     | Some scope, None ->
       install_held_authored_fact ?job_custody ?completion_sample t scope ~delta ~payloads
     | Some _, Some _ -> Error (error Conflict "Job result has two startup owners")
+    | None, None
+      when List.exists jobs ~f:(fun job -> Option.is_some (goal_runtime_job t job)) ->
+      let scopes = List.filter_map jobs ~f:(goal_runtime_job t) in
+      let scope = List.hd_exn scopes in
+      if List.for_all scopes ~f:(phys_equal scope)
+      then
+        goal_runtime_transition
+          ?job_custody
+          ?completion_sample
+          ?check_before_commit
+          t
+          scope
+          ~delta
+          ~payloads
+      else Error (error Conflict "Job ACK has two different runtime owners")
     | None, None ->
       transition
         ?check_before_commit
@@ -16903,18 +18271,29 @@ let update_jobs
                    scope.acknowledged
                    scope.expected)
             in
-            Option.value_map scope.run_preparation ~default:(Ok ()) ~f:(fun preparation ->
-              Run_preparation.check_basis
-                preparation
-                ~owner:t.run_preparation_owner
-                ~state:t.state)
+            Option.value_map
+              (Initialization_scope.preparation_owner scope)
+              ~default:(Ok ())
+              ~f:(fun preparation ->
+                match t.run_preparation with
+                | Some active when Preparation_owner.same active preparation ->
+                  Run_preparation.Custody.check_basis
+                    (Preparation_owner.custody preparation)
+                    ~owner:t.run_preparation_owner
+                    ~state:t.state
+                | Some _ | None ->
+                  Error (error Conflict "initialization preparation owner retired"))
           in
           let%bind () = check_basis () in
           let%bind prepared = prepare_transition t ~delta ~payloads in
           let acknowledgement =
             Initialization_scope.Acknowledgement.prepare scope prepared.state
           in
+          let positive_check = check_before_commit in
           let check_before_commit () =
+            let%bind () =
+              Option.value_map positive_check ~default:(Ok ()) ~f:(fun check -> check ())
+            in
             let%bind () = check_basis () in
             let%bind () =
               Initialization_scope.Acknowledgement.check_basis acknowledgement
@@ -17028,19 +18407,39 @@ let retire_unauthorized_run_job t (job : Agent_protocol.Job.t) =
       true)
 ;;
 
-let claim_job ?run_preparation ?check_before_commit t job_id generation =
+let goal_runtime_job_deferred t (job : Agent_protocol.Job.t) =
+  (match job.status, job.delivery with
+   | Queued, (Pending | Delivered _) -> true
+   | _ -> false)
+  && Option.exists (goal_runtime_job t job) ~f:(fun scope ->
+    Result.is_ok (goal_runtime_scope_basis t scope))
+;;
+
+let claim_job
+      ?initialization_scope
+      ?run_preparation
+      ?check_before_commit
+      t
+      job_id
+      generation
+  =
   let open Result.Let_syntax in
   let%bind job = find_job t job_id in
   let%bind () = validate_job_generation t job generation in
-  if held_authored_job_deferred t job
+  if held_authored_job_deferred t job || goal_runtime_job_deferred t job
   then Ok None
   else (
     let authored_preparation = held_authored_job_preparation t job in
     let run_preparation = Option.first_some authored_preparation run_preparation in
     let check_before_commit =
-      match authored_preparation with
-      | Some _ -> held_startup_effect t authored_preparation
-      | None -> check_before_commit
+      match goal_runtime_job t job with
+      | Some scope ->
+        Some
+          (fun () -> check_runtime_construction_effect (Existing_goal scope.continuation))
+      | None ->
+        (match authored_preparation with
+         | Some _ -> held_startup_effect t authored_preparation
+         | None -> check_before_commit)
     in
     let%bind () =
       if Session_state.execution_migration_required t.state
@@ -17059,7 +18458,12 @@ let claim_job ?run_preparation ?check_before_commit t job_id generation =
     in
     match job.status with
     | Agent_protocol.Job.Queued when job_is_due t job ->
-      let%bind () = require_selected_or_held_execution t run_preparation in
+      let%bind () =
+        match goal_runtime_job t job with
+        | Some scope ->
+          check_runtime_construction_effect (Existing_goal scope.continuation)
+        | None -> require_selected_or_held_execution t run_preparation
+      in
       let%bind retired = retire_unauthorized_run_job t job in
       if retired
       then Ok None
@@ -17086,7 +18490,15 @@ let claim_job ?run_preparation ?check_before_commit t job_id generation =
         let%bind job_custody =
           Job_custody.prepare_claim t.job_agent_custody ~previous ~claimed:job
         in
-        let%map _ = update_job ?check_before_commit ?run_preparation ~job_custody t job in
+        let%map _ =
+          update_jobs
+            ?initialization_scope
+            ?check_before_commit
+            ?run_preparation
+            ~job_custody
+            t
+            [ job ]
+        in
         Some job)
     | Queued -> Ok None
     | Running
@@ -17490,7 +18902,8 @@ let add_constructor_job t owner (job : Agent_protocol.Job.t) =
   let%bind () = validate_new_job t job in
   let run_preparation, parent, temporary =
     match owner with
-    | Initialization_job scope -> scope.run_preparation, scope.agent_admission, false
+    | Initialization_job scope ->
+      Initialization_scope.initial_preparation scope, scope.agent_admission, false
     | Run_constructor_job preparation ->
       ( Some preparation
       , create_agent_admission
@@ -17530,6 +18943,16 @@ let add_constructor_job t owner (job : Agent_protocol.Job.t) =
               ~delta:(Session_delta.Job_changed job)
               ~payloads:[ Agent_protocol.Event.Durable.Payload.Job_state_changed job ]
           in
+          let initialization_acknowledgement =
+            match owner with
+            | Initialization_job scope ->
+              Some
+                (Initialization_scope.Acknowledgement.prepare
+                   ~jobs:(job.id :: scope.jobs)
+                   scope
+                   prepared.state)
+            | Run_constructor_job _ -> None
+          in
           Eio.Cancel.protect (fun () ->
             let%bind () = check_constructor_job_owner t owner in
             let%bind () = check_job_moderator_binding t binding in
@@ -17545,10 +18968,30 @@ let add_constructor_job t owner (job : Agent_protocol.Job.t) =
                 job_custody
                 ~current:t.job_agent_custody
             in
-            let%bind () = persist_transition t prepared in
-            install_committed_transition ?run_preparation ~job_custody t prepared;
+            let check_before_commit () =
+              let%bind () = check_constructor_job_owner t owner in
+              let%bind () = check_job_moderator_binding t binding in
+              let%bind () =
+                Job_custody.Update.check_before_commit
+                  job_custody
+                  ~current:t.job_agent_custody
+              in
+              Option.value_map
+                initialization_acknowledgement
+                ~default:(Ok ())
+                ~f:Initialization_scope.Acknowledgement.check_basis
+            in
+            let%bind () =
+              persist_transition ?run_preparation ~check_before_commit t prepared
+            in
+            install_committed_transition
+              ?run_preparation
+              ~job_custody
+              ?initialization_acknowledgement
+              t
+              prepared;
             (match owner with
-             | Initialization_job scope -> scope.jobs <- job.id :: scope.jobs
+             | Initialization_job _ -> ()
              | Run_constructor_job _ ->
                Option.iter selection ~f:Run_preparation.Constructor_jobs.acknowledge);
             acknowledged := true;
@@ -17581,7 +19024,8 @@ let start_initialization_model_job t scope (job : Agent_protocol.Job.t) =
   let%bind job = add_initialization_model_job t scope job in
   let%bind claimed =
     claim_job
-      ?run_preparation:scope.Initialization_scope.run_preparation
+      ~initialization_scope:scope
+      ?run_preparation:(Initialization_scope.initial_preparation scope)
       t
       job.id
       job.generation
@@ -17610,8 +19054,14 @@ let claim_initialization_model_job t scope job_id generation =
   let%bind () = check_initialization_agent_actor scope in
   let%bind claimed =
     claim_job
-      ?run_preparation:scope.run_preparation
-      ?check_before_commit:(held_startup_effect t scope.run_preparation)
+      ~initialization_scope:scope
+      ?run_preparation:(Initialization_scope.initial_preparation scope)
+      ?check_before_commit:
+        (match Initialization_scope.construction scope with
+         | Some (Runtime_construction.Existing_goal _ as construction) ->
+           Some (fun () -> check_runtime_construction_effect construction)
+         | Some (Initial _) | None ->
+           held_startup_effect t (Initialization_scope.initial_preparation scope))
       t
       job_id
       generation
@@ -17652,6 +19102,43 @@ let initialization_model_job_is_current t scope job_id generation attempt =
   owned
   && Result.is_ok (validate_initialization_scope t scope)
   && Result.is_ok (check_initialization_agent_actor scope)
+;;
+
+(* Cancellation observes an already claimed physical Job, not admission of
+   another inference. Its own graph ACK may advance Store custody concurrently;
+   only the actual effect/checkpoint ports consume a fresh Store observation. *)
+let initialization_model_job_is_running t scope job_id generation attempt =
+  match Initialization_scope.construction scope with
+  | Some (Runtime_construction.Existing_goal continuation) ->
+    let open Result.Let_syntax in
+    let%bind owned =
+      initialization_model_job_is_owned t scope job_id generation attempt
+    in
+    if not owned
+    then Ok false
+    else (
+      let preparation = continuation.Goal_continuation.binding.preparation in
+      let current () =
+        let%bind () = validate_initialization_scope_basis t scope in
+        let%bind () = preparation.registered_policy () in
+        let%bind () =
+          Goal_activation_policy.check_admitted_policy preparation.policy ~state:t.state
+        in
+        let%bind () =
+          Goal_activation_policy.check_deadline
+            preparation.policy
+            ~state:t.state
+            ~now:(t.services.now ())
+        in
+        let%bind () = preparation.registered_authority () in
+        let%bind () = check_initialization_agent_actor scope in
+        validate_initialization_scope_basis t scope
+      in
+      match current () with
+      | Error _ -> Ok false
+      | Ok () -> initialization_model_job_is_owned t scope job_id generation attempt)
+  | Some (Initial _) | None ->
+    initialization_model_job_is_current t scope job_id generation attempt
 ;;
 
 let validate_initialization_model_job t scope job_id generation attempt =
@@ -17734,6 +19221,44 @@ let captured_callback_run t ~allow_unavailable (scope : Callback_scope.t) =
 
 let execution_basis ?admitted t (origins : execution_origin_lookup) execution =
   let open Result.Let_syntax in
+  let initialization_current scope =
+    match admitted with
+    | Some selected ->
+      (match selected.Admitted_inference.startup with
+       | Initialization (actual, Existing_goal continuation) when phys_equal actual scope
+         ->
+         let%bind () = validate_initialization_scope_basis t scope in
+         continuation.binding.preparation.registered_basis ()
+       | Ordinary | Initialization _ | Input _ | Authored _ | Goal_runtime _ ->
+         validate_initialization_scope_current t scope)
+    | None -> validate_initialization_scope_current t scope
+  in
+  let registered_constructor scope =
+    match admitted with
+    | Some { Admitted_inference.startup = Initialization (actual, Existing_goal _); _ }
+      when phys_equal actual scope -> true
+    | Some _ | None -> false
+  in
+  let event_current borrow =
+    match admitted, goal_runtime_of_borrow borrow with
+    | Some { Admitted_inference.startup = Goal_runtime actual; _ }, Some scope
+      when phys_equal actual scope ->
+      let%bind () = goal_runtime_event_basis t borrow scope in
+      scope.continuation.binding.preparation.registered_basis ()
+    | _ ->
+      (match constructor_scope_of_borrow t borrow with
+       | Some scope when registered_constructor scope ->
+         let%bind () = initialization_current scope in
+         constructor_event_current t borrow scope
+       | Some _ | None -> queued_event_inference_current t borrow)
+  in
+  let callback_current (scope : Callback_scope.t) =
+    match scope.constructor_scope with
+    | Some constructor when registered_constructor constructor ->
+      let%bind () = event_current scope.borrow in
+      check_callback_scope_current t scope
+    | Some _ | None -> callback_inference_actor t ~scope |> Result.map ~f:ignore
+  in
   let checked_admission admission =
     let%bind admission = admission in
     Option.value_map admission ~default:(Ok ()) ~f:check_agent_admission
@@ -17805,7 +19330,7 @@ let execution_basis ?admitted t (origins : execution_origin_lookup) execution =
       run
   in
   let event (borrow : queued_event_borrow) =
-    let%bind () = queued_event_inference_current t borrow in
+    let%bind () = event_current borrow in
     let%bind () =
       if Atomic.get borrow.authority_live && Option.is_none borrow.retirement_reason
       then Ok ()
@@ -17813,12 +19338,15 @@ let execution_basis ?admitted t (origins : execution_origin_lookup) execution =
     in
     let%bind () = checked_admission (event_agent_admission t borrow) in
     let%bind run =
-      match borrow.held_authored, t.legacy_callback_scope with
-      | Some scope, _ ->
-        let%map run = held_authored_run t scope in
+      match borrow.lifecycle_owner, t.legacy_callback_scope with
+      | Some (Existing_goal_resume scope), _ ->
+        let%map run = goal_runtime_run t scope in
+        Some run
+      | Some owner, _ ->
+        let%map run = lifecycle_event_run t borrow owner in
         Some run
       | None, Some scope when phys_equal scope.borrow borrow ->
-        let%bind _ = callback_inference_actor t ~scope in
+        let%bind () = callback_current scope in
         origins.event scope
       | None, (None | Some _) ->
         let%bind causal =
@@ -17916,7 +19444,7 @@ let execution_basis ?admitted t (origins : execution_origin_lookup) execution =
         | Some selected ->
           (match selected.Admitted_inference.startup with
            | Input actual when phys_equal actual scope -> Ok ()
-           | Ordinary | Initialization _ | Input _ | Authored _ ->
+           | Ordinary | Initialization _ | Input _ | Authored _ | Goal_runtime _ ->
              Error (error Conflict "admitted inference input owner changed"))
         | None -> check_held_effect scope.continuation
       in
@@ -17928,7 +19456,7 @@ let execution_basis ?admitted t (origins : execution_origin_lookup) execution =
       in
       basis ~preparation:activation.preparation (Some run)
     | Inference_initialization_job (scope, expected) ->
-      let%bind () = validate_initialization_scope_current t scope in
+      let%bind () = initialization_current scope in
       let%bind () = check_initialization_agent_actor scope in
       let%bind () =
         if
@@ -17950,13 +19478,35 @@ let execution_basis ?admitted t (origins : execution_origin_lookup) execution =
                Permission_denied
                "initializer no longer owns this current model attempt")
       in
-      basis ?preparation:scope.run_preparation (initialization_held_run t scope)
+      basis
+        ?preparation:(Initialization_scope.initial_preparation scope)
+        (match admitted with
+         | Some
+             { Admitted_inference.startup =
+                 Initialization (actual, Existing_goal continuation)
+             ; _
+             }
+           when phys_equal actual scope ->
+           Option.bind t.state.run_state ~f:(fun index ->
+             Run_state.find index continuation.binding.preparation.run.id)
+         | Some _ | None -> initialization_held_run t scope)
     | Inference_initialization scope ->
-      let%bind () = validate_initialization_scope_current t scope in
+      let%bind () = initialization_current scope in
       let%bind () = check_initialization_agent_actor scope in
       (* A future controller episode requires a genuine reservation. Existing
          initializer identity is retained; source or auth alone cannot invent it. *)
-      basis ?preparation:scope.run_preparation (initialization_held_run t scope)
+      basis
+        ?preparation:(Initialization_scope.initial_preparation scope)
+        (match admitted with
+         | Some
+             { Admitted_inference.startup =
+                 Initialization (actual, Existing_goal continuation)
+             ; _
+             }
+           when phys_equal actual scope ->
+           Option.bind t.state.run_state ~f:(fun index ->
+             Run_state.find index continuation.binding.preparation.run.id)
+         | Some _ | None -> initialization_held_run t scope)
   in
   let%map () =
     match result.run with
@@ -18397,8 +19947,7 @@ let staged_child_run_delta t execution ~basis ~classification ~parent_work job_d
              let scope = Run_action_service.scope owner in
              let%bind prepared =
                Run_transition.add_owned_work
-                 ?authored_start_run:
-                   (Option.some_if (Option.is_some borrow.held_authored) run)
+                 ?lifecycle_selection:(lifecycle_selection borrow (Some run))
                  t.state
                  ~scope
                  ~executing:borrow.receipt
@@ -18496,6 +20045,7 @@ let initialization_of_inference_execution t execution =
 
 let admit_model_job t execution candidate =
   let open Result.Let_syntax in
+  let goal_scope = goal_runtime_of_execution t execution in
   let authored = held_authored_of_execution t execution in
   let%bind current = authorized_inference_execution_basis t execution in
   let%bind constructor = initialization_of_inference_execution t execution in
@@ -18505,8 +20055,10 @@ let admit_model_job t execution candidate =
     | Some scope ->
       if
         Option.for_all current.basis.preparation ~f:(fun existing ->
-          Option.exists scope.run_preparation ~f:(phys_equal existing))
-      then Ok scope.run_preparation
+          Option.exists
+            (Initialization_scope.initial_preparation scope)
+            ~f:(phys_equal existing))
+      then Ok (Initialization_scope.initial_preparation scope)
       else Error (error Conflict "constructor model preparation changed")
   in
   let%bind job =
@@ -18598,6 +20150,11 @@ let admit_model_job t execution candidate =
             scope
             prepared.state)
       in
+      let%bind goal_runtime_acknowledgement =
+        Option.value_map goal_scope ~default:(Ok None) ~f:(fun scope ->
+          Goal_runtime_acknowledgement.prepare t scope ~candidate:prepared
+          |> Result.map ~f:Option.some)
+      in
       Eio.Cancel.protect (fun () ->
         (* This selection check may refresh host policy. All original/physical
            and immutable-basis checks below run after that refresh. *)
@@ -18645,11 +20202,30 @@ let admit_model_job t execution candidate =
         let%bind () =
           persist_transition
             ?run_preparation:preparation
-            ?check_before_commit:(held_startup_effect t preparation)
+            ?check_before_commit:
+              (match goal_scope with
+               | Some scope ->
+                 Some
+                   (fun () ->
+                     let%bind () =
+                       check_runtime_construction_effect
+                         (Existing_goal scope.continuation)
+                     in
+                     let%bind () = current.check_current () in
+                     Option.value_map
+                       goal_runtime_acknowledgement
+                       ~default:(Ok ())
+                       ~f:(fun ack ->
+                         Goal_runtime_acknowledgement.check
+                           ack
+                           ~actor:t
+                           ~candidate:prepared))
+               | None -> held_startup_effect t preparation)
             t
             prepared
         in
         install_committed_transition
+          ?goal_runtime_acknowledgement
           ?run_preparation:preparation
           ~job_custody
           ?initialization_acknowledgement
@@ -18974,6 +20550,14 @@ let finish_invocation t execution outcome requests commit_starts authoring_refer
                (held_authored_of_execution t (Inference_invocation execution))
                ~f:(held_authored_factual_preparation t)
          in
+         let%bind goal_runtime_acknowledgement =
+           Option.value_map
+             (goal_runtime_of_execution t (Inference_invocation execution))
+             ~default:(Ok None)
+             ~f:(fun scope ->
+               Goal_runtime_acknowledgement.prepare t scope ~candidate:prepared
+               |> Result.map ~f:Option.some)
+         in
          Eio.Cancel.protect (fun () ->
            let%bind () = check_jobs () in
            let%bind () = check_run () in
@@ -18986,8 +20570,18 @@ let finish_invocation t execution outcome requests commit_starts authoring_refer
              then Ok ()
              else Error (error Conflict "Invocation ACK basis changed before commit")
            in
-           let%bind () = persist_transition ?run_preparation t prepared in
+           let%bind () =
+             persist_transition
+               ?run_preparation
+               ?check_before_commit:
+                 (Option.map goal_runtime_acknowledgement ~f:(fun ack ->
+                    fun () ->
+                    Goal_runtime_acknowledgement.check ack ~actor:t ~candidate:prepared))
+               t
+               prepared
+           in
            install_committed_transition
+             ?goal_runtime_acknowledgement
              ~job_custody
              ?run_preparation
              ?initialization_acknowledgement
@@ -19140,30 +20734,52 @@ let commit_moderator_invocation t borrow (resolved : Agent_protocol.Invocation.t
   Ok ()
 ;;
 
-let admitted_inference_startup t execution =
-  match execution with
-  | Inference_held_input scope -> Admitted_inference.Startup.Input scope
-  | Inference_initialization scope | Inference_initialization_job (scope, _) ->
-    (match scope.Initialization_scope.held_continuation with
-     | Some continuation -> Initialization (scope, continuation)
+let admitted_inference_startup ?constructor ?goal_runtime t execution =
+  match constructor with
+  | Some scope ->
+    (match Initialization_scope.construction scope with
+     | Some construction -> Admitted_inference.Startup.Initialization (scope, construction)
      | None -> Ordinary)
-  | Inference_operation _
-  | Inference_invocation _
-  | Inference_moderator _
-  | Inference_event _
-  | Inference_job _ ->
-    (match held_authored_of_execution t execution with
-     | Some scope -> Authored scope
-     | None -> Ordinary)
+  | None ->
+    (match execution with
+     | Inference_held_input scope -> Admitted_inference.Startup.Input scope
+     | Inference_initialization scope | Inference_initialization_job (scope, _) ->
+       (match Initialization_scope.construction scope with
+        | Some construction -> Initialization (scope, construction)
+        | None -> Ordinary)
+     | Inference_operation _
+     | Inference_invocation _
+     | Inference_moderator _
+     | Inference_event _
+     | Inference_job _ ->
+       (match held_authored_of_execution t execution with
+        | Some scope -> Authored scope
+        | None ->
+          Option.value_map
+            goal_runtime
+            ~default:Admitted_inference.Startup.Ordinary
+            ~f:(fun scope -> Goal_runtime scope)))
 ;;
 
 let admitted_inference_continuation (selected : Admitted_inference.t) =
   match selected.startup with
-  | Ordinary -> None
-  | Initialization (_, continuation) -> Some continuation
+  | Ordinary | Goal_runtime _ -> None
+  | Initialization (_, Initial continuation) -> Some continuation
+  | Initialization (_, Existing_goal _) -> None
   | Input scope -> Some scope.continuation
   | Authored scope ->
     if held_authored_handoff_acknowledged scope then None else Some scope.continuation
+;;
+
+let admitted_goal_construction (selected : Admitted_inference.t) =
+  match selected.startup with
+  | Initialization (_, Existing_goal continuation) ->
+    Some continuation.binding.preparation
+  | Goal_runtime scope ->
+    (match scope.continuation.binding.preparation.runtime_phase with
+     | Handed_off (actual, _) when phys_equal actual scope -> None
+     | _ -> Some scope.continuation.binding.preparation)
+  | Ordinary | Initialization (_, Initial _) | Input _ | Authored _ -> None
 ;;
 
 let admitted_inference_owner t (selected : Admitted_inference.t) =
@@ -19204,13 +20820,28 @@ let admitted_inference_owner t (selected : Admitted_inference.t) =
   in
   match selected.startup with
   | Ordinary -> Ok ()
-  | Initialization (scope, continuation) ->
+  | Goal_runtime scope ->
+    let%bind () = goal_runtime_scope_basis t scope in
+    (match scope.continuation.binding.preparation.runtime_phase with
+     | Handed_off (actual, _) when phys_equal actual scope -> Ok ()
+     | _ -> scope.continuation.binding.preparation.registered_basis ())
+  | Initialization (scope, construction) ->
     let%bind () = validate_initialization_scope_basis t scope in
-    if
-      Option.exists scope.held_continuation ~f:(phys_equal continuation)
-      && Option.exists t.held_activation ~f:(phys_equal continuation.target)
-    then continuation.target.owned_basis ()
-    else Error (error Conflict "admitted initializer owner changed")
+    let%bind () =
+      if
+        Option.exists (Initialization_scope.construction scope) ~f:(fun actual ->
+          Preparation_owner.same
+            (Runtime_construction.preparation_owner actual)
+            (Runtime_construction.preparation_owner construction))
+      then Ok ()
+      else Error (error Conflict "admitted initializer owner changed")
+    in
+    (match construction with
+     | Initial continuation ->
+       if Option.exists t.held_activation ~f:(phys_equal continuation.target)
+       then continuation.target.owned_basis ()
+       else Error (error Conflict "admitted initializer activation changed")
+     | Existing_goal continuation -> continuation.binding.preparation.registered_basis ())
   | Input scope ->
     let%bind () = Held_input_scope.parsing scope in
     let%bind () = input_scope_basis t scope in
@@ -19229,6 +20860,12 @@ let refresh_admitted_inference t selected =
       (admitted_inference_continuation selected)
       ~default:(Ok ())
       ~f:(fun continuation -> continuation.refresh_admitted_inference ())
+  in
+  let%bind () =
+    Option.value_map
+      (admitted_goal_construction selected)
+      ~default:(Ok ())
+      ~f:(fun preparation -> preparation.registered_refresh ())
   in
   admitted_inference_owner t selected
 ;;
@@ -19277,10 +20914,21 @@ let check_inference_allocation
       then Ok ()
       else Error (error Permission_denied "admitted inference immutable origin changed")
     in
+    let%bind () =
+      Option.value_map
+        (admitted_inference_continuation selected)
+        ~default:(Ok ())
+        ~f:Admitted_activation.Continuation.check_basis
+    in
     Option.value_map
-      (admitted_inference_continuation selected)
+      (admitted_goal_construction selected)
       ~default:(Ok ())
-      ~f:Admitted_activation.Continuation.check_basis
+      ~f:(fun preparation ->
+        let%bind () = preparation.registered_basis () in
+        match preparation.observed with
+        | Some current when Recurrence_controller.is_current current -> Ok ()
+        | Some _ | None ->
+          Error (error Conflict "admitted Goal Init Store custody changed"))
   in
   let%bind () = check_basis () in
   (* All issuer policies precede the fresh timing sample. This is the SAME
@@ -19290,6 +20938,12 @@ let check_inference_allocation
       (admitted_inference_continuation selected)
       ~default:(Ok ())
       ~f:(fun continuation -> continuation.policy_admitted_inference ())
+  in
+  let%bind () =
+    Option.value_map
+      (admitted_goal_construction selected)
+      ~default:(Ok ())
+      ~f:(fun preparation -> preparation.registered_policy ())
   in
   let%bind deadline_sample =
     match Inference_owner.Registration.goal_id selected.registration with
@@ -19310,6 +20964,12 @@ let check_inference_allocation
       ~f:(fun continuation ->
         let%bind () = continuation.timing () in
         continuation.authority ())
+  in
+  let%bind () =
+    Option.value_map
+      (admitted_goal_construction selected)
+      ~default:(Ok ())
+      ~f:(fun preparation -> preparation.registered_authority ())
   in
   let%bind () = current.check_current () in
   let%bind () =
@@ -19363,6 +21023,15 @@ let allocate_inference t execution owner relation configuration =
   in
   let%bind current = authorized_inference_execution_basis t execution in
   let basis = current.basis in
+  let%bind constructor = initialization_of_inference_execution t execution in
+  let goal_runtime = goal_runtime_of_execution t execution in
+  let goal_constructor =
+    Option.bind constructor ~f:(fun scope ->
+      match Initialization_scope.construction scope with
+      | Some (Runtime_construction.Existing_goal _ as construction) ->
+        Some (scope, construction)
+      | Some (Initial _) | None -> None)
+  in
   let%bind decision =
     Goal_charge_admission.prepare
       t.state
@@ -19376,13 +21045,25 @@ let allocate_inference t execution owner relation configuration =
       match delta with
       | None -> Ok ()
       | Some delta ->
-        transition
-          ?run_preparation:basis.preparation
-          ~admission_hold:goal_id
-          t
-          ~delta
-          ~payloads:[]
-        |> Result.map ~f:ignore
+        (match constructor with
+         | Some scope ->
+           initialization_transition ~admission_hold:goal_id t scope ~delta ~payloads:[]
+         | None when Option.is_some goal_runtime ->
+           goal_runtime_transition
+             ~admission_hold:goal_id
+             t
+             (Option.value_exn goal_runtime)
+             ~delta
+             ~payloads:[]
+           |> Result.map ~f:ignore
+         | None ->
+           transition
+             ?run_preparation:basis.preparation
+             ~admission_hold:goal_id
+             t
+             ~delta
+             ~payloads:[]
+           |> Result.map ~f:ignore)
     in
     Error (error Permission_denied "goal policy holds fresh inference admission")
   | (Unbound | Ready _) as decision ->
@@ -19412,8 +21093,22 @@ let allocate_inference t execution owner relation configuration =
               { episode = Goal_charge_admission.episode ready; handle; tracking } )
       | Held _ -> assert false
     in
+    let allocation_scope =
+      (* Only the shared admitted constructor opens an immutable Init graph.
+         Ordinary and prepared initialization keep their original graph writer. *)
+      let common_constructor =
+        Option.filter constructor ~f:(fun scope ->
+          Option.is_some (Initialization_scope.construction scope))
+      in
+      match common_constructor, goal_runtime, held_authored_of_execution t execution with
+      | Some scope, _, _ ->
+        Some (Held_inference_allocation_acknowledgement.Scope.Initialization scope)
+      | None, Some scope, _ -> Some (Goal_runtime scope)
+      | None, None, Some scope -> Some (Authored scope)
+      | None, None, None -> None
+    in
     let allocation_acknowledgement =
-      Option.map (held_authored_of_execution t execution) ~f:(fun scope ->
+      Option.map allocation_scope ~f:(fun scope ->
         { Held_inference_allocation_acknowledgement.scope
         ; owner
         ; ledger
@@ -19428,20 +21123,38 @@ let allocate_inference t execution owner relation configuration =
         ?run_preparation:basis.preparation
         ?admission
         ?check_before_commit:
-          (match execution with
-           | Inference_held_input scope ->
+          (match goal_constructor with
+           | Some (scope, construction) ->
              Some
                (fun () ->
-                 let%bind () = check_held_effect scope.continuation in
-                 let%bind () = Held_input_scope.parsing scope in
-                 input_graph_basis t scope owner)
-           | Inference_initialization _
-           | Inference_initialization_job _
-           | Inference_operation _
-           | Inference_invocation _
-           | Inference_moderator _
-           | Inference_event _
-           | Inference_job _ -> held_startup_effect t basis.preparation)
+                 let%bind () = check_runtime_construction_effect construction in
+                 let%bind () = current.check_current () in
+                 let%bind () = validate_initialization_scope_basis t scope in
+                 Runtime_construction.check_basis construction)
+           | None ->
+             (match goal_runtime, execution with
+              | Some scope, _ ->
+                Some
+                  (fun () ->
+                    let%bind () =
+                      check_runtime_construction_effect (Existing_goal scope.continuation)
+                    in
+                    let%bind () = current.check_current () in
+                    goal_runtime_scope_basis t scope)
+              | None, Inference_held_input scope ->
+                Some
+                  (fun () ->
+                    let%bind () = check_held_effect scope.continuation in
+                    let%bind () = Held_input_scope.parsing scope in
+                    input_graph_basis t scope owner)
+              | ( None
+                , ( Inference_initialization _
+                  | Inference_initialization_job _
+                  | Inference_operation _
+                  | Inference_invocation _
+                  | Inference_moderator _
+                  | Inference_event _
+                  | Inference_job _ ) ) -> held_startup_effect t basis.preparation))
         t
         ledger
     in
@@ -19464,7 +21177,7 @@ let allocate_inference t execution owner relation configuration =
       ; handle
       ; tracking
       ; basis
-      ; startup = admitted_inference_startup t execution
+      ; startup = admitted_inference_startup ?constructor ?goal_runtime t execution
       }
     in
     let submission_guard =
@@ -19499,16 +21212,13 @@ let refresh_inference t (selected : Admitted_inference.t) =
 let capture_initialization_recipe_target t scope job_id generation attempt target limits =
   let open Result.Let_syntax in
   let%bind () = validate_initialization_model_job t scope job_id generation attempt in
-  capture_recipe_target
-    ?check_before_commit:
-      (held_startup_effect t scope.Initialization_scope.run_preparation)
-    ?run_preparation:scope.Initialization_scope.run_preparation
+  let%bind _, binding = find_model_job_target t job_id generation in
+  let%bind captured = Model_job_target.capture_recipe binding ~target ~limits in
+  initialization_transition
     t
-    job_id
-    generation
-    attempt
-    target
-    limits
+    scope
+    ~delta:(Session_delta.Model_job_recipe_target_captured captured)
+    ~payloads:[]
 ;;
 
 let complete_initialization_model_job t scope job_id generation attempt outcome =
@@ -19523,7 +21233,7 @@ let complete_initialization_model_job t scope job_id generation attempt outcome 
   in
   complete_job
     ~initialization_scope:scope
-    ?run_preparation:scope.Initialization_scope.run_preparation
+    ?run_preparation:(Initialization_scope.initial_preparation scope)
     t
     job_id
     generation
@@ -20379,7 +22089,15 @@ let cancel_job_internal t job_id =
   | (Succeeded | Failed _ | Cancelled), _ -> Ok job
 ;;
 
-let interrupt_job ?run_preparation t job_id generation attempt reason =
+let interrupt_job
+      ?initialization_scope
+      ?run_preparation
+      t
+      job_id
+      generation
+      attempt
+      reason
+  =
   let open Result.Let_syntax in
   let%bind job = find_job t job_id in
   let%bind () = validate_job_generation t job generation in
@@ -20447,7 +22165,14 @@ let interrupt_job ?run_preparation t job_id generation attempt reason =
     in
     let%bind job_custody = prepare_terminal_job_custody t [ job ] in
     let%map _ =
-      update_jobs ?run_preparation ?completion_sample ~job_custody ~run_deltas t [ job ]
+      update_jobs
+        ?initialization_scope
+        ?run_preparation
+        ?completion_sample
+        ~job_custody
+        ~run_deltas
+        t
+        [ job ]
     in
     job
   | Queued
@@ -20469,7 +22194,7 @@ let change_schedule t attachment_id event schedule =
     transition t ~delta:(Session_delta.Schedule_changed schedule) ~payloads:[ payload ])
 ;;
 
-let add_schedule ?run_preparation t schedule =
+let add_schedule ?initialization_scope ?run_preparation t schedule =
   if
     Agent_protocol.Id.Session.compare
       schedule.Agent_protocol.Schedule.session_id
@@ -20485,11 +22210,20 @@ let add_schedule ?run_preparation t schedule =
   else
     let open Result.Let_syntax in
     let%map _ =
-      transition
-        ?run_preparation
-        t
-        ~delta:(Session_delta.Schedule_changed schedule)
-        ~payloads:[ Agent_protocol.Event.Durable.Payload.Schedule_created schedule ]
+      match initialization_scope with
+      | None ->
+        transition
+          ?run_preparation
+          t
+          ~delta:(Session_delta.Schedule_changed schedule)
+          ~payloads:[ Agent_protocol.Event.Durable.Payload.Schedule_created schedule ]
+        |> Result.map ~f:ignore
+      | Some scope ->
+        initialization_transition
+          t
+          scope
+          ~delta:(Session_delta.Schedule_changed schedule)
+          ~payloads:[ Agent_protocol.Event.Durable.Payload.Schedule_created schedule ]
     in
     schedule
 ;;
@@ -21006,18 +22740,27 @@ let skip_schedule t schedule_id generation =
     Error (error Already_resolved "schedule is already terminal")
 ;;
 
-let cancel_schedule_internal ?run_preparation t schedule_id =
+let cancel_schedule_internal ?initialization_scope ?run_preparation t schedule_id =
   let open Result.Let_syntax in
   let%bind schedule = find_schedule t schedule_id in
   match schedule.status with
   | Agent_protocol.Schedule.Scheduled ->
     let schedule = { schedule with status = Cancelled } in
     let%map _ =
-      transition
-        ?run_preparation
-        t
-        ~delta:(Session_delta.Schedule_changed schedule)
-        ~payloads:[ Agent_protocol.Event.Durable.Payload.Schedule_cancelled schedule ]
+      match initialization_scope with
+      | None ->
+        transition
+          ?run_preparation
+          t
+          ~delta:(Session_delta.Schedule_changed schedule)
+          ~payloads:[ Agent_protocol.Event.Durable.Payload.Schedule_cancelled schedule ]
+        |> Result.map ~f:ignore
+      | Some scope ->
+        initialization_transition
+          t
+          scope
+          ~delta:(Session_delta.Schedule_changed schedule)
+          ~payloads:[ Agent_protocol.Event.Durable.Payload.Schedule_cancelled schedule ]
     in
     schedule
   | Delivering | Delivered | Cancelled | Failed _ ->
@@ -22347,8 +24090,10 @@ let lifecycle_request_allowed : type a. a request -> bool = function
          | Finish _ ))
   | Held_startup (Close_input _)
   | Held_startup (End_held_activation _)
+  | Held_startup (Construction (End _ | Finish_resume _))
   | Release_recurrence_due _ | Run_start_receipt _
   | Held_startup (Goal (Receipt _))
+  | Held_startup (Goal_continuation (Receipt _ | Close _))
   | Complete_run_constructor_model_job _
   | Interrupt_run_constructor_job _
   | Cancel_run_constructor_schedule _
@@ -22432,6 +24177,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
          | Complete_retry _
          | Check_execution _
          | Rotate_retry _ ))
+  | Held_startup (Goal_continuation (Begin _ | Bind _ | Admit _))
   | Held_startup (Begin_authored _)
   | Held_startup (Ready_authored _)
   | Held_startup (Claim_authored _)
@@ -22532,8 +24278,21 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Held_startup (Begin_held_activation _)
   | Held_startup (Enable_turn_budget _)
   | Held_startup (Install_runtime _)
-  | Held_startup (Begin_held_initialization _)
-  | Held_startup (Reserve_held_history_block _)
+  | Held_startup
+      (Construction
+         ( Mutate _
+         | Check_admission _
+         | Begin_goal _
+         | Begin_initialization _
+         | Reserve_history _
+         | Add_model _
+         | Model_running _
+         | Enable_budget _
+         | Install _
+         | Begin_resume _
+         | Claim_resume _
+         | Continue_goal _
+         | Resource _ ))
   | Complete_initialization _
   | Checkpoint_runtime_construction _
   | Start _
@@ -23900,6 +25659,659 @@ let goal_run_receipt_internal t ~actor ~authorize ~request ~session =
   else Error (error Conflict "Goal receipt Store observation changed")
 ;;
 
+let goal_resume_receipt_internal t ~actor ~authorize ~session ~request =
+  let open Result.Let_syntax in
+  let check_authority () =
+    let%bind () = Run_command_authorization.check actor ~authorize t.state in
+    Result.map (Goal_command_admission.read t.state ~actor ~authorize) ~f:ignore
+  in
+  let%bind () = check_authority () in
+  let%bind controller = require_recurrence_controller t in
+  let%bind () =
+    if Agent_protocol.Session_ref.equal session (Recurrence_controller.session controller)
+    then Ok ()
+    else Error (error Invalid_request "Goal resume receipt targets another actor")
+  in
+  let%bind current = Recurrence_controller.observe controller t.state in
+  let%bind () = check_authority () in
+  let%bind receipt =
+    Goal_resume_admission.find_receipt
+      t.state
+      ~request
+      ~principal_id:(Operator_authorization.principal actor).id
+  in
+  let%bind () = check_authority () in
+  if Recurrence_controller.is_current current
+  then Ok receipt
+  else Error (error Conflict "Goal resume receipt Store observation changed")
+;;
+
+let goal_resume_quiescent t =
+  let open Result.Let_syntax in
+  let%bind () = require_selected_execution t in
+  let%bind () = require_runtime_admission t in
+  if
+    (not t.stopped)
+    && Option.is_none (Eio.Promise.peek t.finished)
+    && Option.is_none t.state.failure
+    && Option.is_none t.state.active_operation
+    && (match t.state.lifecycle.observed with
+        | Idle | Stopped -> true
+        | _ -> false)
+    && (not t.idle_moderator_borrowed)
+    && (not (moderator_is_borrowed t))
+    && Option.is_none t.queued_event_borrow
+    && Option.is_none t.legacy_callback_scope
+    && Option.is_none t.initialization_scope
+    && Option.is_none t.held_activation
+    && Option.is_none t.held_input_scope
+    && Option.is_none t.held_authored_start
+    && List.is_empty t.invocation_executions
+    && List.is_empty t.job_scopes
+  then Ok ()
+  else Error (error Conflict "Goal resume requires its actual idle construction lane")
+;;
+
+type goal_preparation_use =
+  | Fresh_effect
+  | Registered_allocation
+
+let goal_preparation_basis_for use t (preparation : Goal_continuation.Preparation.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    if
+      Int.equal preparation.domain (Stdlib.Domain.self () :> int)
+      && (not t.stopped)
+      && Option.is_none (Eio.Promise.peek t.finished)
+      && Option.exists t.run_preparation ~f:(function
+        | Existing_goal current -> phys_equal current preparation
+        | Initial _ -> false)
+    then require_runtime_admission t
+    else Error (error Conflict "Goal continuation lost its actual Actor owner")
+  in
+  let%bind () =
+    Run_preparation.Custody.check_basis
+      (Goal_continuation.custody preparation)
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+  in
+  let%bind () =
+    if
+      Run_authorities.is_current
+        t.run_authorities
+        preparation.binding
+        ~run_id:preparation.run.id
+    then Ok ()
+    else Error (error Permission_denied "Goal continuation lost its original Run binding")
+  in
+  let%bind index =
+    Result.of_option
+      t.state.run_state
+      ~error:(error Conflict "Goal continuation Run index is absent")
+  in
+  let%bind run =
+    Result.of_option
+      (Run_state.find index preparation.run.id)
+      ~error:(error Conflict "Goal continuation Run is absent")
+  in
+  let%bind link =
+    Result.of_option
+      (Run_state.goal_link index run.id)
+      ~error:(error Conflict "Goal continuation immutable association is absent")
+  in
+  let%bind admission =
+    Run_state.receipt
+      index
+      ~principal_id:preparation.admission.principal_id
+      ~key:preparation.admission.key
+      ~request_sha256:preparation.admission.request_sha256
+  in
+  let%bind goal =
+    Option.bind t.state.goal_catalog ~f:(fun catalog ->
+      Goal_catalog.find catalog (Run_goal_link.goal_id preparation.link))
+    |> Result.of_option ~error:(error Conflict "Goal continuation Goal is absent")
+  in
+  let%bind () =
+    if
+      Run_goal_link.equal link preparation.link
+      && Agent_protocol.Goal_episode.matches_run (Run_goal_link.episode link) run
+      && Option.exists
+           admission
+           ~f:(Agent_protocol.Run_receipt.equal preparation.admission)
+      && Agent_protocol.Run_source.equal run.source preparation.run.source
+      && Agent_protocol.Run_source.equal (Agent_protocol.Goal.source goal) run.source
+      && Option.exists
+           (Agent_protocol.Goal.episode goal)
+           ~f:(Agent_protocol.Goal_episode.equal (Run_goal_link.episode link))
+      && Agent_protocol.Session_ref.equal run.session preparation.session
+    then Ok ()
+    else Error (error Conflict "Goal continuation immutable Run/source/episode changed")
+  in
+  let%bind captured_index, source = Moderator_source_installation.capture t.state in
+  let%bind () =
+    if
+      Run_state.equal captured_index index
+      && Agent_protocol.Run_source.equal source preparation.run.source
+    then Ok ()
+    else Error (error Conflict "Goal continuation source installation changed")
+  in
+  let%bind () =
+    match run.lifecycle with
+    | Admitted | Active | Waiting _ -> Ok ()
+    | Terminal _ -> Error (error Conflict "Goal continuation Run is terminal")
+  in
+  let%bind () =
+    Goal_activation_policy.check_admitted_policy preparation.policy ~state:t.state
+  in
+  match preparation.phase, Agent_protocol.Goal.state goal with
+  | (Preparing | Source_bound _ | Writer_pending _), Open (Held _) -> Ok ()
+  | Ready _, Open Enabled -> Ok ()
+  | Ready _, Open (Held _)
+    when match use with
+         | Registered_allocation -> true
+         | Fresh_effect -> false -> Ok ()
+  | (Preparing | Source_bound _ | Writer_pending _ | Ready _), (Open _ | Closed _)
+  | (Waiting _ | Closed _), _ ->
+    Error (error Permission_denied "Goal continuation is not live in its actual phase")
+;;
+
+let goal_preparation_basis t preparation =
+  goal_preparation_basis_for Fresh_effect t preparation
+;;
+
+(* Canonical admitted-allocation selection and the exact claimed Init Job's
+   cancellation monitor use these private stages. The former rechecks the same
+   registration/handle/attribution; the latter exposes only liveness DATA and
+   cannot admit another effect. Fresh public construction still uses Enabled. *)
+let goal_registered_basis t (preparation : Goal_continuation.Preparation.t) =
+  let open Result.Let_syntax in
+  let%bind () = goal_preparation_basis_for Registered_allocation t preparation in
+  match preparation.phase with
+  | Ready (binding, _) ->
+    (match binding.source_phase with
+     | Open -> Runtime_source_preparation.validate_target binding.source t.state
+     | Closed -> Error (error Conflict "admitted Goal constructor source closed"))
+  | Preparing | Source_bound _ | Writer_pending _ | Waiting _ | Closed _ ->
+    Error (error Conflict "admitted Goal constructor lost its actual command ACK")
+;;
+
+let goal_registered_policy t preparation =
+  let open Result.Let_syntax in
+  let%bind () = goal_registered_basis t preparation in
+  let%bind () =
+    Run_admission.Scope.authorize (Run_authorities.scope preparation.binding) t.state
+  in
+  let%bind () =
+    Run_preparation.Custody.check
+      (Goal_continuation.custody preparation)
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+  in
+  let%bind () =
+    Goal_activation_policy.check_admitted_policy preparation.policy ~state:t.state
+  in
+  goal_registered_basis t preparation
+;;
+
+let goal_registered_authority t preparation =
+  let open Result.Let_syntax in
+  let%bind () = goal_registered_basis t preparation in
+  let%bind () =
+    Run_admission.Scope.check_current (Run_authorities.scope preparation.binding)
+  in
+  let%bind () =
+    Run_preparation.Custody.check_current
+      (Goal_continuation.custody preparation)
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+  in
+  goal_registered_basis t preparation
+;;
+
+let refresh_goal_registered t preparation =
+  let open Result.Let_syntax in
+  let%bind () = goal_registered_policy t preparation in
+  let%bind controller = require_recurrence_controller t in
+  let%bind current = Recurrence_controller.observe controller t.state in
+  preparation.observed <- Some current;
+  let%bind () = goal_registered_authority t preparation in
+  goal_registered_basis t preparation
+;;
+
+let goal_preparation_current t (preparation : Goal_continuation.Preparation.t) =
+  let open Result.Let_syntax in
+  let%bind () = preparation.basis () in
+  let%bind () = require_selected_execution t in
+  let%bind () =
+    Run_preparation.Custody.check
+      (Goal_continuation.custody preparation)
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+  in
+  let scope = Run_authorities.scope preparation.binding in
+  let%bind () = Run_admission.Scope.authorize scope t.state in
+  let%bind () = Run_admission.Scope.check_current scope in
+  let%bind () =
+    Run_preparation.Custody.check_current
+      (Goal_continuation.custody preparation)
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+  in
+  preparation.basis ()
+;;
+
+let goal_construction_basis t (preparation : Goal_continuation.Preparation.t) =
+  let open Result.Let_syntax in
+  let%bind () = preparation.basis () in
+  let%bind () =
+    match preparation.phase with
+    | Ready (binding, _) -> Goal_continuation.Source_binding.check_basis binding
+    | Preparing | Source_bound _ | Writer_pending _ | Waiting _ | Closed _ ->
+      Error (error Conflict "Goal construction requires its actual command ACK")
+  in
+  match preparation.observed with
+  | Some observed when Recurrence_controller.is_current observed -> Ok ()
+  | Some _ | None -> Error (error Conflict "Goal construction needs fresh Store custody")
+;;
+
+let goal_construction_policy t (preparation : Goal_continuation.Preparation.t) =
+  let open Result.Let_syntax in
+  let%bind () = goal_construction_basis t preparation in
+  let%bind () = preparation.current () in
+  let%bind () = Goal_activation_policy.check_policy preparation.policy ~state:t.state in
+  goal_construction_basis t preparation
+;;
+
+let refresh_goal_construction t (preparation : Goal_continuation.Preparation.t) =
+  let open Result.Let_syntax in
+  let%bind () = preparation.current () in
+  let%bind () = Goal_activation_policy.check_policy preparation.policy ~state:t.state in
+  let%bind controller = require_recurrence_controller t in
+  let%bind observed = Recurrence_controller.observe controller t.state in
+  preparation.observed <- Some observed;
+  goal_construction_policy t preparation
+;;
+
+let goal_construction_timing t (preparation : Goal_continuation.Preparation.t) =
+  let open Result.Let_syntax in
+  let%bind () = goal_construction_basis t preparation in
+  let%bind () =
+    Goal_activation_policy.check_deadline
+      preparation.policy
+      ~state:t.state
+      ~now:(t.services.now ())
+  in
+  goal_construction_basis t preparation
+;;
+
+let goal_construction_authority t (preparation : Goal_continuation.Preparation.t) =
+  let open Result.Let_syntax in
+  let%bind () = goal_construction_basis t preparation in
+  let%bind () =
+    Run_admission.Scope.check_current (Run_authorities.scope preparation.binding)
+  in
+  let%bind () =
+    Run_preparation.Custody.check_current
+      (Goal_continuation.custody preparation)
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+  in
+  goal_construction_basis t preparation
+;;
+
+let begin_goal_resume_preparation_internal t ~actor ~authorize ~session ~request =
+  let open Result.Let_syntax in
+  let%bind retained =
+    goal_resume_receipt_internal t ~actor ~authorize ~session ~request
+  in
+  match retained with
+  | Some receipt -> Ok (Goal_continuation.Resume_issuance.Retained receipt)
+  | None ->
+    let%bind () = goal_resume_quiescent t in
+    let%bind () =
+      if Option.is_none t.run_preparation
+      then Ok ()
+      else Error (error Conflict "another source/command preparation is active")
+    in
+    let principal_id = (Operator_authorization.principal actor).id in
+    let%bind plan =
+      Goal_resume_admission.prepare
+        t.state
+        ~request
+        ~principal_id
+        ~session
+        ~now:(t.services.now ())
+    in
+    (match plan with
+     | Retained receipt -> Ok (Goal_continuation.Resume_issuance.Retained receipt)
+     | Commit plan ->
+       let run = Goal_resume_admission.run plan in
+       let%bind binding =
+         Result.of_option
+           (Run_authorities.find t.run_authorities run.id)
+           ~error:(error Permission_denied "Goal resume has no surviving Run authority")
+       in
+       let scope = Run_authorities.scope binding in
+       let%bind _ =
+         Result.of_option
+           (Run_admission.Scope.original_actor scope)
+           ~error:
+             (error
+                Permission_denied
+                "Goal resume requires the original Run authentication")
+       in
+       let%bind () = Run_admission.Scope.authorize scope t.state in
+       let%bind () = Run_admission.Scope.check_current scope in
+       exclude_effect_deferred t Displaced;
+       let%bind custody =
+         Run_preparation.Goal_continuation.create_authenticated
+           ~owner:t.run_preparation_owner
+           ~state:t.state
+           ~actor
+           ~cause:(Resume request)
+           ~authorize
+       in
+       (* Trusted original policies may run host code. No actual owner is
+          published until all new/old semantic and physical bases pass again. *)
+       let%bind () = goal_resume_quiescent t in
+       let%bind () = Goal_resume_admission.check_basis plan ~state:t.state in
+       let%bind () = Run_admission.Scope.check_current scope in
+       let%bind () =
+         Run_preparation.Custody.check_current
+           (Run_preparation.Goal_continuation.custody custody)
+           ~owner:t.run_preparation_owner
+           ~state:t.state
+       in
+       let%bind () =
+         if
+           Option.is_none t.run_preparation
+           && Run_authorities.is_current t.run_authorities binding ~run_id:run.id
+         then Ok ()
+         else
+           Error (error Conflict "Goal resume source lane or original Run was displaced")
+       in
+       let%bind policy =
+         Goal_activation_policy.create
+           ~goal:(Goal_resume_admission.goal plan)
+           ~link:(Goal_resume_admission.link plan)
+       in
+       let rec preparation : Goal_continuation.Preparation.t =
+         { request = custody
+         ; binding
+         ; run
+         ; admission = Goal_resume_admission.admission plan
+         ; link = Goal_resume_admission.link plan
+         ; policy
+         ; session
+         ; domain = (Stdlib.Domain.self () :> int)
+         ; phase = Preparing
+         ; basis = (fun () -> goal_preparation_basis t preparation)
+         ; current = (fun () -> goal_preparation_current t preparation)
+         ; refresh = (fun () -> refresh_goal_construction t preparation)
+         ; policy_current = (fun () -> goal_construction_policy t preparation)
+         ; timing = (fun () -> goal_construction_timing t preparation)
+         ; authority = (fun () -> goal_construction_authority t preparation)
+         ; effect_basis = (fun () -> goal_construction_basis t preparation)
+         ; registered_basis = (fun () -> goal_registered_basis t preparation)
+         ; registered_refresh = (fun () -> refresh_goal_registered t preparation)
+         ; registered_policy = (fun () -> goal_registered_policy t preparation)
+         ; registered_authority = (fun () -> goal_registered_authority t preparation)
+         ; runtime_phase = Unclaimed
+         ; observed = None
+         }
+       in
+       t.run_preparation <- Some (Existing_goal preparation);
+       Ok (Goal_continuation.Resume_issuance.Prepare preparation))
+;;
+
+let goal_source_basis t (binding : Goal_continuation.Source_binding.t) =
+  let open Result.Let_syntax in
+  let preparation = binding.preparation in
+  let%bind () =
+    match binding.source_phase with
+    | Open -> Ok ()
+    | Closed -> Error (error Conflict "Goal source binding is closed")
+  in
+  let%bind () = preparation.basis () in
+  let%bind () =
+    match preparation.phase with
+    | (Source_bound current | Writer_pending (current, _) | Ready (current, _))
+      when phys_equal current binding -> Ok ()
+    | Preparing | Source_bound _ | Writer_pending _ | Ready _ | Waiting _ | Closed _ ->
+      Error (error Conflict "Goal source selection was consumed or replaced")
+  in
+  let%bind () = Runtime_source_preparation.validate_target binding.source t.state in
+  match Runtime_source_preparation.moderator binding.source with
+  | Legacy observer | Extension observer ->
+    if Agent_protocol.Invocation.equal_observer observer preparation.run.source.observer
+    then preparation.basis ()
+    else Error (error Conflict "Goal selected source differs from the original Run")
+  | No_moderator ->
+    Error (error Invalid_request "Goal resume requires its actual moderator source")
+;;
+
+let bind_goal_continuation_source_internal t ~preparation ~source =
+  let open Result.Let_syntax in
+  let%bind () = goal_preparation_basis t preparation in
+  let%bind () = preparation.Goal_continuation.current () in
+  let%bind () = goal_resume_quiescent t in
+  let%bind () = Runtime_source_preparation.validate_target source t.state in
+  let%bind () =
+    match Runtime_source_preparation.moderator source with
+    | Legacy observer | Extension observer ->
+      if Agent_protocol.Invocation.equal_observer observer preparation.run.source.observer
+      then Ok ()
+      else Error (error Conflict "Goal selected source differs from the original Run")
+    | No_moderator ->
+      Error (error Invalid_request "Goal resume requires its actual moderator source")
+  in
+  match preparation.phase with
+  | Preparing ->
+    let rec binding : Goal_continuation.Source_binding.t =
+      { preparation
+      ; source
+      ; source_phase = Open
+      ; basis = (fun () -> goal_source_basis t binding)
+      }
+    in
+    (* Only nonfailing publication follows the last actual owner/original fence. *)
+    let%bind () = preparation.current () in
+    (match preparation.phase with
+     | Preparing ->
+       preparation.phase <- Source_bound binding;
+       Ok binding
+     | Source_bound _ | Writer_pending _ | Ready _ | Waiting _ | Closed _ ->
+       Error (error Conflict "Goal source selection changed during original policy"))
+  | Source_bound binding when phys_equal binding.source source ->
+    Result.map (Goal_continuation.Source_binding.check_basis binding) ~f:(fun () ->
+      binding)
+  | Source_bound _ | Writer_pending _ | Ready _ | Waiting _ | Closed _ ->
+    Error (error Conflict "Goal source is already selected or consumed")
+;;
+
+module Goal_resume_candidate = struct
+  type t =
+    | Retained of Goal_command_receipt.t
+    | Commit of
+        { plan : Goal_resume_admission.t
+        ; candidate : Session_transition.t
+        ; check_before_commit : unit -> (unit, Agent_protocol.Error.t) result
+        }
+end
+
+let commit_goal_resume_internal t ~(binding : Goal_continuation.Source_binding.t) =
+  let open Result.Let_syntax in
+  let preparation = binding.preparation in
+  let attempted = ref false in
+  let returned = ref false in
+  let request =
+    match Run_preparation.Goal_continuation.cause preparation.request with
+    | Resume request -> Ok request
+    | Wake _ ->
+      Error (error Invalid_request "Goal wake is not an explicit resume command")
+  in
+  Exn.protect
+    ~finally:(fun () -> if not !returned then Goal_continuation.close preparation)
+    ~f:(fun () ->
+      let plan () =
+        let%bind request = request in
+        let%bind () = Goal_continuation.Source_binding.check_basis binding in
+        let%bind () =
+          match preparation.phase with
+          | Source_bound current when phys_equal current binding -> Ok ()
+          | Preparing | Source_bound _ | Writer_pending _ | Ready _ | Waiting _ | Closed _
+            -> Error (error Conflict "Goal resume command selection is no longer fresh")
+        in
+        let%bind () = preparation.current () in
+        let%bind () = goal_resume_quiescent t in
+        let principal_id =
+          Run_preparation.Custody.principal_id (Goal_continuation.custody preparation)
+        in
+        let%bind plan =
+          Goal_resume_admission.prepare
+            t.state
+            ~request
+            ~principal_id
+            ~session:preparation.session
+            ~now:(t.services.now ())
+        in
+        match plan with
+        | Retained receipt -> Ok (Goal_resume_candidate.Retained receipt)
+        | Commit plan ->
+          (* This is metadata bookkeeping for the existing owner, not ordinary
+             initial Run admission. Its common writer retains the exact new
+             custody through ACK; no initial request or fake Held is supplied. *)
+          let%bind candidate =
+            prepare_transition
+              t
+              ~delta:(Goal_catalog_changed (Goal_resume_admission.catalog plan))
+              ~payloads:[]
+          in
+          let check_before_commit () =
+            let%bind () = preparation.current () in
+            (* Recheck only global new-activation policy with a fresh clock;
+               no count dimension is re-admitted or charged. *)
+            let%bind fresh =
+              Goal_resume_admission.prepare
+                t.state
+                ~request
+                ~principal_id
+                ~session:preparation.session
+                ~now:(t.services.now ())
+            in
+            let%bind () =
+              match fresh with
+              | Commit _ -> Ok ()
+              | Retained _ ->
+                Error (error Conflict "Goal resume key appeared before its writer")
+            in
+            let%bind () =
+              Run_admission.Scope.check_current
+                (Run_authorities.scope preparation.binding)
+            in
+            let%bind () =
+              Run_preparation.Custody.check_current
+                (Goal_continuation.custody preparation)
+                ~owner:t.run_preparation_owner
+                ~state:t.state
+            in
+            let%bind () = Goal_resume_admission.check_basis plan ~state:t.state in
+            Goal_continuation.Source_binding.check_basis binding
+          in
+          let%map () = check_before_commit () in
+          Goal_resume_candidate.Commit { plan; candidate; check_before_commit }
+      in
+      match plan () with
+      | Error failure -> Ok (Goal_continuation.Admission.Rejected failure)
+      | Ok (Retained receipt) -> Ok (Goal_continuation.Admission.Retained receipt)
+      | Ok (Commit { plan; candidate; check_before_commit }) ->
+        preparation.phase <- Writer_pending (binding, attempted);
+        (match
+           persist_transition ~commit_attempted:attempted ~check_before_commit t candidate
+         with
+         | Error failure ->
+           Ok
+             (if !attempted
+              then Goal_continuation.Admission.Uncertain failure
+              else Goal_continuation.Admission.Rejected failure)
+         | Ok () ->
+           let receipt = Goal_resume_admission.receipt plan in
+           (* Known ACK is retained before installation/publication can fail. A
+              later close preserves this factual receipt and cannot permit retry. *)
+           Goal_continuation.acknowledge preparation binding receipt;
+           install_committed_transition_owned
+             ~preparation_owner:(Some (Existing_goal preparation))
+             t
+             candidate;
+           publish_committed_transition t candidate;
+           let ready () =
+             let%bind () = Goal_continuation.Source_binding.check_basis binding in
+             let%bind controller = require_recurrence_controller t in
+             let%bind current = Recurrence_controller.observe controller t.state in
+             let%bind () = preparation.current () in
+             let%bind () = Goal_continuation.Source_binding.check_basis binding in
+             if Recurrence_controller.is_current current
+             then Ok ()
+             else Error (error Conflict "Goal resume canonical Store observation changed")
+           in
+           (match ready () with
+            | Error error ->
+              Ok (Goal_continuation.Admission.Resume_failed { receipt; error })
+            | Ok () ->
+              returned := true;
+              (match (Goal_resume_admission.run plan).lifecycle with
+               | Waiting wake ->
+                 preparation.phase <- Waiting (receipt, wake);
+                 Ok (Goal_continuation.Admission.Waiting { receipt; wake })
+               | Admitted | Active ->
+                 Ok (Goal_continuation.Admission.Ready { binding; receipt })
+               | Terminal _ ->
+                 (* The pure plan rejects this; keep known ACK truth if an
+                   unexpected future lifecycle extension reaches this branch. *)
+                 returned := false;
+                 Ok
+                   (Goal_continuation.Admission.Resume_failed
+                      { receipt
+                      ; error = error Conflict "Goal resume Run became terminal"
+                      })))))
+;;
+
+let admit_goal_resume_internal t (binding : Goal_continuation.Source_binding.t) =
+  let open Result.Let_syntax in
+  (* A foreign receiver or repeated/invalid call must not close another actual
+     owner's live preparation while reporting its own rejection. *)
+  let%bind () = goal_preparation_basis t binding.preparation in
+  match binding.preparation.phase with
+  | Source_bound current when phys_equal current binding ->
+    commit_goal_resume_internal t ~binding
+  | Ready (current, receipt) when phys_equal current binding ->
+    let%map () = binding.preparation.current () in
+    Goal_continuation.Admission.Retained receipt
+  | Preparing | Source_bound _ | Writer_pending _ | Ready _ | Waiting _ | Closed _ ->
+    Ok
+      (Goal_continuation.Admission.Rejected
+         (error Conflict "Goal resume command selection is no longer fresh"))
+;;
+
+let end_goal_continuation_preparation_internal
+      t
+      (preparation : Goal_continuation.Preparation.t)
+  =
+  if
+    Int.equal preparation.domain (Stdlib.Domain.self () :> int)
+    && Run_preparation.Custody.belongs_to
+         (Goal_continuation.custody preparation)
+         ~owner:t.run_preparation_owner
+  then (
+    Goal_continuation.close preparation;
+    (match t.run_preparation with
+     | Some (Existing_goal current) when phys_equal current preparation ->
+       t.run_preparation <- None
+     | Some (Initial _ | Existing_goal _) | None -> ());
+    Ok ())
+  else Error (error Conflict "Goal continuation belongs to another Actor owner")
+;;
+
 module Goal_controller_phase = struct
   type t =
     | Startup
@@ -24366,7 +26778,7 @@ let begin_held_activation_internal t binding (held : Held_run.t) checked =
           let%bind () =
             if
               Option.exists t.held_activation ~f:(phys_equal activation)
-              && Option.exists t.run_preparation ~f:(phys_equal preparation)
+              && Option.exists (initial_run_preparation t) ~f:(phys_equal preparation)
               &&
               match !phase with
               | Reserved | Constructing -> true
@@ -25192,8 +27604,7 @@ let submit_held_run_input_internal t (scope : Held_input_scope.t) input =
     else Error (error Conflict "held root transferred another admitted association")
   in
   let proof : Held_operation.Proof.t =
-    { preparation = activation.preparation
-    ; scope = activation.scope
+    { scope = activation.scope
     ; run
     ; admission = activation.admission
     ; source = activation.source
@@ -25370,24 +27781,393 @@ let end_held_activation_internal t (activation : Held_run.Activation.t) =
     Ok ()
 ;;
 
-let begin_held_initialization_internal t continuation purpose expected =
-  let activation = Admitted_activation.Continuation.target continuation in
+let runtime_construction_owner_basis t construction =
+  let supplied = Runtime_construction.preparation_owner construction in
+  if
+    Run_preparation.Custody.belongs_to
+      (Preparation_owner.custody supplied)
+      ~owner:t.run_preparation_owner
+    && Option.exists t.run_preparation ~f:(Preparation_owner.same supplied)
+  then Ok ()
+  else Error (error Conflict "runtime construction belongs to another Actor")
+;;
+
+let check_runtime_construction_admission_internal t construction =
   let open Result.Let_syntax in
-  let%bind () = activation.Held_run.Activation.owned_basis () in
-  let%bind () =
-    if Option.exists t.held_activation ~f:(phys_equal activation)
-    then Ok ()
-    else Error (error Conflict "held initializer belongs to another actor")
+  let%bind () = runtime_construction_owner_basis t construction in
+  let%bind () = require_runtime_admission t in
+  let%bind () = check_runtime_construction_effect construction in
+  runtime_construction_owner_basis t construction
+;;
+
+let runtime_initialization_scope_basis t construction =
+  let open Result.Let_syntax in
+  let%bind () = runtime_construction_owner_basis t construction in
+  let%bind scope =
+    Result.of_option
+      t.initialization_scope
+      ~error:(error Conflict "runtime construction has no actual Init scope")
   in
-  let%bind () = check_run_preparation t activation.preparation in
-  begin_initialization
-    ~held_continuation:continuation
-    ~run_preparation:activation.preparation
-    ~original_actor:
-      (Option.value_exn (Run_admission.Scope.original_actor activation.scope))
-    ~purpose
+  let%bind () =
+    if
+      Option.exists (Initialization_scope.construction scope) ~f:(fun selected ->
+        Preparation_owner.same
+          (Runtime_construction.preparation_owner selected)
+          (Runtime_construction.preparation_owner construction))
+    then validate_initialization_scope_basis t scope
+    else Error (error Conflict "runtime construction does not own this Init scope")
+  in
+  Ok scope
+;;
+
+let runtime_initialization_scope t construction =
+  let open Result.Let_syntax in
+  let%bind scope = runtime_initialization_scope_basis t construction in
+  let%map () = validate_initialization_scope t scope in
+  scope
+;;
+
+let begin_runtime_initialization_internal t construction purpose expected =
+  let open Result.Let_syntax in
+  let%bind () = check_runtime_construction_admission_internal t construction in
+  let original_actor =
+    match construction with
+    | Runtime_construction.Initial continuation ->
+      Run_admission.Scope.original_actor continuation.target.scope
+    | Existing_goal continuation ->
+      Run_admission.Scope.original_actor
+        (Run_authorities.scope continuation.Goal_continuation.binding.preparation.binding)
+  in
+  let%bind original_actor =
+    Result.of_option
+      original_actor
+      ~error:
+        (error
+           Permission_denied
+           "runtime construction lost its original Run authorization")
+  in
+  begin_initialization_owned ~construction ~original_actor ~purpose t expected
+;;
+
+let begin_held_initialization_internal t continuation purpose expected =
+  begin_runtime_initialization_internal
     t
+    (Runtime_construction.of_admitted continuation)
+    purpose
     expected
+;;
+
+let begin_goal_runtime_construction_internal t construction step =
+  let open Result.Let_syntax in
+  let%bind () = check_runtime_construction_admission_internal t construction in
+  let%bind continuation =
+    match construction with
+    | Runtime_construction.Existing_goal continuation -> Ok continuation
+    | Initial _ ->
+      Error
+        (error Invalid_request "Goal construction requires its existing episode owner")
+  in
+  let preparation = continuation.Goal_continuation.binding.preparation in
+  let%bind () =
+    if
+      Option.is_none t.operation_worker
+      && Option.is_none t.moderator_manager
+      && Option.is_none t.state.active_operation
+      && Option.is_none t.initialization_scope
+      && (not t.idle_moderator_borrowed)
+      && not (moderator_is_borrowed t)
+    then Ok ()
+    else
+      Error
+        (error Conflict "cold Goal construction requires its actual empty runtime slot")
+  in
+  let%bind observed =
+    match step, preparation.runtime_phase, t.state.lifecycle.observed with
+    | Runtime_construction_request.Step.Starting, Unclaimed, (Stopped | Idle) ->
+      Ok Agent_protocol.Session.Starting
+    | Running, Starting_acknowledged, Starting -> Ok Agent_protocol.Session.Idle
+    | (Starting | Running), _, _ ->
+      Error (error Conflict "Goal construction lifecycle attempt was consumed")
+  in
+  let lifecycle = Session_state.Lifecycle.{ desired = Running; observed } in
+  let%bind candidate =
+    prepare_transition
+      t
+      ~delta:(Session_delta.Lifecycle_changed lifecycle)
+      ~payloads:
+        [ Agent_protocol.Event.Durable.Payload.Session_state_changed
+            { desired_state = Running; observed_state = observed }
+        ]
+  in
+  let attempted = ref false in
+  let previous_phase = preparation.runtime_phase in
+  let consumed = ref false in
+  let check_before_commit () =
+    let%bind () = check_runtime_construction_admission_internal t construction in
+    if
+      Option.is_none t.operation_worker
+      && Option.is_none t.moderator_manager
+      && Option.is_none t.state.active_operation
+      && Option.is_none t.initialization_scope
+    then Ok ()
+    else Error (error Conflict "Goal runtime slot changed before lifecycle ACK")
+  in
+  preparation.runtime_phase
+  <- (match step with
+      | Starting -> Starting_writer attempted
+      | Running -> Running_writer attempted);
+  Exn.protect
+    ~finally:(fun () ->
+      if not !consumed
+      then
+        if !attempted
+        then Goal_continuation.close preparation
+        else (
+          match preparation.runtime_phase with
+          | (Starting_writer current | Running_writer current)
+            when phys_equal current attempted ->
+            preparation.runtime_phase <- previous_phase
+          | Unclaimed
+          | Starting_writer _
+          | Starting_acknowledged
+          | Running_writer _
+          | Constructing
+          | Installed _
+          | Callback_completed _
+          | Handed_off _
+          | Retired _
+          | Closed -> ()))
+    ~f:(fun () ->
+      Eio.Cancel.protect (fun () ->
+        let%bind () =
+          persist_transition ~commit_attempted:attempted ~check_before_commit t candidate
+        in
+        install_committed_transition_owned
+          ~preparation_owner:(Some (Existing_goal preparation))
+          t
+          candidate;
+        (* Local revocation during the yielding save remains monotone. The ACK
+         advances factual custody but cannot reopen a closed runtime context. *)
+        (match preparation.runtime_phase with
+         | (Starting_writer current | Running_writer current)
+           when phys_equal current attempted ->
+           preparation.runtime_phase
+           <- (match step with
+               | Starting -> Starting_acknowledged
+               | Running -> Constructing)
+         | Unclaimed
+         | Starting_writer _
+         | Starting_acknowledged
+         | Running_writer _
+         | Constructing
+         | Installed _
+         | Callback_completed _
+         | Handed_off _
+         | Retired _
+         | Closed -> ());
+        consumed := true;
+        publish_committed_transition t candidate;
+        Ok ()))
+;;
+
+let reserve_runtime_history_block_internal t construction count =
+  match construction with
+  | Runtime_construction.Initial continuation ->
+    reserve_held_history_block_internal t continuation count
+  | Existing_goal continuation ->
+    let open Result.Let_syntax in
+    let%bind () = check_runtime_construction_admission_internal t construction in
+    let preparation = continuation.Goal_continuation.binding.preparation in
+    let%bind () =
+      match preparation.runtime_phase with
+      | Constructing -> Ok ()
+      | Unclaimed
+      | Starting_writer _
+      | Starting_acknowledged
+      | Running_writer _
+      | Installed _
+      | Callback_completed _
+      | Handed_off _
+      | Retired _
+      | Closed ->
+        Error
+          (error Conflict "Goal history reservation requires its cold construction ACK")
+    in
+    let%bind () =
+      if
+        count > 0
+        && Int64.(t.state.conversation.next_history_sequence <= max_value - of_int count)
+      then Ok ()
+      else Error (error Invalid_request "invalid runtime history reservation")
+    in
+    let first_sequence = t.state.conversation.next_history_sequence in
+    let reserved_through = Int64.(first_sequence + of_int count) in
+    let%bind candidate =
+      prepare_transition
+        t
+        ~delta:(Session_delta.History_block_reserved reserved_through)
+        ~payloads:[]
+    in
+    let%map () =
+      Eio.Cancel.protect (fun () ->
+        let%bind () =
+          persist_transition
+            ~check_before_commit:(fun () ->
+              check_runtime_construction_admission_internal t construction)
+            t
+            candidate
+        in
+        install_committed_transition_owned
+          ~preparation_owner:(Some (Existing_goal preparation))
+          t
+          candidate;
+        publish_committed_transition t candidate;
+        Ok ())
+    in
+    History_id_source.{ first_sequence; reserved_through }
+;;
+
+let runtime_constructor_mutation_request
+  : type a.
+    t -> a Runtime_constructor_mutation_request.t -> (a, Agent_protocol.Error.t) result
+  =
+  fun t request ->
+  let open Result.Let_syntax in
+  let graph_mutation (graph : Runtime_constructor_graph.t) acknowledgement =
+    Owned_inference_mutation.
+      { scope = Initialization graph; owner = graph.owner; acknowledgement }
+  in
+  match request with
+  | Open_graph (construction, source) ->
+    let%bind scope = runtime_initialization_scope t construction in
+    let%bind owner = open_inference_owner t source in
+    scope.graphs <- owner :: scope.graphs;
+    Ok ({ scope; construction; owner } : Runtime_constructor_graph.t)
+  | Acknowledge (graph, handle, attempt) ->
+    let%bind () = initialization_graph_basis t graph in
+    let%bind registration = inference_registration t graph.owner handle in
+    acknowledge_inference
+      ~owned_graph:(graph_mutation graph (Acknowledge (registration, attempt)))
+      t
+      graph.owner
+      handle
+      attempt
+  | Observe (graph, handle, incoming) ->
+    let%bind () = initialization_graph_basis t graph in
+    let%bind () =
+      match
+        Inference_ledger.find
+          t.state.inference_ledger
+          ~ordinal:(Inference_ledger.Handle.ordinal handle)
+      with
+      | Some row
+        when Inference_ledger.Handle.equal (Inference_ledger.Row.handle row) handle
+             && Option.exists (Graph_owner.qualified_source graph.owner) ~f:(fun source ->
+               Transcript.Source_id.equal
+                 source
+                 (Transcript.Scope.key (Inference_ledger.Handle.scope handle)).source) ->
+        Ok ()
+      | Some _ | None ->
+        Error (error Conflict "observation is not in this constructor graph")
+    in
+    observe_inference ~owned_graph:(graph_mutation graph Preserve) t handle incoming
+  | Observe_owned (graph, incoming) ->
+    let%bind () = initialization_graph_basis t graph in
+    observe_owned_inference
+      ~owned_graph:(graph_mutation graph Preserve)
+      t
+      graph.owner
+      incoming
+  | Complete (graph, handle, completion) ->
+    let%bind () = initialization_graph_basis t graph in
+    complete_inference
+      ~owned_graph:(graph_mutation graph Preserve)
+      t
+      graph.owner
+      handle
+      completion
+  | Release (graph, handle) ->
+    let%bind () = initialization_graph_basis t graph in
+    release_inference ~owned_graph:(graph_mutation graph Preserve) t graph.owner handle
+  | Seal graph ->
+    let%bind () = initialization_graph_basis t graph in
+    seal_inference_owner t graph.owner
+  | Finish graph ->
+    let%bind () = initialization_graph_basis t graph in
+    finish_inference_owner ~owned_graph:(graph_mutation graph Finish) t graph.owner
+  | Shell_approvals (construction, approval_grants) ->
+    let%bind scope = runtime_initialization_scope t construction in
+    initialization_transition
+      t
+      scope
+      ~delta:(Shell_changed { t.state.shell with approval_grants })
+      ~payloads:[]
+  | Shell_snapshots (construction, extension_snapshots) ->
+    let%bind scope = runtime_initialization_scope t construction in
+    initialization_transition
+      t
+      scope
+      ~delta:(Shell_changed { t.state.shell with extension_snapshots })
+      ~payloads:[]
+  | Shell_manifest (construction, grant) ->
+    let%bind scope = runtime_initialization_scope t construction in
+    let projected =
+      Security_grant.project_manifest
+        ~now:(t.services.now ())
+        ~session_id:t.state.identity.session_id
+        ~creating_principal:t.state.identity.creating_principal
+        grant
+    in
+    initialization_transition
+      t
+      scope
+      ~delta:
+        (Shell_changed
+           { t.state.shell with manifest_grants = grant :: t.state.shell.manifest_grants })
+      ~payloads:[ Grant_created projected ]
+  | Add_job (construction, job) ->
+    let%bind scope = runtime_initialization_scope t construction in
+    add_constructor_job t (Initialization_job scope) job
+  | Add_schedule (construction, schedule) ->
+    let%bind scope = runtime_initialization_scope t construction in
+    add_schedule ~initialization_scope:scope t schedule
+  | Cancel_schedule (construction, schedule_id) ->
+    let%bind scope = runtime_initialization_scope t construction in
+    cancel_schedule_internal ~initialization_scope:scope t schedule_id
+  | Capture_source (construction, job_id, generation, target, limits) ->
+    let%bind scope = runtime_initialization_scope t construction in
+    let%bind job, binding = find_model_job_target t job_id generation in
+    let%bind () =
+      if List.mem scope.jobs job.id ~equal:Agent_protocol.Id.Job.equal
+      then Ok ()
+      else Error (error Conflict "constructor does not own this Model source")
+    in
+    let%bind captured = Model_job_target.capture_source binding ~target ~limits in
+    initialization_transition
+      t
+      scope
+      ~delta:(Model_job_target_captured captured)
+      ~payloads:[]
+  | Capture_recipe (construction, job_id, generation, attempt, target, limits) ->
+    let%bind scope = runtime_initialization_scope t construction in
+    capture_initialization_recipe_target t scope job_id generation attempt target limits
+  | Complete_model (construction, job_id, generation, attempt, outcome) ->
+    let%bind scope = runtime_initialization_scope_basis t construction in
+    complete_initialization_model_job t scope job_id generation attempt outcome
+  | Interrupt_model (construction, job_id, generation, attempt, reason) ->
+    let%bind scope = runtime_initialization_scope_basis t construction in
+    let%bind owned =
+      initialization_model_job_is_owned t scope job_id generation attempt
+    in
+    let%bind () =
+      if owned
+      then Ok ()
+      else Error (error Conflict "constructor does not own this interrupted Model")
+    in
+    interrupt_job ~initialization_scope:scope t job_id generation attempt reason
+  | Checkpoint (construction, moderator, manager) ->
+    let%bind scope = runtime_initialization_scope t construction in
+    checkpoint_runtime_construction t scope moderator manager
 ;;
 
 let held_runtime_installation_basis t continuation =
@@ -25401,7 +28181,7 @@ let held_runtime_installation_basis t continuation =
   let%bind () =
     if
       Option.exists t.held_activation ~f:(phys_equal activation)
-      && Option.exists t.run_preparation ~f:(phys_equal activation.preparation)
+      && Option.exists (initial_run_preparation t) ~f:(phys_equal activation.preparation)
       && Option.is_none t.operation_worker
       && Option.is_none t.state.active_operation
       && (not t.idle_moderator_borrowed)
@@ -25447,6 +28227,896 @@ let install_held_runtime_internal t continuation worker inference moderator_mana
   let%bind () = held_runtime_installation_basis t continuation in
   let%bind () = Admitted_activation.Continuation.check_basis continuation in
   install_runtime_worker t (Some worker) (Some inference) moderator_manager
+;;
+
+let goal_runtime_installation_basis t continuation =
+  let open Result.Let_syntax in
+  let construction = Runtime_construction.Existing_goal continuation in
+  let%bind () = check_runtime_construction_effect construction in
+  let preparation = continuation.Goal_continuation.binding.preparation in
+  if
+    Option.is_none t.state.active_operation
+    && Option.is_none t.initialization_scope
+    && (not t.idle_moderator_borrowed)
+    && (not (moderator_is_borrowed t))
+    &&
+    match preparation.runtime_phase with
+    | Unclaimed -> Option.is_some t.operation_worker
+    | Constructing -> Option.is_none t.operation_worker
+    | _ -> false
+  then Ok ()
+  else
+    Error
+      (error
+         Conflict
+         "Goal runtime installation requires its exact idle loaded or cold owner")
+;;
+
+let enable_runtime_turn_budget_internal t construction policy =
+  match construction with
+  | Runtime_construction.Initial continuation ->
+    enable_held_turn_budget_internal t continuation policy
+  | Existing_goal continuation ->
+    let open Result.Let_syntax in
+    let%bind () = goal_runtime_installation_basis t continuation in
+    (match t.state.automatic_turn_budget with
+     | Some budget when Chat_response.Runtime_semantics.equal_policy budget.policy policy
+       -> Ok ()
+     | _ ->
+       let%bind candidate =
+         prepare_transition t ~delta:(Automatic_turn_budget_enabled policy) ~payloads:[]
+       in
+       let%bind () =
+         persist_transition
+           ~check_before_commit:(fun () -> goal_runtime_installation_basis t continuation)
+           t
+           candidate
+       in
+       install_committed_transition_owned
+         ~preparation_owner:(Some (Existing_goal continuation.binding.preparation))
+         t
+         candidate;
+       publish_committed_transition t candidate;
+       Ok ())
+;;
+
+let install_runtime_construction_internal t construction worker inference manager =
+  match construction with
+  | Runtime_construction.Initial continuation ->
+    install_held_runtime_internal t continuation worker inference manager
+  | Existing_goal continuation ->
+    let open Result.Let_syntax in
+    let%bind () = goal_runtime_installation_basis t continuation in
+    let preparation = continuation.Goal_continuation.binding.preparation in
+    let%bind cold =
+      match preparation.runtime_phase with
+      | Constructing -> Ok true
+      | Unclaimed -> Ok false
+      | _ -> Error (error Conflict "Goal installation attempt was consumed")
+    in
+    let%bind () =
+      match t.operation_worker with
+      | Some current
+        when (not cold)
+             && phys_equal current worker
+             && Option.equal phys_equal manager t.moderator_manager
+             && Option.exists t.inference_execution ~f:(phys_equal inference) -> Ok ()
+      | None when cold -> validate_runtime_worker t (Some worker) (Some inference) manager
+      | _ ->
+        Error
+          (error Conflict "Goal installation cannot replace a different physical runtime")
+    in
+    let%bind () = goal_runtime_installation_basis t continuation in
+    let%bind () =
+      if cold
+      then install_runtime_worker t (Some worker) (Some inference) manager
+      else Ok ()
+    in
+    let scope : Goal_continuation.runtime_scope =
+      { issuing_actor = t.inference_owner_identity
+      ; continuation
+      ; worker
+      ; manager
+      ; cold
+      ; resume = None
+      ; callback = (if cold then Pending else Joined)
+      ; jobs = []
+      ; graphs = []
+      }
+    in
+    preparation.runtime_phase <- Installed scope;
+    Ok ()
+;;
+
+let select_goal_runtime t continuation =
+  let open Result.Let_syntax in
+  let preparation = continuation.Goal_continuation.binding.preparation in
+  let%bind scope =
+    match preparation.runtime_phase with
+    | (Installed scope | Callback_completed scope | Handed_off (scope, _) | Retired scope)
+      when phys_equal scope.continuation continuation -> Ok scope
+    | _ -> Error (error Conflict "Goal continuation has no exact installed runtime")
+  in
+  let%map () = goal_runtime_scope_basis t scope in
+  scope
+;;
+
+let begin_goal_resume_callback_internal t continuation resume =
+  let open Result.Let_syntax in
+  let%bind scope = select_goal_runtime t continuation in
+  let%bind () = check_runtime_construction_effect (Existing_goal continuation) in
+  let%bind () =
+    if
+      scope.cold
+      && Option.is_none scope.resume
+      && phys_equal scope.worker (Runtime_builder.Runtime_resume.worker resume)
+      && Option.equal
+           phys_equal
+           scope.manager
+           (Runtime_builder.Runtime_resume.manager resume)
+      &&
+      match scope.callback with
+      | Pending -> true
+      | _ -> false
+    then Runtime_builder.Runtime_resume.check_pending resume
+    else
+      Error
+        (error
+           Conflict
+           "Goal resume callback is not this cold runtime's unconsumed lifecycle")
+  in
+  let%bind () = check_runtime_construction_effect (Existing_goal continuation) in
+  scope.resume <- Some resume;
+  Ok scope
+;;
+
+let claim_goal_resume_event t scope id snapshot event =
+  let open Result.Let_syntax in
+  let%bind run = goal_runtime_run t scope in
+  let%bind () = check_runtime_construction_effect (Existing_goal scope.continuation) in
+  let%bind () =
+    match scope.Goal_continuation.callback, scope.resume, event with
+    | Pending, Some resume, Chat_response.Moderation.Event.Session_resume
+      when idle_moderator_eligible t ->
+      Runtime_builder.Runtime_resume.check_pending resume
+    | _ ->
+      Error (error Conflict "Goal lifecycle is not ready for its actual Session_resume")
+  in
+  let%bind receipt, event =
+    Queued_moderator_event.claim_ordinary
+      ~state:t.state
+      ~id
+      ~snapshot
+      ~operation_id:None
+      ~event
+      ~now:(t.services.now ())
+  in
+  let%bind original =
+    Result.of_option
+      (Run_admission.Scope.original_actor
+         (Run_authorities.scope scope.continuation.binding.preparation.binding))
+      ~error:(error Permission_denied "Goal lifecycle has no original Run authorization")
+  in
+  let admission = create_agent_admission (Some (create_agent_custody original)) in
+  let acknowledged = ref false in
+  Exn.protect
+    ~finally:(fun () -> if not !acknowledged then retire_agent_admission admission)
+    ~f:(fun () ->
+      let%bind run_scope = Run_scope.create ~run ~execution_id:id in
+      let borrow : queued_event_borrow =
+        { kind = Ordinary
+        ; lifecycle_owner = Some (Existing_goal_resume scope)
+        ; job_scope = None
+        ; agent_admission = Resumed_run (Some admission)
+        ; receipt
+        ; before = snapshot
+        ; event
+        ; retirement_reason = None
+        ; callback_active = true
+        ; authority_live = Atomic.make true
+        ; run_actions = Some (Run_action_service.create ~scope:run_scope)
+        ; committed = false
+        ; stop_retirement = None
+        ; cancel = None
+        ; cancel_requested = false
+        }
+      in
+      let%bind candidate =
+        prepare_transition t ~delta:(Moderator_execution_changed receipt) ~payloads:[]
+      in
+      let%bind ack = Goal_runtime_acknowledgement.prepare t scope ~candidate in
+      let check_before_commit () =
+        let%bind () =
+          check_runtime_construction_effect (Existing_goal scope.continuation)
+        in
+        let%bind () = check_agent_admission admission in
+        let%bind () = Goal_runtime_acknowledgement.check ack ~actor:t ~candidate in
+        if
+          Option.is_none t.queued_event_borrow
+          &&
+          match scope.callback with
+          | Pending -> true
+          | _ -> false
+        then Ok ()
+        else Error (error Conflict "Goal lifecycle claim changed before ACK")
+      in
+      Eio.Cancel.protect (fun () ->
+        let%bind () = persist_transition ~check_before_commit t candidate in
+        install_committed_transition ~goal_runtime_acknowledgement:ack t candidate;
+        scope.callback <- Executing id;
+        t.queued_event_borrow <- Some borrow;
+        t.idle_moderator_borrowed <- true;
+        acknowledged := true;
+        publish_committed_transition t candidate;
+        Ok (Some borrow)))
+;;
+
+let finish_goal_resume_callback_internal t scope =
+  let open Result.Let_syntax in
+  let%bind () = goal_runtime_scope_basis t scope in
+  let%bind () =
+    if Option.is_some t.queued_event_borrow || moderator_is_borrowed t
+    then Error (error Conflict "Goal resume callback has not joined")
+    else (
+      match scope.Goal_continuation.callback with
+      | Pending ->
+        (* The actual runtime's legacy/absent callback returned without invoking
+           the supplied extension claim. It cannot replay that constructor ACK. *)
+        Option.value_map
+          scope.resume
+          ~default:(Error (error Conflict "Goal resume lifecycle is absent"))
+          ~f:Runtime_builder.Runtime_resume.check_pending
+      | Completed id ->
+        if
+          List.exists t.state.moderator_executions ~f:(fun receipt ->
+            Agent_protocol.Id.Moderator_execution.equal receipt.context.id id
+            && Agent_protocol.Moderator_execution.equal_phase
+                 receipt.context.phase
+                 Session_resume
+            && Agent_protocol.Invocation.equal_observer
+                 receipt.context.source
+                 scope.continuation.binding.preparation.run.source.observer
+            &&
+            match receipt.status with
+            | Completed _ -> true
+            | _ -> false)
+        then Ok ()
+        else
+          Error (error Conflict "Goal resume has no successful actual lifecycle receipt")
+      | Executing _ | Joined ->
+        Error (error Conflict "Goal resume callback is not a fresh joined result"))
+  in
+  scope.callback <- Joined;
+  let preparation = scope.continuation.binding.preparation in
+  (match preparation.runtime_phase with
+   | Installed current when phys_equal current scope ->
+     preparation.runtime_phase <- Callback_completed scope
+   | Retired current when phys_equal current scope -> ()
+   | _ -> ());
+  Ok ()
+;;
+
+module Goal_operation_phase = struct
+  type t =
+    | Staged
+    | Installed
+    | Closed
+  [@@deriving equal]
+end
+
+(* Capture the real command original before source closure. Only this private
+   actual-ACK installer transfers it to the existing first-prefix owner. *)
+let goal_resume_operation_controller t (scope : Goal_continuation.runtime_scope) =
+  let open Result.Let_syntax in
+  let preparation = scope.continuation.binding.preparation in
+  let old_scope = Run_authorities.scope preparation.binding in
+  let%bind authorization =
+    Run_preparation.Custody.capture_authorization
+      (Goal_continuation.custody preparation)
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+  in
+  let%bind store = require_recurrence_controller t in
+  let policy = preparation.policy in
+  let association : Activation_association.t =
+    { issuer_policy = Goal policy
+    ; check_target =
+        (fun ~store:current ~state ~run ~admission ->
+          if Recurrence_controller.same_store store current
+          then Goal_activation_policy.check_association policy ~state ~run ~admission
+          else Error (error Conflict "Goal continuation Store changed"))
+    }
+  in
+  let phase = ref Goal_operation_phase.Staged in
+  let current = ref None in
+  let structural () =
+    let%bind () =
+      if Goal_operation_phase.equal !phase Installed
+      then Ok ()
+      else Error (error Conflict "Goal continuation Operation owner is not installed")
+    in
+    let%bind () =
+      Runtime_source_preparation.validate_target scope.continuation.binding.source t.state
+    in
+    let%bind index =
+      Result.of_option
+        t.state.run_state
+        ~error:(error Conflict "Goal Operation Run index is absent")
+    in
+    let%bind run =
+      Result.of_option
+        (Run_state.find index preparation.run.id)
+        ~error:(error Conflict "Goal Operation Run is absent")
+    in
+    let%bind () =
+      if Run_authorities.is_current t.run_authorities preparation.binding ~run_id:run.id
+      then Ok ()
+      else Error (error Permission_denied "Goal Operation lost its original binding")
+    in
+    Activation_association.check_target
+      association
+      ~store
+      ~state:t.state
+      ~run
+      ~admission:preparation.admission
+  in
+  let basis () =
+    let%bind () = structural () in
+    match !current with
+    | Some observed when Recurrence_controller.is_current observed -> Ok ()
+    | Some _ | None ->
+      Error (error Conflict "Goal continuation Operation requires fresh Store custody")
+  in
+  let originals () =
+    let%bind () = Run_admission.Scope.check_current old_scope in
+    Run_preparation.Authorization.check authorization t.state
+  in
+  let policy_check () =
+    let%bind () = structural () in
+    let%bind () = Run_admission.Scope.authorize old_scope t.state in
+    let%bind () = Goal_activation_policy.check_admitted_policy policy ~state:t.state in
+    let%bind () = originals () in
+    structural ()
+  in
+  let refresh () =
+    let%bind () = policy_check () in
+    let%bind observed = Recurrence_controller.observe store t.state in
+    current := Some observed;
+    basis ()
+  in
+  Ok
+    Activation_controller.Operation.
+      { association
+      ; install =
+          (fun () -> if Goal_operation_phase.equal !phase Staged then phase := Installed)
+      ; close = (fun () -> phase := Closed)
+      ; refresh
+      ; policy =
+          (fun () ->
+            let%bind () = basis () in
+            let%bind () = policy_check () in
+            basis ())
+      ; timing =
+          (fun () ->
+            let%bind () = basis () in
+            let%bind () =
+              Goal_activation_policy.check_deadline
+                policy
+                ~state:t.state
+                ~now:(t.services.now ())
+            in
+            basis ())
+      ; authority =
+          (fun () ->
+            let%bind () = basis () in
+            let%bind () = originals () in
+            basis ())
+      ; basis
+      }
+;;
+
+let goal_resume_settlement index preparation run =
+  let open Result.Let_syntax in
+  let receipts =
+    List.filter (Run_state.receipts index) ~f:(fun receipt ->
+      Agent_protocol.Run_receipt.Kind.equal receipt.kind Terminal
+      && Agent_protocol.Id.Run.equal receipt.run_id run.Agent_protocol.Run.id
+      && Int64.equal receipt.run_revision run.revision)
+  in
+  let%bind receipt =
+    match receipts with
+    | [ receipt ] -> Ok receipt
+    | _ -> Error (error Conflict "Goal resume terminal Run has no exact terminal receipt")
+  in
+  Agent_protocol.Goal_episode.Settlement.create
+    (Run_goal_link.episode preparation.Goal_continuation.link)
+    ~run
+    ~receipt
+;;
+
+let continue_goal_episode_internal t continuation =
+  let open Result.Let_syntax in
+  let preparation = continuation.Goal_continuation.binding.preparation in
+  let failed error =
+    Ok (Goal_resume_result.Resume_failed { receipt = continuation.receipt; error })
+  in
+  let proceed () =
+    let%bind scope = select_goal_runtime t continuation in
+    let%bind () =
+      if
+        Option.is_none t.queued_event_borrow
+        && (not (moderator_is_borrowed t))
+        && Option.is_none t.initialization_scope
+        && Option.is_none t.state.active_operation
+        &&
+        match scope.callback with
+        | Joined -> true
+        | _ -> false
+      then Ok ()
+      else Error (error Conflict "Goal continuation lifecycle has not joined")
+    in
+    let%bind index =
+      Result.of_option
+        t.state.run_state
+        ~error:(error Conflict "Goal continuation Run index is absent")
+    in
+    let%bind run =
+      Result.of_option
+        (Run_state.find index preparation.run.id)
+        ~error:(error Conflict "Goal continuation Run is absent")
+    in
+    match preparation.runtime_phase with
+    | Handed_off (actual, result) when phys_equal actual scope ->
+      Ok
+        (Goal_resume_result.Resumed
+           { receipt = continuation.receipt; continuation = result })
+    | _ ->
+      let%bind () =
+        if
+          Agent_protocol.Goal_episode.matches_run
+            (Run_goal_link.episode preparation.link)
+            run
+        then Ok ()
+        else
+          Error (error Conflict "Goal continuation episode changed before final handoff")
+      in
+      (match run.lifecycle with
+       | Terminal _ ->
+         let%map settlement = goal_resume_settlement index preparation run in
+         let result = Goal_resume_result.Continuation.Settled settlement in
+         preparation.runtime_phase <- Handed_off (scope, result);
+         Goal_resume_result.Resumed
+           { receipt = continuation.receipt; continuation = result }
+       | Waiting wake ->
+         let%map () = check_runtime_construction_effect (Existing_goal continuation) in
+         let result = Goal_resume_result.Continuation.Waiting wake in
+         preparation.runtime_phase <- Handed_off (scope, result);
+         Goal_resume_result.Resumed
+           { receipt = continuation.receipt; continuation = result }
+       | Admitted | Active ->
+         let%bind () = check_runtime_construction_effect (Existing_goal continuation) in
+         let now, sample = completion_clock_pair t in
+         let%bind settled =
+           Run_work_settlement.prepare
+             index
+             ~state:t.state
+             ~previous:run
+             ~owned_work:run.owned_work
+             ~terminal_work:run.terminal_work
+             ~operation_id:None
+             ~now
+         in
+         let%bind settled_run =
+           Result.of_option
+             (Run_state.find settled run.id)
+             ~error:(error Conflict "Goal aggregate lost its Run")
+         in
+         (match settled_run.lifecycle with
+          | Terminal _ ->
+            let%bind candidate =
+              prepare_transition t ~delta:(Run_state_changed settled) ~payloads:[]
+            in
+            let%bind acknowledgement =
+              Goal_runtime_acknowledgement.prepare t scope ~candidate
+            in
+            let%bind completions = prepare_completion_plan t candidate (Some sample) in
+            let%bind settlement =
+              goal_resume_settlement settled preparation settled_run
+            in
+            let result = Goal_resume_result.Continuation.Settled settlement in
+            let%bind () =
+              persist_transition
+                ~check_before_commit:(fun () ->
+                  let%bind () =
+                    check_runtime_construction_effect (Existing_goal continuation)
+                  in
+                  Goal_runtime_acknowledgement.check acknowledgement ~actor:t ~candidate)
+                t
+                candidate
+            in
+            install_committed_transition
+              ~goal_runtime_acknowledgement:acknowledgement
+              t
+              candidate;
+            Option.iter
+              completions
+              ~f:(Recurrence_runtime.install_completions t.recurrence_runtime);
+            preparation.runtime_phase <- Handed_off (scope, result);
+            publish_committed_transition t candidate;
+            Ok
+              (Goal_resume_result.Resumed
+                 { receipt = continuation.receipt; continuation = result })
+          | Waiting _ ->
+            Error
+              (error Internal_error "Goal aggregate introduced a wake without a callback")
+          | Admitted | Active ->
+            let pending_finish =
+              List.exists (Run_state.intents index) ~f:(fun intent ->
+                Agent_protocol.Id.Run.equal intent.Run_intent.receipt.run_id run.id
+                && Run_intent.Disposition.equal intent.disposition Pending
+                &&
+                match intent.action with
+                | Finish _ -> true
+                | Continue | Wait _ -> false)
+            in
+            if pending_finish
+            then
+              Error
+                (error Conflict "Goal continuation still awaits its actual Finish work")
+            else (
+              let%bind recovery =
+                History_continuation.prepare t.state ~retiring_history:false
+              in
+              let operation = create_turn_operation t Administrative in
+              let%bind turn =
+                Turn_admission.create
+                  t.state
+                  ~operation
+                  ~notification_wakes:[]
+                  ~adopt_deferred:false
+              in
+              let%bind work =
+                Agent_protocol.Run_work.create
+                  ~key:(Operation operation.id)
+                  ~generation:operation.generation
+              in
+              let%bind next =
+                Run_work_settlement.prepare
+                  index
+                  ~state:t.state
+                  ~previous:run
+                  ~owned_work:(run.owned_work @ [ work ])
+                  ~terminal_work:run.terminal_work
+                  ~operation_id:None
+                  ~now:operation.started_at
+              in
+              let%bind candidate =
+                prepare_transition
+                  t
+                  ~delta:
+                    (Batch
+                       (History_continuation.deltas recovery
+                        @ Turn_admission.deltas turn
+                        @ [ Run_state_changed next ]))
+                  ~payloads:
+                    (History_continuation.payloads recovery @ Turn_admission.payloads turn)
+              in
+              let%bind controller = goal_resume_operation_controller t scope in
+              let old_scope = Run_authorities.scope preparation.binding in
+              let%bind original =
+                Result.of_option
+                  (Run_admission.Scope.original_actor old_scope)
+                  ~error:
+                    (error
+                       Permission_denied
+                       "Goal continuation has no original Run authority")
+              in
+              let proof : Held_operation.Proof.t =
+                { scope = old_scope
+                ; run
+                ; admission = preparation.admission
+                ; source = continuation.binding.source
+                ; operation
+                ; worker = scope.worker
+                ; binding = preparation.binding
+                ; controller
+                }
+              in
+              let held : Held_operation.t =
+                { proof; phase = Staged; target_current = None }
+              in
+              let owner : Operation_owner.t =
+                { operation_id = operation.id
+                ; admission =
+                    create_agent_admission (Some (create_agent_custody original))
+                ; held = Some held
+                }
+              in
+              let ack : Goal_runtime_operation_acknowledgement.t =
+                { previous = t.state; candidate; scope; held; owner }
+              in
+              let%bind fact = Goal_runtime_acknowledgement.prepare t scope ~candidate in
+              let attempted = ref false in
+              let installed = ref false in
+              Exn.protect
+                ~finally:(fun () ->
+                  if not !installed
+                  then (
+                    retire_agent_admission owner.admission;
+                    controller.close ());
+                  if !attempted && not !installed then Goal_continuation.close preparation)
+                ~f:(fun () ->
+                  let%bind () =
+                    persist_transition
+                      ~commit_attempted:attempted
+                      ~check_before_commit:(fun () ->
+                        let%bind () =
+                          check_runtime_construction_effect (Existing_goal continuation)
+                        in
+                        let%bind () =
+                          Goal_runtime_operation_acknowledgement.check
+                            ack
+                            ~actor:t
+                            ~candidate
+                        in
+                        Goal_runtime_acknowledgement.check fact ~actor:t ~candidate)
+                      t
+                      candidate
+                  in
+                  install_committed_transition
+                    ~goal_runtime_acknowledgement:fact
+                    ~goal_operation_acknowledgement:ack
+                    t
+                    candidate;
+                  installed := true;
+                  publish_committed_transition t candidate;
+                  launch_worker t operation;
+                  Ok
+                    (Goal_resume_result.Resumed
+                       { receipt = continuation.receipt
+                       ; continuation = Started operation
+                       })))))
+  in
+  match proceed () with
+  | Ok result -> Ok result
+  | Error error -> failed error
+;;
+
+let initialization_construction_resource t construction scope owner =
+  let open Result.Let_syntax in
+  let scope_basis () =
+    let%bind () = validate_initialization_scope_basis t scope in
+    if
+      Option.exists (Initialization_scope.construction scope) ~f:(fun actual ->
+        Preparation_owner.same
+          (Runtime_construction.preparation_owner actual)
+          (Runtime_construction.preparation_owner construction))
+    then Ok ()
+    else Error (error Conflict "constructor resource preparation changed")
+  in
+  let event_basis borrow =
+    let%bind () = scope_basis () in
+    if
+      Option.exists t.queued_event_borrow ~f:(phys_equal borrow)
+      && Option.exists (constructor_scope_of_borrow t borrow) ~f:(phys_equal scope)
+      && initialization_callback_is_owned t scope
+      && borrow.callback_active
+      && Atomic.get borrow.authority_live
+      && not (borrow.committed || borrow.cancel_requested)
+    then Ok ()
+    else Error (error Conflict "constructor resource Event execution ended")
+  in
+  let job_basis job =
+    let%bind () = scope_basis () in
+    let%bind current = job_scope_current t job in
+    if
+      List.mem
+        scope.Initialization_scope.jobs
+        current.id
+        ~equal:Agent_protocol.Id.Job.equal
+      && job.active
+      && (not job.cancel_requested)
+      && Atomic.get job.authority_live
+    then Ok ()
+    else Error (error Conflict "constructor resource Job execution ended")
+  in
+  let%bind selected, execution =
+    match owner with
+    | Agent_protocol.Job.Moderator_event id ->
+      let%bind borrow =
+        Result.of_option
+          t.queued_event_borrow
+          ~error:(error Conflict "constructor resource has no actual Event")
+      in
+      let%map () =
+        if Agent_protocol.Id.Moderator_execution.equal id borrow.receipt.context.id
+        then event_basis borrow
+        else Error (error Conflict "constructor resource Event changed")
+      in
+      `Event borrow, None
+    | Invocation id ->
+      let%bind execution =
+        List.find t.invocation_executions ~f:(fun execution ->
+          Agent_protocol.Id.Invocation.equal id execution.dispatched.context.id)
+        |> Result.of_option
+             ~error:(error Conflict "constructor resource has no actual Invocation")
+      in
+      let%map selected =
+        match execution.owner with
+        | Event_moderator borrow ->
+          let%map () = event_basis borrow in
+          `Event borrow
+        | Background_job job ->
+          let%bind () = job_scope_can_execute t job in
+          let%map () = job_basis job in
+          `Job job
+        | Foreground _ | Invocation_moderator _ ->
+          Error (error Conflict "constructor resource Invocation has another owner")
+      in
+      selected, Some execution
+  in
+  let basis () =
+    let%bind () =
+      match selected with
+      | `Event borrow -> event_basis borrow
+      | `Job job -> job_basis job
+    in
+    match execution with
+    | None -> Ok ()
+    | Some execution ->
+      if
+        List.mem t.invocation_executions execution ~equal:phys_equal
+        && execution.accepts_children
+        && Atomic.get execution.authority_live
+        && List.exists
+             t.state.invocations
+             ~f:(Agent_protocol.Invocation.equal execution.dispatched)
+      then Ok ()
+      else Error (error Conflict "constructor resource Invocation execution ended")
+  in
+  let%bind () = check_runtime_construction_effect construction in
+  let%bind () = check_initialization_agent_actor scope in
+  let%map () = basis () in
+  { Held_authored_resource.domain = (Stdlib.Domain.self () :> int); basis }
+;;
+
+let runtime_construction_resource_internal t construction owner =
+  let constructor =
+    Option.filter t.initialization_scope ~f:(fun scope ->
+      Option.exists (Initialization_scope.construction scope) ~f:(fun actual ->
+        Preparation_owner.same
+          (Runtime_construction.preparation_owner actual)
+          (Runtime_construction.preparation_owner construction)))
+  in
+  match constructor with
+  | Some scope -> initialization_construction_resource t construction scope owner
+  | None ->
+    (match construction with
+     | Runtime_construction.Initial continuation ->
+       held_authored_resource_internal t continuation owner
+     | Existing_goal continuation ->
+       let open Result.Let_syntax in
+       let%bind scope = select_goal_runtime t continuation in
+       let%bind borrow, execution =
+         match owner with
+         | Agent_protocol.Job.Moderator_event id ->
+           let%bind borrow =
+             Result.of_option
+               t.queued_event_borrow
+               ~error:(error Conflict "Goal resource has no actual Event owner")
+           in
+           let%bind () =
+             if Agent_protocol.Id.Moderator_execution.equal borrow.receipt.context.id id
+             then goal_runtime_event_basis t borrow scope
+             else Error (error Conflict "Goal resource Event changed")
+           in
+           Ok (`Event borrow, None)
+         | Invocation id ->
+           let%bind execution =
+             List.find t.invocation_executions ~f:(fun execution ->
+               Agent_protocol.Id.Invocation.equal execution.dispatched.context.id id)
+             |> Result.of_option
+                  ~error:(error Conflict "Goal resource has no actual Invocation owner")
+           in
+           let%map borrow =
+             match execution.owner with
+             | Event_moderator borrow ->
+               let%map () = goal_runtime_event_basis t borrow scope in
+               `Event borrow
+             | Background_job job ->
+               let%bind () = job_scope_can_execute t job in
+               if Option.exists (goal_runtime_job t job.job) ~f:(phys_equal scope)
+               then Ok (`Job job)
+               else Error (error Conflict "Goal resource Job belongs to another startup")
+             | Foreground _ | Invocation_moderator _ ->
+               Error
+                 (error
+                    Conflict
+                    "Goal resource Invocation belongs to another physical owner")
+           in
+           borrow, Some execution
+       in
+       let basis () =
+         let%bind () = goal_runtime_scope_basis t scope in
+         let%bind () =
+           match borrow with
+           | `Event borrow -> goal_runtime_event_basis t borrow scope
+           | `Job job ->
+             let%bind current = job_scope_current t job in
+             if
+               Option.exists (goal_runtime_job t current) ~f:(phys_equal scope)
+               && job.active
+               && (not job.cancel_requested)
+               && Atomic.get job.authority_live
+             then Ok ()
+             else Error (error Conflict "Goal resource Job execution ended")
+         in
+         match execution with
+         | None -> Ok ()
+         | Some execution ->
+           if
+             List.mem t.invocation_executions execution ~equal:phys_equal
+             && execution.accepts_children
+             && Atomic.get execution.authority_live
+             && List.exists
+                  t.state.invocations
+                  ~f:(Agent_protocol.Invocation.equal execution.dispatched)
+           then Ok ()
+           else Error (error Conflict "Goal resource Invocation execution ended")
+       in
+       let%bind () = check_runtime_construction_effect construction in
+       let%map () = basis () in
+       { Held_authored_resource.domain = (Stdlib.Domain.self () :> int); basis })
+;;
+
+let end_runtime_construction_internal t construction =
+  match construction with
+  | Runtime_construction.Initial continuation ->
+    end_held_activation_internal t continuation.target
+  | Existing_goal continuation ->
+    let open Result.Let_syntax in
+    let preparation = continuation.Goal_continuation.binding.preparation in
+    let%bind () =
+      if
+        Run_preparation.Custody.belongs_to
+          (Goal_continuation.custody preparation)
+          ~owner:t.run_preparation_owner
+      then Ok ()
+      else Error (error Conflict "Goal construction cleanup belongs to another Actor")
+    in
+    (match preparation.runtime_phase with
+     | Handed_off _ -> Ok ()
+     | _ ->
+       let scope =
+         match preparation.runtime_phase with
+         | Installed scope | Callback_completed scope | Retired scope -> Some scope
+         | _ -> None
+       in
+       let constructor =
+         Option.filter t.initialization_scope ~f:(fun scope ->
+           match Initialization_scope.construction scope with
+           | Some (Existing_goal current) -> phys_equal current continuation
+           | Some (Initial _) | None -> false)
+       in
+       let jobs =
+         Option.value_map constructor ~default:[] ~f:(fun scope ->
+           scope.Initialization_scope.jobs)
+         @ Option.value_map scope ~default:[] ~f:(fun scope ->
+           List.map scope.Goal_continuation.jobs ~f:(fun job -> job.Agent_protocol.Job.id))
+       in
+       Runtime_construction.close construction;
+       let%bind () =
+         Option.value_map constructor ~default:(Ok ()) ~f:(end_initialization t)
+       in
+       (* Retire only acknowledged new constructor descendants, never the old Run,
+         its passive wake, prior work or account. Their ordinary factual result
+         path owns any actual Run work/permission settlement. *)
+       List.fold_result
+         (List.dedup_and_sort jobs ~compare:Agent_protocol.Id.Job.compare)
+         ~init:()
+         ~f:(fun () id ->
+           let%bind _ = cancel_job_internal t id in
+           Ok ()))
 ;;
 
 let acquire_recurrence_activation_internal t ~actor ~authorize ~observation =
@@ -26723,7 +30393,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
           ~finally:(fun () ->
             Run_preparation.close preparation;
             match t.run_preparation with
-            | Some active when phys_equal active preparation -> t.run_preparation <- None
+            | Some (Initial active) when phys_equal active preparation ->
+              t.run_preparation <- None
             | Some _ | None -> ())
           ~f:(fun () ->
             let attempted = ref false in
@@ -26784,6 +30455,16 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       bind_run_source_internal t ~preparation ~source
     | Held_startup request ->
       (match request with
+       | Goal_continuation request ->
+         (match request with
+          | Receipt (actor, authorize, session, request) ->
+            goal_resume_receipt_internal t ~actor ~authorize ~session ~request
+          | Begin (actor, authorize, session, request) ->
+            begin_goal_resume_preparation_internal t ~actor ~authorize ~session ~request
+          | Bind (preparation, source) ->
+            bind_goal_continuation_source_internal t ~preparation ~source
+          | Admit binding -> admit_goal_resume_internal t binding
+          | Close preparation -> end_goal_continuation_preparation_internal t preparation)
        | Effect_deferred request -> effect_deferred_request t request
        | Input_graph request -> input_graph_request t request
        | Begin_authored (continuation, startup, snapshot) ->
@@ -26811,10 +30492,37 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
             admit_held_goal_run_internal t ~binding ~intent ~session)
        | Begin_held_activation (binding, held, checked) ->
          begin_held_activation_internal t binding held checked
-       | Begin_held_initialization (activation, purpose, expected) ->
-         begin_held_initialization_internal t activation purpose expected
-       | Reserve_held_history_block (continuation, count) ->
-         reserve_held_history_block_internal t continuation count)
+       | Construction request ->
+         (match request with
+          | Mutate mutation -> runtime_constructor_mutation_request t mutation
+          | Check_admission construction ->
+            check_runtime_construction_admission_internal t construction
+          | Begin_goal (construction, step) ->
+            begin_goal_runtime_construction_internal t construction step
+          | Begin_initialization (construction, purpose, expected) ->
+            (match construction with
+             | Initial continuation ->
+               begin_held_initialization_internal t continuation purpose expected
+             | Existing_goal _ ->
+               begin_runtime_initialization_internal t construction purpose expected)
+          | Reserve_history (construction, count) ->
+            reserve_runtime_history_block_internal t construction count
+          | Add_model (scope, job) -> add_initialization_model_job t scope job
+          | Model_running (scope, job_id, generation, attempt) ->
+            initialization_model_job_is_running t scope job_id generation attempt
+          | Enable_budget (construction, policy) ->
+            enable_runtime_turn_budget_internal t construction policy
+          | Install (construction, worker, inference, manager) ->
+            install_runtime_construction_internal t construction worker inference manager
+          | Begin_resume (continuation, resume) ->
+            begin_goal_resume_callback_internal t continuation resume
+          | Claim_resume (scope, id, snapshot, event) ->
+            claim_goal_resume_event t scope id snapshot event
+          | Finish_resume scope -> finish_goal_resume_callback_internal t scope
+          | Continue_goal continuation -> continue_goal_episode_internal t continuation
+          | Resource (construction, owner) ->
+            runtime_construction_resource_internal t construction owner
+          | End construction -> end_runtime_construction_internal t construction))
     | Admit_held_recurrence_run (binding, intent, attempt, session) ->
       admit_held_recurrence_run_internal t ~binding ~intent ~attempt ~session
     | Close_run_preparation preparation ->
@@ -26823,7 +30531,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       else (
         Run_preparation.close preparation;
         (match t.run_preparation with
-         | Some active when phys_equal active preparation -> close_run_preparation t
+         | Some (Initial active) when phys_equal active preparation ->
+           close_run_preparation t
          | Some _ | None -> ());
         Ok ())
     | Run_start_receipt (authorize, principal_id, request, request_sha256) ->
@@ -27571,6 +31280,93 @@ module Constructor_mutations = struct
   ;;
 end
 
+module Runtime_constructor_mutations = struct
+  let call t request = call t (Held_startup (Construction (Mutate request)))
+
+  let fresh t construction request =
+    let%bind.Result () = Runtime_construction.refresh construction in
+    call t request
+  ;;
+
+  let open_inference_owner t ~construction ~source =
+    fresh t construction (Open_graph (construction, source))
+  ;;
+
+  let acknowledge_inference t ~graph ~handle attempt =
+    call t (Acknowledge (graph, handle, attempt))
+  ;;
+
+  let observe_inference t ~graph ~handle incoming =
+    call t (Observe (graph, handle, incoming))
+  ;;
+
+  let observe_owned_inference t ~graph incoming = call t (Observe_owned (graph, incoming))
+
+  let complete_inference t ~graph ~handle completion =
+    call t (Complete (graph, handle, completion))
+  ;;
+
+  let release_inference t ~graph ~handle = call t (Release (graph, handle))
+  let seal_inference_owner t ~graph = call t (Seal graph)
+  let finish_inference_owner t ~graph = call t (Finish graph)
+
+  let replace_shell_approval_grants t ~construction values =
+    fresh t construction (Shell_approvals (construction, values))
+  ;;
+
+  let replace_shell_extension_snapshots t ~construction values =
+    fresh t construction (Shell_snapshots (construction, values))
+  ;;
+
+  let add_shell_manifest_grant t ~construction grant =
+    fresh t construction (Shell_manifest (construction, grant))
+  ;;
+
+  let add_job t ~construction job = fresh t construction (Add_job (construction, job))
+
+  let add_schedule t ~construction schedule =
+    fresh t construction (Add_schedule (construction, schedule))
+  ;;
+
+  let cancel_schedule t ~construction ~schedule_id =
+    fresh t construction (Cancel_schedule (construction, schedule_id))
+  ;;
+
+  let capture_model_source t ~construction ~job_id ~generation ~target ~limits =
+    let open Result.Let_syntax in
+    let%bind () =
+      fresh
+        t
+        construction
+        (Capture_source (construction, job_id, generation, target, limits))
+    in
+    Runtime_construction.refresh construction
+  ;;
+
+  let capture_recipe_target t ~construction ~job_id ~generation ~attempt ~target ~limits =
+    let open Result.Let_syntax in
+    let%bind () =
+      fresh
+        t
+        construction
+        (Capture_recipe (construction, job_id, generation, attempt, target, limits))
+    in
+    Runtime_construction.refresh construction
+  ;;
+
+  let complete_model_job t ~construction ~job_id ~generation ~attempt outcome =
+    call t (Complete_model (construction, job_id, generation, attempt, outcome))
+  ;;
+
+  let interrupt_model_job t ~construction ~job_id ~generation ~attempt ~reason =
+    call t (Interrupt_model (construction, job_id, generation, attempt, reason))
+  ;;
+
+  let checkpoint_moderator ?moderator_manager t ~construction moderator =
+    fresh t construction (Checkpoint (construction, moderator, moderator_manager))
+  ;;
+end
+
 let reconcile_inference_recovery t = call t Reconcile_inference_recovery
 
 let begin_initialization
@@ -28115,6 +31911,19 @@ let capture_inference_target t ~target ~limits =
   call t (Capture_inference_target (target, limits))
 ;;
 
+let refresh_goal_runtime_job t ~job_id ~generation =
+  Option.value_map
+    (List.find_map t.state.jobs ~f:(fun job ->
+       if
+         Agent_protocol.Id.Job.equal job.id job_id
+         && Int.equal generation job.generation
+         && Int.equal generation t.state.identity.generation
+       then goal_runtime_job t job
+       else None))
+    ~default:(Ok ())
+    ~f:(fun scope -> Runtime_construction.refresh (Existing_goal scope.continuation))
+;;
+
 let capture_model_job_source t ~job_id ~generation ~target ~limits =
   let open Result.Let_syntax in
   let selected =
@@ -28122,7 +31931,9 @@ let capture_model_job_source t ~job_id ~generation ~target ~limits =
       if Agent_protocol.Id.Job.equal job.id job_id then held_authored_job t job else None)
   in
   let%bind () = Option.value_map selected ~default:(Ok ()) ~f:(refresh_held_authored t) in
+  let%bind () = refresh_goal_runtime_job t ~job_id ~generation in
   let%bind () = call t (Capture_model_job_source (job_id, generation, target, limits)) in
+  let%bind () = refresh_goal_runtime_job t ~job_id ~generation in
   Option.value_map selected ~default:(Ok ()) ~f:(refresh_held_authored t)
 ;;
 
@@ -28133,9 +31944,11 @@ let capture_recipe_target t ~job_id ~generation ~attempt ~target ~limits =
       if Agent_protocol.Id.Job.equal job.id job_id then held_authored_job t job else None)
   in
   let%bind () = Option.value_map selected ~default:(Ok ()) ~f:(refresh_held_authored t) in
+  let%bind () = refresh_goal_runtime_job t ~job_id ~generation in
   let%bind () =
     call t (Capture_recipe_target (job_id, generation, attempt, target, limits))
   in
+  let%bind () = refresh_goal_runtime_job t ~job_id ~generation in
   Option.value_map selected ~default:(Ok ()) ~f:(refresh_held_authored t)
 ;;
 
@@ -28151,17 +31964,44 @@ let add_initialization_model_job t ~scope job =
   call t (Add_initialization_model_job (scope, job))
 ;;
 
+let refresh_goal_initialization scope =
+  match Initialization_scope.construction scope with
+  | Some (Runtime_construction.Existing_goal _ as construction) ->
+    Runtime_construction.refresh construction
+  | Some (Initial _) | None -> Ok ()
+;;
+
 let start_initialization_model_job t ~scope job =
-  call t (Start_initialization_model_job (scope, job))
+  Eio.Cancel.protect (fun () ->
+    match Initialization_scope.construction scope with
+    | Some (Runtime_construction.Existing_goal _) ->
+      let open Result.Let_syntax in
+      let%bind () = refresh_goal_initialization scope in
+      let%bind job = call t (Held_startup (Construction (Add_model (scope, job)))) in
+      let%bind () = refresh_goal_initialization scope in
+      call t (Claim_initialization_model_job (scope, job.id, job.generation))
+    | Some (Initial _) | None -> call t (Start_initialization_model_job (scope, job)))
 ;;
 
 let claim_initialization_model_job t ~scope ~job_id ~generation =
   Eio.Cancel.protect (fun () ->
+    let%bind.Result () = refresh_goal_initialization scope in
     call t (Claim_initialization_model_job (scope, job_id, generation)))
 ;;
 
 let initialization_model_job_is_current t ~scope ~job_id ~generation ~attempt =
+  let%bind.Result () = refresh_goal_initialization scope in
   call t (Initialization_model_job_is_current (scope, job_id, generation, attempt))
+;;
+
+let initialization_model_job_is_running t ~scope ~job_id ~generation ~attempt =
+  match Initialization_scope.construction scope with
+  | Some (Runtime_construction.Existing_goal _) ->
+    call
+      t
+      (Held_startup (Construction (Model_running (scope, job_id, generation, attempt))))
+  | Some (Initial _) | None ->
+    initialization_model_job_is_current t ~scope ~job_id ~generation ~attempt
 ;;
 
 let capture_initialization_recipe_target
@@ -28173,10 +32013,15 @@ let capture_initialization_recipe_target
       ~target
       ~limits
   =
-  call
-    t
-    (Capture_initialization_recipe_target
-       (scope, job_id, generation, attempt, target, limits))
+  let open Result.Let_syntax in
+  let%bind () = refresh_goal_initialization scope in
+  let%bind () =
+    call
+      t
+      (Capture_initialization_recipe_target
+         (scope, job_id, generation, attempt, target, limits))
+  in
+  refresh_goal_initialization scope
 ;;
 
 let complete_initialization_model_job t ~scope ~job_id ~generation ~attempt outcome =
@@ -28211,12 +32056,22 @@ let claim_job t ~job_id ~generation =
            if
              Int.equal generation job.generation
              && Int.equal generation t.state.identity.generation
-             && held_authored_job_deferred t job
+             && (held_authored_job_deferred t job || goal_runtime_job_deferred t job)
            then None
            else held_authored_job t job
          else None))
       ~default:(Ok ())
       ~f:(refresh_held_authored t)
+  in
+  let deferred =
+    List.exists t.state.jobs ~f:(fun job ->
+      Agent_protocol.Id.Job.equal job.id job_id
+      && Int.equal generation job.generation
+      && Int.equal generation t.state.identity.generation
+      && goal_runtime_job_deferred t job)
+  in
+  let%bind.Result () =
+    if deferred then Ok () else refresh_goal_runtime_job t ~job_id ~generation
   in
   call t (Claim_job (job_id, generation))
 ;;
@@ -28676,6 +32531,26 @@ let goal_run_receipt t ~actor ~authorize ~request ~session =
   call t (Held_startup (Goal (Receipt (actor, authorize, request, session))))
 ;;
 
+let goal_resume_receipt t ~actor ~authorize ~session ~request =
+  call t (Held_startup (Goal_continuation (Receipt (actor, authorize, session, request))))
+;;
+
+let begin_goal_resume_preparation t ~actor ~authorize ~session ~request =
+  call t (Held_startup (Goal_continuation (Begin (actor, authorize, session, request))))
+;;
+
+let bind_goal_continuation_source t ~preparation ~source =
+  call t (Held_startup (Goal_continuation (Bind (preparation, source))))
+;;
+
+let admit_goal_resume t ~binding =
+  call t (Held_startup (Goal_continuation (Admit binding)))
+;;
+
+let end_goal_continuation_preparation t ~preparation =
+  call t (Held_startup (Goal_continuation (Close preparation)))
+;;
+
 let admit_held_goal_run t ~binding ~intent ~session =
   call t (Held_startup (Goal (Admit (binding, intent, session))))
 ;;
@@ -28692,12 +32567,51 @@ let begin_held_recurrence_activation t ~binding ~held ~checked =
     ~checked:(Recurrence_activation.Checked.admitted checked)
 ;;
 
+let check_runtime_construction_admission t ~construction =
+  call t (Held_startup (Construction (Check_admission construction)))
+;;
+
+let begin_goal_runtime_construction t ~construction =
+  let open Result.Let_syntax in
+  let%bind () = runtime_construction_owner_basis t construction in
+  let%bind () = Runtime_construction.refresh construction in
+  let%bind () =
+    call t (Held_startup (Construction (Begin_goal (construction, Starting))))
+  in
+  (* The first real ACK stales Store custody. Never refresh under the mailbox. *)
+  let%bind () = Runtime_construction.refresh construction in
+  call t (Held_startup (Construction (Begin_goal (construction, Running))))
+;;
+
+let begin_runtime_initialization t ~construction ~purpose ~expected =
+  let open Result.Let_syntax in
+  let%bind () = runtime_construction_owner_basis t construction in
+  let%bind () = Runtime_construction.refresh construction in
+  call
+    t
+    (Held_startup (Construction (Begin_initialization (construction, purpose, expected))))
+;;
+
 let begin_held_initialization t ~continuation ~purpose ~expected =
-  call t (Held_startup (Begin_held_initialization (continuation, purpose, expected)))
+  begin_runtime_initialization
+    t
+    ~construction:(Runtime_construction.of_admitted continuation)
+    ~purpose
+    ~expected
+;;
+
+let reserve_runtime_history_block t ~construction ~count =
+  let open Result.Let_syntax in
+  let%bind () = runtime_construction_owner_basis t construction in
+  let%bind () = Runtime_construction.refresh construction in
+  call t (Held_startup (Construction (Reserve_history (construction, count))))
 ;;
 
 let reserve_held_history_block t ~continuation ~count =
-  call t (Held_startup (Reserve_held_history_block (continuation, count)))
+  reserve_runtime_history_block
+    t
+    ~construction:(Runtime_construction.of_admitted continuation)
+    ~count
 ;;
 
 let end_held_activation t ~activation =
@@ -28853,4 +32767,90 @@ let with_held_input t ~continuation ~prepare f =
     (try ignore (cleanup () : (unit, Agent_protocol.Error.t) result) with
      | _ -> ());
     Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let install_runtime_construction
+      ?automatic_turn_policy
+      ?moderator_manager
+      t
+      ~construction
+      ~worker
+      ~inference
+  =
+  match construction with
+  | Runtime_construction.Initial continuation ->
+    install_held_runtime
+      ?automatic_turn_policy
+      ?moderator_manager
+      t
+      ~continuation
+      ~worker
+      ~inference
+  | Existing_goal _ ->
+    let open Result.Let_syntax in
+    let%bind () = Runtime_construction.refresh construction in
+    Eio.Cancel.protect (fun () ->
+      let%bind () =
+        match automatic_turn_policy with
+        | None -> Ok ()
+        | Some policy ->
+          let%bind () =
+            call t (Held_startup (Construction (Enable_budget (construction, policy))))
+          in
+          Runtime_construction.refresh construction
+      in
+      call
+        t
+        (Held_startup
+           (Construction (Install (construction, worker, inference, moderator_manager)))))
+;;
+
+let run_goal_runtime_resume t ~continuation ~resume =
+  let open Result.Let_syntax in
+  let construction = Runtime_construction.Existing_goal continuation in
+  let%bind () = Runtime_construction.refresh construction in
+  let%bind scope =
+    Eio.Cancel.protect (fun () ->
+      call t (Held_startup (Construction (Begin_resume (continuation, resume)))))
+  in
+  let claim ~event ~snapshot callback =
+    with_event_tools
+      t
+      ~claim:(fun () ->
+        let%bind snapshot = snapshot () in
+        let%map () = Runtime_construction.refresh construction in
+        Some
+          (Held_startup
+             (Construction
+                (Claim_resume
+                   ( scope
+                   , Agent_protocol.Id.Moderator_execution.create ()
+                   , snapshot
+                   , event )))))
+      callback
+  in
+  let%bind () = Runtime_builder.Runtime_resume.run resume ~claim in
+  Eio.Cancel.protect (fun () ->
+    call t (Held_startup (Construction (Finish_resume scope))))
+;;
+
+let continue_goal_episode t ~continuation =
+  let open Result.Let_syntax in
+  let preparation = continuation.Goal_continuation.binding.preparation in
+  let%bind () =
+    match preparation.runtime_phase with
+    | Retired _ | Handed_off _ -> Ok ()
+    | _ -> Runtime_construction.refresh (Existing_goal continuation)
+  in
+  Eio.Cancel.protect (fun () ->
+    call t (Held_startup (Construction (Continue_goal continuation))))
+;;
+
+let runtime_construction_resource t ~construction ~owner =
+  let%bind.Result () = Runtime_construction.refresh construction in
+  call t (Held_startup (Construction (Resource (construction, owner))))
+;;
+
+let end_runtime_construction t ~construction =
+  call t ~priority:Priority (Held_startup (Construction (End construction)))
 ;;

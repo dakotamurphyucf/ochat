@@ -39,6 +39,89 @@ fails is returned with that exact receipt and error; it is not a claim that all
 effects were rolled back or that replay is safe. Retained receipt data never
 recreates process-local activation custody.
 
+The existing-episode source and command path uses a separate immutable
+`Goal_resume_request`. Its original Goal, catalog and Run revisions and complete
+source identity remain fixed while the source is selected. The actor checks both
+the new operator proof and the existing Run's original authentication, and keeps
+the same physical Run binding. The pure `Goal_resume_admission` planner changes
+only the held Goal and its command receipt. It neither creates another Admission
+nor resets the episode, account or passive Wait.
+
+`Session_factory.with_goal_resume_source_reported` stages that command through the
+existing exclusive runtime source owner. It joins target and generated-parent
+source loans before closing the actual actor preparation. Its result separates
+the callback result, known command receipt and cleanup outcome. An unknown first
+write yields no acknowledged continuation; an acknowledged command retains its
+receipt even when later publication or cleanup fails. A returned staging value
+is data after its source scope closes: it does not prove that a new Operation
+started or that runtime initialization succeeded. Full existing-episode execution
+uses the runtime continuation consumer rather than interpreting that staging
+value as an execution result.
+
+## Resuming an existing episode
+
+`Goal_run_service.resume_episode` is the host entry point for continuing a held,
+nonterminal Workflow. It authenticates the current registered session and checks
+for the command's retained receipt before acquiring the runtime. Retrying the same
+command returns historical receipt data, including when the runtime is busy; it
+does not repeat initialization or submit another turn.
+
+The runtime owner selects one of these paths:
+
+| Existing state | Resume behavior |
+| --- | --- |
+| Run waiting for an owned occurrence | Preserve the exact wake; do not load a runtime or create a turn. |
+| Runtime already loaded | Reuse that runtime without replaying `Session_start` or `Session_resume`. |
+| Runtime unloaded after a same-process stop | Build from the selected captured source and run the genuine `Session_resume` lifecycle before continuing. |
+
+The cold path uses the shared constructor and existing worker. The original Run
+identity remains the identity used for native effects; the resuming operator's
+authorization is checked separately. Both proofs are required for fresh work.
+The new command cannot replace the original Run principal or recreate an expired
+process-local binding from stored IDs.
+
+A completed resume reports the actual outcome: `Started` identifies the admitted
+Administrative turn, `Waiting` retains the callback's chosen wake, and `Settled`
+identifies the original episode's terminal settlement. In particular, a cold
+callback that waits or finishes its Goal does not receive an extra continuation
+turn. All paths retain the same Run, Admission, episode and cumulative account.
+Any new admitted turn or inference is charged through that existing account.
+An owned timer created by the resume callback records that Run's source and
+origin alongside its actual callback ownership. These are retained provenance;
+they do not authorize a later callback without the current runtime checks.
+
+The command acknowledgement and execution outcome are separate. `Uncertain`
+means the first command acknowledgement is unknown. `Resume_failed` carries a
+known command receipt and a later construction, execution-admission or cleanup
+error. Neither result authorizes blindly retrying effects. Source loans join
+before the service classifies its result; cancellation and unexpected exceptions
+propagate after cleanup. A retained receipt alone never grants execution.
+
+Callers should distinguish these results when presenting a resume command:
+
+| Result | What the caller knows |
+| --- | --- |
+| `Rejected` | The command was rejected before its first write. Correct the reported condition before issuing a new command. |
+| `Uncertain` | The command's acknowledgement is unknown. Reconcile durable state; do not infer that no work happened. |
+| `Resume_failed` | The command was acknowledged, but a later step failed. Keep its receipt and show the error; completed effects are not rolled back. |
+| `Resumed` | The continuation actually started, waited, or settled as reported. `Started` does not mean the Goal has been achieved. |
+| `Retained` | This exact command already has a receipt. The reply is historical data and does not report a new continuation. |
+
+An exact retry keeps the original key, source and revision intent. Changing the
+payload while retaining its key can conflict with the stored command; issuing a
+new key does not resolve uncertainty about the first command. Inspect the current
+Goal and Run to show subsequent progress, rather than interpreting a retained
+receipt as current execution status. If both the callback
+and cleanup fail, the callback failure remains primary; cleanup failure replaces
+only a successful callback result.
+
+This same-process resume is distinct from restarting after process recovery.
+Recovery does not restore live authentication or runtime ownership from storage.
+An interrupted episode requires its actual terminal evidence before a new episode
+can be admitted.
+
+## Finishing and reconciling episodes
+
 `Goal.finish` stages an untrusted bounded completion intent in the existing
 `Run_action_service`. The actor's actual queued callback borrow and current
 `Run_scope` authority remain necessary. The actor joins the sealed intent to the
@@ -107,6 +190,6 @@ cancellation leaves it unachieved. Explicit Hold retires pending activation even
 when its save fails; an automatic budget hold preserves the same already-admitted
 inference while denying fresh work.
 
-Same-live-episode resume, selective continuation controls and configurable Goal
-helpers remain separate integration work. This component adds no second Workflow
+Selective continuation controls and configurable Goal helpers remain separate
+integration work. This component adds no second Workflow
 scheduler and does not complete end-to-end goal automation by itself.

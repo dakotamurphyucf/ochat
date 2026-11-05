@@ -765,6 +765,34 @@ val acquire_recurrence_target
   -> authorize:(Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
   -> (Session_registry.entry, Agent_protocol.Error.t) result
 
+(** Immutable factual read through this Factory's actual Registry. Checks local
+    server, current original Send/read scopes and supplied nonyielding summary
+    visibility before IO and again after the joined read. Never loads/selects an
+    owner or constructs a runtime. Errors and cancellation remain unchanged. *)
+val read_recurrence_state
+  :  t
+  -> session:Agent_protocol.Session_ref.t
+  -> actor:Operator_authorization.t
+  -> authorize:(Agent_protocol.Session.t -> (unit, Agent_protocol.Error.t) result)
+  -> (Agent_session.Session_state.t, Agent_protocol.Error.t) result
+
+(** Recover only an actual retained reciprocal captured child. Current parent
+    original visibility and host target policy are required, but no new creation
+    permit, Enabled control, grace, native installation or initialization occurs.
+    Verify the real stored delegation/link/Spec/artifact through the canonical
+    metadata acquisition owner. Missing facts cannot create a replacement child.
+    Returned opaque Child DATA grants no execution permission. *)
+val acquire_recurrence_child
+  :  t
+  -> parent:Session_registry.entry
+  -> actor:Operator_authorization.t
+  -> authorize:
+       (Agent_session.Session_state.t
+        -> Agent_session.Recurrence_definition.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> occurrence:Agent_session.Recurrence_identity.Occurrence.t
+  -> (Recurrence_child.t * Session_registry.entry, Agent_protocol.Error.t) result
+
 (** Select/verify the actual source through the existing static source path and
     installation rules. Join every temporary source/parent loan before returning
     source+CAS DATA. No native/MCP, Manager, initializer, input/history, runtime or
@@ -785,3 +813,45 @@ val check_execution_selected_entry
   -> Session_registry.entry
   -> session:Agent_protocol.Session_ref.t
   -> (unit, Agent_protocol.Error.t) result
+
+module Goal_resume_source : sig
+  module Decision = Runtime_owner.Goal_resume_source.Decision
+
+  (** Completed staging report: target and every acquired generated-parent
+      source loan have joined, then the actual Actor preparation was factually
+      closed. Cleanup failures remain explicit; this proves no absence of effects. *)
+  type 'a t
+
+  (** Preserve exact primary Error/exception/cancellation and raw backtrace.
+      Cleanup/close failures replace only a successful callback. Fresh is callback
+      DATA, not a resumed episode or a usable escaped continuation. *)
+  val result : 'a t -> ('a Decision.t, Agent_protocol.Error.t) result
+
+  (** Historical actual command ACK, including Retained and ACK-before-publication
+      failure. Read from the actual captured preparation/decision after all joins;
+      no reauthorization, decoding, receipt search or inferred writer success.
+      None means no known ACK, not a confirmed negative/NoEffects. *)
+  val receipt : 'a t -> Agent_session.Goal_command_receipt.t option
+
+  (** Both target and parent joins, plus factual preparation close. A successful
+      callback cannot hide a failed or missing required cleanup report. *)
+  val cleanup : 'a t -> Runtime_owner.Scope_outcome.Cleanup.t
+end
+
+(** Fixed source-only composition over with_selected_source: actual registered
+    entry/Actor/Owner/Store association; hidden issuer; exclusive Owner stage;
+    actual Actor Begin; actual captured source restore/parent loan; one bind.
+    The callback can pass Prepared.binding to Actor.admit_goal_resume and then
+    the genuine Owner continuation consumer. Ready alone is staging DATA and is
+    never described as resumed execution. All acquired target/parent finalizers
+    finish before factual end_goal_continuation_preparation and report creation.
+    Primary failures remain primary; actual known receipt is retained separately. *)
+val with_goal_resume_source_reported
+  :  t
+  -> Session_registry.entry
+  -> actor:Operator_authorization.t
+  -> authorize:(Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> session:Agent_protocol.Session_ref.t
+  -> request:Agent_session.Goal_resume_request.t
+  -> (Runtime_owner.Prepared_goal_continuation.t -> ('a, Agent_protocol.Error.t) result)
+  -> ('a Goal_resume_source.t, Agent_protocol.Error.t) result

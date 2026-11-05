@@ -189,6 +189,14 @@ let runtime ?script_tools ?check_execution ?activity ~close () : Builder.t =
              ~message:"fixture has no authored startup"
              ~retryable:false
              ()))
+  ; runtime_resume =
+      (fun () ->
+        Error
+          (Agent_protocol.Error.create
+             Invalid_state
+             ~message:"fixture has no runtime resume"
+             ~retryable:false
+             ()))
   ; start_moderator = (fun () -> Ok None)
   ; enqueue_internal_event = (fun ?prepare:_ _ -> failwith "unexpected event")
   ; legacy_events = None

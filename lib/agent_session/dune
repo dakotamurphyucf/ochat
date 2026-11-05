@@ -198,6 +198,7 @@
   goal_episode_admission
   goal_activation_request
   goal_resume_request
+  goal_resume_admission
   goal_activation_policy
   goal_run_transition
   goal_run_settlement

@@ -1794,12 +1794,18 @@ let compose
       ~clock:(Eio.Stdenv.clock env)
       ~registry
   in
+  let recurrence_dispatcher =
+    Option.map recurrence_execution ~f:(fun host ->
+      Recurrence_dispatcher.create ~factory ~registry ~host)
+  in
   let schedule_scheduler =
     Schedule_scheduler.start_controlled
+      ?recurrence_dispatcher
       ~enabled:execution_enabled
       ~sw
       ~clock:(Eio.Stdenv.mono_clock env)
       ~registry
+      ()
   in
   Startup_cleanup.adopt_schedule_scheduler_exn startup_cleanup schedule_scheduler;
   let maintenance =

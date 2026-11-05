@@ -183,6 +183,40 @@ module Custody : sig
   end
 end
 
+module Goal_continuation : sig
+  module Cause : sig
+    (** Wake DATA is only a locator. The actual Actor selects the exact retained
+        ready delivery/Wait and live physical binding before issuing custody. *)
+    type t =
+      | Resume of Goal_resume_request.t
+      | Wake of
+          { run_id : Agent_protocol.Id.Run.t
+          ; wake : Agent_protocol.Run_wake.t
+          }
+  end
+
+  (** Distinct request family over the SAME private Owner and common Custody.
+      Not convertible to initial preparation, Deferred, Held or admission. *)
+  type t
+
+  (** Capture the actual state's session revision, not a Run revision or a new
+      request fence. The supplied actual original is fresh resume authorization,
+      or the Actor-selected original Run binding for an authentic wake. Actor
+      retains and checks the old Run binding original separately for Resume.
+      This constructor validates custody only; it cannot authenticate Run/source
+      association for a caller that does not possess Actor's private Owner. *)
+  val create_authenticated
+    :  owner:Owner.t
+    -> state:Session_state.t
+    -> actor:Operator_authorization.t
+    -> cause:Cause.t
+    -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+    -> (t, Agent_protocol.Error.t) result
+
+  val cause : t -> Cause.t
+  val custody : t -> Custody.t
+end
+
 (** Projection of the SAME physical custody, not a new owner or conversion to a
     different admission family. Initial request/digest/deferred evidence remains
     attached only to this initial preparation. *)
